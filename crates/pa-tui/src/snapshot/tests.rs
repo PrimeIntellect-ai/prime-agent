@@ -732,6 +732,52 @@ fn a_leftover_settle_keeps_its_own_orphan_card() {
     );
 }
 
+/// The rebuild's loader anchor (the operator's 2026-09-28 rule: the
+/// waiting/executing timer counts since the LAST HUMAN PROMPT): the
+/// reconstruct reads the NEWEST user message's wall-clock timestamp —
+/// the numeric ms wire form, the f64 form, and the ISO-8601 string
+/// form — and skips non-user messages and unreadable times.
+#[test]
+fn reconstructs_the_last_user_prompt_timestamp() {
+    // The numeric ms form (the live engine's wire shape).
+    let mut attach = slim_attach();
+    let snapshot = attach.get_mut("snapshot").expect("snapshot");
+    let messages = snapshot
+        .get_mut("messages")
+        .expect("messages")
+        .as_array_mut()
+        .expect("messages array");
+    assert_eq!(messages[0].get("role"), Some(&json!("user")));
+    messages[0]["timestamp"] = json!(1_700_000_000_000u64);
+    let view = reconstruct(&attach_data_from_response(attach).unwrap());
+    assert_eq!(view.last_user_prompt_ms, Some(1_700_000_000_000));
+    // The f64 form reads as ms too.
+    let mut attach = slim_attach();
+    let messages = attach
+        .get_mut("snapshot")
+        .expect("snapshot")
+        .get_mut("messages")
+        .expect("messages")
+        .as_array_mut()
+        .expect("messages array");
+    messages[0]["timestamp"] = json!(1_700_000_000_050.0f64);
+    let view = reconstruct(&attach_data_from_response(attach).unwrap());
+    assert_eq!(view.last_user_prompt_ms, Some(1_700_000_000_050));
+    // The ISO-8601 string form parses through the same reader (older
+    // wire shapes carry the entry timestamp as a string).
+    let mut attach = slim_attach();
+    let messages = attach
+        .get_mut("snapshot")
+        .expect("snapshot")
+        .get_mut("messages")
+        .expect("messages")
+        .as_array_mut()
+        .expect("messages array");
+    messages[0]["timestamp"] = json!("2026-09-28T12:00:01.000Z");
+    let view = reconstruct(&attach_data_from_response(attach).unwrap());
+    assert_eq!(view.last_user_prompt_ms, Some(1_790_596_801_000));
+}
+
 #[test]
 fn reconstructs_slim_attach() {
     let data = attach_data_from_response(slim_attach()).unwrap();

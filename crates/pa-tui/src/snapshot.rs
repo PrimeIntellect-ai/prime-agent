@@ -66,6 +66,16 @@ pub struct Reconstructed {
     /// attach re-syncs the queue strip (TS re-reads the queue after
     /// subscribe because a `session_action_update` in the gap is lost).
     pub queued: crate::queued::QueuedMessages,
+    /// The LAST HUMAN PROMPT's wall-clock time (unix ms): the newest
+    /// user message's `timestamp` in fold order. The rebuilt loader
+    /// anchors its elapsed clock here (the operator's 2026-09-28
+    /// rule: the waiting/executing timer counts since the last human
+    /// prompt and never resets on a view transition — an agents-view
+    /// round trip re-attaches mid-turn and the clock keeps its
+    /// anchor). `None` when no user message carries a timestamp (an
+    /// old snapshot or a seeded replay) — the loader then keeps its
+    /// re-attach-instant anchor.
+    pub last_user_prompt_ms: Option<u64>,
     /// The session's effective service tier (`state.serviceTier`), the
     /// `/fast` toggle's baseline.
     pub service_tier: Option<String>,
@@ -381,6 +391,17 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         .and_then(|state| state.get("serviceTier"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let last_user_prompt_ms =
+        snapshot
+            .get("messages")
+            .and_then(Value::as_array)
+            .and_then(|messages| {
+                messages
+                    .iter()
+                    .rev()
+                    .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+                    .and_then(message_timestamp_ms)
+            });
     Reconstructed {
         chat: messages,
         model_id,
@@ -392,6 +413,26 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         last_event_sequence,
         queued,
         service_tier,
+        last_user_prompt_ms,
+    }
+}
+
+/// One message's wall-clock timestamp (unix ms): the wire's numeric
+/// `timestamp` (u64 or f64) or an ISO-8601 string. `None` when the
+/// message carries no readable time.
+fn message_timestamp_ms(message: &Value) -> Option<u64> {
+    match message.get("timestamp") {
+        Some(Value::Number(number)) => number.as_u64().or_else(|| {
+            number
+                .as_f64()
+                .filter(|value| value.is_finite())
+                .map(|value| value.max(0.0) as u64)
+        }),
+        Some(Value::String(iso)) => {
+            let ms = crate::agents_view_state::timestamp_ms(Some(iso));
+            (ms > 0).then_some(ms as u64)
+        }
+        _ => None,
     }
 }
 
