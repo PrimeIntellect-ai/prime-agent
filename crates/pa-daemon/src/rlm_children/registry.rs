@@ -3,22 +3,8 @@
 //! target lookup/resolution; the close-failure no-op marker is
 //! registry-only.
 use super::{
-    Arc,
-    ChildCloseReason,
-    ChildRecord,
-    Context,
-    DaemonCommand,
-    DeletedChild,
-    KILL_TIMEOUT_MS,
-    Map,
-    Mutex,
-    Result,
-    SupervisorChildSessionsInner,
-    anyhow,
-    bail,
-    json,
-    registry,
-    usage,
+    bail, json, registry, usage, Arc, ChildCloseReason, ChildRecord, Context, DaemonCommand,
+    DeletedChild, Map, Mutex, Result, SupervisorChildSessionsInner, KILL_TIMEOUT_MS,
 };
 
 /// The already-gone marker inside a close failure (the supervisor's

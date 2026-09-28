@@ -4,22 +4,8 @@
 //! and the unleased fallback) that serializes writers onto the file.
 
 use super::{
-    Context,
-    HashMap,
-    PathBuf,
-    Result,
-    Serialize,
-    SessionEntry,
-    SessionFile,
-    SessionHeader,
-    Value,
-    Write,
-    anyhow,
-    fs,
-    index,
-    json,
-    new_entry_id,
-    write,
+    fs, index, json, new_entry_id, write, Context, HashMap, PathBuf, Result, Serialize,
+    SessionEntry, SessionFile, SessionHeader, Value, Write,
 };
 
 impl SessionEntry {

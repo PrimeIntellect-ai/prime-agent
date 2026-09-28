@@ -77,7 +77,7 @@ use pa_types::daemon::{
 };
 use pa_types::platform::transport::{bind_transport, connect_transport, TransportStream};
 use serde_json::{json, Map, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, mpsc, oneshot};
 

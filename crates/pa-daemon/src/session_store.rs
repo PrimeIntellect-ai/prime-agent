@@ -13,6 +13,9 @@ use serde_json::{json, Map, Value};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
+// `BufRead` re-exports to the session-store children through this facade
+// (the split children import it via `super`).
+#[allow(unused_imports)]
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 

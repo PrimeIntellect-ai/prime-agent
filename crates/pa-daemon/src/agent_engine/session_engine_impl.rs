@@ -4,33 +4,11 @@
 //! impl block (a trait impl is one block per type; it moved whole).
 
 use super::{
-    AgentSessionEngine,
-    Arc,
-    BranchSummaryOutcome,
-    BranchSummaryRequest,
-    BranchSummaryRun,
-    CompactionOutcome,
-    CompactionRequest,
-    CompactionRun,
-    DEFAULT_RLM_MAX_DEPTH,
-    EngineEvent,
-    EngineModelSelection,
-    ParentIdentity,
-    PromptRequest,
-    ProviderTarget,
-    SessionEngine,
-    SideQuestionOutcome,
-    SideQuestionRequest,
-    TurnPrompt,
-    Value,
-    artifact_reference,
-    config,
-    json,
-    map_thinking_level,
-    model,
-    now_millis,
-    persisted_rlm_max_depth,
-    turn,
+    artifact_reference, json, map_thinking_level, model, now_millis, persisted_rlm_max_depth, turn,
+    AgentSessionEngine, Arc, BranchSummaryOutcome, BranchSummaryRequest, BranchSummaryRun,
+    CompactionOutcome, CompactionRequest, CompactionRun, EngineEvent, EngineModelSelection,
+    ParentIdentity, PromptRequest, ProviderTarget, SessionEngine, SideQuestionOutcome,
+    SideQuestionRequest, TurnPrompt, Value, DEFAULT_RLM_MAX_DEPTH,
 };
 
 impl SessionEngine for AgentSessionEngine {

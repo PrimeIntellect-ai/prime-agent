@@ -412,15 +412,9 @@ mod tests {
         use DaemonWorkerLifecycle as L;
         assert_eq!(effective_worker_state(true, L::Ready, true), "stopping");
         assert_eq!(effective_worker_state(true, L::Failed, false), "failed");
-        assert_eq!(
-            effective_worker_state(false, L::Ready, false),
-            "recovering"
-        );
+        assert_eq!(effective_worker_state(false, L::Ready, false), "recovering");
         assert_eq!(effective_worker_state(true, L::Ready, false), "ready");
-        assert_eq!(
-            effective_worker_state(true, L::Starting, false),
-            "starting"
-        );
+        assert_eq!(effective_worker_state(true, L::Starting, false), "starting");
         assert_eq!(
             effective_worker_state(false, L::Recovering, false),
             "recovering"

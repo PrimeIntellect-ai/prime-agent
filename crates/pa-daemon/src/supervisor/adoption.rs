@@ -4,33 +4,10 @@
 use std::sync::Arc;
 
 use super::{
-    Context,
-    DaemonCommand,
-    DaemonResponse,
-    DaemonWorkerLifecycle,
-    Duration,
-    Ordering,
-    Path,
-    PathBuf,
-    ResidentWorker,
-    Result,
-    Supervisor,
-    Value,
-    WorkerRegistration,
-    anyhow,
-    clients,
-    json,
-    load_descriptors,
-    options,
-    persist_worker,
-    response_failure,
-    response_success,
-    routing,
-    sessions,
-    socket,
-    subscribers,
-    util,
-    worker_connect_deadline,
+    anyhow, json, load_descriptors, options, persist_worker, response_failure, response_success,
+    routing, sessions, socket, subscribers, util, worker_connect_deadline, Context, DaemonCommand,
+    DaemonResponse, DaemonWorkerLifecycle, Duration, Ordering, Path, PathBuf, ResidentWorker,
+    Result, Supervisor, Value, WorkerRegistration,
 };
 
 /// The boot the descriptor-adoption pass runs under. An update boot
@@ -296,7 +273,11 @@ impl Supervisor {
                 match revived_child {
                     Some(child) => {
                         let child_pid = child.id().unwrap_or(0);
-                        self.spawn_monitor(Arc::clone(&resident), Some(child), u64::from(child_pid));
+                        self.spawn_monitor(
+                            Arc::clone(&resident),
+                            Some(child),
+                            u64::from(child_pid),
+                        );
                     }
                     None => self.spawn_monitor(Arc::clone(&resident), None, pid),
                 }

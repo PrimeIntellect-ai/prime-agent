@@ -2,7 +2,7 @@
 //! types (`TurnResult`/`TurnAdmission`/`TurnPrompt`/`BoundaryRun`/
 //! `TurnOnce`) and the retry/abort message helpers that shape them
 //! (moved with their concern).
-use super::{EngineEvent, Model, StopReason, model, turn};
+use super::{turn, EngineEvent, Model, StopReason};
 
 /// The outcome of one admitted turn.
 pub(crate) enum TurnResult {

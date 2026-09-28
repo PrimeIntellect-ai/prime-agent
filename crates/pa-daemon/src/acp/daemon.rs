@@ -377,15 +377,15 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
     let mut stdin = BufReader::new(tokio::io::stdin());
     let mut line = String::new();
     loop {
-        line.clear();
-        match stdin.read_line(&mut line).await {
+        input_line.clear();
+        match stdin.read_line(&mut input_line).await {
             Ok(0) | Err(_) => break,
             Ok(_) => {}
         }
-        if line.trim().is_empty() {
+        if input_line.trim().is_empty() {
             continue;
         }
-        let incoming = match jsonrpc::parse_line(&line) {
+        let incoming = match jsonrpc::parse_line(&input_line) {
             Ok(incoming) => incoming,
             Err(error_response) => {
                 let _ = tx.send(error_response);

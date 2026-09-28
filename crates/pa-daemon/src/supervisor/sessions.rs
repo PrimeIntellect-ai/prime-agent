@@ -2,34 +2,10 @@
 //! handlers, the stale-id binding and rebind seam, and the saved-row
 //! builders.
 use super::{
-    Arc,
-    DaemonCommand,
-    DaemonResponse,
-    DaemonSessionLifecycle,
-    NameScope,
-    Outbound,
-    Path,
-    PathBuf,
-    ROUTE_TIMEOUT_MS,
-    ResidentWorker,
-    Result,
-    RouteAdmission,
-    Supervisor,
-    Value,
-    anyhow,
-    bail,
-    json,
-    list_sessions,
-    mpsc,
-    name_unavailable_error,
-    options,
-    paths,
-    reservation_key,
-    response_failure,
-    response_line,
-    response_success,
-    sessions,
-    subscribers,
+    anyhow, bail, json, list_sessions, mpsc, name_unavailable_error, paths, reservation_key,
+    response_failure, response_line, response_success, sessions, subscribers, Arc, DaemonCommand,
+    DaemonResponse, DaemonSessionLifecycle, NameScope, Outbound, Path, PathBuf, ResidentWorker,
+    Result, RouteAdmission, Supervisor, Value, ROUTE_TIMEOUT_MS,
 };
 
 /// One spawn-name reservation held across a fresh-launch create (TS

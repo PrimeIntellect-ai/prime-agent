@@ -1,7 +1,7 @@
 //! Agent-engine artifact references (moved with their concern): the
 //! sha256 artifact-id mint, the cwd-relative logical-path resolution,
 //! and the epoch-millis clock.
-use super::{Value, json};
+use super::{json, Value};
 
 /// One artifact reference (TS `createArtifactReference` in
 /// modes/agent-connection/snapshot.ts): the sha256-derived id, the owning

@@ -4,24 +4,8 @@
 //! most-recent-session lookup.
 
 use super::{
-    Cow,
-    Deserialize,
-    HashMap,
-    Map,
-    Path,
-    PathBuf,
-    SessionHeader,
-    Usage,
-    Value,
-    fs,
-    index,
-    info,
-    list_sessions,
-    message_text,
-    normalize_state_status,
-    read,
-    view,
-    write,
+    fs, index, info, list_sessions, message_text, normalize_state_status, read, view, write, Cow,
+    Deserialize, HashMap, Path, PathBuf, SessionHeader, Usage, Value,
 };
 
 /// Port of `readSessionInfo`'s fold (single pass, no resume cache): the durable
