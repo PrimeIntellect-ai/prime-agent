@@ -4,7 +4,7 @@
 //! spawn-admission helpers only this surface uses.
 use super::{
     assert_thinking_supported, bail, create_default_rlm_subagent_session_name, json, now_ms,
-    resolve_child_model, rlm_child_label, spawn_name_unavailable, usage, Arc, ChildCloseReason,
+    resolve_child_model, rlm_child_label, spawn_name_unavailable, Arc, ChildCloseReason,
     ChildRecord, Context, DaemonCommand, Duration, Instant, Mutex, Path, PathBuf, Result,
     RlmChildResult, RlmChildTerminalNotice, RlmCreateSessionHandle, RlmCreateSessionRequest,
     RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry,

@@ -1,7 +1,7 @@
 //! Client connections: accept, authenticate, and the frame/event plumbing
 //! between the worker and its supervisor.
 use super::{
-    active_session_id_of, anyhow, bind_transport, broadcast, connection, create_daemon_replay_info,
+    active_session_id_of, anyhow, bind_transport, broadcast, create_daemon_replay_info,
     current_protocol_info, default_client_capabilities, env, input, json,
     normalize_client_capabilities, paths, peer_command_allowed, response_failure, response_success,
     summary, turn, worker_peer_command_allowed, worker_server_capabilities, write_frame,

@@ -1,8 +1,8 @@
 //! The dispatch surface: command routing, the command handlers,
 //! and the abort family.
 use super::{
-    create, input, json, queue, response_failure, response_success, summary, turn, KillCloseReason,
-    Lane, QueueCheckpoint, QueuedItem, Result, SessionFile, TurnSettle, VecDeque, Worker,
+    input, json, queue, response_failure, response_success, summary, turn, KillCloseReason, Lane,
+    QueueCheckpoint, QueuedItem, Result, SessionFile, TurnSettle, VecDeque, Worker,
     PROMPT_ABORTED_BEFORE_DELIVERY, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 

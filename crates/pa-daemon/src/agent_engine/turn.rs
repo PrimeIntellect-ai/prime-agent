@@ -3,7 +3,7 @@
 //! once-runner with its retry/failover and quota-park machinery, the
 //! queue-mode mapping, and the session-agent constructor.
 use super::{
-    aborted_message, drop_trailing_assistant, json, json_round_trip, map_thinking_level, model,
+    aborted_message, drop_trailing_assistant, json, json_round_trip, map_thinking_level,
     retry_event_to_engine_event, turn, AbortController, AgentSessionEngine, AutoCompactionRun,
     BoundaryRun, DaemonAllowlist, EngineEvent, GoalBoundary, Model, OverflowArmRun, ProviderTarget,
     QuotaParkState, StopReason, TurnAdmission, TurnOnce, TurnPrompt, TurnResult, Value,

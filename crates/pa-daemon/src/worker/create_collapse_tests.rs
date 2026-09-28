@@ -3,9 +3,11 @@
 //! writes it replaces, the failure window leaves no session file, and an
 //! old build's header-only crash artifact is neither consumed nor bled into.
 
+use std::path::PathBuf;
+
 use super::*;
 use crate::engine::{
-    BranchSummaryOutcome, BranchSummaryRequest, CompactionOutcome, CompactionRequest,
+    BranchSummaryOutcome, BranchSummaryRequest, CompactionOutcome, CompactionRequest, EngineEvent,
 };
 
 /// The scripted harness engine: the create-path seams keep their trait

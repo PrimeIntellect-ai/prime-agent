@@ -2,9 +2,9 @@
 //! construction of the live session.
 use super::{
     connection, create, default_server_capabilities, json, paths, queue, response_failure,
-    response_success, restore_queue_snapshot, session_file_name, summary, Arc, EngineEvent,
-    EngineModelSelection, PathBuf, PromptRequest, Result, RlmSessionIdentity, ScriptedEngine,
-    SessionEngine, SessionFile, VecDeque, Worker, WorkerConfig,
+    response_success, restore_queue_snapshot, session_file_name, summary, Arc,
+    EngineModelSelection, PromptRequest, Result, RlmSessionIdentity, ScriptedEngine, SessionEngine,
+    SessionFile, VecDeque, Worker, WorkerConfig,
 };
 
 use serde_json::Value;
