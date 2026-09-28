@@ -852,7 +852,6 @@ mod tests {
             &records,
             None,
             &std::collections::HashSet::default(),
-            &std::collections::HashSet::default(),
             &std::collections::HashMap::default(),
             None,
         );
@@ -1050,7 +1049,6 @@ mod tests {
             &records,
             None,
             &std::collections::HashSet::default(),
-            &std::collections::HashSet::default(),
             &std::collections::HashMap::default(),
             None,
         );
@@ -1099,7 +1097,6 @@ mod tests {
         let rows = crate::agents_view_forest::build_rows(
             &records,
             None,
-            &std::collections::HashSet::default(),
             &std::collections::HashSet::default(),
             &std::collections::HashMap::default(),
             None,

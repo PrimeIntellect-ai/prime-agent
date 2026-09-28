@@ -13,7 +13,7 @@
 use crate::theme::{Theme, ThemeColor};
 use crate::width::{str_width, truncate_line};
 use crate::{Line, Span};
-use ratatui::style::Color;
+use ratatui::style::Style;
 
 /// The field prompt (TS `Input` renders `"> "`).
 const FIELD_PROMPT: &str = "> ";
@@ -219,28 +219,18 @@ pub(crate) fn hug_width(content_width: usize, width: usize) -> usize {
     (content_width + HUG_TRAILING).max(MIN_HUG_WIDTH).min(width)
 }
 
-/// The wash every selected inline-picker row paints with: the theme's
-/// shared selection band ([`crate::theme::Theme::soft_selection_style`]).
-/// A theme too partial to compute one (no `selectedBg`, or no RGB/palette
-/// slot either side of the blend) keeps the onboarding wash — a selected
-/// row must always read as selected, never fall back to no band at all.
-fn selection_wash(theme: &Theme) -> Color {
-    theme
-        .soft_selection_style()
-        .bg
-        .unwrap_or_else(|| crate::onboarding::highlight_wash(theme))
-}
-
 /// One hug row: the content truncated to the pane, the selected row
-/// padded to its wash width and washed over the hug only — the theme's
-/// shared selection wash (the same band the `›`-marker rows carry), a
-/// little past the text, not the whole terminal width.
+/// padded to its band width and painted over the hug only — the style
+/// the CALLER passes (the activity surfaces pass the ONE shared
+/// selection style, the operator's 2026-09-28 consistency rule: the
+/// same purple band and bold the dock's groups and the agents view's
+/// rows paint), a little past the text, not the whole terminal width.
 pub(crate) fn hug_row(
-    theme: &Theme,
     row: Line,
     content_width: usize,
     selected: bool,
     width: usize,
+    style: Style,
 ) -> Line {
     let mut row = truncate_line(&row, width, "");
     if !selected {
@@ -253,7 +243,7 @@ pub(crate) fn hug_row(
     }
     row.into_iter()
         .map(|mut span| {
-            span.style = span.style.bg(selection_wash(theme));
+            span.style = span.style.patch(style);
             span
         })
         .collect()
@@ -264,7 +254,11 @@ pub(crate) fn hug_row(
 /// the row is truncated to the frame width and padded out to it, so the
 /// selection reads as one full-width table surface while the columns
 /// themselves keep their content-hug geometry.
-pub(crate) fn fill_row(theme: &Theme, row: Line, selected: bool, width: usize) -> Line {
+/// The full-width mirror of [`hug_row`]: the selected row pads to the
+/// frame width and paints the CALLER's style (the activity surfaces
+/// pass the ONE shared selection style — the operator's 2026-09-28
+/// consistency rule).
+pub(crate) fn fill_row(row: Line, selected: bool, width: usize, style: Style) -> Line {
     let mut row = truncate_line(&row, width, "");
     if !selected {
         return row;
@@ -275,7 +269,7 @@ pub(crate) fn fill_row(theme: &Theme, row: Line, selected: bool, width: usize) -
     }
     row.into_iter()
         .map(|mut span| {
-            span.style = span.style.bg(selection_wash(theme));
+            span.style = span.style.patch(style);
             span
         })
         .collect()
@@ -637,34 +631,26 @@ mod tests {
         assert!(text.ends_with("connected"));
     }
 
-    /// Every selected picker row carries the theme's ONE selection wash
+    /// The panel's own `›`-marker rows keep the soft selection wash
     /// (the operator's 2026-09-26 directive: the panel redesign's
-    /// selection must be unmistakable) — the `›`-marker menu rows, the
-    /// full-width table rows, and the hug rows all patch the same
-    /// [`crate::theme::Theme::soft_selection_style`], and the wash clears
-    /// the theme's visibility bar over the editor surface, so the
-    /// selected row reads at a glance.
+    /// selection must be unmistakable), while the shared row painters
+    /// (`fill_row`/`hug_row`) paint the style their CALLER passes: the
+    /// activity surfaces (the heartbeats picker, the shell view) pass
+    /// the ONE shared selection style — the operator's 2026-09-28
+    /// consistency rule — the same purple band and bold the dock's
+    /// groups and the agents view's rows paint, so every activity
+    /// surface's selected row reads identically.
     #[test]
-    fn selected_rows_carry_the_shared_selection_wash() {
+    fn menu_rows_wash_and_the_row_painters_take_the_callers_style() {
         let theme = theme();
         let wash = theme.soft_selection_style().bg.expect("the wash");
         let menu = menu_row(&theme, 40, vec![Span::raw("label")], &[], true);
         assert!(
             menu.iter().all(|span| span.style.bg == Some(wash)),
-            "the menu row washes with the shared selection: {menu:?}"
+            "the menu row washes with the soft selection: {menu:?}"
         );
-        let filled = fill_row(&theme, vec![Span::raw("label")], true, 40);
-        assert!(
-            filled.iter().all(|span| span.style.bg == Some(wash)),
-            "the fill row washes with the shared selection: {filled:?}"
-        );
-        let hugged = hug_row(&theme, vec![Span::raw("label")], 6, true, 40);
-        assert!(
-            hugged.iter().all(|span| span.style.bg == Some(wash)),
-            "the hug row washes with the shared selection: {hugged:?}"
-        );
-        // The wash is unmistakable: its rendered luminance clears the
-        // theme's visibility bar over the editor surface.
+        // The menu wash is unmistakable: its rendered luminance clears
+        // the theme's visibility bar over the editor surface.
         let surface = theme
             .bg_color(crate::theme::ThemeBg::UserMessageBg)
             .expect("the editor surface");
@@ -675,15 +661,32 @@ mod tests {
             (wash_lum - surface_lum).abs() >= crate::theme::SELECTION_MIN_LUMINANCE_DELTA - 1.0,
             "the wash reads off the surface: lum {wash_lum:.2} vs {surface_lum:.2}"
         );
-        // Unselected rows keep the surface: no wash at all.
+        // The shared row painters paint exactly the style passed: the
+        // activity surfaces' purple band and bold.
+        let band = theme.selection_row_style();
+        let filled = fill_row(vec![Span::raw("label")], true, 40, band);
+        assert!(
+            filled.iter().all(
+                |span| span.style.bg == band.bg && span.style.add_modifier == band.add_modifier
+            ),
+            "the fill row paints the caller's style: {filled:?}"
+        );
+        let hugged = hug_row(vec![Span::raw("label")], 6, true, 40, band);
+        assert!(
+            hugged.iter().all(
+                |span| span.style.bg == band.bg && span.style.add_modifier == band.add_modifier
+            ),
+            "the hug row paints the caller's style: {hugged:?}"
+        );
+        // Unselected rows keep the surface: no band at all.
         for plain in [
             menu_row(&theme, 40, vec![Span::raw("label")], &[], false),
-            fill_row(&theme, vec![Span::raw("label")], false, 40),
-            hug_row(&theme, vec![Span::raw("label")], 6, false, 40),
+            fill_row(vec![Span::raw("label")], false, 40, band),
+            hug_row(vec![Span::raw("label")], 6, false, 40, band),
         ] {
             assert!(
                 plain.iter().all(|span| span.style.bg.is_none()),
-                "an unselected row carries no wash: {plain:?}"
+                "an unselected row carries no band: {plain:?}"
             );
         }
     }
@@ -707,10 +710,26 @@ mod tests {
             theme.soft_selection_style().bg.is_none(),
             "the partial theme computes no selection"
         );
+        // The ONE shared selection style keeps the same contract: with
+        // neither the accent nor `selectedBg` resolvable, the band
+        // falls back to the onboarding wash, so a selected
+        // heartbeat/shell row never reads as unselected.
         let fallback = crate::onboarding::highlight_wash(&theme);
+        assert_eq!(theme.selection_row_style().bg, Some(fallback));
         for washed in [
-            fill_row(&theme, vec![Span::raw("label")], true, 40),
-            hug_row(&theme, vec![Span::raw("label")], 6, true, 40),
+            fill_row(
+                vec![Span::raw("label")],
+                true,
+                40,
+                theme.selection_row_style(),
+            ),
+            hug_row(
+                vec![Span::raw("label")],
+                6,
+                true,
+                40,
+                theme.selection_row_style(),
+            ),
         ] {
             assert!(
                 washed.iter().all(|span| span.style.bg == Some(fallback)),

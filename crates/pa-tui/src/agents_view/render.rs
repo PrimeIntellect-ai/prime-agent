@@ -417,7 +417,7 @@ impl AgentsViewMode {
                 ];
                 line = pad_line(line, width);
                 if selected {
-                    return theme.bg_paint(ThemeBg::SelectedBg, line);
+                    return theme.selection_paint(line);
                 }
                 return line;
             }
@@ -426,7 +426,7 @@ impl AgentsViewMode {
             ))];
             line = pad_line(line, width);
             if selected {
-                return theme.bg_paint(ThemeBg::SelectedBg, line);
+                return theme.selection_paint(line);
             }
             return line;
         }
@@ -496,7 +496,7 @@ impl AgentsViewMode {
         line.push(theme.fg(ThemeColor::Dim, details));
         if selected {
             line = pad_line(line, width);
-            return theme.bg_paint(ThemeBg::SelectedBg, line);
+            return theme.selection_paint(line);
         }
         line
     }

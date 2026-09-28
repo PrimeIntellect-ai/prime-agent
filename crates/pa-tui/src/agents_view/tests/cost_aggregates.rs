@@ -1,19 +1,20 @@
-//! The summary-line cost aggregate: the descendant-tree cost cell across
-//! the running line, the all-done inactive line, and the notice/click
-//! render paths.
+//! The summary-line cost aggregate: the descendant-tree cost cell on
+//! the ONE merged line, across the running, all-done, notice, and
+//! click render paths.
 
 use super::*;
 
-/// The operator's 2026-09-26 ask: BOTH collapsed summary lines render
-/// the descendant-tree aggregate in the SAME Cost column the agent
-/// rows bill — the right-aligned `${:.2}` cell, the Age column blank
-/// behind it. The running line first, then the follow-up: an all-done
-/// tree renders no running line, so the inactive line carries the same
-/// aggregate. TS renders no cost on the summary row
-/// (`createSubagentSummaryRow` pins `recursiveCost: 0`): the
-/// aggregate is a deliberate Rust divergence.
+/// The operator's 2026-09-26 ask carried by the ONE merged line
+/// (2026-09-28): the collapsed summary row renders the
+/// descendant-tree aggregate in the SAME Cost column the agent rows
+/// bill — the right-aligned `${:.2}` cell, the Age column blank
+/// behind it — and the merged line never unmounts (an all-done tree
+/// keeps its row), so the aggregate always has a surface. TS renders
+/// no cost on the summary row (`createSubagentSummaryRow` pins
+/// `recursiveCost: 0`): the aggregate is a deliberate Rust
+/// divergence.
 #[test]
-fn running_line_renders_the_aggregate_in_the_cost_column() {
+fn the_summary_line_renders_the_aggregate_in_the_cost_column() {
     let mut parent = parent_summary("p");
     parent["usage"] = serde_json::json!({ "cost": 0.25 });
     let mut runner = child_summary("r1", "p", "runner");
@@ -34,45 +35,37 @@ fn running_line_renders_the_aggregate_in_the_cost_column() {
         roster_entry("x1", "inactive", inactive_child),
     ];
     mode.rebuild_rows();
-    assert_eq!(mode.rows[1].title, "1, 1 running");
+    assert_eq!(mode.rows[1].title, "4 subagents (2 running)");
     let (lines, _) = mode.render_frame(120, 36);
     let flat_lines: Vec<String> = lines.iter().map(flat).collect();
-    let running = flat_lines
+    let summary = flat_lines
         .iter()
-        .find(|line| line.contains("1, 1 running"))
-        .expect("running line renders");
+        .find(|line| line.contains("4 subagents (2 running)"))
+        .expect("the ONE line renders");
     let parent_line = flat_lines
         .iter()
         .find(|line| line.contains("p name"))
         .expect("parent row renders");
-    let cost_at = running.find("$4.75").expect("the aggregate prints");
+    let cost_at = summary.find("$4.75").expect("the aggregate prints");
     let parent_cost_at = parent_line.find("$5.00").expect("the parent total prints");
     assert_eq!(
         cost_at, parent_cost_at,
         "the aggregate shares the agent rows' Cost column"
     );
     assert!(
-        running.trim_end().ends_with("$4.75"),
-        "the Age column stays blank behind the aggregate: {running:?}"
+        summary.trim_end().ends_with("$4.75"),
+        "the Age column stays blank behind the aggregate: {summary:?}"
     );
-    // The inactive line bills the SAME descendant tree aggregate at
-    // the same right-aligned column (the operator's follow-up: the
-    // aggregate must stay visible in the all-done state, where no
-    // running line renders), Age blank behind it.
-    let inactive = flat_lines
-        .iter()
-        .find(|line| line.contains("inactive subagents"))
-        .expect("inactive line renders");
-    let inactive_cost_at = inactive
-        .find("$4.75")
-        .expect("the inactive aggregate prints");
+    // ONE line carries both statuses: no second per-status summary
+    // row renders.
     assert_eq!(
-        inactive_cost_at, cost_at,
-        "the inactive line shares the agent rows' Cost column"
-    );
-    assert!(
-        inactive.trim_end().ends_with("$4.75"),
-        "the Age column stays blank behind the inactive aggregate: {inactive:?}"
+        mode.rows
+            .iter()
+            .filter(|row| row.kind == RowKind::SubagentSummary)
+            .count(),
+        1,
+        "the ONE merged line is the only summary row: {:?}",
+        mode.rows
     );
 }
 
@@ -80,31 +73,29 @@ fn running_line_renders_the_aggregate_in_the_cost_column() {
 /// the cost cell rides the row, it is never a value-dependent
 /// extra.
 #[test]
-fn running_line_renders_zero_when_nothing_bills() {
+fn the_summary_line_renders_zero_when_nothing_bills() {
     let mut mode = mode_with_parent_and_child();
-    assert_eq!(mode.rows[1].title, "1, 0 running");
+    assert_eq!(mode.rows[1].title, "1 subagents (1 running)");
     let (lines, _) = mode.render_frame(120, 36);
-    let running = lines
+    let summary = lines
         .iter()
         .map(flat)
-        .find(|line| line.contains("1, 0 running"))
-        .expect("running line renders");
+        .find(|line| line.contains("1 subagents (1 running)"))
+        .expect("the ONE line renders");
     assert!(
-        running.contains("$0.00"),
-        "the zero aggregate prints in the Cost column: {running:?}"
+        summary.contains("$0.00"),
+        "the zero aggregate prints in the Cost column: {summary:?}"
     );
 }
 
 /// The all-done state — the frame the operator actually inspects
-/// after work completes: no descendant runs, so NO running line
-/// renders and the inactive line is the only summary row. Its Cost
-/// cell carries the same descendant-tree aggregate the running line
-/// billed mid-run (#2843's regression: the aggregate rode a row
-/// that vanished the moment the children finished, and the
-/// full-width unbilled inactive line left the Cost column blank
-/// behind it).
+/// after work completes: no descendant runs, and the ONE merged line
+/// (which never unmounts — #2843's regression class: an aggregate on
+/// a row that vanished when the children finished) carries the same
+/// descendant-tree aggregate it billed mid-run. Its Cost cell prints
+/// in the same right-aligned column, the Age column blank behind it.
 #[test]
-fn inactive_line_renders_the_aggregate_in_the_all_done_state() {
+fn the_summary_line_renders_the_aggregate_in_the_all_done_state() {
     let mut parent = parent_summary("p");
     parent["usage"] = serde_json::json!({ "cost": 0.25 });
     let mut idle_child = child_summary("i1", "p", "idle worker");
@@ -118,29 +109,29 @@ fn inactive_line_renders_the_aggregate_in_the_all_done_state() {
         roster_entry("x1", "inactive", inactive_child),
     ];
     mode.rebuild_rows();
-    assert!(
-        !mode.rows.iter().any(|row| row.title.contains("running")),
-        "no running line renders when nothing runs"
+    assert_eq!(
+        mode.rows[1].title, "2 subagents (0 running)",
+        "the ONE line keeps its row in the all-done state"
     );
     let (lines, _) = mode.render_frame(120, 36);
     let flat_lines: Vec<String> = lines.iter().map(flat).collect();
-    let inactive = flat_lines
+    let summary = flat_lines
         .iter()
-        .find(|line| line.contains("2 inactive subagents"))
-        .expect("the inactive line renders");
+        .find(|line| line.contains("2 subagents (0 running)"))
+        .expect("the ONE line renders in the all-done state");
     let parent_line = flat_lines
         .iter()
         .find(|line| line.contains("p name"))
         .expect("parent row renders");
-    let cost_at = inactive.find("$2.00").expect("the aggregate prints");
+    let cost_at = summary.find("$2.00").expect("the aggregate prints");
     let parent_cost_at = parent_line.find("$2.25").expect("the parent total prints");
     assert_eq!(
         cost_at, parent_cost_at,
-        "the inactive line shares the agent rows' Cost column"
+        "the summary line shares the agent rows' Cost column"
     );
     assert!(
-        inactive.trim_end().ends_with("$2.00"),
-        "the Age column stays blank behind the aggregate: {inactive:?}"
+        summary.trim_end().ends_with("$2.00"),
+        "the Age column stays blank behind the aggregate: {summary:?}"
     );
 }
 
@@ -174,13 +165,13 @@ fn aggregate_survives_the_incident_notice_render_path() {
         text.iter().any(|line| line.contains("worker w1 crashed")),
         "the notice renders: {text:?}"
     );
-    let inactive = text
+    let summary = text
         .iter()
-        .find(|line| line.contains("1 inactive subagent"))
-        .expect("the inactive line renders behind the notice");
+        .find(|line| line.contains("1 subagents (0 running)"))
+        .expect("the ONE line renders behind the notice");
     assert!(
-        inactive.contains("$1.25"),
-        "the aggregate prints under the incident notice: {inactive:?}"
+        summary.contains("$1.25"),
+        "the aggregate prints under the incident notice: {summary:?}"
     );
 }
 
@@ -209,13 +200,13 @@ fn aggregate_survives_the_click_surface_render_path() {
     mode.rebuild_rows();
     let (lines, _) = mode.render_frame(120, 36);
     let flat_lines: Vec<String> = lines.iter().map(flat).collect();
-    let inactive = flat_lines
+    let summary = flat_lines
         .iter()
-        .find(|line| line.contains("1 inactive subagent"))
-        .expect("the inactive line renders");
+        .find(|line| line.contains("1 subagents (0 running)"))
+        .expect("the ONE line renders");
     assert!(
-        inactive.contains("$1.25"),
-        "the aggregate prints in the click-recorded frame: {inactive:?}"
+        summary.contains("$1.25"),
+        "the aggregate prints in the click-recorded frame: {summary:?}"
     );
     let summary_index = mode
         .rows
@@ -234,15 +225,15 @@ fn aggregate_survives_the_click_surface_render_path() {
     let flat_lines: Vec<String> = lines.iter().map(flat).collect();
     assert!(
         flat_lines.iter().any(|line| line.contains("idle worker")),
-        "the click expanded the inactive list"
+        "the click expanded the merged group"
     );
-    let inactive = flat_lines
+    let summary = flat_lines
         .iter()
-        .find(|line| line.contains("1 inactive subagent"))
-        .expect("the inactive line still renders expanded");
+        .find(|line| line.contains("1 subagents (0 running)"))
+        .expect("the ONE line still renders expanded");
     assert!(
-        inactive.contains("$1.25"),
-        "the aggregate stays on the expanded line: {inactive:?}"
+        summary.contains("$1.25"),
+        "the aggregate stays on the expanded line: {summary:?}"
     );
     crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
 }

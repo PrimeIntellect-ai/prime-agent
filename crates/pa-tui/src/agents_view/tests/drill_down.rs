@@ -136,13 +136,19 @@ fn unattachable_child_opens_its_root_with_a_status() {
     mode.roster
         .push(roster_entry("gc", "inactive", unattachable));
     // The grandchild is roster-inactive under the running child: the
-    // parent's inactive line flattens through the child and renders
-    // it (the running expansion never expands a child's inactive
-    // line — the purity rule keeps the running view's rows
-    // running-only, so the child's own inactive line stays shut
-    // there and the inactive path is the one that reaches it).
-    mode.expanded_inactive_parents
-        .insert("file:/x/p.jsonl".to_string());
+    // ONE merged group nests it under the child's own line — expand
+    // the parent's line first, then the child's (whose identity is
+    // its parent-qualified `agent:` alias), so the row renders.
+    mode.expanded_parents.insert("file:/x/p.jsonl".to_string());
+    mode.rebuild_rows();
+    let child_identity = mode
+        .rows
+        .iter()
+        .find(|row| row.title == "worker one")
+        .expect("the child row renders in the merged group")
+        .identity
+        .clone();
+    mode.expanded_parents.insert(child_identity);
     mode.rebuild_rows();
     let grandchild = mode
         .rows

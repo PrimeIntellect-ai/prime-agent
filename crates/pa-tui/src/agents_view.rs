@@ -33,7 +33,7 @@ pub use crate::agents_view_forest::AgentsViewScope;
 pub use crate::agents_view_forest::SelectionKey as AgentsViewSelectionKey;
 use crate::daemon_client::{DaemonClient, DaemonClientEvent};
 use crate::interactive::SessionSelection;
-use crate::theme::{Theme, ThemeBg, ThemeColor};
+use crate::theme::{Theme, ThemeColor};
 use crate::width::{pad_line, str_width};
 use crate::Line;
 mod data_input;
@@ -369,13 +369,10 @@ struct AgentsViewMode {
     /// `resolveAgentsViewScopeFrames` dropping the frame): reported on the
     /// outcome so the flow drops the scope.
     scope_dropped: bool,
-    /// Parent row identities whose running lines are expanded (TS
-    /// `expandedSubagentParents`; the operator's 2026-09-25 split gives
-    /// the inactive line its own set).
+    /// Parent row identities whose subagents lines are expanded (TS
+    /// `expandedSubagentParents`; the operator's 2026-09-28 one-line
+    /// merge carries one set for the single group).
     expanded_parents: std::collections::HashSet<String>,
-    /// Parent row identities whose inactive lines are expanded (the
-    /// operator's historical-agents line).
-    expanded_inactive_parents: std::collections::HashSet<String>,
     /// Session ids to expand on the next rebuild (TS
     /// `pendingExpandedAncestorSessionIds`, consumed once).
     pending_ancestors: Option<Vec<String>>,
@@ -519,7 +516,6 @@ impl AgentsViewMode {
             scope_active: false,
             scope_dropped: false,
             expanded_parents: std::collections::HashSet::default(),
-            expanded_inactive_parents: std::collections::HashSet::default(),
             pending_ancestors,
             selected_identity,
             selected_key,

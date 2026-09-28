@@ -1,5 +1,5 @@
-//! The subagent summary lines: the scoped view, the header counts, and
-//! the running/inactive pair under live transitions.
+//! The subagent summary line: the scoped view, the header counts, and
+//! the ONE merged line under live transitions.
 
 use super::*;
 
@@ -122,75 +122,56 @@ fn mode_with_mixed_children() -> AgentsViewMode {
     mode
 }
 
-/// The operator's 2026-09-25 directive (Kevin): Enter on the running
-/// line expands to ONLY the running children — the historical agents
-/// never flood the running expansion — and the inactive line expands
-/// separately to keep them discoverable.
+/// The operator's 2026-09-28 one-dropdown directive: Enter on the
+/// ONE line expands to the FULL roster in one group — the two runners
+/// first (with their running state), the two historical workers after
+/// — and the historical agents stay discoverable in the SAME group
+/// (the two separate expansions are gone).
 #[test]
-fn enter_expands_the_running_line_to_running_children_only() {
+fn enter_expands_the_one_line_to_the_full_roster_running_first() {
     let mut mode = mode_with_mixed_children();
-    // Collapsed: the parent, its `2, 0 running` line, its `2 inactive
-    // subagents` line.
-    assert_eq!(mode.rows.len(), 3);
-    assert_eq!(mode.rows[1].title, "2, 0 running");
+    // Collapsed: the parent and its ONE line.
+    assert_eq!(mode.rows.len(), 2);
+    assert_eq!(mode.rows[1].title, "4 subagents (2 running)");
     assert_eq!(mode.rows[1].identity, "subagents:file:/x/p.jsonl");
-    assert_eq!(mode.rows[2].title, "2 inactive subagents");
-    assert_eq!(mode.rows[2].identity, "subagents-inactive:file:/x/p.jsonl");
-    // Enter on the running line: exactly the two runners render.
+    // Enter on the line: the whole roster renders in one group.
     mode.handle_key("down");
     mode.handle_key("enter");
-    assert_eq!(mode.rows.len(), 5);
+    assert_eq!(mode.rows.len(), 6);
     assert!(mode.rows[1].expanded);
     assert!(
         mode.rows[2..4]
             .iter()
             .all(|row| row.title.starts_with("runner")),
-        "the running expansion lists runners only: {rows:?}",
+        "the runners render FIRST: {rows:?}",
         rows = mode.rows
     );
     assert!(
-        !mode.rows.iter().any(|row| row.title.contains("old worker")),
-        "the inactive children stay off the running expansion"
+        mode.rows[4..6]
+            .iter()
+            .all(|row| row.title.starts_with("old worker")),
+        "the historical workers follow in the SAME group: {rows:?}",
+        rows = mode.rows
     );
     // Enter again collapses it.
     mode.handle_key("enter");
-    assert_eq!(mode.rows.len(), 3);
+    assert_eq!(mode.rows.len(), 2);
     assert!(!mode.rows[1].expanded);
-    // The inactive line expands independently: the old workers
-    // render, the runners stay out.
-    mode.handle_key("down");
-    mode.handle_key("down");
-    assert_eq!(mode.rows[mode.selected].kind, RowKind::SubagentSummary);
-    assert_eq!(mode.rows[mode.selected].title, "2 inactive subagents");
-    mode.handle_key("enter");
-    assert_eq!(mode.rows.len(), 5);
-    assert!(mode.rows[2].expanded);
-    assert!(
-        mode.rows[3..5]
-            .iter()
-            .all(|row| row.title.starts_with("old worker")),
-        "the inactive expansion lists the historical rows only: {rows:?}",
-        rows = mode.rows
-    );
-    // The running line stays collapsed while the inactive one is
-    // open: the two toggles never interfere.
-    assert!(!mode.rows[1].expanded);
-    // alt+right on the parent row opens its first line (the running
-    // one, while work runs).
+    // alt+right on the parent row opens its ONE line.
     let mut mode = mode_with_mixed_children();
     mode.handle_key("alt+right");
-    assert!(mode.rows[1].expanded, "alt+right opens the running line");
-    assert!(!mode.rows[2].expanded);
+    assert_eq!(mode.rows.len(), 6);
+    assert!(mode.rows[1].expanded, "alt+right opens the ONE line");
 }
 
-/// Live transitions (roster pushes): a child flipping running to idle
-/// leaves the running expansion, the two lines' counts update in the
-/// same rebuild, and the selection never resets to the top of the
-/// list.
+/// Live transitions (roster pushes): a child flipping running to
+/// idle STAYS in the merged group (the one group carries every
+/// child), the ONE line's counts update in the same rebuild, and the
+/// selection never resets to the top of the list.
 #[test]
-fn live_transitions_update_both_lines_and_keep_the_selection() {
+fn live_transitions_update_the_one_line_and_keep_the_selection() {
     let mut mode = mode_with_mixed_children();
-    // Expand the running line and select the first runner.
+    // Expand the ONE line and select the first runner.
     mode.handle_key("down");
     mode.handle_key("enter");
     mode.handle_key("down");
@@ -199,57 +180,49 @@ fn live_transitions_update_both_lines_and_keep_the_selection() {
     // The runner finishes: its roster row flips to idle.
     let idle_flip = roster_entry("r1", "idle", child_summary("r1", "p", "runner one"));
     mode.apply_roster_update(vec![idle_flip], Vec::new(), false);
-    // The counts updated: one runner left, one historical row.
-    let running_line = mode
+    // The counts updated in the same rebuild: one runner left, and
+    // the finished child stays a row in the group.
+    let line = mode
         .rows
         .iter()
-        .find(|row| row.title == "1, 0 running")
-        .expect("the running line re-counted");
-    assert!(
-        running_line.expanded,
-        "the line stays open through the flip"
-    );
-    let inactive_line = mode
+        .find(|row| row.kind == RowKind::SubagentSummary)
+        .expect("the ONE line");
+    assert_eq!(line.title, "4 subagents (1 running)");
+    assert!(line.expanded, "the line stays open through the flip");
+    // The finished runner keeps its row in the merged group (it now
+    // reads idle) and the selection stays on its session.
+    let settled = mode
         .rows
         .iter()
-        .find(|row| row.title == "3 inactive subagents")
-        .expect("the inactive line re-counted");
-    assert!(!inactive_line.expanded);
-    // The finished runner left the running expansion (it now rides
-    // the collapsed inactive line); the selection follows the next
-    // runner instead of snapping to the top.
-    assert!(
-        !mode
-            .rows
-            .iter()
-            .any(|row| row.identity == selected_identity),
-        "the idle row left the running expansion: {rows:?}",
-        rows = mode.rows
+        .find(|row| row.identity == selected_identity)
+        .expect("the settled runner keeps its row in the group");
+    assert_ne!(settled.section, Section::Running, "the section flipped");
+    assert_eq!(
+        mode.rows[mode.selected].identity, selected_identity,
+        "the selection stays on the session it followed"
     );
-    assert_ne!(mode.selected, 0, "the selection never resets to the top");
-    assert_eq!(mode.rows[mode.selected].title, "runner two");
-    // The runner restarts: it reappears in the running expansion and
-    // the counts flip back.
+    // The runner restarts: the counts flip back.
     let running_flip = roster_entry("r1", "running", child_summary("r1", "p", "runner one"));
     mode.apply_roster_update(vec![running_flip], Vec::new(), false);
-    assert!(
-        mode.rows.iter().any(|row| row.title == "runner one"),
-        "the restarted runner renders again: {rows:?}",
-        rows = mode.rows
-    );
+    let line = mode
+        .rows
+        .iter()
+        .find(|row| row.kind == RowKind::SubagentSummary)
+        .expect("the ONE line");
+    assert_eq!(line.title, "4 subagents (2 running)");
     assert!(mode
         .rows
         .iter()
-        .any(|row| row.title == "2, 0 running" && row.expanded));
-    // The selection stays on the session it followed (runner two),
-    // not the re-inserted row above it.
-    assert_eq!(mode.rows[mode.selected].title, "runner two");
+        .any(|row| row.identity == selected_identity && row.section == Section::Running));
+    // The selection still rides the same session.
+    assert_eq!(mode.rows[mode.selected].identity, selected_identity);
 }
 
-/// The rendered frame carries the two summary lines: the running
-/// line's `direct, nested` pair and the explicit inactive label.
+/// The rendered frame carries the ONE summary line: the full-roster
+/// count with the running parenthetical — no per-status pair, no
+/// second line.
 #[test]
-fn frame_renders_the_running_pair_and_inactive_line() {
+fn frame_renders_the_one_line() {
     let mut grandchild = child_summary("gc", "c", "grandkid");
     grandchild["rlmChildId"] = serde_json::json!("child-gc");
     let mut mode = mode_with_parent_and_child();
@@ -260,13 +233,20 @@ fn frame_renders_the_running_pair_and_inactive_line() {
         child_summary("i1", "p", "old worker"),
     ));
     mode.rebuild_rows();
-    assert_eq!(mode.rows[1].title, "1, 1 running");
-    assert_eq!(mode.rows[2].title, "1 inactive subagent");
+    assert_eq!(mode.rows.len(), 2, "the parent and its ONE line");
+    assert_eq!(mode.rows[1].title, "3 subagents (2 running)");
     let (lines, _) = mode.render_frame(120, 36);
     let frame = lines.iter().map(flat).collect::<Vec<_>>().join("\n");
-    assert!(frame.contains("\u{25b8} 1, 1 running"), "frame: {frame}");
     assert!(
-        frame.contains("\u{25b8} 1 inactive subagent"),
+        frame.contains("\u{25b8} 3 subagents (2 running)"),
         "frame: {frame}"
+    );
+    assert!(
+        !frame.contains("inactive subagent"),
+        "no second per-status line: {frame}"
+    );
+    assert!(
+        !frame.contains(", 2 running"),
+        "no `direct, nested` pair: {frame}"
     );
 }

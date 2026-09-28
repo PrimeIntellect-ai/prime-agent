@@ -650,6 +650,48 @@ impl Theme {
             None => self.bg_style(ThemeBg::SelectedBg),
         }
     }
+
+    /// The ONE selected-row style every activity surface paints (the
+    /// operator's 2026-09-28 consistency rule: the selected row's
+    /// background is IDENTICAL across the dock's groups, the agents
+    /// view's rows, the heartbeats picker, and the bash view — one
+    /// style, not per-surface copies): the accent purple as the
+    /// selection background — the shade the dock's selection carried
+    /// before #2831 swapped it for the near-invisible dark-green
+    /// `ToolSuccessBg` band — at FULL opacity (a solid band, never a
+    /// translucent wash), with the selected row's text bold. Each
+    /// surface keeps its own foreground colors; the style patches only
+    /// the background and the bold modifier.
+    ///
+    /// TS parity: the TS fork paints `theme.bg("selectedBg", ...)` on
+    /// its focused rows (a plain dark-gray band — no purple, no bold);
+    /// the purple+opaque+bold treatment is the operator's sanctioned
+    /// divergence. A theme too partial to resolve the accent falls
+    /// back to the plain selection background and then the onboarding
+    /// wash, so a selected row always reads as selected (Macroscope
+    /// PR #2908's contract).
+    pub fn selection_row_style(&self) -> Style {
+        let purple = self
+            .fg_style(ThemeColor::Accent)
+            .fg
+            .or_else(|| self.bg_color(ThemeBg::SelectedBg))
+            .unwrap_or_else(|| crate::onboarding::highlight_wash(self));
+        Style::default().bg(purple).add_modifier(Modifier::BOLD)
+    }
+
+    /// Paint one line's spans with [`Theme::selection_row_style`] —
+    /// the `bg_paint` counterpart for the one selection style: each
+    /// span keeps its own foreground, gains the purple band and the
+    /// bold modifier.
+    pub fn selection_paint(&self, line: crate::Line) -> crate::Line {
+        let style = self.selection_row_style();
+        line.into_iter()
+            .map(|mut span| {
+                span.style = span.style.patch(style);
+                span
+            })
+            .collect()
+    }
 }
 
 fn span_with(span: crate::Span, modifier: Modifier) -> crate::Span {

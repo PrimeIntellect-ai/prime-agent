@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::theme::{ColorMode, Theme};
+use ratatui::style::Modifier;
 
 fn kb() -> KeybindingsManager {
     KeybindingsManager::new()
@@ -223,32 +224,30 @@ fn the_table_fills_the_full_width() {
     assert!(plain.iter().all(|span| span.style.bg.is_none()));
 }
 
-/// The selected row's wash is the theme's shared selection and it
-/// READS (the operator's 2026-09-26 directive: the heartbeats
-/// selection was barely visible): the whole-row band is the same
-/// wash the `›`-marker rows carry, and its rendered luminance clears
-/// the theme's visibility bar over the editor surface.
+/// The selected row paints the ONE shared selection style (the
+/// operator's 2026-09-28 consistency rule: the heartbeats selection's
+/// background is IDENTICAL to the agents view's and the shell view's
+/// selected rows and the dock's group band): the accent purple at full
+/// opacity with bold text — one style constant
+/// (`Theme::selection_row_style`), not a per-surface copy.
 #[test]
-fn the_selected_row_wash_reads_off_the_surface() {
+fn the_selected_row_paints_the_shared_selection_style() {
     let theme = theme();
     let frame = HeartbeatsPicker::new(entries(), None, None, 24).render(&theme, 90, &kb());
     let selected = frame
         .iter()
         .find(|line| line.iter().any(|span| span.content.contains("tick user-1")))
         .expect("the selected row");
-    let wash = theme.soft_selection_style().bg.expect("the wash");
+    let band = theme.selection_row_style();
     assert!(
-        selected.iter().all(|span| span.style.bg == Some(wash)),
-        "every span of the selected row carries the shared wash: {selected:?}"
+        selected.iter().all(|span| span.style.bg == band.bg),
+        "every span of the selected row carries the shared purple band: {selected:?}"
     );
-    let surface = theme
-        .bg_color(crate::theme::ThemeBg::UserMessageBg)
-        .expect("the editor surface");
-    let wash_lum = crate::theme::quantized_luminance(wash).expect("the wash evaluates");
-    let surface_lum = crate::theme::quantized_luminance(surface).expect("the surface evaluates");
     assert!(
-        (wash_lum - surface_lum).abs() >= crate::theme::SELECTION_MIN_LUMINANCE_DELTA - 1.0,
-        "the heartbeats wash must read off the surface: lum {wash_lum:.2} vs {surface_lum:.2}"
+        selected
+            .iter()
+            .all(|span| span.style.add_modifier.contains(Modifier::BOLD)),
+        "every span of the selected row carries the bold modifier: {selected:?}"
     );
 }
 
