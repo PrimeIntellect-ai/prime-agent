@@ -210,6 +210,14 @@ build_fixture() { # sandbox-dir target-triple
   cat > "$fixture/payload/prime-agent" <<'BIN'
 #!/bin/sh
 # fake payload binary for the installer sandbox test
+if [ "$1" = "--prime-agent-bootstrap" ]; then
+  if [ "${PRIME_AGENT_FAUX_BOOTSTRAP_FAIL:-0}" = "1" ]; then
+    echo "Error: uv is required to set up the Python kernel. Install uv yourself: curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+    exit 1
+  fi
+  printf 'kernel python: %s/venvs/kernel/bin/python\n' "${PRIME_AGENT_CODING_AGENT_DIR:-$HOME/.prime/agent}"
+  exit 0
+fi
 printf '0.1.2-continuous.0000042\n'
 BIN
   chmod 0755 "$fixture/payload/prime-agent"
@@ -299,6 +307,7 @@ run_installer() { # mach extra-args...  -> runs the installer, returns its exit 
   HOME="$mach/home" TMPDIR="$mach/tmp" \
   GH_FIXTURE_DIR="$mach/fixture" NPM_MOCK_LOG="$mach/logs/npm-mock.log" \
   NPM_MOCK_ROOT="$mach/npm-global" \
+  PRIME_AGENT_FAUX_BOOTSTRAP_FAIL="${PRIME_AGENT_FAUX_BOOTSTRAP_FAIL:-0}" \
   PATH="$mach/mocks:$(dirname "$(command -v python3)"):/usr/bin:/bin" \
     sh "$INSTALLER" "$@" > "$mach/install.log" 2>&1
 }
@@ -317,6 +326,8 @@ build_fixture "$mach" "$FIXTURE_TRIPLE"
 seed_ts_native "$mach"
 seed_store "$mach"
 seed_old_rust_layout "$mach"
+printf '#!/bin/sh\necho "uv 0.9.9 (mock)"\n' > "$mach/home/.local/bin/uv"
+chmod 0755 "$mach/home/.local/bin/uv"
 start_daemon "$mach" 0
 store_before="$(store_snapshot "$mach")"
 session_hash_before="$(sha256sum "$mach/home/.prime/agent/sessions/sess-0001.jsonl" | cut -d' ' -f1)"
@@ -385,6 +396,10 @@ assert_eq "case 1 (e) npm global package removed" "gone" \
 assert_eq "case 1 lock released" "gone" \
   "$([ -e "$mach/home/.local/share/.prime-agent-install.lock" ] && echo here || echo gone)"
 assert_contains "case 1 install log names the source commit" "$mach/install.log" "0000042"
+assert_contains "case 1 (h) uv found" "$mach/install.log" "uv found"
+assert_contains "case 1 (h) the kernel pre-warm ran" "$mach/install.log" "kernel pre-warmed"
+assert_contains "case 1 (h) the bootstrap answers the kernel python path" "$mach/install.log" "kernel python:"
+assert_not_contains "case 1 (h) no bootstrap warning on the happy path" "$mach/install.log" "kernel pre-warm failed"
 
 # A user-made lookalike in the rollback namespace must SURVIVE the sweep
 # (only marker-carrying generations are swept).
@@ -704,6 +719,47 @@ assert_eq "case 10 no migration slot was created from it" "none" \
 assert_eq "case 10 the launcher installed" "yes" \
   "$([ -f "$mach10/home/.local/bin/prime-agent" ] && echo yes || echo no)"
 assert_eq "case 10 the store is untouched" "$store_before_10" "$(store_snapshot "$mach10")"
+
+# ==============================================================================
+echo "== case 11: a failing kernel pre-warm warns but never fails the install =="
+mach11="$(new_machine bootstrap-fail)"
+write_gh_mock "$mach11/mocks/gh"
+write_npm_mock "$mach11/mocks/npm"
+build_fixture "$mach11" "$FIXTURE_TRIPLE"
+seed_store "$mach11"
+mkdir -p "$mach11/home/.local/bin"
+printf '#!/bin/sh\necho "uv 0.9.9 (mock)"\n' > "$mach11/home/.local/bin/uv"
+chmod 0755 "$mach11/home/.local/bin/uv"
+store_before_11="$(store_snapshot "$mach11")"
+PRIME_AGENT_FAUX_BOOTSTRAP_FAIL=1 run_installer "$mach11"
+rc11=$?
+assert_eq "case 11 the install succeeds despite the bootstrap failure" 0 "$rc11"
+assert_contains "case 11 the bootstrap failure is a warning" "$mach11/install.log" "kernel pre-warm failed"
+assert_contains "case 11 the warning says the first session retries" "$mach11/install.log" "retry it online"
+assert_eq "case 11 the launcher still installed" "yes" \
+  "$([ -f "$mach11/home/.local/bin/prime-agent" ] && echo yes || echo no)"
+assert_eq "case 11 the store is untouched" "$store_before_11" "$(store_snapshot "$mach11")"
+
+# ==============================================================================
+echo "== case 12: uv missing and offline warns but never fails the install =="
+mach12="$(new_machine offline-uv)"
+write_gh_mock "$mach12/mocks/gh"
+write_npm_mock "$mach12/mocks/npm"
+build_fixture "$mach12" "$FIXTURE_TRIPLE"
+seed_store "$mach12"
+# offline curl: the astral installer fetch never succeeds
+printf '#!/bin/sh\nexit 7\n' > "$mach12/mocks/curl"
+chmod 0755 "$mach12/mocks/curl"
+store_before_12="$(store_snapshot "$mach12")"
+run_installer "$mach12"
+rc12=$?
+assert_eq "case 12 the install succeeds despite the missing uv" 0 "$rc12"
+assert_contains "case 12 the offline uv install is a warning" "$mach12/install.log" "could not install uv"
+assert_contains "case 12 the warning names the uv install command" "$mach12/install.log" "astral.sh/uv/install.sh"
+assert_contains "case 12 the pre-warm skip is noted" "$mach12/install.log" "kernel pre-warm skipped"
+assert_eq "case 12 the launcher still installed" "yes" \
+  "$([ -f "$mach12/home/.local/bin/prime-agent" ] && echo yes || echo no)"
+assert_eq "case 12 the store is untouched" "$store_before_12" "$(store_snapshot "$mach12")"
 
 echo
 echo "passed: $passed  failed: $failures"

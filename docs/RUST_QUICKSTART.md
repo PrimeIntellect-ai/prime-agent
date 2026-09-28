@@ -49,6 +49,13 @@ releases). The installed binary answers its exact source commit:
 same command with `--update` re-installs the newest run; it is the entry
 point the `prime-agent update` command and the TUI `/update` exec.
 
+The installer also pre-warms the Python kernel: it makes sure `uv` exists
+(installing it from the command the product's own error names when missing)
+and runs `prime-agent --prime-agent-bootstrap`, so the first session's
+kernel venv is ready before you start. Both steps are best-effort — if the
+machine is offline, the install still succeeds with a warning, and the
+first session needs the network once to bootstrap the kernel itself.
+
 Manual steps — download the platform artifact from the latest run, verify
 it, extract it, and run the binary directly:
 

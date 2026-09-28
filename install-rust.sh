@@ -63,6 +63,9 @@
 #      and the install-time stop-when-idle above retires a TS daemon
 #      cleanly instead of orphaning one. Pin + clean stop together mean
 #      the two daemons can never fight over a socket again after install.
+#      Together with the kernel pre-warm below (uv + the Python venv at
+#      install time), a fresh install's FIRST session works out of the
+#      box, online or offline.
 #
 # THE SHARED STORE IS NEVER TOUCHED: ~/.prime/agent/ (sessions, leases,
 # config) is read and written by BOTH products by design — the same
@@ -116,6 +119,10 @@ install is preserved under share/prime-agent-legacy, and its npm package is unin
 (the restore command is printed). ~/.prime/agent (the shared session store) is never
 touched. Both the default and --update install the newest successful `continuous`
 workflow run on the `rust` branch.
+
+The installer pre-warms the Python kernel (uv + `prime-agent
+--prime-agent-bootstrap`); offline, that step degrades to a warning and the
+first session bootstraps the kernel itself — it needs the network once.
 
 Environment:
   PRIME_AGENT_RUST_REPO     <org>/<repo> to install from
@@ -855,6 +862,47 @@ except Exception:
       fi
     fi
   fi
+fi
+
+# --- the kernel pre-warm: uv + the Python kernel venv ------------------------
+# The payload ships the prime-agent-runtime/ sidecar but NOT uv and not the
+# venv: without this step the FIRST session fails with "uv is required to
+# set up the Python kernel" — and the Python kernel is the product's only
+# tool, so a fresh install would be dead in the water. The binary's own
+# install-time entry (`--prime-agent-bootstrap`, the TS cli-main.ts
+# precedent) creates the venv now; both steps are best-effort — an offline
+# machine still gets a successful install, and the first session retries
+# the bootstrap online per the product's own guidance.
+if command -v uv >/dev/null 2>&1 || [ -x "${HOME}/.local/bin/uv" ]; then
+  echo "uv found (the kernel venv's package manager)"
+else
+  echo "installing uv (the kernel venv's package manager — the command the"
+  echo "product's own error message names):"
+  # The fetch and the script run are checked SEPARATELY: a plain
+  # `curl | sh` pipeline reports the SCRIPT's status, so a dead network
+  # (curl fails, sh reads nothing and exits 0) would masquerade as success.
+  if curl_out="$(curl -LsSf https://astral.sh/uv/install.sh)" \
+     && printf '%s\n' "$curl_out" | sh; then
+    [ -x "${HOME}/.local/bin/uv" ] \
+      || echo "warning: the uv installer reported success but ${HOME}/.local/bin/uv is missing; the first session may need to install uv itself"
+  else
+    echo "warning: could not install uv (offline?); the kernel pre-warm was"
+    echo "  skipped. The first session needs uv — install it with:"
+    echo "  curl -LsSf https://astral.sh/uv/install.sh | sh"
+  fi
+fi
+if command -v uv >/dev/null 2>&1 || [ -x "${HOME}/.local/bin/uv" ]; then
+  if bootstrap_out="$("$launcher" --prime-agent-bootstrap 2>&1)"; then
+    echo "kernel pre-warmed: the first session's Python kernel is ready"
+    printf '  %s\n' "$bootstrap_out"
+  else
+    echo "warning: the kernel pre-warm failed (the install stands; the first"
+    echo "  session will retry it online):"
+    printf '%s\n' "$bootstrap_out"
+  fi
+else
+  echo "note: kernel pre-warm skipped (no uv); the first session bootstraps"
+  echo "  the kernel itself and needs the network once"
 fi
 
 # --- PATH check (warn, not fail) ---------------------------------------------------
