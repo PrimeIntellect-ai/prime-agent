@@ -1291,7 +1291,12 @@ fn rpc_compact_flushes_the_start_frame_before_the_pipeline() {
     let (response, events) = client.wait_response(&id, TIMEOUT);
     assert_eq!(response["success"], true, "the response: {response}");
     let result = &response["data"];
-    assert_eq!(result["summary"], "corpus history summary: the scale corpus ran");
+    let summary = result["summary"].as_str().expect("the summary");
+    assert!(
+        summary.contains("corpus history summary: the scale corpus ran")
+            && summary.contains("corpus turn-prefix summary: the final marker"),
+        "the split-turn compaction composes both summarizer answers: {summary}"
+    );
     assert!(result["tokensBefore"].is_number(), "the CompactionResult shape");
     let mut cs: Option<(Instant, &Value)> = None;
     let mut ce: Option<(Instant, &Value)> = None;
