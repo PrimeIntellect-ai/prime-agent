@@ -494,7 +494,7 @@ impl ProviderAuth {
 /// store, and an OAuth row reaching it answers the silent cancel (the
 /// session routes the panel rows to the panel body).
 fn login_blocking(
-    provider_row: ProviderRow,
+    provider_row: &ProviderRow,
     agent_dir: PathBuf,
     api_key: Option<String>,
 ) -> ProviderAuthOutcome {
@@ -537,7 +537,7 @@ fn login_blocking(
 /// answers arrive from the TUI loop's thread), and the inline auth panel
 /// carries every surface the plain terminal used to.
 fn login_blocking_on_panel(
-    provider_row: ProviderRow,
+    provider_row: &ProviderRow,
     cwd: PathBuf,
     agent_dir: PathBuf,
     panel: pa_tui::auth_panel::AuthPanelHandle,
@@ -717,7 +717,7 @@ fn login_blocking_on_panel(
 
 /// The logout body (blocking: the auth store lock stays off the async
 /// workers).
-fn logout_blocking(provider_row: ProviderRow, agent_dir: PathBuf) -> ProviderAuthOutcome {
+fn logout_blocking(provider_row: &ProviderRow, agent_dir: &Path) -> ProviderAuthOutcome {
     let mut auth = pa_core::auth::AuthStorage::create(&agent_dir);
     if auth.get_all().get(&provider_row.id).is_none() {
         return ProviderAuthOutcome::Status(format!("{} is not configured.", provider_row.name));

@@ -561,7 +561,7 @@ fn run_package_update(
     manager: &mut PackageManager,
     options: PackageCommandOptions,
     stdin_is_terminal: bool,
-    self_update: &dyn Fn(&SelfUpdateOptions, Option<String>) -> i32,
+    self_update: &dyn Fn(&SelfUpdateOptions, Option<&str>) -> i32,
 ) -> PackageCommandOutcome {
     let target = options.update_target.unwrap_or(UpdateTarget::All);
     let persisted_wire = manager
