@@ -20,6 +20,16 @@ use super::{migrate_to_current_version, parse_session_entries, CURRENT_SESSION_V
 #[cfg(test)]
 mod tests;
 
+// The header + rlm-depth concern (the first-line header read and the
+// RLM depth resolution) moved to the child module at the same tree
+// position (session::manager::header); the re-export keeps the pub API
+// path stable (discovery.rs) and the pub(super) bindings keep the
+// constructors' bare calls in scope (set_session_file, new_session,
+// fork_from, materialize_session_file).
+mod header;
+pub use header::read_session_header;
+use header::{is_valid_rlm_depth, resolve_session_rlm_depth, root_rlm_depth_from_env};
+
 // The git-context concern (the quiet git probes and the header capture)
 // moved to the child module at the same tree position
 // (session::manager::git); the re-export keeps the pub API path stable
@@ -93,40 +103,6 @@ pub fn format_iso(millis: i64) -> String {
     let second = (time_ms / 1_000) % 60;
     let ms = time_ms % 1_000;
     format!("{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{ms:03}Z")
-}
-
-/// Read just the header of a session file (first line).
-pub fn read_session_header(file_path: &Path) -> Option<SessionHeader> {
-    use std::io::BufRead;
-    let file = std::fs::File::open(file_path).ok()?;
-    let mut first_line = String::new();
-    std::io::BufReader::new(file)
-        .read_line(&mut first_line)
-        .ok()?;
-    let wrapper: SessionHeaderWrapper = serde_json::from_str(&first_line).ok()?;
-    Some(wrapper.header)
-}
-
-#[derive(serde::Deserialize)]
-struct SessionHeaderWrapper {
-    #[serde(flatten)]
-    header: SessionHeader,
-}
-
-fn is_valid_rlm_depth(value: Option<u64>) -> bool {
-    value.is_some_and(|depth| depth < u64::MAX)
-}
-
-fn root_rlm_depth_from_env() -> u64 {
-    match std::env::var("RLM_DEPTH") {
-        Ok(value) if value.is_empty() => 0,
-        Ok(value) => value
-            .parse::<u64>()
-            .ok()
-            .filter(|depth| is_valid_rlm_depth(Some(*depth)))
-            .unwrap_or_else(|| panic!("RLM_DEPTH must be a non-negative integer")),
-        Err(_) => 0,
-    }
 }
 
 /// Options for creating a new session.
@@ -1652,13 +1628,6 @@ impl SessionManager {
         })?;
         Ok(id)
     }
-}
-
-fn resolve_session_rlm_depth(header: &SessionHeader, _session_path: &Path) -> u64 {
-    if is_valid_rlm_depth(header.rlm_depth) {
-        return header.rlm_depth.unwrap();
-    }
-    0
 }
 
 /// Atomic session-file write: private temp + fsync + rename onto the
