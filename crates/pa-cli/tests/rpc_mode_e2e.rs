@@ -1106,7 +1106,13 @@ impl TimedRpcChild {
                 }
             }
         });
-        TimedRpcChild { child, stdin, frames, next_id: 0, home }
+        TimedRpcChild {
+            child,
+            stdin,
+            frames,
+            next_id: 0,
+            home,
+        }
     }
 
     fn send(&mut self, frame: Value) {
