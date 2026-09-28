@@ -60,9 +60,15 @@ const STALL_MSG: &[u8] = b"shutdown stalled; forced exit.";
 /// The transcript rows this harness seeds: `row <index>` text, the same
 /// needle family the kitty-release e2e drives. The startup paint shows
 /// the viewport tail only, so the mount needle is the LAST seeded row;
-/// the exit flush writes the whole transcript, so the completeness
-/// assertion checks the FIRST row appears after the exit.
-const FIRST_ROW: &[u8] = b"row 0";
+/// the exit flush writes the whole view, so the completeness assertion
+/// checks the view's FIRST rows appear after the exit. The seed (1600
+/// messages) crosses the initial render window, so the view opens with
+/// the cap notice (its first entry) over the newest-400 tail — the
+/// notice and the window's first message row are the completeness
+/// needles; the window's head is `SEED_MESSAGES - 400` (the TS
+/// `initialRenderMessages` walk start).
+const FIRST_ROW: &[u8] = b"Showing latest 400 of 1600 messages for faster open.";
+const WINDOW_HEAD_ROW: &[u8] = b"row 1200";
 const CHILD_SOCKET_ENV: &str = "PA_SLOW_DRAIN_CHILD_SOCKET";
 /// The exit flush of the seeded transcript, at the paced read rate,
 /// must still be draining when the 1500ms deadline passes: the flush is
@@ -170,7 +176,9 @@ fn a_slow_drain_flushes_the_whole_transcript_without_forcing_the_exit() {
     // carry per-word SGR spans) and the dock's exit hint, which the
     // dock renders after every chat row.
     let first_row_at = find_subsequence_last(&output, FIRST_ROW)
-        .expect("the flush wrote the transcript's first row");
+        .expect("the flush wrote the transcript's first row (the cap notice)");
+    let window_head_at = find_subsequence_last(&output, WINDOW_HEAD_ROW)
+        .expect("the flush wrote the capped window's first message row");
     let last_user_row = format!("row {}", SEED_MESSAGES - 2).into_bytes();
     let last_row_at = find_subsequence_last(&output, &last_user_row)
         .expect("the flush wrote the transcript's last user row");
@@ -179,8 +187,11 @@ fn a_slow_drain_flushes_the_whole_transcript_without_forcing_the_exit() {
     let leave_at =
         find_subsequence(&output, ALT_SCREEN_LEAVE).expect("the exit left the alternate screen");
     assert!(
-        leave_at < first_row_at && first_row_at < last_row_at && last_row_at < dock_at,
-        "the flushed rows follow the alt-screen leave (output {}B, leave_at {leave_at}, first_row_at {first_row_at}, last_row_at {last_row_at}, dock_at {dock_at})",
+        leave_at < first_row_at
+            && first_row_at < window_head_at
+            && window_head_at < last_row_at
+            && last_row_at < dock_at,
+        "the flushed rows follow the alt-screen leave in transcript order (output {}B, leave_at {leave_at}, notice_at {first_row_at}, window_head_at {window_head_at}, last_row_at {last_row_at}, dock_at {dock_at})",
         output.len()
     );
     // The restore tail lands after the flushed rows: the terminal is

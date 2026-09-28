@@ -280,17 +280,24 @@ fn drag_select_frame_cost_is_independent_of_session_size() {
     let (_, _, large_baseline) = run_plan(large, baseline());
     let (frames_large_drag, copies_large, large_drag) = run_plan(large, drag_burst());
 
-    // The copies are the same text both sizes: the drag extracts the
-    // spanned rows through the same coordinates on either session.
+    // The copies are one span each: the drag extracts the spanned rows
+    // through the same coordinates on either session. The small session
+    // (40 messages) stays under the initial render window, so its head
+    // is the transcript's own first row; the large session (4000
+    // messages) crosses the cap — its head is the window's head (the
+    // stitched newest-400 tail begins at "row 3600"), and the drag's
+    // blank-leading copy reads the notice's spacer rows above it.
     assert_eq!(copies_small.len(), 1, "the small drag copies once");
-    assert_eq!(
-        copies_large, copies_small,
-        "the large session drags the same rows"
+    assert_eq!(copies_large.len(), 1, "the large drag copies once");
+    assert!(
+        copies_small[0].starts_with("row 0"),
+        "the small copy reads the pressed row: {:?}",
+        &copies_small[0][..copies_small[0].len().min(40)]
     );
     assert!(
-        copies_large[0].starts_with("row 0"),
-        "the copy reads the pressed row: {:?}",
-        &copies_large[0][..copies_large[0].len().min(40)]
+        copies_large[0].contains("row 3600"),
+        "the large copy reads the capped window's head (the 4000-message          session folds to the newest 400, starting at row 3600): {:?}",
+        &copies_large[0][..copies_large[0].len().min(60)]
     );
 
     // The drag path's own cost (burst minus baseline) stays in the same
