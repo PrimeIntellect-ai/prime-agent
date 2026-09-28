@@ -8,8 +8,7 @@ pseudonymous installation identity for Prime Agent product analytics
 
 - `Properties`: primitive-only property maps (the privacy boundary — strings,
   numbers, booleans, null; structured values are rejected at insertion).
-- `TelemetryEvent`: `{name, timestamp, properties}` records; name catalog is
-  versioned in `docs/telemetry-events.md`.
+- `TelemetryEvent`: `{name, timestamp, properties}` records.
 - `TelemetryClient`: non-blocking `track(event, properties)`, `flush`,
   `shutdown`. One background worker, capped queue (drop-oldest), batched
   flush (size + interval + explicit), fan-out to every sink. Best-effort by

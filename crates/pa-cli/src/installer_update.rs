@@ -6,8 +6,8 @@
 //! core out-of-band (`client_update.rs`), so the two surfaces cannot
 //! diverge. This command exists only in the Rust binary: the TypeScript
 //! version does not have it — the move happens when the user runs the
-//! curl|sh URL from `docs/RUST_QUICKSTART.md` or `prime-agent update`
-//! (after the Rust install exists).
+//! installer's curl|sh URL (the README's Install section) or
+//! `prime-agent update` (after the Rust install exists).
 
 use pa_core::update::installer::{self, InstallerOutput};
 

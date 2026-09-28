@@ -215,7 +215,7 @@ MOCK
 # --- the fixture artifact -------------------------------------------------------
 build_fixture() { # sandbox-dir target-triple
   fixture="$1/fixture"
-  mkdir -p "$fixture/payload/docs"
+  mkdir -p "$fixture/payload"
   cat > "$fixture/payload/prime-agent" <<'BIN'
 #!/bin/sh
 # fake payload binary for the installer sandbox test
@@ -232,7 +232,6 @@ BIN
   chmod 0755 "$fixture/payload/prime-agent"
   printf '{"name":"prime-agent","version":"0.1.2-continuous.0000042"}\n' \
     > "$fixture/payload/package.json"
-  printf '# quickstart stub\n' > "$fixture/payload/docs/RUST_QUICKSTART.md"
   printf 'LICENSE stub\n' > "$fixture/payload/LICENSE"
   tarball="prime-agent-0.1.2-$2.tar.gz"
   tar -czf "$fixture/$tarball" -C "$fixture/payload" .

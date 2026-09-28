@@ -914,6 +914,23 @@ fn is_rlm_child_status_item(item: &QueuedItem) -> bool {
     crate::child_status_notices::is_reserved_child_status_custom_type(row)
 }
 
+/// One parked item's engine-minted internal-prompt provenance (the
+/// injected continuations TS's `visibleSessionActionProjection` filters
+/// out of the queue projection entirely): the turn policy marks the
+/// admission class and `queue_visible` the invisible shape — the goal
+/// continuations and budget-limit steers (`admit_goal_follow_up`, the
+/// post-compaction continuation) and the threshold-compaction
+/// autonomous continuation (`admit_autonomous_follow_up`) all park
+/// exactly this way, preview-less, so their raw message text is the
+/// only thing a string could read. The queue projection marks them by
+/// index instead (the `injectedPrompts` rider, the `rlmChildStatus`
+/// precedent): a user-typed prompt that merely looks like a
+/// continuation stays the human row it is. Child status notices never
+/// ride this rider — they carry their own.
+fn is_injected_prompt_item(item: &QueuedItem) -> bool {
+    item.policy == TurnPolicy::Injected && !item.queue_visible && !is_rlm_child_status_item(item)
+}
+
 #[cfg(test)]
 #[path = "worker_resume_settings_tests.rs"]
 mod worker_resume_settings_tests;
