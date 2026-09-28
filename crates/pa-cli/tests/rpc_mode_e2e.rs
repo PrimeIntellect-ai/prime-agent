@@ -1024,13 +1024,17 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
         row
     };
     for base in 0..11 {
-        let row = entry(&mut counter, &mut parent, json!({
-            "customType": "harness_digest",
-            "content": format!(
-                "[harness-digest] base note {base}: persistent state summary for the corpus."
-            ),
-            "type": "custom_message",
-        }));
+        let row = entry(
+            &mut counter,
+            &mut parent,
+            json!({
+                "customType": "harness_digest",
+                "content": format!(
+                    "[harness-digest] base note {base}: persistent state summary for the corpus."
+                ),
+                "type": "custom_message",
+            }),
+        );
         rows.push(row);
     }
     // ~40KB of assistant text per turn keeps the fixture at `size_mib`
@@ -1042,28 +1046,103 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
     let per_turn = turn_text.len() + 1024;
     let turns = (size_mib * (1 << 20)) / per_turn;
     for turn in 0..turns {
-        let row = entry(&mut counter, &mut parent, json!({
-            "message": {
-                "role": "user",
-                "content": [{ "type": "text", "text": format!("please do task number {turn}") }],
-                "timestamp": 1_789_584_016_603_i64 + turn as i64,
-            },
-            "type": "message",
-        }));
+        let row = entry(
+            &mut counter,
+            &mut parent,
+            json!({
+                "message": {
+                    "role": "user",
+                    "content": [{ "type": "text", "text": format!("please do task number {turn}") }],
+                    "timestamp": 1_789_584_016_603_i64 + turn as i64,
+                },
+                "type": "message",
+            }),
+        );
         rows.push(row);
         let call_id = format!("call_{turn:06}");
-        let row = entry(&mut counter, &mut parent, json!({
+        let row = entry(
+            &mut counter,
+            &mut parent,
+            json!({
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "thinking", "thinking": format!("task {turn}: run the corpus command") },
+                        { "type": "text", "text": turn_text },
+                    ],
+                    "toolCalls": [{
+                        "id": call_id,
+                        "name": "ipython",
+                        "arguments": { "code": format!("print('corpus {turn}')") },
+                    }],
+                    "api": "openai-completions",
+                    "provider": "prime-inference",
+                    "model": "mock-1",
+                    "usage": {
+                        "input": 100, "output": 20, "cacheRead": 10, "cacheWrite": 0,
+                        "totalTokens": 130,
+                        "cost": { "input": 0.1, "output": 0.02, "cacheRead": 0, "cacheWrite": 0, "total": 0.12 },
+                    },
+                    "stopReason": "tool_calls",
+                    "timestamp": 1_789_584_016_603_i64 + turn as i64,
+                },
+                "type": "message",
+            }),
+        );
+        rows.push(row);
+        let row = entry(
+            &mut counter,
+            &mut parent,
+            json!({
+                "message": {
+                    "role": "toolResult",
+                    "toolCallId": call_id,
+                    "content": [{ "type": "text", "text": format!("corpus {turn}\n[0, 1, 2]\n") }],
+                    "isError": false,
+                    "timestamp": 1_789_584_016_603_i64 + turn as i64,
+                },
+                "type": "message",
+            }),
+        );
+        rows.push(row);
+        if (turn + 1) % 20 == 0 {
+            let row = entry(
+                &mut counter,
+                &mut parent,
+                json!({
+                    "customType": "harness_digest",
+                    "content": format!(
+                        "[harness-digest] note {turn}: persistent state summary for the corpus."
+                    ),
+                    "type": "custom_message",
+                }),
+            );
+            rows.push(row);
+        }
+    }
+    let row = entry(
+        &mut counter,
+        &mut parent,
+        json!({
+            "message": {
+                "role": "user",
+                "content": [{ "type": "text", "text": "final marker request" }],
+                "timestamp": 1_789_584_016_603_i64,
+            },
+            "type": "message",
+        }),
+    );
+    rows.push(row);
+    let row = entry(
+        &mut counter,
+        &mut parent,
+        json!({
             "message": {
                 "role": "assistant",
                 "content": [
-                    { "type": "thinking", "thinking": format!("task {turn}: run the corpus command") },
-                    { "type": "text", "text": turn_text },
+                    { "type": "thinking", "thinking": "final marker" },
+                    { "type": "text", "text": "CVIS-E2E-TAIL end of corpus." },
                 ],
-                "toolCalls": [{
-                    "id": call_id,
-                    "name": "ipython",
-                    "arguments": { "code": format!("print('corpus {turn}')") },
-                }],
                 "api": "openai-completions",
                 "provider": "prime-inference",
                 "model": "mock-1",
@@ -1072,63 +1151,12 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
                     "totalTokens": 130,
                     "cost": { "input": 0.1, "output": 0.02, "cacheRead": 0, "cacheWrite": 0, "total": 0.12 },
                 },
-                "stopReason": "tool_calls",
-                "timestamp": 1_789_584_016_603_i64 + turn as i64,
+                "stopReason": "stop",
+                "timestamp": 1_789_584_016_603_i64,
             },
             "type": "message",
-        }));
-        rows.push(row);
-        let row = entry(&mut counter, &mut parent, json!({
-            "message": {
-                "role": "toolResult",
-                "toolCallId": call_id,
-                "content": [{ "type": "text", "text": format!("corpus {turn}\n[0, 1, 2]\n") }],
-                "isError": false,
-                "timestamp": 1_789_584_016_603_i64 + turn as i64,
-            },
-            "type": "message",
-        }));
-        rows.push(row);
-        if (turn + 1) % 20 == 0 {
-            let row = entry(&mut counter, &mut parent, json!({
-                "customType": "harness_digest",
-                "content": format!(
-                    "[harness-digest] note {turn}: persistent state summary for the corpus."
-                ),
-                "type": "custom_message",
-            }));
-            rows.push(row);
-        }
-    }
-    let row = entry(&mut counter, &mut parent, json!({
-        "message": {
-            "role": "user",
-            "content": [{ "type": "text", "text": "final marker request" }],
-            "timestamp": 1_789_584_016_603_i64,
-        },
-        "type": "message",
-    }));
-    rows.push(row);
-    let row = entry(&mut counter, &mut parent, json!({
-        "message": {
-            "role": "assistant",
-            "content": [
-                { "type": "thinking", "thinking": "final marker" },
-                { "type": "text", "text": "CVIS-E2E-TAIL end of corpus." },
-            ],
-            "api": "openai-completions",
-            "provider": "prime-inference",
-            "model": "mock-1",
-            "usage": {
-                "input": 100, "output": 20, "cacheRead": 10, "cacheWrite": 0,
-                "totalTokens": 130,
-                "cost": { "input": 0.1, "output": 0.02, "cacheRead": 0, "cacheWrite": 0, "total": 0.12 },
-            },
-            "stopReason": "stop",
-            "timestamp": 1_789_584_016_603_i64,
-        },
-        "type": "message",
-    }));
+        }),
+    );
     rows.push(row);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut text = String::new();
@@ -1150,7 +1178,9 @@ struct TimedRpcChild {
     /// Held while the reader is deferred (the stalled-reader oracle).
     pending_stdout: Option<std::process::ChildStdout>,
     next_id: u64,
-    home: tempfile::TempDir,
+    /// Held so the tempdir (the child's cwd) outlives the child process:
+    /// the Drop reaps the child before the field drops.
+    _home: tempfile::TempDir,
 }
 
 impl TimedRpcChild {
@@ -1196,7 +1226,7 @@ impl TimedRpcChild {
             frames: None,
             pending_stdout: Some(stdout),
             next_id: 0,
-            home,
+            _home: home,
         }
     }
 
