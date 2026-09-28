@@ -168,6 +168,31 @@ pub fn create_refinement_notice_message(
     }
 }
 
+/// The refinement rows a refine run appends that belong in the live loop
+/// context (TS `_appendDurableRefineMessage`: the outcome row, and the
+/// notice row only when any edit applied; the audit entry is durable-only
+/// and never enters the context). `from` is the session's row count before
+/// the run, so only this run's rows can match. Materialized from the
+/// appended durable entries — the same reconstruction a context rebuild
+/// performs — so the pushed rows are byte-identical to a rebuild's rows
+/// for them.
+pub(crate) fn appended_context_rows(entries: &[FileEntry], from: usize) -> Vec<AgentMessage> {
+    entries[from.min(entries.len())..]
+        .iter()
+        .filter_map(|entry| match entry {
+            FileEntry::CustomMessage { payload, .. }
+                if payload.custom_type == REFINEMENT_OUTCOME_CUSTOM_TYPE
+                    || payload.custom_type == REFINEMENT_NOTICE_CUSTOM_TYPE =>
+            {
+                Some(AgentMessage::Custom(crate::session::create_custom_message(
+                    payload, entry,
+                )))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// Refinement history recorded in this session's JSONL entries.
 pub fn session_refinement_history(entries: &[FileEntry]) -> Vec<RefinementResult> {
     entries
