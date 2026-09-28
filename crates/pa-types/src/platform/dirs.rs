@@ -65,7 +65,7 @@ fn expand_tilde(path: &str) -> PathBuf {
         return home_dir().map_or_else(|| PathBuf::from(path), |home| home.join(rest));
     }
     #[cfg(windows)]
-    if let Some(rest) = path.strip_prefix("~\") {
+    if let Some(rest) = path.strip_prefix("~\\") {
         return home_dir().map_or_else(|| PathBuf::from(path), |home| home.join(rest));
     }
     if path == "~" {
