@@ -156,22 +156,19 @@ def include_path(relative, extra_excluded_names=frozenset(), extra_excluded_suff
 
 
 def copy_tree(source, target, extra_excluded_names=frozenset(),
-              extra_excluded_suffixes=(), only_files=None):
+              extra_excluded_suffixes=()):
     """Copy an asset tree, rejecting symlinks and excluded entries (the TS
     `includeBinaryAsset` filter: a stale `.venv` or cache never ships, and an
     unexpected symlink fails the packaging instead of riding the artifact).
 
     `extra_excluded_*` widen the exclusion set for one asset (the runtime's
-    dev-only files); `only_files` restricts the TOP LEVEL to a whitelist (the
-    user-facing docs subset) while nested content ships normally.
+    dev-only files).
     """
     if not source.is_dir():
         raise SystemExit(f"error: missing packaging asset directory: {source}")
 
     def walk(source_dir, relative):
         for entry in sorted(source_dir.iterdir(), key=lambda item: item.name):
-            if only_files is not None and not relative.parts and entry.name not in only_files:
-                continue
             entry_relative = relative / entry.name
             if not include_path(entry_relative, extra_excluded_names, extra_excluded_suffixes):
                 continue
