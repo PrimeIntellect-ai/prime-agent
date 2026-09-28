@@ -1159,6 +1159,7 @@ impl TimedRpcChild {
             .args(["--mode", "rpc", "--resume", fixture.to_str().unwrap()])
             .env("HOME", home.path())
             .env("PRIME_AGENT_FAUX_SCRIPT", script.to_string())
+            .env("RUST_LOG", "error")
             .current_dir(home.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1167,6 +1168,17 @@ impl TimedRpcChild {
             .expect("binary present");
         let stdin = child.stdin.take().expect("stdin piped");
         let stdout = child.stdout.take().expect("stdout piped");
+        let stderr = child.stderr.take().expect("stderr piped");
+        // The child's stderr must drain for the trial's lifetime: a
+        // piped-but-undrained stderr fills its 64KB pipe and the child
+        // blocks on its next log write, wedging the very path the test
+        // measures.
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut sink = [0u8; 8192];
+            let mut stderr = stderr;
+            while matches!(stderr.read(&mut sink), Ok(n) if n > 0) {}
+        });
         let (tx, frames) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             use std::io::Read;
