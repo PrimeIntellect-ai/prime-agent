@@ -254,6 +254,10 @@ impl SessionUi {
             values.tree_filter_mode = settings.tree_filter_mode();
             values.warnings_anthropic_extra_usage = settings.warnings_anthropic_extra_usage();
             values.theme = settings.theme().unwrap_or_else(|| "prime".to_string());
+            // TS reads the persisted default tier through the settings
+            // manager (`getDefaultServiceTier`): the tier row preselects
+            // the saved value instead of the struct default.
+            values.default_service_tier = settings.default_service_tier();
         } else {
             values.show_images = true;
             values.auto_resize_images = true;
@@ -265,6 +269,9 @@ impl SessionUi {
             values.tree_filter_mode = "user-only".to_string();
             values.warnings_anthropic_extra_usage = true;
             values.theme = "prime".to_string();
+            // No settings seam: the tier row reads the TS default tier
+            // (getDefaultServiceTier's "default"), never a blank value.
+            values.default_service_tier = "default".to_string();
         }
         // The registered themes (TS `getAvailableThemes`; this surface
         // ships the builtins).
@@ -295,7 +302,10 @@ impl SessionUi {
             menu.handle_key(&id, view.editor.keybindings())
         };
         match action {
-            crate::settings_menu::SettingsMenuAction::None => {}
+            // No-op closes: a bare None and Esc inside a submenu (TS
+            // `onCancel`) keep the menu itself open.
+            crate::settings_menu::SettingsMenuAction::None
+            | crate::settings_menu::SettingsMenuAction::SubmenuClosed => {}
             crate::settings_menu::SettingsMenuAction::Cancel => {
                 view.settings_menu = None;
             }
@@ -496,6 +506,66 @@ impl SessionUi {
                 )
                 .await;
             }
+            "default-service-tier" => {
+                // TS `onDefaultServiceTierChange`: persist the default tier
+                // (the settings seam — new sessions start on it), then apply
+                // it to the running session through the same daemon tier
+                // switch `/tier` uses (the serialized change queue); the
+                // status row reports what the session actually applied.
+                if let Some(settings) = &self.client_settings {
+                    if let Err(error) = settings.set_default_service_tier(value) {
+                        self.error_row(&format!("{error:#}"), view);
+                        return;
+                    }
+                }
+                let tier = match serde_json::from_value::<pa_types::ai::ServiceTier>(Value::String(
+                    value.to_string(),
+                )) {
+                    Ok(tier) => tier,
+                    Err(error) => {
+                        self.error_row(&format!("{error:#}"), view);
+                        return;
+                    }
+                };
+                let switched = self
+                    .bounded_request(
+                        Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                        DaemonCommand::SetServiceTier {
+                            id: None,
+                            active_session_id: self.active_session_id.clone(),
+                            service_tier: Some(tier),
+                            rest: Map::default(),
+                        },
+                    )
+                    .await;
+                if let Err(error) = switched {
+                    self.error_row(&format!("{error:#}"), view);
+                    return;
+                }
+                // The status row reports what the session actually applied
+                // (TS `formatStatus(state.serviceTier)`); a state read that
+                // fails or omits the tier shows no success row (the
+                // `service_tier_changed` event refreshes the local tier
+                // when it lands).
+                let Some(state) = self.connection_state(view).await else {
+                    return;
+                };
+                let Some(applied) = state
+                    .get("serviceTier")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                else {
+                    return;
+                };
+                self.service_tier = Some(applied.clone());
+                view.chrome.service_tier = Some(applied.clone());
+                self.update_model_eligibility_filters(view);
+                self.note(
+                    &format!("Default service tier: {value} (session: {applied})"),
+                    view,
+                );
+            }
+
             "mermaid-rendering" => {
                 if let Some(settings) = &self.client_settings {
                     if let Err(error) = settings.set_mermaid_rendering_mode(value) {
@@ -575,20 +645,6 @@ impl SessionUi {
     // /fullscreen, /reload)
     // ------------------------------------------------------------------
 
-    /// Recompute the `/fast` autocomplete filter (TS
-    /// `getAvailableCommands` drops `/fast` when the current model is not
-    /// fast-mode-eligible): call after every point the model id can move.
-    pub(super) fn update_fast_filter(&self, view: &mut AgentView) {
-        let eligible = self
-            .current_model_entry(view)
-            .is_some_and(pa_types::ai::supports_fast_mode);
-        let mut hidden = std::collections::HashSet::new();
-        if !eligible {
-            hidden.insert("fast".to_string());
-        }
-        view.editor.set_autocomplete_hidden_commands(hidden);
-    }
-
     /// `/fast` (TS `handleFastCommand`): toggle the priority service tier.
     /// The TS queue (`fastModeToggleQueue`) serializes toggles; here the
     /// dispatch is the only submission path and awaits to completion, so
@@ -638,6 +694,10 @@ impl SessionUi {
                 self.service_tier = Some(tier.to_string());
             }
         }
+        // The tray badge and the `/tier` completions follow the applied
+        // tier (the `fast` token for priority).
+        view.chrome.service_tier.clone_from(&self.service_tier);
+        self.update_model_eligibility_filters(view);
         let on = self.service_tier.as_deref() == Some("priority");
         self.note(
             &format!("Fast mode: {}", if on { "on" } else { "off" }),

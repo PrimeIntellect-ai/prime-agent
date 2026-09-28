@@ -58,6 +58,11 @@ impl Generation {
 /// serve). 4: the older-path stats fold child usage attributions (v3
 /// sidecars carry pre-fold totals and must not serve).
 pub(super) const SNAPSHOT_VERSION: u32 = 7;
+// `retained_whole_file` (added after v7) is `#[serde(default)]` false:
+// older sidecars deserialize it as false and simply skip the
+// full-history fast paths until the next walk rewrites the sidecar —
+// the default is the conservative pre-change behavior, so v7 caches
+// stay servable (a version bump would force a full re-walk instead).
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Snapshot {
@@ -79,6 +84,12 @@ pub(super) struct Snapshot {
     pub first_user: Option<serde_json::Value>,
     pub goal: Option<crate::goals::GoalState>,
     pub non_bootstrap: bool,
+    /// The open's walk retained every file row (no compaction boundary
+    /// was found): the retained window covers the whole session file, so
+    /// the owning manager's entries hold every persisted row. Older
+    /// sidecars deserialize this as `false` (the conservative default).
+    #[serde(default)]
+    pub retained_whole_file: bool,
 }
 fn cache_path(path: &Path) -> PathBuf {
     path.with_extension("window-cache.json")
