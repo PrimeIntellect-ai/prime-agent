@@ -628,6 +628,9 @@ impl super::AgentSession {
     }
 
     /// The last four user/assistant texts, newest first (digest ranking).
+    /// TS `_buildHarnessDigestQueryTerms` (agent-session.ts):
+    /// `.filter(user || assistant).slice(-4).reverse()` - the NEWEST
+    /// four texts of the recent window, never the chronological head.
     async fn recent_message_texts_newest_first(&self) -> Vec<String> {
         use pa_agent::types::{AgentMessage, AssistantContent, Message};
         let state = self.agent.state().await;
@@ -651,7 +654,12 @@ impl super::AgentSession {
                 _ => None,
             })
             .collect();
-        texts.truncate(4);
+        // TS `.slice(-4)`: keep the newest four texts (the window tail).
+        // `truncate(4)` here would keep the chronological head - the
+        // oldest four - and rank the wrong end of the window.
+        if texts.len() > 4 {
+            texts.drain(..texts.len() - 4);
+        }
         texts.reverse();
         texts
     }

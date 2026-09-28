@@ -40,7 +40,7 @@ fn wire_assistant(text: &str) -> pa_types::session::AgentMessage {
             cache_read: 0,
             cache_write: 0,
             total_tokens: 120,
-            cost: Default::default(),
+            cost: pa_types::ai::UsageCost::default(),
         },
         stop_reason: StopReason::Stop,
         stop_reason_raw: None,
@@ -69,14 +69,18 @@ fn direction_memory(id: &str, title: &str, content: &str) -> HarnessEntry {
     }
 }
 
-/// Seed the rig's global harness dir with one memory.
-fn seed_global_memory(dir: &std::path::Path, entry: HarnessEntry) {
+/// Seed the rig's global harness dir with the given `(id, title, content)`
+/// memories in one save (each save rewrites the state file, so the memories
+/// must ride one `save_harness_state`).
+fn seed_global_memories(dir: &std::path::Path, memories: &[(&str, &str, &str)]) {
     let mut state = crate::refinement::empty_harness_state();
-    state
+    let records = state
         .entries
         .get_mut(&crate::refinement::RefinementKind::Memory)
-        .unwrap()
-        .insert(entry.id.clone(), entry);
+        .unwrap();
+    for (id, title, content) in memories {
+        records.insert(id.to_string(), direction_memory(id, title, content));
+    }
     crate::refinement::save_harness_state(dir, &state).unwrap();
 }
 
@@ -132,7 +136,7 @@ async fn direction_rig(
 /// The shipped (base) selection, kept as the differential's A-side only:
 /// the chronological `truncate(4)` - the oldest four - then reversed.
 fn base_selection_terms(texts: &[&str]) -> HarnessQueryTerms {
-    let mut base: Vec<String> = texts.iter().map(|text| text.to_string()).collect();
+    let mut base: Vec<String> = texts.iter().map(ToString::to_string).collect();
     base.truncate(4);
     base.reverse();
     digest_query_terms(None, &base)
@@ -163,8 +167,7 @@ async fn digest_terms_rank_the_newest_four_texts() {
         .expect("the rig wires a harness digest context");
     for (term, weight) in [("foxtrot", 2.0), ("echo", 1.5), ("delta", 1.0), ("charlie", 1.0)] {
         assert_eq!(
-            inputs.terms.get(term),
-            Some(&weight),
+            inputs.terms.get(term), Some(&weight),
             "TS slice(-4): the newest texts carry the recency ladder"
         );
     }
@@ -176,15 +179,12 @@ async fn digest_terms_rank_the_newest_four_texts() {
     }
     // Served-path: the selected window IS the newest four texts.
     let selected = engine.recent_message_texts_newest_first().await;
-    assert_eq!(
-        selected,
-        [
-            "foxtrot frontier newest reply".to_string(),
-            "echo ember fifth turn".to_string(),
-            "delta dagger reply".to_string(),
-            "charlie candle third turn".to_string(),
-        ]
-    );
+    let expected_newest_first: Vec<String> = DISTINCT6[2..]
+        .iter()
+        .rev()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(selected, expected_newest_first);
 }
 
 /// The differential across window shapes. Where the two selections coincide
@@ -210,9 +210,9 @@ async fn digest_direction_differential_across_window_shapes() {
     ];
     for texts in coincide_classes {
         let tmp = tempfile::tempdir().unwrap();
-        seed_global_memory(
+        seed_global_memories(
             &tmp.path().join("harness"),
-            direction_memory("aaa_alpha", "alpha anchor notes", "the alpha anchor checklist"),
+            &[("aaa_alpha", "alpha anchor notes", "the alpha anchor checklist")],
         );
         let engine = direction_rig(&tmp, texts).await;
         let inputs = engine
@@ -220,17 +220,18 @@ async fn digest_direction_differential_across_window_shapes() {
             .await
             .expect("the rig wires a harness digest context");
         let base_terms = base_selection_terms(texts);
-        assert_eq!(inputs.terms, base_terms, "the selections coincide on this shape");
+        assert_eq!(
+            inputs.terms, base_terms,
+            "the selections coincide on this shape"
+        );
         let base_render = render_digest_with_fingerprint(&inputs.context, base_terms);
         let fixed_render = inputs.render_with_fingerprint();
         assert_eq!(
-            base_render.digest,
-            fixed_render.digest,
+            base_render.digest, fixed_render.digest,
             "coinciding selections render byte-identical digests"
         );
         assert_eq!(
-            base_render.state_fingerprint,
-            fixed_render.state_fingerprint,
+            base_render.state_fingerprint, fixed_render.state_fingerprint,
             "the fingerprint never sees the query terms"
         );
     }
@@ -238,17 +239,12 @@ async fn digest_direction_differential_across_window_shapes() {
     // The >=5-distinct-text class: the selections differ and the renders
     // diverge; the engine's terms are exactly the newest-4 selection's.
     let tmp = tempfile::tempdir().unwrap();
-    seed_global_memory(
+    seed_global_memories(
         &tmp.path().join("harness"),
-        direction_memory("aaa_alpha", "alpha anchor notes", "the alpha anchor checklist"),
-    );
-    seed_global_memory(
-        &tmp.path().join("harness"),
-        direction_memory(
-            "zzz_foxtrot",
-            "foxtrot frontier notes",
-            "the foxtrot frontier checklist",
-        ),
+        &[
+            ("aaa_alpha", "alpha anchor notes", "the alpha anchor checklist"),
+            ("zzz_foxtrot", "foxtrot frontier notes", "the foxtrot frontier checklist"),
+        ],
     );
     let engine = direction_rig(&tmp, &DISTINCT6).await;
     let inputs = engine
@@ -262,12 +258,11 @@ async fn digest_direction_differential_across_window_shapes() {
     assert_ne!(base_render.digest, fixed_render.digest);
     // The state fingerprint is direction-invariant: staleness and delivery
     // triggers stay unchanged for unchanged harness state.
-    assert_eq!(base_render.state_fingerprint, fixed_render.state_fingerprint);
-    let newest_four: Vec<String> = DISTINCT6[2..]
-        .iter()
-        .rev()
-        .map(|text| text.to_string())
-        .collect();
+    assert_eq!(
+        base_render.state_fingerprint,
+        fixed_render.state_fingerprint
+    );
+    let newest_four: Vec<String> = DISTINCT6[2..].iter().rev().map(ToString::to_string).collect();
     assert_eq!(inputs.terms, digest_query_terms(None, &newest_four));
 }
 
@@ -277,21 +272,16 @@ async fn digest_direction_differential_across_window_shapes() {
 #[tokio::test]
 async fn digest_ranks_the_newest_texts_memory_first() {
     let tmp = tempfile::tempdir().unwrap();
-    seed_global_memory(
+    seed_global_memories(
         &tmp.path().join("harness"),
-        direction_memory(
-            "aaa_alpha",
-            "alpha anchor notes",
-            "the alpha anchor checklist lives here",
-        ),
-    );
-    seed_global_memory(
-        &tmp.path().join("harness"),
-        direction_memory(
-            "zzz_foxtrot",
-            "foxtrot frontier notes",
-            "the foxtrot frontier checklist lives here",
-        ),
+        &[
+            ("aaa_alpha", "alpha anchor notes", "the alpha anchor checklist lives here"),
+            (
+                "zzz_foxtrot",
+                "foxtrot frontier notes",
+                "the foxtrot frontier checklist lives here",
+            ),
+        ],
     );
     let engine = direction_rig(&tmp, &DISTINCT6).await;
     let digest = engine
@@ -305,5 +295,8 @@ async fn digest_ranks_the_newest_texts_memory_first() {
     let oldest = digest
         .find("alpha anchor notes")
         .expect("the oldest texts' memory renders");
-    assert!(newest < oldest, "the newest texts' memory ranks first (TS direction)");
+    assert!(
+        newest < oldest,
+        "the newest texts' memory ranks first (TS direction)"
+    );
 }
