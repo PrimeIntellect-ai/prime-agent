@@ -24,6 +24,12 @@ pub fn restrict_file(path: &Path) -> std::io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))
 }
 
+/// Windows arm of [`restrict_file`]: inherited ACLs carry the access
+/// decision, so the restriction is a no-op.
+///
+/// # Errors
+///
+/// Does not error: inherited ACLs apply; see the ACL note above.
 #[cfg(not(unix))]
 pub fn restrict_file(_path: &Path) -> std::io::Result<()> {
     // Windows: inherited ACLs apply; see the ACL note above.
@@ -41,6 +47,12 @@ pub fn restrict_dir(path: &Path) -> std::io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(PRIVATE_DIR_MODE))
 }
 
+/// Windows arm of [`restrict_dir`]: inherited ACLs carry the access
+/// decision, so the restriction is a no-op.
+///
+/// # Errors
+///
+/// Does not error: inherited ACLs apply; see the ACL note above.
 #[cfg(not(unix))]
 pub fn restrict_dir(_path: &Path) -> std::io::Result<()> {
     // Windows: inherited ACLs apply; see the ACL note above.
@@ -126,6 +138,13 @@ pub fn is_readable(path: &Path) -> Result<(), std::io::Error> {
     }
 }
 
+/// Windows arm of [`is_readable`]: a read open probe is the equivalent
+/// permission test.
+///
+/// # Errors
+///
+/// Returns the open error when the file cannot be opened for reading
+/// (permission denied or missing).
 #[cfg(not(unix))]
 pub fn is_readable(path: &Path) -> Result<(), std::io::Error> {
     // Windows: a read open probe is the equivalent permission test.
@@ -145,6 +164,12 @@ pub fn restrict_open_file(file: &std::fs::File) -> std::io::Result<()> {
     file.set_permissions(std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))
 }
 
+/// Windows arm of [`restrict_open_file`]: inherited ACLs carry the
+/// access decision, so the restriction is a no-op.
+///
+/// # Errors
+///
+/// Does not error: inherited ACLs apply; see the ACL note above.
 #[cfg(not(unix))]
 pub fn restrict_open_file(_file: &std::fs::File) -> std::io::Result<()> {
     // Windows: inherited ACLs apply; see the ACL note above.
@@ -166,6 +191,12 @@ pub fn create_dir_all_private(path: &Path) -> std::io::Result<()> {
         .create(path)
 }
 
+/// Windows arm of [`create_dir_all_private`]: inherited ACLs carry the
+/// access decision, so the directories are plain recursive creates.
+///
+/// # Errors
+///
+/// Returns the underlying I/O error when a directory cannot be created.
 #[cfg(not(unix))]
 pub fn create_dir_all_private(path: &Path) -> std::io::Result<()> {
     // Windows: inherited ACLs apply; see the ACL note above.

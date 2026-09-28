@@ -173,6 +173,14 @@ async fn unlink_stale_socket(path: &Path, expected: SocketIdentity) -> Result<()
     }
 }
 
+/// Windows arm of [`prepare_socket_path`]: named-pipe endpoints have
+/// no filesystem residue (the first listener creates the pipe), so
+/// preparing the path is a no-op (the TS `prepareDaemonSocketPath`
+/// returns early on win32 for the same reason).
+///
+/// # Errors
+///
+/// Does not error: there is no path to prepare for a named pipe.
 #[cfg(not(unix))]
 pub async fn prepare_socket_path(_path: &Path) -> Result<()> {
     Ok(())
