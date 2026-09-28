@@ -294,17 +294,66 @@ impl SettingsStorage for FileSettingsStorage {
     }
 }
 
+/// The TS `WriteFileAtomicOptions` (atomic-file.ts) for
+/// [`atomic_write_with`]: `fsync` is the durability opt-in and defaults to
+/// OFF, exactly like the TS reference.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AtomicWriteOptions {
+    /// fsync the temp file before the rename (TS
+    /// `WriteFileAtomicOptions.fsync`; opt-in, default off).
+    pub fsync: bool,
+}
+
+// Test-only served-path counter: how many times this thread took the
+// opt-in fsync branch of `atomic_write_with`. The per-call-site durability
+// tests assert their writer's delta through the real write path (0 for the
+// TS-default no-sync sites, exactly 1 for the opted-in cron state write) —
+// the anti-vacuity pattern: the oracle fails loudly if a site's durability
+// binding flips.
+#[cfg(test)]
+thread_local! {
+    static OPT_IN_FSYNC: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The per-thread count of opt-in fsync branches taken by
+/// [`atomic_write_with`] (test-only; see the counter's declaration).
+#[cfg(test)]
+pub(crate) fn opt_in_fsync_calls() -> usize {
+    OPT_IN_FSYNC.with(std::cell::Cell::get)
+}
+
 /// Atomic write: temp file + rename, private mode like `writeFileAtomicSync`
 /// (its win32-only destination-busy retry rides along in `rename_onto`).
+///
+/// The TS default durability: NO fsync. `writeFileAtomicSync`'s `fsync` is
+/// opt-in (atomic-file.ts: `if (options.fsync) fsyncSync(descriptor)`) and
+/// every non-journal TS call site passes only `{mode}` — the crash window is
+/// the one TS ships: the atomic rename still means a reader never sees a
+/// torn file, and a hard crash leaves either the previous file (before the
+/// rename) or the new file (after it). Sites whose crash-safety genuinely
+/// needs the pre-rename fsync opt in through [`atomic_write_with`] — the
+/// audit is per call site, never blanket.
 pub fn atomic_write(path: &Path, content: &str) -> Result<()> {
+    atomic_write_with(path, content, AtomicWriteOptions::default())
+}
+
+/// [`atomic_write`] with explicit [`AtomicWriteOptions`]: the TS
+/// `writeFileAtomicSync(path, data, options)` shape. The opt-in this port's
+/// call sites use is `fsync: true` — the durability the TS cron state keeps
+/// (cron-jobs.ts `writeJobsState` passes `{ mode: 0o600, fsync: true }`).
+pub fn atomic_write_with(path: &Path, content: &str, options: AtomicWriteOptions) -> Result<()> {
     let temp = PathBuf::from(format!("{}.tmp{}", path.display(), std::process::id()));
     {
-        let mut options = fs::OpenOptions::new();
-        options.create(true).write(true).truncate(true);
-        crate::platform::perms::set_private_mode(&mut options);
-        let mut file = options.open(&temp)?;
+        let mut open = fs::OpenOptions::new();
+        open.create(true).write(true).truncate(true);
+        crate::platform::perms::set_private_mode(&mut open);
+        let mut file = open.open(&temp)?;
         file.write_all(content.as_bytes())?;
-        file.sync_all()?;
+        if options.fsync {
+            #[cfg(test)]
+            OPT_IN_FSYNC.with(|count| count.set(count.get() + 1));
+            file.sync_all()?;
+        }
     }
     crate::platform::rename_onto(&temp, path)?;
     Ok(())
@@ -372,6 +421,59 @@ mod tests {
         // Owner-only mode is a Unix guarantee; Windows inherits ACLs.
         #[cfg(unix)]
         assert_eq!(crate::platform::perms::file_mode(&path), Some(0o600));
+    }
+
+    /// The helper's TS-parity contract: the default takes NO fsync branch
+    /// (the served-path counter stays flat — TS `writeFileAtomicSync` without
+    /// `options.fsync`), the opt-in takes exactly one, and both land the
+    /// exact bytes through the private temp + rename.
+    #[test]
+    fn atomic_write_default_skips_fsync_and_opt_in_takes_exactly_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+
+        let before = opt_in_fsync_calls();
+        atomic_write(&path, "default bytes\n").unwrap();
+        assert_eq!(
+            opt_in_fsync_calls(),
+            before,
+            "TS-default write must not sync"
+        );
+
+        atomic_write_with(&path, "durable bytes\n", AtomicWriteOptions { fsync: true }).unwrap();
+        assert_eq!(
+            opt_in_fsync_calls(),
+            before + 1,
+            "the opt-in must sync once"
+        );
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "durable bytes\n");
+        #[cfg(unix)]
+        assert_eq!(crate::platform::perms::file_mode(&path), Some(0o600));
+        // The temp never leaks: only the destination remains.
+        let names: Vec<String> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["state.json".to_string()]);
+    }
+
+    /// Per-call-site served-path oracle (settings-manager.ts:390 passes only
+    /// `{ mode: 0o600 }`): the settings write goes through the real
+    /// `with_lock` writer and takes NO fsync branch, landing the exact
+    /// document bytes.
+    #[test]
+    fn settings_write_takes_the_ts_default_no_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = FileSettingsStorage::new(dir.path().join("cwd"), dir.path().join("agent"));
+        let document = "{ \"defaultProvider\": \"prime-inference\" }";
+        let before = opt_in_fsync_calls();
+        storage
+            .with_lock(SettingsScope::Global, &mut |_| Some(document.to_string()))
+            .unwrap();
+        assert_eq!(opt_in_fsync_calls(), before);
+        let path = dir.path().join("agent").join("settings.json");
+        assert_eq!(fs::read_to_string(&path).unwrap(), document);
     }
 
     #[test]
