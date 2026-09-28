@@ -1,6 +1,6 @@
 //! NDJSON line framing for the extension sidecar RPC.
 //!
-//! The private protocol of `docs/extensions-runner-design.md` §2.2: one JSON
+//! The private protocol: one JSON
 //! object per line over the sidecar's stdio, both directions. This module owns
 //! the byte level: line encoding, incremental decoding, and size limits.
 

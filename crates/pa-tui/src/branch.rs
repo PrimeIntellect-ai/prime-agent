@@ -3,8 +3,7 @@
 //! `\u{2570}\u{2500} ` gutter, and every following row sits at the
 //! four-column continuation indent (the one-column chat margin plus the
 //! gutter's three columns) — the same geometry the expanded ipython cell
-//! code (TS `renderCode`) and the received agent-message body use (the
-//! divergence note lives in `docs/FEATURE_PARITY.md`).
+//! code (TS `renderCode`) and the received agent-message body use.
 
 use crate::{Line, Span};
 

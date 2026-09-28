@@ -4,7 +4,7 @@
 Runs the installed TS `prime-agent` supervisor and the Rust `pa-daemon`
 side by side on isolated temp HOME/TMPDIR state, sends the same command
 envelopes to both, and byte-compares the response shapes (dynamic fields
-normalized away). The lane contract (docs/protocol-breadth-audit.md):
+normalized away). The lane contract:
 
   - an unknown command type fails with the exact TS error string and the
     offending type echoed in the response `command` field;
@@ -285,8 +285,7 @@ CASES = [
     # fresh-supervisor comparison with a deterministic envelope (the
     # empty-catalog reads, and the bogus-selector refusal). Types with
     # real side effects (create, ack_result, restart, shutdown,
-    # prepare_update_restart) are covered by the e2e suites instead and
-    # are documented in docs/protocol-breadth-audit.md.
+    # prepare_update_restart) are covered by the e2e suites instead.
     ("close-out: list answers the empty catalog",
      {"type": "list"}),
     ("close-out: list_saved_sessions answers the empty catalog",

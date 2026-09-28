@@ -2,8 +2,7 @@
 //! independent implementation of the refinement row whose output must
 //! byte-match the production traversal at every width and detail level.
 //! The expanded block hangs off the `◆` header on the `╰─ ` gutter with
-//! continuation rows at the branch depth (the parity note lives in
-//! `docs/FEATURE_PARITY.md`).
+//! continuation rows at the branch depth.
 use super::*;
 
 pub(crate) fn render_refinement_outcome(

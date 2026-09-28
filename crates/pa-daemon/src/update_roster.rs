@@ -1,5 +1,4 @@
-//! The update roster assembly (spec §8 of
-//! `docs/update-flow-state-machine.md`): the durable snapshot of sessions,
+//! The update roster assembly: the durable snapshot of sessions,
 //! workers, subagents, and heartbeats written at `Snapshotted`, fsynced
 //! before the `Prepared` ack.
 //!

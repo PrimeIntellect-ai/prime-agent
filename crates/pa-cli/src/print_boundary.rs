@@ -28,7 +28,7 @@
 //! turns through [`TurnBoundary::admit_continuation`] (TS: the session
 //! admits an owed continuation through its own turn loop, so the arms
 //! fire on continuation turns exactly like on prompt turns — #229's
-//! print flag was reconciled here; see docs/PORTING-NOTES.md).
+//! print flag was reconciled here).
 //!
 //! Output surfaces: json mode streams the TS session events (the
 //! `compaction_start`/`compaction_end` pair and the outcome row's message

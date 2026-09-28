@@ -420,19 +420,55 @@ impl AgentSessionEngine {
         // worker-owned session file answers otherwise. The seed also sets
         // the published baseline so the rehydrated state never announces
         // itself (TS loads at construction without emitting).
-        let seed = if let Some(entries) = &pending_branch {
-            crate::goal_state_persist::goal_state_in_branch(entries)
-        } else {
+        // The goal seed and the retained-context adoption read the SAME
+        // session file through ONE windowed open below (the old flow
+        // opened the store twice back-to-back: `persisted_goal_state`'s
+        // open for the seed, then an identical open for the adoption -
+        // each re-reading and re-parsing the retained suffix; on a
+        // no-boundary session the whole file pays that twice). The seed
+        // reads the shared window's snapshot goal BEFORE the adoption
+        // moves the window's trees in.
+        let seed;
+        let mut shared_window = None;
+        let mut shared_branch = None;
+        {
             let path = self
                 .session_file
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
-            tokio::task::spawn_blocking(move || {
-                crate::goal_state_persist::persisted_goal_state(path.as_deref())
-            })
-            .await?
-        };
+            if let Some(entries) = &pending_branch {
+                seed = crate::goal_state_persist::goal_state_in_branch(entries);
+            } else {
+                let (goal, window, branch) = tokio::task::spawn_blocking(move || {
+                    // Mirrors `persisted_goal_state` (the window's
+                    // snapshot goal; the full reader's branch scan
+                    // fallback) and the adoption open (window present ->
+                    // adopt; the full reader's branch entries otherwise)
+                    // over one read of each artifact instead of two.
+                    let Some(path) = path else {
+                        return (None, None, None);
+                    };
+                    if let Ok(Some(window)) =
+                        pa_core::session::window::WindowedSessionStore::open(&path)
+                    {
+                        let goal = window.goal_state().cloned();
+                        (goal, Some(window), None)
+                    } else {
+                        let store = crate::session_store::SessionFile::open(&path).ok();
+                        let goal = store
+                            .as_ref()
+                            .and_then(crate::goal_state_persist::goal_state_in_session_file);
+                        let branch = store.map(|store| store.branch_file_entries());
+                        (goal, None, branch)
+                    }
+                })
+                .await?;
+                seed = goal;
+                shared_window = window;
+                shared_branch = branch;
+            }
+        }
         if let Some(state) = seed {
             let handles = self.goal_runtime.lock().expect("goal runtime lock").clone();
             if let Some(handles) = handles {
@@ -450,43 +486,24 @@ impl AgentSessionEngine {
             return Ok(());
         }
         // Restore the retained context and certified metadata without loading
-        // discarded message bodies. Unsupported files use the ordinary reader.
-        let session_file = self
-            .session_file
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if let Some(path) = session_file {
-            let (window, branch) = tokio::task::spawn_blocking(move || {
-                match pa_core::session::window::WindowedSessionStore::open(&path) {
-                    Ok(Some(window)) => (Some(window), None),
-                    Ok(None) | Err(_) => (
-                        None,
-                        crate::session_store::SessionFile::open(&path)
-                            .ok()
-                            .map(|store| store.branch_file_entries()),
-                    ),
-                }
-            })
-            .await?;
-            if let Some(window) = window {
-                built.session.restore_windowed_context(window).await;
-                // This worker holds the session's runtime lease for the
-                // engine's lifetime: its durable appends may certify the
-                // window cache incrementally (exactly one writer per
-                // lease), and the lease's release flushes the certified
-                // snapshot to the sidecar for the next warm open.
-                built
-                    .session
-                    .shared_persistence()
-                    .lock()
-                    .await
-                    .set_append_ownership(
-                        pa_core::session::window::AppendOwnership::SessionLeaseHeld,
-                    );
-            } else if let Some(entries) = branch.filter(|entries| !entries.is_empty()) {
-                built.session.rebuild_branch_context(entries).await?;
-            }
+        // discarded message bodies. Unsupported files use the ordinary
+        // reader. The window (or the fallback branch entries) came from the
+        // shared open above - the second back-to-back open is gone.
+        if let Some(window) = shared_window {
+            built.session.restore_windowed_context(window).await;
+            // This worker holds the session's runtime lease for the
+            // engine's lifetime: its durable appends may certify the
+            // window cache incrementally (exactly one writer per
+            // lease), and the lease's release flushes the certified
+            // snapshot to the sidecar for the next warm open.
+            built
+                .session
+                .shared_persistence()
+                .lock()
+                .await
+                .set_append_ownership(pa_core::session::window::AppendOwnership::SessionLeaseHeld);
+        } else if let Some(entries) = shared_branch.take().filter(|entries| !entries.is_empty()) {
+            built.session.rebuild_branch_context(entries).await?;
         }
         // Restore the quota park this branch ended on (TS
         // `_restoreQuotaPark`, at construction): the newest

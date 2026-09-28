@@ -1258,7 +1258,7 @@ impl SessionEngine for AgentSessionEngine {
     fn set_rlm_max_depth(&self, max_depth: u64, global: bool) -> anyhow::Result<Value> {
         // The live bound every spawn checks (TS updates `_rlmMaxDepth`
         // and rebuilds the system prompt; the bound itself lives in the
-        // registry here - see PORTING-NOTES for the prompt-text note).
+        // registry here).
         if let Some(children) = &self.children {
             children.set_rlm_max_depth(max_depth.min(u64::from(u32::MAX)) as u32);
         }

@@ -6,7 +6,7 @@ check:
 	cargo build --release --workspace
 
 
-# Supply-chain gates (docs/installer-ci-design.md §7/§9) — local mirrors of the
+# Supply-chain gates — local mirrors of the
 # ci.yml workflow jobs. They fail loudly when the tool is missing instead of
 # silently skipping the gate.
 
@@ -14,7 +14,7 @@ deny:
 	@command -v cargo-deny >/dev/null 2>&1 || { echo "cargo-deny not installed (cargo install cargo-deny --locked)"; exit 1; }
 	cargo deny --all-features --workspace check advisories licenses
 
-# Windows cfg-hygiene gate (docs/windows-readiness.md): cross-target check +
+# Windows cfg-hygiene gate: cross-target check +
 # clippy at -D warnings for every crate and test, the local mirror of the
 # ci.yml windows-cross job (.github/workflows/ci.yml). Fails loudly when the
 # target is missing instead of silently skipping the gate.
@@ -62,7 +62,7 @@ glibc-gate:
 perf-wave:
 	scripts/battery/ci_perf_wave.sh
 
-# Local mirror of the release build-job gates (docs/installer-ci-design.md §9):
+# Local mirror of the release build-job gates:
 # release build against the committed lockfile, deterministic tarball assembly,
 # then end-to-end verification of the host-target artifact. The vendored
 # prime-agent-runtime/ at the repo root is the default runtime sidecar
@@ -121,7 +121,7 @@ release-dry-run:
 	python3 scripts/release/verify_release.py \
 		--dist-dir target/release/dist --version "$(VERSION)" --target "$(TARGET)"
 
-# Local mirror of the continuous.yml build job (docs/installer-ci-design.md §9):
+# Local mirror of the continuous.yml build job:
 # same release build, but commit-stamped: the tarball carries a package.json
 # version manifest and the binary must report "<version>-continuous.<sha>".
 GIT_SHA := $(shell git rev-parse HEAD)
@@ -140,7 +140,7 @@ continuous-dry-run:
 		--sha "$(GIT_SHA)"
 
 # Optional hardening: embed the dependency list in the binary for incident
-# response (docs/installer-ci-design.md §7).
+# response.
 audit-build:
 	@command -v cargo-auditable >/dev/null 2>&1 || { echo "cargo-auditable not installed (cargo install cargo-auditable --locked)"; exit 1; }
 	cargo auditable build --release --locked --workspace

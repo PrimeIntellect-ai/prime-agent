@@ -4,7 +4,7 @@
 //! or `shutdown --force` run from a *different* fixture root must never see
 //! or stop it — nor any other live daemon on the machine (this sandbox runs
 //! next to the real mission daemon; its sockets must never surface in a
-//! report). See docs/PORTING-NOTES.md ("Daemon discovery containment").
+//! report).
 #![cfg(unix)]
 
 use std::os::unix::net::UnixStream;

@@ -303,7 +303,7 @@ fn proc_socket_inodes() -> Vec<(u32, String, std::collections::HashSet<String>)>
 }
 
 /// The dependency-free Linux listening census (operator-mandated fallback
-/// for tool-less root-user systems; see PORTING-NOTES.md): map
+/// for tool-less root-user systems): map
 /// `/proc/net/unix` listeners to their owning pids and keep those whose
 /// comm name is this product. Visibility matches `ss -lxp`: uid 0 sees
 /// every daemon on the machine, an unprivileged user only its own — other

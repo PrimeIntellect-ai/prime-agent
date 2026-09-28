@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Editor Unicode/grapheme wrap parity verifier (the `editor-wrap-unicode`
-lane, FEATURE_PARITY.md tier-0): frame-diff the Rust interactive
+lane): frame-diff the Rust interactive
 TUI against the installed TS binary in tmux over a golden Unicode corpus.
 
 Two tmux sessions per binary (each pane its own transcript):

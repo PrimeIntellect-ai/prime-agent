@@ -2,8 +2,7 @@
 //!
 //! Unix: owner-only mode bits (0o600 files, 0o700 dirs). Windows: NTFS ACLs
 //! govern access - new files inherit ACLs from their parent directory, so the
-//! restriction helpers are documented no-ops there; an explicit ACL lane is
-//! tracked in docs/windows-readiness.md.
+//! restriction helpers are documented no-ops there.
 
 use std::fs::OpenOptions;
 use std::path::Path;

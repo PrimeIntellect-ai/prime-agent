@@ -2,14 +2,12 @@
 
 The Rust rewrite of Prime Agent, packaged for coworkers. It is the same product
 — same wire protocol family, same session store, same CLI shape — as the
-TypeScript build, re-implemented in Rust; the port is in progress and tracked
-row by row in [FEATURE_PARITY.md](FEATURE_PARITY.md). The Rust port owns the
+TypeScript build, re-implemented in Rust. The Rust port owns the
 product keyword: it installs as `prime-agent` and takes over an existing
 TypeScript install (its daemon is stopped cleanly, its files are preserved
 under a legacy name, and its npm package is uninstalled), while the session
 store the two products share is never touched. This page covers install, the
-takeover rules, and known limits — for feature status, read the parity
-tracker, not this page.
+takeover rules, and known limits.
 
 ## Install
 
@@ -267,9 +265,9 @@ there and you no longer want the rollback).
   Rust build reaches coworkers through the `continuous` branch-push
   artifacts only — no tags, no releases (the repo's release history is
   the TypeScript product's).
-- The port is mid-flight. Before filing a "missing feature" bug, check
-  the row in [FEATURE_PARITY.md](FEATURE_PARITY.md) — the gap may already
-  be known and owned by a lane.
+- The build is young. Before filing a "missing feature" bug, check the
+  open pull requests — the gap may already be
+  known and owned by a lane.
 - The pre-takeover `prime-agent-rust` layout still migrates: an old
   `~/.local/share/prime-agent-rust` install moves to the rollback slot on
   the first takeover install (the sandbox test

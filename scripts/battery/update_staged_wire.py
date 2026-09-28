@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Wire parity battery for the staged-activation update flow (spec
-`docs/update-flow-state-machine.md` §4/§7, slice 4): the coordinator FSM, the
+"""Wire parity battery for the staged-activation update flow:
+the coordinator FSM, the
 bin-symlink staged activation, the rollback, and the TS status-file schema.
 
 Rust phases run against a managed fixture install root (the battery's own
@@ -141,8 +141,8 @@ def build_fixture_root(root: Path, binary: Path, version: str) -> dict:
 
 
 def build_candidate(server_dir: Path, binary: Path, version: str) -> tuple[str, str]:
-    """Stage + tar the candidate payload (files at the archive root,
-    installer-ci-design.md §5); returns the archive's real digest and name.
+    """Stage + tar the candidate payload (files at the archive root);
+    returns the archive's real digest and name.
     The digest the manifest carries is the one the staged release directory
     is named after (TS install.sh naming)."""
     staging = tempfile.mkdtemp(prefix="candidate-")
