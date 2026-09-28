@@ -298,9 +298,7 @@ fn win32_normalize_string(path: &str, allow_above_root: bool) -> String {
                 }
             } else {
                 // A normal segment.
-                let segment: String = chars[(last_slash + 1).max(0) as usize..i]
-                    .iter()
-                    .collect();
+                let segment: String = chars[(last_slash + 1).max(0) as usize..i].iter().collect();
                 if res.is_empty() {
                     res = segment;
                 } else {
@@ -465,7 +463,11 @@ fn win32_resolve_with(base: &str, path: &str, device_cwd: &dyn Fn(&str) -> Strin
         format!("{resolved_device}\\{resolved_tail}")
     } else {
         let joined = format!("{resolved_device}{resolved_tail}");
-        if joined.is_empty() { ".".to_string() } else { joined }
+        if joined.is_empty() {
+            ".".to_string()
+        } else {
+            joined
+        }
     }
 }
 
