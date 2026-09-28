@@ -20,7 +20,7 @@ const DEFAULT_ON_MODES: [u32; 2] = [7, 25];
 /// scanned range (that is the leak: an `h`-armed mode never reset, or a
 /// default-on mode never restored).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct ModeTally {
+pub(crate) struct ModeTally {
     sets: usize,
     resets: usize,
     armed: bool,
