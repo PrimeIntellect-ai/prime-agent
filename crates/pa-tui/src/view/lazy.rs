@@ -557,7 +557,7 @@ impl AgentView {
         // TS `precededByToolActivity` = the compact set (see layout pass).
         let preceded_by_tool = index > 0 && self.is_compact_neighbor(&self.chat[index - 1]);
         let spacing = self.entry_spacing(index, entry, index == 0, preceded_by_tool);
-        if self.entry_cacheable_at(index, entry) {
+        if self.entry_cacheable(entry) {
             if let Some(layout) = &self.entry_layout[index][detail] {
                 if layout.spacing == spacing {
                     return EntryRows::Packed(layout.rows.clone());
@@ -571,7 +571,7 @@ impl AgentView {
             index == 0,
             preceded_by_tool,
         ));
-        if self.entry_cacheable_at(index, entry) {
+        if self.entry_cacheable(entry) {
             // The cache is storage, not output: the entry's rows stay
             // resident for the process lifetime, so they are stored
             // packed (byte-exact expansion on read) instead of as the

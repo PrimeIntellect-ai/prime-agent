@@ -1,17 +1,18 @@
 //! Headless e2e for the click/touch grammar on the session surface: a
 //! mock supervisor serves one attached session whose replayed transcript
-//! carries a condensed activity run, and the headless harness feeds
+//! carries a mixed activity run (eight ipython calls around a received
+//! agent message and hidden thinking), and the headless harness feeds
 //! byte-identical SGR press/release pairs through the same
 //! decode-and-dispatch path a terminal's clicks take.
 //!
-//! Verifies the operator's core interactions: a plain click on a
-//! condensed run block expands the card's own output (operator directive
-//! 2026-09-26: the card click toggles the card, not the thinking blocks
-//! around it), a plain click in the prompt bar places the caret at the
-//! clicked cell (then typing inserts there), and a plain click on a
-//! `/model` picker row moves the selection onto it. The `?1003` hover
-//! motions (the hover affordance's buttonless reports) ride the same
-//! path without disturbing the click grammar.
+//! Verifies the operator's core interactions: a plain click on a tool
+//! card expands the card's own output (operator directive 2026-09-26:
+//! the card click toggles the card, not the thinking blocks around it),
+//! a plain click in the prompt bar places the caret at the clicked cell
+//! (then typing inserts there), and a plain click on a `/model` picker
+//! row moves the selection onto it. The `?1003` hover motions (the
+//! hover affordance's buttonless reports) ride the same path without
+//! disturbing the click grammar.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -193,10 +194,10 @@ fn write_json(writer: &mut UnixStream, value: &Value) {
     writer.flush().expect("flush mock frame");
 }
 
-/// The slim attach result with the condensed-run transcript of
-/// `tool_runs_headless.rs`: eight ipython calls around a received agent
-/// message and hidden thinking - one >=3 activity-item run that
-/// condenses at the overview level.
+/// The slim attach result: eight ipython calls around a received agent
+/// message and hidden thinking - the collapsed view renders every call
+/// as its own card (the 2026-09-28 undo of the condensed-run summary
+/// block), with only the thinking hidden.
 fn attach_data(id: &str) -> Value {
     let tool_call = |index: usize| {
         json!({
@@ -423,49 +424,39 @@ fn locate(frames: &[String], needle: &str) -> Option<(usize, usize, usize)> {
         .next_back()
 }
 
-fn ctrl_o() -> crossterm::event::KeyEvent {
-    crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Char('o'),
-        crossterm::event::KeyModifiers::CONTROL,
-    )
-}
-
-/// A click on a condensed run block expands the card's own output: the
-/// plain press/release pair on the block's summary row toggles the
-/// clicked card's expansion (operator directive 2026-09-26: the click
-/// lands on the card the user means, so the level jumps to `all` —
-/// where the cards render WITH their output bodies — instead of the
-/// `details` level a blind cycle reaches from `overview`, which only
-/// expands the thinking blocks around them), so the cards' output
-/// bodies appear and the condensed block is gone.
+/// A click on a tool card expands the card's own output: the plain
+/// press/release pair on the card's summary row toggles the clicked
+/// card's expansion (operator directive 2026-09-26: the click lands on
+/// the card the user means, so the level jumps to `all` — where the
+/// cards render WITH their output bodies — instead of the `details`
+/// level a blind cycle reaches from `overview`, which only reveals the
+/// thinking blocks around them). The chat opens at the collapsed
+/// overview level (operator directive 2026-09-28: every activity item
+/// renders as `details` does, only the thinking hidden), so no cycling
+/// precedes the click.
 #[test]
-fn a_click_on_a_condensed_run_expands_it() {
+fn a_click_on_a_card_expands_it() {
     let frames = run_plan(
         vec![
             HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            // A chat starts at the middle details level; cycle down to
-            // the collapsed overview where the run condenses.
-            HeadlessStep::Key(ctrl_o()),
-            HeadlessStep::Key(ctrl_o()),
+            // The chat starts at the collapsed overview level; the tail
+            // card renders its own summary row.
             HeadlessStep::WaitRender {
-                needle: "8 tool calls".to_string(),
+                needle: "print(7)".to_string(),
                 timeout_ms: 5_000,
             },
         ],
         Vec::new(),
     );
-    let (_, row, col) =
-        locate(&frames, "8 tool calls").expect("the condensed run renders before the click");
+    let (_, row, col) = locate(&frames, "print(7)").expect("the card renders before the click");
     // The SGR report's cells are one-based.
     let click = HeadlessStep::Mouse(press(col + 1, row + 1));
     let release = HeadlessStep::Mouse(release(col + 1, row + 1));
     let frames = run_plan(
         vec![
             HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            HeadlessStep::Key(ctrl_o()),
-            HeadlessStep::Key(ctrl_o()),
             HeadlessStep::WaitRender {
-                needle: "8 tool calls".to_string(),
+                needle: "print(7)".to_string(),
                 timeout_ms: 5_000,
             },
             click,
@@ -473,7 +464,7 @@ fn a_click_on_a_condensed_run_expands_it() {
             // The click's frame: the card's own output body renders (the
             // `╰─` gutter row only appears with tool output expanded).
             HeadlessStep::WaitRender {
-                needle: "\u{2570}\u{2500} print(4)".to_string(),
+                needle: "\u{2570}\u{2500} print(7)".to_string(),
                 timeout_ms: 5_000,
             },
         ],
@@ -481,50 +472,45 @@ fn a_click_on_a_condensed_run_expands_it() {
     );
     let last = frames.last().expect("a frame after the click");
     assert!(
-        last.contains("\u{2570}\u{2500} print(4)"),
+        last.contains("\u{2570}\u{2500} print(7)"),
         "the click expanded the card's own output (the `all` level, not the \
          `details` level that only opens the thinking around it): {last}"
     );
     assert!(
-        !last.contains("8 tool calls"),
-        "the condensed block is gone at the expanded level: {last}"
+        last.contains("print(7)"),
+        "the card's own summary row stays rendered: {last}"
     );
 }
 
-/// The card click is a toggle: a second click on an expanded card
-/// collapses the conversation back to the `overview` level — the cards
-/// fold into the condensed run block again and the output bodies fold
-/// away.
+/// The card click is a togg/// The card click is a toggle: a second click on an expanded card
+/// collapses the conversation back to the `overview` level — the cards'
+/// output bodies fold away and every card keeps its own summary row.
 #[test]
 fn a_second_click_on_a_card_collapses_back() {
     let frames = run_plan(
         vec![
             HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            HeadlessStep::Key(ctrl_o()),
-            HeadlessStep::Key(ctrl_o()),
             HeadlessStep::WaitRender {
-                needle: "8 tool calls".to_string(),
+                needle: "print(7)".to_string(),
                 timeout_ms: 5_000,
             },
         ],
         Vec::new(),
     );
-    let (_, block_row, block_col) =
-        locate(&frames, "8 tool calls").expect("the condensed run renders before the click");
+    let (_, card_row, card_col) =
+        locate(&frames, "print(7)").expect("the card renders before the click");
     let frames = run_plan(
         vec![
             HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            HeadlessStep::Key(ctrl_o()),
-            HeadlessStep::Key(ctrl_o()),
             HeadlessStep::WaitRender {
-                needle: "8 tool calls".to_string(),
+                needle: "print(7)".to_string(),
                 timeout_ms: 5_000,
             },
-            // The first click expands the run (the block's own row).
-            HeadlessStep::Mouse(press(block_col + 1, block_row + 1)),
-            HeadlessStep::Mouse(release(block_col + 1, block_row + 1)),
+            // The first click expands the card (its own summary row).
+            HeadlessStep::Mouse(press(card_col + 1, card_row + 1)),
+            HeadlessStep::Mouse(release(card_col + 1, card_row + 1)),
             HeadlessStep::WaitRender {
-                needle: "\u{2570}\u{2500} print(4)".to_string(),
+                needle: "\u{2570}\u{2500} print(7)".to_string(),
                 timeout_ms: 5_000,
             },
         ],
@@ -532,27 +518,26 @@ fn a_second_click_on_a_card_collapses_back() {
     );
     // The expanded frame: locate a rendered card row for the second
     // click (its row toggles the card back).
-    let (_, row, col) = locate(&frames, "print(4)").expect("the cards render expanded");
+    let (_, row, col) =
+        locate(&frames, "\u{2570}\u{2500} print(7)").expect("the card renders expanded");
     let frames = run_plan(
         vec![
             HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            HeadlessStep::Key(ctrl_o()),
-            HeadlessStep::Key(ctrl_o()),
             HeadlessStep::WaitRender {
-                needle: "8 tool calls".to_string(),
+                needle: "print(7)".to_string(),
                 timeout_ms: 5_000,
             },
-            HeadlessStep::Mouse(press(block_col + 1, block_row + 1)),
-            HeadlessStep::Mouse(release(block_col + 1, block_row + 1)),
+            HeadlessStep::Mouse(press(card_col + 1, card_row + 1)),
+            HeadlessStep::Mouse(release(card_col + 1, card_row + 1)),
             HeadlessStep::WaitRender {
-                needle: "\u{2570}\u{2500} print(4)".to_string(),
+                needle: "\u{2570}\u{2500} print(7)".to_string(),
                 timeout_ms: 5_000,
             },
-            // The second click lands on the now-rendered card row.
+            // The second click lands on the now-rendered expanded row.
             HeadlessStep::Mouse(press(col + 1, row + 1)),
             HeadlessStep::Mouse(release(col + 1, row + 1)),
             HeadlessStep::WaitRender {
-                needle: "8 tool calls".to_string(),
+                needle: "print(7)".to_string(),
                 timeout_ms: 5_000,
             },
         ],
@@ -560,47 +545,42 @@ fn a_second_click_on_a_card_collapses_back() {
     );
     let last = frames.last().expect("a frame after the second click");
     assert!(
-        last.contains("8 tool calls"),
-        "the second click collapsed the cards back: {last}"
+        last.contains("print(7)"),
+        "the card keeps its own collapsed summary row: {last}"
     );
     assert!(
-        !last.contains("\u{2570}\u{2500} print(4)"),
+        !last.contains("\u{2570}\u{2500} print(7)"),
         "the expanded output folded away again: {last}"
     );
 }
 
 /// Buttonless motion reports (the `?1003` hover surface) flow through the
 /// same decode-and-dispatch path without disturbing the click grammar:
-/// hover motions across the frame, then a plain click on the condensed
-/// block still expands the run (the hover branch never consumes or
-/// corrupts the press state).
+/// hover motions across the frame, then a plain click on the card still
+/// expands it (the hover branch never consumes or corrupts the press
+/// state).
 #[test]
 fn hover_motion_reports_do_not_disturb_the_click_grammar() {
     let frames = run_plan(
         vec![
             HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            HeadlessStep::Key(ctrl_o()),
-            HeadlessStep::Key(ctrl_o()),
             HeadlessStep::WaitRender {
-                needle: "8 tool calls".to_string(),
+                needle: "print(7)".to_string(),
                 timeout_ms: 5_000,
             },
         ],
         Vec::new(),
     );
-    let (_, row, col) =
-        locate(&frames, "8 tool calls").expect("the condensed run renders before the motions");
+    let (_, row, col) = locate(&frames, "print(7)").expect("the card renders before the motions");
     let motion = |col: usize, row: usize| HeadlessStep::Mouse(format!("\x1b[<35;{col};{row}M"));
     let frames = run_plan(
         vec![
             HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            HeadlessStep::Key(ctrl_o()),
-            HeadlessStep::Key(ctrl_o()),
             HeadlessStep::WaitRender {
-                needle: "8 tool calls".to_string(),
+                needle: "print(7)".to_string(),
                 timeout_ms: 5_000,
             },
-            // Hover motions across the block row and the plain rows
+            // Hover motions across the card row and the plain rows
             // around it (the `?1003` any-event reports the real
             // terminal sends with the hover affordance active).
             motion(col + 1, row),
@@ -611,7 +591,7 @@ fn hover_motion_reports_do_not_disturb_the_click_grammar() {
             HeadlessStep::Mouse(press(col + 1, row + 1)),
             HeadlessStep::Mouse(release(col + 1, row + 1)),
             HeadlessStep::WaitRender {
-                needle: "\u{2570}\u{2500} print(4)".to_string(),
+                needle: "\u{2570}\u{2500} print(7)".to_string(),
                 timeout_ms: 5_000,
             },
         ],
@@ -619,12 +599,12 @@ fn hover_motion_reports_do_not_disturb_the_click_grammar() {
     );
     let last = frames.last().expect("a frame after the click");
     assert!(
-        last.contains("\u{2570}\u{2500} print(4)"),
+        last.contains("\u{2570}\u{2500} print(7)"),
         "the click expanded the card's own output after the hover motions: {last}"
     );
     assert!(
-        !last.contains("8 tool calls"),
-        "the condensed block is gone: {last}"
+        last.contains("print(7)"),
+        "the card keeps its own summary row: {last}"
     );
 }
 

@@ -88,12 +88,7 @@ impl Reconstructed {
                         name: view.name,
                         args: serde_json::Value::Null,
                         started: true,
-                        ended_ms: (view.timestamp > 0).then_some(view.timestamp),
                         result: Some(view.view),
-                        // An orphan keeps its own standalone row: it
-                        // never joins a condensed run (it is not a
-                        // call).
-                        unmatched_result: true,
                         ..Default::default()
                     })));
             }
@@ -111,10 +106,6 @@ struct ToolResultReplay {
     /// card matches).
     tool_name: String,
     view: crate::chat::ToolResultView,
-    /// The message's wire `timestamp` (Unix milliseconds; 0 when absent):
-    /// reading an existing field for the condensed runs' wall-clock - no
-    /// schema change.
-    timestamp: u64,
 }
 
 /// Decode a `role: "toolResult"` message into its replay view; `None` for
@@ -146,10 +137,6 @@ fn tool_result_message_view(message: &Value) -> Option<ToolResultReplay> {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
         },
-        timestamp: message
-            .get("timestamp")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
     })
 }
 
@@ -163,7 +150,6 @@ fn apply_tool_result(chat: &mut [ChatEntry], result: ToolResultReplay) -> Option
         tool_call_id,
         tool_name,
         view,
-        timestamp,
     } = result;
     for entry in chat.iter_mut() {
         if let ChatEntry::Tool(card) = entry {
@@ -175,7 +161,6 @@ fn apply_tool_result(chat: &mut [ChatEntry], result: ToolResultReplay) -> Option
                 let now = std::time::Instant::now();
                 card.started_at = Some(now);
                 card.ended_at = Some(now);
-                card.ended_ms = (timestamp > 0).then_some(timestamp);
                 card.result = Some(view);
                 card.result_partial = false;
                 return None;
@@ -186,7 +171,6 @@ fn apply_tool_result(chat: &mut [ChatEntry], result: ToolResultReplay) -> Option
         id: tool_call_id,
         name: tool_name,
         view,
-        timestamp,
     })
 }
 
@@ -195,7 +179,6 @@ struct OrphanResult {
     id: String,
     name: String,
     view: crate::chat::ToolResultView,
-    timestamp: u64,
 }
 
 /// Replay a whole transcript: map every message to its rows, then fold
@@ -309,7 +292,6 @@ fn settle_last_pending(
         tool_call_id: _,
         tool_name: _,
         view,
-        timestamp,
     } = result;
     if let Some(ChatEntry::Tool(card)) = chat.get_mut(index) {
         card.started = true;
@@ -319,7 +301,6 @@ fn settle_last_pending(
         let now = std::time::Instant::now();
         card.started_at = Some(now);
         card.ended_at = Some(now);
-        card.ended_ms = (timestamp > 0).then_some(timestamp);
         card.result = Some(view);
         card.result_partial = false;
     }
@@ -333,16 +314,13 @@ fn orphan_card(result: ToolResultReplay) -> ChatEntry {
         tool_call_id,
         tool_name,
         view,
-        timestamp,
     } = result;
     ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
         id: tool_call_id,
         name: tool_name,
         args: serde_json::Value::Null,
         started: true,
-        ended_ms: (timestamp > 0).then_some(timestamp),
         result: Some(view),
-        unmatched_result: true,
         ..Default::default()
     }))
 }
