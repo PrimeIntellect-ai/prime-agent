@@ -110,7 +110,14 @@ impl AgentSessionEngine {
         self.apply_armed_image_route(&agent);
         let policy = self.retry_policy();
         let failover_policy = self.failover_policy();
-        let candidates = self.failover_candidates(&model);
+        // A routed image-model episode serves (and may fail over within)
+        // the ROUTED model: the candidate chain and its overflow window
+        // derive from the serving model, never from the text-only session
+        // model the requests never reach.
+        let candidates = match self.armed_image_route() {
+            Some(route) => self.failover_candidates(&route.target.model),
+            None => self.failover_candidates(&model),
+        };
         // The pa-core retry driver owns the attempt loop; this engine owns
         // one turn. The driver awaits each attempt to completion before
         // emitting retry events, so the single `emit` reference is handed

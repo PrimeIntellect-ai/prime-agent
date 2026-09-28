@@ -614,20 +614,33 @@ fn headless_image_model_router(
     cwd: std::path::PathBuf,
     agent_dir: std::path::PathBuf,
     session_model: pa_types::ai::Model,
-    thinking_level: pa_types::ai::ModelThinkingLevel,
+    thinking_level: pa_core::session_engine::provider_adapter::ModelThinkingLevel,
 ) -> pa_core::session_engine::image_model_routing::ImageModelRouter {
-    let session_target = provider_target
-        .read()
-        .expect("provider target lock")
-        .clone();
-    // The decide closure takes its own copies; the swap closure moves the
-    // originals (the last uses).
+    // The pre-route session target, captured at the FIRST arm (not at
+    // build): a mid-run model switch rewrites the live slot, and the
+    // capture-then-restore contract (arm -> serve the route -> settle ->
+    // restore) must return the SWITCHED-TO target, never the build-time
+    // snapshot. Cleared on every settle so the next arm re-captures
+    // whatever the session serves by then.
+    let armed_from = std::sync::Arc::new(std::sync::Mutex::new(None));
     let decide_agent_dir = agent_dir.clone();
+    let decide_provider_target = std::sync::Arc::clone(&provider_target);
     let decide = std::sync::Arc::new(
         move |carries_images: bool| -> Result<Option<pa_core::models::ResolvedImageModel>, String> {
             if !carries_images {
                 return Ok(None);
             }
+            // The routing decision runs at commit, when the live slot
+            // holds the CURRENT session target (the previous episode
+            // settles before the next batch commits): decide against the
+            // switched-to model, falling back to the build-time pair only
+            // when the slot is somehow empty.
+            let session_model = decide_provider_target
+                .read()
+                .expect("provider target lock")
+                .as_ref()
+                .map(|target| target.model.clone())
+                .unwrap_or_else(|| session_model.clone());
             let settings = pa_core::settings::SettingsManager::create(&cwd, &decide_agent_dir);
             let image_model_reference = settings.get_image_model();
             let block_images = settings.get_block_images();
@@ -653,8 +666,18 @@ fn headless_image_model_router(
     let swap_target = {
         let provider_target = std::sync::Arc::clone(&provider_target);
         std::sync::Arc::new(move |route: Option<&pa_core::models::ResolvedImageModel>| {
-            let target = match route {
+            match route {
                 Some(resolved) => {
+                    // The first swap of the episode captures the session
+                    // target it replaces (the later arms re-write the slot,
+                    // so only the arm preceding them holds it).
+                    let mut armed_from = armed_from.lock().expect("armed-from lock");
+                    if armed_from.is_none() {
+                        *armed_from = provider_target
+                            .read()
+                            .expect("provider target lock")
+                            .clone();
+                    }
                     // The routed model's request auth resolves like the
                     // session model's did at startup (registry + headers).
                     let auth = pa_core::auth::AuthStorage::create(&agent_dir);
@@ -663,18 +686,34 @@ fn headless_image_model_router(
                     registry.load_private_authorization_from_cache();
                     let resolved_auth = registry
                         .get_api_key_and_headers(&resolved.model, resolved.model.headers.as_ref());
-                    pa_core::session_engine::provider_adapter::ProviderTarget {
+                    let target = pa_core::session_engine::provider_adapter::ProviderTarget {
                         api_key: resolved_auth.api_key,
                         headers: resolved_auth.headers,
                         model: resolved.model.clone(),
                         service_tier: resolved.service_tier,
+                    };
+                    *provider_target.write().expect("provider target lock") = Some(target);
+                }
+                None => {
+                    // Restore the captured session target and release the
+                    // capture: a mid-run model switch rewrote the slot, and
+                    // the next arm captures the switched-to target.
+                    let captured =
+                        armed_from
+                            .lock()
+                            .expect("armed-from lock")
+                            .take()
+                            .or_else(|| {
+                                provider_target
+                                    .read()
+                                    .expect("provider target lock")
+                                    .clone()
+                            });
+                    if let Some(target) = captured {
+                        *provider_target.write().expect("provider target lock") = Some(target);
                     }
                 }
-                None => session_target
-                    .clone()
-                    .expect("the session target is set at startup"),
-            };
-            *provider_target.write().expect("provider target lock") = Some(target);
+            }
         })
     };
     pa_core::session_engine::image_model_routing::ImageModelRouter {
