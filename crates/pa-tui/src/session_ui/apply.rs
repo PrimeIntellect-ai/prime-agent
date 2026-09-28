@@ -692,12 +692,14 @@ impl SessionUi {
                 follow_ups,
                 starting,
                 rlm_child_status,
+                injected_prompts,
             } => {
                 view.queued = crate::queued::QueuedMessages {
                     steering,
                     follow_ups,
                     starting,
                     rlm_child_status,
+                    injected_prompts,
                 };
                 // A queue change under an active browse reconciles the
                 // selection (TS `refreshQueueSelectionAt`): the cursor
