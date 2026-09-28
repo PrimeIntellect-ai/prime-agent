@@ -607,7 +607,7 @@ fn run_package_update(
         archive: None,
         source: None,
     };
-    let code = self_update(&invocation, persisted_wire);
+    let code = self_update(&invocation, persisted_wire.as_deref());
     if code == 0 {
         HANDLED_OK
     } else {

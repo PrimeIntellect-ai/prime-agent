@@ -175,7 +175,7 @@ impl PrintGoalSurface {
         }
     }
 
-    fn emit(&self, event: Value) {
+    fn emit(&self, event: &Value) {
         if self.json_mode {
             (self.sink)(&event);
         }
