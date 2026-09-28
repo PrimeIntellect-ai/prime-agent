@@ -257,7 +257,7 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
     // attached parent renders the subagent summary box from the real daemon.
     let ledger = pa_daemon::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &session_dir, |_m| {});
     ledger
-        .append_spawn(pa_daemon::rlm_ledger::RlmSpawnInput {
+        .append_spawn(&pa_daemon::rlm_ledger::RlmSpawnInput {
             child_id: "panel-nav-child".to_string(),
             parent: parent_path.to_string_lossy().to_string(),
             child: child_path.to_string_lossy().to_string(),

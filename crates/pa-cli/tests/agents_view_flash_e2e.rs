@@ -390,7 +390,7 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
             &[("do the work", "work complete")],
         );
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: format!("sub-{index}"),
                 parent: parent_file.to_string_lossy().to_string(),
                 child: child_file.to_string_lossy().to_string(),
