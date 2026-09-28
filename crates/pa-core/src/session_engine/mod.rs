@@ -681,9 +681,9 @@ impl AgentSession {
         refine_call: crate::refinement::executor::RefinerFn,
         global_harness_dir: std::path::PathBuf,
     ) -> anyhow::Result<crate::refinement::RefinementResult> {
-        let (snapshot, pre_refine_rows) = {
+        let snapshot = {
             let session = self.session.lock().await;
-            (session.history_snapshot(), session.retained_entries().len())
+            session.history_snapshot()
         };
         let entries = snapshot.await?;
         let messages: Vec<SessionAgentMessage> = entries
@@ -693,9 +693,9 @@ impl AgentSession {
                 _ => None,
             })
             .collect();
-        let result = {
+        let (result, context_row_ids) = {
             let mut session = self.session.lock().await;
-            refine::execute_refinement(
+            refine::execute_refinement_with_rows(
                 &mut session,
                 refine::RefinementTranscript {
                     messages: &messages,
@@ -715,19 +715,21 @@ impl AgentSession {
         // after a refine — the rebuild is the compact/navigate arm, and a
         // rebuild here would also resurrect a retried turn's dropped
         // trailing assistant, which TS deliberately keeps out of the live
-        // context. The pushed rows materialize from the appended durable
-        // entries, so they are byte-identical to a context rebuild's rows
-        // for them, while the live-context update stays O(refine rows)
-        // instead of O(session file).
+        // context. The pushed rows are THIS run's, selected by the ids the
+        // run appended (so interleaved runs can never select each other's
+        // rows), and materialize from the appended durable entries, so they
+        // are byte-identical to a context rebuild's rows for them, while the
+        // live-context update stays O(refine rows) instead of O(session
+        // file) and lands under ONE agent-state lock (TS's synchronous
+        // `agent.state.messages.push`).
         let rows = {
             let session = self.session.lock().await;
-            refine::appended_context_rows(session.retained_entries(), pre_refine_rows)
+            refine::context_rows_by_ids(session.retained_entries(), &context_row_ids)
         };
-        if !rows.is_empty() {
-            let state = self.agent.state().await;
-            let mut messages = state.messages;
-            messages.extend(rows.iter().filter_map(session_message_to_loop));
-            self.agent.set_messages(messages).await;
+        let loop_rows: Vec<AgentMessage> =
+            rows.iter().filter_map(session_message_to_loop).collect();
+        if !loop_rows.is_empty() {
+            self.agent.append_messages(loop_rows).await;
         }
         Ok(result)
     }
@@ -2699,6 +2701,56 @@ mod compaction_outcome_tests {
             custom_types(&candidate[candidate.len() - 1..]),
             vec!["refinement_outcome"],
             "no notice row without an applied edit"
+        );
+    }
+
+    #[tokio::test]
+    async fn sequential_refines_push_exactly_their_own_rows() {
+        // Two runs back-to-back: the second must select exactly its own
+        // rows (by id), never the first run's — the pushed live context
+        // stays byte-identical to a full rebuild, which holds exactly one
+        // copy of each appended row.
+        let (session, tmp) = refine_test_session().await;
+        let global_dir = tmp.path().join("harness");
+        let first = r#"{"summary":"one","edits":[{"action":"create","kind":"memory","id":"m1","title":"A","content":"a"}]}"#;
+        let second = r#"{"summary":"two","edits":[{"action":"create","kind":"memory","id":"m2","title":"B","content":"b"}]}"#;
+        session
+            .refine_with_refiner(
+                &refine::RefineOptions::default(),
+                refine::RefinementSource::User,
+                &session_ai_model(),
+                refine_plan_call(first),
+                global_dir.clone(),
+            )
+            .await
+            .unwrap();
+        session
+            .refine_with_refiner(
+                &refine::RefineOptions::default(),
+                refine::RefinementSource::User,
+                &session_ai_model(),
+                refine_plan_call(second),
+                global_dir,
+            )
+            .await
+            .unwrap();
+        let candidate = session.agent().state().await.messages;
+        let reference = full_rebuild_reference(&session).await;
+        assert_eq!(
+            serde_json::to_value(&candidate).unwrap(),
+            serde_json::to_value(&reference).unwrap(),
+            "two sequential refines hold exactly one copy of each appended row"
+        );
+        // Base rows + two outcomes + two notices, in durable order.
+        assert_eq!(candidate.len(), 6);
+        assert_eq!(
+            custom_types(&candidate[candidate.len() - 4..]),
+            vec![
+                "refinement_outcome",
+                "refinement_notice",
+                "refinement_outcome",
+                "refinement_notice"
+            ]
         );
     }
 
