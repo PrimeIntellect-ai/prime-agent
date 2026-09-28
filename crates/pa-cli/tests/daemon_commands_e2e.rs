@@ -205,7 +205,7 @@ impl Wire {
     }
 
     fn request(&mut self, id: &str, command: Value) -> Value {
-        self.send_command(id, command);
+        self.send_command(id, &command);
         loop {
             let line = self.read_line();
             if line.get("id").and_then(Value::as_str) == Some(id) {

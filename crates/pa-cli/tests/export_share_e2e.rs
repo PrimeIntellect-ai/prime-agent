@@ -34,7 +34,7 @@ fn kill_worker(pid: u32) {
         libc::kill(pid as i32, libc::SIGKILL);
     }
     let deadline = Instant::now() + Duration::from_secs(5);
-    while process_alive(*pid) {
+    while process_alive(pid) {
         assert!(
             Instant::now() < deadline,
             "worker {pid} survived the teardown kill"

@@ -420,7 +420,7 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
     // root is resident.
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "sessionPath": parent_file.to_string_lossy(),
             "config": {
@@ -457,7 +457,7 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
     // never vanishes).
     client.send_command(
         "k1",
-        json!({ "type": "kill", "activeSessionId": active_id }),
+        &json!({ "type": "kill", "activeSessionId": active_id }),
     );
     let killed = client.request("k1");
     assert_eq!(killed["success"], true, "kill failed: {killed}");
@@ -494,7 +494,7 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
     // ledger walk): the parent plus its hundreds of children.
     client.send_command(
         "s1",
-        json!({ "type": "list_saved_sessions", "cwd": dir.path().to_string_lossy() }),
+        &json!({ "type": "list_saved_sessions", "cwd": dir.path().to_string_lossy() }),
     );
     let saved = client.request("s1");
     assert_eq!(saved["success"], true, "list_saved_sessions: {saved}");
@@ -607,7 +607,7 @@ async fn a_stopped_session_stays_visible_in_the_view() {
     // remove it.
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "sessionPath": stopped_file.to_string_lossy(),
             "config": {
@@ -629,7 +629,7 @@ async fn a_stopped_session_stays_visible_in_the_view() {
     client.drain_roster_pushes(Duration::from_millis(500));
     client.send_command(
         "k1",
-        json!({ "type": "kill", "activeSessionId": active_id }),
+        &json!({ "type": "kill", "activeSessionId": active_id }),
     );
     let killed = client.request("k1");
     assert_eq!(killed["success"], true, "kill failed: {killed}");
