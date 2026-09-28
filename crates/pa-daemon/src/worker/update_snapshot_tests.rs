@@ -407,10 +407,11 @@ fn the_rider_serializes_only_when_a_notice_is_parked() {
         queued_count: 1,
         steering: vec!["[child-exited: no-reply child:lane]".to_string()],
         follow_ups: Vec::new(),
-        rlm_child_status: crate::types::RlmChildStatusIndices {
+        rlm_child_status: crate::types::QueueLaneIndices {
             steering: vec![0],
             follow_up: Vec::new(),
         },
+        injected_prompts: crate::types::QueueLaneIndices::default(),
         active: None,
     };
     let wire = serde_json::to_value(&parked).unwrap();
@@ -419,6 +420,175 @@ fn the_rider_serializes_only_when_a_notice_is_parked() {
         json!({ "steering": [0] }),
         "the rider carries the lane indices in camelCase, the empty lane omitted"
     );
+    assert!(
+        wire.get("injectedPrompts").is_none(),
+        "the second rider skips when it carries no mark: {wire}"
+    );
+    // The injected-prompt rider serializes with the same shape.
+    let parked_continuation = SessionActionSnapshot {
+        queued_count: 1,
+        steering: Vec::new(),
+        follow_ups: vec!["[goal: continuation]\n\nKeep driving the goal.".to_string()],
+        rlm_child_status: crate::types::QueueLaneIndices::default(),
+        injected_prompts: crate::types::QueueLaneIndices {
+            steering: Vec::new(),
+            follow_up: vec![0],
+        },
+        active: None,
+    };
+    let wire = serde_json::to_value(&parked_continuation).unwrap();
+    assert_eq!(
+        wire["injectedPrompts"],
+        json!({ "followUp": [0] }),
+        "the injected rider carries its lane indices, the empty lane omitted"
+    );
+}
+
+/// The engine-minted continuations carry their own typed provenance
+/// (operator directive 2026-09-28 — internal prompts never render as
+/// individual queue rows): the injected, queue-invisible admissions
+/// (goal continuations, budget-limit steers, threshold-compaction
+/// continuations) mark the `injectedPrompts` rider by lane index, and
+/// every other shape never does — the same-text user row, the visible
+/// labeled injected row (the busy agent message folds by its TS label
+/// instead), and the child-status notice (it rides its own rider).
+#[tokio::test]
+async fn injected_continuations_mark_their_own_rider_only() {
+    let (worker, _) = snapshot_after_create().await;
+    let continuation = "[goal: continuation]\n\nKeep driving the goal.".to_string();
+    {
+        let mut core = worker.core.lock().unwrap();
+        // A user-typed prompt with the continuation's exact text parks
+        // first: the rider must not flag it.
+        core.follow_up.push_back(QueuedItem {
+            priority: QueuePriority::Human,
+            message: continuation.clone(),
+            preview: None,
+            custom_message: None,
+            agent_message: None,
+            queue_key: None,
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible: true,
+            policy: TurnPolicy::Queued,
+            forced_batch: false,
+        });
+        // The engine-minted continuation: injected and queue-invisible.
+        core.follow_up.push_back(QueuedItem {
+            priority: QueuePriority::Background,
+            message: continuation,
+            preview: None,
+            custom_message: None,
+            agent_message: None,
+            queue_key: None,
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible: false,
+            policy: TurnPolicy::Injected,
+            forced_batch: false,
+        });
+        // A visible injected row (the busy agent message shape) folds
+        // by its TS label in the strip — the injected rider never flags
+        // it, so the label classification keeps owning it.
+        core.follow_up.push_back(QueuedItem {
+            priority: QueuePriority::Background,
+            message: "from the research child".to_string(),
+            preview: Some("Agent message received: from the research child".to_string()),
+            custom_message: None,
+            agent_message: Some("from the research child".to_string()),
+            queue_key: None,
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible: true,
+            policy: TurnPolicy::Injected,
+            forced_batch: false,
+        });
+    }
+    let snapshot = {
+        let core = worker.core.lock().unwrap();
+        worker.snapshot_locked(&core)
+    };
+    assert_eq!(
+        snapshot.injected_prompts.follow_up,
+        vec![1],
+        "only the injected queue-invisible continuation marks the rider"
+    );
+    assert!(
+        snapshot.injected_prompts.steering.is_empty(),
+        "the steering lane carries no continuation here"
+    );
+    // A child-status notice admitted idle (injected, queue-invisible)
+    // still rides ITS rider, never the injected one.
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.follow_up.push_back(QueuedItem {
+            priority: QueuePriority::Background,
+            message: "[child-exited: no-reply child:lane]".to_string(),
+            preview: None,
+            custom_message: Some(child_status_notice_wire("terminal")),
+            agent_message: None,
+            queue_key: None,
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible: false,
+            policy: TurnPolicy::Injected,
+            forced_batch: false,
+        });
+    }
+    let snapshot = {
+        let core = worker.core.lock().unwrap();
+        worker.snapshot_locked(&core)
+    };
+    assert_eq!(
+        snapshot.rlm_child_status.follow_up,
+        vec![3],
+        "the notice rides its own rider"
+    );
+    assert_eq!(
+        snapshot.injected_prompts.follow_up,
+        vec![1],
+        "the notice never rides the injected rider"
+    );
+}
+
+/// A queue-invisible injected item still projects its lane text (the
+/// strip's preview projection is unchanged) — the rider is what folds
+/// it, never an omission from the projection: the browse affordance
+/// keeps the full queue inspectable.
+#[tokio::test]
+async fn injected_continuations_still_project_their_lane_text() {
+    let (worker, _) = snapshot_after_create().await;
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.steering.push_back(QueuedItem {
+            priority: QueuePriority::Background,
+            message: "[goal: continuation]\n\nKeep driving the goal.".to_string(),
+            preview: None,
+            custom_message: None,
+            agent_message: None,
+            queue_key: None,
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible: false,
+            policy: TurnPolicy::Injected,
+            forced_batch: false,
+        });
+    }
+    let snapshot = {
+        let core = worker.core.lock().unwrap();
+        worker.snapshot_locked(&core)
+    };
+    assert_eq!(
+        snapshot.steering,
+        vec!["[goal: continuation]\n\nKeep driving the goal."],
+        "the projection keeps serving the parked rows to the browse"
+    );
+    assert_eq!(snapshot.injected_prompts.steering, vec![0]);
 }
 
 /// The journal round-trip preserves the typed provenance: the restore
