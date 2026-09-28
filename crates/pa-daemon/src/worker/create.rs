@@ -1,7 +1,7 @@
 //! Session creation and reuse on the worker: the create command's
 //! construction of the live session.
 use super::{
-    create, default_server_capabilities, json, paths, queue, response_failure, response_success,
+    default_server_capabilities, json, paths, queue, response_failure, response_success,
     restore_queue_snapshot, session_file_name, summary, Arc, EngineModelSelection, Result,
     RlmSessionIdentity, SessionEngine, SessionFile, VecDeque, Worker,
 };

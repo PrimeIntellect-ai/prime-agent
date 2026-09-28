@@ -3,8 +3,8 @@
 use super::lifecycle::active_lifecycle;
 use super::{
     checkpoint_queue_recovery, create_daemon_event_meta, effective_service_tier,
-    is_rlm_child_status_item, json, queue, summary, supports_fast_mode, turn, AgentConnectionState,
-    Arc, DaemonOutbound, DaemonSessionClosedReason, EventPump, Map, Mutex, OutboundFrame,
+    is_rlm_child_status_item, json, summary, supports_fast_mode, turn, AgentConnectionState, Arc,
+    DaemonOutbound, DaemonSessionClosedReason, EventPump, Map, Mutex, OutboundFrame,
     QueueCheckpoint, QueueLanes, QueuedItem, Result, SessionActionSnapshot, SessionCore,
     SessionEngine, Value, Worker,
 };

@@ -1,7 +1,7 @@
 //! Session lifecycle on the worker: shutdown, replacement handoff,
 //! resume, compaction triggers, and the wait-for-settled arms.
 use super::{
-    env, input, json, lifecycle, paths, queue, queue_lanes, response_failure, response_success,
+    input, json, lifecycle, paths, queue, queue_lanes, response_failure, response_success,
     session_snapshot, summary, turn, DaemonResponse, QueueCheckpoint, QueuePriority, QueuedItem,
     SessionFile, TurnPolicy, Value, Worker, SIDE_QUESTION_SETTLE_TIMEOUT,
 };

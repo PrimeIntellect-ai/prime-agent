@@ -3,7 +3,7 @@
 use super::{
     active_session_id_of, anyhow, bind_transport, broadcast, create_daemon_replay_info,
     current_protocol_info, default_client_capabilities, json, normalize_client_capabilities,
-    peer_command_allowed, response_failure, response_success, turn, worker_peer_command_allowed,
+    peer_command_allowed, response_failure, response_success, worker_peer_command_allowed,
     worker_server_capabilities, write_frame, write_frame_segments, Arc, AtomicU64, ConnectionRole,
     Context, DaemonOutbound, DaemonResponse, DaemonResumeCursor, Map, Ordering, Result,
     TransportStream, Value, Worker, WorkerRecoveryJournal, DAEMON_APP_VERSION, DAEMON_SCHEMA_ID,
