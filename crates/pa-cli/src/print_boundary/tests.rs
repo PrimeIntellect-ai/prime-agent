@@ -117,6 +117,9 @@ async fn faux_engine_with_telemetry(
         cron_store: None,
         steering_mode: None,
         follow_up_mode: None,
+        // The test engine never routes image turns (TS tests run the same
+        // un-configured image-model default).
+        image_model_router: None,
         telemetry,
         cwd: dir.path().to_path_buf(),
         agent_dir,

@@ -52,7 +52,13 @@ impl AgentSessionEngine {
         // has no configured credential fails the run before the provider
         // request, with the login-guidance message. The create-config key
         // covers the TS runtime-key candidate (`setRuntimeApiKey`), and the
-        // scripted faux seam has no credentials at all.
+        // scripted faux seam has no credentials at all. The preflight
+        // validates the model SERVING the run (TS `_runModel()`): a routed
+        // image-model episode is authenticated by its own image model, not
+        // by a text-only session model that never receives a request.
+        let preflight_model = self
+            .armed_image_route()
+            .map_or_else(|| model.clone(), |route| route.target.model);
         if self.config.faux_script.is_none() && self.current_selection().api_key.is_none() {
             let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
             let mut registry = pa_core::models::ModelRegistry::create(
@@ -60,24 +66,24 @@ impl AgentSessionEngine {
                 self.config.agent_dir.join("models.json"),
             );
             registry.load_private_authorization_from_cache();
-            if !registry.has_configured_auth(&model) {
+            if !registry.has_configured_auth(&preflight_model) {
                 let uses_oauth = registry
                     .auth
                     .get_all()
-                    .credential(&model.provider)
+                    .credential(&preflight_model.provider)
                     .is_some_and(|credential| {
                         matches!(credential, pa_core::auth::AuthCredential::Oauth { .. })
                     });
                 let message = if uses_oauth {
                     format!(
                         "Authentication failed for \"{}\". Credentials may have expired or network is unavailable.\n\nRun /login to update credentials.",
-                        model.provider
+                        preflight_model.provider
                     )
                 } else {
                     let docs = pa_core::packages::docs_path();
                     format!(
                         "No API key found for {}.\n\nUse /login to log into a provider via OAuth or API key. See:\n  {}\n  {}",
-                        model.provider,
+                        preflight_model.provider,
                         docs.join("providers.md").display(),
                         docs.join("models.md").display()
                     )
@@ -97,9 +103,21 @@ impl AgentSessionEngine {
                 }
             }
         };
+        // A routed image-model episode applies its override BEFORE the
+        // first provider call: the serving target swaps to the image
+        // model and the run carries the route's model override (the
+        // agent state itself never swaps - TS the override is per-run).
+        self.apply_armed_image_route(&agent);
         let policy = self.retry_policy();
         let failover_policy = self.failover_policy();
-        let candidates = self.failover_candidates(&model);
+        // A routed image-model episode serves (and may fail over within)
+        // the ROUTED model: the candidate chain and its overflow window
+        // derive from the serving model, never from the text-only session
+        // model the requests never reach.
+        let candidates = match self.armed_image_route() {
+            Some(route) => self.failover_candidates(&route.target.model),
+            None => self.failover_candidates(&model),
+        };
         // The pa-core retry driver owns the attempt loop; this engine owns
         // one turn. The driver awaits each attempt to completion before
         // emitting retry events, so the single `emit` reference is handed
@@ -156,12 +174,19 @@ impl AgentSessionEngine {
                     outcome
                 })
             });
+        // A routed image-model episode serves (and overflows within) the
+        // ROUTED model: the overflow classification window derives from
+        // the serving model, never from the text-only session model.
+        let overflow_window = match self.armed_image_route() {
+            Some(route) => route.target.model.context_window,
+            None => model.context_window,
+        };
         let result = self.runtime.block_on(
             pa_core::session_engine::provider_failover::run_turn_with_provider_failover(
                 &policy,
                 &failover_policy,
                 &candidates,
-                model.context_window,
+                overflow_window,
                 None,
                 || {
                     let mut emit = emit_cell.borrow_mut();
@@ -272,16 +297,30 @@ impl AgentSessionEngine {
                         // request hits the switched-to provider with its
                         // resolved key.
                         {
-                            let (api_key, headers) =
-                                self.resolve_request_key_and_headers(&next);
-                            let mut target =
-                                self.provider_target.write().expect("provider target lock");
-                            *target = Some(ProviderTarget {
-                                service_tier: *self.service_tier.read().expect("service tier lock"),
-                                api_key,
-                                model: next.clone(),
-                                headers,
-                            });
+                            // A routed image-model episode keeps serving
+                            // the route's target across the failover
+                            // switch (the image model receives the
+                            // requests; the switch moves only the agent
+                            // state).
+                            if let Some(route) = self.armed_image_route() {
+                                let mut target =
+                                    self.provider_target.write().expect("provider target lock");
+                                *target = Some(route.target);
+                            } else {
+                                let (api_key, headers) =
+                                    self.resolve_request_key_and_headers(&next);
+                                let mut target =
+                                    self.provider_target.write().expect("provider target lock");
+                                *target = Some(ProviderTarget {
+                                    service_tier: *self
+                                        .service_tier
+                                        .read()
+                                        .expect("service tier lock"),
+                                    api_key,
+                                    model: next.clone(),
+                                    headers,
+                                });
+                            }
                         }
                         agent.set_model(agent_model).await;
                         agent
@@ -315,12 +354,22 @@ impl AgentSessionEngine {
                         {
                             let mut target =
                                 self.provider_target.write().expect("provider target lock");
-                            *target = Some(ProviderTarget {
-                                service_tier: *self.service_tier.read().expect("service tier lock"),
-                                api_key: primary_api_key,
-                                model: primary_model.clone(),
-                                headers: primary_headers,
-                            });
+                            // The ROUTED image-model target while a routed
+                            // episode runs: the episode keeps serving the
+                            // routed model across the failover restore.
+                            if let Some(route) = self.armed_image_route() {
+                                *target = Some(route.target);
+                            } else {
+                                *target = Some(ProviderTarget {
+                                    service_tier: *self
+                                        .service_tier
+                                        .read()
+                                        .expect("service tier lock"),
+                                    api_key: primary_api_key,
+                                    model: primary_model.clone(),
+                                    headers: primary_headers,
+                                });
+                            }
                         }
                         agent.set_model(agent_model).await;
                         agent.set_thinking_level(thinking_level).await;

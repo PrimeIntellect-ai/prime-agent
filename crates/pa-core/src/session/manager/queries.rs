@@ -41,7 +41,24 @@ impl SessionManager {
             .as_ref()
             .map(|window| window.source_path().to_owned());
         let retained = self.file_entries.clone();
+        // Full-history fast path (the shared-window pattern): when the
+        // window's walk retained every file row and this manager holds the
+        // session's sole runtime lease, the historical read would re-read
+        // and re-parse a file whose rows are all already resident — the
+        // file's rows are exactly `retained`'s persisted subset, and the
+        // retained copy also carries the current unpersisted tail the
+        // read would have to merge back in. Without the lease another
+        // writer may have appended out of band, so the gate stays closed
+        // and the historical read runs.
+        let fast_path = self
+            .window
+            .as_ref()
+            .is_some_and(super::window::WindowedSessionStore::retained_whole_file)
+            && self.append_ownership == super::window::AppendOwnership::SessionLeaseHeld;
         async move {
+            if fast_path {
+                return Ok(retained);
+            }
             let Some(path) = path else {
                 return Ok(retained);
             };
@@ -59,6 +76,80 @@ impl SessionManager {
                     .filter(|entry| entry.id().is_some_and(|id| !ids.contains(id))),
             );
             Ok(entries)
+        }
+    }
+
+    /// Extract the refine transcript's consumed artifacts (see
+    /// [`RefineTranscriptParts`]) without materializing an owned copy of
+    /// every entry: the message rows the refine prompt serializes, and
+    /// the in-session refinement history the audit scan reads. A
+    /// windowless manager — and a full-history window under the
+    /// session's sole runtime lease — serves both straight from the
+    /// retained rows; a boundary window keeps the historical read, since
+    /// its pre-window conversation and audit rows live only on disk, and
+    /// moves the messages out of the read's parse result instead of
+    /// re-cloning them.
+    ///
+    /// Capture while the session lock is held; await after releasing it,
+    /// like [`Self::history_snapshot`].
+    ///
+    /// # Errors
+    ///
+    /// The returned future errors when the historical read fails (see
+    /// [`Self::history_snapshot`]); the retained-serving arms cannot
+    /// fail.
+    ///
+    /// # Panics
+    ///
+    /// The read arm's `expect` cannot fire: it is reached only when the
+    /// retained-serving arms did not run, and the snapshot is captured in
+    /// exactly that case.
+    pub fn refine_transcript_parts(
+        &self,
+    ) -> impl std::future::Future<Output = anyhow::Result<RefineTranscriptParts>> + Send + 'static
+    {
+        let retained_serves = self.window.is_none()
+            || (self
+                .window
+                .as_ref()
+                .is_some_and(super::window::WindowedSessionStore::retained_whole_file)
+                && self.append_ownership == super::window::AppendOwnership::SessionLeaseHeld);
+        let parts = retained_serves.then(|| RefineTranscriptParts {
+            messages: self
+                .file_entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    FileEntry::Message { message, .. } => Some(message.clone()),
+                    _ => None,
+                })
+                .collect(),
+            refinement_history: crate::session_engine::refine::session_refinement_history(
+                &self.file_entries,
+            ),
+        });
+        // Only the read arm pays `history_snapshot`'s capture (its eager
+        // retained clone feeds the unpersisted-rows merge).
+        let snapshot = (!retained_serves).then(|| self.history_snapshot());
+        async move {
+            if let Some(parts) = parts {
+                return Ok(parts);
+            }
+            let entries = snapshot
+                .expect("the read arm always carries its snapshot")
+                .await?;
+            let refinement_history =
+                crate::session_engine::refine::session_refinement_history(&entries);
+            let messages = entries
+                .into_iter()
+                .filter_map(|entry| match entry {
+                    FileEntry::Message { message, .. } => Some(message),
+                    _ => None,
+                })
+                .collect();
+            Ok(RefineTranscriptParts {
+                messages,
+                refinement_history,
+            })
         }
     }
 

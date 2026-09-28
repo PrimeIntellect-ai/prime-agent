@@ -27,14 +27,39 @@ pub(super) const WORKER_CONNECT_TIMEOUT_ENV: &str = "PA_DAEMON_WORKER_CONNECT_TI
 pub(super) const WORKER_CONNECT_PROBE_MS: u64 = 500;
 #[cfg(not(unix))]
 pub(super) const WORKER_CONNECT_PROBE_MS: u64 = 2_000;
-/// Pause between probe attempts. The TS backoff min = max on Unix; this
-/// port tightens the pause from TS's 25ms to 5ms: a session worker binds
-/// its socket ~1-3ms after the fork (measured cold-open boot floor at
-/// 7064d039a, boot-floor lane record 20260926-194800), so the 25ms grid
-/// quantized every spawn by 0-25ms (mean ~12.5ms) of pure wait on the
-/// open path. Timing-only: the probe, the connect budget, the auth floor,
-/// and the launch-failure error are unchanged.
+/// Pause between probe attempts. TS `WORKER_PROBE_BACKOFF_MIN_MS` (25ms)
+/// doubles per retry up to `WORKER_PROBE_BACKOFF_MAX_MS` (win32 2s, unix
+/// 25 - TS's min equals its max there, so the doubling is a flat grid).
+/// This port keeps the unix pause flat at a tightened 5ms: a session
+/// worker binds its socket ~1-3ms after the fork (measured cold-open
+/// boot floor at 7064d039a, boot-floor lane record 20260926-194800), so
+/// the 25ms grid quantized every spawn by 0-25ms (mean ~12.5ms) of pure
+/// wait on the open path. Windows doubles exactly like TS (a flat 2s
+/// first retry would sleep through the sub-second boots the doubling
+/// exists to catch). Timing-only: the probe, the connect budget, the
+/// auth floor, and the launch-failure error are unchanged.
 #[cfg(unix)]
 pub(super) const WORKER_CONNECT_BACKOFF_MS: u64 = 5;
+/// TS `WORKER_PROBE_BACKOFF_MIN_MS`: the first retry pause.
 #[cfg(not(unix))]
-pub(super) const WORKER_CONNECT_BACKOFF_MS: u64 = 2_000;
+pub(super) const WORKER_PROBE_BACKOFF_MIN_MS: u64 = 25;
+/// TS `WORKER_PROBE_BACKOFF_MAX_MS` (win32 arm:
+/// `process.platform === "win32" ? 2_000 : 25`): the doubling cap.
+#[cfg(not(unix))]
+pub(super) const WORKER_PROBE_BACKOFF_MAX_MS: u64 = 2_000;
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    /// The TS win32 budgets (`daemon-supervisor.ts` :183-186): 90s
+    /// connect, 2s probes, a 25ms first retry doubling to a 2s cap.
+    /// The windows-latest job proves the values the TS product ships.
+    #[test]
+    fn windows_budgets_match_the_ts_values() {
+        assert_eq!(DEFAULT_WORKER_CONNECT_TIMEOUT_MS, 90_000);
+        assert_eq!(WORKER_CONNECT_PROBE_MS, 2_000);
+        assert_eq!(WORKER_PROBE_BACKOFF_MIN_MS, 25);
+        assert_eq!(WORKER_PROBE_BACKOFF_MAX_MS, 2_000);
+    }
+}

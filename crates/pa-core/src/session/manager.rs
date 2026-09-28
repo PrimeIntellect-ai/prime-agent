@@ -135,3 +135,15 @@ pub struct SessionManager {
     leaf_id: Option<String>,
     persist_listeners: Vec<SessionPersistListener>,
 }
+
+/// The refine transcript's consumed artifacts: the conversation
+/// message rows (sequence order) and the in-session refinement
+/// history (the audit scan's output). Both are small next to the full
+/// entry set — the rows refine reads — so extracting them directly
+/// spares the owned copy of every entry a historical snapshot would
+/// materialize.
+#[derive(Debug, Default)]
+pub struct RefineTranscriptParts {
+    pub messages: Vec<AgentMessage>,
+    pub refinement_history: Vec<crate::refinement::RefinementResult>,
+}

@@ -232,7 +232,9 @@ pub async fn execute_session_command(
 /// `_appendDurableSessionCommandMessage` pushes each row onto
 /// `agent.state.messages`, so the next admitted turn's request and every
 /// state snapshot carry them). The post-execution rebuild is idempotent
-/// for the compaction and refinement paths, which rebuild mid-execution.
+/// for the compaction path, which rebuilds mid-execution; the refinement
+/// path pushes its rows mid-execution and this rebuild then normalizes
+/// the command path's live context onto the durable one.
 async fn sync_live_context(engine: &SessionEngine) {
     let session = engine.session.session_handle().clone();
     let rebuilt = {
