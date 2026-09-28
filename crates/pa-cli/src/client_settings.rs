@@ -199,7 +199,9 @@ impl ClientSettings for CliClientSettings {
     }
 
     fn effective_update_channel(&self, version: &str) -> String {
-        let preferred = self.manager().get_update_channel()
+        let preferred = self
+            .manager()
+            .get_update_channel()
             .map(|channel| match channel {
                 pa_core::settings::UpdateChannel::Stable => {
                     pa_core::update::version::UpdateChannel::Stable

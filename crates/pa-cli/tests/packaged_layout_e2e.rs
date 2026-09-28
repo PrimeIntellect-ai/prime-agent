@@ -915,8 +915,16 @@ fn sha256(data: &[u8]) -> [u8; 32] {
                 .wrapping_add(w[index - 7])
                 .wrapping_add(s1);
         }
-        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
-            (hash_words[0], hash_words[1], hash_words[2], hash_words[3], hash_words[4], hash_words[5], hash_words[6], hash_words[7]);
+        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) = (
+            hash_words[0],
+            hash_words[1],
+            hash_words[2],
+            hash_words[3],
+            hash_words[4],
+            hash_words[5],
+            hash_words[6],
+            hash_words[7],
+        );
         for index in 0..64 {
             let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
             let ch = (e & f) ^ ((!e) & g);

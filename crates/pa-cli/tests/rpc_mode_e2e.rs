@@ -800,7 +800,10 @@ fn rpc_mode_never_prints_the_missing_subsystem_stub() {
     assert_eq!(response["success"], true);
     drop(client.stdin.take());
     let wait_status = client.child.wait().expect("exit");
-    assert!(wait_status.success(), "the mode serves the protocol: {wait_status}");
+    assert!(
+        wait_status.success(),
+        "the mode serves the protocol: {wait_status}"
+    );
     client.spawn_stderr = None;
 }
 
@@ -826,7 +829,10 @@ fn rpc_fresh_sessions_lease_their_files() {
     );
     drop(client.stdin.take());
     let wait_status = client.child.wait().expect("exit");
-    assert!(wait_status.success(), "eof settles the leased session: {wait_status}");
+    assert!(
+        wait_status.success(),
+        "eof settles the leased session: {wait_status}"
+    );
     client.spawn_stderr = None;
 }
 
@@ -846,7 +852,10 @@ fn rpc_fork_leases_the_materialized_file() {
         .to_string();
     drop(source.stdin.take());
     let wait_status = source.child.wait().expect("the source exits cleanly");
-    assert!(wait_status.success(), "the source session settles: {wait_status}");
+    assert!(
+        wait_status.success(),
+        "the source session settles: {wait_status}"
+    );
     source.spawn_stderr = None;
 
     let mut forked = RpcChild::spawn(
@@ -869,7 +878,10 @@ fn rpc_fork_leases_the_materialized_file() {
     );
     drop(forked.stdin.take());
     let wait_status = forked.child.wait().expect("exit");
-    assert!(wait_status.success(), "eof settles the forked session: {wait_status}");
+    assert!(
+        wait_status.success(),
+        "eof settles the forked session: {wait_status}"
+    );
     forked.spawn_stderr = None;
 }
 

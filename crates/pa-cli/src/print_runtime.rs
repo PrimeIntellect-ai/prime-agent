@@ -726,8 +726,8 @@ fn build_session_manager_with_lease(
         // selector's convention; the interactive fork arm matches).
         let expanded = crate::config::expand_tilde_path(selector);
         let selector = expanded.to_string_lossy();
-        let resolved =
-            resolve_session_path(&selector, &cwd, &session_dir).map_err(|error| render_selector_error(&error))?;
+        let resolved = resolve_session_path(&selector, &cwd, &session_dir)
+            .map_err(|error| render_selector_error(&error))?;
         let source = match resolved {
             ResolvedSession::Path(path)
             | ResolvedSession::Local(path)
@@ -744,8 +744,8 @@ fn build_session_manager_with_lease(
     // over the stored session cwd on resume.
     let explicit_cwd_override = options.session.cwd_from_flag.then_some(cwd.as_path());
     if let Some(selector) = &options.session.resume {
-        let resolved =
-            resolve_session_path(selector, &cwd, &session_dir).map_err(|error| render_selector_error(&error))?;
+        let resolved = resolve_session_path(selector, &cwd, &session_dir)
+            .map_err(|error| render_selector_error(&error))?;
         return match resolved {
             ResolvedSession::Path(path) | ResolvedSession::Local(path) => {
                 let lease = session_open_guard(options.daemon_socket.as_deref(), &path)?;

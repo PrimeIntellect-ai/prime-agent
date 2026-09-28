@@ -192,7 +192,8 @@ pub struct Args {
     pub offline: bool,
     pub verbose: bool,
     pub messages: Vec<String>,
-    #[allow(clippy::struct_field_names)] // the trailing _args matches the TS `fileArgs` wire surface
+    #[allow(clippy::struct_field_names)]
+    // the trailing _args matches the TS `fileArgs` wire surface
     pub file_args: Vec<String>,
     /// Unknown long flags (extension flags): flag name to value.
     pub unknown_flags: HashMap<String, UnknownFlagValue>,

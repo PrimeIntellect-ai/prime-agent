@@ -112,10 +112,7 @@ pub fn run(options: &SelfUpdateOptions, persisted_wire: Option<&str>) -> i32 {
             // not-attempted exit (75) reaches here only as the child-mode
             // no-change skip: a declined confirmation never runs the flow.
             let flag_wire = options.channel.map(UpdateChannel::wire_name);
-            if (code == 0 || code == 75)
-                && flag_wire.is_some()
-                && flag_wire != persisted_wire
-            {
+            if (code == 0 || code == 75) && flag_wire.is_some() && flag_wire != persisted_wire {
                 let wire = flag_wire.unwrap_or_default();
                 if let Ok(cwd) = std::env::current_dir() {
                     let settings_channel = match wire {
