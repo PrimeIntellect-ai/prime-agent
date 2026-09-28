@@ -213,6 +213,35 @@ struct RestoredNamespaceSkip {
     completed_executions: u64,
 }
 
+/// The last committed capture, replayed while the namespace provably cannot
+/// have changed since it: the recurring freshness memo. Fresh means no USER
+/// execution settled since the commit — a settled cell is the only product
+/// path that rebinds or mutates namespace objects; internal state requests
+/// (the namespace listing, the captures themselves, the repair bootstrap)
+/// settle without touching the user namespace — and the committed manifest
+/// is still the one on disk (nothing external replaced the payload). A fresh
+/// capture would reproduce the committed payload byte-for-byte, so the
+/// kernel request — a full-namespace re-dump serialized on the kernel's
+/// single request queue — is skipped wholesale. The same witness class as
+/// the shipped post-restore skip and boot hold, held across every capture:
+/// the compact-time prune, the dispose flush, and the debounced fire.
+#[derive(Clone)]
+struct CaptureFreshness {
+    /// Settled USER-execution count at the commit; any later user settle
+    /// defeats the memo (internal state requests never move it).
+    user_executions: u64,
+    /// The manifest stat right after the commit, re-checked at every consult.
+    manifest_stat: Option<ManifestStat>,
+    /// The committed capture's result, replayed to callers while fresh: a
+    /// fresh capture reports the same lists (the namespace is unchanged),
+    /// except the prune, whose names are already gone from the live
+    /// namespace (a fresh prune finds nothing).
+    result: SnapshotResult,
+    /// Live names above the per-variable cap survived the commit: a pruning
+    /// capture must still run to remove and disclose them (#227 semantics).
+    live_over_cap: bool,
+}
+
 struct Guarded {
     state: KernelState,
     start_generation: u64,
@@ -231,6 +260,12 @@ struct Guarded {
     /// Settled-execution counter: the post-restore skip arm and the debounced
     /// snapshot compare it to spot a real cell in between.
     completed_executions: u64,
+    /// Settled USER executions only: internal state requests (the namespace
+    /// listing, the captures, the repair bootstrap) settle like any request
+    /// but never change the user namespace, so the capture-freshness memo
+    /// compares this counter — a real cell is the only product path that
+    /// rebinds or mutates namespace objects between captures.
+    user_executions: u64,
     /// A restore attempt failed outright or revived only part of the saved
     /// namespace: the on-disk payload stays the fresher copy, so the dispose
     /// flush must not overwrite it. Unlike `pending_restore`, the reprovision
@@ -247,6 +282,10 @@ struct Guarded {
     restored_manifest_stat: Option<Option<ManifestStat>>,
     /// Armed one-shot post-restore snapshot skip (see `RestoredNamespaceSkip`).
     restored_namespace_skip: Option<RestoredNamespaceSkip>,
+    /// The last committed capture while the namespace provably cannot have
+    /// changed: the recurring freshness memo every capture entry consults
+    /// (see `CaptureFreshness`).
+    capture_freshness: Option<CaptureFreshness>,
     /// Unattributed stream text that arrived between cells; surfaced on the next execution.
     pending_background_output: String,
     pending_background_output_chars: usize,
@@ -382,10 +421,12 @@ impl ReplKernelManager {
                 pending_rebootstrap: false,
                 pending_restore: false,
                 completed_executions: 0,
+                user_executions: 0,
                 restore_incomplete: false,
                 restore_boot_hold: None,
                 restored_manifest_stat: None,
                 restored_namespace_skip: None,
+                capture_freshness: None,
                 pending_background_output: String::new(),
                 pending_background_output_chars: 0,
                 pending_background_output_truncated: false,

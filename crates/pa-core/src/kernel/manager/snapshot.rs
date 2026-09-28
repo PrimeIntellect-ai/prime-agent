@@ -3,6 +3,11 @@
 
 use super::*;
 
+/// The runtime snapshot writer's reason for a name above the per-variable
+/// cap (prime-agent-runtime/src/rlm/repl.py): such a skipped name is a live
+/// over-cap survivor unless the same capture also pruned it.
+const OVER_CAP_SKIP_REASON: &str = "exceeds per-variable snapshot size cap";
+
 // ---------------------------------------------------------------------------
 // Snapshot / restore
 // ---------------------------------------------------------------------------
@@ -20,6 +25,22 @@ impl Inner {
         if !self.is_running_state() {
             return None;
         }
+        // While the namespace provably cannot have changed since the last
+        // committed capture, a fresh capture would reproduce the committed
+        // payload byte-for-byte: skip the kernel request (the full-namespace
+        // re-dump serialized on the kernel's single request queue).
+        if let Some(fresh) = self.fresh_capture(prune_oversized).await {
+            return Some(fresh);
+        }
+        // The user-settled count the memo may claim once this capture
+        // commits, read before the request is queued. This capture and
+        // every other internal state request (the listing, the repair
+        // bootstrap) settle without touching the user counter, and the
+        // kernel runs one request at a time, so only a user cell settling
+        // ahead of this capture can move the count first — which leaves the
+        // claim stale-low (the next consult never matches), never
+        // wrong-fresh.
+        let user_executions_before = lock(&self.guarded).user_executions;
         let request = Request::Snapshot {
             path: cfg.path.to_string_lossy().to_string(),
             manifest_path: cfg.manifest_path.to_string_lossy().to_string(),
@@ -46,7 +67,7 @@ impl Inner {
                     self.append_diagnostic("state snapshot failed: no done fields");
                     return None;
                 };
-                Some(SnapshotResult {
+                let committed = SnapshotResult {
                     saved: as_string_array(fields, "saved"),
                     skipped: as_reason_array(fields, "skipped"),
                     pruned: {
@@ -54,9 +75,16 @@ impl Inner {
                         (!pruned.is_empty()).then_some(pruned)
                     },
                     bytes: fields.get("bytes").and_then(Value::as_u64).unwrap_or(0),
-                    path: cfg.path,
-                })
+                    path: cfg.path.clone(),
+                };
+                self.record_capture_freshness(&cfg, &committed, user_executions_before)
+                    .await;
+                Some(committed)
             }
+            // A failed or timed-out capture leaves the memo describing the
+            // last successful commit: the payload still matches the
+            // namespace while no execution settled since, so the next
+            // capture consults it unchanged.
             Ok(r) => {
                 self.append_diagnostic(&format!(
                     "state snapshot {}: {}",
@@ -78,6 +106,72 @@ impl Inner {
 
     fn is_running_state(&self) -> bool {
         lock(&self.guarded).state == KernelState::Running
+    }
+
+    /// The recurring capture-freshness skip (see `CaptureFreshness`).
+    /// `Some(result)` replays the last committed capture — the caller sees
+    /// exactly what a fresh capture of the unchanged namespace would report.
+    async fn fresh_capture(self: &Arc<Self>, prune_oversized: bool) -> Option<SnapshotResult> {
+        let (user_executions, memo) = {
+            let g = lock(&self.guarded);
+            (g.user_executions, g.capture_freshness.clone())
+        };
+        let memo = memo?;
+        if user_executions != memo.user_executions {
+            return None;
+        }
+        // A pruning capture still must run while live over-cap names
+        // survive: it removes them from the namespace and the compaction
+        // notice discloses the removal (#227 semantics).
+        if prune_oversized && memo.live_over_cap {
+            return None;
+        }
+        let cfg = self.options.snapshot.clone()?;
+        // Off the executor, like the arming stat in perform_restore.
+        let manifest_path = cfg.manifest_path.clone();
+        let current = tokio::task::spawn_blocking(move || manifest_stat_of(&manifest_path))
+            .await
+            .ok()
+            .flatten();
+        if current != memo.manifest_stat {
+            return None;
+        }
+        let mut result = memo.result;
+        // The pruned names left the live namespace with the commit that
+        // pruned them; a fresh prune finds nothing to disclose.
+        result.pruned = None;
+        Some(result)
+    }
+
+    /// Arm the freshness memo with a committed capture: the namespace on
+    /// disk is the live one again, and stays provably unchanged until the
+    /// next settled USER execution or an external manifest replacement
+    /// (see `capture_snapshot` for why internal state requests cannot move
+    /// the claimed count).
+    async fn record_capture_freshness(
+        self: &Arc<Self>,
+        cfg: &crate::kernel::shared::KernelSnapshotConfig,
+        result: &SnapshotResult,
+        user_executions: u64,
+    ) {
+        let manifest_path = cfg.manifest_path.clone();
+        let manifest_stat = tokio::task::spawn_blocking(move || manifest_stat_of(&manifest_path))
+            .await
+            .ok()
+            .flatten();
+        let live_over_cap = result.skipped.iter().any(|skip| {
+            skip.reason == OVER_CAP_SKIP_REASON
+                && !result
+                    .pruned
+                    .as_ref()
+                    .is_some_and(|pruned| pruned.contains(&skip.name))
+        });
+        lock(&self.guarded).capture_freshness = Some(CaptureFreshness {
+            user_executions,
+            manifest_stat,
+            result: result.clone(),
+            live_over_cap,
+        });
     }
 
     /// Revive a previously snapshotted namespace into the kernel.
