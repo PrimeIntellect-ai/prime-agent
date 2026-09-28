@@ -135,9 +135,8 @@ pub(crate) const QUOTA_WAKE_MAX_RETRIES: u32 = 3;
 /// The settled-child kernel release handle (TS #2483's inline arm): the
 /// session's snapshot-flushing kernel stop as a boxed-future factory,
 /// adopted onto every built session as a weak provisioner reference.
-pub(crate) type SettledKernelRelease = std::sync::Arc<
-    dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync,
->;
+pub(crate) type SettledKernelRelease =
+    std::sync::Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
 
 /// A [`SessionEngine`] running real agent turns.
 pub struct AgentSessionEngine {

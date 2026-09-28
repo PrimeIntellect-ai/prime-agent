@@ -91,7 +91,10 @@ impl AgentSessionEngine {
         self: &Arc<Self>,
         probe: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
     ) {
-        *self.registered_jobs_probe.lock().expect("registered jobs probe lock") = Some(probe);
+        *self
+            .registered_jobs_probe
+            .lock()
+            .expect("registered jobs probe lock") = Some(probe);
     }
 
     /// TS `_finishGoalForTerminalAssistantMessage` for a failed run: an

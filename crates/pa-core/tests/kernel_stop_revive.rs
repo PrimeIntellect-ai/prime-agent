@@ -12,9 +12,7 @@
 
 use std::path::PathBuf;
 
-use pa_core::kernel::provisioner::{
-    IpythonKernelProvisioner, IpythonKernelProvisionerOptions,
-};
+use pa_core::kernel::provisioner::{IpythonKernelProvisioner, IpythonKernelProvisionerOptions};
 use pa_core::kernel::shared::{ExecuteOptions, ExecuteStatus, KernelShutdownOptions};
 
 /// The kernel Python with prime-agent-runtime installed (see

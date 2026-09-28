@@ -353,20 +353,19 @@ impl AgentSessionEngine {
         *self
             .kernel_release_probe
             .lock()
-            .expect("kernel release probe lock") =
-            Some(std::sync::Arc::new(move || {
-                let provisioner = release_provisioner.clone();
-                Box::pin(async move {
-                    if let Some(provisioner) = provisioner.upgrade() {
-                        provisioner
-                            .stop_kernel(Some(pa_core::kernel::shared::KernelShutdownOptions {
-                                snapshot: true,
-                                drain_host_requests: true,
-                            }))
-                            .await;
-                    }
-                })
-            }));
+            .expect("kernel release probe lock") = Some(std::sync::Arc::new(move || {
+            let provisioner = release_provisioner.clone();
+            Box::pin(async move {
+                if let Some(provisioner) = provisioner.upgrade() {
+                    provisioner
+                        .stop_kernel(Some(pa_core::kernel::shared::KernelShutdownOptions {
+                            snapshot: true,
+                            drain_host_requests: true,
+                        }))
+                        .await;
+                }
+            })
+        }));
         // The in-run autonomous continuation hook (the natural mint rides
         // the agent loop; the goal seam keeps its own boundary mint).
         self.install_autonomous_continuation_hook_on(built.session.agent());

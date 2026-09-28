@@ -171,6 +171,7 @@ impl SessionEngine for BurstStreamEngine {
 /// test counts the fires.
 struct ReleaseCountingEngine {
     releases: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    fired: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl SessionEngine for ReleaseCountingEngine {
@@ -229,6 +230,7 @@ impl SessionEngine for ReleaseCountingEngine {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         self.releases
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.fired.notify_waiters();
         Box::pin(std::future::ready(()))
     }
 }
@@ -1923,16 +1925,22 @@ async fn an_instant_burst_flushes_the_final_snapshot_with_its_settle_frame() {
 /// child stay resident.
 /// The settled-child kernel release fires from the park arm only for a
 /// parent-owned child (TS #2483's `canPassivateSettledSession`,
-/// worker-side): a depth-1 child with no attached clients releases at
-/// the idle park; a root session, an attached child, and a compacting
-/// child stay resident.
+/// worker-side). The test waits for the observable readiness (the
+/// engine's release notification) - the bounded timeout is the
+/// failure bound for the positive arm and the absence bound for the
+/// gated arms (no fixed sleep ever makes a pass).
 #[tokio::test]
 async fn the_idle_park_releases_a_parent_owned_childs_kernel_only() {
-    async fn parked_releases(depth: u32, attached: bool, compacting: bool) -> usize {
-        let releases =
-            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    struct ParkedProbe {
+        releases: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    async fn park_with(depth: u32, attached: bool, compacting: bool) -> ParkedProbe {
+        let releases = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fired = std::sync::Arc::new(tokio::sync::Notify::new());
         let runner = burst_runner(Arc::new(ReleaseCountingEngine {
             releases: std::sync::Arc::clone(&releases),
+            fired: std::sync::Arc::clone(&fired),
         }));
         {
             let mut core = runner.core.lock().unwrap();
@@ -1945,27 +1953,44 @@ async fn the_idle_park_releases_a_parent_owned_childs_kernel_only() {
         let task = tokio::spawn(async move {
             runner.run().await;
         });
-        // The runner parks with no work in flight; the park arm fires
-        // the release when the policy holds. Bounded wait.
-        let mut count = 0;
-        for _ in 0..100 {
-            count = releases.load(std::sync::atomic::Ordering::SeqCst);
-            if count > 0 {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+        // The runner parks with no work in flight; the park arm
+        // fires the release when the policy holds and the engine
+        // notifies - the wait is the observable readiness, and the
+        // task tear-down runs after the await resolves either way.
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_millis(2000), fired.notified()).await;
         task.abort();
-        count
+        ParkedProbe { releases }
     }
 
-    // A parent-owned child releases its kernel at the idle park.
-    assert_eq!(parked_releases(1, false, false).await, 1);
-    // A root session keeps its kernel (the release is for RLM
-    // children only).
-    assert_eq!(parked_releases(0, false, false).await, 0);
-    // An attached client keeps the kernel resident.
-    assert_eq!(parked_releases(1, true, false).await, 0);
-    // An in-flight compaction keeps the kernel resident.
-    assert_eq!(parked_releases(1, false, true).await, 0);
+    // A parent-owned child releases its kernel at the idle park: the
+    // notification arrives (the bounded wait is the failure bound).
+    let probe = park_with(1, false, false).await;
+    assert_eq!(
+        probe.releases.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the park arm must fire the release for a parent-owned child"
+    );
+    // A root session, an attached child, and a compacting child stay
+    // resident: the same observable read must NOT fire within the
+    // absence bound (there is no readiness event to await, so the
+    // bound itself is the absence proof).
+    let probe = park_with(0, false, false).await;
+    assert_eq!(
+        probe.releases.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a root session keeps its kernel"
+    );
+    let probe = park_with(1, true, false).await;
+    assert_eq!(
+        probe.releases.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "an attached child keeps its kernel resident"
+    );
+    let probe = park_with(1, false, true).await;
+    assert_eq!(
+        probe.releases.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a compacting child keeps its kernel resident"
+    );
 }
