@@ -39,4 +39,8 @@ pub fn trim_freed_heap_if_large(bytes: usize) {
     if bytes >= (1 << 20) {
         trim_freed_heap();
     }
+    // Non-glibc builds keep the parameter named: the threshold's only
+    // use sits in the linux arm above.
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    let _ = bytes;
 }

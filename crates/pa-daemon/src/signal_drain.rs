@@ -22,9 +22,9 @@
 //! (tokio keeps the replacement disposition installed after the listener
 //! is gone, so a dropped stream swallows every later delivery).
 
-use std::sync::Arc;
-
+#[cfg(unix)]
 use tokio::signal::unix::{signal, Signal, SignalKind};
+use std::sync::Arc;
 
 use crate::supervisor::Supervisor;
 
@@ -74,6 +74,7 @@ pub(crate) fn install(supervisor: Arc<Supervisor>) -> impl std::future::Future<O
 
 /// Wait on one optional signal stream: an absent stream (a registration
 /// failure) parks forever instead of spinning the loop.
+#[cfg(unix)]
 async fn recv_opt(stream: Option<&mut Signal>) {
     match stream {
         Some(stream) => {

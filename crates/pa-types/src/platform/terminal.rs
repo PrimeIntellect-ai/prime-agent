@@ -12,8 +12,11 @@
 //! depends on pa-types alone and opts into the workspace `unsafe_code`
 //! forbid (the process-suspend precedent).
 
+#[cfg(unix)]
 use std::fs::File;
+#[cfg(unix)]
 use std::io;
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 
 /// The classic control characters `stty sane` restores (Linux
@@ -59,7 +62,9 @@ fn cooked(attrs: &libc::termios) -> bool {
 /// there is nothing to clear off it there.
 #[cfg(target_os = "linux")]
 const OLCUC: libc::tcflag_t = libc::OLCUC;
-#[cfg(not(target_os = "linux"))]
+/// Other unixes (and every non-unix build, where `tcflag_t` does not
+/// exist) never see the flag: the constant itself stays unix-only.
+#[cfg(all(unix, not(target_os = "linux")))]
 const OLCUC: libc::tcflag_t = 0;
 
 /// Rebuild a sane cooked mode in place (the `stty sane` recipe): the

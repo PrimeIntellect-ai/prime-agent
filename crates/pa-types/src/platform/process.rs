@@ -139,10 +139,10 @@ pub fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
     let handle = winapi::open_process(winapi::PROCESS_QUERY_LIMITED_INFORMATION, pid)?;
     let mut buffer = [0u16; 1024];
     let mut size = buffer.len() as u32;
-    // SAFETY: writes the process image path into `buffer` (at most `size`
-    // wide chars, NUL-terminated); a 0 return means the query failed.
-    let written =
-        unsafe { winapi::query_full_process_image_name(handle, buffer.as_mut_ptr(), &mut size) };
+    // Writes the process image path into `buffer` (at most `size` wide
+    // chars, NUL-terminated); a 0 return means the query failed. The
+    // hand-declared `winapi` wrappers are safe fns, so no `unsafe` here.
+    let written = winapi::query_full_process_image_name(handle, buffer.as_mut_ptr(), &mut size);
     winapi::close_handle(handle);
     if written == 0 {
         return None;

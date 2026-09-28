@@ -609,7 +609,10 @@ fn resolve_relative_socket_tokens(pid: u32, argv: &mut [String]) {
 /// daemon --daemon-socket <socket>`) or the pa-daemon binary form
 /// (`supervisor --socket <socket>`). The executable gate is
 /// load-bearing: an arbitrary inherited-socket command that merely carries
-/// the argument tokens is never a target.
+/// the argument tokens is never a target. Unix only: the spelling it
+/// compares against is the unix socket spelling, and every caller (the
+/// linux supervisor census, the unix tests) sits behind a unix gate.
+#[cfg(unix)]
 pub(crate) fn supervisor_argv_names_socket(argv: &[String], socket: &str) -> bool {
     let Some(exe) = argv.first() else {
         return false;
@@ -653,6 +656,14 @@ pub(crate) fn supervisor_argv_names_socket(argv: &[String], socket: &str) -> boo
 fn is_unix_socket_file(path: &Path) -> bool {
     use std::os::unix::fs::FileTypeExt;
     std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_socket())
+}
+
+/// Windows endpoints are named pipes, not files: no path the reap can
+/// see is ever a socket file, so the endpoint-unlink gate never fires
+/// (the TS `daemon-ps` census is empty on win32 for the same reason).
+#[cfg(not(unix))]
+fn is_unix_socket_file(_path: &Path) -> bool {
+    false
 }
 
 /// The pids the reap must never touch: the live-worker descriptors this

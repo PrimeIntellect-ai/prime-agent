@@ -149,7 +149,9 @@ async fn prepare_locked_socket_path(path: &Path) -> Result<()> {
 /// The caller holds the cleanup lock, so competing startup workers are
 /// serialized out of this check-then-act window; the identity gate covers
 /// processes that do not take the lock (non-pa-daemon), like the TS gate
-/// behind proper-lockfile's lease.
+/// behind proper-lockfile's lease. Unix only: named-pipe endpoints leave
+/// no socket file to unlink, so the whole path stays unix.
+#[cfg(unix)]
 async fn unlink_stale_socket(path: &Path, expected: SocketIdentity) -> Result<()> {
     if can_connect(path, Duration::from_millis(250)).await {
         return Err(anyhow!("Daemon socket already in use: {}", path.display()));
