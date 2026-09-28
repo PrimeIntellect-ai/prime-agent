@@ -65,7 +65,6 @@ STAGED_ENTRIES = [
     "prime-agent",
     "prime-agent-runtime",
     "skills",
-    "docs",
     "LICENSE",
     "README.md",
     # The bundled catalog assets (spec §3.2 layer 2): staged at the tarball
@@ -100,15 +99,6 @@ RUNTIME_EXCLUDED_NAMES = frozenset({
     "node_modules",
 })
 RUNTIME_EXCLUDED_SUFFIXES = (".pyc", ".egg-info")
-
-# The docs/ files that ship to end users: the quickstart install-rust.sh
-# prints the payload path for ("next steps"), the keybindings reference,
-# and the model-surface contract package_release.py's REQUIRED_FILES
-# pins. The rest of docs/ is reference material for repository
-# developers and stays out of the installed
-# footprint; the docs payload entry itself always ships (the update
-# flow's RELEASE_ASSETS and the TS binaryAssets list require it).
-SHIPPED_DOC_ENTRIES = ("RUST_QUICKSTART.md", "keybindings.md", "MODEL-SURFACE.md")
 
 # Rust target triple -> TS release-platform alias (the v1 installer schema).
 TARGET_ALIASES = {
@@ -259,22 +249,6 @@ def copy_runtime_tree(source: Path, target: Path) -> None:
     shutil.copytree(source, target, ignore=ignore)
 
 
-def copy_shipped_docs(source: Path, target: Path) -> None:
-    """Stage the user-facing docs subset (SHIPPED_DOC_ENTRIES).
-
-    The docs entry always ships (the update flow's RELEASE_ASSETS and the
-    TS binaryAssets list require it), and every curated doc is REQUIRED:
-    a missing user-facing doc fails the assembly (the adversarial-review
-    gate — a whitelist that silently skips missing files would let the
-    payload ship without the quickstart install-rust.sh points at).
-    """
-    target.mkdir()
-    for name in SHIPPED_DOC_ENTRIES:
-        doc = source / name
-        if not doc.is_file():
-            fail(f"user-facing doc {name!r} missing from {source}; the payload must ship {SHIPPED_DOC_ENTRIES}")
-        shutil.copy2(doc, target / name)
-
 
 def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | None) -> dict:
     """Copy the tarball payload into the staging dir; return per-entry facts.
@@ -284,8 +258,8 @@ def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | N
     so `--version` reports it at runtime (the same exe-adjacent manifest the
     TS binaryAssets carry — the Rust binary resolves it from `current_exe()`).
 
-    The runtime and docs entries ship the curated content (see
-    RUNTIME_EXCLUDED_* and SHIPPED_DOC_ENTRIES); every other entry is a
+    The runtime entry ships the curated content (see
+    RUNTIME_EXCLUDED_*); every other entry is a
     verbatim copy.
     """
     binary = resolve_binary(args)
@@ -294,7 +268,6 @@ def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | N
         "prime-agent": binary,
         "prime-agent-runtime": runtime_dir,
         "skills": args.repo_root / "skills",
-        "docs": args.repo_root / "docs",
         "LICENSE": args.repo_root / "LICENSE",
         "README.md": args.repo_root / "README.md",
     }
@@ -311,8 +284,6 @@ def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | N
         if source.is_dir():
             if name == "prime-agent-runtime":
                 copy_runtime_tree(source, target_path)
-            elif name == "docs":
-                copy_shipped_docs(source, target_path)
             elif name == "skills":
                 shutil.copytree(source, target_path, ignore=lambda _directory, names: {
                     entry for entry in names

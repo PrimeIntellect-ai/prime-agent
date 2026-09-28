@@ -152,8 +152,22 @@ pub trait ClientSettings: Send + Sync {
     /// Returns `Err` when opening or persisting the settings
     /// store fails.
     fn set_tree_filter_mode(&self, mode: &str) -> Result<()>;
+    /// `defaultServiceTier` (TS `getDefaultServiceTier`, default
+    /// "default"): the wire name of the persisted default tier — the
+    /// settings row's bound value.
+    fn default_service_tier(&self) -> String;
+    /// TS `settingsManager.setDefaultServiceTier` — persists the wire name.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when the tier name is not a known service tier or
+    /// opening or persisting the settings store fails.
+    fn set_default_service_tier(&self, tier: &str) -> Result<()>;
     /// `chatDetail` (`overview`/`details`/`all`; TS #2709 default
     /// `details`): the conversation-detail level the chat starts at.
+    /// `chatDetail` (`overview`/`details`/`all`; the default reads as
+    /// `overview`, the collapse mode): the conversation-detail level the
+    /// chat starts at.
     fn chat_detail(&self) -> String;
     /// Persists `chatDetail` to the global scope (TS #2709: the Ctrl+O
     /// cycle saves the level; every later chat re-reads it).

@@ -90,6 +90,15 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     ] {
         command.env_remove(var);
     }
+    // The daemon's default sessions dir must stay the agent dir under the
+    // tempdir: an ambient `PRIME_AGENT_SESSION_DIR` (every agent-session
+    // shell on the fleet box exports one) would otherwise become the
+    // daemon's default session dir, so `rlm_spawn_ledger_for(None)`
+    // resolves the family ledger against the foreign dir and the seeded
+    // family never registers (the same env hygiene the sibling e2e
+    // spawns pin: ambient overrides must not leak in).
+    command.env_remove("PRIME_AGENT_SESSION_DIR");
+    command.env_remove("PRIME_AGENT_CODING_AGENT_SESSION_DIR");
     command.env(
         pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
         "15000",

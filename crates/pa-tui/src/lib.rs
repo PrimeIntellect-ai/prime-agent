@@ -88,7 +88,6 @@ mod terminal_image;
 pub mod theme;
 pub mod toast;
 pub mod tool_card;
-pub mod tool_runs;
 pub mod traces;
 pub mod tree_display;
 pub mod tree_list;
