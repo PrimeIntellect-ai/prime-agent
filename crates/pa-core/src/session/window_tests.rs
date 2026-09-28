@@ -900,3 +900,111 @@ async fn adopted_manager_live_appends_match_full_reopen() {
         "the live attribution fold did not reach the served context"
     );
 }
+
+/// A no-compaction fixture: the walk retains every row, so the window
+/// covers the whole file (`retained_whole_file`).
+fn full_history_fixture() -> String {
+    let mut rows = vec![json!({"type":"session","id":"s","version":3,"cwd":"/tmp","timestamp":"2026-01-01T00:00:00Z"})];
+    let mut parent: Option<String> = None;
+    for i in 0..5 {
+        let id = format!("u{i}");
+        rows.push(json!({"type":"message","id":id.clone(),"parentId":parent,"message":{"role":"user","content":format!("hello {i}"),"timestamp":0}}));
+        parent = Some(id);
+    }
+    // One refinement audit row: the in-session history class the refine
+    // transcript's audit scan reads through this snapshot.
+    rows.push(json!({"type":"custom","id":"audit","parentId":parent,"customType":"prime-agent.refinement","data":{"id":"refine_0","summary":"seed","rationale":"r","expectedOutcome":"o","appliedEdits":[]}}));
+    rows.into_iter().map(|row| row.to_string() + "\n").collect()
+}
+
+/// The historical snapshot over a full-history window serves the retained
+/// rows without the file: with the sole-writer lease held, deleting the
+/// session file cannot fail the snapshot (the fast path never touches the
+/// path), and the served entries are the historical read's exact result.
+#[tokio::test]
+async fn full_history_snapshot_serves_retained_rows_without_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("full.jsonl");
+    let body = full_history_fixture();
+    std::fs::write(&path, &body).unwrap();
+    let store = WindowedSessionStore::open(&path).unwrap().unwrap();
+    assert!(store.retained_whole_file(), "no compaction boundary: the walk covered the file");
+    drop(store);
+    // The flag survives the sidecar round-trip (the cache-warm open).
+    let warm = WindowedSessionStore::open(&path).unwrap().unwrap();
+    assert!(warm.read_stats().cache_hit, "the second open served the sidecar");
+    assert!(
+        warm.retained_whole_file(),
+        "the covered flag must round-trip through the snapshot cache"
+    );
+    drop(warm);
+    let expected = super::super::parse_session_entries(&body);
+    let mut manager =
+        super::super::manager::SessionManager::open_windowed(dir.path(), dir.path(), &path)
+            .await
+            .unwrap();
+    manager.set_append_ownership(AppendOwnership::SessionLeaseHeld);
+    // The served-path assertion: a hidden fallback to the historical
+    // read would fail on the missing file.
+    std::fs::remove_file(&path).unwrap();
+    let snapshot = manager.history_snapshot().await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&snapshot).unwrap(),
+        serde_json::to_value(&expected).unwrap(),
+        "the memory-served snapshot must be the historical read's exact result"
+    );
+}
+
+/// Without the sole-writer lease another writer may have appended out of
+/// band, so the gate stays closed and the historical read still serves
+/// whatever the file gained.
+#[tokio::test]
+async fn full_history_snapshot_without_lease_keeps_the_historical_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("unleased-full.jsonl");
+    std::fs::write(&path, full_history_fixture()).unwrap();
+    let manager =
+        super::super::manager::SessionManager::open_windowed(dir.path(), dir.path(), &path)
+            .await
+            .unwrap();
+    // An out-of-band append (the unleased world's other writer).
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(b"{\"type\":\"message\",\"id\":\"oob\",\"parentId\":\"audit\",\"message\":{\"role\":\"user\",\"content\":\"external\",\"timestamp\":0}}\n").unwrap();
+    drop(file);
+    let snapshot = manager.history_snapshot().await.unwrap();
+    assert!(
+        snapshot.iter().any(|entry| entry.id() == Some("oob")),
+        "the unleased manager must keep re-reading the file"
+    );
+}
+
+/// A compaction boundary window discards a prefix by design: the fast
+/// path must never claim coverage, and the historical read must keep
+/// serving the pre-window rows even under the lease.
+#[tokio::test]
+async fn boundary_window_snapshot_keeps_the_historical_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("boundary.jsonl");
+    std::fs::write(&path, fixture()).unwrap();
+    let store = WindowedSessionStore::open(&path).unwrap().unwrap();
+    assert!(!store.retained_whole_file(), "the boundary discarded a prefix");
+    drop(store);
+    let warm = WindowedSessionStore::open(&path).unwrap().unwrap();
+    assert!(warm.read_stats().cache_hit, "the second open served the sidecar");
+    assert!(
+        !warm.retained_whole_file(),
+        "the partial flag must round-trip through the snapshot cache"
+    );
+    drop(warm);
+    let mut manager =
+        super::super::manager::SessionManager::open_windowed(dir.path(), dir.path(), &path)
+            .await
+            .unwrap();
+    manager.set_append_ownership(AppendOwnership::SessionLeaseHeld);
+    let snapshot = manager.history_snapshot().await.unwrap();
+    assert!(
+        snapshot.iter().any(|entry| entry.id() == Some("u0")),
+        "the pre-window row must stay served through the historical read"
+    );
+}
