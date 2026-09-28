@@ -161,6 +161,8 @@ impl AgentSessionEngine {
             queue_modes,
             autonomous_boundary: std::sync::Mutex::new(None),
             background_bash_probe: std::sync::Mutex::new(None),
+            kernel_release_probe: std::sync::Mutex::new(None),
+            registered_jobs_probe: std::sync::Mutex::new(None),
             session_file,
             selection: std::sync::RwLock::new(selection.clone()),
             restored_model: std::sync::Mutex::new(None),
@@ -341,6 +343,28 @@ impl AgentSessionEngine {
                 .upgrade()
                 .and_then(|provisioner| provisioner.manager())
                 .is_some_and(|manager| manager.has_background_work())
+        }));
+        // The settled-child kernel release handle (TS #2483's inline
+        // arm): the same weak-provisioner adoption, so the turn runner's
+        // park arm can stop the session's kernel with a snapshot flush
+        // without ever taking the session mutex. A retired runtime or a
+        // dead weak reference releases nothing (the TS `?.` arm).
+        let release_provisioner = built.kernel_provisioner_weak();
+        *self
+            .kernel_release_probe
+            .lock()
+            .expect("kernel release probe lock") = Some(std::sync::Arc::new(move || {
+            let provisioner = release_provisioner.clone();
+            Box::pin(async move {
+                if let Some(provisioner) = provisioner.upgrade() {
+                    provisioner
+                        .stop_kernel(Some(pa_core::kernel::shared::KernelShutdownOptions {
+                            snapshot: true,
+                            drain_host_requests: true,
+                        }))
+                        .await;
+                }
+            })
         }));
         // The in-run autonomous continuation hook (the natural mint rides
         // the agent loop; the goal seam keeps its own boundary mint).
@@ -581,6 +605,10 @@ impl AgentSessionEngine {
             .background_bash_probe
             .lock()
             .expect("background bash probe lock") = None;
+        *self
+            .kernel_release_probe
+            .lock()
+            .expect("kernel release probe lock") = None;
         *self.published_goal.lock().expect("published goal lock") = None;
         // The retired session's provider target goes with it: a demand
         // seam before the replacement build (an immediate `/compact`)
@@ -651,6 +679,10 @@ impl AgentSessionEngine {
             .background_bash_probe
             .lock()
             .expect("background bash probe lock") = None;
+        *self
+            .kernel_release_probe
+            .lock()
+            .expect("kernel release probe lock") = None;
     }
 
     /// The create path's live reset: a fresh (or replaced) session starts

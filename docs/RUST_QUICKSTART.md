@@ -110,6 +110,13 @@ does not have it; the move happens when you run the curl|sh URL above or
 `prime-agent update` (after the Rust install exists). Restart `prime-agent`
 after the update to run the new build.
 
+The fetch source flips to the official domain install endpoint
+(`https://app.primeintellect.ai/prime-agent/install.sh`) at the
+rust-to-main merge — the operator ships the Rust installer through the
+domain itself then, and the command's contract stays "fetch from the
+official source, run it" (`PRIME_AGENT_RUST_INSTALLER_URL` overrides the
+source for testing).
+
 ## Both versions installed — what to expect
 
 This is the section that matters. The two products share one session store and

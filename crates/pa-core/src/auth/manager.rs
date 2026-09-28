@@ -237,6 +237,13 @@ pub struct AuthStorage {
     fallback_resolver: Option<FallbackResolver>,
     load_error: Option<String>,
     errors: Vec<String>,
+    /// Memoized auth-source candidates (TS #2479's `authCandidateMemos`),
+    /// keyed by `source:provider`, superseded exactly when the candidate's
+    /// hashed material changes. Reuse skips only the SHA-256 work: the
+    /// material itself (env reads, stored-value resolution, the fallback
+    /// resolver) is recomputed on every call, and stale checks run against
+    /// the memoized candidate — candidates are immutable.
+    candidate_memos: std::sync::Mutex<HashMap<String, (String, AuthSourceCandidate)>>,
 }
 
 impl AuthStorage {
@@ -254,6 +261,7 @@ impl AuthStorage {
             fallback_resolver: None,
             load_error: None,
             errors: Vec::new(),
+            candidate_memos: std::sync::Mutex::new(HashMap::new()),
         };
         auth.reload();
         auth
@@ -331,6 +339,7 @@ impl AuthStorage {
             fallback_resolver: None,
             load_error: None,
             errors: Vec::new(),
+            candidate_memos: std::sync::Mutex::new(HashMap::new()),
         };
         auth.reload();
         auth
@@ -413,34 +422,84 @@ impl AuthStorage {
         }
     }
 
+    /// Memo marker for candidates whose value material could not be
+    /// resolved into a key (TS #2479's `AUTH_SOURCE_LAZY_VALUE_KEY`): the
+    /// entry is keyed by everything else the candidate hashes.
+    fn auth_source_lazy_value_key() -> &'static str {
+        "value-lazy"
+    }
+
+    /// The memo reuse arm (TS #2479's `reuseAuthSourceCandidate`): the key
+    /// is the hashed material itself, so the memo is superseded exactly
+    /// when the material is.
+    fn reuse_auth_source_candidate(
+        &self,
+        source: AuthSource,
+        provider: &str,
+        key: String,
+        build: impl FnOnce() -> AuthSourceCandidate,
+    ) -> AuthSourceCandidate {
+        let memo_slot = format!("{source:?}:{provider}");
+        let mut memos = self
+            .candidate_memos
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((memo_key, candidate)) = memos.get(&memo_slot) {
+            if memo_key == &key {
+                return candidate.clone();
+            }
+        }
+        let candidate = build();
+        memos.insert(memo_slot, (key, candidate.clone()));
+        candidate
+    }
+
     fn runtime_candidate(&self, provider: &str) -> Option<AuthSourceCandidate> {
-        let key = self.runtime_overrides.get(provider)?;
-        Some(AuthSourceCandidate {
-            source: AuthSource::Runtime,
-            configured: true,
-            label: None,
-            identity_fingerprint: fingerprint(AuthSource::Runtime, "identity:runtime-override"),
-            value_fingerprint: Some(fingerprint(
-                AuthSource::Runtime,
-                &format!("value:runtime-override {key}"),
-            )),
-            resolve_value_fingerprint: None,
-        })
+        let key = self.runtime_overrides.get(provider)?.clone();
+        Some(self.reuse_auth_source_candidate(
+            AuthSource::Runtime,
+            provider,
+            key.clone(),
+            move || AuthSourceCandidate {
+                source: AuthSource::Runtime,
+                configured: true,
+                label: None,
+                identity_fingerprint: fingerprint(AuthSource::Runtime, "identity:runtime-override"),
+                value_fingerprint: Some(fingerprint(
+                    AuthSource::Runtime,
+                    &format!("value:runtime-override {key}"),
+                )),
+                resolve_value_fingerprint: None,
+            },
+        ))
     }
 
     fn stored_candidate(&self, provider: &str) -> Option<AuthSourceCandidate> {
         let credential = self.data.credential(provider)?;
         let value_material = self.stored_value_material(&credential);
-        Some(AuthSourceCandidate {
-            source: AuthSource::Stored,
-            configured: true,
-            label: None,
-            identity_fingerprint: fingerprint(AuthSource::Stored, "identity:auth.json"),
-            value_fingerprint: value_material.map(|material| {
-                fingerprint(AuthSource::Stored, &format!("value:auth.json {material}"))
+        // The key is the hashed material itself (TS #2479: keyed by
+        // credential fields, never object identity, so the key
+        // changes exactly when the hashed material does).
+        let key = format!(
+            "identity:auth.json {}",
+            value_material
+                .as_deref()
+                .unwrap_or(Self::auth_source_lazy_value_key()),
+        );
+        Some(
+            self.reuse_auth_source_candidate(AuthSource::Stored, provider, key, || {
+                AuthSourceCandidate {
+                    source: AuthSource::Stored,
+                    configured: true,
+                    label: None,
+                    identity_fingerprint: fingerprint(AuthSource::Stored, "identity:auth.json"),
+                    value_fingerprint: value_material.map(|material| {
+                        fingerprint(AuthSource::Stored, &format!("value:auth.json {material}"))
+                    }),
+                    resolve_value_fingerprint: None,
+                }
             }),
-            resolve_value_fingerprint: None,
-        })
+        )
     }
 
     fn environment_candidate(&self, provider: &str) -> Option<AuthSourceCandidate> {
@@ -453,39 +512,52 @@ impl AuthStorage {
         let identity_material = env_keys
             .and_then(|keys| keys.first().cloned())
             .unwrap_or_else(|| self.env_credentials.ambient_identity_material(provider));
-        Some(AuthSourceCandidate {
-            source: AuthSource::Environment,
-            configured: false,
-            label: Some(label),
-            identity_fingerprint: fingerprint(
-                AuthSource::Environment,
-                &format!("identity:{identity_material}"),
-            ),
-            value_fingerprint: Some(fingerprint(
-                AuthSource::Environment,
-                &format!("value:{identity_material} {api_key}"),
-            )),
-            resolve_value_fingerprint: None,
-        })
+        // Env values are deliberately re-read on every call (TS
+        // #2479); the memo only skips re-fingerprinting unchanged
+        // material.
+        let key = format!("{identity_material} {api_key}");
+        Some(
+            self.reuse_auth_source_candidate(AuthSource::Environment, provider, key, || {
+                AuthSourceCandidate {
+                    source: AuthSource::Environment,
+                    configured: false,
+                    label: Some(label),
+                    identity_fingerprint: fingerprint(
+                        AuthSource::Environment,
+                        &format!("identity:{identity_material}"),
+                    ),
+                    value_fingerprint: Some(fingerprint(
+                        AuthSource::Environment,
+                        &format!("value:{identity_material} {api_key}"),
+                    )),
+                    resolve_value_fingerprint: None,
+                }
+            }),
+        )
     }
 
     fn fallback_candidate(&self, provider: &str) -> Option<AuthSourceCandidate> {
         let resolver = self.fallback_resolver.as_ref()?;
         let api_key = resolver(provider)?;
-        Some(AuthSourceCandidate {
-            source: AuthSource::Fallback,
-            configured: false,
-            label: Some("custom provider config".to_string()),
-            identity_fingerprint: fingerprint(
-                AuthSource::Fallback,
-                &format!("identity:{provider}"),
-            ),
-            value_fingerprint: Some(fingerprint(
-                AuthSource::Fallback,
-                &format!("value:{provider} {api_key}"),
-            )),
-            resolve_value_fingerprint: None,
-        })
+        Some(self.reuse_auth_source_candidate(
+            AuthSource::Fallback,
+            provider,
+            api_key.clone(),
+            || AuthSourceCandidate {
+                source: AuthSource::Fallback,
+                configured: false,
+                label: Some("custom provider config".to_string()),
+                identity_fingerprint: fingerprint(
+                    AuthSource::Fallback,
+                    &format!("identity:{provider}"),
+                ),
+                value_fingerprint: Some(fingerprint(
+                    AuthSource::Fallback,
+                    &format!("value:{provider} {api_key}"),
+                )),
+                resolve_value_fingerprint: None,
+            },
+        ))
     }
 
     /// Candidate priority: runtime first; prime-inference prefers environment
@@ -1185,6 +1257,67 @@ mod tests {
         assert_eq!(
             auth.get_api_key("prime-inference").as_deref(),
             Some("sk-stale")
+        );
+    }
+
+    #[test]
+    fn candidate_memos_supersede_exactly_when_material_changes() {
+        // The memo is keyed by the hashed material itself (TS #2479's
+        // `authCandidateMemos`): a changed env value must re-resolve to the
+        // new fingerprint, so a stale marking from the old value never gates
+        // the new one, and the same value keeps serving the same
+        // resolution.
+        let mut auth = storage_with_env(
+            serde_json::json!({}),
+            ScriptedEnv(HashMap::from([(
+                "ANTHROPIC_API_KEY".to_string(),
+                "sk-one".to_string(),
+            )])),
+        );
+        assert_eq!(auth.get_api_key("anthropic").as_deref(), Some("sk-one"));
+        assert!(auth.mark_auth_stale("anthropic"));
+        assert_eq!(
+            auth.get_api_key("anthropic"),
+            None,
+            "the marked value is gated"
+        );
+        // A changed value changes the memo key: the rebuilt candidate's
+        // value fingerprint differs from the stale token's, so the new
+        // value resolves.
+        auth.env_credentials = Arc::new(ScriptedEnv(HashMap::from([(
+            "ANTHROPIC_API_KEY".to_string(),
+            "sk-two".to_string(),
+        )])));
+        assert_eq!(
+            auth.get_api_key("anthropic").as_deref(),
+            Some("sk-two"),
+            "the memo must not serve the superseded candidate"
+        );
+        // The marked material's candidate re-serves when its value returns.
+        auth.env_credentials = Arc::new(ScriptedEnv(HashMap::from([(
+            "ANTHROPIC_API_KEY".to_string(),
+            "sk-one".to_string(),
+        )])));
+        assert_eq!(auth.get_api_key("anthropic"), None);
+        auth.clear_auth_stale("anthropic");
+        assert_eq!(auth.get_api_key("anthropic").as_deref(), Some("sk-one"));
+        // The stored arm: replacing the credential changes the hashed
+        // material, so a stale marking of the old key never gates the new
+        // one.
+        let mut auth = storage_with(serde_json::json!({
+            "anthropic": { "type": "api_key", "key": "sk-old" }
+        }));
+        assert!(auth.mark_auth_stale("anthropic"));
+        auth.set(
+            "anthropic",
+            AuthCredential::ApiKey {
+                key: "sk-new".into(),
+                prime_team: None,
+            },
+        );
+        assert!(
+            auth.has_auth("anthropic"),
+            "the replaced credential is not the stale-marked material"
         );
     }
 
