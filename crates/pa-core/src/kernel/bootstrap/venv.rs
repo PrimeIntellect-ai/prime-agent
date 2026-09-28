@@ -18,19 +18,23 @@ use super::{
 // The concern children (cut with their concerns; the flows + the shared
 // record stay in the composition root).
 mod skills;
+mod version;
 
 #[cfg(test)]
 use skills::{
     file_content_hash, read_python_skill_dependency_names, read_python_skill_project_name,
 };
 pub(crate) use skills::{normalize_python_skills, BootstrapPythonSkill};
+use version::{
+    bootstrap_base_version_current, bootstrap_skill_key, bootstrap_version_current,
+    read_bootstrap_version, read_bootstrap_version_raw, write_bootstrap_version,
+    STATE_SNAPSHOT_REQUIREMENT,
+};
+#[cfg(test)]
+use version::{recorded_skills_cover, BOOTSTRAP_SCHEMA};
 
-/// Schema of `.bootstrap-version`; a mismatch rebuilds the venv.
-const BOOTSTRAP_SCHEMA: u64 = 9;
 const PYTHON_VERSION: &str = "3.11";
 const RUNTIME_REQUIREMENT: &str = "prime-agent-runtime";
-const STATE_SNAPSHOT_REQUIREMENT: &str = "dill";
-const BOOTSTRAP_VERSION_FILE: &str = ".bootstrap-version";
 pub(crate) const BOOTSTRAP_LOCK_NAME: &str = ".bootstrap.lock";
 pub(crate) const BOOTSTRAP_LOCK_RETRY_MS: u64 = 100;
 pub(crate) const BOOTSTRAP_LOCK_STALE_WITHOUT_PID_MS: u64 = 30_000;
@@ -256,99 +260,6 @@ fn windows_executable_candidates(name: &str, pathext: Option<&str>) -> Vec<Strin
 
 fn is_executable(path: &Path) -> bool {
     crate::platform::perms::is_executable(path)
-}
-
-fn read_bootstrap_version(venv: &Path) -> Option<BootstrapVersion> {
-    let raw = std::fs::read_to_string(venv.join(BOOTSTRAP_VERSION_FILE)).ok()?;
-    let parsed: BootstrapVersion = serde_json::from_str(&raw).ok()?;
-    (parsed.schema > 0).then_some(parsed)
-}
-
-fn extra_uv_args_match(a: &Option<Vec<String>>, b: &[&str]) -> bool {
-    match a {
-        None => false,
-        Some(a) => a.iter().map(String::as_str).eq(b.iter().copied()),
-    }
-}
-
-/// Identity of one recorded skill: the install root is the package path, and
-/// the editable install follows that path.
-fn bootstrap_skill_key(skill: &BootstrapPythonSkill) -> String {
-    format!("{}\u{0}{}", skill.import_name, skill.package_path)
-}
-
-/// True when the recorded installs cover every current skill at the same
-/// path with the same pyproject hash. Extra recorded skills from other
-/// sessions are fine: the venv is a shared cache, not a per-session manifest,
-/// so a session whose skill set differs must not force reinstalls.
-fn recorded_skills_cover(
-    recorded: &Option<Vec<BootstrapPythonSkill>>,
-    current: &[BootstrapPythonSkill],
-) -> bool {
-    if current.is_empty() {
-        return true;
-    }
-    let Some(recorded) = recorded else {
-        return false;
-    };
-    current.iter().all(|skill| {
-        recorded.iter().any(|entry| {
-            bootstrap_skill_key(entry) == bootstrap_skill_key(skill)
-                && entry.pyproject_path == skill.pyproject_path
-                && entry.pyproject_hash == skill.pyproject_hash
-        })
-    })
-}
-
-fn bootstrap_base_version_current(
-    version: Option<BootstrapVersion>,
-    runtime_identity: &str,
-) -> bool {
-    match version {
-        Some(version) => {
-            version.schema == BOOTSTRAP_SCHEMA
-                && version.runtime.as_deref() == Some(runtime_identity)
-                && version.snapshot.as_deref() == Some(STATE_SNAPSHOT_REQUIREMENT)
-                && extra_uv_args_match(&version.extra_uv_args, &default_rlm_extra_uv_args())
-        }
-        None => false,
-    }
-}
-
-fn bootstrap_version_current(
-    version: Option<BootstrapVersion>,
-    runtime_identity: &str,
-    python_skills: &[BootstrapPythonSkill],
-) -> bool {
-    bootstrap_base_version_current(version.clone(), runtime_identity)
-        && recorded_skills_cover(
-            &version.as_ref().and_then(|v| v.python_skills.clone()),
-            python_skills,
-        )
-}
-
-pub(crate) fn write_bootstrap_version(
-    venv: &Path,
-    runtime_identity: &str,
-    python_skills: &[BootstrapPythonSkill],
-) -> anyhow::Result<()> {
-    let version = BootstrapVersion {
-        schema: BOOTSTRAP_SCHEMA,
-        runtime: Some(runtime_identity.to_string()),
-        snapshot: Some(STATE_SNAPSHOT_REQUIREMENT.to_string()),
-        extra_uv_args: Some(
-            default_rlm_extra_uv_args()
-                .into_iter()
-                .map(String::from)
-                .collect(),
-        ),
-        python_skills: Some(python_skills.to_vec()),
-    };
-    std::fs::write(
-        venv.join(BOOTSTRAP_VERSION_FILE),
-        format!("{}\n", serde_json::to_string(&version)?),
-    )?;
-    Ok(())
 }
 
 /// Directory of the installed `prime-agent-runtime` sources. The Rust binary
@@ -807,14 +718,6 @@ pub fn invalidate_runtime_probe_cache() {
 #[cfg(test)]
 pub(crate) fn clear_in_process_probe_memo_for_tests() {
     *lock_probe_memo() = None;
-}
-
-/// The parsed `.bootstrap-version` plus its raw text (the probe-memo key
-/// input), in one read.
-fn read_bootstrap_version_raw(venv: &Path) -> (Option<BootstrapVersion>, String) {
-    let raw = std::fs::read_to_string(venv.join(BOOTSTRAP_VERSION_FILE)).unwrap_or_default();
-    let parsed: Option<BootstrapVersion> = serde_json::from_str(&raw).ok();
-    (parsed.filter(|v| v.schema > 0), raw)
 }
 
 pub(crate) fn kernel_base_ready(python: &str, venv: &Path, runtime_identity: &str) -> bool {
