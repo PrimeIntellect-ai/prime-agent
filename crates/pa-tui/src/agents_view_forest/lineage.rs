@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
-use super::{is_subagent_summary, AgentsViewScope, Rollup, SelectionKey};
+use super::{AgentsViewScope, Rollup, SelectionKey};
 use crate::agents_view_state::{summary_for_record, UnifiedRecord};
-use crate::subagents::summary_parent_keys;
+use crate::subagents::{depth_consistent_binding, is_subagent_summary, summary_parent_keys};
 
 /// The record hierarchy (TS `UnifiedSessionIndex`): every record by its
 /// aliases, and each record's children by parent linkage.
@@ -94,20 +94,6 @@ fn parent_record_file(parent: &UnifiedRecord) -> Option<&str> {
 /// one level up); a fork's source binding sits at the SAME depth and is
 /// a sibling, never a parent.
 pub(super) fn depth_consistent_parent(daemon: &Value, parent: &UnifiedRecord) -> bool {
-    let Some(depth) = daemon
-        .get("rlmDepth")
-        .and_then(Value::as_u64)
-        .filter(|depth| *depth > 0)
-    else {
-        return false;
-    };
-    let Some(parent_path) = daemon
-        .get("parentSessionPath")
-        .and_then(Value::as_str)
-        .filter(|path| !path.is_empty())
-    else {
-        return false;
-    };
     let parent_depth = parent
         .daemon
         .as_ref()
@@ -120,7 +106,7 @@ pub(super) fn depth_consistent_parent(daemon: &Value, parent: &UnifiedRecord) ->
                 .and_then(|saved| saved.get("rlmDepth"))
                 .and_then(Value::as_u64)
         });
-    parent_record_file(parent) == Some(parent_path) && parent_depth == Some(depth - 1)
+    depth_consistent_binding(daemon, parent_record_file(parent), parent_depth)
 }
 
 /// Whether `child` rolls up under `parent` (TS `isSubagentDescendantRecord`):
