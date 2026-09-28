@@ -1,0 +1,1 @@
+- Grouped ACP model choices by provider and omitted the picker when model discovery is unavailable.

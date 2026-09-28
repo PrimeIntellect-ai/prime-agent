@@ -226,7 +226,12 @@ describe("ACP mode end to end", () => {
 					category: "model",
 					type: "select",
 					currentValue: JSON.stringify([harness.models[0].provider, "reasoner"]),
-					options: expect.arrayContaining([expect.objectContaining({ value: model })]),
+					options: expect.arrayContaining([
+						expect.objectContaining({
+							group: harness.models[0].provider,
+							options: expect.arrayContaining([expect.objectContaining({ value: model })]),
+						}),
+					]),
 				},
 				{
 					id: "thought_level",
@@ -280,6 +285,25 @@ describe("ACP mode end to end", () => {
 				discovery.mockRestore();
 			}
 		} finally {
+			close();
+			harness.cleanup();
+		}
+	});
+
+	it("keeps session/new usable without model discovery (AX-5)", async () => {
+		const harness = await createHarness();
+		const connection = new InProcessAgentConnection(runtimeHostFor(harness.session));
+		const discovery = vi.spyOn(connection, "getAvailableModels").mockRejectedValue(new Error("offline"));
+		const { client, close } = connectAcpClient(connection);
+		try {
+			await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+			const session = (await client.request("session/new", {
+				cwd: harness.tempDir,
+				mcpServers: [],
+			})) as acp.NewSessionResponse;
+			expect(session.configOptions?.some((option) => option.id === "model")).toBe(false);
+		} finally {
+			discovery.mockRestore();
 			close();
 			harness.cleanup();
 		}

@@ -145,23 +145,29 @@ function sessionConfigOptions(
 	state: AgentConnectionState,
 	models: readonly AgentConnectionModel[],
 ): acp.SessionConfigOption[] {
-	if (!state.model) return [];
 	const available = new Map(models.map((model) => [modelValue(model), model]));
-	available.set(modelValue(state.model), state.model);
-	const configOptions: acp.SessionConfigOption[] = [
-		{
+	const currentModelValue = state.model ? modelValue(state.model) : undefined;
+	const configOptions: acp.SessionConfigOption[] = [];
+	// ACP requires currentValue to name an advertised option. If discovery is
+	// unavailable or stale, omit the model picker rather than publishing a model
+	// that the connection did not report as available.
+	if (currentModelValue && available.has(currentModelValue)) {
+		const groups = new Map<string, acp.SessionConfigSelectOption[]>();
+		for (const model of available.values()) {
+			const options = groups.get(model.provider) ?? [];
+			options.push({ value: modelValue(model), name: model.name });
+			groups.set(model.provider, options);
+		}
+		configOptions.push({
 			id: "model",
 			name: "Model",
 			category: "model",
 			type: "select",
-			currentValue: modelValue(state.model),
-			options: [...available.values()].map((model) => ({
-				value: modelValue(model),
-				name: `${model.name} (${model.provider})`,
-			})),
-		},
-	];
-	if (state.model.reasoning && state.availableThinkingLevels.length > 0) {
+			currentValue: currentModelValue,
+			options: [...groups].map(([provider, options]) => ({ group: provider, name: provider, options })),
+		});
+	}
+	if (state.model?.reasoning && state.availableThinkingLevels.length > 0) {
 		configOptions.push({
 			id: "thought_level",
 			name: "Reasoning effort",
