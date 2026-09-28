@@ -138,9 +138,9 @@ async fn try_daemon_attached_acp(options: &RunOptions) -> Option<i32> {
     }
     // Flag > env > default: the ACP transport resolves the same
     // `PRIME_AGENT_DAEMON_SOCKET` contract as every other mode (the
-    // `prime-agent-rust` launcher pins that env, so the ACP path must
-    // honor it or it would target the TypeScript default socket and
-    // treat the schema mismatch as a stale daemon).
+    // `prime-agent` launcher written by install-rust.sh pins that env,
+    // so the ACP path must honor it or it would target the TypeScript
+    // default socket and treat the schema mismatch as a stale daemon).
     let socket_path = crate::config::resolve_daemon_socket_path(options.daemon_socket.as_deref());
     let cwd = options.config.cwd.clone();
     let result = async {

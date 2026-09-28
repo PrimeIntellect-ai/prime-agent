@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Wire parity battery for the update-prepare transaction (spec
-`docs/update-flow-state-machine.md` §5/§7/§8): the TS binary and the Rust
+"""Wire parity battery for the update-prepare transaction:
+the TS binary and the Rust
 binary side by side on the `prepare_update_restart`/`commit_update_restart`
 daemon-command surface (slices 2-3).
 

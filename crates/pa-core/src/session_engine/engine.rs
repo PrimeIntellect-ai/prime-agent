@@ -917,6 +917,21 @@ impl SessionEngine {
         self.provisioner.dispose(None).await;
     }
 
+    /// Release the session's kernel now with a final namespace snapshot,
+    /// revivable: the provisioner stays undisposed, and the next kernel
+    /// use boots a fresh kernel gated on this stop's flush and revives
+    /// the flushed snapshot (TS #2483's `stopKernel({ snapshot: true })`
+    /// — the settled-child release arm; the session stays live,
+    /// listable, and collectable).
+    pub async fn stop_kernel_snapshot(&self) {
+        self.provisioner
+            .stop_kernel(Some(crate::kernel::shared::KernelShutdownOptions {
+                snapshot: true,
+                drain_host_requests: true,
+            }))
+            .await;
+    }
+
     /// Out-of-band kernel bash activity, scoped to this session's live kernel.
     ///
     /// # Errors

@@ -3,8 +3,7 @@
 // The Rust half of this pair is `crates/pa-core/src/extensions/`
 // (`host.rs` spawns this script and owns the lifecycle; `client.rs` +
 // `framing.rs` own the dispatch; `script.rs` materializes this bundle next
-// to the vendored jiti runtime). Design: `docs/extensions-runner-design.md`
-// §2.2-2.3. The protocol is private and versioned; both ends ship in the
+// to the vendored jiti runtime). The protocol is private and versioned; both ends ship in the
 // same release, so they always match.
 //
 // Stage 2 turns the stage-1 protocol peer into the extension runtime:

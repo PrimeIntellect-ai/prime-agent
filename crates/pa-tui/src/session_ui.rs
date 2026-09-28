@@ -34,7 +34,7 @@ pub(crate) use prompt::SubmitBehavior;
 use sessions_fork::{create_session, terminal_columns};
 use settings::PendingConfirm;
 pub(crate) use settings::ReloadNote;
-pub(crate) use share::{ShareNote, TracesUploadNote};
+pub(crate) use share::{ShareNote, TracesUploadNote, UpdateNote};
 use share::{ShareRun, TraceUploadAllRun, TracesLoginIntent};
 use stream::already_running_warning;
 pub(crate) use stream::resume_hint_from_stats;
@@ -324,12 +324,17 @@ pub(crate) struct SessionUi {
     /// marks it and unmounts, and a cancelled flow never writes its
     /// credential.
     auth_panel_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    /// A `/update` run parked for the run loop: the child processes need
-    /// the plain terminal, and a successful self-update replaces this
-    /// process with the updated CLI.
-    pending_update: Option<crate::update_command::UpdatePlan>,
-    /// `/update`: the child runner + relaunch the composition root owns.
+    /// `/update`: the installer funnel the composition root owns. The run
+    /// is out-of-band (a spawned task with the output captured) — the
+    /// TUI stays mounted, the daemon keeps running, and the outcome lands
+    /// through [`Self::update_notes`].
     update_commands: Option<crate::update_command::UpdateCommandsHandle>,
+    /// The background `/update` run's outcome channel (the spawned task
+    /// sends, the run loop folds the note row in).
+    update_notes: mpsc::UnboundedSender<UpdateNote>,
+    /// A confirmed `/update` whose download+install is still in flight:
+    /// a second run is refused until the outcome lands.
+    update_in_flight: bool,
     pub(crate) exit_requested: bool,
     /// `/resume` or the agents-back key: reopen the agents view after this
     /// session detaches.
@@ -610,6 +615,7 @@ impl SessionUi {
         prompt_notes: mpsc::UnboundedSender<PromptSubmitNote>,
         share_notes: mpsc::UnboundedSender<ShareNote>,
         reload_notes: mpsc::UnboundedSender<ReloadNote>,
+        update_notes: mpsc::UnboundedSender<UpdateNote>,
         traces_upload_notes: mpsc::UnboundedSender<crate::traces::TraceUploadAllNote>,
         catalog_updates: mpsc::UnboundedSender<ModelCatalogUpdate>,
         auth_panel_notes: mpsc::UnboundedSender<crate::auth_panel::AuthPanelRequest>,
@@ -704,8 +710,9 @@ impl SessionUi {
             pending_model_sign_in: None,
             auth_panel_notes,
             auth_panel_cancel: None,
-            pending_update: None,
             update_commands: options.update_commands.clone(),
+            update_notes,
+            update_in_flight: false,
             exit_requested: false,
             open_agents_view: false,
             scoped_agents_view: None,
@@ -2027,11 +2034,12 @@ impl SessionUi {
                 self.handle_traces_command(resolved, view).await?;
             }
             // `/nightly [on|off|status]` (TS `interactive-mode.ts`
-            // 5455-5484): status resolves the effective channel,
-            // off/stable pins the settings channel to stable, and on (or
-            // bare) hands a `--self --nightly` update to the same parked
-            // plan `/update` builds (the update command owns the nightly
-            // warning, the channel switch, and the relaunch).
+            // 5455-5484): status resolves the effective channel and
+            // off/stable pins the settings channel — the settings surface
+            // the TS product still shares. `on` (or bare) explains the
+            // move instead of switching: the update installs the latest
+            // continuous Rust build, so there is no nightly channel left
+            // to switch to.
             "nightly" => {
                 self.track_command_used("nightly");
                 let arg = resolved.args.trim().to_lowercase();
@@ -2074,7 +2082,7 @@ impl SessionUi {
                         return Ok(());
                     }
                     self.note(
-                        "Updates now follow the stable channel. Run /update to install the latest stable release.",
+                        "Updates now follow the stable channel. Run /update to install the latest build.",
                         view,
                     );
                     return Ok(());
@@ -2083,52 +2091,50 @@ impl SessionUi {
                     self.error_row("Usage: /nightly [on|off|status]", view);
                     return Ok(());
                 }
-                // TS guards on compacting/streaming/bash: `turn_active`
-                // carries the streaming and compaction arms, and the
-                // user-bash slot (`!` runs) is its own state — a relaunch
-                // mid-run would interrupt either.
-                if self.turn_active || self.user_bash_running || self.work_in_flight() {
+                // The nightly channel moved: the update installs the
+                // latest continuous Rust build (the TS release channels
+                // this arm switched between belong to the TypeScript
+                // product the migration uninstalls), so the arm explains
+                // the move instead of parking an update plan.
+                self.note(
+                    "Nightly builds are now the continuous Rust build — run /update to install the latest.",
+                    view,
+                );
+            }
+            // `/update` (the TS->Rust migration path): the confirm, then
+            // the download+install runs OUT-OF-BAND (a background task —
+            // the TUI stays mounted, the daemon keeps running, and the
+            // update replaces only the on-disk binary, so the new build
+            // takes effect on restart and nothing here blocks or tears
+            // down; there is no busy guard to keep). The confirm carries
+            // the preserve invariant: the update uninstalls the
+            // TypeScript version and installs the latest Rust build;
+            // sessions and configuration (~/.prime/agent) are never
+            // touched.
+            "update" => {
+                self.track_command_used("update");
+                if !resolved.args.trim().is_empty() {
+                    view.editor.set_text(text);
+                    self.error_row("Usage: /update", view);
+                    return Ok(());
+                }
+                if self.update_in_flight {
                     self.note_as(
-                        "Wait for the current work to finish before updating.",
+                        "An update is already running; its outcome lands here when it finishes.",
                         StatusKind::Warning,
                         view,
                     );
                     return Ok(());
                 }
-                let plan = crate::update_command::parse_update_args(&[
-                    "--self".to_string(),
-                    "--nightly".to_string(),
-                ]);
                 view.editor.set_text("");
-                self.pending_update = Some(plan);
-            }
-            // `/update [source|--self|--extensions|--extension <source>
-            // |--force|--rollback|--nightly|--stable]` (TS
-            // `handleUpdateCommand`): the busy guard, then the child
-            // runs own the terminal (a successful self-update replaces
-            // this process with the updated CLI).
-            "update" => {
-                self.track_command_used("update");
-                let plan = crate::update_command::parse_update_args(
-                    &resolved
-                        .args
-                        .split_whitespace()
-                        .map(str::to_string)
-                        .collect::<Vec<String>>(),
-                );
-                // TS: the guard applies when the run does not update the
-                // binary (package updates wait for the turn; the self path
-                // tears the session down anyway).
-                if !plan.includes_self && (self.turn_active || self.work_in_flight()) {
-                    self.note_as(
-                        "Wait for the current work to finish before updating.",
-                        StatusKind::Warning,
-                        view,
-                    );
-                } else {
-                    view.editor.set_text("");
-                    self.pending_update = Some(plan);
-                }
+                // The message is hand-wrapped to fit the panel rows (the
+                // confirm renders each line truncated, never wrapped).
+                view.confirm = Some(crate::confirm::ConfirmPanel::yes_no(
+                    "Update Prime Agent",
+                    "Update uninstalls the TypeScript version and installs the latest Rust build;\nyour sessions and configuration (~/.prime/agent) are never touched.\n\nThe update runs in the background — restart prime-agent after it\nfinishes to run the new build.",
+                ));
+                self.pending_confirm = Some(PendingConfirm::Update);
+                self.dirty = true;
             }
             // TS `handleMcpCommand`'s login/logout branches: the auth
             // flows run in the client process (the composition root's

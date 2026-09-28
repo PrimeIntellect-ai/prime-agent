@@ -292,7 +292,7 @@ plain click fired one of the clickable surfaces' actions.
 
 | property | type | notes |
 |---|---|---|
-| `surface` | string | `transcript` (a card or condensed-run expand click) / `editor` (a prompt-bar caret placement) / `picker` (a menu row select) |
+| `surface` | string | `transcript` (a card expand click) / `editor` (a prompt-bar caret placement) / `picker` (a menu row select) |
 
 ### `tui enhanced keys`
 
@@ -339,8 +339,7 @@ the privacy contract keeps paths, status messages, and ids out.
 
 ### `update download started` / `update staged` / `update prepare started` / `update prepared` / `update stopping` / `update restarting` / `update restoring` / `update complete` / `update rollback` / `update aborted` / `update failed`
 
-The update flow's per-phase events (spec
-`docs/update-flow-state-machine.md` §11): one event per status-file state
+The update flow's per-phase events: one event per status-file state
 transition, all derived from the same transitions that drive the CLI status
 lines and the client banner. Emitted by the invoking CLI (the same process
 owns `update completed`); the coordinator never emits. Primitives only -

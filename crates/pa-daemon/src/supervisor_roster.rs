@@ -447,12 +447,88 @@ impl Supervisor {
     }
 
     /// Push one `roster_update` to subscribed clients. The TS supervisor
-    /// batches pending mutations into one push; roster writes are low-rate
-    /// here, so each mutation pushes immediately and subscribers apply
-    /// entries idempotently by agent id.
+    /// batches pending mutations into one push and content-diffs each
+    /// entry against what it last published (TS #2481): an identical
+    /// rewrite is dropped from the push (an update whose entries all
+    /// match their last published forms broadcasts nothing), so the wire
+    /// never re-ships an unchanged row. The diff is per entry, not per
+    /// frame: a changed row still reaches subscribers alongside an
+    /// unchanged sibling in one push.
     pub(crate) fn push_roster_update(&self, changed: Vec<AgentRosterEntry>, removed: Vec<String>) {
+        // ONE lock acquisition spans the diff decision, the baseline
+        // rebase, and the send: two concurrent pushes cannot interleave
+        // as A-diff+A-rebase, B-diff+B-rebase+B-send, A-send —
+        // subscribers would apply stale A after B while the map records
+        // B (and then suppresses the correction). The broadcast send is
+        // sync (the tokio broadcast channel delivers in send order), so
+        // holding the std mutex across it serializes the pushes exactly.
+        let mut last = self.last_published_roster.lock().unwrap();
+        let mut changed = changed;
+        changed.retain(|entry| {
+            let Some(published) = serde_json::to_value(entry).ok() else {
+                return true; // an unserializable entry always ships
+            };
+            let id = entry.agent_id.clone();
+            let is_new = match last.get(&id) {
+                Some(previous) => *previous != published,
+                None => true,
+            };
+            if is_new {
+                last.insert(id, published);
+            }
+            is_new
+        });
+        let mut removed = removed;
+        removed.retain(|id| last.remove(id).is_some());
         if changed.is_empty() && removed.is_empty() {
             return;
+        }
+        let update = DaemonOutbound::RosterUpdate {
+            changed: serde_json::to_value(&changed).unwrap_or(Value::Null),
+            removed: (!removed.is_empty()).then_some(removed),
+            resync: None,
+            rest: Map::default(),
+        };
+        let Ok(payload) = serde_json::to_value(&update) else {
+            return;
+        };
+        let _ = self.events.send((
+            ClientRouting::RosterSubscribers,
+            std::sync::Arc::new(payload),
+        ));
+    }
+
+    /// Broadcast one `roster_update` WITHOUT the content-diff guard: the
+    /// seeded-row publish's replay contract (a row the roster still holds
+    /// verbatim re-ships to make sure subscribers have it — see
+    /// [`Self::push_seeded_rows`]'s own identity gate, which is that
+    /// path's unchanged-row filter). Every mutation-driven push goes
+    /// through the guarded [`Self::push_roster_update`] instead. The
+    /// shipped content still REBASES the last-published map — the replay
+    /// did publish, so a later identical mutation is correctly dropped
+    /// and a later removal of the row correctly passes the guard.
+    pub(crate) fn push_roster_update_unguarded(
+        &self,
+        changed: Vec<AgentRosterEntry>,
+        removed: Vec<String>,
+    ) {
+        if changed.is_empty() && removed.is_empty() {
+            return;
+        }
+        // The rebase and the send share one lock hold: the replay's
+        // baseline update and its broadcast are one serialized operation
+        // (the same ordering guarantee the guarded arm holds).
+        let mut last = self.last_published_roster.lock().unwrap();
+        for entry in &changed {
+            if let Ok(published) = serde_json::to_value(entry) {
+                last.insert(entry.agent_id.clone(), published);
+            }
+            // An unserializable row still shipped; dropping its map
+            // entry only makes a later identical push ship again
+            // (idempotent by agent id), never skips one.
+        }
+        for id in &removed {
+            last.remove(id);
         }
         let update = DaemonOutbound::RosterUpdate {
             changed: serde_json::to_value(&changed).unwrap_or(Value::Null),
@@ -601,6 +677,74 @@ mod tests {
         assert!(
             drain_roster_pushes(&mut events).is_empty(),
             "subscribe never pushes"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TS #2481 (the P3 port): an identical rewrite broadcasts nothing.
+    /// The content-diff guard drops a `roster_update` whose entries all
+    /// match their last published forms, so the wire never re-ships an
+    /// unchanged row.
+    #[tokio::test]
+    async fn an_identical_rewrite_does_not_broadcast() {
+        let (dir, supervisor, root_file, child_file) = roster_fixture().await;
+        register_root_worker(&supervisor, "w-root", &root_file).await;
+        let mut events = supervisor.events.subscribe();
+        let mut summary = live_child_summary(&root_file, &child_file);
+        summary["runtimeKind"] = json!("top-level");
+        summary["sessionId"] = json!("root-persisted");
+        summary["id"] = json!("root-persisted");
+        summary["sessionFile"] = json!(root_file.to_string_lossy());
+        summary.as_object_mut().unwrap().remove("rlmChildId");
+        summary.as_object_mut().unwrap().remove("parentSessionPath");
+        supervisor.write_roster_summary(&summary, Some("w-root"));
+        let first = drain_roster_pushes(&mut events);
+        assert_eq!(first.len(), 1, "the first write publishes: {first:?}");
+
+        // The identical rewrite: the same summary through the same write
+        // path (a fresh classification of equal content).
+        supervisor.write_roster_summary(&summary, Some("w-root"));
+        assert!(
+            drain_roster_pushes(&mut events).is_empty(),
+            "an identical rewrite broadcasts nothing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TS #2481 (the P3 port): only an actual content change broadcasts -
+    /// and the changed form becomes the new diff baseline (the guard
+    /// compares against the last published form, not the first).
+    #[tokio::test]
+    async fn a_changed_rewrite_broadcasts_and_resets_the_diff_baseline() {
+        let (dir, supervisor, root_file, child_file) = roster_fixture().await;
+        register_root_worker(&supervisor, "w-root", &root_file).await;
+        let mut events = supervisor.events.subscribe();
+        let mut summary = live_child_summary(&root_file, &child_file);
+        summary["runtimeKind"] = json!("top-level");
+        summary["sessionId"] = json!("root-persisted");
+        summary["id"] = json!("root-persisted");
+        summary["sessionFile"] = json!(root_file.to_string_lossy());
+        summary.as_object_mut().unwrap().remove("rlmChildId");
+        summary.as_object_mut().unwrap().remove("parentSessionPath");
+        supervisor.write_roster_summary(&summary, Some("w-root"));
+        let _ = drain_roster_pushes(&mut events);
+
+        summary["model"] = json!("changed-model");
+        supervisor.write_roster_summary(&summary, Some("w-root"));
+        let changed = drain_roster_pushes(&mut events);
+        assert_eq!(changed.len(), 1, "the changed row broadcasts: {changed:?}");
+        assert_eq!(
+            changed[0]["changed"][0]["summary"]["model"],
+            json!("changed-model"),
+            "the push carries the changed form: {changed:?}"
+        );
+
+        // The changed form is the new baseline: repeating it is now an
+        // identical rewrite.
+        supervisor.write_roster_summary(&summary, Some("w-root"));
+        assert!(
+            drain_roster_pushes(&mut events).is_empty(),
+            "the rebased identical rewrite broadcasts nothing"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

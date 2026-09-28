@@ -5,7 +5,7 @@
 //! Session resource resolution lives here as well: `PackageManager::resolve`
 //! produces the ranked skill/prompt/theme/extension paths sessions consume.
 //!
-//! Non-goals (follow-up specs in `docs/parity-checklist.md`): the extension
+//! Non-goals: the extension
 //! *runner* (loading/executing extension modules) and Prime Agent
 //! self-updates.
 

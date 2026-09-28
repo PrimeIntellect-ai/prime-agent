@@ -169,6 +169,14 @@ struct ProvisionerState {
     /// Snapshot policy of the dispose that aborted a startup, honored by
     /// the failed startup's own teardown.
     dispose_snapshot: bool,
+    /// The in-flight `stop_kernel` shutdown (TS #2483's `pendingStop`): a
+    /// revival boot waits for it to finish flushing its final snapshot
+    /// before reading that snapshot back, so the two kernels never race
+    /// over the same on-disk file. The receiver yields `true` once the
+    /// recorded stop settles (a settled stop awaits instantly; a dead
+    /// sender errs and unblocks the same way); each stop supersedes the
+    /// previous.
+    pending_stop: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 /// Owns one kernel for one session: lazily starts it, memoizes the startup so
@@ -203,6 +211,7 @@ impl IpythonKernelProvisioner {
                     last_restore: None,
                     disposed: false,
                     dispose_snapshot: true,
+                    pending_stop: None,
                 }),
                 dispose_signal: AbortSignal::new(),
             }),
@@ -350,6 +359,58 @@ impl IpythonKernelProvisioner {
 
     /// Dispose the kernel owned by this provisioner, including one still
     /// starting up. A still-queued boot drops out of the boot gate.
+    /// Stop the owned kernel without marking the provisioner disposed (TS
+    /// #2483's `stopKernel`): the shutdown flushes the final snapshot, and
+    /// the next `ensure()` boots a fresh kernel gated on this stop (the
+    /// pending-stop revival gate), so a follow-up turn revives from the
+    /// flushed snapshot instead of racing the flush over the same on-disk
+    /// file. A kernel still starting up is joined first and shut down the
+    /// same way (the TS `managerPromise` arm - the boot is not left
+    /// resident); with neither a live kernel nor an in-flight boot there
+    /// is nothing to stop.
+    ///
+    /// Best-effort by construction: a failed shutdown leaves no manager
+    /// and the next `ensure()` boots fresh.
+    pub async fn stop_kernel(&self, options: Option<KernelShutdownOptions>) {
+        let snapshot = options.is_none_or(|o| o.snapshot);
+        let (manager, startup) = {
+            let mut state = self.lock_state();
+            state.dispose_snapshot = snapshot;
+            (state.manager.take(), state.startup.take())
+        };
+        if manager.is_none() && startup.is_none() {
+            return;
+        }
+        let inner = Arc::clone(&self.inner);
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        self.lock_state().pending_stop = Some(stop_rx);
+        let stop = tokio::spawn(async move {
+            let manager = if let Some(manager) = manager {
+                Some(manager)
+            } else {
+                if let Some(startup) = startup {
+                    let _ = startup.await;
+                }
+                inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .manager
+                    .take()
+            };
+            if let Some(manager) = manager {
+                let _ = manager
+                    .shutdown(KernelShutdownOptions {
+                        snapshot,
+                        drain_host_requests: true,
+                    })
+                    .await;
+            }
+            let _ = stop_tx.send(true);
+        });
+        let _ = stop.await;
+    }
+
     pub async fn dispose(&self, options: Option<KernelShutdownOptions>) {
         let snapshot = options.is_none_or(|o| o.snapshot);
         {
@@ -589,6 +650,20 @@ async fn start_kernel_impl(
     // The boot-permit closure moves its own clone; the bootstrap below runs
     // on the same shared signal.
     let permit_dispose_signal = dispose_signal.clone();
+    // Wait for this provisioner's own in-flight stop_kernel() — and its
+    // final snapshot flush — before reading that snapshot back (TS #2483's
+    // `pendingStop` gate; a completed stop awaits instantly and each stop
+    // supersedes the previous). `ready_gate` stays the cross-provisioner
+    // /reload arm.
+    let stop_gate = inner
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .pending_stop
+        .clone();
+    if let Some(mut stop_gate) = stop_gate {
+        let _ = stop_gate.wait_for(|done| *done).await;
+    }
     // Wait for a previous provisioner (e.g. on /reload) to finish disposing —
     // and flushing its final snapshot — before reading that snapshot back.
     if let Some(gate) = options.ready_gate.clone() {

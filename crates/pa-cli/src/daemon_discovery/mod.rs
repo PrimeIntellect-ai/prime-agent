@@ -18,7 +18,7 @@
 //! paths are invisible to discovery from another invocation until the
 //! registry lane lands.)
 //!
-//! Containment (operator-mandated; see PORTING-NOTES.md): every scan, probe,
+//! Containment (operator-mandated): every scan, probe,
 //! and stop is scoped to an explicit [`DaemonStateRoot`] handed in by the
 //! caller — the CLI passes the env-resolved current root, tests pass only
 //! fixture directories they created — and [`NEVER_TOUCH_SOCKET_DIRS`] is a
@@ -65,13 +65,13 @@ pub(crate) struct DaemonStateRoot {
 }
 
 /// Directories the discovery code must never touch, unconditionally
-/// (operator-mandated containment guard; see the module docs and
-/// PORTING-NOTES.md). These hold this box's live mission infrastructure;
+/// (operator-mandated containment guard; see the module docs).
+/// These hold this box's live mission infrastructure;
 /// an ambient `HOME`/`TMPDIR` leaking into a test process makes
 /// `current_state_root()` resolve onto them, so root matching alone cannot
 /// be trusted. NOTE: `/tmp/prime-agent-1000` is also the product-default
-/// socket dir for uid 1000 — the exclusion is deliberate and mission-local;
-/// see PORTING-NOTES.md before changing it. The `-0` entries are the uid-0
+/// socket dir for uid 1000 — the exclusion is deliberate and mission-local.
+/// The `-0` entries are the uid-0
 /// twins: the product-default socket dir is `<tmpdir>/prime-agent-<uid>`,
 /// so on a root-user Linux box (uid 0 — the fleet's root-uid gate and
 /// mission topology) the ambient mission daemon lives under

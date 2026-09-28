@@ -78,6 +78,25 @@ impl AgentSessionEngine {
         }));
     }
 
+    /// Wire the registered-jobs gate (TS #2483's
+    /// `canPassivateSettledSession` `hasRegisteredCronJob`): the worker calls
+    /// this once with a probe over the shared cron store; the settled-child
+    /// kernel release defers while the probe reports an active or paused
+    /// scheduled job for the current session.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the probe lock is poisoned.
+    pub fn set_registered_jobs_probe(
+        self: &Arc<Self>,
+        probe: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    ) {
+        *self
+            .registered_jobs_probe
+            .lock()
+            .expect("registered jobs probe lock") = Some(probe);
+    }
+
     /// TS `_finishGoalForTerminalAssistantMessage` for a failed run: an
     /// error assistant message fails an active goal (an abort keeps it).
     /// The state change surfaces through the run's tracking wrapper with

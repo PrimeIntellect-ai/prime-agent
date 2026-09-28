@@ -7,13 +7,12 @@
 //! it, so a click hit-tests a bounded scan over the visible rows and
 //! never re-walks transcript geometry.
 //!
-//! The actions mirror the keyboard grammar exactly: a card or condensed
-//! run block cycles the conversation detail (`app.tools.expand`'s
-//! action), an editor content row places the caret (TS
-//! `placeCursorFromClick`), and a picker row moves the selection. The
-//! TS card components own a per-card `expanded` state; this port's cards
-//! are detail-mode driven (the condensed runs are a purely render-time
-//! grouping), so every card family maps to the same detail cycle.
+//! The actions mirror the keyboard grammar exactly: an activity card
+//! cycles the conversation detail (`app.tools.expand`'s action), an
+//! editor content row places the caret (TS `placeCursorFromClick`), and
+//! a picker row moves the selection. The TS card components own a
+//! per-card `expanded` state; this port's cards are detail-mode driven,
+//! so every card family maps to the same detail cycle.
 
 use super::AgentView;
 use crate::chat::ChatEntry;
@@ -30,9 +29,8 @@ pub(crate) enum ClickAction {
     /// (tool output, notice body, completion content) — and back to the
     /// collapsed `overview`; the `details` level a blind cycle would
     /// reach only expands the thinking blocks around the card): the
-    /// click target spans a condensed run block, a tool card, a bash
-    /// execution card, an agent-message notice, or a shell-completion
-    /// row.
+    /// click target spans a tool card, a bash execution card, an
+    /// agent-message notice, or a shell-completion row.
     ToggleCardExpansion,
     /// Place the editor caret at the clicked cell: `row` indexes the
     /// editor's visible content rows, `col` is the column relative to
@@ -256,11 +254,11 @@ impl AgentView {
     }
 
     /// The click action for one transcript window row: a row inside a
-    /// visible activity entry (a condensed run block, a tool card, a
-    /// bash card, an agent-message notice, a shell-completion row)
-    /// toggles that card's own expansion. Plain text rows (user,
-    /// assistant, status, panels) are not clickable — the TS components
-    /// register no regions there either.
+    /// visible activity entry (a tool card, a bash card, an
+    /// agent-message notice, a shell-completion row) toggles that
+    /// card's own expansion. Plain text rows (user, assistant, status,
+    /// panels) are not clickable — the TS components register no
+    /// regions there either.
     fn transcript_click_target(&self, window_row: usize) -> Option<ClickAction> {
         let section = self
             .click

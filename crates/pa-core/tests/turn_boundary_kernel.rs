@@ -1,6 +1,6 @@
 //! Verifier: the turn-boundary host-request contract (`model.info`,
 //! `compact.*`, `refine.*`) over a REAL kernel, driven in-process through
-//! `create_session` (completion-matrix family 10).
+//! `create_session`.
 //!
 //! The scripted faux provider drives one turn whose `ipython` cell calls the
 //! kernel's `rlm.host_request` bridge directly — the exact surface the
@@ -10,8 +10,8 @@
 //! reached the turn-boundary seam the runtime consumes after the turn settles.
 //!
 //! The daemon-level dogfood (a daemon session's boundary consuming a
-//! kernel-scheduled refinement end to end) is the documented follow-up
-//! (completion-matrix family 10); this test proves the wire contract with a
+//! kernel-scheduled refinement end to end) is the documented follow-up;
+//! this test proves the wire contract with a
 //! real kernel without the daemon turn choreography.
 #![cfg(unix)]
 

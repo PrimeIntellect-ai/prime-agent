@@ -253,12 +253,14 @@ impl SettingsManager {
 
     /// `chatDetail` (TS #2709 `getChatDetail`): the conversation-detail
     /// level the chat starts at; an unset or invalid value falls back to
-    /// `details` (the TS #2447 startup level).
+    /// `overview` (the collapse mode: every activity item renders as
+    /// `details` does with only the thinking hidden - operator
+    /// directive 2026-09-28).
     pub fn get_chat_detail(&self) -> String {
         match self.settings().chat_detail.as_deref() {
-            Some("overview") => "overview",
+            Some("details") => "details",
             Some("all") => "all",
-            _ => "details",
+            _ => "overview",
         }
         .to_string()
     }
@@ -1047,11 +1049,12 @@ mod tests {
 
     /// TS #2709: the Ctrl+O level persists as the global `chatDetail`
     /// setting — a later run reads it back — and anything but the three
-    /// TS levels reads as the `details` startup default.
+    /// TS levels reads as the `overview` startup default (the collapse
+    /// mode; operator directive 2026-09-28).
     #[test]
-    fn chat_detail_persists_the_chosen_level_with_ts_fallback() {
+    fn chat_detail_persists_the_chosen_level_with_the_startup_fallback() {
         let mut manager = SettingsManager::in_memory(Settings::default());
-        assert_eq!(manager.get_chat_detail(), "details");
+        assert_eq!(manager.get_chat_detail(), "overview");
         manager.set_chat_detail("all").unwrap();
         assert_eq!(manager.get_chat_detail(), "all");
         manager.reload().unwrap();
@@ -1060,11 +1063,17 @@ mod tests {
             "all",
             "the saved level survives a reload (a later chat re-reads it)"
         );
-        manager.set_chat_detail("verbose").unwrap();
+        manager.set_chat_detail("details").unwrap();
         assert_eq!(
             manager.get_chat_detail(),
             "details",
-            "an invalid value falls back to the TS startup default"
+            "a saved details level reads back exactly (the Ctrl+O thinking reveal persists)"
+        );
+        manager.set_chat_detail("verbose").unwrap();
+        assert_eq!(
+            manager.get_chat_detail(),
+            "overview",
+            "an invalid value falls back to the startup default"
         );
     }
 

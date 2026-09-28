@@ -38,8 +38,8 @@ Daemon wire mechanics shared by the serving side (pa-daemon) and clients (pa-tui
   to the consuming crates.
 - `extension_rpc`: the private, versioned NDJSON-over-stdio protocol between the pa-core extension host and the Node sidecar (handshake, RPC envelopes, registration payloads, `ExtensionError`). Both ends ship in the same release, so these types are strict (no catch-alls).
 
-- `daemon::update_flow`: the update-flow state machine's shared vocabulary
-  (docs/update-flow-state-machine.md): the coordinator FSM states + legal
+- `daemon::update_flow`: the update-flow state machine's shared vocabulary:
+  the coordinator FSM states + legal
   transition table, `UpdateId`, the on-disk artifact schemas (`intent.json`,
   `status.json` — TS status-file shape, `prepared/<id>/{roster,marker}.json`),
   the roster-snapshot projection (sessions/workers/subagents/heartbeats,

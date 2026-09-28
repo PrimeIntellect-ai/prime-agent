@@ -133,6 +133,12 @@ pub(crate) const QUOTA_WAKE_RETRY_DELAY_MS: u64 = 60_000;
 /// parked forever — TS `QUOTA_WAKE_MAX_RETRIES`.
 pub(crate) const QUOTA_WAKE_MAX_RETRIES: u32 = 3;
 
+/// The settled-child kernel release handle (TS #2483's inline arm): the
+/// session's snapshot-flushing kernel stop as a boxed-future factory,
+/// adopted onto every built session as a weak provisioner reference.
+pub(crate) type SettledKernelRelease =
+    std::sync::Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
+
 /// A [`SessionEngine`] running real agent turns.
 pub struct AgentSessionEngine {
     pub(crate) runtime: crate::async_safe_runtime::AsyncSafeRuntime,
@@ -216,6 +222,22 @@ pub struct AgentSessionEngine {
     /// session (a weak provisioner reference) and cleared with the
     /// runtime's retirement or close; an unwired probe answers `false`.
     pub(crate) background_bash_probe:
+        std::sync::Mutex<Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>>,
+    /// The settled-child kernel release (TS #2483's inline arm): the
+    /// current session's stop-with-snapshot handle, adopted onto every
+    /// built session as a weak provisioner reference (the same
+    /// deadlock-free read discipline as the bash probe — the runner's
+    /// park arm never takes the session mutex). `None` when no session
+    /// is built or the runtime retired; the release then no-ops and the
+    /// child stays resident.
+    pub(crate) kernel_release_probe: std::sync::Mutex<Option<SettledKernelRelease>>,
+    /// The registered scheduled-jobs gate (TS #2483's
+    /// `canPassivateSettledSession` `hasRegisteredCronJob`): the worker
+    /// wires it over the shared cron store — `true` while this
+    /// session still owns an active or paused scheduled job (a cron or
+    /// heartbeat run must not lose its kernel). `None` keeps the
+    /// release open (a store-less embedding).
+    pub(crate) registered_jobs_probe:
         std::sync::Mutex<Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>>,
     /// The worker-owned session file (conversation-log path), set at create.
     session_file: std::sync::Mutex<Option<std::path::PathBuf>>,

@@ -132,8 +132,38 @@ impl TurnRunner {
                 self.run_turn(engine, items).await;
             } else {
                 self.idle_notify.notify_waiters();
+                // TS #2483's settled-child kernel release (the inline arm): a
+                // parent-owned child that parks with no lane work releases its
+                // kernel with a snapshot flush; the next kernel use revives it
+                // from the flushed snapshot. Best-effort: a failed stop leaves
+                // the kernel resident, and the roster/collect surfaces stay
+                // untouched by design.
+                self.maybe_release_settled_child_kernel().await;
                 self.work_notify.notified().await;
             }
+        }
+    }
+
+    /// The settle-conditioned kernel release for a parent-owned child (TS
+    /// #2483's `canPassivateSettledSession`, worker-side): the park arm
+    /// already proved the idle state (no lane work, no input pauses, no
+    /// suspended input), so the remaining gates are the parent-owned
+    /// identity, no attached clients, and no compaction in flight; the
+    /// engine owns the rest (busy descendants, registered scheduled
+    /// jobs, the snapshot-flushing stop). Best-effort like the TS
+    /// `_passivateSettledRlmChildRuntime`: failure leaves the kernel
+    /// resident and the child stays listable, inspectable,
+    /// collectable, and deletable.
+    async fn maybe_release_settled_child_kernel(&self) {
+        let release = {
+            let core = self.core.lock().unwrap();
+            core.rlm_depth > 0
+                && core.attached_client_ids.is_empty()
+                && !core.compacting
+                && !core.shutdown_requested
+        };
+        if release {
+            self.engine.release_settled_child_kernel().await;
         }
     }
 
