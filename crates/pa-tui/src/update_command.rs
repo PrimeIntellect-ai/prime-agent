@@ -1,158 +1,28 @@
-//! The `/update` command (TS `handleUpdateCommand`): the busy guard, the
-//! child-process update runs, and the self-update relaunch. The Rust CLI
-//! splits TS's single `update` target surface in two (`prime-agent update`
-//! for the binary, `prime-agent package update` for extensions), so the
-/// TS target parse maps onto the two child invocations — packages first,
-/// the binary last, because the self-update relaunch ends this process.
+//! The `/update` command's runner seam: the TUI confirms, then the
+//! download+install runs OUT-OF-BAND (a background task — the TUI stays
+//! mounted and the daemon keeps running; the update replaces only the
+//! on-disk binary, so the new build takes effect on restart), and the
+//! outcome lands as a note row. The old TS-parity child + relaunch flow
+//! is gone: a successful update never tears this process down.
+
 use std::pin::Pin;
 
-/// The package-update half of one `/update` run.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PackageUpdate {
-    /// All installed packages (TS `--extensions`).
-    All,
-    /// One package's source (TS `--extension <src>` / a positional source).
-    Source(String),
-}
+/// One `/update` run's outcome: the new build's version line, or the
+/// failure message for the error row.
+pub type UpdateOutcome = std::result::Result<String, String>;
 
-/// One parsed `/update` invocation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UpdatePlan {
-    /// Whether the run updates the binary (TS `updateTargetIncludesSelf`:
-    /// `--self`, a self positional, or no positional at all).
-    pub includes_self: bool,
-    /// The package half, when the args ask for it.
-    pub package: Option<PackageUpdate>,
-    /// The self-update flags to pass through (`--force`, `--rollback`,
-    /// `--nightly`, `--stable`).
-    pub flags: Vec<String>,
-}
+/// The boxed-future shape of [`UpdateCommands::run_update`].
+pub type UpdateRunFuture = Pin<Box<dyn std::future::Future<Output = UpdateOutcome> + Send>>;
 
-/// TS `isSelfUpdateSource`.
-fn is_self_update_source(source: &str) -> bool {
-    source == "self" || source == "pi" || source == "prime-agent"
-}
-
-/// TS `updateArgsIncludeSelf` (verbatim parse).
-pub fn update_args_include_self(args: &[String]) -> bool {
-    let mut self_flag = false;
-    let mut extensions_only_flag = false;
-    let mut positional: Option<&str> = None;
-    let mut index = 0;
-    while index < args.len() {
-        let arg = &args[index];
-        if arg == "--self" {
-            self_flag = true;
-        } else if arg == "--extensions" {
-            extensions_only_flag = true;
-        } else if arg == "--extension" {
-            extensions_only_flag = true;
-            index += 1;
-        } else if arg == "--daemon-socket" {
-            index += 1;
-        } else if !arg.starts_with('-') && positional.is_none() {
-            positional = Some(arg);
-        }
-        index += 1;
-    }
-    if self_flag {
-        return true;
-    }
-    if extensions_only_flag {
-        return false;
-    }
-    match positional {
-        None => true,
-        Some(positional) => is_self_update_source(positional),
-    }
-}
-
-/// Parse `/update`'s arguments (TS `parsePackageCommand`'s target
-/// resolution over the split CLI: `--self`/`--extensions`/`--extension
-/// <source>`/positionals resolve the same way; the default target is TS's
-/// "all", which runs packages then the binary).
-pub fn parse_update_args(args: &[String]) -> UpdatePlan {
-    let includes_self = update_args_include_self(args);
-    let mut self_flag = false;
-    let mut extensions_flag = false;
-    let mut extension_source: Option<String> = None;
-    let mut positional: Option<String> = None;
-    let mut flags: Vec<String> = Vec::new();
-    let mut index = 0;
-    while index < args.len() {
-        let arg = &args[index];
-        match arg.as_str() {
-            "--self" => self_flag = true,
-            "--extensions" => extensions_flag = true,
-            "--extension" => {
-                index += 1;
-                if let Some(source) = args.get(index) {
-                    extension_source = Some(source.clone());
-                }
-            }
-            "--daemon-socket" => index += 1,
-            "--force" | "--rollback" | "--nightly" | "--stable" => flags.push(arg.clone()),
-            other if !other.starts_with('-') && positional.is_none() => {
-                positional = Some(other.to_string());
-            }
-            _ => {}
-        }
-        index += 1;
-    }
-    // The TS target resolution (`parsePackageCommand`'s `updateTarget`).
-    let package = if extension_source.is_some() {
-        extension_source.map(PackageUpdate::Source)
-    } else if let Some(positional) = positional.as_deref() {
-        if is_self_update_source(positional) {
-            // TS: a self positional with `--extensions` is the "all"
-            // target; alone it is self-only.
-            extensions_flag.then_some(PackageUpdate::All)
-        } else {
-            Some(PackageUpdate::Source(positional.to_string()))
-        }
-    } else if extensions_flag {
-        // `--extensions` alone or with `--self` (the TS "all" target):
-        // packages run either way.
-        Some(PackageUpdate::All)
-    } else if self_flag {
-        None
-    } else {
-        // The default target ("all"): packages plus the binary.
-        Some(PackageUpdate::All)
-    };
-    UpdatePlan {
-        includes_self,
-        package,
-        flags,
-    }
-}
-
-/// TS `argsIncludeSessionSelection`: a relaunch that already selects a
-/// session keeps its own selection.
-pub fn args_include_session_selection(args: &[String]) -> bool {
-    args.iter().any(|arg| {
-        matches!(
-            arg.as_str(),
-            "--resume" | "-r" | "--continue" | "-c" | "--fork"
-        )
-    })
-}
-
-/// The boxed-future shape of [`UpdateCommands::run_cli_child`].
-pub type UpdateChildFuture =
-    Pin<Box<dyn std::future::Future<Output = std::io::Result<i32>> + Send>>;
-
-/// The update child runs the composition root owns: spawning the CLI
-/// with inherited stdio and replacing this process after a self-update.
+/// The update funnel the composition root owns: the same body
+/// `prime-agent update` runs (the installer script download + exec with
+/// the output captured — the live frame stays intact), so the two
+/// surfaces cannot diverge.
 pub trait UpdateCommands: Send + Sync {
-    /// Run one CLI child invocation with inherited stdio (TS
-    /// `spawnSync(..., { stdio: "inherit" })`) and report its exit code.
-    fn run_cli_child(&self, args: Vec<String>) -> UpdateChildFuture;
-    /// Replace this process with the updated CLI (TS
-    /// `tryExecUpdateRelaunch` and its child-relaunch fallback). Returns
-    /// only when the relaunch itself failed; a successful replacement
-    /// never returns.
-    fn relaunch(&self, args: Vec<String>) -> !;
+    /// Run the download+install and report the new build's version (or
+    /// the failure message). The caller spawns this; the run may take
+    /// minutes (the installer downloads its own artifacts).
+    fn run_update(&self) -> UpdateRunFuture;
 }
 
 /// The handle the interactive options carry.
@@ -169,88 +39,44 @@ impl std::fmt::Debug for UpdateCommandsHandle {
 mod tests {
     use super::*;
 
-    fn args(values: &[&str]) -> Vec<String> {
-        values.iter().map(ToString::to_string).collect()
+    /// A scripted runner: records the call, answers a fixed outcome (the
+    /// headless verifier's seam — no network, no installer).
+    struct ScriptedUpdate {
+        calls: std::sync::atomic::AtomicUsize,
+        outcome: UpdateOutcome,
     }
 
-    #[test]
-    fn the_default_target_is_the_ts_all_target() {
-        let plan = parse_update_args(&args(&[]));
-        assert!(plan.includes_self);
-        assert_eq!(plan.package, Some(PackageUpdate::All));
-
-        let plan = parse_update_args(&args(&["--force"]));
-        assert!(plan.includes_self);
-        assert_eq!(plan.package, Some(PackageUpdate::All));
-        assert_eq!(plan.flags, vec!["--force".to_string()]);
-    }
-
-    #[test]
-    fn self_targets_run_the_binary_only() {
-        for target in ["--self", "self", "pi", "prime-agent"] {
-            let plan = parse_update_args(&args(&[target]));
-            assert!(plan.includes_self, "{target}");
-            assert_eq!(plan.package, None, "{target}");
+    impl UpdateCommands for ScriptedUpdate {
+        fn run_update(&self) -> UpdateRunFuture {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let outcome = self.outcome.clone();
+            Box::pin(async move { outcome })
         }
     }
 
-    #[test]
-    fn extension_targets_run_packages_only() {
-        let plan = parse_update_args(&args(&["--extensions"]));
-        assert!(!plan.includes_self);
-        assert_eq!(plan.package, Some(PackageUpdate::All));
-
-        let plan = parse_update_args(&args(&["--extension", "npm:@foo/bar"]));
-        assert!(!plan.includes_self);
+    #[tokio::test]
+    async fn the_runner_reports_its_outcome() {
+        let success = ScriptedUpdate {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            outcome: Ok("9.9.9-continuous.0123456789abcdef".to_string()),
+        };
         assert_eq!(
-            plan.package,
-            Some(PackageUpdate::Source("npm:@foo/bar".to_string()))
+            UpdateCommandsHandle(std::sync::Arc::new(success))
+                .0
+                .run_update()
+                .await,
+            Ok("9.9.9-continuous.0123456789abcdef".to_string())
         );
-        assert!(!update_args_include_self(&args(&[
-            "--extension",
-            "npm:@foo/bar"
-        ])));
-
-        let plan = parse_update_args(&args(&["npm:@foo/bar"]));
-        assert!(!plan.includes_self);
+        let failure = ScriptedUpdate {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            outcome: Err("the installer exited with code 3".to_string()),
+        };
         assert_eq!(
-            plan.package,
-            Some(PackageUpdate::Source("npm:@foo/bar".to_string()))
+            UpdateCommandsHandle(std::sync::Arc::new(failure))
+                .0
+                .run_update()
+                .await,
+            Err("the installer exited with code 3".to_string())
         );
-    }
-
-    #[test]
-    fn the_channel_flags_pass_through_to_the_self_child() {
-        let plan = parse_update_args(&args(&["--nightly"]));
-        assert_eq!(plan.flags, vec!["--nightly".to_string()]);
-        let plan = parse_update_args(&args(&["--self", "--rollback", "--stable"]));
-        assert!(plan.includes_self);
-        assert_eq!(
-            plan.flags,
-            vec!["--rollback".to_string(), "--stable".to_string()]
-        );
-    }
-
-    #[test]
-    fn the_busy_guard_reads_the_same_target_as_ts() {
-        // TS `updateArgsIncludeSelf`: the default and --self include self;
-        // extension targets do not.
-        assert!(update_args_include_self(&args(&[])));
-        assert!(update_args_include_self(&args(&["--self"])));
-        assert!(update_args_include_self(&args(&[
-            "--daemon-socket",
-            "/x.sock"
-        ])));
-        assert!(!update_args_include_self(&args(&["--extensions"])));
-        assert!(!update_args_include_self(&args(&["my-package"])));
-    }
-
-    #[test]
-    fn the_relaunch_keeps_an_explicit_session_selection() {
-        assert!(args_include_session_selection(&args(&[
-            "--resume", "/s.jsonl"
-        ])));
-        assert!(args_include_session_selection(&args(&["-c"])));
-        assert!(!args_include_session_selection(&args(&["--model", "m"])));
     }
 }
