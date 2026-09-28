@@ -278,12 +278,12 @@ mod tests {
         assert_eq!(strip_ansi("plain"), "plain");
     }
 
-    // HOME-asserting: with no HOME (the Windows default), the shortening
-    // no-ops, so the test only runs where HOME is the real source.
-    #[cfg(unix)]
+    // The home read goes through the platform wall exactly like the
+    // product's shortening (USERPROFILE on win32), so the test runs
+    // everywhere the home resolves.
     #[test]
     fn shorten_path_replaces_home() {
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = pa_types::platform::home_dir().expect("the platform home resolves");
         assert_eq!(shorten_path(&format!("{home}/a/b")), "~/a/b");
         assert_eq!(shorten_path("/etc/passwd"), "/etc/passwd");
     }
