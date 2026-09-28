@@ -146,9 +146,9 @@ impl AgentCronJobStore {
 }
 
 /// Read one scheduled-jobs artifact file's job rows: a locked, read-only
-/// scan shared by the update-flow roster projection (spec
-/// `docs/update-flow-state-machine.md` §8: heartbeat rows are a projection
-/// of these files, never a separate write path) and the supervisor's boot
+/// scan shared by the update-flow roster projection (heartbeat rows are a
+/// projection of these files, never a separate write path) and the
+/// supervisor's boot
 /// re-arm. A missing or unparseable file reads as no jobs.
 pub fn read_scheduled_jobs_artifact(path: &Path) -> Vec<AgentCronJob> {
     with_state_locks(&[path.to_path_buf()], || read_jobs_state(path).jobs)

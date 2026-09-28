@@ -86,13 +86,12 @@ listening unix sockets owned by product processes, a socket-dir sweep, probing/c
 each discovered daemon, and the reap/shutdown planners and executors. Containment is part of
 the contract: every scan, probe, and stop is scoped to an explicit `DaemonStateRoot`
 (the env-resolved current root for the CLI), with a hard never-touch exclusion list for this
-sandbox's ambient mission daemons - see docs/PORTING-NOTES.md. All e2e daemons live in
+sandbox's ambient mission daemons. All e2e daemons live in
 test-created fixture directories only.
 
 ## Update flow (staged activation)
 
-`prime-agent update` (the `update_flow` module, spec
-`docs/update-flow-state-machine.md`): the invoking CLI plans, downloads, and
+`prime-agent update` (the `update_flow` module): the invoking CLI plans, downloads, and
 stages the candidate (`Acquire`..`Staged`), then spawns the detached
 coordinator - the new binary running from its release dir - which adopts the
 status file and owns the FSM to a terminal state (`Preparing..Complete`,

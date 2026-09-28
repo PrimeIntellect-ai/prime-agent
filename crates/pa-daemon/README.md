@@ -122,8 +122,7 @@ fallback). Worker session files carry the TS creation prefix
 snapshots persist to the worker recovery journal, not the session file.
 Queue-lane command surface (`queue_commands.rs`): the full TS
 `DAEMON_COMMAND_TYPES` accept list with exhaustive router tables in
-`protocol.rs` (see `docs/protocol-breadth-audit.md` for the staged breadth
-plan), plus the worker's `mutate_queued_message`/`resume_queue` arms
+`protocol.rs`, plus the worker's `mutate_queued_message`/`resume_queue` arms
 (`AgentSession.mutateQueuedMessage`/`resumeQueuedWork`: preview-addressed
 delete/move/replace over the two lanes with the TS status vocabulary, and
 the empty-queue resume refusal). The `sessionActions` queue projection
@@ -157,7 +156,7 @@ immediately and the aborted turn settles on its zero-usage aborted message
 (the usage-accounting parity of the #238 adjacent gap 3 fix; the transport
 half is pa-core's provider-adapter cancellation token).
 Queued-input suspension (TS `_sessionInputPumpSuspended`, the #227/#233
-ruling — see PORTING-NOTES.md): `abort`/`abort_and_clear_queue`/manual
+ruling): `abort`/`abort_and_clear_queue`/manual
 `compact` suspend queued-input admission indefinitely; while suspended a
 plain `prompt`/`prompt_and_wait` is rejected with the TS admission error
 and the lanes park. Resume sites: a prompt carrying `streamingBehavior`,
@@ -231,8 +230,7 @@ round-trips through a real worker session and kernel - the kernel cell's
 session's host handlers, spawn the fixture
 (`tests/fixtures/mcp_echo_server.py`), and echo back.
 
-Update-prepare transaction (`update_prepare.rs`, spec
-`docs/update-flow-state-machine.md` §5): the supervisor-side FSM
+Update-prepare transaction (`update_prepare.rs`): the supervisor-side FSM
 `Draining -> Fenced -> Snapshotted -> Prepared -> Stopping` with the
 mutation-drain latch + admission gate (mutating commands refused with
 "Daemon is preparing an update restart" while active; reads/attach and the

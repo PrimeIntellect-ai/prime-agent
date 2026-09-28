@@ -195,8 +195,7 @@ pub struct Supervisor {
     /// Memoized ledger over the default sessions dir (ledgers are per
     /// sessions-dir families; another dir gets a fresh instance).
     rlm_ledger: tokio::sync::Mutex<Option<std::sync::Arc<crate::rlm_ledger::RlmSpawnLedger>>>,
-    /// The update-prepare transaction (spec
-    /// `docs/update-flow-state-machine.md` §5): at most one per supervisor;
+    /// The update-prepare transaction: at most one per supervisor;
     /// empty = `Serving`.
     update_prepare: PrepareCoordinator,
     /// In-flight mutating-command counter feeding the prepare transaction's

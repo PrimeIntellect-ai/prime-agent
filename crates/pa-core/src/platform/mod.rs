@@ -1,8 +1,7 @@
 //! pa-core platform wall: every OS-specific behavior behind small traits in
 //! cfg-gated modules (MISSION.md, Windows-readiness).
 //!
-//! Unix and Windows implementations live behind the same signatures (see
-//! docs/windows-readiness.md for the plan and per-module dispositions).
+//! Unix and Windows implementations live behind the same signatures.
 //! Call sites in the session engine never branch on `cfg` themselves.
 
 pub mod browser;

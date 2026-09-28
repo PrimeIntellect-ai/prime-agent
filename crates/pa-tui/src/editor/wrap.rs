@@ -371,7 +371,7 @@ mod tests {
         assert_eq!(joined, "hello world this wraps");
     }
 
-    // FEATURE_PARITY.md Tier 0 audit repro: a CJK draft wider than the editor
+    // Audit repro: a CJK draft wider than the editor
     // panicked with `byte index ... is not a char boundary` because
     // `Segment.index` held grapheme ordinals while `word_wrap_line` sliced
     // `line` with them as byte offsets.

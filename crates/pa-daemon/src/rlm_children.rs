@@ -5,7 +5,7 @@
 //! the kernel reads through `rlm.list_subagents`, `rlm.collect`, and
 //! `rlm.delete_subagent`.
 //!
-//! Mechanism note (PORTING-NOTES): the TS daemon hosts children in-process
+//! Mechanism note: the TS daemon hosts children in-process
 //! (`createRlmSubagentRuntime`); this redesign gives every child its own
 //! supervised worker process, created through the supervisor like any other
 //! session. The kernel-visible surface (handles, roster rows, collect
@@ -698,8 +698,8 @@ impl SupervisorChildSessions {
             session_name: record.session_name.clone(),
             session_dir: record.session_dir.clone(),
             status: record.roster_status(),
-            // Live tool introspection across worker processes is a follow-up
-            // (PORTING-NOTES); a running child reports `executing`.
+            // Live tool introspection across worker processes is a follow-up;
+            // a running child reports `executing`.
             activity: running.then_some(RlmSubagentActivity {
                 kind: "executing",
                 tool_name: None,

@@ -2,11 +2,11 @@
 //! pa-core extension host and the Node sidecar (both shipped in the same
 //! release, so they always match).
 //!
-//! Design: `docs/extensions-runner-design.md` §2.2-2.3 - newline-delimited
+//! The protocol: newline-delimited
 //! JSON over the sidecar's stdio, correlation ids, `protocol: 1` handshake.
 //! pa-core owns framing and dispatch; these types live in pa-types because the
 //! daemon protocol also carries `extension_error` and extension UI dialogs to
-//! attached clients (§3.1, §3.7 of the design doc).
+//! attached clients.
 //!
 //! Field names are camelCase on the wire (the sidecar is JavaScript). The
 //! protocol is private, so unlike the TS-parity wire types these structs are

@@ -1,5 +1,4 @@
-//! The supervisor's update-prepare transaction (spec §5 of
-//! `docs/update-flow-state-machine.md`): `Draining -> Fenced -> Snapshotted
+//! The supervisor's update-prepare transaction: `Draining -> Fenced -> Snapshotted
 //! -> Prepared -> Stopping`, with `Aborted -> Serving` as the recovery path
 //! of last resort.
 //!

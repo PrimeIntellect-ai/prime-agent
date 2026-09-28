@@ -1151,8 +1151,7 @@ pub enum DaemonCommand {
         rest: JsonMap,
     },
     /// Coordinator -> supervisor: consume the prepared transaction and stop
-    /// gracefully (spec `docs/update-flow-state-machine.md` §5: the only
-    /// consumption of the prepared artifact).
+    /// gracefully (the only consumption of the prepared artifact).
     CommitUpdateRestart {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,

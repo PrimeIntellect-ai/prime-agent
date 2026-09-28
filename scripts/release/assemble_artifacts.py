@@ -104,11 +104,11 @@ RUNTIME_EXCLUDED_SUFFIXES = (".pyc", ".egg-info")
 # The docs/ files that ship to end users: the quickstart install-rust.sh
 # prints the payload path for ("next steps"), the keybindings reference,
 # and the model-surface contract package_release.py's REQUIRED_FILES
-# pins. The rest of docs/ is porting/audit/CI material for repository
-# developers (~570KB at assembly time) and stays out of the installed
+# pins. The rest of docs/ is reference material for repository
+# developers and stays out of the installed
 # footprint; the docs payload entry itself always ships (the update
 # flow's RELEASE_ASSETS and the TS binaryAssets list require it).
-SHIPPED_DOC_ENTRIES = ("RUST_QUICKSTART.md", "keybindings.md", "MODEL-SURFACE.md", "FEATURE_PARITY.md")
+SHIPPED_DOC_ENTRIES = ("RUST_QUICKSTART.md", "keybindings.md", "MODEL-SURFACE.md")
 
 # Rust target triple -> TS release-platform alias (the v1 installer schema).
 TARGET_ALIASES = {
@@ -166,8 +166,8 @@ def fail_if_decoder_in_archive(archive_path: Path) -> None:
 # case accepted).
 SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
-# The continuous-build version stamp suffix (docs/installer-ci-design.md §4;
-# the trailing SHA keeps the string inside semver prerelease syntax, which
+# The continuous-build version stamp suffix
+# (the trailing SHA keeps the string inside semver prerelease syntax, which
 # both VERSION_RE and the TS installer's release-directory pattern accept).
 CONTINUOUS_SUFFIX = "continuous"
 

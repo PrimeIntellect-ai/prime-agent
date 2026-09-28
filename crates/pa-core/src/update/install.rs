@@ -5,9 +5,9 @@
 //! `.activation-state` rollback pointer (spec §7 "install root
 //! (TS-compatible, native-installation.ts parity)").
 //!
-//! Divergence from TS, recorded in PORTING-NOTES: TS releases carry
+//! Divergence from TS: TS releases carry
 //! `package.json`, `install.sh`, `.archive-sha256`, and `.install-source`
-//! from the installer; the Rust release payload (installer-ci-design.md §5)
+//! from the installer; the Rust release payload
 //! ships `prime-agent`, `prime-agent-runtime/`, `skills/`, `docs/`,
 //! `LICENSE`, `README.md`, and the update flow writes `.archive-sha256` and
 //! `.install-source` itself at staging time. Validation checks the Rust
@@ -92,7 +92,7 @@ impl Installation {
 /// layout (TS `.managed` = `prime-agent-native-v1`).
 pub const MANAGED_MARKER: &str = "prime-agent-native-v1";
 
-/// The payload every staged release must carry (installer-ci-design.md §5).
+/// The payload every staged release must carry.
 pub const RELEASE_ASSETS: &[&str] = &[
     "prime-agent",
     "prime-agent-runtime",
