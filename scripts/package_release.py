@@ -61,7 +61,6 @@ from bundle_catalog import BUNDLED_CATALOG_FILES, validate_bundled_catalog_dir  
 from assemble_artifacts import (  # noqa: E402
     RUNTIME_EXCLUDED_NAMES,
     RUNTIME_EXCLUDED_SUFFIXES,
-    SHIPPED_DOC_ENTRIES,
     debug_sections,
     decoder_facts,
     fail_if_decoder_in_archive,
@@ -98,17 +97,11 @@ REQUIRED_FILES = (
     "mcp-services.bundled.json",
     "prime-agent-runtime/pyproject.toml",
     "prime-agent-runtime/src/rlm/repl.py",
-    # Every user-facing doc SHIPPED_DOC_ENTRIES gates the local dry-run too
-    # (the adversarial-review docs gate: a curated doc missing from the
-    # repo must fail packaging, not silently ship an empty docs entry).
-    "docs/MODEL-SURFACE.md",
-    "docs/RUST_QUICKSTART.md",
-    "docs/keybindings.md",
 )
 REQUIRED_DIRS = ("prime-agent-runtime/src/rlm", "skills")
 
 # Tree assets copied with the exclusion filter; everything else is a single file.
-TREE_ASSETS = ("prime-agent-runtime", "skills", "docs")
+TREE_ASSETS = ("prime-agent-runtime", "skills")
 
 
 def parse_args(argv):
@@ -225,8 +218,6 @@ def stage(root, binary, version, stage_dir, catalog_assets):
             copy_tree(root / name, stage_dir / name,
                       extra_excluded_names=RUNTIME_EXCLUDED_NAMES,
                       extra_excluded_suffixes=RUNTIME_EXCLUDED_SUFFIXES)
-        elif name == "docs":
-            copy_tree(root / name, stage_dir / name, only_files=SHIPPED_DOC_ENTRIES)
         else:
             copy_tree(root / name, stage_dir / name)
     shutil.copy2(root / "README.md", stage_dir / "README.md")
