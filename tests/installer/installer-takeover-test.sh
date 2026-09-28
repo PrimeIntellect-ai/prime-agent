@@ -345,6 +345,8 @@ done
 assert_eq "case 1 (d) new payload published" "yes" \
   "$([ -x "$mach/home/.local/share/prime-agent/prime-agent" ] && echo yes || echo no)"
 assert_contains "case 1 (d) payload is the fixture binary" "$mach/home/.local/share/prime-agent/package.json" "0.1.2-continuous.0000042"
+assert_eq "case 1 (d) payload carries the ownership marker" "yes" \
+  "$([ -f "$mach/home/.local/share/prime-agent/.prime-agent-install" ] && echo yes || echo no)"
 assert_eq "case 1 (d) TS native tree preserved under legacy name" "yes" \
   "$([ -f "$mach/home/.local/share/prime-agent-legacy/.managed" ] && echo yes || echo no)"
 assert_contains "case 1 (d) legacy tree keeps the TS marker" "$mach/home/.local/share/prime-agent-legacy/.managed" "prime-agent-native-v1"
@@ -422,6 +424,56 @@ assert_eq "case 3 nothing was written under the store" "yes" \
   "$([ ! -e "$mach3/home/.prime/agent/share" ] && [ ! -e "$mach3/home/.prime/agent/bin" ] && echo yes || echo no)"
 assert_eq "case 3 session file intact" "$(sha256sum "$mach3/home/.prime/agent/sessions/sess-0001.jsonl" | cut -d' ' -f1)" \
   "$(sha256sum "$mach3/home/.prime/agent/sessions/sess-0001.jsonl" | cut -d' ' -f1)"
+
+# ==============================================================================
+echo "== case 4: an unowned share dir is refused (never adopted, never swept) =="
+mach4="$(new_machine unowned)"
+write_daemon_mock "$mach4/ts-daemon-mock.py"
+write_gh_mock "$mach4/mocks/gh"
+build_fixture "$mach4" "$FIXTURE_TRIPLE"
+seed_store "$mach4"
+mkdir -p "$mach4/home/.local/share/prime-agent"
+printf 'unowned file
+' > "$mach4/home/.local/share/prime-agent/prime-agent"
+printf 'unowned other
+' > "$mach4/home/.local/share/prime-agent/README.txt"
+store_before_u="$(store_snapshot "$mach4")"
+run_installer "$mach4"
+rcu=$?
+assert_eq "case 4 installer aborts on the unowned tree" 1 "$rcu"
+assert_contains "case 4 refusal names the marker contract" "$mach4/install.log" "neither this"
+assert_contains "case 4 refusal tells the user to move it aside" "$mach4/install.log" "move it aside and re-run"
+assert_eq "case 4 the unowned tree was NOT moved or deleted" "yes" \
+  "$([ -f "$mach4/home/.local/share/prime-agent/README.txt" ] && echo yes || echo no)"
+assert_eq "case 4 no .old slot swallowed the tree" "none" \
+  "$(for d in "$mach4"/home/.local/share/prime-agent.old.*; do [ -e "$d" ] && echo some; done; echo none | head -1)"
+assert_eq "case 4 the store is untouched by the refusal" "$store_before_u" "$(store_snapshot "$mach4")"
+
+# ==============================================================================
+echo "== case 5: an unowned regular file at bin/prime-agent is preserved, not destroyed =="
+mach5="$(new_machine unowned-bin)"
+write_gh_mock "$mach5/mocks/gh"
+build_fixture "$mach5" "$FIXTURE_TRIPLE"
+seed_store "$mach5"
+mkdir -p "$mach5/home/.local/bin"
+printf '#!/bin/sh\necho my own tool\n' > "$mach5/home/.local/bin/prime-agent"
+chmod 0755 "$mach5/home/.local/bin/prime-agent"
+store_before_p="$(store_snapshot "$mach5")"
+run_installer "$mach5"
+rcp=$?
+assert_eq "case 5 installer proceeds (the keyword is ours; the file is kept)" 0 "$rcp"
+assert_contains "case 5 the takeover notes the preserved file" "$mach5/install.log" "preserved at"
+preserved_count=0
+for preserved in "$mach5"/home/.local/bin/prime-agent.pre-takeover.*; do
+  [ -f "$preserved" ] && preserved_count=$((preserved_count + 1))
+done
+assert_eq "case 5 exactly one preserved unowned launcher" 1 "$preserved_count"
+preserved_path="$(printf '%s\n' "$mach5"/home/.local/bin/prime-agent.pre-takeover.* | head -n1)"
+assert_contains "case 5 the preserved file is the user's own" "$preserved_path" "my own tool"
+assert_eq "case 5 our launcher took the keyword" "yes" \
+  "$([ -f "$mach5/home/.local/bin/prime-agent" ] && [ ! -L "$mach5/home/.local/bin/prime-agent" ] && echo yes || echo no)"
+assert_contains "case 5 our launcher is the installed shim" "$mach5/home/.local/bin/prime-agent" "launcher written by install-rust.sh"
+assert_eq "case 5 the store is untouched" "$store_before_p" "$(store_snapshot "$mach5")"
 
 echo
 echo "passed: $passed  failed: $failures"

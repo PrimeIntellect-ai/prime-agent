@@ -22,7 +22,10 @@
 #
 # THE TYPESCRIPT TAKEOVER (this script is also the uninstall path for the
 # TS product — one installer owns the keyword's lifecycle):
-#   1. THE TS DAEMON IS STOPPED CLEANLY, NEVER KILLED. The TS daemon's
+#   1. THE TS DAEMON IS STOPPED CLEANLY, NEVER KILLED, but only AFTER the
+#      new payload and launcher are published — the retirement steps
+#      (daemon stop, npm uninstall) never leave the machine without a
+#      working prime-agent if the install aborts mid-way. The TS daemon's
 #      default socket is ${TMPDIR:-/tmp}/prime-agent-$(id -u)/daemon.sock;
 #      the installer probes it (and its own rust socket) the same way the
 #      schema-id check does: the daemon's hello line carries a schemaId,
@@ -162,6 +165,14 @@ mkdir -p "${PREFIX}/share" "${PREFIX}/bin"
 # own prepare-root pattern) and re-check the guard against the resolved value.
 PREFIX="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$PREFIX")"
 guard_preserved "$PREFIX" "${PREFIX}/share" "${PREFIX}/bin"
+# The guard must also see THROUGH symlinked child roots: a ${PREFIX}/share or
+# ${PREFIX}/bin that is a symlink into the shared store would otherwise let
+# the publish write under it while every lexical check passes. Resolving the
+# children (not refusing them) keeps legitimate out-of-store symlinked roots
+# installable while the resolved paths go through the same guard.
+for install_root in "${PREFIX}/share" "${PREFIX}/bin"; do
+  guard_preserved "$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$install_root")"
+done
 
 share_dir="${PREFIX}/share/prime-agent"
 bin_dir="${PREFIX}/bin"
@@ -469,8 +480,9 @@ PY
       ;;
   esac
 }
-stop_ts_daemon "$ts_socket"
-stop_ts_daemon "$rust_socket"
+# The stop itself runs in the COMPLETION section after the publish (below):
+# a failed install must never leave the machine with its TS daemon stopped
+# and no Rust replacement published.
 
 # --- the TypeScript takeover, step 2: the files -------------------------------
 # ts_managed_root: the directory the TS installer owns (its .managed marker).
@@ -484,31 +496,6 @@ ts_managed() {
 if [ "$ts_managed_root" != "$share_dir" ] && [ -d "$ts_managed_root" ] && ts_managed "$ts_managed_root"; then
   echo "note: a TypeScript native install also lives at ${ts_managed_root}"
   echo "  (XDG_DATA_HOME); it does not occupy ${share_dir} and was left in place."
-fi
-
-# The TS npm package: uninstalled (operator directive — the Rust port owns the
-# keyword), with the restore command printed. Exact package `prime-agent`
-# only; best-effort — an npm failure warns and moves on.
-if command -v npm >/dev/null 2>&1; then
-  npm_root="$(npm root -g 2>/dev/null || true)"
-  if [ -n "$npm_root" ] && [ -f "${npm_root}/prime-agent/package.json" ]; then
-    ts_version="$(python3 -c 'import json, sys
-try:
-    package = json.load(open(sys.argv[1]))
-    if package.get("name") == "prime-agent":
-        print(package.get("version", ""))
-except Exception:
-    print("")' "${npm_root}/prime-agent/package.json")"
-    if [ -n "$ts_version" ]; then
-      if npm uninstall -g prime-agent >/dev/null 2>&1; then
-        echo "the TypeScript npm package prime-agent@${ts_version} was uninstalled"
-        echo "  restore with: npm install -g prime-agent@${ts_version}"
-      else
-        echo "warning: npm uninstall -g prime-agent failed; run it by hand — the"
-        echo "  npm-installed TS command can shadow ${launcher} on PATH"
-      fi
-    fi
-  fi
 fi
 
 # --- install ---------------------------------------------------------------------
@@ -530,6 +517,13 @@ guard_preserved "$stage"
 tar -xzf "$asset" -C "$stage"
 [ -x "${stage}/prime-agent" ] \
   || die "the tarball did not contain an executable prime-agent payload"
+# The ownership marker: the share tree this script publishes carries it, so
+# later installs recognize the tree as theirs BY MARKER, not by shape — an
+# unrelated directory that happens to contain a `prime-agent` entry is never
+# adopted, moved aside, or swept (the refusal below sends it back to the
+# user instead).
+printf 'install-rust.sh continuous run %s\ncommit %s\n' "$RUN" "${commit:-unknown}" \
+  > "${stage}/.prime-agent-install"
 
 # A lock left by the pre-takeover installer (name .prime-agent-rust-install.lock):
 # a live holder still owns the publish, a dead one can never publish again —
@@ -574,17 +568,19 @@ if [ -d "$share_dir" ] && ts_managed "$share_dir"; then
 fi
 
 # Refuse to take ownership of a share dir that is neither this installer's
-# flat payload tree nor the TS managed root (the TS installer's own rule:
-# never adopt a nonempty directory you do not own).
+# marked payload tree nor the TS managed root (the TS installer's own rule:
+# never adopt a nonempty directory you do not own). Only a tree carrying the
+# .prime-agent-install marker is claimed — an unowned tree is never moved
+# aside, where the next install's rollback sweep would delete it.
 if [ -d "$share_dir" ]; then
-  if [ -e "${share_dir}/prime-agent" ] || [ -L "${share_dir}/prime-agent" ]; then
+  if [ -f "${share_dir}/.prime-agent-install" ]; then
     :   # this installer's own previous tree: the normal update path below
   elif [ -z "$(ls -A "$share_dir" 2>/dev/null)" ]; then
     rmdir "$share_dir"
   else
     die "refusing to take ownership of ${share_dir}: it is neither this
-installer's payload tree nor the TypeScript installer's managed root; move
-it aside and re-run"
+installer's marked payload tree (.prime-agent-install) nor the TypeScript
+installer's managed root; move it aside and re-run"
   fi
 fi
 
@@ -631,12 +627,21 @@ fi
 # syntax can never end up reparsed inside this generated script.
 # The launcher REPLACES whatever occupied ~/.local/bin/prime-agent — on a
 # TS machine that path was the TS installer's public symlink; the keyword
-# is the Rust port's now (the TS tree itself was preserved above).
+# is the Rust port's now (the TS tree itself was preserved above). An
+# UNOWNED regular file at the path is not silently destroyed: it is moved
+# aside first, so nothing this script did not write is ever lost.
 if [ -e "$launcher" ] || [ -L "$launcher" ]; then
   if [ -L "$launcher" ]; then
-    echo "replacing the existing prime-agent command (was a symlink to: $(readlink "$launcher" 2>/dev/null || true))"
+    echo "replacing the prime-agent command symlink (was: $(readlink "$launcher" 2>/dev/null || true));"
+    echo "  the keyword is the Rust port's now"
+  elif grep -q 'launcher written by install-rust.sh' "$launcher" 2>/dev/null; then
+    :   # this installer's own previous launcher: plain replace below
   else
-    echo "replacing the existing prime-agent command at ${launcher}"
+    preserved_launcher="${bin_dir}/prime-agent.pre-takeover.$$"
+    mv "$launcher" "$preserved_launcher" \
+      || die "could not preserve the existing file at ${launcher}; resolve it and re-run"
+    echo "note: an unrelated prime-agent command existed at ${launcher};"
+    echo "  it was preserved at ${preserved_launcher}"
   fi
 fi
 launcher_tmp="$(mktemp "${bin_dir}/.prime-agent.XXXXXX")"
@@ -667,6 +672,42 @@ old_launcher="${bin_dir}/prime-agent-rust"
 if [ -f "$old_launcher" ] && grep -q 'launcher written by install-rust.sh' "$old_launcher" 2>/dev/null; then
   rm -f "$old_launcher"
   echo "removed the old ${old_launcher} launcher (the keyword is prime-agent now)"
+fi
+
+# --- the TypeScript takeover completes AFTER the publish ----------------------
+# The TS-side steps that RETIRE the old command — the clean idle-daemon stop
+# and the npm uninstall — run only once this install has published its
+# payload and launcher: a failed install (a refused share dir, a live lock,
+# a failed swap) must never leave the machine without a working prime-agent.
+# The TS native tree's move to the legacy name cannot be deferred (it
+# occupies this installer's publish path); it runs inside the lock with its
+# own restore-on-failure and printed rollback instead.
+stop_ts_daemon "$ts_socket"
+stop_ts_daemon "$rust_socket"
+
+# The TS npm package: uninstalled (operator directive — the Rust port owns the
+# keyword), with the restore command printed. Exact package `prime-agent`
+# only; best-effort — an npm failure warns and moves on.
+if command -v npm >/dev/null 2>&1; then
+  npm_root="$(npm root -g 2>/dev/null || true)"
+  if [ -n "$npm_root" ] && [ -f "${npm_root}/prime-agent/package.json" ]; then
+    ts_version="$(python3 -c 'import json, sys
+try:
+    package = json.load(open(sys.argv[1]))
+    if package.get("name") == "prime-agent":
+        print(package.get("version", ""))
+except Exception:
+    print("")' "${npm_root}/prime-agent/package.json")"
+    if [ -n "$ts_version" ]; then
+      if npm uninstall -g prime-agent >/dev/null 2>&1; then
+        echo "the TypeScript npm package prime-agent@${ts_version} was uninstalled"
+        echo "  restore with: npm install -g prime-agent@${ts_version}"
+      else
+        echo "warning: npm uninstall -g prime-agent failed; run it by hand — the"
+        echo "  npm-installed TS command can shadow ${launcher} on PATH"
+      fi
+    fi
+  fi
 fi
 
 # --- PATH check (warn, not fail) ---------------------------------------------------

@@ -174,22 +174,25 @@ concrete commands, so nothing is left to guess:
 > process holds it.
 >
 > • Continue where you left off:
->   `prime-agent --resume \<session-id\>`
->   (switch to the TypeScript product — its daemon owns this session)
+>   `'<holder binary>' --resume '<session-id>'`
+>   (that TypeScript binary holds the lease — its daemon owns this session)
 >
 > • Take over on this daemon:
->   `kill \<holder-pid\> # the holder is \<its process image\>`
+>   `kill '<holder-pid>' # the holder is '<its process image>'`
 >   Then retry — the file unlocks when the holder exits.
 >
-> Session: \<session-id\> (\<session-name\>)
+> Session: '<session-id>' ('<session-name>')
 
 — and the TypeScript product refuses in the same situation when this build
 holds the session (the Rust-holder flavor of the same refusal names the
 `prime-agent --daemon-socket <socket> --resume <session-id>` attach
-command instead). `<holder-id>` is the holder's identity: its active session
-id when it recorded one (the TS session id), else the holder pid. Never race
-one file in both products — continue in the holder's product, or stop the
-holder and retry.
+command instead). Because the Rust port owns the `prime-agent` keyword, the
+TS-holder continue path names the holder's own TypeScript binary (resolved
+from the live holder — wherever the takeover preserved it) rather than the
+keyword, which now launches this build. `<holder-id>` is the holder's
+identity: its active session id when it recorded one (the TS session id),
+else the holder pid. Never race one file in both products — continue in the
+holder's product, or stop the holder and retry.
 
 **Refusals leave a log record.** The daemon logs every refused session open
 to its rotating log: `~/.prime/agent/logs/daemon.sock.<hash>.log` — the
