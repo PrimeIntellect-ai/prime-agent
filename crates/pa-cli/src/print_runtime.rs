@@ -1515,7 +1515,6 @@ async fn build_faux_engine_with(
     // tests can verify persistence without the network.
     let engine = pa_core::session_engine::engine::create_session(
         pa_core::session_engine::engine::SessionEngineConfig {
-                image_model_router: None,
             cron_store: None,
             // Faux verification harness: no product telemetry.
             steering_mode: None,
