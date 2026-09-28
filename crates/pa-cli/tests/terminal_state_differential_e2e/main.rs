@@ -49,7 +49,9 @@
 mod harness;
 mod ledger;
 
+use std::io::Read;
 use std::os::fd::AsRawFd;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
