@@ -360,10 +360,9 @@ fn fork_from_rejects_empty_and_headerless_sources() {
         "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[],\"timestamp\":0},\"id\":\"aaaa1\",\"parentId\":null}\n",
     )
     .unwrap();
-    let error =
-        SessionManager::fork_from(&headerless, tmp.path(), &tmp.path().join("sessions"))
-            .err()
-            .expect("fork rejects a headerless source");
+    let error = SessionManager::fork_from(&headerless, tmp.path(), &tmp.path().join("sessions"))
+        .err()
+        .expect("fork rejects a headerless source");
     assert_eq!(
         error,
         format!(
@@ -384,10 +383,9 @@ fn fork_from_rejects_a_non_regular_source() {
     let tmp = tempfile::tempdir().unwrap();
     let dir_source = tmp.path().join("not-a-session");
     std::fs::create_dir_all(&dir_source).unwrap();
-    let error =
-        SessionManager::fork_from(&dir_source, tmp.path(), &tmp.path().join("sessions"))
-            .err()
-            .expect("fork rejects a non-regular source");
+    let error = SessionManager::fork_from(&dir_source, tmp.path(), &tmp.path().join("sessions"))
+        .err()
+        .expect("fork rejects a non-regular source");
     assert_eq!(
         error,
         format!(

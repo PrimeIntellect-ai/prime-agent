@@ -68,8 +68,8 @@ use super::window;
 // find_most_recent_session_for_cwd precedent) and the pub(super)
 // bindings keep the constructors' + the append arm's bare calls in scope.
 mod ids;
-pub use ids::{format_iso, format_iso_now, get_session_file_path};
 use ids::{create_session_id, generate_id};
+pub use ids::{format_iso, format_iso_now, get_session_file_path};
 
 // The header + rlm-depth concern (the first-line header read and the
 // RLM depth resolution) moved to the child module at the same tree
@@ -98,7 +98,9 @@ pub use git::capture_git_context;
 // write arms until their own cut + the test child).
 mod repair;
 pub use repair::load_entries_from_file;
-use repair::{repair_jsonl_damage, serialize_entry};
+#[cfg(test)]
+use repair::repair_jsonl_damage;
+use repair::serialize_entry;
 
 /// A persist observer; must not break session writes (panics are contained).
 pub type SessionPersistListener = Box<dyn Fn(&Path) + Send + Sync>;
