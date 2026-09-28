@@ -84,11 +84,9 @@ pub struct GoalContextDetails {
 pub fn normalize_goal_state(goal: GoalState) -> GoalState {
     let created_at = match goal.created_at {
         Some(created_at) => Some(created_at),
-        None => {
-            (goal.goal_id.is_some() || goal.objective.is_some())
-                .then_some(goal.updated_at)
-                .flatten()
-        }
+        None => (goal.goal_id.is_some() || goal.objective.is_some())
+            .then_some(goal.updated_at)
+            .flatten(),
     };
     GoalState {
         active: goal.status == GoalStatus::Active,
