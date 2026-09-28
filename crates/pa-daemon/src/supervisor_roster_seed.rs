@@ -731,7 +731,7 @@ pub(crate) mod tests {
     ) {
         let ledger = crate::rlm_ledger::RlmSpawnLedger::new(agent_dir, sessions_dir, |_| {});
         ledger
-            .append_spawn(crate::rlm_ledger::RlmSpawnInput {
+            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
                 child_id: child_id.to_string(),
                 parent: parent.to_string_lossy().to_string(),
                 child: child.to_string_lossy().to_string(),

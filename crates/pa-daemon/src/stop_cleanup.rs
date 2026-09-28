@@ -697,7 +697,7 @@ mod tests {
         // The ledger edge parent -> child.
         let ledger = RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
         ledger
-            .append_spawn(crate::rlm_ledger::RlmSpawnInput {
+            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
                 child_id: "child-1".to_string(),
                 parent: root_file.to_string_lossy().to_string(),
                 child: child_file.to_string_lossy().to_string(),
@@ -814,7 +814,7 @@ mod tests {
         let (_, child_file) = write_session(&sessions_dir, Some("lane"));
         let ledger = RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
         ledger
-            .append_spawn(crate::rlm_ledger::RlmSpawnInput {
+            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
                 child_id: "sub-1".to_string(),
                 parent: parent_file.to_string_lossy().to_string(),
                 child: child_file.to_string_lossy().to_string(),
@@ -898,7 +898,7 @@ mod tests {
         let (_, child_file) = write_session(&sessions_dir, None);
         let ledger = RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
         ledger
-            .append_spawn(crate::rlm_ledger::RlmSpawnInput {
+            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
                 child_id: "sub-1".to_string(),
                 parent: parent_file.to_string_lossy().to_string(),
                 child: child_file.to_string_lossy().to_string(),
@@ -975,7 +975,7 @@ mod tests {
         let (_, child_file) = write_session(&sessions_dir, None);
         let ledger = RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
         ledger
-            .append_spawn(crate::rlm_ledger::RlmSpawnInput {
+            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
                 child_id: "sub-1".to_string(),
                 parent: parent_file.to_string_lossy().to_string(),
                 child: child_file.to_string_lossy().to_string(),
@@ -1010,7 +1010,7 @@ mod tests {
         let ledger = RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
         for child_id in ["sub-1", "sub-2"] {
             ledger
-                .append_spawn(crate::rlm_ledger::RlmSpawnInput {
+                .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
                     child_id: child_id.to_string(),
                     parent: parent_file.to_string_lossy().to_string(),
                     child: child_file.to_string_lossy().to_string(),

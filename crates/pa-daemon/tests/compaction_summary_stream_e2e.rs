@@ -222,7 +222,7 @@ fn serve(mut stream: TcpStream, requests: &Arc<Mutex<Vec<Value>>>) -> std::io::R
                 None,
                 &small_usage(),
             ),
-            chunk(&json!({}), Some("stop"), usage),
+            chunk(&json!({}), Some("stop"), &usage),
             json!({
                 "id": "chatcmpl-test",
                 "object": "chat.completion.chunk",

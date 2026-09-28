@@ -369,7 +369,7 @@ pub(crate) fn build_update_roster(
         .collect();
     let mut sessions = Vec::new();
     let mut rows = Vec::new();
-    for snapshot in &workers {
+    for snapshot in workers {
         let row = session_row(snapshot, &child_parents)?;
         rows.push(worker_row(
             agent_dir,
@@ -511,7 +511,7 @@ mod tests {
         }
         let ledger = RlmSpawnLedger::new(agent_dir, &sessions_dir, |_| {});
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 parent: sessions_file(&sessions_dir, "p1"),
                 child: sessions_file(&sessions_dir, "c1"),
                 child_id: "child-c1".into(),

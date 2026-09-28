@@ -1008,7 +1008,7 @@ mod tombstone_usage_tests {
         std::fs::write(&parent, "{}").unwrap();
         let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
         ledger
-            .append_spawn(crate::rlm_ledger::RlmSpawnInput {
+            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
                 child_id: "sub-1".to_string(),
                 parent: parent.to_string_lossy().to_string(),
                 child: child.to_string_lossy().to_string(),
@@ -1086,7 +1086,7 @@ mod tombstone_usage_tests {
         };
         let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
         ledger
-            .append_spawn(crate::rlm_ledger::RlmSpawnInput {
+            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
                 child_id: "sub-9".into(),
                 parent: parent.to_string_lossy().into(),
                 child: child.to_string_lossy().into(),
@@ -1137,7 +1137,7 @@ mod tombstone_usage_tests {
         std::os::unix::net::UnixListener::bind(&fifo).unwrap();
         let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
         ledger
-            .append_spawn(crate::rlm_ledger::RlmSpawnInput {
+            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
                 child_id: "sub-9".into(),
                 parent: parent.to_string_lossy().into(),
                 child: fifo.to_string_lossy().into(),

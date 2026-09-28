@@ -1186,7 +1186,7 @@ impl ScriptedEngine {
     /// [`ScriptedEngine::from_value`]).
     pub fn from_file(path: &std::path::Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        Self::from_value(serde_json::from_str(&content)?)
+        Self::from_value(&serde_json::from_str(&content)?)
     }
 
     fn response_text(response: &Value) -> String {
@@ -1803,7 +1803,7 @@ mod tests {
     #[test]
     fn scripted_engine_replays_then_echoes() {
         let engine = ScriptedEngine::from_value(
-            json!({"responses": ["first", {"text": "second", "delayMs": 0}]}),
+            &json!({"responses": ["first", {"text": "second", "delayMs": 0}]}),
         )
         .unwrap();
         let request_for = |message: &str| PromptRequest {

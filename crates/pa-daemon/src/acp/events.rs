@@ -362,7 +362,7 @@ pub fn acp_updates_for_event(
                 }),
                 content: text.map(|text| vec![ToolCallContent::new(text)]),
                 meta: rich.map(|rich| {
-                    super::meta::prime_agent_meta(super::meta::PrimeAgentSessionMeta {
+                    super::meta::prime_agent_meta(&super::meta::PrimeAgentSessionMeta {
                         ipython: Some(rich),
                         ..Default::default()
                     })

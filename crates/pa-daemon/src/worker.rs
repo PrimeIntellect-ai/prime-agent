@@ -657,10 +657,7 @@ impl Worker {
                     roster_delta_sequence: std::sync::Arc::clone(&roster_delta_sequence),
                     roster_push_order: std::sync::Arc::clone(&roster_push_order),
                 });
-            crate::roster_activity::spawn_roster_activity_watch(
-                events.clone(),
-                roster_pushes.clone(),
-            );
+            crate::roster_activity::spawn_roster_activity_watch(&events, roster_pushes.clone());
             let runner = TurnRunner {
                 recovery: Arc::clone(&recovery),
                 core: Arc::clone(&core),
