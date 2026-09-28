@@ -55,14 +55,18 @@
 #          only; the restore command is printed with the recorded version);
 #        - the standalone node dir is LEFT in place (it is a runtime, not
 #          the product binary/package — the user can remove it by hand).
-#   3. WHY DAEMON CONFLICTS ARE IMPOSSIBLE AFTER THIS INSTALL: the
-#      launcher pins a rust-only daemon socket
+#   3. WHY DAEMON CONFLICTS ARE GONE AFTER THIS INSTALL: the launcher
+#      pins a rust-only daemon socket
 #      (${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock) — a
-#      different path than the TS daemon's own — so this CLI can never
-#      attach to, replace, or be confused with the TS daemon at runtime;
-#      and the install-time stop-when-idle above retires a TS daemon
-#      cleanly instead of orphaning one. Pin + clean stop together mean
-#      the two daemons can never fight over a socket again after install.
+#      different path than the TS daemon's own — so BY DEFAULT this CLI
+#      and the TS daemon never meet (each product's default socket is its
+#      own), and the install-time stop-when-idle above retires a TS daemon
+#      cleanly instead of orphaning one. Explicit overrides can still point
+#      anywhere (--daemon-socket > PRIME_AGENT_DAEMON_SOCKET > the pinned
+#      default — the product's documented contract; a foreign-schema daemon
+#      behind an override reads as stale, the same behavior in both
+#      products). Default pin + clean stop: out of the box, the two
+#      daemons cannot fight over a socket after install.
 #      Together with the kernel pre-warm below (uv + the Python venv at
 #      install time), a fresh install's FIRST session works out of the
 #      box, online or offline.
@@ -929,8 +933,11 @@ else
 fi
 echo "launcher:  ${launcher}"
 echo "payload:   ${share_dir}"
-if [ -d "$old" ]; then
+if [ -d "$old" ] && grep -qxF -- "$old" "$generations_record" 2>/dev/null; then
   echo "rollback:  ${old} (the previous payload, one generation; swept on the next install)"
+elif [ -d "$old" ]; then
+  echo "rollback:  ${old} (the migrated pre-takeover tree; kept — remove it by hand"
+  echo "            once you no longer need the rollback)"
 fi
 echo "source:    ${WORKFLOW} run ${RUN} (commit ${commit:-unknown})"
 

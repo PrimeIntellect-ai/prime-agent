@@ -50,11 +50,20 @@ assert_not_contains() { # label haystack-file needle
 }
 
 MOCK_PIDS=""
+# The per-run machine-root track: new_machine runs inside a command
+# substitution (a subshell), so a variable would not survive it — the file
+# does. $$ keeps concurrent suite runs from sweeping each other.
+MACHINE_TRACK="${TMPDIR:-/tmp}/installtest-homes.$$.txt"
 cleanup() {
   for pid in $MOCK_PIDS; do
     kill "$pid" 2>/dev/null || true
   done
-  [ -n "${SANDBOX:-}" ] && rm -rf "$SANDBOX"
+  if [ -f "$MACHINE_TRACK" ]; then
+    while IFS= read -r root; do
+      rm -rf "$root"
+    done < "$MACHINE_TRACK"
+    rm -f "$MACHINE_TRACK"
+  fi
 }
 trap cleanup EXIT INT TERM
 
@@ -234,6 +243,7 @@ BIN
 # --- one sandboxed machine -----------------------------------------------------
 new_machine() { # name
   base="$(mktemp -d "${TMPDIR:-/tmp}/installtest-home.XXXXXX")"
+  printf '%s\n' "$base" >> "$MACHINE_TRACK"
   mach="$base/$1"
   mkdir -p "$mach/home" "$mach/tmp" "$mach/mocks" "$mach/npm-global/prime-agent" \
            "$mach/logs"

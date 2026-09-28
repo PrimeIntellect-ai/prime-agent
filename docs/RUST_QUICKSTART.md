@@ -155,13 +155,18 @@ the steps are idempotent):
   created, migrated, renamed, or deleted — the installer aborts if any
   step would write under it.
 
-Why daemon conflicts are impossible after this install: the launcher pins
+Why daemon conflicts are gone after this install: the launcher pins
 a rust-only daemon socket
 (`${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock`), a different
-path than the TS daemon's own — so this CLI can never attach to or
-replace the TS daemon at runtime — and the install-time stop-when-idle
-retires a TS daemon cleanly instead of orphaning one. Pin + clean stop
-together: the two daemons cannot fight over a socket again.
+path than the TS daemon's own — so by DEFAULT this CLI and the TS daemon
+never meet (each product's default socket is its own), and the
+install-time stop-when-idle retires a TS daemon cleanly instead of
+orphaning one. An explicit override can still point anywhere
+(`--daemon-socket` > `PRIME_AGENT_DAEMON_SOCKET` > the pinned default):
+that is the product's documented contract, and pointing it at a daemon
+with a foreign schema id makes the CLI treat that daemon as stale (the
+same behavior in both products). Default pin + clean stop: out of the
+box, the two daemons cannot fight over a socket.
 
 ## The shared store and the daemons
 
