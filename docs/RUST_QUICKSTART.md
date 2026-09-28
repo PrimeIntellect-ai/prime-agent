@@ -99,11 +99,20 @@ prime-agent shutdown    # the TS state-root sweep (see Uninstall before relying 
 ```
 
 The rest of the public commands (`attach`, `status`, `doctor`, `prompt`,
-...) mirror the TS product. To update this installation, re-run the
-installer (plain or `--update`) — or use the `prime-agent update` command
-once its lane lands; the update needs the managed `releases/` layout a
-self-updating install uses, which the installer's flat
-`share/prime-agent/` tree is not.
+...) mirror the TS product. To update this installation, run:
+
+```bash
+prime-agent update --check   # what the latest build is, without installing
+prime-agent update           # uninstall the TS version, install the latest
+                            # Rust build — ~/.prime/agent is never touched
+```
+
+`prime-agent update` downloads the branch's `install-rust.sh` and runs it,
+so the script owns the whole move (the same source the curl|sh one-liner
+uses). The command exists only in the Rust binary — the TypeScript version
+does not have it; the move happens when you run the curl|sh URL above or
+`prime-agent update` (after the Rust install exists). Restart `prime-agent`
+after the update to run the new build.
 
 ## The TypeScript takeover — what the installer does
 

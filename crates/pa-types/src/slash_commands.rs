@@ -33,7 +33,9 @@ pub enum SlashCommandExecution {
 }
 
 /// One builtin slash command. Descriptions and argument hints are
-/// user-facing: keep them byte-identical to the TS table.
+/// user-facing: keep them byte-identical to the TS table. `update` is the
+/// one sanctioned divergence (the 2026-09-27 operator directive): it is
+/// the TS->Rust migration path, not the TS update surface.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BuiltinSlashCommand {
     pub name: &'static str,
@@ -61,7 +63,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
     BuiltinSlashCommand { name: "traces", description: "Preview, upload, or configure Prime Agent traces", execution: SlashCommandExecution::Client, argument_hint: Some("[status|on|off|preview|upload|upload-current|upload-all|login]"), aliases: &[], takes_argument: false },
     BuiltinSlashCommand { name: "context", description: "Show token, cost, and context usage for agent and sub-agents", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &["usage"], takes_argument: false },
     BuiltinSlashCommand { name: "changelog", description: "Show changelog entries", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
-    BuiltinSlashCommand { name: "update", description: "Update Prime Agent and installed packages", execution: SlashCommandExecution::Client, argument_hint: Some("[source|--self|--extensions|--nightly|--stable]"), aliases: &[], takes_argument: true },
+    BuiltinSlashCommand { name: "update", description: "Update to the latest Rust build (uninstalls the TypeScript version; sessions preserved)", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
     BuiltinSlashCommand { name: "nightly", description: "Switch Prime Agent updates to the nightly channel (unreleased builds, may be broken)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off|status]"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "hotkeys", description: "Show all keyboard shortcuts", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
     BuiltinSlashCommand { name: "fork", description: "Create a new fork from a previous user message", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
