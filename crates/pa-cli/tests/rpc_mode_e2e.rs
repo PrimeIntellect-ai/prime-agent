@@ -1,3 +1,22 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
+// by design on hot paths (boxing 130 fns is allocation-churn with zero
+// correctness gain); the fn-length threshold is a style gate, not
+// correctness (the harness fns are intentionally linear); 64-bit targets -
+// the narrowing sits at OS/protocol boundaries where the values are
+// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
+// guarded parses), and checked conversions would add panic paths where
+// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
+// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
+// dossier for the conductor).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! End-to-end RPC-mode verification: the real binary serves the TS
 //! `modes/rpc` JSONL command surface over stdio, driven by the scripted
 //! faux provider. Covers the protocol contract (response shapes, parse
@@ -731,13 +750,13 @@ fn rpc_eof_settles_and_exits_zero() {
     client.wait_event("message_start", TIMEOUT);
     // Close stdin mid-turn: the child settles the turn and exits 0.
     drop(client.stdin.take());
-    let status = client
+    let wait_status = client
         .child
         .wait()
         .expect("the child exits when stdin closes");
     assert!(
-        status.success(),
-        "stdin close settles the turn and exits 0 (status {status})"
+        wait_status.success(),
+        "stdin close settles the turn and exits 0 (status {wait_status})"
     );
     client.spawn_stderr = None;
 }
@@ -806,8 +825,8 @@ fn rpc_fresh_sessions_lease_their_files() {
         "the fresh session's file is runtime-leased while the engine is live (leased: {leased:?})"
     );
     drop(client.stdin.take());
-    let status = client.child.wait().expect("exit");
-    assert!(status.success(), "eof settles the leased session: {status}");
+    let wait_status = client.child.wait().expect("exit");
+    assert!(wait_status.success(), "eof settles the leased session: {wait_status}");
     client.spawn_stderr = None;
 }
 
@@ -965,12 +984,12 @@ fn rpc_sigterm_during_replacement_exits_promptly() {
     // The replacement queues behind the running turn's settle; SIGTERM
     // must cut through both.
     client.send(&json!({ "type": "new_session", "id": "t-replace" }));
-    let status = std::process::Command::new("kill")
+    let wait_status = std::process::Command::new("kill")
         .arg("-TERM")
         .arg(client.child.id().to_string())
         .status()
         .expect("send SIGTERM");
-    assert!(status.success(), "the SIGTERM dispatch succeeded");
+    assert!(wait_status.success(), "the SIGTERM dispatch succeeded");
     // Event-gated wait: the stdout pipe closes exactly when the child
     // exits — well inside the faux turn's 30s hold.
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -986,7 +1005,7 @@ fn rpc_sigterm_during_replacement_exits_promptly() {
             }
         }
     }
-    let status = client.child.wait().expect("the signal exits the child");
-    assert_eq!(status.code(), Some(143), "SIGTERM exits 143");
+    let wait_status = client.child.wait().expect("the signal exits the child");
+    assert_eq!(wait_status.code(), Some(143), "SIGTERM exits 143");
     client.spawn_stderr = None;
 }

@@ -410,7 +410,7 @@ impl PrintGoalSurface {
     /// `compaction_start`, `compaction_end`, `refine_complete`,
     /// `refine_failed`).
     pub(crate) fn emit_stream_event(&self, event: &Value) {
-        self.emit(&event);
+        self.emit(event);
     }
 
     /// The unconditional goal-state publish (TS `_emitGoalUpdate` in the

@@ -136,7 +136,7 @@ fn get_global_mcp_servers() -> BTreeMap<String, McpServerConfig> {
 }
 
 fn set_global_mcp_server(name: &str, config: &McpServerConfig) -> Result<()> {
-    let value = serde_json::to_value(&config)?;
+    let value = serde_json::to_value(config)?;
     mutate_global_settings(|settings| {
         let servers = settings
             .as_object_mut()

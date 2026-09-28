@@ -512,7 +512,7 @@ fn login_blocking(
             provider_row.name
         ));
     };
-    let mut auth = pa_core::auth::AuthStorage::create(&agent_dir);
+    let mut auth = pa_core::auth::AuthStorage::create(agent_dir);
     auth.set(
         &provider_row.id,
         AuthCredential::ApiKey {
@@ -718,7 +718,7 @@ fn login_blocking_on_panel(
 /// The logout body (blocking: the auth store lock stays off the async
 /// workers).
 fn logout_blocking(provider_row: &ProviderRow, agent_dir: &Path) -> ProviderAuthOutcome {
-    let mut auth = pa_core::auth::AuthStorage::create(&agent_dir);
+    let mut auth = pa_core::auth::AuthStorage::create(agent_dir);
     if auth.get_all().get(&provider_row.id).is_none() {
         return ProviderAuthOutcome::Status(format!("{} is not configured.", provider_row.name));
     }
