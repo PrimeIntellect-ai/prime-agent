@@ -82,7 +82,7 @@ impl DifferentialHarness {
         )
         .expect("open pty");
         let before = Termios::capture(pty.master.as_raw_fd());
-        let child = spawn_child(&spec, &socket, &pty.slave);
+        let child = spawn_child(spec, &socket, &pty.slave);
         // The child needs the socket and the temp dir for its lifetime;
         // the whole tree dies with the child at teardown.
         std::mem::forget(dir);
