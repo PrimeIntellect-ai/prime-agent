@@ -1,0 +1,1 @@
+- Fixed truncated JSON responses when an RPC client closes stdin before queued stdout has finished draining.

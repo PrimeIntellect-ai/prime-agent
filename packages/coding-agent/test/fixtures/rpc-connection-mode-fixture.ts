@@ -64,6 +64,9 @@ const connection = {
 	async waitForIdle() {
 		await activePrompt;
 	},
+	async getMessages() {
+		return [{ role: "user" as const, content: "x".repeat(1024 * 1024), timestamp: 1 }];
+	},
 	async getLastAssistantText() {
 		return undefined;
 	},

@@ -3,7 +3,7 @@
  */
 
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
-import { takeOverStdout, writeRawStdout } from "../../core/output-guard.js";
+import { flushRawStdout, takeOverStdout, writeRawStdout } from "../../core/output-guard.js";
 import { killTrackedDetachedChildren } from "../../utils/shell.js";
 import { InProcessAgentConnection } from "../agent-connection/in-process-agent-connection.js";
 import type {
@@ -194,6 +194,7 @@ async function runRpcModeWithConnectionInternal(
 		process.stdin.pause();
 		await Promise.allSettled([...observations.keys()].map((activeSessionId) => stopObservation(activeSessionId)));
 		await connection.dispose();
+		await flushRawStdout();
 		process.exit(exitCode);
 	}
 

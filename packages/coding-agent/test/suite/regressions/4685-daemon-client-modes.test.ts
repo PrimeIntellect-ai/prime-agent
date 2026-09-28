@@ -131,7 +131,7 @@ async function runRpc(
 	child.stdin?.end(options.trailingNewline === false ? input : `${input}\n`);
 	const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveExit, reject) => {
 		const timeout = setTimeout(() => reject(new Error(`RPC fixture timed out\n${stderr}`)), 10_000);
-		child.once("exit", (code, signal) => {
+		child.once("close", (code, signal) => {
 			clearTimeout(timeout);
 			resolveExit({ code, signal: signal as NodeJS.Signals | null });
 		});
@@ -349,18 +349,18 @@ describe("ENG-4685 daemon-backed client modes", () => {
 		expect(readFileSync(markerPath, "utf8").trim().split("\n")).toEqual(["loaded"]);
 	}, 30_000);
 
-	it("drains accepted RPC commands before EOF releases the connection", async () => {
-		const result = await runRpc([{ id: "models", type: "get_available_models" }]);
-		expect(result.stderr).toBe("");
-		expect(result.stdout).toEqual([
-			{
-				id: "models",
-				type: "response",
-				command: "get_available_models",
-				success: true,
-				data: { models: [] },
-			},
-		]);
+	const largeMessages = [{ role: "user", content: "x".repeat(1024 * 1024), timestamp: 1 }];
+	it.each([
+		["get_available_models", true, { models: [] }],
+		["get_available_models", false, { models: [] }],
+		["get_messages", true, { messages: largeMessages }],
+		["get_messages", false, { messages: largeMessages }],
+	] as const)("drains complete %s responses before EOF (newline: %s)", async (command, trailingNewline, data) => {
+		const result = await runRpc([{ id: "eof", type: command }], { trailingNewline });
+		expect(result).toEqual({
+			stderr: "",
+			stdout: [{ id: "eof", type: "response", command, success: true, data }],
+		});
 	});
 
 	it("drains accepted RPC prompt work before EOF releases the connection", async () => {
@@ -406,22 +406,6 @@ describe("ENG-4685 daemon-backed client modes", () => {
 		expect(result.stdout).toContain("rpc eof response");
 		expect(result.stdout).toContain('"type":"agent_end"');
 	}, 30_000);
-
-	it("drains an unterminated final RPC command before EOF", async () => {
-		const result = await runRpc([{ id: "models", type: "get_available_models" }], {
-			trailingNewline: false,
-		});
-		expect(result.stderr).toBe("");
-		expect(result.stdout).toEqual([
-			{
-				id: "models",
-				type: "response",
-				command: "get_available_models",
-				success: true,
-				data: { models: [] },
-			},
-		]);
-	});
 
 	it("returns a structured error for scalar JSON input", async () => {
 		const result = await runRpc([null]);
