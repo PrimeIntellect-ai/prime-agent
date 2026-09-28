@@ -302,7 +302,10 @@ impl SessionScanState {
 
     /// TS `seedRosterLedger`-side identity: the resume requires the same
     /// file (dev/ino) with a grown-or-equal length.
-    fn same_file_identity(&self, generation: &SessionInfoGeneration) -> bool {
+    fn same_file_identity(
+        &self,
+        #[cfg_attr(not(unix), allow(unused_variables))] generation: &SessionInfoGeneration,
+    ) -> bool {
         #[cfg(unix)]
         {
             self.generation.dev == generation.dev && self.generation.ino == generation.ino

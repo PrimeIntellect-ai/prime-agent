@@ -55,9 +55,13 @@ pub fn get_shell_config(custom_shell_path: Option<&str>) -> anyhow::Result<Shell
 }
 
 /// Windows: the TS resolution order (TS `getShellConfig` win32): an explicit
-/// path, then Git Bash in the canonical install dirs (from the ProgramFiles
+/// path, then Git Bash in the canonical install dirs (from the `ProgramFiles`
 /// environment), then `where bash.exe` with System32 matches demoted to last
 /// (`System32\bash.exe` is the WSL launcher - it runs Linux-side).
+///
+/// # Errors
+///
+/// Returns an error when no shell resolves.
 #[cfg(windows)]
 pub fn get_shell_config(custom_shell_path: Option<&str>) -> anyhow::Result<ShellConfig> {
     if let Some(path) = custom_shell_path {
@@ -157,7 +161,7 @@ fn bash_config(shell: &str) -> ShellConfig {
     }
 }
 
-/// The Git Bash install dirs searched on Windows, from the ProgramFiles
+/// The Git Bash install dirs searched on Windows, from the `ProgramFiles`
 /// environment (TS `getShellConfig` win32 order). The kernel-shell
 /// resolution does NOT use these - see [`resolve_kernel_bash_shell`].
 #[cfg(windows)]
@@ -190,18 +194,18 @@ pub fn resolve_kernel_bash_shell(custom_shell_path: Option<&str>) -> Option<Stri
 /// Windows: canonical Git Bash install paths only, never PATH - a
 /// repo-controlled PATH/`where` must not pick the kernel shell (TS
 /// `resolveKernelBashShell` win32). The candidates are hardcoded literals
-/// by design: the ProgramFiles variables are ambient attacker-influenceable
+/// by design: the `ProgramFiles` variables are ambient attacker-influenceable
 /// input, the same trust-laundering class as PATH. `None` means no shell:
 /// kernel startup must not fail, `bash()` raises its teaching error.
 #[cfg(windows)]
 pub fn resolve_kernel_bash_shell(custom_shell_path: Option<&str>) -> Option<String> {
-    if let Some(explicit) = custom_shell_path.map(str::trim).filter(|s| !s.is_empty()) {
-        return Some(explicit.to_string());
-    }
     const WINDOWS_GIT_BASH_PATHS: [&str; 2] = [
         r"C:\Program Files\Git\bin\bash.exe",
         r"C:\Program Files (x86)\Git\bin\bash.exe",
     ];
+    if let Some(explicit) = custom_shell_path.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(explicit.to_string());
+    }
     WINDOWS_GIT_BASH_PATHS
         .into_iter()
         .find(|path| Path::new(path).exists())
@@ -242,7 +246,7 @@ mod windows_tests {
         );
     }
 
-    /// Without SystemRoot the order is preserved unchanged.
+    /// Without `SystemRoot` the order is preserved unchanged.
     #[test]
     fn without_system_root_the_order_stands() {
         let candidates =

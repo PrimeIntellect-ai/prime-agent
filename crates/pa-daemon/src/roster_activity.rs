@@ -192,10 +192,14 @@ pub(crate) fn spawn_roster_activity_watch(events: Arc<EventPump>, queue: RosterP
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::supervisor_link::SupervisorLink;
     use serde_json::json;
+    #[cfg(unix)]
     use serde_json::Value;
+    #[cfg(unix)]
     use std::sync::Mutex;
+    #[cfg(unix)]
     use std::time::Duration;
 
     fn session_event_frame(event: serde_json::Value) -> OutboundFrame {

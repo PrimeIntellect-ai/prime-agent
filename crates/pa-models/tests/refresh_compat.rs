@@ -76,6 +76,7 @@ async fn fresh_fetch_writes_a_validated_0600_snapshot_and_serves_it() {
     assert!(models.iter().any(|m| m.id == "model-a"));
 
     let path = dir.path().join("provider-model-catalog.v1.json");
+    #[cfg_attr(not(unix), allow(unused_variables))]
     let metadata = std::fs::metadata(&path).expect("snapshot written");
     #[cfg(unix)]
     {

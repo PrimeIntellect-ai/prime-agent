@@ -86,9 +86,9 @@ fn make_sane(attrs: &mut libc::termios) {
 /// The reopen-stdin fallback for the no-controlling-terminal case:
 /// Linux exposes open descriptors under /proc, macOS through its
 /// fdesc `/dev/fd` (there is no /proc on the Mac).
-#[cfg(target_os = "linux")]
+#[cfg(all(unix, target_os = "linux"))]
 const STDIN_TTY_PATH: &str = "/proc/self/fd/0";
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 const STDIN_TTY_PATH: &str = "/dev/fd/0";
 
 /// The process tty (`/dev/tty`, stdin when no controlling terminal

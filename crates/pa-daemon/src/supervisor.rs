@@ -102,10 +102,11 @@ use crate::registry::{
 use crate::saved_session_commands::{name_unavailable_error, reservation_key, NameScope};
 use crate::session_store::list_sessions;
 use crate::snapshot_stream::{attach_client_capabilities, stream_attach, wants_chunked};
+#[cfg(unix)]
+use crate::update_prepare::PrepareState;
 use crate::update_prepare::{
     marker_expires_at_iso, update_gate_refuses, write_prepared_artifacts, AbortOutcome,
-    BeginOutcome, MutationDrainLatch, PrepareCoordinator, PrepareOp, PrepareState,
-    UPDATE_PREPARING_MESSAGE,
+    BeginOutcome, MutationDrainLatch, PrepareCoordinator, PrepareOp, UPDATE_PREPARING_MESSAGE,
 };
 use crate::update_roster::{
     build_update_roster, supervisor_identity, UpdateRosterInputs, WorkerSnapshot,

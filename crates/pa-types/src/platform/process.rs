@@ -197,6 +197,7 @@ pub fn stop_own_process_group() -> anyhow::Result<()> {
 /// pends, and it would then arrive after this cycle restored the default
 /// disposition and kill the process. A handler runs (and does nothing)
 /// at that delivery instead.
+#[cfg(unix)]
 extern "C" fn swallow_sigint(_signal: libc::c_int) {}
 
 /// Ignore SIGINT for the suspended window (TS installs a no-op `SIGINT`
@@ -242,16 +243,25 @@ pub fn restore_default_sigint() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// # Errors
+///
+/// The non-unix targets have no POSIX process groups: always errors.
 #[cfg(not(unix))]
 pub fn stop_own_process_group() -> anyhow::Result<()> {
     anyhow::bail!("suspend to background requires a POSIX process group")
 }
 
+/// # Errors
+///
+/// The non-unix targets have no POSIX signals: always errors.
 #[cfg(not(unix))]
 pub fn ignore_sigint_for_suspend() -> anyhow::Result<()> {
     anyhow::bail!("suspend to background requires a POSIX process group")
 }
 
+/// # Errors
+///
+/// The non-unix targets have no POSIX signals: always errors.
 #[cfg(not(unix))]
 pub fn restore_default_sigint() -> anyhow::Result<()> {
     anyhow::bail!("suspend to background requires a POSIX process group")
@@ -311,12 +321,17 @@ pub fn is_process_alive(pid: u32) -> anyhow::Result<bool> {
         .starts_with('Z'))
 }
 
-/// Windows: a handle-existence probe with the STILL_ACTIVE exit-code check
+/// Windows: a handle-existence probe with the `STILL_ACTIVE` exit-code check
 /// (TS `isProcessAlive` = `processIdExists` && !zombie; win32 has no zombie
 /// state, and Node's `kill(pid, 0)` is the same exit-code probe). A pid the
 /// caller may not query exists (TS counts EPERM as existing) and reads
 /// alive: lease owners must not treat an access-denied probe as a dead
 /// owner.
+///
+/// # Errors
+///
+/// Never errors on this target: the probe answers dead for pid zero,
+/// alive otherwise.
 #[cfg(windows)]
 pub fn is_process_alive(pid: u32) -> anyhow::Result<bool> {
     if pid == 0 {
@@ -325,6 +340,9 @@ pub fn is_process_alive(pid: u32) -> anyhow::Result<bool> {
     Ok(winapi::is_still_active(pid))
 }
 
+/// # Errors
+///
+/// Liveness has no implementation on this platform: always errors.
 #[cfg(not(any(unix, windows)))]
 pub fn is_process_alive(_pid: u32) -> anyhow::Result<bool> {
     anyhow::bail!("process liveness is not implemented on this platform")

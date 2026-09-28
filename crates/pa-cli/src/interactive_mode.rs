@@ -1149,7 +1149,12 @@ fn resolve_resume_selector(selector: &str, session_dir: &Path) -> SessionSelecti
     SessionSelection::Attach(selector.to_string())
 }
 
-/// The daemon probe outcome (TS `DaemonVersionProbe`).
+/// The daemon probe outcome (TS `DaemonVersionProbe`). The `Stale`
+/// variant carries the answered client whole (the probe's caller talks to
+/// it); the windows pipe client's larger transport state crosses the
+/// `large_enum_variant` budget there, so the lint is waived for the probe
+/// result's rare one-shot value.
+#[allow(clippy::large_enum_variant)]
 enum DaemonProbe {
     /// No socket answered.
     Absent,

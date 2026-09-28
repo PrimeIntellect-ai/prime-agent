@@ -89,6 +89,7 @@ pub(crate) enum ReapKind {
     /// A leftover session worker of a previous daemon on this socket.
     Worker,
     /// A wedged supervisor process bound to this socket path.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Supervisor,
 }
 
@@ -471,6 +472,7 @@ fn socket_spelling_of(pid: u32, value: &str) -> String {
 /// what the harnesses execute). A reap target's executable must be one of
 /// these - a session's arbitrary long-running command (`python worker`, a
 /// tool server) never qualifies, whatever it inherited.
+#[cfg(unix)]
 pub(crate) fn is_product_binary(exe: &str) -> bool {
     matches!(
         Path::new(exe).file_name().and_then(|name| name.to_str()),
@@ -484,6 +486,7 @@ pub(crate) fn is_product_binary(exe: &str) -> bool {
 /// hazard classes this gate exists for: a session kernel, bash child, or
 /// tool server that merely INHERITED the worker env, and a user's
 /// same-socket command that happens to carry a `worker` argument.
+#[cfg(unix)]
 pub(crate) fn is_worker_argv(argv: &[String]) -> bool {
     argv.first().is_some_and(|exe| is_product_binary(exe))
         && argv.get(1).map(String::as_str) == Some("worker")
@@ -530,7 +533,7 @@ fn proc_environ_names_active_session(pid: u32, active_session: &str) -> bool {
     })
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn proc_environ_names_active_session(_pid: u32, _active_session: &str) -> bool {
     false
 }
@@ -610,6 +613,7 @@ fn resolve_relative_socket_tokens(pid: u32, argv: &mut [String]) {
 /// (`supervisor --socket <socket>`). The executable gate is
 /// load-bearing: an arbitrary inherited-socket command that merely carries
 /// the argument tokens is never a target.
+#[cfg(unix)]
 pub(crate) fn supervisor_argv_names_socket(argv: &[String], socket: &str) -> bool {
     let Some(exe) = argv.first() else {
         return false;
@@ -648,11 +652,19 @@ pub(crate) fn supervisor_argv_names_socket(argv: &[String], socket: &str) -> boo
 /// removes endpoints only - a regular file at a matching name is never
 /// touched). UNIX-wide on purpose (the caller is unconditional): the
 /// std `os::unix` socket-file probe compiles on every unix - darwin
-/// included.
+/// included. No unix socket files exist on the other targets, so the
+/// probe answers false there and the unlink never fires (the not(unix)
+/// reaping stubs already collect zero targets).
 #[cfg(unix)]
 fn is_unix_socket_file(path: &Path) -> bool {
     use std::os::unix::fs::FileTypeExt;
     std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_socket())
+}
+
+/// Windows has no unix socket files to unlink: the probe always false.
+#[cfg(not(unix))]
+fn is_unix_socket_file(_path: &Path) -> bool {
+    false
 }
 
 /// The pids the reap must never touch: the live-worker descriptors this
@@ -738,8 +750,8 @@ fn protected_worker_pids(agent_dir: &Path, socket_path: &Path) -> HashSet<u32> {
 /// (`/a/b/../c/daemon.sock` vs `/a/c/daemon.sock`, a symlinked tmpdir)
 /// is still a same-socket predecessor - its lease is held either way.
 /// Pure `std` (canonicalize + components): it compiles on every unix -
-/// darwin included, which the unconditional `supervisor_argv_names_socket`
-/// (the argv-only view the supervisor census normalizes with) requires.
+/// darwin included, which `supervisor_argv_names_socket` (the argv-only
+/// view the supervisor census normalizes with) requires.
 #[cfg(unix)]
 pub(crate) fn normalize_socket_spelling(path: &Path) -> String {
     if let Ok(canonical) = path.canonicalize() {

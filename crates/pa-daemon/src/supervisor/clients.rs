@@ -1048,10 +1048,15 @@ impl Supervisor {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     use crate::supervisor::SupervisorOptions;
+    #[cfg(unix)]
     use pa_types::platform::transport::TransportStream;
+    #[cfg(unix)]
     use serde_json::json;
+    #[cfg(unix)]
     use std::sync::Arc;
 
     /// A client that falls behind the shared event ring loses events (the

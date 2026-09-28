@@ -1203,6 +1203,7 @@ async fn fake_supervisor(
 
 /// A turn runner whose roster pushes and activity watcher ship to a
 /// live supervisor link (the burst runner keeps them disabled).
+#[cfg(unix)]
 fn live_feed_runner(engine: Arc<dyn SessionEngine>, socket: std::path::PathBuf) -> TurnRunner {
     let core = Arc::new(Mutex::new(SessionCore::test_core(None, "/tmp".to_string())));
     let user_bash = Arc::new(crate::user_bash::UserBash::new());

@@ -116,7 +116,9 @@ impl LineWriter {
 }
 
 /// The signal exit codes (TS `runRpcModeWithConnectionInternal`).
+#[cfg(unix)]
 const SIGTERM_EXIT: i32 = 143;
+#[cfg(unix)]
 const SIGHUP_EXIT: i32 = 129;
 
 /// The mode's exit path. The signal paths' bounded drains already waited
@@ -126,6 +128,7 @@ const SIGHUP_EXIT: i32 = 129;
 /// synchronous flush here would wait on it indefinitely — the 143/129
 /// exit must fire regardless of the reader (TS `process.exit` never
 /// queues on the pipe).
+#[cfg(unix)]
 fn exit_with(code: i32) -> ! {
     std::process::exit(code);
 }
@@ -177,6 +180,7 @@ pub async fn run_rpc_mode(options: RpcOptions) -> anyhow::Result<i32> {
             pa_core::models::ModelRegistry::create(auth, options.agent_dir.join("models.json"));
         let _ = registry.refresh_available_models().await;
     });
+    #[cfg(unix)]
     spawn_signal_handlers(Arc::clone(&session), writer.clone());
     Ok(serve_stdin(state).await)
 }
@@ -184,6 +188,7 @@ pub async fn run_rpc_mode(options: RpcOptions) -> anyhow::Result<i32> {
 /// SIGTERM exits 143, SIGHUP 129 (unix; the TS mode handles exactly this
 /// pair): abort the running turn, settle it, dispose the kernel, drain
 /// the queued frames, exit.
+#[cfg(unix)]
 fn spawn_signal_handlers(session: Arc<RpcSession>, writer: LineWriter) {
     use tokio::signal::unix::{signal, SignalKind};
     let terminate_session = Arc::clone(&session);

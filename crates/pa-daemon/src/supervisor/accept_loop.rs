@@ -189,6 +189,7 @@ mod tests {
     /// One end of a local socket pair as the accepted stream: the
     /// dispatch writes its hello and parks on the unread peer, like an
     /// idle client.
+    #[cfg(unix)]
     async fn accepted_stream() -> Box<dyn TransportStream> {
         let (_, accepted) = tokio::net::UnixStream::pair().expect("socket pair");
         Box::new(accepted)
@@ -199,6 +200,7 @@ mod tests {
     /// noise below [`RECOVERABLE_STORM_AFTER`] must not burn the
     /// backoff: the loop retries immediately, like Codex's
     /// control-socket acceptor.
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn recoverable_accept_errors_do_not_exit_the_loop() {
         let dir = TempDir::new().unwrap();
@@ -235,6 +237,7 @@ mod tests {
     /// [`RECOVERABLE_STORM_AFTER`] consecutive errors take one backoff,
     /// and the storm never spends the give-up budget - twice the budget
     /// of recoverable errors still serves the client behind them.
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn recoverable_error_storms_back_off_but_never_escalate() {
         let dir = TempDir::new().unwrap();
@@ -271,6 +274,7 @@ mod tests {
     /// A non-recoverable accept error (fd pressure, kernel buffer
     /// exhaustion) must back off and keep serving: the scripted client
     /// behind it is accepted after exactly one backoff.
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn non_recoverable_accept_errors_back_off_and_keep_serving() {
         let dir = TempDir::new().unwrap();
@@ -308,6 +312,7 @@ mod tests {
     /// connection between two sub-budget bursts resets it, so a
     /// repeating transient error with live client traffic never
     /// escalates.
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn a_served_connection_resets_the_give_up_budget() {
         let dir = TempDir::new().unwrap();

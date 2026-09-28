@@ -24,6 +24,11 @@ pub fn restrict_file(path: &Path) -> std::io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))
 }
 
+/// Windows: inherited ACLs apply; see the ACL note above.
+///
+/// # Errors
+///
+/// Never errors on this target: inherited ACLs already restrict the file.
 #[cfg(not(unix))]
 pub fn restrict_file(_path: &Path) -> std::io::Result<()> {
     // Windows: inherited ACLs apply; see the ACL note above.
@@ -41,6 +46,12 @@ pub fn restrict_dir(path: &Path) -> std::io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(PRIVATE_DIR_MODE))
 }
 
+/// Windows: inherited ACLs apply; see the ACL note above.
+///
+/// # Errors
+///
+/// Never errors on this target: inherited ACLs already restrict the
+/// directory.
 #[cfg(not(unix))]
 pub fn restrict_dir(_path: &Path) -> std::io::Result<()> {
     // Windows: inherited ACLs apply; see the ACL note above.
@@ -126,6 +137,11 @@ pub fn is_readable(path: &Path) -> Result<(), std::io::Error> {
     }
 }
 
+/// Windows: a read open probe is the equivalent permission test.
+///
+/// # Errors
+///
+/// Returns the underlying I/O error when the read open fails.
 #[cfg(not(unix))]
 pub fn is_readable(path: &Path) -> Result<(), std::io::Error> {
     // Windows: a read open probe is the equivalent permission test.
@@ -145,6 +161,11 @@ pub fn restrict_open_file(file: &std::fs::File) -> std::io::Result<()> {
     file.set_permissions(std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))
 }
 
+/// Windows: inherited ACLs apply; see the ACL note above.
+///
+/// # Errors
+///
+/// Never errors on this target: inherited ACLs already restrict the file.
 #[cfg(not(unix))]
 pub fn restrict_open_file(_file: &std::fs::File) -> std::io::Result<()> {
     // Windows: inherited ACLs apply; see the ACL note above.
@@ -166,6 +187,11 @@ pub fn create_dir_all_private(path: &Path) -> std::io::Result<()> {
         .create(path)
 }
 
+/// Windows: inherited ACLs apply; see the ACL note above.
+///
+/// # Errors
+///
+/// Returns the underlying I/O error when a directory cannot be created.
 #[cfg(not(unix))]
 pub fn create_dir_all_private(path: &Path) -> std::io::Result<()> {
     // Windows: inherited ACLs apply; see the ACL note above.
