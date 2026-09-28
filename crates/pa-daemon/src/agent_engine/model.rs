@@ -440,10 +440,17 @@ pub(crate) fn persisted_rlm_max_depth(path: Option<&str>) -> Option<u64> {
     content
         .lines()
         .rev()
-        // The marker gate never misses a match (a custom row's JSON
-        // always carries its `customType` literal) and skips the parse
-        // for every other line of the transcript.
-        .filter(|line| line.contains("rlm_max_depth_state"))
+        // The exact union gate: a matching row's raw text carries either
+        // the `customType` literal or a `\u`-escape. The reference reads
+        // every line through `serde_json` (the decoded row set), and a
+        // JSON-escaped marker character (e.g. `rlm_max_depth_\u0073tate`)
+        // only ever appears as a `\uXXXX` escape in the raw text — the
+        // short escape forms cover no marker character and serde never
+        // letter-escapes — so the union admits every line the reference
+        // could match and `rlm_max_depth_row` judges the candidates by
+        // the decoded fields (no missed rows; the `\u` arm only widens
+        // the parse set, never narrows a match).
+        .filter(|line| line.contains("rlm_max_depth_state") || line.contains("\\u"))
         .find_map(rlm_max_depth_row)
 }
 

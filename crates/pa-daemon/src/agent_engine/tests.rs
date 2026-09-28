@@ -5809,6 +5809,35 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
             ]
             .join("\n"),
         ),
+        // The escaped-marker classes (the union gate's `\u` arm): a
+        // row whose `customType` carries a JSON-escaped marker character
+        // is exactly the reference's row after decoding — the scan must
+        // honor it like the full-parse reference does — and an escaped
+        // NON-marker must stay rejected (the `\u` arm widens the parse
+        // set, never a match).
+        (
+            "escaped_customType_honored",
+            [
+                header(),
+                message(),
+                // Raw (never re-serialized): `\u0073` decodes to `s`.
+                r#"{"type":"custom","id":"e1","timestamp":"2026-01-01T00:00:05.000Z","customType":"rlm_max_depth_\u0073tate","data":{"maxDepth":13}}"#
+                    .to_string(),
+            ]
+            .join("\n"),
+        ),
+        (
+            "escaped_non_marker_rejected",
+            [
+                header(),
+                message(),
+                // `\u0041` decodes to `A`: an escaped customType that is
+                // NOT the marker — both readers return `None`.
+                r#"{"type":"custom","id":"e2","timestamp":"2026-01-01T00:00:06.000Z","customType":"totally_other_\u0041type","data":{"maxDepth":13}}"#
+                    .to_string(),
+            ]
+            .join("\n"),
+        ),
         ("empty_file", String::new()),
     ]
     .into();
@@ -5879,12 +5908,20 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
             "timestamp": "2026-01-01T00:00:00.000Z", "cwd": "/w",
         })
     };
-    let message = |id: &str, parent: &str, role: &str| {
-        json!({
+    // A message row: `parent: Some(_)` links it into the branch
+    // chain; `None` terminates the ancestry at this row (the window
+    // walk's `expected` must resolve to `None` before the header or
+    // the open reads as ambiguous ancestry and falls back).
+    let message = |id: &str, parent: Option<&str>, role: &str| {
+        let mut row = json!({
             "type": "message", "id": id, "parentId": parent,
             "timestamp": "2026-01-01T00:00:01.000Z",
             "message": { "role": role, "content": "hi", "timestamp": 0 },
-        })
+        });
+        if parent.is_none() {
+            row.as_object_mut().unwrap().remove("parentId");
+        }
+        row
     };
     let goal_row = |id: &str, parent: &str| {
         json!({
@@ -5898,17 +5935,28 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
             },
         })
     };
-    // (name, rows, terminated tail: an unterminated row forces the
-    // ordinary full-reader fallback for both readers)
-    let classes: Vec<(&str, Vec<serde_json::Value>, bool)> = [
+    // (name, rows, terminated tail, the window MUST serve): an
+    // unterminated row forces the ordinary full-reader fallback for
+    // both readers. The `window_serves` flag is the anti-vacuity gate:
+    // the windowed classes must genuinely take the WINDOW path (the
+    // exact surface the shared-open changes) — a fixture regression
+    // that silently falls back fails the open-outcome assertion, not
+    // just the (trivially equal) goal comparison.
+    let classes: Vec<(&str, Vec<serde_json::Value>, bool, bool)> = [
         (
             "windowed_with_goal",
-            vec![header(), message("m1", "", "user"), goal_row("g1", "m1")],
+            vec![
+                header(),
+                message("m1", None, "user"),
+                goal_row("g1", "m1"),
+            ],
+            true,
             true,
         ),
         (
             "windowed_no_goal",
-            vec![header(), message("m1", "", "user")],
+            vec![header(), message("m1", None, "user")],
+            true,
             true,
         ),
         (
@@ -5916,25 +5964,35 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
             vec![
                 header(),
                 // The goal links to a row no chain reaches: the active
-                // branch (leaf m2 -> m1 -> header) never visits it.
+                // branch (leaf m2 -> m1 -> header) never visits it, so
+                // the window's on-path capture skips it exactly like
+                // the reference reader does.
                 goal_row("g1", "ghost-id"),
-                message("m2", "m1", "assistant"),
+                message("m1", None, "user"),
+                message("m2", Some("m1"), "assistant"),
             ],
+            true,
             true,
         ),
         (
             "fallback_with_goal",
-            vec![header(), message("m1", "", "user"), goal_row("g1", "m1")],
+            vec![
+                header(),
+                message("m1", None, "user"),
+                goal_row("g1", "m1"),
+            ],
+            false,
             false,
         ),
         (
             "fallback_no_goal",
-            vec![header(), message("m1", "", "user")],
+            vec![header(), message("m1", None, "user")],
+            false,
             false,
         ),
     ]
     .into();
-    for (name, rows, terminated) in classes {
+    for (name, rows, terminated, window_serves) in classes {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         let mut content = rows
@@ -5946,18 +6004,23 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
             content.push('\n');
         }
         std::fs::write(&path, content).unwrap();
+        let opened = pa_core::session::window::WindowedSessionStore::open(&path);
+        assert_eq!(
+            opened.is_ok_and(|window| window.is_some()),
+            window_serves,
+            "goal class {name}: the window-served outcome must match the class              (the windowed classes must exercise the WINDOW path, the fallback              classes the full reader)"
+        );
         // The shared open's extraction (adopt_built_session's block):
         // the window's snapshot goal when the window serves, else the
         // loaded store's active-branch scan.
-        let shared =
-            if let Ok(Some(window)) = pa_core::session::window::WindowedSessionStore::open(&path) {
-                window.goal_state().cloned()
-            } else {
-                crate::session_store::SessionFile::open(&path)
-                    .ok()
-                    .as_ref()
-                    .and_then(crate::goal_state_persist::goal_state_in_session_file)
-            };
+        let shared = if let Ok(Some(window)) = opened {
+            window.goal_state().cloned()
+        } else {
+            crate::session_store::SessionFile::open(&path)
+                .ok()
+                .as_ref()
+                .and_then(crate::goal_state_persist::goal_state_in_session_file)
+        };
         assert_eq!(
             shared,
             crate::goal_state_persist::persisted_goal_state(Some(&path)),
