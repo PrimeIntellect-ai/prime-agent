@@ -4,12 +4,12 @@
 //! spawn-admission helpers only this surface uses.
 use super::{
     assert_thinking_supported, bail, create_default_rlm_subagent_session_name, json, now_ms,
-    registry, resolve_child_model, rlm_child_label, spawn_name_unavailable, usage, Arc,
-    ChildCloseReason, ChildRecord, Context, DaemonCommand, Duration, Instant, Mutex, Path, PathBuf,
-    Result, RlmChildResult, RlmChildTerminalNotice, RlmCreateSessionHandle,
-    RlmCreateSessionRequest, RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle,
-    RlmSpawnRequest, RlmSubagentEntry, RlmSubagentHost, SpawnNameReservationGuard,
-    SupervisorChildSessions, SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS,
+    resolve_child_model, rlm_child_label, spawn_name_unavailable, usage, Arc, ChildCloseReason,
+    ChildRecord, Context, DaemonCommand, Duration, Instant, Mutex, Path, PathBuf, Result,
+    RlmChildResult, RlmChildTerminalNotice, RlmCreateSessionHandle, RlmCreateSessionRequest,
+    RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry,
+    RlmSubagentHost, SpawnNameReservationGuard, SupervisorChildSessions,
+    SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS,
 };
 
 /// Resolve the child model with the daemon `allowedModels` allowlist

@@ -2,10 +2,10 @@
 //! per-request deadlines, and the worker-not-connected refusal.
 use super::{
     anyhow, attach_client_capabilities, bail, client_command_payload, command_active_session_id,
-    json, mpsc, oneshot, response_failure, response_line, response_success, socket,
-    streamed_attach_lines, subscribers, wants_chunked, Arc, DaemonCommand, DaemonResponse,
-    Duration, Outbound, ResidentWorker, Result, RouteAdmission, SnapshotPurpose, Supervisor, Value,
-    WorkerReply, WorkerRequest,
+    json, mpsc, oneshot, response_failure, response_line, response_success, streamed_attach_lines,
+    subscribers, wants_chunked, Arc, DaemonCommand, DaemonResponse, Duration, Outbound,
+    ResidentWorker, Result, RouteAdmission, SnapshotPurpose, Supervisor, Value, WorkerReply,
+    WorkerRequest,
 };
 
 pub(crate) const ROUTE_TIMEOUT_MS: u64 = 30_000;

@@ -4,7 +4,7 @@
 //! and the unleased fallback) that serializes writers onto the file.
 
 use super::{
-    fs, json, new_entry_id, write, Context, HashMap, PathBuf, Result, Serialize, SessionEntry,
+    fs, json, new_entry_id, Context, HashMap, PathBuf, Result, Serialize, SessionEntry,
     SessionFile, SessionHeader, Value, Write,
 };
 

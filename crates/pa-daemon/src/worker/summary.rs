@@ -6,7 +6,7 @@ use super::{
     env, is_rlm_child_status_item, json, lifecycle, queue, summary, supports_fast_mode, turn,
     AgentConnectionState, Arc, DaemonOutbound, DaemonSessionClosedReason, EventPump, Map, Mutex,
     OutboundFrame, QueueCheckpoint, QueueLanes, QueuedItem, Result, SessionActionSnapshot,
-    SessionCore, SessionEngine, SessionFile, Value, VecDeque, Worker,
+    SessionCore, SessionEngine, Value, VecDeque, Worker,
 };
 
 use crate::types::SessionSummary;

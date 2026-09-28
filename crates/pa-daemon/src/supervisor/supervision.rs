@@ -2,7 +2,7 @@
 //! the spawn/connect plumbing.
 use super::routing::fail_unsent_request;
 use super::{
-    anyhow, connect_transport, create_command_payload, json, mpsc, options, persist_worker,
+    anyhow, connect_transport, create_command_payload, json, mpsc, persist_worker,
     probe_worker_socket, routing, sessions, socket, supervision, util, worker_connect_deadline,
     write_frame, Arc, Child, ClientRouting, Command, Context, DaemonWorkerLifecycle, Duration,
     Ordering, PathBuf, PrivateFrameReader, ResidentWorker, Result, RouteAdmission, Supervisor,

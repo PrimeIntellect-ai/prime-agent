@@ -3,8 +3,8 @@
 use super::{
     anyhow, config, connection, create, env, input, json, lifecycle, paths, queue, queue_lanes,
     response_failure, response_success, session_snapshot, summary, turn, DaemonResponse,
-    QueueCheckpoint, QueuePriority, QueuedItem, Result, RlmSessionIdentity, SessionFile,
-    TurnPolicy, Value, Worker, SIDE_QUESTION_SETTLE_TIMEOUT,
+    QueueCheckpoint, QueuePriority, QueuedItem, RlmSessionIdentity, SessionFile, TurnPolicy, Value,
+    Worker, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 impl Worker {

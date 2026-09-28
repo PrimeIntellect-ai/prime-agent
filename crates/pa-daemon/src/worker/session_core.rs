@@ -2,7 +2,7 @@
 //! lanes, and the event sequencing shared by the connection tasks, the turn
 //! runner, and the compaction manager (every access is through the core
 //! mutex).
-use super::{input, queue, summary, turn, QueuedItem};
+use super::{queue, summary, turn, QueuedItem};
 
 use std::collections::VecDeque;
 

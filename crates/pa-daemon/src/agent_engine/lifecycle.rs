@@ -3,7 +3,7 @@
 //! expansion and session-command funnels, and the kernel host
 //! wiring the session build installs (moved with its concern).
 use super::{
-    execute_session_command, json_round_trip, map_thinking_level, model,
+    execute_session_command, json_round_trip, map_thinking_level,
     register_agent_message_host_handlers, register_agent_observe_host_handlers,
     switchable_stream_fn, turn, AgentEngineConfig, AgentSessionEngine, Arc, CoreSessionEngine,
     EngineModelSelection, HostRequestHandlers, LinkAgentMessageController,

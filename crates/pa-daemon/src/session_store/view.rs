@@ -2,7 +2,7 @@
 //! the window/settings reads, the compacted message fold and its scalars,
 //! and the wire-shape message helpers.
 
-use super::{json, view, MessageWindowScalars, SessionEntry, SessionFile, Value};
+use super::{json, MessageWindowScalars, SessionEntry, SessionFile, Value};
 
 /// Entry types that represent user intent (vs daemon bookkeeping).
 const CONTENT_ENTRY_TYPES: &[&str] = &[
