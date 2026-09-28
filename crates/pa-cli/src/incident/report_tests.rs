@@ -16,7 +16,7 @@ fn entries(lines: &[String]) -> Vec<IncidentLogEntry> {
 }
 
 /// A supervisor-side log line (the daemon-supervisor component).
-fn supervisor_line(ts: &str, msg: &str, extra: serde_json::Value) -> String {
+fn supervisor_line(ts: &str, msg: &str, extra: &serde_json::Value) -> String {
     let mut record = json!({
         "ts": ts,
         "level": "warn",
