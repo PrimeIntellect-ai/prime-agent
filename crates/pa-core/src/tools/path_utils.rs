@@ -329,6 +329,28 @@ fn win32_normalize_string(path: &str, allow_above_root: bool) -> String {
 /// the fixture tests below pin it against Node's own outputs.
 #[cfg(any(windows, test))]
 fn win32_node_path_resolve(base: &str, path: &str) -> String {
+    win32_resolve_with(base, path, &win32_device_cwd)
+}
+
+/// Node's drive-specific cwd lookup: the `=<device>` environment
+/// convention, else the process cwd (the caller's drive check decides
+/// whether the answer applies).
+#[cfg(any(windows, test))]
+fn win32_device_cwd(device: &str) -> String {
+    std::env::var_os(format!("={device}"))
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        })
+}
+
+/// The resolver core, with the drive-cwd lookup injected so the drive
+/// convention is testable without mutating the process environment.
+#[cfg(any(windows, test))]
+fn win32_resolve_with(base: &str, path: &str, device_cwd: &dyn Fn(&str) -> String) -> String {
     let mut resolved_device = String::new();
     let mut resolved_tail = String::new();
     let mut resolved_absolute = false;
@@ -351,21 +373,14 @@ fn win32_node_path_resolve(base: &str, path: &str) -> String {
             // against that drive's cwd (Node's `=<device>` convention),
             // else the process cwd - unless the process cwd itself sits
             // on a different drive, where the drive root is the answer.
-            let device_cwd = std::env::var_os(format!("={resolved_device}"))
-                .map(|value| value.to_string_lossy().into_owned())
-                .unwrap_or_else(|| {
-                    std::env::current_dir()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned()
-                });
-            let same_drive = device_cwd
+            let candidate = device_cwd(&resolved_device);
+            let same_drive = candidate
                 .get(..2)
                 .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&resolved_device));
-            if !same_drive && device_cwd.chars().nth(2) == Some('\\') {
+            if !same_drive && candidate.chars().nth(2) == Some('\\') {
                 format!("{resolved_device}\\")
             } else {
-                device_cwd
+                candidate
             }
         };
         let chars: Vec<char> = part.chars().collect();
@@ -548,32 +563,32 @@ mod tests {
     fn win32_resolve_matches_node_outputs() {
         let cases = [
             // (base, input, expected)
-            ("C:\cwd\dir", "C:\a\b\c.txt", "C:\a\b\c.txt"),
-            ("C:\cwd\dir", "a\b.txt", "C:\cwd\dir\a\b.txt"),
-            ("C:\cwd\dir", "a/b.txt", "C:\cwd\dir\a\b.txt"),
-            ("C:\cwd\dir", ".\a.txt", "C:\cwd\dir\a.txt"),
-            ("C:\cwd\dir", "..\a.txt", "C:\cwd\a.txt"),
-            ("C:\cwd\dir", "a\..\..\z.txt", "C:\cwd\z.txt"),
-            ("C:\cwd\dir", "/foo.txt", "C:\foo.txt"),
-            ("C:\cwd\dir", "\foo.txt", "C:\foo.txt"),
+            (r"C:\cwd\dir", r"C:\a\b\c.txt", r"C:\a\b\c.txt"),
+            (r"C:\cwd\dir", r"a\b.txt", r"C:\cwd\dir\a\b.txt"),
+            (r"C:\cwd\dir", r"a/b.txt", r"C:\cwd\dir\a\b.txt"),
+            (r"C:\cwd\dir", r".\a.txt", r"C:\cwd\dir\a.txt"),
+            (r"C:\cwd\dir", r"..\a.txt", r"C:\cwd\a.txt"),
+            (r"C:\cwd\dir", r"a\..\..\z.txt", r"C:\cwd\z.txt"),
+            (r"C:\cwd\dir", "/foo.txt", r"C:\foo.txt"),
+            (r"C:\cwd\dir", r"\foo.txt", r"C:\foo.txt"),
             (
-                "C:\cwd\dir",
-                "\\server\share\f.txt",
-                "\\server\share\f.txt",
+                r"C:\cwd\dir",
+                r"\\server\share\f.txt",
+                r"\\server\share\f.txt",
             ),
-            ("C:\cwd\dir", "D:\work\f.txt", "D:\work\f.txt"),
-            ("C:\cwd\dir", "C:rel.txt", "C:\cwd\dir\rel.txt"),
-            ("C:\cwd\dir", "", "C:\cwd\dir"),
-            ("C:\cwd\dir", "C:\", "C:\"),
-            ("C:\cwd\dir", "a\", "C:\cwd\dir\a"),
-            ("C:\cwd\dir", "..", "C:\cwd"),
-            ("C:\cwd\dir", "C:/a/b/../c", "C:\a\c"),
+            (r"C:\cwd\dir", r"D:\work\f.txt", r"D:\work\f.txt"),
+            (r"C:\cwd\dir", "C:rel.txt", r"C:\cwd\dir\rel.txt"),
+            (r"C:\cwd\dir", "", r"C:\cwd\dir"),
+            (r"C:\cwd\dir", r"C:\", r"C:\"),
+            (r"C:\cwd\dir", r"a\", r"C:\cwd\dir\a"),
+            (r"C:\cwd\dir", "..", r"C:\cwd"),
+            (r"C:\cwd\dir", "C:/a/b/../c", r"C:\a\c"),
             (
-                "\\server\share\cwd",
-                "rel\f.txt",
-                "\\server\share\cwd\rel\f.txt",
+                r"\\server\share\cwd",
+                r"rel\f.txt",
+                r"\\server\share\cwd\rel\f.txt",
             ),
-            ("\\server\share\cwd", "C:\abs.txt", "C:\abs.txt"),
+            (r"\\server\share\cwd", r"C:\abs.txt", r"C:\abs.txt"),
         ];
         for (base, input, expected) in cases {
             assert_eq!(
@@ -584,12 +599,12 @@ mod tests {
         }
 
         let absolute = [
-            ("C:\", true),
+            (r"C:\", true),
             ("C:/x", true),
             ("D:work", false),
             ("/x", true),
-            ("\x", true),
-            ("\\server\share", true),
+            (r"\x", true),
+            (r"\\server\share", true),
             ("", false),
             ("C:rel", false),
             ("foo", false),
@@ -602,23 +617,29 @@ mod tests {
     }
 
     /// Node's drive-specific cwd convention: a device-relative tail
-    /// resolves against the drive's cwd from the `=<device>` environment
-    /// variable when the convention is present (Node's exact fallback
-    /// order).
+    /// resolves against that drive's cwd when the convention answers
+    /// (Node's `=<device>` fallback order), and against the DRIVE ROOT
+    /// when the answered cwd sits on a different drive (the injected
+    /// lookup keeps the test off the process environment).
     #[test]
     fn win32_resolve_honors_the_drive_cwd_convention() {
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::set_var("=Q:", r"Q:\custom");
         assert_eq!(
-            win32_node_path_resolve(r"C:\cwd", r"Q:rel\f.txt"),
+            win32_resolve_with(
+                r"C:\cwd",
+                r"Q:rel\f.txt",
+                &|device| {
+                    assert_eq!(device, "Q:", "the lookup sees the resolved drive");
+                    r"Q:\custom".to_string()
+                }
+            ),
             r"Q:\custom\rel\f.txt"
         );
-        std::env::remove_var("=Q:");
+        // A drive cwd on a DIFFERENT drive is not the answer: the drive
+        // root is (Node's `path.charCodeAt(2) === CHAR_BACKWARD_SLASH`
+        // guard).
+        assert_eq!(
+            win32_resolve_with(r"C:\cwd", r"Q:rel\f.txt", &|_| r"D:\other".to_string()),
+            r"Q:\rel\f.txt"
+        );
     }
-
-    /// Env-mutating tests serialize on this lock (the env is
-    /// process-global).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }
