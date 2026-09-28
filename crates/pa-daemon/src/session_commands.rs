@@ -39,19 +39,19 @@ pub(crate) fn run_session_command(
     // `_executeSelectedSessionCommand` records the attempted command
     // before the queue runs it).
     if !emit(EngineEvent::CustomMessage(custom_message_value(
-        &session_command_echo_row(&command),
+        &session_command_echo_row(command),
     ))) {
         return None;
     }
     if is_compact {
-        let custom_instructions = compact_custom_instructions(&command);
+        let custom_instructions = compact_custom_instructions(command);
         let start =
             crate::compaction::compaction_start_event("manual", custom_instructions.as_deref());
         if !emit(EngineEvent::CompactionStart { event: start }) {
             return None;
         }
     }
-    let execution = match engine.execute_session_command(&command) {
+    let execution = match engine.execute_session_command(command) {
         Ok(execution) => execution,
         // Pre-execution failures (model resolution, session build) still
         // record the attempted command as a failure result row (the echo
@@ -59,7 +59,7 @@ pub(crate) fn run_session_command(
         Err(error) => {
             let error = format!("{error:#}");
             let execution = SessionCommandExecution {
-                messages: vec![session_command_failure_row(&command, &error)],
+                messages: vec![session_command_failure_row(command, &error)],
                 compaction: None,
                 compaction_skipped: None,
                 continuation_message: None,
@@ -67,7 +67,7 @@ pub(crate) fn run_session_command(
                 refinement: None,
                 refinement_failed: None,
             };
-            if !emit_compact_end(&command, &execution, emit) {
+            if !emit_compact_end(command, &execution, emit) {
                 return None;
             }
             for message in &execution.messages {
@@ -95,7 +95,7 @@ pub(crate) fn run_session_command(
     // The settled `compaction_end` precedes any failure result row (TS
     // `compact()` emits the event before the queued-command catch arm
     // appends `Command failed: ...`).
-    if is_compact && !emit_compact_end(&command, &execution, emit) {
+    if is_compact && !emit_compact_end(command, &execution, emit) {
         return None;
     }
     // `/autonomous` (either flip): the previous run's owed continuations

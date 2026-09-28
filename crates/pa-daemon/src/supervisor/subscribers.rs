@@ -220,7 +220,7 @@ impl SessionSubscribers {
             return outcome;
         };
         subscribers.retain(|connection_id, subscriber| {
-            match subscriber.queue.try_send(Arc::clone(&payload)) {
+            match subscriber.queue.try_send(Arc::clone(payload)) {
                 Ok(()) => {
                     outcome.delivered += 1;
                     subscriber.logged_full = false;

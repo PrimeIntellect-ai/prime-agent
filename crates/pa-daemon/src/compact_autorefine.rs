@@ -152,7 +152,7 @@ mod tests {
     /// dir derives from (the worker shape: sessions with the refine
     /// surface), or without one (sessions that never auto-refine).
     fn trigger_engine(
-        script: serde_json::Value,
+        script: &serde_json::Value,
         reserve_tokens: u64,
         with_session_file: bool,
     ) -> (AgentSessionEngine, tempfile::TempDir) {

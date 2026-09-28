@@ -337,7 +337,6 @@ impl Supervisor {
     /// then (after the routed detach answered) release the client's leases
     /// for those sessions.
     pub(crate) fn begin_detach_pause_bookkeeping(
-        &self,
         connection: &Arc<ClientConnectionState>,
         active_session_id: Option<&str>,
         attached: &[String],
@@ -406,7 +405,6 @@ impl Supervisor {
     /// The reattach clear (TS reattach arm): reattached sessions may
     /// acquire pauses again.
     pub(crate) fn clear_detaching_after_reattach(
-        &self,
         connection: &Arc<ClientConnectionState>,
         sessions: &[String],
     ) {

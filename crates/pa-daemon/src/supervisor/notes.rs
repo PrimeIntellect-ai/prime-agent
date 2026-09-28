@@ -56,7 +56,7 @@ impl Supervisor {
     /// evaluates the attached set in the same pass that writes). A full
     /// queue drops the frame and the stall-cycle transition lands in the
     /// daemon log (finding 4a visibility).
-    pub(crate) fn publish_session_event(&self, active_session_id: &str, payload: Arc<Value>) {
+    pub(crate) fn publish_session_event(&self, active_session_id: &str, payload: &Arc<Value>) {
         let outcome = self
             .session_subscribers
             .publish(active_session_id, &payload);

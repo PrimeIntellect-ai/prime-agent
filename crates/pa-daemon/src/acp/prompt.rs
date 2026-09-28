@@ -70,7 +70,7 @@ pub(super) async fn handle_session_prompt(
         // of a request error.
         session.producer().finish_prompt(turn_id).await;
         let _ = tx.send(jsonrpc::response(
-            &id,
+            id,
             &stop_reason_response(AcpStopReason::Cancelled),
         ));
         return;

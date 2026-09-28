@@ -286,7 +286,7 @@ async fn handle_request(
     tx: producer::FrameSink,
 ) {
     match method.as_str() {
-        "initialize" => handle_initialize(id, &params, &mode.product_version, &tx),
+        "initialize" => handle_initialize(&id, &params, &mode.product_version, &tx),
         "session/new" => {
             handle_session_new(id, params, state, mode, tx).await;
         }
@@ -310,7 +310,7 @@ async fn handle_request(
     }
 }
 
-fn handle_initialize(id: Value, params: &Value, product_version: &str, tx: &producer::FrameSink) {
+fn handle_initialize(id: &Value, params: &Value, product_version: &str, tx: &producer::FrameSink) {
     if let Err(error_response) = validate_initialize(&id, params) {
         let _ = tx.send(error_response);
         return;

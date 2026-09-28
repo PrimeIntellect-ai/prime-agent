@@ -128,7 +128,7 @@ pub(super) async fn handle_set_config_option(
     let options = match outcome {
         Ok(options) => options,
         Err(error) => {
-            let _ = tx.send(error.response(id));
+            let _ = tx.send(error.response(&id));
             return;
         }
     };
@@ -148,7 +148,7 @@ impl ConfigOptionError {
     }
 
     /// The JSON-RPC error frame (the TS `invalidParams` data shape).
-    fn response(self, id: Value) -> Value {
+    fn response(self, id: &Value) -> Value {
         match self {
             ConfigOptionError::InvalidParams(reason) => jsonrpc::error_response(
                 &id,

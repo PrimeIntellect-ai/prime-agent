@@ -217,7 +217,7 @@ fn serve(
             None,
             &small_usage(),
         ),
-        chunk(&json!({}), Some("stop"), usage),
+        chunk(&json!({}), Some("stop"), &usage),
         json!({
             "id": "chatcmpl-test",
             "object": "chat.completion.chunk",

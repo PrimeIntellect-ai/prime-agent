@@ -96,7 +96,7 @@ pub(super) async fn handle_set_config_option(
         ))
     };
     if let Err(error) = outcome {
-        let _ = tx.send(error.response(id));
+        let _ = tx.send(error.response(&id));
         return;
     }
     // TS's `refreshConfig` rethrows a failed `getState`, so the enqueued
@@ -105,7 +105,7 @@ pub(super) async fn handle_set_config_option(
     let options = match refresh_wire_config(link, &daemon_session_id, &config, &producer).await {
         Ok(options) => options,
         Err(error) => {
-            let _ = tx.send(error.response(id));
+            let _ = tx.send(error.response(&id));
             return;
         }
     };
@@ -129,7 +129,7 @@ impl WireConfigError {
     }
 
     /// The JSON-RPC error frame (the TS `invalidParams` data shape).
-    fn response(self, id: Value) -> Value {
+    fn response(self, id: &Value) -> Value {
         match self {
             WireConfigError::InvalidParams(reason) => jsonrpc::error_response(
                 &id,

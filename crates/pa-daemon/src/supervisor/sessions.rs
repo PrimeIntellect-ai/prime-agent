@@ -57,7 +57,7 @@ impl Supervisor {
                     "sessionId": binding.session_id,
                     "sessionFile": binding.session_file,
                 });
-                self.publish_session_event(&previous, std::sync::Arc::new(event));
+                self.publish_session_event(&previous, &std::sync::Arc::new(event));
             }
         }
     }
@@ -95,7 +95,7 @@ impl Supervisor {
             };
             self.publish_session_event(
                 &current,
-                std::sync::Arc::new(json!({
+                &std::sync::Arc::new(json!({
                     "type": "session_binding",
                     "previousActiveSessionId": selector,
                     "activeSessionId": current,

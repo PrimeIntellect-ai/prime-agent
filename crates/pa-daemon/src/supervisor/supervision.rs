@@ -697,7 +697,7 @@ impl Supervisor {
                         if let Some(active_session_id) = active_session_id {
                             reader_supervisor.publish_session_event(
                                 &active_session_id,
-                                std::sync::Arc::new(payload),
+                                &std::sync::Arc::new(payload),
                             );
                         }
                     } else if outbound_type == "side_question_event" {
@@ -708,7 +708,7 @@ impl Supervisor {
                         if let Some(active_session_id) = active_session_id {
                             reader_supervisor.publish_session_event(
                                 &active_session_id,
-                                std::sync::Arc::new(payload),
+                                &std::sync::Arc::new(payload),
                             );
                         }
                     } else if outbound_type == "heartbeats_changed" {

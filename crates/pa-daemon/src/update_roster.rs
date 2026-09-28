@@ -681,7 +681,7 @@ mod tests {
                 created_at_ms: 1,
                 ledger: &ledger,
             },
-            &vec![snapshot],
+            &[snapshot],
         )
         .unwrap_err();
         assert!(error.to_string().contains("no session id"));
