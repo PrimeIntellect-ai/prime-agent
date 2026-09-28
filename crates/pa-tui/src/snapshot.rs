@@ -369,7 +369,11 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         starting: actions.as_ref().and_then(starting_from_actions),
         rlm_child_status: actions
             .as_ref()
-            .map(queue_rlm_child_status)
+            .map(|actions| queue_lane_indices(actions, "rlmChildStatus"))
+            .unwrap_or_default(),
+        injected_prompts: actions
+            .as_ref()
+            .map(|actions| queue_lane_indices(actions, "injectedPrompts"))
             .unwrap_or_default(),
     };
 
@@ -410,15 +414,16 @@ fn starting_from_actions(actions: &Value) -> Option<String> {
     })
 }
 
-/// The RLM child status provenance rider of a `sessionActions` wire value
-/// (`rlmChildStatus`: the parked child-status notices by lane index —
-/// Rust-native typed provenance with no TS counterpart; the strip folds
-/// exactly these rows). A projection without parked notices omits the
-/// rider entirely.
-fn queue_rlm_child_status(actions: &Value) -> crate::queued::RlmChildStatusIndices {
+/// One typed-provenance rider of a `sessionActions` wire value (the
+/// parked lane indices it marks — Rust-native provenance with no TS
+/// counterpart; the strip folds exactly the marked rows): `rlmChildStatus`
+/// for the parked child-status notices, `injectedPrompts` for the
+/// engine-minted continuations. A projection without parked marks omits
+/// the rider entirely.
+fn queue_lane_indices(actions: &Value, rider: &str) -> crate::queued::QueueLaneIndices {
     let indices = |lane: &str| {
         actions
-            .get("rlmChildStatus")
+            .get(rider)
             .and_then(|rider| rider.get(lane))
             .and_then(Value::as_array)
             .map(|items| {
@@ -430,7 +435,7 @@ fn queue_rlm_child_status(actions: &Value) -> crate::queued::RlmChildStatusIndic
             })
             .unwrap_or_default()
     };
-    crate::queued::RlmChildStatusIndices {
+    crate::queued::QueueLaneIndices {
         steering: indices("steering"),
         follow_up: indices("followUp"),
     }
