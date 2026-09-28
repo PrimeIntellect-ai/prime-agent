@@ -105,7 +105,22 @@ impl LineWriter {
     /// must fire even against a stalled reader, so the wait is bounded
     /// (a broken or slow pipe retires after the deadline).
     pub async fn drain_bounded(&self) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        self.drain_within(std::time::Duration::from_secs(2)).await;
+    }
+
+    /// Wait until the writer task has written every queued frame, giving
+    /// up once `budget` elapses. A frame queued right before a
+    /// non-yielding CPU span would otherwise sit unflushed behind it
+    /// (the writer task cannot run until the executor next polls), so a
+    /// transport that publishes a frame ahead of such a span flushes
+    /// first — TS writes stdout frames synchronously at the emit, and
+    /// the queue's deferral is the only thing that makes the frame late.
+    /// The budget keeps a stalled reader (a full pipe) from wedging the
+    /// command behind it: TS never blocks a command on the reader, so
+    /// the wait retires at the deadline and the writer task keeps its
+    /// queue.
+    pub async fn drain_within(&self, budget: std::time::Duration) {
+        let deadline = std::time::Instant::now() + budget;
         while self.pending.load(Ordering::SeqCst) > 0 {
             if std::time::Instant::now() >= deadline {
                 return;
@@ -114,6 +129,17 @@ impl LineWriter {
         }
     }
 }
+
+/// The compaction paths' frame-flush budget: after queueing
+/// `compaction_start` and before entering the compaction's pre-
+/// summarizer CPU span, the handler waits for the writer task to flush
+/// the frame (the span runs to the first `await` without an executor
+/// yield, so the queued frame would otherwise reach the client only
+/// when the span ends). The budget is sized far above a healthy pipe
+/// write (microseconds) and far below the command's own wall, and only
+/// binds against a reader that stopped draining its pipe.
+pub(crate) const COMPACT_FRAME_FLUSH_BUDGET: std::time::Duration =
+    std::time::Duration::from_millis(50);
 
 /// The signal exit codes (TS `runRpcModeWithConnectionInternal`).
 const SIGTERM_EXIT: i32 = 143;

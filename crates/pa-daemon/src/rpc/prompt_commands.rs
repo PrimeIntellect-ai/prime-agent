@@ -19,6 +19,7 @@ use pa_core::session_engine::{PromptOptions, PromptOutcome};
 use pa_types::session::CustomMessage;
 
 use super::commands::{compaction_frame, kick_queue_pump, resume_pump, RpcState};
+use super::COMPACT_FRAME_FLUSH_BUDGET;
 use super::protocol::{self, ResponseData};
 
 /// `prompt` (TS `connection.prompt(message, {images, streamingBehavior,
@@ -165,6 +166,12 @@ async fn run_session_command(
                 None,
             ))
             .await;
+        // Same flush as the direct `compact` command: the admitted
+        // `/compact` runs the identical pre-summarizer CPU span (the
+        // pa-core executor's compact branch), and TS shows the client
+        // the compaction start at the emit — the queued frame must not
+        // wait the span out behind it.
+        state.writer.drain_within(COMPACT_FRAME_FLUSH_BUDGET).await;
     }
     let execution = {
         // The executor rebuilds session context on its compact branch
