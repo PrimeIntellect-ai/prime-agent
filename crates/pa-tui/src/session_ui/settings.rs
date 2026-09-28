@@ -269,6 +269,9 @@ impl SessionUi {
             values.tree_filter_mode = "user-only".to_string();
             values.warnings_anthropic_extra_usage = true;
             values.theme = "prime".to_string();
+            // No settings seam: the tier row reads the TS default tier
+            // (getDefaultServiceTier's "default"), never a blank value.
+            values.default_service_tier = "default".to_string();
         }
         // The registered themes (TS `getAvailableThemes`; this surface
         // ships the builtins).

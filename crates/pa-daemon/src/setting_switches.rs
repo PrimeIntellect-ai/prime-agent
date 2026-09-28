@@ -442,6 +442,11 @@ impl Worker {
         let effective = effective_service_tier(Some(tier), self.engine.as_ref()).unwrap_or(tier);
         let (preference_changed, effective_changed, cwd) = {
             let mut core = self.core.lock().unwrap();
+            // The engine's request slot moves under the SAME lock as the
+            // core publish (the clamp's contract): a concurrent turn must
+            // never read the new connection state while its provider
+            // target still carries the old tier.
+            self.engine.configure_service_tier(Some(effective));
             let preference = core.service_tier;
             let previous_active = core.active_service_tier;
             core.service_tier = Some(tier);
@@ -461,7 +466,6 @@ impl Worker {
             }
             (preference_changed, effective_changed, cwd)
         };
-        self.engine.configure_service_tier(Some(effective));
         if preference_changed && engine_supports_service_tier(self.engine.as_ref(), tier) {
             // TS persists the default only when the model supports the
             // tier (#2144: `supportsServiceTier(this.model, serviceTier)`).

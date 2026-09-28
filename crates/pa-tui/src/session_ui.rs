@@ -1327,6 +1327,13 @@ impl SessionUi {
             view.working = None;
         }
         view.follow();
+        // An open `/heartbeats` picker follows the rebuilt session's
+        // catalog (the channel fold's `apply_catalog` path): without this
+        // a rebind leaves the picker showing the previous session's rows
+        // and its Manage actions target stale jobs.
+        if let Some(picker) = view.heartbeats_picker.as_mut() {
+            picker.apply_catalog(self.heartbeat_catalog.clone(), None);
+        }
         // The brand splash is the EMPTY chat's header (TS mounts
         // `BrandSplashHeader` in `ui.start()`): a rebuild that folds a
         // non-empty transcript suppresses it — the chat opened or
