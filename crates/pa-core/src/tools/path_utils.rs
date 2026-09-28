@@ -626,14 +626,10 @@ mod tests {
     #[test]
     fn win32_resolve_honors_the_drive_cwd_convention() {
         assert_eq!(
-            win32_resolve_with(
-                r"C:\cwd",
-                r"Q:rel\f.txt",
-                &|device| {
-                    assert_eq!(device, "Q:", "the lookup sees the resolved drive");
-                    r"Q:\custom".to_string()
-                }
-            ),
+            win32_resolve_with(r"C:\cwd", r"Q:rel\f.txt", &|device| {
+                assert_eq!(device, "Q:", "the lookup sees the resolved drive");
+                r"Q:\custom".to_string()
+            }),
             r"Q:\custom\rel\f.txt"
         );
         // A drive cwd on a DIFFERENT drive is not the answer: the drive
