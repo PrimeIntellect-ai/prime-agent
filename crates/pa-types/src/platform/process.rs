@@ -17,6 +17,7 @@
 /// exposes neither - owners then trust liveness checks alone, exactly like
 /// TS records with `processStartId: undefined`.
 #[cfg(unix)]
+#[must_use]
 pub fn process_start_id(pid: u32) -> Option<String> {
     if pid == 0 {
         return None;
@@ -79,6 +80,7 @@ pub fn process_start_id(_pid: u32) -> Option<String> {
 /// a guess: the refusal's flavor claim (TypeScript vs Rust) is made only
 /// from a resolved path.
 #[cfg(target_os = "linux")]
+#[must_use]
 pub fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
     if pid == 0 {
         return None;
@@ -533,7 +535,7 @@ mod suspend_shield_tests {
     fn sigint_disposition() -> &'static str {
         let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
         // SAFETY: queries SIGINT's disposition into `action`.
-        unsafe { libc::sigaction(libc::SIGINT, std::ptr::null(), &mut action) };
+        unsafe { libc::sigaction(libc::SIGINT, std::ptr::null(), &raw mut action) };
         let handler = action.sa_sigaction;
         if handler == libc::SIG_DFL {
             "default"

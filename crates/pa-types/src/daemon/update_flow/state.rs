@@ -53,6 +53,7 @@ pub enum UpdateState {
 
 impl UpdateState {
     /// The states this one may legally move to (spec §4 transition table).
+    #[must_use]
     pub fn successors(self) -> &'static [UpdateState] {
         match self {
             Self::Acquire => &[UpdateState::Join, UpdateState::Planning],
@@ -76,6 +77,7 @@ impl UpdateState {
     }
 
     /// Terminal states relay a final status and never transition again.
+    #[must_use]
     pub fn is_terminal(self) -> bool {
         self.successors().is_empty()
     }
@@ -84,6 +86,7 @@ impl UpdateState {
 /// Whether the coordinator FSM may move `from` to `to` (spec §4). Every
 /// out-of-table move is a driver bug: the watchdog table (spec §9) only ever
 /// produces the successors listed here.
+#[must_use]
 pub fn update_transition_allowed(from: UpdateState, to: UpdateState) -> bool {
     from.successors().contains(&to)
 }

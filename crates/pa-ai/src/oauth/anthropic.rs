@@ -316,6 +316,8 @@ fn credentials_from(token: TokenResponse) -> AnthropicCredentials {
 }
 
 /// Wall-clock milliseconds since the epoch (the `expires` convention).
+// Epoch millis fit i64 for ~292 million years; the u128 duration's millis are the i64 convention here.
+#[allow(clippy::cast_possible_truncation)]
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -403,10 +405,13 @@ async fn json_token_request(
         .and_then(serde_json::Value::as_f64)
         .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
         .ok_or_else(|| format!("{label} response missing fields: {json}"))?;
+    // The wire's expires_in is an integer second count read through JSON f64; the i64 truncation is the port's convention.
+    #[allow(clippy::cast_possible_truncation)]
+    let expires_in_seconds = expires_in as i64;
     Ok(TokenResponse {
         access,
         refresh,
-        expires_in: expires_in as i64,
+        expires_in: expires_in_seconds,
     })
 }
 
@@ -660,6 +665,8 @@ mod tests {
         assert_eq!(credentials.access, "the-access");
         assert_eq!(credentials.refresh, "the-refresh");
         // TS: expires = now + expires_in * 1000 - 5 minutes.
+        // Epoch millis fit i64; the assertion's tolerance covers the cast convention.
+        #[allow(clippy::cast_possible_truncation)]
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()

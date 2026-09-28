@@ -149,6 +149,8 @@ fn strip_symbol_keys(value: &Value) -> Value {
 }
 
 /// Port of `toChatMessages`.
+// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+#[allow(clippy::too_many_lines)]
 fn to_chat_messages(messages: &[Message], supports_images: bool) -> Vec<Value> {
     let mut result: Vec<Value> = Vec::new();
 

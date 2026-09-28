@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 /// Environment variable names that can provide an API key for a provider.
+#[must_use]
 pub fn get_api_key_env_vars(provider: &str) -> Option<Vec<&'static str>> {
     match provider {
         "github-copilot" => Some(vec!["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]),
@@ -63,6 +64,7 @@ pub fn find_env_keys(provider: &str) -> Option<Vec<String>> {
 /// Get an API key for a provider from known environment variables.
 /// Returns the sentinel "<authenticated>" for providers configured through
 /// ambient credential sources (Google Vertex ADC, Amazon Bedrock profiles).
+#[must_use]
 pub fn get_env_api_key(provider: &str) -> Option<String> {
     if let Some(keys) = find_env_keys(provider) {
         if let Some(first) = keys.first() {

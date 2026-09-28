@@ -27,6 +27,8 @@ fn spawn_stub(responses: Vec<(u16, serde_json::Value)>) -> (String, mpsc::Receiv
     std::thread::spawn(move || {
         for response in responses {
             let (mut stream, _) = listener.accept().expect("accept");
+            // 64 KiB read buffer on a dedicated stub thread is fine for a test.
+            #[allow(clippy::large_stack_arrays)]
             let mut buffer = [0u8; 64 * 1024];
             let mut read_total = 0usize;
             let mut request = String::new();

@@ -284,6 +284,8 @@ fn codex_usage_limit_message(
         .plan_type
         .map(|plan| format!(" ({plan} plan)"))
         .unwrap_or_default();
+    // Epoch millis fit i64; the max(0) floor makes the ms count non-negative for the u64 wire field.
+    #[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
     let retry_after_ms = error
         .resets_at
         .map(|resets_at| {
@@ -292,6 +294,8 @@ fn codex_usage_limit_message(
                 .saturating_sub(now_ms() as i64)
         })
         .map(|ms| ms.max(0) as u64);
+    // The minutes wait is f64 rounding math; u64 ms is the message's integral form.
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
     let when = retry_after_ms
         .map(|ms| {
             format!(
@@ -381,6 +385,8 @@ pub fn map_codex_event(event: Value) -> Result<MappedCodexEvent, CodexStreamErro
         let flat_code = event.get("code").and_then(Value::as_str).unwrap_or("");
         let flat_message = event.get("message").and_then(Value::as_str).unwrap_or("");
         let nested = event.get("error").filter(|error| error.is_object());
+        // The wire's status_code is an HTTP status; u16 is the protocol's width.
+        #[allow(clippy::cast_possible_truncation)]
         let status = event
             .get("status_code")
             .and_then(Value::as_u64)
@@ -511,6 +517,8 @@ pub fn apply_codex_service_tier_pricing(
     model_id: &str,
 ) {
     let multiplier = get_codex_service_tier_cost_multiplier(model_id, service_tier);
+    // The multiplier table is discrete; equality with the 1.0 sentinel is the no-op contract.
+    #[allow(clippy::float_cmp)]
     if multiplier == 1.0 {
         return;
     }
@@ -681,6 +689,8 @@ mod tests {
     }
 
     #[test]
+    // Golden equality against the fixed multiplier table is the contract here.
+    #[allow(clippy::float_cmp)]
     fn service_tier_multipliers() {
         assert_eq!(
             get_codex_service_tier_cost_multiplier("gpt-5.5-codex", Some("priority")),

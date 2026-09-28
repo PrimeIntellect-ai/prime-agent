@@ -13,6 +13,7 @@ use crate::daemon::SocketIdentity;
 /// Stat the endpoint's filesystem identity (dev + ino). Unix sockets only;
 /// named-pipe endpoints have no file to stat.
 #[cfg(unix)]
+#[must_use]
 pub fn socket_identity(path: &Path) -> Option<SocketIdentity> {
     use std::os::unix::fs::MetadataExt;
     let metadata = std::fs::symlink_metadata(path).ok()?;

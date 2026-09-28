@@ -87,7 +87,7 @@ pub fn timestamp_to_ms(ts: &str) -> Option<i64> {
             if !rest.is_empty() || zone_hour > 23 || zone_minute > 59 {
                 return None;
             }
-            offset_ms = sign * (zone_hour as i64 * 3_600_000 + zone_minute as i64 * 60_000);
+            offset_ms = sign * (i64::from(zone_hour) * 3_600_000 + i64::from(zone_minute) * 60_000);
         }
     } else if !rest.is_empty() {
         return None;
@@ -103,9 +103,9 @@ pub fn timestamp_to_ms(ts: &str) -> Option<i64> {
     }
     Some(
         days * 86_400_000
-            + hour as i64 * 3_600_000
-            + minute as i64 * 60_000
-            + second as i64 * 1_000
+            + i64::from(hour) * 3_600_000
+            + i64::from(minute) * 60_000
+            + i64::from(second) * 1_000
             + millis
             - offset_ms,
     )
@@ -125,8 +125,8 @@ fn take_digits(rest: &mut &str, len: usize) -> Option<u32> {
 /// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's
 /// `days_from_civil`); `None` for a date outside the i64 epoch-day range.
 fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
-    let month = month as i64;
-    let day = day as i64;
+    let month = i64::from(month);
+    let day = i64::from(day);
     if !(-999_999_999..=999_999_999).contains(&year) {
         return None;
     }
@@ -152,7 +152,9 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = if month <= 2 { y + 1 } else { y };
-    (year, month as u32, day as u32)
+    let month = u32::try_from(month).expect("month of a civil date is 1..=12");
+    let day = u32::try_from(day).expect("day of a civil date is 1..=31");
+    (year, month, day)
 }
 
 /// Parse one `agent.jsonl` line; malformed lines return `None` (TS
@@ -191,6 +193,9 @@ pub fn parse_incident_log_line(line: &str) -> Option<IncidentLogEntry> {
 
 /// The pid field accepts any integral JSON number (the daemon writes
 /// integer pids; a non-integral one is not a pid sighting).
+// Only whole JSON numbers reach the cast (fract filter); the saturating
+// `as` is the lenient contract for out-of-range pids.
+#[allow(clippy::cast_possible_truncation)]
 fn pid_number(value: &serde_json::Value) -> Option<i64> {
     value.as_i64().or_else(|| {
         value

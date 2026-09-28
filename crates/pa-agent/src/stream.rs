@@ -85,6 +85,7 @@ pub enum AssistantMessageEvent {
 
 impl AssistantMessageEvent {
     /// Terminal message for a `Done`/`Error` event (TS `getTerminalMessage`).
+    #[must_use]
     pub fn terminal_message(&self) -> Option<&AssistantMessage> {
         match self {
             AssistantMessageEvent::Done { message, .. } => Some(message),
@@ -95,6 +96,7 @@ impl AssistantMessageEvent {
 
     /// True for the partial-update events the loop applies to the streaming
     /// message (`text_*`, `thinking_*`, `toolcall_*`).
+    #[must_use]
     pub fn is_delta(&self) -> bool {
         matches!(
             self,
@@ -261,6 +263,7 @@ pub struct AssistantMessageEventStream {
 }
 
 /// Create a connected event stream pair.
+#[must_use]
 pub fn event_stream() -> (
     AssistantMessageEventStreamHandle,
     AssistantMessageEventStream,

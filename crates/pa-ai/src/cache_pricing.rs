@@ -18,6 +18,7 @@ pub struct AnthropicCacheCreationUsage {
     pub ephemeral_1h_input_tokens: u64,
 }
 
+#[must_use]
 pub fn has_standard_anthropic_cache_pricing(model: &Model) -> bool {
     let model_id = model.id.to_lowercase();
     let is_anthropic_model = model.provider == "anthropic"
@@ -35,6 +36,7 @@ pub fn has_standard_anthropic_cache_pricing(model: &Model) -> bool {
     (model.cost.cache_write.as_f64() - expected_cache_write_cost).abs() <= tolerance
 }
 
+#[must_use]
 pub fn get_anthropic_cache_costs(input_cost: f64, duration: AnthropicCacheDuration) -> (f64, f64) {
     (
         input_cost * ANTHROPIC_CACHE_READ_COST_MULTIPLIER,
@@ -47,6 +49,7 @@ pub fn get_anthropic_cache_costs(input_cost: f64, duration: AnthropicCacheDurati
     )
 }
 
+#[must_use]
 pub fn get_anthropic_cache_write_cost(
     input_cost: f64,
     duration: AnthropicCacheDuration,
@@ -55,7 +58,10 @@ pub fn get_anthropic_cache_write_cost(
     let Some(creation) = cache_creation else {
         return get_anthropic_cache_costs(input_cost, duration).1;
     };
+    // Token counts sit far below f64's 2^53 exact-integer range; the cost math is f64 by design.
+    #[allow(clippy::cast_precision_loss)]
     let five_minute_tokens = creation.ephemeral_5m_input_tokens as f64;
+    #[allow(clippy::cast_precision_loss)]
     let one_hour_tokens = creation.ephemeral_1h_input_tokens as f64;
     let total_tokens = five_minute_tokens + one_hour_tokens;
     if total_tokens == 0.0 {

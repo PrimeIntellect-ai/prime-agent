@@ -59,9 +59,9 @@ pub fn record_websocket_sse_fallback(session_id: Option<&str>) {
         return;
     };
     let active = state.sse_fallback_sessions.contains(session_id);
-    let stats = state.stats.entry(session_id.to_string()).or_default();
-    stats.sse_fallbacks += 1;
-    stats.websocket_fallback_active = Some(active);
+    let session_stats = state.stats.entry(session_id.to_string()).or_default();
+    session_stats.sse_fallbacks += 1;
+    session_stats.websocket_fallback_active = Some(active);
 }
 
 /// Port of `recordWebSocketFailure`: pins the session to SSE fallback and
@@ -76,13 +76,14 @@ pub fn record_websocket_failure(session_id: Option<&str>, error: &CodexStreamErr
         return;
     };
     state.sse_fallback_sessions.insert(session_id.to_string());
-    let stats = state.stats.entry(session_id.to_string()).or_default();
-    stats.websocket_failures += 1;
-    stats.last_websocket_error = Some(error.to_string());
-    stats.websocket_fallback_active = Some(true);
+    let session_stats = state.stats.entry(session_id.to_string()).or_default();
+    session_stats.websocket_failures += 1;
+    session_stats.last_websocket_error = Some(error.to_string());
+    session_stats.websocket_fallback_active = Some(true);
 }
 
 /// Port of `getOpenAICodexWebSocketDebugStats`.
+#[must_use]
 pub fn get_debug_stats(session_id: &str) -> Option<WebSocketDebugStats> {
     session_state().lock().ok()?.stats.get(session_id).cloned()
 }
@@ -141,35 +142,35 @@ pub fn record_request_stats(
     let Ok(mut state) = session_state().lock() else {
         return;
     };
-    let stats = state.stats.entry(session_id.to_string()).or_default();
-    stats.requests += 1;
+    let session_stats = state.stats.entry(session_id.to_string()).or_default();
+    session_stats.requests += 1;
     if reused {
-        stats.connections_reused += 1;
+        session_stats.connections_reused += 1;
     } else {
-        stats.connections_created += 1;
+        session_stats.connections_created += 1;
     }
     if use_cached_context {
-        stats.cached_context_requests += 1;
+        session_stats.cached_context_requests += 1;
     }
     if request_body.get("store").and_then(Value::as_bool) == Some(true) {
-        stats.store_true_requests += 1;
+        session_stats.store_true_requests += 1;
     }
     let input_items = request_body
         .get("input")
         .and_then(Value::as_array)
         .map_or(0, |items| items.len() as u64);
-    stats.last_input_items = input_items;
+    session_stats.last_input_items = input_items;
     if let Some(previous_response_id) = request_body
         .get("previous_response_id")
         .and_then(Value::as_str)
     {
-        stats.delta_requests += 1;
-        stats.last_delta_input_items = Some(input_items);
-        stats.last_previous_response_id = Some(previous_response_id.to_string());
+        session_stats.delta_requests += 1;
+        session_stats.last_delta_input_items = Some(input_items);
+        session_stats.last_previous_response_id = Some(previous_response_id.to_string());
     } else {
-        stats.full_context_requests += 1;
-        stats.last_delta_input_items = None;
-        stats.last_previous_response_id = None;
+        session_stats.full_context_requests += 1;
+        session_stats.last_delta_input_items = None;
+        session_stats.last_previous_response_id = None;
     }
 }
 

@@ -76,6 +76,8 @@ async fn normalized_result(model: &Model) -> Value {
     });
     let stream = stream_openai_completions(model, &context, Some(&options));
     let result = stream.result().await;
+    // The local mirrors the `content` JSON field it builds; a rename would churn the differential harness.
+    #[allow(clippy::similar_names)]
     let content: Vec<Value> = result
         .content
         .iter()

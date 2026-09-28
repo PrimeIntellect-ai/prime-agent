@@ -15,6 +15,7 @@ pub struct Properties(Map<String, Value>);
 
 impl Properties {
     /// An empty map.
+    #[must_use]
     pub fn new() -> Self {
         Self(Map::new())
     }
@@ -44,15 +45,18 @@ impl Properties {
     }
 
     /// Read back a property (test + schema-check surface).
+    #[must_use]
     pub fn get(&self, key: &str) -> Option<&Value> {
         self.0.get(key)
     }
 
     /// Number of properties.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }

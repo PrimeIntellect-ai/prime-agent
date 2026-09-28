@@ -32,6 +32,8 @@ pub struct CallbackCode {
 }
 
 /// Settled once per login; the first settle wins.
+// Two states: outer None = unsettled, inner None = settled-empty (cancelled).
+#[allow(clippy::option_option)]
 #[derive(Default, Debug)]
 struct CallbackShared {
     result: tokio::sync::Mutex<Option<Option<CallbackCode>>>,
@@ -104,7 +106,7 @@ impl AnthropicCallbackServer {
     /// Returns an error when the listener cannot be bound.
     pub async fn start(state: &str) -> Result<Self, String> {
         let host = std::env::var(CALLBACK_HOST_ENV).unwrap_or_else(|_| "127.0.0.1".to_string());
-        Self::bind(&host, CALLBACK_PORT, state).await
+        Self::bind(&host, CALLBACK_PORT, state)
     }
 
     /// Bind one exact host and port; the caller owns the failure
@@ -113,7 +115,7 @@ impl AnthropicCallbackServer {
     /// # Errors
     ///
     /// Returns an error when the listener cannot be bound.
-    pub async fn bind(host: &str, port: u16, state: &str) -> Result<Self, String> {
+    pub fn bind(host: &str, port: u16, state: &str) -> Result<Self, String> {
         // `SO_REUSEADDR`: a closed listener's recent connections linger
         // in TIME_WAIT on the registered port (the browser race drives
         // real sockets); the next login's bind must not fail on them
@@ -413,7 +415,6 @@ mod tests {
     /// One live server on a free loopback port, with its port.
     async fn live(state: &str) -> (AnthropicCallbackServer, u16) {
         let server = AnthropicCallbackServer::bind("127.0.0.1", 0, state)
-            .await
             .expect("a free loopback port binds");
         let port = server.port();
         (server, port)
@@ -514,7 +515,6 @@ mod tests {
     #[tokio::test]
     async fn a_settle_in_the_registration_window_still_wakes() {
         let server = AnthropicCallbackServer::bind("127.0.0.1", 0, "the-state")
-            .await
             .expect("a free loopback port binds");
         let shared = &server.shared;
         // The settle lands before the wait registers: the stored permit

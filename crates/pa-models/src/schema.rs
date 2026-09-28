@@ -14,7 +14,7 @@
 //! - remote refresh parses with skip-invalid semantics: bad entries drop,
 //!   the rest of the refresh survives.
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use serde::Deserialize;
 
@@ -116,7 +116,7 @@ pub fn parse_model_catalog(
     let _ = envelope.models.len();
 
     let mut parsed: Vec<Model> = Vec::with_capacity(models.len());
-    let mut seen: BTreeMap<(String, String), ()> = BTreeMap::new();
+    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
     for candidate in models {
         let model = match parse_entry(candidate) {
             Ok(model) => model,
@@ -128,10 +128,7 @@ pub fn parse_model_catalog(
                 InvalidEntries::Reject => return Err(error),
             },
         };
-        if seen
-            .insert((model.provider.clone(), model.id.clone()), ())
-            .is_some()
-        {
+        if !seen.insert((model.provider.clone(), model.id.clone())) {
             return Err(format!(
                 "Duplicate model catalog entry [\"{}\",\"{}\"]",
                 model.provider, model.id
@@ -235,7 +232,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn entry(overrides: serde_json::Value) -> serde_json::Value {
+    fn entry(overrides: &serde_json::Value) -> serde_json::Value {
         let mut base = json!({
             "id": "model-a",
             "name": "Model A",
@@ -256,23 +253,26 @@ mod tests {
         base
     }
 
-    fn catalog(models: Vec<serde_json::Value>) -> serde_json::Value {
-        json!({"schemaVersion": 1, "models": models})
+    fn catalog(models: impl AsRef<[serde_json::Value]>) -> serde_json::Value {
+        json!({"schemaVersion": 1, "models": models.as_ref()})
     }
 
     #[test]
     fn parses_a_valid_entry() {
-        let parsed = parse_model_catalog(&catalog(vec![entry(json!({}))]), InvalidEntries::Reject)
+        let parsed = parse_model_catalog(&catalog(vec![entry(&json!({}))]), InvalidEntries::Reject)
             .expect("valid");
         assert_eq!(parsed.models.len(), 1);
         assert_eq!(parsed.models[0].id, "model-a");
+        // Golden equality is the contract: cacheWrite must round-trip the
+        // fixture's exact 1.25.
+        #[allow(clippy::float_cmp)]
         assert_eq!(parsed.models[0].cost.cache_write.as_f64(), 1.25);
     }
 
     #[test]
     fn unsupported_version_rejects() {
         for version in [json!(2), json!(3), json!(0)] {
-            let payload = json!({"schemaVersion": version, "models": [entry(json!({}))]});
+            let payload = json!({"schemaVersion": version, "models": [entry(&json!({}))]});
             assert!(parse_model_catalog(&payload, InvalidEntries::Reject).is_err());
         }
         assert!(parse_model_catalog(&json!({"models": []}), InvalidEntries::Reject).is_err());
@@ -280,15 +280,15 @@ mod tests {
 
     #[test]
     fn unknown_entry_key_rejects() {
-        let payload = catalog(vec![entry(json!({"surprise": 1}))]);
+        let payload = catalog(vec![entry(&json!({"surprise": 1}))]);
         assert!(parse_model_catalog(&payload, InvalidEntries::Reject).is_err());
     }
 
     #[test]
     fn headers_key_rejects_the_entry() {
         let payload = catalog(vec![
-            entry(json!({"id": "good"})),
-            entry(json!({"id": "evil", "headers": {"User-Agent": "x/1"}})),
+            entry(&json!({"id": "good"})),
+            entry(&json!({"id": "evil", "headers": {"User-Agent": "x/1"}})),
         ]);
         assert!(parse_model_catalog(&payload, InvalidEntries::Reject).is_err());
         let parsed = parse_model_catalog(&payload, InvalidEntries::SkipInvalid).expect("kept rest");
@@ -312,7 +312,7 @@ mod tests {
             json!({"thinkingLevelMap": {"high": ""}}),
             json!({"api": ""}),
         ] {
-            let payload = catalog(vec![entry(bad)]);
+            let payload = catalog(vec![entry(&bad)]);
             assert!(
                 parse_model_catalog(&payload, InvalidEntries::Reject).is_err(),
                 "expected rejection"
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn thinking_level_map_parses_levels() {
-        let payload = catalog(vec![entry(json!({
+        let payload = catalog(vec![entry(&json!({
             "reasoning": true,
             "thinkingLevelMap": {"off": null, "low": "low", "high": "high", "xhigh": "max"}
         }))]);
@@ -333,12 +333,12 @@ mod tests {
 
     #[test]
     fn compat_shapes_validate_per_api() {
-        let good = catalog(vec![entry(json!({
+        let good = catalog(vec![entry(&json!({
             "api": "anthropic-messages",
             "compat": {"supportsEagerToolInputStreaming": true}
         }))]);
         assert!(parse_model_catalog(&good, InvalidEntries::Reject).is_ok());
-        let bad = catalog(vec![entry(json!({
+        let bad = catalog(vec![entry(&json!({
             "api": "anthropic-messages",
             "compat": {"supportsStore": true}
         }))]);
@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn duplicates_reject_even_in_skip_mode() {
-        let payload = catalog(vec![entry(json!({})), entry(json!({}))]);
+        let payload = catalog(vec![entry(&json!({})), entry(&json!({}))]);
         let err = parse_model_catalog(&payload, InvalidEntries::SkipInvalid)
             .expect_err("duplicate rejected");
         assert!(err.contains("Duplicate"), "{err}");
@@ -356,10 +356,10 @@ mod tests {
     #[test]
     fn skip_invalid_drops_bad_entries_and_keeps_the_rest() {
         let payload = catalog(vec![
-            entry(json!({"id": "bad", "contextWindow": 0})),
-            entry(json!({"id": "good-1"})),
-            entry(json!({"id": "bad-2", "input": []})),
-            entry(json!({"id": "good-2"})),
+            entry(&json!({"id": "bad", "contextWindow": 0})),
+            entry(&json!({"id": "good-1"})),
+            entry(&json!({"id": "bad-2", "input": []})),
+            entry(&json!({"id": "good-2"})),
         ]);
         let parsed = parse_model_catalog(&payload, InvalidEntries::SkipInvalid).expect("kept rest");
         let ids: Vec<&str> = parsed.models.iter().map(|m| m.id.as_str()).collect();
@@ -368,13 +368,13 @@ mod tests {
 
     #[test]
     fn empty_after_skipping_rejects() {
-        let payload = catalog(vec![entry(json!({"contextWindow": 0}))]);
+        let payload = catalog(vec![entry(&json!({"contextWindow": 0}))]);
         assert!(parse_model_catalog(&payload, InvalidEntries::SkipInvalid).is_err());
     }
 
     #[test]
     fn envelope_allows_unknown_top_level_keys() {
-        let mut payload = catalog(vec![entry(json!({}))]);
+        let mut payload = catalog(vec![entry(&json!({}))]);
         payload
             .as_object_mut()
             .unwrap()

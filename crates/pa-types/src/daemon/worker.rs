@@ -1,7 +1,11 @@
 //! Worker protocol: the supervisor <-> worker command/event unions, worker
 //! descriptors, and the update-restart manifest.
 
-use super::*;
+#[cfg(test)]
+use super::rt;
+use super::{
+    AgentMessage, DaemonClientCapability, Deserialize, JsonMap, Serialize, SnapshotPurpose, Value,
+};
 
 // ---------------------------------------------------------------------------
 // Worker protocol (supervisor <-> worker)
@@ -277,6 +281,9 @@ pub struct DaemonUpdateRestartQueue {
     pub next_turn: Vec<AgentMessage>,
 }
 
+// Wire/API contract: the per-session state flags serialize as-is; reshaping
+// them into enums changes the restart-session schema.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DaemonUpdateRestartSession {

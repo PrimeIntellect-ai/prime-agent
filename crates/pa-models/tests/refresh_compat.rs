@@ -21,12 +21,15 @@ use serde_json::{json, Value};
 
 /// A cache over the models catalog parse pipeline (the same closure
 /// `ModelCatalog` installs in production), aimed at the mock server.
-fn models_cache(dir: &std::path::Path, url: String) -> CatalogCache<Vec<pa_models::Model>> {
+fn models_cache(
+    dir: &std::path::Path,
+    url: impl AsRef<str>,
+) -> CatalogCache<Vec<pa_models::Model>> {
     let templates = PinnedTemplates::from_compiled();
     let parse: pa_models::cache::CatalogParse<Vec<pa_models::Model>> =
         Arc::new(move |payload, _scope| parse_provider_model_catalog(payload, &templates));
     CatalogCache::new(
-        &url,
+        url.as_ref(),
         Some(dir.join("provider-model-catalog.v1.json")),
         Arc::new(CatalogFetcher::new()),
         parse,

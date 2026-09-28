@@ -57,7 +57,9 @@ pub enum MistralPromptMode {
 
 impl MistralPromptMode {
     pub fn as_str(self) -> &'static str {
-        "reasoning"
+        match self {
+            MistralPromptMode::Reasoning => "reasoning",
+        }
     }
 }
 

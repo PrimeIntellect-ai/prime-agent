@@ -16,6 +16,7 @@ pub const MIN_OUTPUT_TOKENS: u64 = 1_024;
 /// The default per-request output budget for a model (TS `buildBaseOptions`):
 /// the model's max output capped at [`REQUEST_MAX_TOKENS_CAP`], or `None` when
 /// the model declares no max output (providers that default server-side).
+#[must_use]
 pub fn default_request_max_tokens(model: &Model) -> Option<u64> {
     (model.max_tokens > 0).then(|| model.max_tokens.min(REQUEST_MAX_TOKENS_CAP))
 }
@@ -123,6 +124,7 @@ pub fn adjust_max_tokens_for_thinking(
 /// thresholds must reserve this effective budget, or a request can claim
 /// `input + max_tokens > contextWindow` while the trigger still says
 /// "not due".
+#[must_use]
 pub fn effective_request_max_tokens(model: &Model, reasoning: ModelThinkingLevel) -> u64 {
     let base = default_request_max_tokens(model).unwrap_or(0);
     if matches!(reasoning, ModelThinkingLevel::Off) || base == 0 {

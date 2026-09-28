@@ -132,6 +132,7 @@ impl ModelThinkingLevel {
     /// The wire name shared by the `thinkingLevelMap` keys, the CLI
     /// `--thinking` values, and the daemon `create` config (`"off"`,
     /// `"minimal"`, ...).
+    #[must_use]
     pub fn wire_name(self) -> &'static str {
         match self {
             ModelThinkingLevel::Off => "off",
@@ -426,6 +427,7 @@ impl UserContent {
     /// Tag-strict like the TS text extraction (`block.type === "text"`):
     /// un-modeled [`UserContentBlock::Raw`] blocks contribute nothing here
     /// even when they carry a bare `text` field.
+    #[must_use]
     pub fn text(&self) -> String {
         match self {
             UserContent::Text(text) => text.clone(),
@@ -846,6 +848,10 @@ impl ModelCompat {
     /// Panics if serializing `kind` to a JSON value fails or if that value
     /// is not a JSON object. Both are unreachable for the current compat
     /// structs, which serialize to plain JSON objects.
+    // Workspace API consumed across crates (pa-ai, pa-models, pa-core); the
+    // by-value `CompatKind` signature is fleet-wide, out of this lane's scope.
+    #[allow(clippy::needless_pass_by_value)]
+    #[must_use]
     pub fn from_kind(kind: CompatKind) -> Self {
         let value = match &kind {
             CompatKind::AnthropicMessages(c) => serde_json::to_value(c),
@@ -1090,6 +1096,7 @@ pub fn clamp_service_tier(model: Option<&Model>, tier: Option<ServiceTier>) -> O
 /// the fast-mode (priority) tier exists on the eligible ids served over
 /// the `OpenAI` Responses APIs. Shared by the surfaces that gate the
 /// `/fast` command on model eligibility.
+#[must_use]
 pub fn supports_fast_mode(model: &Model) -> bool {
     supports_service_tier(model, ServiceTier::Priority)
 }
