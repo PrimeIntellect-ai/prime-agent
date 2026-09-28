@@ -279,10 +279,7 @@ mod tests {
             Arc::clone(&http) as Arc<dyn pa_core::mcp::OAuthHttp>,
         );
         let mut handlers = HostRequestHandlers::default();
-        manager
-            .lock()
-            .unwrap()
-            .register_host_handlers(&mut handlers);
+        McpManager::register_host_handlers(&manager, &mut handlers);
         let begin_login = handlers.get("mcp.begin_login").expect("wired").clone();
 
         let login = tokio::spawn(async move {
@@ -413,10 +410,7 @@ mod tests {
             Arc::clone(&http) as Arc<dyn pa_core::mcp::OAuthHttp>,
         );
         let mut handlers = HostRequestHandlers::default();
-        manager
-            .lock()
-            .unwrap()
-            .register_host_handlers(&mut handlers);
+        McpManager::register_host_handlers(&manager, &mut handlers);
         let begin_login = handlers.get("mcp.begin_login").expect("wired").clone();
         let error = begin_login(HostRequestPayload {
             data: json!({ "server": "nope" }),
