@@ -270,7 +270,12 @@ impl SessionNavigation {
                 ));
             }
         }
-        self.open_replacement(&target.to_string_lossy(), cwd_override, "import_jsonl", lease)
+        self.open_replacement(
+            &target.to_string_lossy(),
+            cwd_override,
+            "import_jsonl",
+            lease,
+        )
     }
 
     /// Open one replacement session file and check its stored cwd exists
@@ -768,8 +773,8 @@ mod tests {
         let entry_id = {
             let mut core = worker.core.lock().unwrap();
             let store = core.store.as_mut().expect("created store");
-            let entry_id =
-                store.append_message(&json!({ "role": "user", "content": "hi", "timestamp": 1u64 }));
+            let entry_id = store
+                .append_message(&json!({ "role": "user", "content": "hi", "timestamp": 1u64 }));
             let _ = store.rewrite();
             entry_id
         };

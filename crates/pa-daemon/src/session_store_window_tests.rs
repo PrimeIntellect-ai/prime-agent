@@ -449,7 +449,8 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
         let mut store = SessionFile::create("/tmp", None, 0);
         store.set_path(path);
         store.append_message(&assistant(&usage_of(1, 1, 0, 0.0), 1));
-        let kept = store.append_message(&json!({"role": "user", "content": "k", "timestamp": 2u64}));
+        let kept =
+            store.append_message(&json!({"role": "user", "content": "k", "timestamp": 2u64}));
         store.append_entry(
             "compaction",
             json!({"summary": "old", "firstKeptEntryId": kept, "tokensBefore": 5}),

@@ -199,7 +199,7 @@ mod tests {
     /// below, the big turns cross, environment-independently.
     fn crossing_headroom() -> u64 {
         let (probe, _probe_dir) =
-            faux_engine_with_settings(&json!{ "responses": [{"text": "seed reply"}] }), 1);
+            faux_engine_with_settings(&json!({ "responses": [{"text": "seed reply"}] }), 1);
         let mut probe_events: Vec<EngineEvent> = Vec::new();
         admit(&probe, "seed turn".to_string(), &mut probe_events);
         let baseline = probe_events

@@ -546,8 +546,9 @@ fn scan_builds_transcript_search_text() {
     let mut session = SessionFile::create("/tmp", None, 0);
     let path = dir.join(session_file_name(session.session_id()));
     session.set_path(path.clone());
-    session
-        .append_message(&json!({"role": "user", "content": "fix the login bug", "timestamp": 1u64}));
+    session.append_message(
+        &json!({"role": "user", "content": "fix the login bug", "timestamp": 1u64}),
+    );
     session.append_message(&json!({
         "role": "assistant",
         "content": [{ "type": "text", "text": "fixed in auth.rs" }],

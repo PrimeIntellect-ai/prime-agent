@@ -83,10 +83,7 @@ impl Supervisor {
     }
 
     /// `roster_unsubscribe`.
-    pub(crate) fn handle_roster_unsubscribe(
-        command_id: &str,
-        type_name: &str,
-    ) -> DaemonResponse {
+    pub(crate) fn handle_roster_unsubscribe(command_id: &str, type_name: &str) -> DaemonResponse {
         response_success(Some(command_id), type_name, None)
     }
 

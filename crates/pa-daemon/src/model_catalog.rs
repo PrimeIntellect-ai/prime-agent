@@ -637,9 +637,11 @@ mod tests {
         write_auth_json(&fixture.agent_dir, "sk-account-b", "team-b");
         let (release, held) = gate();
         fixture.server.push(held);
-        fixture.server.push(Answer::Raw(ok_json(&pi_snapshot_payload(
-            "live/team-b-marker",
-        ))));
+        fixture
+            .server
+            .push(Answer::Raw(ok_json(&pi_snapshot_payload(
+                "live/team-b-marker",
+            ))));
         fixture
             .server
             .push(Answer::Raw(ok_json(&private_payload(&[]))));
@@ -741,9 +743,11 @@ mod tests {
         write_auth_json(&fixture.agent_dir, "sk-account-b", "team-b");
         let (release, held) = gate();
         fixture.server.push(held);
-        fixture.server.push(Answer::Raw(ok_json(&pi_snapshot_payload(
-            "live/team-b-marker",
-        ))));
+        fixture
+            .server
+            .push(Answer::Raw(ok_json(&pi_snapshot_payload(
+                "live/team-b-marker",
+            ))));
         fixture
             .server
             .push(Answer::Raw(ok_json(&private_payload(&[]))));

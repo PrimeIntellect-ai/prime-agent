@@ -79,7 +79,7 @@ fn spawn_mock(answer: &'static str) -> PathBuf /* url */ {
     PathBuf::from(url)
 }
 
-fn chunk(delta: Value, finish_reason: Option<&str>) -> String {
+fn chunk(delta: &Value, finish_reason: Option<&str>) -> String {
     json!({
         "id": "chatcmpl-archive",
         "object": "chat.completion.chunk",
@@ -112,8 +112,8 @@ fn serve(mut stream: TcpStream, answer: &str) -> std::io::Result<()> {
     }
     let mut payload = String::new();
     for data in [
-        chunk(json!({"role": "assistant", "content": answer}), None),
-        chunk(json!({}), Some("stop")),
+        chunk(&json!({"role": "assistant", "content": answer}), None),
+        chunk(&json!({}), Some("stop")),
     ] {
         write!(payload, "data: {data}\n\n").expect("write to String");
     }
@@ -178,7 +178,7 @@ impl Client {
         (client, hello)
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -291,7 +291,7 @@ fn pin_with_scheduled_job(agent_dir: &Path, session_id: &str, session_file: &Pat
 fn saved_rows(client: &mut Client, id: &str, cwd: &Path) -> Vec<Value> {
     client.send_command(
         id,
-        json!({ "type": "list_saved_sessions", "cwd": cwd.to_string_lossy() }),
+        &json!({ "type": "list_saved_sessions", "cwd": cwd.to_string_lossy() }),
     );
     loop {
         let line = client.read_line();
@@ -416,7 +416,7 @@ fn an_archived_session_resumes_through_the_wake() {
         assert_eq!(hello["type"], "daemon_hello");
         client.send_command(
             "c1",
-            json!({
+            &json!({
                 "type": "create",
                 "name": "beta",
                 "config": {
@@ -440,7 +440,7 @@ fn an_archived_session_resumes_through_the_wake() {
             .to_string();
         client.send_command(
             "p1",
-            json!({
+            &json!({
                 "type": "prompt_and_wait",
                 "activeSessionId": active_id,
                 "message": "first turn",
@@ -453,7 +453,7 @@ fn an_archived_session_resumes_through_the_wake() {
         );
         client.send_command(
             "k1",
-            json!({ "type": "kill", "activeSessionId": active_id }),
+            &json!({ "type": "kill", "activeSessionId": active_id }),
         );
         assert_eq!(client.read_response("k1")["success"], true, "kill failed");
         session_id
@@ -486,7 +486,7 @@ fn an_archived_session_resumes_through_the_wake() {
     // turn runs against the mock.
     client.send_command(
         "s1",
-        json!({ "type": "send_message", "targetActiveSessionId": "beta", "message": "wake up" }),
+        &json!({ "type": "send_message", "targetActiveSessionId": "beta", "message": "wake up" }),
     );
     let sent = client.read_response("s1");
     assert_eq!(sent["success"], true, "send by name failed: {sent}");
@@ -502,7 +502,7 @@ fn an_archived_session_resumes_through_the_wake() {
     wait_until(Duration::from_secs(30), || {
         client.send_command(
             "gm1",
-            json!({ "type": "get_messages", "activeSessionId": woken_id }),
+            &json!({ "type": "get_messages", "activeSessionId": woken_id }),
         );
         let response = client.read_response("gm1");
         assert_eq!(response["success"], true, "get_messages failed");

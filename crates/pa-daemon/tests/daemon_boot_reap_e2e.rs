@@ -135,7 +135,7 @@ impl Client {
         self.writer.flush().expect("flush");
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         self.send(&json!({
             "type": "command",
             "id": id,
@@ -195,7 +195,7 @@ fn create_session(
     .expect("write script");
     client.send_command(
         &format!("c{index}"),
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.to_string_lossy(),
@@ -213,7 +213,7 @@ fn create_session(
         .to_string();
     client.send_command(
         &format!("a{index}"),
-        json!({ "type": "attach", "activeSessionId": session_id }),
+        &json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let attached = client.read_response(&format!("a{index}"));
     assert_eq!(attached["success"], true, "attach {index} failed");
@@ -363,7 +363,7 @@ fn boot_reap_clears_the_leftover_and_the_session_reopens() {
     assert_eq!(hello2["type"], "daemon_hello");
     client2.send_command(
         "reopen",
-        json!({
+        &json!({
             "type": "create",
             "sessionPath": session_file.to_string_lossy(),
             "config": {
@@ -404,7 +404,7 @@ fn boot_reap_clears_the_leftover_and_the_session_reopens() {
 
     // A clean terminal stop for the reopened session: the new daemon's
     // own worker dies with its supervisor (no leak into later tests).
-    client2.send_command("bye", json!({ "type": "shutdown" }));
+    client2.send_command("bye", &json!({ "type": "shutdown" }));
     let deadline = Instant::now() + Duration::from_secs(10);
     while process_alive(daemon2.child.id()) {
         assert!(Instant::now() < deadline, "the new supervisor never exited");
@@ -477,7 +477,7 @@ fn boot_reap_never_touches_a_different_socket_daemon() {
     );
     client_b.send_command(
         "p-b",
-        json!({ "type": "prompt", "activeSessionId": session_b, "message": "go" }),
+        &json!({ "type": "prompt", "activeSessionId": session_b, "message": "go" }),
     );
     loop {
         let line = client_b.read_line();
@@ -493,7 +493,7 @@ fn boot_reap_never_touches_a_different_socket_daemon() {
     // Teardown: no workers leak into later tests. Both supervisors take
     // the protocol stop (a clean terminal stop under the fixed
     // begin_shutdown), and both processes exit inside the window.
-    client_b.send_command("bye-b", json!({ "type": "shutdown" }));
+    client_b.send_command("bye-b", &json!({ "type": "shutdown" }));
     client_a_send_shutdown(&socket_a);
     let deadline = Instant::now() + Duration::from_secs(10);
     while process_alive(daemon_b.child.id()) || process_alive(daemon_a2.child.id()) {
@@ -508,6 +508,6 @@ fn boot_reap_never_touches_a_different_socket_daemon() {
 /// `daemon_a2`'s own shutdown (the reopened session's worker dies with it).
 fn client_a_send_shutdown(socket: &Path) -> Value {
     let (mut client, _) = Client::connect(socket);
-    client.send_command("bye-a2", json!({ "type": "shutdown" }));
+    client.send_command("bye-a2", &json!({ "type": "shutdown" }));
     client.read_response("bye-a2")
 }

@@ -149,7 +149,7 @@ impl Client {
         }
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -209,7 +209,7 @@ fn setup(name: &str) -> Harness {
     let mut client = Client::connect(&socket);
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -353,7 +353,7 @@ fn imported_session_compacts() {
     // Import the grown transcript onto the live session.
     harness.client.send_command(
         "i-1",
-        json!({
+        &json!({
             "type": "import_jsonl",
             "activeSessionId": harness.session_id,
             "inputPath": fixture.to_string_lossy(),
@@ -384,7 +384,7 @@ fn imported_session_compacts() {
     // request after the import carries the imported rows).
     harness.client.send_command(
         "p-1",
-        json!({
+        &json!({
             "type": "prompt_and_wait",
             "activeSessionId": harness.session_id,
             "message": "one turn on the imported session",
@@ -396,7 +396,7 @@ fn imported_session_compacts() {
     // Compact: must run (TS parity), not refuse as too short.
     harness.client.send_command(
         "cp-1",
-        json!({ "type": "compact", "activeSessionId": harness.session_id }),
+        &json!({ "type": "compact", "activeSessionId": harness.session_id }),
     );
     let compact = harness.client.request("cp-1");
     assert_eq!(

@@ -152,7 +152,7 @@ impl Client {
         self.writer.flush().expect("flush");
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         self.send(&json!({
             "type": "command",
             "id": id,
@@ -211,7 +211,7 @@ fn mcp_cell(receipt_path: &Path) -> String {
 fn messages(client: &mut Client, id: &str, active_session_id: &str) -> Vec<Value> {
     client.send_command(
         id,
-        json!({ "type": "get_messages", "activeSessionId": active_session_id }),
+        &json!({ "type": "get_messages", "activeSessionId": active_session_id }),
     );
     let response = client.read_response(id);
     assert_eq!(response["success"], true, "get_messages failed: {response}");
@@ -316,7 +316,7 @@ fn settings_declared_stdio_server_round_trips_through_the_kernel_mcp_client() {
 
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -335,13 +335,13 @@ fn settings_declared_stdio_server_round_trips_through_the_kernel_mcp_client() {
 
     client.send_command(
         "p1",
-        json!({ "type": "prompt", "activeSessionId": session_id, "message": "use the echo server" }),
+        &json!({ "type": "prompt", "activeSessionId": session_id, "message": "use the echo server" }),
     );
     let prompted = client.read_response("p1");
     assert_eq!(prompted["success"], true, "prompt failed: {prompted}");
     client.send_command(
         "w1",
-        json!({ "type": "wait_for_idle", "activeSessionId": session_id }),
+        &json!({ "type": "wait_for_idle", "activeSessionId": session_id }),
     );
     let idle = client.read_response("w1");
     assert_eq!(idle["success"], true, "wait_for_idle failed: {idle}");
@@ -460,7 +460,7 @@ fn begin_login_host_request_is_live_in_the_worker() {
 
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -478,12 +478,12 @@ fn begin_login_host_request_is_live_in_the_worker() {
         .to_string();
     client.send_command(
         "p1",
-        json!({ "type": "prompt", "activeSessionId": session_id, "message": "probe begin_login" }),
+        &json!({ "type": "prompt", "activeSessionId": session_id, "message": "probe begin_login" }),
     );
     assert_eq!(client.read_response("p1")["success"], true, "prompt failed");
     client.send_command(
         "w1",
-        json!({ "type": "wait_for_idle", "activeSessionId": session_id }),
+        &json!({ "type": "wait_for_idle", "activeSessionId": session_id }),
     );
     assert_eq!(
         client.read_response("w1")["success"],

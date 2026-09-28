@@ -844,8 +844,11 @@ impl Supervisor {
                 // arm ordering).
                 let client_id = effective_client_id.lock().unwrap().clone();
                 let attached_ids = attached.session_ids();
-                let marked =
-                    self.begin_detach_pause_bookkeeping(connection, active_session_id.as_deref(), &attached_ids);
+                let marked = self.begin_detach_pause_bookkeeping(
+                    connection,
+                    active_session_id.as_deref(),
+                    &attached_ids,
+                );
                 let outcome = self
                     .route_client_command(
                         command,

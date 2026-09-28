@@ -430,7 +430,9 @@ impl Supervisor {
             return Self::admission_status(command_id, type_name, "unknown");
         };
         match status {
-            AdmissionStatus::Cancelled => Self::admission_status(command_id, type_name, "cancelled"),
+            AdmissionStatus::Cancelled => {
+                Self::admission_status(command_id, type_name, "cancelled")
+            }
             AdmissionStatus::Owned => Self::admission_status(command_id, type_name, "owned"),
             AdmissionStatus::Waiting => {
                 // The route is in flight: forward the cancellation to the
@@ -502,11 +504,7 @@ impl Supervisor {
         }
     }
 
-    fn admission_failure(
-        command_id: &str,
-        type_name: &str,
-        error: &str,
-    ) -> (Vec<Value>, bool) {
+    fn admission_failure(command_id: &str, type_name: &str, error: &str) -> (Vec<Value>, bool) {
         (
             vec![response_line(&response_failure(
                 Some(command_id),
@@ -518,11 +516,7 @@ impl Supervisor {
         )
     }
 
-    fn admission_status(
-        command_id: &str,
-        type_name: &str,
-        status: &str,
-    ) -> (Vec<Value>, bool) {
+    fn admission_status(command_id: &str, type_name: &str, status: &str) -> (Vec<Value>, bool) {
         (
             vec![response_line(&response_success(
                 Some(command_id),

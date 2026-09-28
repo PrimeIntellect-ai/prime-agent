@@ -143,7 +143,7 @@ impl Client {
         }
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let mut line = serde_json::to_string(&json!({
             "type": "command",
             "id": id,
@@ -156,8 +156,8 @@ impl Client {
         self.writer.flush().expect("flush");
     }
 
-    fn request(&mut self, id: &str, command: Value) -> Value {
-        self.send_command(id, command);
+    fn request(&mut self, id: &str, command: &Value) -> Value {
+        self.send_command(id, &command);
         loop {
             let response = self.read_line();
             if response.get("id").and_then(Value::as_str) == Some(id) {
@@ -180,7 +180,7 @@ fn create_session(client: &mut Client, id: &str, dir: &Path, agent_dir: &Path) -
     let script = write_script(dir);
     let created = client.request(
         id,
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.to_string_lossy(),
@@ -222,7 +222,7 @@ fn write_script(dir: &Path) -> PathBuf {
 fn session_file_of(client: &mut Client, active_id: &str) -> PathBuf {
     let stats = client.request(
         "stats",
-        json!({ "type": "get_session_stats", "activeSessionId": active_id }),
+        &json!({ "type": "get_session_stats", "activeSessionId": active_id }),
     );
     assert_eq!(stats["success"], true, "stats failed: {stats}");
     PathBuf::from(
@@ -315,7 +315,7 @@ fn a_hung_worker_is_killed_within_the_escalation_window_and_its_lease_frees() {
     let sent = Instant::now();
     let killed = client.request(
         "kill",
-        json!({ "type": "kill", "activeSessionId": session.active_id }),
+        &json!({ "type": "kill", "activeSessionId": session.active_id }),
     );
     let elapsed = sent.elapsed();
     assert_eq!(
@@ -363,7 +363,7 @@ fn a_hung_worker_is_killed_within_the_escalation_window_and_its_lease_frees() {
     // The session reopens (the end-user symptom of finding #5 is gone).
     let reopened = client.request(
         "reopen",
-        json!({
+        &json!({
             "type": "create",
             "sessionPath": session_file.to_string_lossy(),
             "config": {
@@ -387,7 +387,7 @@ fn a_hung_worker_is_killed_within_the_escalation_window_and_its_lease_frees() {
         .expect("reopened session id");
     let cleaned = client.request(
         "cleanup",
-        json!({ "type": "kill", "activeSessionId": reopened_id }),
+        &json!({ "type": "kill", "activeSessionId": reopened_id }),
     );
     assert_eq!(cleaned["success"], true, "cleanup kill failed: {cleaned}");
 
@@ -417,7 +417,7 @@ fn a_well_behaved_worker_keeps_the_clean_stop() {
     let sent = Instant::now();
     let killed = client.request(
         "kill",
-        json!({ "type": "kill", "activeSessionId": session.active_id }),
+        &json!({ "type": "kill", "activeSessionId": session.active_id }),
     );
     let elapsed = sent.elapsed();
     assert_eq!(killed["success"], true, "kill failed: {killed}");
@@ -453,7 +453,7 @@ fn a_well_behaved_worker_keeps_the_clean_stop() {
     drop(lease);
     let reopened = client.request(
         "reopen",
-        json!({
+        &json!({
             "type": "create",
             "sessionPath": session_file.to_string_lossy(),
             "config": {
@@ -477,7 +477,7 @@ fn a_well_behaved_worker_keeps_the_clean_stop() {
         .expect("reopened session id");
     let cleaned = client.request(
         "cleanup",
-        json!({ "type": "kill", "activeSessionId": reopened_id }),
+        &json!({ "type": "kill", "activeSessionId": reopened_id }),
     );
     assert_eq!(cleaned["success"], true, "cleanup kill failed: {cleaned}");
 

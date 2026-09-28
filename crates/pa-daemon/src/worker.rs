@@ -422,9 +422,9 @@ impl Worker {
                         Err(_) => std::sync::Arc::new(ScriptedEngine::default()),
                     }
                 }
-                Some(script) => std::sync::Arc::new(
-                    ScriptedEngine::from_value(script).unwrap_or_default(),
-                ),
+                Some(script) => {
+                    std::sync::Arc::new(ScriptedEngine::from_value(script).unwrap_or_default())
+                }
                 None => {
                     let cwd =
                         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
