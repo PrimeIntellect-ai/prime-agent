@@ -576,7 +576,12 @@ trap on_exit EXIT
 for sweep_dir in "${PREFIX}"/share/prime-agent.old.* "${PREFIX}"/share/prime-agent-rust.old.*; do
   [ -d "$sweep_dir" ] || continue
   [ -f "${sweep_dir}/.prime-agent-install" ] || continue
-  rm -rf "$sweep_dir"
+  # Best-effort: an un-sweepable generation (a mounted dir, a permission
+  # wall) must not abort the install — the leftover is harmless.
+  if ! rm -rf "$sweep_dir" 2>/dev/null; then
+    echo "warning: could not sweep the previous rollback generation ${sweep_dir};"
+    echo "  it stays (harmless — remove it by hand if you recognize it)"
+  fi
 done
 
 # The TypeScript takeover, inside the lock: preserve a TS managed root that
@@ -641,17 +646,22 @@ had_old_layout=0
 # Migration from the pre-takeover layout: an old share/prime-agent-rust tree
 # becomes this run's rollback (the install migrates to the new name).
 if [ -d "$old_layout_dir" ] && [ ! -d "$share_dir" ]; then
-  if [ ! -x "${old_layout_dir}/prime-agent" ] || ts_managed "$old_layout_dir"; then
+  # The pre-takeover script stamped nothing, so ownership here is a SHAPE
+  # claim (its payload always shipped the binary beside prime-agent-runtime/),
+  # never a marker: the slot is moved but deliberately NOT stamped — a
+  # shape check is not proof of ownership, so nothing the sweep can
+  # auto-delete ever rides on it. The migrated tree is PRESERVED in its
+  # .old slot (the user removes it when they are done with the rollback).
+  if [ ! -x "${old_layout_dir}/prime-agent" ] \
+     || [ ! -d "${old_layout_dir}/prime-agent-runtime" ] \
+     || ts_managed "$old_layout_dir"; then
     die "refusing to move ${old_layout_dir}: it is not this installer's payload tree"
   fi
   had_old_layout=1
   mv "$old_layout_dir" "$old"
-  # The migrated tree carries no marker (the pre-takeover script stamped
-  # nothing): stamp the slot now so the NEXT install's sweep recognizes it
-  # as this installer's generation.
-  printf 'install-rust.sh continuous run %s\ncommit %s\nmigrated from prime-agent-rust\n' \
-    "$RUN" "${commit:-unknown}" > "${old}/.prime-agent-install"
   echo "the old prime-agent-rust install migrated to the rollback slot ${old}"
+  echo "  (it is kept — the sweep only removes marker-stamped generations; remove"
+  echo "   the slot by hand once you no longer need the rollback)"
 fi
 if [ -d "$share_dir" ]; then
   had_share_dir=1

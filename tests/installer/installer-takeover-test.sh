@@ -244,9 +244,10 @@ seed_store() { # mach  — ~/.prime/agent with one session file
 seed_old_rust_layout() { # mach  — a pre-takeover install-rust.sh machine
   home="$1/home"
   old="$home/.local/share/prime-agent-rust"
-  mkdir -p "$old" "$home/.local/bin"
+  mkdir -p "$old/prime-agent-runtime" "$home/.local/bin"
   printf '#!/bin/sh\necho old-rust-binary\n' > "$old/prime-agent"
   chmod 0755 "$old/prime-agent"
+  printf 'runtime stub\n' > "$old/prime-agent-runtime/pyproject.toml"
   printf 'old tree marker\n' > "$old/old-tree-marker.txt"
   cat > "$home/.local/bin/prime-agent-rust" <<'LAUNCHER'
 #!/bin/sh
@@ -381,20 +382,26 @@ rc2=$?
 assert_eq "case 1 (g) --update re-run exits 0" 0 "$rc2"
 store_after2="$(store_snapshot "$mach")"
 assert_eq "case 1 (g) ~/.prime/agent still untouched" "$store_before2" "$store_after2"
+# After the --update re-run: the marker-stamped payload generation from
+# run 1 was swept by run 2; the UNSTAMPED migrated old-layout slot and the
+# user-made .old.backup lookalike are both preserved (never auto-deleted).
 old_count2=0
 for d in "$mach"/home/.local/share/prime-agent.old.*; do
   case "$d" in *.backup) continue ;; esac
   [ -e "$d" ] && old_count2=$((old_count2 + 1))
 done
-assert_eq "case 1 (g) still exactly one real .old generation" 1 "$old_count2"
-# The remaining generation is run 2's fresh slot (run 1's payload tree), not
-# the migrated old-layout tree: the stamped slot was swept.
+assert_eq "case 1 (g) two real .old slots remain (migrated + fresh generation)" 2 "$old_count2"
+migrated_kept=0
+for d in "$mach"/home/.local/share/prime-agent.old.*; do
+  [ -e "$d/old-tree-marker.txt" ] && migrated_kept=$((migrated_kept + 1))
+done
+assert_eq "case 1 (g) the migrated old-layout slot is preserved, never swept" 1 "$migrated_kept"
+fresh_stamped=0
 for d in "$mach"/home/.local/share/prime-agent.old.*; do
   case "$d" in *.backup) continue ;; esac
-  [ -e "$d/old-tree-marker.txt" ] \
-    && fail "case 1 (g) the migrated old-layout slot was swept: $d still holds it" \
-    || ok "case 1 (g) the migrated old-layout slot was swept (only the fresh payload slot remains)"
+  [ -f "$d/.prime-agent-install" ] && [ -x "$d/prime-agent" ] && fresh_stamped=$((fresh_stamped + 1))
 done
+assert_eq "case 1 (g) the fresh payload slot is the one stamped generation" 1 "$fresh_stamped"
 assert_eq "case 1 (g) launcher still ours after --update" "yes" \
   "$([ -f "$mach/home/.local/bin/prime-agent" ] && [ ! -L "$mach/home/.local/bin/prime-agent" ] && echo yes || echo no)"
 uninstalls=$(grep -c "uninstall -g prime-agent" "$mach/logs/npm-mock.log" || true)
