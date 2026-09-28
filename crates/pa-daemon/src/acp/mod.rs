@@ -420,7 +420,7 @@ async fn handle_session_new(
             state.session_new_in_flight = false;
             state.session = Some(entry);
             drop(state);
-            let _ = tx.send(jsonrpc::response(id, &result));
+            let _ = tx.send(jsonrpc::response(&id, &result));
             producer.commit_session_new_response().await;
         }
     }
