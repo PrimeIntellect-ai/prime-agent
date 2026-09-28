@@ -26,13 +26,16 @@ fn typed_keys(text: &str) -> Vec<KeyEvent> {
 }
 
 /// Seed the static chrome state for a fresh interactive run: splash
-/// version/cwd, top-bar name, and the `manage` hint for persisted sessions.
+/// version/cwd, top-bar name, the `manage` hint for persisted sessions,
+/// and the zero dock a fresh session mounts — the placeholder frame
+/// keeps the landed frame's geometry.
 pub(super) fn apply_startup_chrome(view: &mut AgentView, options: &InteractiveOptions) {
     view.chrome.version.clone_from(&options.version);
     view.chrome.cwd = options.cwd.to_string_lossy().to_string();
     view.chrome.chat_name = crate::chrome::display_name(&view.chrome.cwd);
     view.chrome.show_manage = !options.no_session;
     view.chrome.tray_depth = options.session_rlm_depth;
+    view.chrome.activity = Some(crate::chrome::ActivityDock::default());
 }
 
 /// The tmux keyboard notice (TS `checkTmuxKeyboardSetup`): warn once per

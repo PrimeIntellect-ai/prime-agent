@@ -129,7 +129,6 @@ impl SessionUi {
             bash_updates: activity_updates.bash,
             subagents_focused: false,
             activity_group: crate::chrome::ActivityGroup::Subagents,
-            pending_dock_focus_restore: false,
             subagent_counts: crate::subagents::SubagentCounts::default(),
             session_file: None,
             pending_selection: None,
@@ -184,12 +183,10 @@ impl SessionUi {
             .attach_session(&active_session_id, DockFold::FirstFrame)
             .await
             .with_context(|| format!("attaching session {active_session_id}"))?;
-        // The scope-back reopen's restore arms AFTER the attach: every
-        // later attach's rebind reset clears an armed restore (focus
-        // returns to the editor, TS `resetSubagentSummary`), so the
-        // initial attach must carry the reopen's own restore past that
-        // reset to the first summary.
-        session.pending_dock_focus_restore = options.restore_dock_focus;
+        // The scope-back reopen's restore lands AFTER the attach: the
+        // attach's rebind reset clears the focus, so the reopen's own
+        // restore must survive it.
+        session.subagents_focused = options.restore_dock_focus;
         Ok(session)
     }
 
@@ -449,22 +446,17 @@ impl SessionUi {
         // the editor (TS `resetSubagentSummary` on rebind).
         self.roster.clear();
         self.subagents_focused = false;
-        // A rebind drops an armed scope-back restore with the session it
-        // belonged to: the arriving session's focus is the editor's
-        // (TS `resetSubagentSummary`), never the left session's
-        // panel-exit state.
-        self.pending_dock_focus_restore = false;
         self.subscribe_roster().await;
         // The dock's heartbeat rows follow `dock_fold` (the enum's
         // contract): a first-content-frame attach folds the fresh fetch
-        // BEFORE the attach returns — the dock's visibility (the panel
-        // and its divider under the prompt bar) is first-frame geometry,
-        // never a late layout shift (the operator's 2026-09-26
-        // zero-shift ruling). TS guarantees the same for its dock: the
-        // counts seed from the attach snapshot (`seedSubagentSummary`)
-        // and the roster subscription is awaited before the first
-        // content render; TS's own heartbeat fetch stays fire-and-forget
-        // only because its summary line renders no heartbeat rows.
+        // BEFORE the attach returns — the first content frame reads the
+        // final counts, never a late repaint (the operator's
+        // 2026-09-26 zero-shift ruling). TS guarantees the same for its
+        // dock: the counts seed from the attach snapshot
+        // (`seedSubagentSummary`) and the roster subscription is
+        // awaited before the first content render; TS's own heartbeat
+        // fetch stays fire-and-forget only because its summary line
+        // renders no heartbeat rows.
         match dock_fold {
             DockFold::FirstFrame | DockFold::Fresh => self.heartbeat_catalog.clear(),
             // The held dock keeps its data: an already-up surface's dock

@@ -177,7 +177,7 @@ pub trait InteractionTelemetry: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// The subagent summary line opened the scoped agents view (`tui
     /// subagents open`): `children_total` is the live descendant count at
-    /// open time.
+    /// open time (zero when opened from a dock with no subagents).
     fn subagents_view_opened(
         &self,
         children_total: u64,

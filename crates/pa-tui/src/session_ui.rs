@@ -405,13 +405,6 @@ pub(crate) struct SessionUi {
     /// The subagent summary line holds keyboard focus.
     subagents_focused: bool,
     activity_group: crate::chrome::ActivityGroup,
-    /// A scope-back reopen (the agents view's parent/escape key handed
-    /// the pane back from the dock's Subagents panel) restores the dock
-    /// focus once, at the first summary after the attach: the roster is
-    /// seeded by then, so the panel's own group is actionable at the
-    /// first paint or the editor keeps the focus (a later roster must
-    /// not yank the keyboard back mid-composition).
-    pending_dock_focus_restore: bool,
     /// The last computed descendant counts (selectability reads them between
     /// roster updates).
     subagent_counts: crate::subagents::SubagentCounts,
@@ -619,14 +612,13 @@ enum DockFocusSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DockFold {
     /// Clear and fold the first `heartbeats_list` and `list_kernel_bash`
-    /// responses into the session before the attach returns: the dock
-    /// (the panel and its divider under the prompt bar) is first-frame
-    /// geometry — its visibility must be final when the first content
-    /// frame renders (open, switch, rebind), never a late layout shift.
+    /// responses into the session before the attach returns: the dock's
+    /// counts are first-frame state — the first content frame reads the
+    /// final counts (open, switch, rebind), never a late repaint.
     FirstFrame,
     /// Clear and hand the dock to the background refreshes: a brand-new
     /// session (`/new`) owns nothing, so its dock is deterministically
-    /// empty — the fold cannot change geometry, and waiting on two
+    /// empty — the fold cannot change the counts, and waiting on two
     /// registry reads would only delay the new chat's first frame.
     Fresh,
     /// Hold the dock's data and let the background refreshes update it: a
@@ -646,25 +638,11 @@ impl SessionUi {
     /// Hand the keyboard focus to the compact dock on its selected group:
     /// the `app.subagents.focus` shortcut and every dock panel's close
     /// restore (the operator's 2026-09-26 ruling: leaving a panel lands
-    /// on the panel's own dock item, never the prompt bar). The dock owns
-    /// the hand-off exactly while it renders — a session with nothing to
-    /// show keeps the dock unmounted and the focus where it was; every
-    /// group the row renders is traversable, empty ones included, so no
-    /// feed gate remains here.
-    fn focus_activity_dock(&mut self, view: &mut AgentView) -> bool {
-        let dock = self.activity_dock_state();
-        if !dock.visible() {
-            return false;
-        }
-        if !dock.groups().contains(&self.activity_group) {
-            // Only the goal group leaves with its row: the selection
-            // steps back to the group that now ends the row.
-            self.activity_group =
-                dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
-        }
+    /// on the panel's own dock item, never the prompt bar). The summary
+    /// refresh moves a selection whose group left the row.
+    fn focus_activity_dock(&mut self, view: &mut AgentView) {
         self.subagents_focused = true;
         self.update_subagent_summary(view);
-        true
     }
 
     /// Materialize parked editor autocomplete requests once the input

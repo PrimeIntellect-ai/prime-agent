@@ -261,15 +261,16 @@ async fn run_interactive_surface(
     )?;
     // The startup chrome paints before the session loads only for a NEW
     // chat (TS `ui.start()` renders the banner once before the session
-    // loads): a fresh session's dock is deterministically empty, so the
-    // placeholder frame never reflows when the attach lands. A direct
-    // open into an existing session holds the previous surface instead
-    // (TS attaches BEFORE the chat mounts — main.ts and the agents view
-    // construct the chat over an already-attached connection whose
-    // `getInitialSnapshot` is cached, so the first visible frame is the
-    // content): the queued clear rides the first draw's single flush,
-    // which carries the complete frame — no splash flash, no panel
-    // appearing late over a half-open view.
+    // loads): the startup chrome carries the zero dock a fresh session
+    // mounts (`apply_startup_chrome`), so the placeholder frame never
+    // reflows when the attach lands. A direct open into an existing
+    // session holds the previous surface instead (TS attaches BEFORE
+    // the chat mounts — main.ts and the agents view construct the chat
+    // over an already-attached connection whose `getInitialSnapshot`
+    // is cached, so the first visible frame is the content): the queued
+    // clear rides the first draw's single flush, which carries the
+    // complete frame — no splash flash, no panel appearing late over a
+    // half-open view.
     if !headless && matches!(&options.session, SessionSelection::New) {
         if let Some(renderer) = renderer.is_terminal_mut() {
             crate::app::draw(renderer, &mut view)?;

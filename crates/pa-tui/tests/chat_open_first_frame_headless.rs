@@ -8,8 +8,8 @@
 //!
 //! The mock supervisor serves the attach snapshot immediately but
 //! delays the `heartbeats_list` and `list_kernel_bash` responses (the
-//! loaded-daemon repro from the report): the dock's visibility data
-//! must fold synchronously with the attach, so no captured frame ever
+//! loaded-daemon repro from the report): the dock's count data must
+//! fold synchronously with the attach, so no captured frame ever
 //! repaints the dock in late.
 #![cfg(unix)]
 
@@ -290,9 +290,9 @@ fn is_divider_row(line: &str, width: usize) -> bool {
     !line.is_empty() && line.chars().count() == width && line.chars().all(|c| c == '\u{2500}')
 }
 
-/// The dock (the muted divider plus the activity panel row under the
-/// prompt bar) is first-frame geometry: every captured frame carries
-/// both rows, so the delayed dock data never repaints the layout in
+/// The dock's counts (the activity panel row under the prompt bar) are
+/// first-frame state: every captured frame carries both rows with the
+/// final count, so the delayed dock data never repaints the row in
 /// late — the first frame is the final geometry (the operator's
 /// zero-layout-shift report).
 #[test]

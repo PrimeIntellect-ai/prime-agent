@@ -739,7 +739,7 @@ impl SessionUi {
             return Ok(());
         }
         // TS `app.subagents.focus` (default alt+a): the dock takes focus
-        // while it renders (an unmounted dock keeps the editor's focus).
+        // (it renders in every session).
         if view
             .editor
             .keybindings()
