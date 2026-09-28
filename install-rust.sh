@@ -163,13 +163,16 @@ USAGE
 # run because the flow is idempotent by construction. --verbose folds the fd-3
 # progress detail onto stdout (PRIME_AGENT_RUST_VERBOSE=1 does the same).
 VERBOSE="${PRIME_AGENT_RUST_VERBOSE:-0}"
-case "${1:-}" in
-  "") ;;
-  --update) ;;
-  --verbose|-v) VERBOSE=1 ;;
-  -h|--help) usage; exit 0 ;;
-  *) usage >&2; die "unknown argument: ${1}" ;;
-esac
+# Every argument is scanned (no positionals exist): the flags compose, so
+# `--update --verbose` sets both effects instead of silently dropping one.
+for arg in "$@"; do
+  case "$arg" in
+    --update) ;;
+    --verbose|-v) VERBOSE=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; die "unknown argument: ${arg}" ;;
+  esac
+done
 
 # --- the output contract ------------------------------------------------------
 # Minimal by default (the curl|sh reference class): stdout carries the
@@ -245,7 +248,7 @@ if [ -n "$uv_bin" ]; then
   # interpreters (uv's own managed installs count).
   UVPY="$("$uv_bin" python find --system 3.11 2>/dev/null || true)"
   if [ -z "$UVPY" ]; then
-    if "$uv_bin" python install 3.11 >/dev/null 2>&1; then
+    if env -u UV_PYTHON_INSTALL_DIR "$uv_bin" python install 3.11 >/dev/null 2>&1; then
       UVPY="$("$uv_bin" python find --system 3.11 2>/dev/null || true)"
     fi
   fi
@@ -453,10 +456,10 @@ line="$(grep "  ${asset_name}\$" "$dl/SHA256SUMS" || true)"
 [ -n "$line" ] || die "SHA256SUMS in run ${RUN} has no line for ${asset_name}"
 printf '%s\n' "$line" > "$dl/SHA256SUMS.check"
 if command -v sha256sum >/dev/null 2>&1; then
-  (cd "$dl" && sha256sum -c SHA256SUMS.check) \
+  (cd "$dl" && sha256sum -c SHA256SUMS.check 2>&1 >&3) 1>&3 \
     || die "checksum mismatch for ${asset_name}: the download is corrupt; re-run the installer"
 elif command -v shasum >/dev/null 2>&1; then
-  (cd "$dl" && shasum -a 256 -c SHA256SUMS.check) \
+  (cd "$dl" && shasum -a 256 -c SHA256SUMS.check 2>&1 >&3) 1>&3 \
     || die "checksum mismatch for ${asset_name}: the download is corrupt; re-run the installer"
 else
   die "no sha256 tool found (sha256sum or shasum is required to verify the download)"
