@@ -960,10 +960,10 @@ async fn full_history_snapshot_serves_retained_rows_without_the_file() {
 /// whatever the file gained.
 #[tokio::test]
 async fn full_history_snapshot_without_lease_keeps_the_historical_read() {
+    use std::io::Write as _;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("unleased-full.jsonl");
     std::fs::write(&path, full_history_fixture()).unwrap();
-    use std::io::Write as _;
     let manager =
         super::super::manager::SessionManager::open_windowed(dir.path(), dir.path(), &path)
             .await

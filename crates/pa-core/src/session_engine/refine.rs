@@ -860,6 +860,7 @@ Reviewer instructions: record it"
     /// the prompt.
     #[tokio::test]
     async fn refine_request_is_identical_across_extraction_paths() {
+        use std::io::Write as _;
         let body = oracle_fixture();
         let mut captured: Vec<CapturedRequest> = Vec::new();
         for leg in ["full-reader", "windowed-leased", "windowed-unleased"] {
@@ -936,7 +937,6 @@ Reviewer instructions: record it"
         // The read-leg proof: the unleased window's extraction must
         // serve an out-of-band audit row (the historical read), which
         // changes the prompt's history section.
-        use std::io::Write as _;
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         std::fs::write(&path, &body).unwrap();
