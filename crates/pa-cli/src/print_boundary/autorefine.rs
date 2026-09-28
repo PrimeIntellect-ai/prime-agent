@@ -178,7 +178,7 @@ impl TurnBoundary {
                             (self.sink)(&json!({ "type": event_type, "message": value }));
                         }
                     }
-                    self.emit_json(json!({
+                    self.emit_json(&json!({
                         "type": "refine_complete",
                         "result": serde_json::to_value(result)
                             .unwrap_or(serde_json::Value::Null),
@@ -188,7 +188,7 @@ impl TurnBoundary {
             Err(error) => {
                 if emit {
                     if self.json_mode {
-                        self.emit_json(json!({
+                        self.emit_json(&json!({
                             "type": "refine_failed",
                             "error": format!("{error}"),
                         }));
