@@ -5639,6 +5639,46 @@ async fn early_resume_clears_the_park_and_cancels_the_wake() {
     );
 }
 
+/// The settled-child kernel release policy (TS #2483's
+/// `canPassivateSettledSession` gates, engine-side): with no
+/// registered scheduled jobs the release probe fires; a jobs probe
+/// reporting this session's jobs defers the release (the kernel
+/// stays resident for the job's next run).
+#[test]
+fn release_settled_child_kernel_defers_to_scheduled_jobs_and_fires_the_release_probe() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let engine = std::sync::Arc::new(bare_engine(dir.path()));
+    let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let probe_fired = std::sync::Arc::clone(&fired);
+    *engine
+        .kernel_release_probe
+        .lock()
+        .expect("kernel release probe lock") = Some(std::sync::Arc::new(move || {
+        probe_fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(std::future::ready(()))
+    }));
+    // No children (the bare engine wires none) and no jobs probe:
+    // the release probe fires once.
+    engine
+        .runtime
+        .block_on(crate::engine::SessionEngine::release_settled_child_kernel(
+            &*engine,
+        ));
+    assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // A jobs probe reporting this session's jobs defers the
+    // release (the TS `hasRegisteredCronJob` gate).
+    *engine
+        .registered_jobs_probe
+        .lock()
+        .expect("registered jobs probe lock") = Some(std::sync::Arc::new(|| true));
+    engine
+        .runtime
+        .block_on(crate::engine::SessionEngine::release_settled_child_kernel(
+            &*engine,
+        ));
+    assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
 // ---------------------------------------------------------------------------
 // saved_session_context differential oracle.
 //

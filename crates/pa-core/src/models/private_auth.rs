@@ -130,12 +130,124 @@ pub fn private_prime_authorization_cache_path(models_json_path: &Path) -> PathBu
         .join(PRIVATE_PRIME_AUTHORIZATION_CACHE_FILE)
 }
 
+/// The stat identity a cached parse is validated against: device, inode,
+/// mtime (nanoseconds), and length — the same validation shape as the auth
+/// document's read-through cache (`crate::auth::storage`). Every writer
+/// the protocol knows replaces the file by atomic rename (a new inode) or
+/// rewrites it in place (a new mtime), so a matching identity means the
+/// cached parse is what a fresh read would return.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CacheFileIdentity {
+    dev: u64,
+    ino: u64,
+    mtime_sec: i64,
+    mtime_nsec: i64,
+    len: u64,
+}
+
+#[cfg(unix)]
+fn cache_file_identity(metadata: &std::fs::Metadata) -> Option<CacheFileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    Some(CacheFileIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+        mtime_sec: metadata.mtime(),
+        mtime_nsec: metadata.mtime_nsec(),
+        len: metadata.len(),
+    })
+}
+
+#[cfg(not(unix))]
+fn cache_file_identity(metadata: &std::fs::Metadata) -> Option<CacheFileIdentity> {
+    use std::time::UNIX_EPOCH;
+    let modified = metadata.modified().ok()?;
+    let since = modified.duration_since(UNIX_EPOCH).ok()?;
+    Some(CacheFileIdentity {
+        dev: 0,
+        ino: 0,
+        mtime_sec: since.as_secs() as i64,
+        mtime_nsec: since.subsec_nanos() as i64,
+        len: metadata.len(),
+    })
+}
+
+/// One validated parse held in the process-wide read-through cache. The
+/// port of TS #2479's stat snapshot: the port builds a fresh registry per
+/// model-resolution touchpoint (the TS session kept one long-lived
+/// registry), so the parse would otherwise re-run on every resolution
+/// while the file sits unchanged.
+struct CachedParse {
+    identity: CacheFileIdentity,
+    cache: PrivatePrimeAuthorizationCache,
+}
+
+fn parse_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, CachedParse>> {
+    static PARSE_CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, CachedParse>>> =
+        std::sync::OnceLock::new();
+    PARSE_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 /// Read and validate the authorization cache; `None` on any mismatch.
+///
+/// The parse is served from the process-wide stat-identity snapshot while
+/// the file is unchanged. Only a successful parse is pinned, and only
+/// when the file's stat identity is the same before and after the read
+/// (a concurrent writer replacing the file mid-read must not be pinned);
+/// a failed read unpins any stale entry so the next call retries (TS
+/// #2479 never pins an unstable or failed read).
 pub fn read_private_prime_authorization_cache(
     models_json_path: &Path,
 ) -> Option<PrivatePrimeAuthorizationCache> {
-    let content =
-        std::fs::read_to_string(private_prime_authorization_cache_path(models_json_path)).ok()?;
+    let path = private_prime_authorization_cache_path(models_json_path);
+    let before = std::fs::metadata(&path)
+        .ok()
+        .and_then(|m| cache_file_identity(&m));
+    if let Some(identity) = before {
+        if let Some(entry) = parse_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&path)
+        {
+            if entry.identity == identity {
+                return Some(entry.cache.clone());
+            }
+        }
+    }
+    let Some(cache) = parse_private_prime_authorization_cache(&path) else {
+        // A failed read never pins: drop any superseded entry so the next
+        // call retries the parse from the file as it stands.
+        parse_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&path);
+        return None;
+    };
+    let after = std::fs::metadata(&path)
+        .ok()
+        .and_then(|m| cache_file_identity(&m));
+    let mut entries = parse_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match (before, after) {
+        (Some(before), Some(after)) if before == after => {
+            entries.insert(
+                path,
+                CachedParse {
+                    identity: after,
+                    cache: cache.clone(),
+                },
+            );
+        }
+        _ => {
+            entries.remove(&path);
+        }
+    }
+    Some(cache)
+}
+
+/// The uncached read+parse (the read-through cache's miss arm).
+fn parse_private_prime_authorization_cache(path: &Path) -> Option<PrivatePrimeAuthorizationCache> {
+    let content = std::fs::read_to_string(path).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
     let fingerprint = parsed.get("fingerprint")?.as_str()?.to_string();
     let refreshed_at = parsed.get("refreshedAt")?.as_u64()?;
@@ -277,6 +389,47 @@ mod tests {
         assert_eq!(cost.cache_read.0, 0.0);
         assert_eq!(cost.cache_write.0, 0.0);
         assert_eq!(cost.total.0, 0.0);
+    }
+
+    #[test]
+    fn parse_snapshot_pins_stable_parses_and_re_parses_rewrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let models_json = dir.path().join("models.json");
+        let cache_path = private_prime_authorization_cache_path(&models_json);
+        write_private_prime_authorization_cache(&models_json, &cache("fingerprint-a"));
+        let first = read_private_prime_authorization_cache(&models_json).expect("cache readable");
+        assert_eq!(first.fingerprint, "fingerprint-a");
+        // A stable parse is pinned process-wide and a repeat read is served
+        // from the snapshot (the same stat identity).
+        assert!(parse_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&cache_path));
+        let second = read_private_prime_authorization_cache(&models_json).expect("cache readable");
+        assert_eq!(second.fingerprint, "fingerprint-a");
+        // The write path's atomic rename changes the identity, so the next
+        // read re-parses instead of serving the superseded entry.
+        write_private_prime_authorization_cache(&models_json, &cache("fingerprint-b"));
+        let third = read_private_prime_authorization_cache(&models_json).expect("cache readable");
+        assert_eq!(third.fingerprint, "fingerprint-b");
+    }
+
+    #[test]
+    fn parse_snapshot_never_pins_a_failed_read_or_resurrects_a_deleted_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let models_json = dir.path().join("models.json");
+        let cache_path = private_prime_authorization_cache_path(&models_json);
+        std::fs::write(&cache_path, "{ not json").unwrap();
+        assert!(read_private_prime_authorization_cache(&models_json).is_none());
+        assert!(!parse_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&cache_path));
+        write_private_prime_authorization_cache(&models_json, &cache("fingerprint-a"));
+        assert!(read_private_prime_authorization_cache(&models_json).is_some());
+        // A deleted cache is never served from the snapshot.
+        std::fs::remove_file(&cache_path).unwrap();
+        assert!(read_private_prime_authorization_cache(&models_json).is_none());
     }
 
     #[test]

@@ -638,7 +638,7 @@ string — which is not build recency.
     the same name is re-validated before reuse — a damaged or foreign
     staging is never silently reactivated. The launcher repoint and the
     `.activation-state` write fsync their directories.
-  - New CLI surface, no TS counterpart: `prime-agent update --archive
+  - Legacy CLI surface, no TS counterpart: `prime-agent update --archive
     <path> --source <https-url>` stages a local payload (a release archive
     or a payload directory) with the version probed from the payload
     binary's `--version` output — never a hand-typed string — then runs the
@@ -646,11 +646,14 @@ string — which is not build recency.
     The direct install requires the current launcher to already name a
     valid release (the rollback boot depends on it) and copies the payload
     into scratch before the atomic rename, so an in-place copy over a
-    running binary is structurally impossible.
+    running binary is structurally impossible. (2026-09-27: the staged flow
+    keeps this surface on its flags; the BARE `prime-agent update` moved to
+    the installer-takeover funnel — see the section below.)
 - Ownership: pa-core `update` (`version.rs` guards, `install.rs` anchor +
   validation helpers, `download.rs` atomic staging + direct stage); pa-cli
   `update_flow` (plan anchor + guards, the Direct plan arm) and
-  `public_command` (flag parse; the TUI `/update` surface stays TS parity).
+  `public_command` (flag parse; the TUI `/update` surface is the
+  installer-takeover flow since 2026-09-27 — see below).
 
 ## Package update self target = the real update flow (2026-09-25)
 
@@ -1997,3 +2000,55 @@ truncated in agents view, containing lots of text)."
   displayed title across named, prompt-derived, cwd-basename, and
   archived rows), and `a_named_sessions_first_message_stays_out_of_the_corpus`
   (the over-match guard).
+
+## `prime-agent update` = the installer-takeover funnel (2026-09-27)
+
+The operator-directive migration path: `prime-agent update` and the TUI's
+`/update` move a user from the TypeScript version to the Rust port in one
+step, and the installer script (`install-rust.sh`, the installer-takeover
+lane's rework) is the SINGLE SOURCE OF TRUTH for the move — the script
+downloads the latest `continuous` build, uninstalls the TypeScript version,
+publishes the payload, and never touches `~/.prime/agent` (sessions +
+configuration). The Rust side only fetches and execs the script; no install
+or uninstall logic is duplicated in Rust.
+
+- pa-core `update::installer` is the funnel core: the platform preflight
+  (the continuous matrix), the script download from the branch's raw URL
+  (`PRIME_AGENT_RUST_INSTALLER_URL` overrides — tests serve their own
+  script), the `sh` exec (the install prefix rides the child env as the
+  installer's own `PRIME_AGENT_RUST_PREFIX` knob), the launcher `--version`
+  probe (the takeover's `bin/prime-agent` first, the legacy
+  `bin/prime-agent-rust` second, and only answers stamped
+  `-continuous.<commit>` count — the TypeScript product's own
+  `bin/prime-agent` never matches), and `--check`'s run-list read (the
+  same workflow-runs REST query the installer's non-`gh` path sends).
+- The fetch source flips to the OFFICIAL DOMAIN install endpoint
+  (`https://app.primeintellect.ai/prime-agent/install.sh`) at the
+  rust-to-main merge, per the operator's 2026-09-28 clarification: the
+  domain serves the TypeScript product's official installer today, and
+  `prime-agent update` must not run that — the operator flips the
+  domain's content at merge-to-main time, and the command's contract is
+  "fetch from the official source, run it". Until then the branch's
+  `install-rust.sh` stays the default, and
+  `PRIME_AGENT_RUST_INSTALLER_URL` overrides the source for testing.
+- pa-cli `installer_update` is the CLI body: the bare command runs the
+  funnel with the installer's own output streaming to the terminal, and
+  `--check` (alias `--version`) prints the platform, the running version,
+  the latest run, and the verdict, without installing.
+- The TS-parity staged-activation flow above KEEPS its flag surface
+  (`--force`, `--rollback`, `--nightly`, `--stable`, `--archive/--source`)
+  exactly as before — the managed `releases/` layout world the battery's
+  wire suites pin, and the body of `prime-agent package update`'s self
+  half. The bare command alone moved.
+- The TUI `/update` surfaces a Yes/No confirm carrying the preserve
+  invariant, then runs the SAME funnel OUT-OF-BAND: a spawned background
+  task with the output captured (the live frame stays intact, the daemon
+  keeps running — the update replaces only the on-disk binary, so the new
+  build takes effect on restart). The outcome lands as a note row
+  ("updated to <version> — restart prime-agent to run it") or the error
+  row. There is no busy guard (nothing blocks), no terminal handoff, and
+  no process relaunch — the old TS-parity child + relaunch flow is gone.
+  `/nightly` keeps its settings surface (status/off pin the TS-shared
+  channel setting) but `on` explains the move: the update installs the
+  latest continuous build, so there is no nightly channel to switch to.
+
