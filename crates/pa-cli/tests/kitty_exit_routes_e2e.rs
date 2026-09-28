@@ -121,28 +121,6 @@ impl Route {
         }
     }
 
-    /// The mount proof each route waits for before exiting (the handoff
-    /// routes mount the chat first; the view mounts after the detach).
-    /// (The stage lists own the needles now; kept as the route's
-    /// self-documentation — safe to keep even unused.)
-    #[allow(dead_code)]
-    fn mount_needle(self) -> &'static [u8] {
-        match self {
-            // The force-quit route's big transcript paints only the
-            // viewport (its tail); the seeded last rows are its proof.
-            Route::ForceQuit => b"row 1598",
-            Route::CtrlD
-            | Route::SlashExit
-            | Route::CtrlCTwice
-            | Route::HandoffViewExit
-            | Route::ViewChatExit
-            | Route::LateAnswer
-            | Route::SuspendResume => b"row 0",
-            Route::ConfigSelector => b"Resources",
-            Route::ReplayAuto | Route::ReplayPanic => b"replay row",
-        }
-    }
-
     /// The exit code a clean route ends with (the panic route dies on
     /// the unwind: libtest's 101).
     fn expect_exit_code(self) -> Option<i32> {
@@ -1045,6 +1023,9 @@ fn spawn_child(route: Route, socket: &Path, slave: &OwnedFd, known_terminal: boo
         .env(CHILD_ROUTE_ENV, route.name())
         .env(CHILD_SOCKET_ENV, socket)
         .env_remove("TMUX")
+        .env_remove("KITTY_WINDOW_ID")
+        .env_remove("GHOSTTY_RESOURCES_DIR")
+        .env_remove("KITTY_PID")
         .stdin(slave_as_stdio(slave))
         .stdout(slave_as_stdio(slave))
         .stderr(slave_as_stdio(slave));
