@@ -642,7 +642,6 @@ impl SessionUi {
     // /fullscreen, /reload)
     // ------------------------------------------------------------------
 
-
     /// `/fast` (TS `handleFastCommand`): toggle the priority service tier.
     /// The TS queue (`fastModeToggleQueue`) serializes toggles; here the
     /// dispatch is the only submission path and awaits to completion, so
