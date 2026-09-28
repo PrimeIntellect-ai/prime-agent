@@ -4,15 +4,6 @@
 //! spawn-admission helpers only this surface uses.
 use super::*;
 
-/// The spawn-name-unavailability error (TS
-/// `formatAgentSessionNameUnavailable`): one source so the reservation
-/// refusal and the availability check stay byte-identical.
-fn spawn_name_unavailable(name: &str, depth: u32) -> anyhow::Error {
-    anyhow!(
-        "Agent name \"{name}\" is unavailable: an agent of that name already exists at depth {depth} under this parent"
-    )
-}
-
 /// Resolve the child model with the daemon `allowedModels` allowlist
 /// enforced (the parent's cwd scopes the settings read), refusing a model
 /// outside the allowlist loudly with the typed error and emitting the

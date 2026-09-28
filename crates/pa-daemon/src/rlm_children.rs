@@ -840,6 +840,15 @@ impl SupervisorChildSessionsInner {
     }
 }
 
+/// The spawn-name-unavailability error (TS
+/// `formatAgentSessionNameUnavailable`): one source so the reservation
+/// refusal and the availability check stay byte-identical.
+fn spawn_name_unavailable(name: &str, depth: u32) -> anyhow::Error {
+    anyhow!(
+        "Agent name \"{name}\" is unavailable: an agent of that name already exists at depth {depth} under this parent"
+    )
+}
+
 mod host;
 mod lifecycle;
 mod registry;
