@@ -181,8 +181,11 @@ esac
 # Warnings and diagnostics go to stderr, which a `curl | sh` run keeps.
 if [ "$VERBOSE" = 1 ]; then
   exec 3>&1
-elif [ -e /dev/fd/3 ]; then
-  :   # already open — a wrapper's capture channel; keep it
+elif ( : >&3 ) 2>/dev/null; then
+  :   # already open — a wrapper's capture channel; keep it (the subshell
+      # probe tests the DESCRIPTOR, not a /dev/fd node: on macOS /dev/fd/3
+      # exists while fd 3 is closed, and a redirect onto a closed fd under
+      # set -e would abort the installer at its first progress line)
 else
   exec 3>/dev/null
 fi
@@ -211,9 +214,14 @@ elif [ -x "${HOME}/.local/bin/uv" ]; then
 else
   # The fetch and the script run are checked SEPARATELY: a plain
   # `curl | sh` pipeline reports the script's status, so a dead network
-  # would masquerade as success.
+  # would masquerade as success. The astral installer honors two
+  # destination-redirecting env vars (UV_INSTALL_DIR, UV_UNMANAGED_INSTALL):
+  # an inherited value pointing into the shared session store would place uv
+  # there BEFORE the store guard runs — clear both so the install lands at
+  # uv's own fixed path.
   if uv_install_out="$(curl -fsSLsS https://astral.sh/uv/install.sh)" \
-     && printf '%s\n' "$uv_install_out" | sh >/dev/null 2>&1 \
+     && printf '%s\n' "$uv_install_out" \
+        | env -u UV_INSTALL_DIR -u UV_UNMANAGED_INSTALL sh >/dev/null 2>&1 \
      && [ -x "${HOME}/.local/bin/uv" ]; then
     uv_bin="${HOME}/.local/bin/uv"
   fi
@@ -227,10 +235,18 @@ fi
 # one prerequisite the installer cannot provide for itself.
 UVPY=""
 if [ -n "$uv_bin" ]; then
-  UVPY="$("$uv_bin" python find 3.11 2>/dev/null || true)"
+  # --system is load-bearing twice over: without it `uv python find`
+  # honors the CURRENT DIRECTORY's project pin (a pyproject.toml or
+  # .python-version demanding a newer Python can shadow the exact 3.11
+  # this bootstrap just installed) and its venv discovery can hand back
+  # a checkout's .venv interpreter — code this installer would then
+  # EXECUTE with GITHUB_TOKEN in its environment, before any artifact
+  # validation. The flag restricts the resolution to system-level
+  # interpreters (uv's own managed installs count).
+  UVPY="$("$uv_bin" python find --system 3.11 2>/dev/null || true)"
   if [ -z "$UVPY" ]; then
     if "$uv_bin" python install 3.11 >/dev/null 2>&1; then
-      UVPY="$("$uv_bin" python find 3.11 2>/dev/null || true)"
+      UVPY="$("$uv_bin" python find --system 3.11 2>/dev/null || true)"
     fi
   fi
 fi
@@ -837,9 +853,9 @@ if [ -d "$old_layout_dir" ] && [ ! -d "$share_dir" ]; then
   else
     mv "$old_layout_dir" "$old"
     migrated_old_layout="$old"
-    say "the old prime-agent-rust install migrated to the rollback slot ${old}"
-    say "  (it is kept — the sweep only removes marker-stamped generations; remove"
-    say "   the slot by hand once you no longer need the rollback)"
+    echo "the old prime-agent-rust install migrated to the rollback slot ${old}"
+    echo "  (it is kept — the sweep only removes marker-stamped generations; remove"
+    echo "   the slot by hand once you no longer need the rollback)"
   fi
 fi
 if [ -d "$share_dir" ]; then
@@ -993,7 +1009,8 @@ else
   # `curl | sh` pipeline reports the SCRIPT's status, so a dead network
   # (curl fails, sh reads nothing and exits 0) would masquerade as success.
   if curl_out="$(curl -LsSf https://astral.sh/uv/install.sh)" \
-     && printf '%s\n' "$curl_out" | sh; then
+     && printf '%s\n' "$curl_out" \
+        | env -u UV_INSTALL_DIR -u UV_UNMANAGED_INSTALL sh; then
     [ -x "${HOME}/.local/bin/uv" ] \
       || note "warning: the uv installer reported success but ${HOME}/.local/bin/uv is missing; the first session may need to install uv itself"
   else
