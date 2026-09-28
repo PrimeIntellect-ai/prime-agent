@@ -1,3 +1,4 @@
+import type { ChildProcess } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -64,6 +65,7 @@ input.on("line", (line) => {
       return;
     }
     if (request.code === "corrupt-huge-line") return process.stdout.write("x".repeat(33 * 1024 * 1024));
+    if (request.code === "echo-id") return emit({ event: "stdout", id: request.id, text: request.id });
     if (request.code === "corrupt-idle") {
       process.stdout.write(JSON.stringify({ event: "done", id: request.id, status: "ok" }) + "\\n42\\n");
       return;
@@ -362,6 +364,34 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 		try {
 			await expect(manager.execute("corrupt-huge-line")).rejects.toThrow(/oversized protocol line/);
 			expect((await manager.execute("read")).status).toBe("ok");
+		} finally {
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
+		}
+	});
+
+	it("frames protocol lines across arbitrary stdout chunk boundaries", async () => {
+		const { manager } = newManager();
+		try {
+			let onId: (id: string) => void = () => {};
+			const echoed = new Promise<string>((resolve) => {
+				onId = resolve;
+			});
+			const result = manager.execute("echo-id", { onStream: (text) => onId(text) });
+			const id = await echoed;
+			const stdout = (manager as unknown as { child?: ChildProcess }).child?.stdout;
+			const emitChunks = (text: string, size: number) => {
+				const bytes = Buffer.from(text);
+				for (let i = 0; i < bytes.length; i += size) stdout?.emit("data", bytes.subarray(i, i + size));
+			};
+			const frame = (fields: Record<string, unknown>) => JSON.stringify({ event: "stdout", id, ...fields });
+			// Byte-sized chunks split every newline, the CRLF pair and the two-byte "é".
+			emitChunks(`${frame({ text: "-é" })}\n\n \r\n${frame({ text: "-crlf" })}\r\n`, 1);
+			// A line over 1 MiB spans many 64 KiB chunks; its last chunk also carries the done frame.
+			emitChunks(
+				`${frame({ text: "-big", pad: "x".repeat(1 << 20) })}\n${frame({ event: "done", status: "ok" })}\n`,
+				65_536,
+			);
+			await expect(result).resolves.toMatchObject({ status: "ok", stdout: `${id}-é-crlf-big` });
 		} finally {
 			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}

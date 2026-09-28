@@ -36,7 +36,6 @@
 	},
 	"types": "./dist/index.d.ts",
 	"dependencies": {
-		"chalk": "^5.5.0",
 		"get-east-asian-width": "^1.6.0",
 		"marked": "^18.0.7"
 	},
@@ -45,6 +44,6 @@
 	},
 	"devDependencies": {
 		"@xterm/headless": "^6.0.0",
-		"@xterm/xterm": "^6.0.0"
+		"chalk": "^5.5.0"
 	}
 }

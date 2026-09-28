@@ -36,7 +36,6 @@ vi.mock("node:fs", async (importOriginal) => {
 import { computeOwnAndTotalUsage } from "../../src/core/context-tree.js";
 import {
 	type FileEntry,
-	findMostRecentSession,
 	loadEntriesFromFile,
 	loadEntriesFromFileAsync,
 	migrateSessionEntries,
@@ -352,66 +351,6 @@ describe("session tree metadata", () => {
 
 		expect(SessionManager.open(file).getHeader()?.rlmDepth).toBe(expected);
 		expect(headerOf(file).rlmDepth).toBe(expected);
-	});
-});
-
-describe("findMostRecentSession", () => {
-	let tempDir: string;
-
-	beforeEach(() => {
-		tempDir = join(tmpdir(), `session-test-${Date.now()}`);
-		mkdirSync(tempDir, { recursive: true });
-	});
-
-	afterEach(() => {
-		rmSync(tempDir, { recursive: true, force: true });
-	});
-
-	function writeSession(name: string, id: string, mtimeSeconds?: number): string {
-		const file = join(tempDir, name);
-		writeFileSync(file, `{"type":"session","id":"${id}","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n`);
-		if (mtimeSeconds !== undefined) utimesSync(file, mtimeSeconds, mtimeSeconds);
-		return file;
-	}
-
-	it.each<[string, () => { dir: string; expected: string | null }]>([
-		[
-			"ignores non-jsonl files",
-			() => {
-				writeFileSync(join(tempDir, "file.txt"), "hello");
-				writeFileSync(join(tempDir, "file.json"), "{}");
-				return { dir: tempDir, expected: null };
-			},
-		],
-		[
-			"ignores jsonl files without a valid session header",
-			() => {
-				writeFileSync(join(tempDir, "invalid.jsonl"), '{"type":"message"}\n');
-				return { dir: tempDir, expected: null };
-			},
-		],
-		[
-			"returns the single valid session file",
-			() => ({ dir: tempDir, expected: writeSession("session.jsonl", "abc") }),
-		],
-		[
-			"returns the most recently modified session",
-			() => {
-				writeSession("older.jsonl", "old", 1000);
-				return { dir: tempDir, expected: writeSession("newer.jsonl", "new", 2000) };
-			},
-		],
-		[
-			"skips invalid files and returns the valid one",
-			() => {
-				writeFileSync(join(tempDir, "invalid.jsonl"), '{"type":"not-session"}\n');
-				return { dir: tempDir, expected: writeSession("valid.jsonl", "abc") };
-			},
-		],
-	])("%s", (_label, build) => {
-		const { dir, expected } = build();
-
-		expect(findMostRecentSession(dir)).toBe(expected);
 	});
 });
 

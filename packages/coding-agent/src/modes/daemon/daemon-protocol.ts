@@ -863,6 +863,24 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	shutdown: LEGACY_DAEMON_COMMAND,
 } as const satisfies Record<DaemonCommandName, DaemonCommandCompatibility>;
 
+/** Commands only the supervisor serves; a worker rejects them as unknown. */
+const SUPERVISOR_ONLY_DAEMON_COMMANDS: ReadonlySet<string> = new Set([
+	"complete_owned_session",
+	"get_direct_worker_transport",
+	"list_agent_peers",
+	"promote_owned_session",
+	"reattach",
+	"roster_subscribe",
+	"roster_unsubscribe",
+] satisfies DaemonCommandName[]);
+
+/** Commands the supervisor admits: every command in the compatibility table. */
+export const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set(Object.keys(DAEMON_COMMAND_COMPATIBILITY));
+
+export const WORKER_DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set(
+	[...DAEMON_COMMAND_TYPES].filter((type) => !SUPERVISOR_ONLY_DAEMON_COMMANDS.has(type)),
+);
+
 /**
  * Which endpoint serves each command when a client holds both a supervisor
  * (control-plane) and a direct worker (session-plane) connection. Session is
@@ -1211,7 +1229,8 @@ export type DaemonOutbound =
 			meta?: DaemonEventMeta;
 	  };
 
-export const DAEMON_OUTBOUND_COMPATIBILITY = {
+// Compile-time only: forces every DaemonOutbound type to declare its compatibility.
+const _DAEMON_OUTBOUND_COMPATIBILITY = {
 	response: LEGACY_DAEMON_COMMAND,
 	session_list_progress: LEGACY_DAEMON_COMMAND,
 	session_list_item: LEGACY_DAEMON_COMMAND,
@@ -1361,22 +1380,6 @@ export const UPDATE_RESTART_DRAIN_COMMANDS: ReadonlySet<DaemonCommand["type"]> =
 	"abort_compaction",
 	"abort_retry",
 ]);
-
-export function createDaemonEventEnvelope<TEvent extends DaemonOutbound>(
-	event: TEvent,
-	meta: DaemonEventMeta,
-): DaemonEventEnvelope<TEvent> {
-	return {
-		type: "event",
-		id: meta.id,
-		protocol: meta.protocol,
-		...(meta.activeSessionId ? { activeSessionId: meta.activeSessionId } : {}),
-		...(meta.sequence !== undefined ? { sequence: meta.sequence } : {}),
-		...(meta.cursor ? { cursor: meta.cursor } : {}),
-		emittedAt: meta.emittedAt,
-		event,
-	};
-}
 
 export function createDaemonEventMeta(
 	activeSessionId: string,

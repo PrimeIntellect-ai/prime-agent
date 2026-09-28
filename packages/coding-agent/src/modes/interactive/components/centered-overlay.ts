@@ -12,7 +12,6 @@ import {
 interface CenteredOverlayOptions {
 	getRows: () => number;
 	maxContentWidth?: number;
-	verticalOffset?: number;
 }
 
 interface InputHandler {
@@ -100,8 +99,7 @@ export class CenteredOverlayComponent implements Component, Focusable {
 			Number.isFinite(requestedRows) && requestedRows > 0
 				? Math.max(contentLines.length, Math.floor(requestedRows))
 				: contentLines.length;
-		const centeredTop = Math.floor((targetRows - contentLines.length) / 2) + (this.options.verticalOffset ?? 0);
-		const topPadding = Math.max(0, Math.min(centeredTop, targetRows - contentLines.length));
+		const topPadding = Math.floor((targetRows - contentLines.length) / 2);
 		const bottomPadding = Math.max(0, targetRows - contentLines.length - topPadding);
 
 		return [

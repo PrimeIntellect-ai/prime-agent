@@ -29,7 +29,6 @@ export interface PrimeAgentAutonomousMeta {
 	tokensUsed: number;
 	gateAttempt?: number;
 	gateFailure?: string;
-	limitReason?: string;
 }
 
 export interface PrimeAgentIpythonAttachmentMeta {

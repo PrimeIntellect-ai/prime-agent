@@ -13,7 +13,6 @@ export interface CollapsibleErrorOptions {
 	text: string;
 	summary?: string;
 	expanded?: boolean;
-	forceCollapse?: boolean;
 	paddingX?: number;
 }
 
@@ -108,7 +107,7 @@ export class CollapsibleErrorComponent implements Component {
 			return [];
 		}
 
-		const collapsible = this.options.forceCollapse ?? shouldCollapseErrorDetails(text);
+		const collapsible = shouldCollapseErrorDetails(text);
 		if (!collapsible || this.expanded) {
 			this.clickRegions = [{ line: 0, col: 0, width, height: 1, onClick: () => this.setExpanded(!this.expanded) }];
 			return this.renderText(text, width);

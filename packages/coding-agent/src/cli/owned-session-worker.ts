@@ -536,11 +536,8 @@ export async function runOwnedSessionWorkerFrontend(
 	}
 }
 
-export async function maybeRunOwnedSessionWorkerFrontend(
-	args: readonly string[],
-	forceLegacyFrontend = false,
-): Promise<boolean> {
-	if (!forceLegacyFrontend && process.env.PRIME_AGENT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND !== "1") {
+export async function maybeRunOwnedSessionWorkerFrontend(args: readonly string[]): Promise<boolean> {
+	if (process.env.PRIME_AGENT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND !== "1") {
 		return false;
 	}
 	const profile = classifyOwnedSessionWorkerInvocation(args, process.stdin.isTTY);

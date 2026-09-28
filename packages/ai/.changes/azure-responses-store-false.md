@@ -1,0 +1,1 @@
+- Fixed Azure OpenAI Responses requests to send `store: false`, so responses are no longer stored server-side, and to omit `prompt_cache_key` when `cacheRetention` is `"none"`, matching the OpenAI Responses provider.
