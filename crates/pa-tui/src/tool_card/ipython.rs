@@ -79,6 +79,20 @@ impl CardStatus {
     }
 }
 
+/// Whether the cell's final result carries a still-running background
+/// shell (the renderer's own `Running` case): the cell itself settled,
+/// but the spawned shell keeps working, so the summary line keeps
+/// animating (the working icon) - the card's rows must not cache.
+pub(crate) fn background_shell_running(card: &ToolCallCard) -> bool {
+    if card.result_partial {
+        return false;
+    }
+    card.result
+        .as_ref()
+        .and_then(|result| read_background_shell(cell_code(card), &result.details))
+        .is_some_and(|background| background.exit_code.is_none())
+}
+
 fn cell_code(card: &ToolCallCard) -> &str {
     card.args
         .get("code")

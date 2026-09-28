@@ -517,7 +517,6 @@ impl AgentView {
             content,
             details,
             is_error,
-            timestamp,
         } = &item
         {
             let pending = self.chat.iter().rposition(|entry| {
@@ -538,7 +537,6 @@ impl AgentView {
                     let now = std::time::Instant::now();
                     card.started_at = Some(now);
                     card.ended_at = Some(now);
-                    card.ended_ms = (*timestamp > 0).then_some(*timestamp);
                     card.result = Some(crate::chat::ToolResultView {
                         content: if content.is_empty() {
                             vec![serde_json::json!({ "type": "text", "text": text })]
@@ -567,11 +565,7 @@ impl AgentView {
                 name: tool_name.clone(),
                 args: serde_json::Value::Null,
                 started: true,
-                ended_ms: (*timestamp > 0).then_some(*timestamp),
                 result: Some(view),
-                // An orphan keeps its own standalone row (it is not
-                // a call).
-                unmatched_result: true,
                 ..Default::default()
             })));
             return;
@@ -1969,13 +1963,11 @@ fn item_to_entry(item: TranscriptItem) -> ChatEntry {
             id,
             name,
             arguments,
-            timestamp,
         } => ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
             id,
             name,
             args: serde_json::from_str(&arguments).unwrap_or(serde_json::Value::Null),
             started: false,
-            started_ms: (timestamp > 0).then_some(timestamp),
             ..Default::default()
         })),
         // A replayed tool result reaches the view through
@@ -1988,13 +1980,11 @@ fn item_to_entry(item: TranscriptItem) -> ChatEntry {
             content,
             details,
             is_error,
-            timestamp,
         } => ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
             id: tool_call_id,
             name: tool_name,
             args: serde_json::Value::Null,
             started: true,
-            ended_ms: (timestamp > 0).then_some(timestamp),
             result: Some(crate::chat::ToolResultView {
                 content: if content.is_empty() {
                     vec![serde_json::json!({ "type": "text", "text": text })]
@@ -2881,7 +2871,6 @@ mod tests {
             }),
             result_partial: false,
             aborted: false,
-            ..Default::default()
         }))
     }
 
@@ -2992,7 +2981,6 @@ mod tests {
             result: None,
             result_partial: false,
             aborted: false,
-            ..Default::default()
         }));
         let mut view = view_with(vec![running, settled_tool_card("call_d")]);
         view.pulse_frame = 0;

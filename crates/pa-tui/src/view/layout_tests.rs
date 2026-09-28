@@ -663,7 +663,6 @@ fn an_orphan_result_keeps_its_own_row() {
             id: format!("c{index}"),
             name: "bash".to_string(),
             arguments: r#"{"command": "echo done"}"#.to_string(),
-            timestamp: 1,
         });
         view.push(crate::session::TranscriptItem::ToolResult {
             tool_call_id: format!("c{index}"),
@@ -672,7 +671,6 @@ fn an_orphan_result_keeps_its_own_row() {
             content: Vec::new(),
             details: serde_json::Value::Null,
             is_error: false,
-            timestamp: 2,
         });
     }
     view.push(crate::session::TranscriptItem::ToolResult {
@@ -682,7 +680,6 @@ fn an_orphan_result_keeps_its_own_row() {
         content: Vec::new(),
         details: serde_json::Value::Null,
         is_error: false,
-        timestamp: 3,
     });
     let frame = view.render_frame(80, 30);
     let rendered: Vec<String> = frame
@@ -945,7 +942,6 @@ fn a_replayed_result_into_a_pending_card_folds_its_row_delta() {
         content: Vec::new(),
         details: serde_json::Value::Null,
         is_error: false,
-        timestamp: 2,
     });
     view.render_frame(80, 12);
     view.render_frame(80, 12);
@@ -953,6 +949,58 @@ fn a_replayed_result_into_a_pending_card_folds_its_row_delta() {
     assert!(
         selected.as_deref().is_some_and(|text| text.contains("b1")),
         "the selection stays on the card's own rows (never a drifted row): {selected:?}"
+    );
+}
+
+#[test]
+fn a_background_shell_card_stays_uncached() {
+    // An ipython cell whose final result carries a still-running
+    // background shell keeps its card LIVE: the summary line renders the
+    // working icon (CardStatus::Running while the shell has no exit
+    // code), so the rows re-render on every pulse frame instead of
+    // caching the first paint.
+    let card = |id: &str, shell: bool| {
+        ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
+            id: id.to_string(),
+            name: "ipython".to_string(),
+            args: if shell {
+                serde_json::json!({"code": "bash('sleep 60')"})
+            } else {
+                serde_json::json!({"code": "print(1)"})
+            },
+            started: true,
+            started_at: Some(std::time::Instant::now()),
+            ended_at: Some(std::time::Instant::now()),
+            result: Some(crate::chat::ToolResultView {
+                content: Vec::new(),
+                details: if shell {
+                    serde_json::json!({
+                        "result": "<BashHandle pid=123 running command='sleep 60'>"
+                    })
+                } else {
+                    serde_json::Value::Null
+                },
+                is_error: false,
+            }),
+            result_partial: false,
+            ..Default::default()
+        }))
+    };
+    let mut view = view();
+    view.detail = Detail::Overview;
+    for index in 0..4 {
+        view.push_entry(card(&format!("c{index}"), false));
+    }
+    view.push_entry(card("c4", true));
+    let shell_entry = view.chat.last().expect("the shell card").clone();
+    assert!(
+        !view.entry_cacheable(&shell_entry),
+        "the live card never caches while the background shell runs"
+    );
+    let settled = card("c5", false);
+    assert!(
+        view.entry_cacheable(&settled),
+        "a settled cell without a background shell caches"
     );
 }
 

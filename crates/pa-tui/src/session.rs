@@ -27,10 +27,6 @@ pub enum TranscriptItem {
         id: String,
         name: String,
         arguments: String,
-        /// The parent assistant message's wire `timestamp` (Unix
-        /// milliseconds): an existing field the cards' own duration
-        /// rows read on replay - no schema change.
-        timestamp: u64,
     },
     ToolResult {
         tool_call_id: String,
@@ -44,8 +40,6 @@ pub enum TranscriptItem {
         /// structured output exactly like live ones.
         details: serde_json::Value,
         is_error: bool,
-        /// The message's wire `timestamp` (Unix milliseconds).
-        timestamp: u64,
     },
     BashExecution {
         command: String,
@@ -233,7 +227,6 @@ fn message_to_items(message: &AgentMessage) -> Vec<TranscriptItem> {
                             id: tc.id.clone(),
                             name: tc.name.clone(),
                             arguments: serde_json::to_string(&tc.arguments).unwrap_or_default(),
-                            timestamp: a.timestamp,
                         });
                     }
                 }
@@ -261,7 +254,6 @@ fn message_to_items(message: &AgentMessage) -> Vec<TranscriptItem> {
                 .collect(),
             details: t.details.clone().unwrap_or(serde_json::Value::Null),
             is_error: t.is_error,
-            timestamp: t.timestamp,
         }],
         AgentMessage::BashExecution(b) => vec![TranscriptItem::BashExecution {
             command: b.command.clone(),
