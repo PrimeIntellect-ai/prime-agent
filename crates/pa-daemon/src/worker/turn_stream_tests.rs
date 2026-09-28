@@ -166,6 +166,73 @@ impl SessionEngine for BurstStreamEngine {
     }
 }
 
+/// A recording engine for the settled-child kernel release (TS #2483's
+/// inline arm): the runner's park arm fires the trait method, and the
+/// test counts the fires.
+struct ReleaseCountingEngine {
+    releases: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl SessionEngine for ReleaseCountingEngine {
+    fn run_prompt(
+        &self,
+        _prompt_index: usize,
+        _request: PromptRequest,
+        _aborted: &dyn Fn() -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> bool,
+    ) {
+        emit(EngineEvent::Done(Ok(())));
+    }
+
+    fn run_side_question(
+        &self,
+        _request: SideQuestionRequest,
+        _signal: &pa_agent::abort::AbortSignal,
+        _sink: &pa_core::session_engine::side_question::SideQuestionSink,
+    ) -> SideQuestionOutcome {
+        SideQuestionOutcome::Failed {
+            answer: String::new(),
+            error: "unsupported".to_string(),
+        }
+    }
+
+    fn run_compaction(
+        &self,
+        _request: CompactionRequest,
+        _signal: &pa_agent::abort::AbortSignal,
+    ) -> CompactionOutcome {
+        CompactionOutcome::Skipped {
+            message: "nothing to compact".to_string(),
+        }
+    }
+
+    fn run_branch_summary(
+        &self,
+        _request: crate::engine::BranchSummaryRequest,
+        _signal: &pa_agent::abort::AbortSignal,
+    ) -> crate::engine::BranchSummaryOutcome {
+        crate::engine::BranchSummaryOutcome::Failed {
+            error: "unsupported".to_string(),
+        }
+    }
+
+    fn rebuild_session_context(
+        &self,
+        _branch_entries: Vec<pa_types::session::FileEntry>,
+        _goal_reload: pa_core::session_engine::goal_driver::GoalBranchReload,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn release_settled_child_kernel(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        self.releases
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(std::future::ready(()))
+    }
+}
+
 /// A minimal turn runner over a fresh session core: exactly what
 /// `run_turn` touches (the store stays `None`, the roster push is a
 /// no-op link, no supervisor socket).
@@ -1847,4 +1914,58 @@ async fn an_instant_burst_flushes_the_final_snapshot_with_its_settle_frame() {
         updates.iter().all(|index| *index < end[0]),
         "the flushed snapshot precedes message_end"
     );
+}
+
+/// The settled-child kernel release fires from the park arm only for a
+/// parent-owned child (TS #2483's `canPassivateSettledSession`,
+/// worker-side): a depth-1 child with no attached clients releases at
+/// the idle park; a root session, an attached child, and a compacting
+/// child stay resident.
+/// The settled-child kernel release fires from the park arm only for a
+/// parent-owned child (TS #2483's `canPassivateSettledSession`,
+/// worker-side): a depth-1 child with no attached clients releases at
+/// the idle park; a root session, an attached child, and a compacting
+/// child stay resident.
+#[tokio::test]
+async fn the_idle_park_releases_a_parent_owned_childs_kernel_only() {
+    async fn parked_releases(depth: u32, attached: bool, compacting: bool) -> usize {
+        let releases =
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let runner = burst_runner(Arc::new(ReleaseCountingEngine {
+            releases: std::sync::Arc::clone(&releases),
+        }));
+        {
+            let mut core = runner.core.lock().unwrap();
+            core.rlm_depth = depth;
+            core.compacting = compacting;
+            if attached {
+                core.attached_client_ids.push("client-1".to_string());
+            }
+        }
+        let task = tokio::spawn(async move {
+            runner.run().await;
+        });
+        // The runner parks with no work in flight; the park arm fires
+        // the release when the policy holds. Bounded wait.
+        let mut count = 0;
+        for _ in 0..100 {
+            count = releases.load(std::sync::atomic::Ordering::SeqCst);
+            if count > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        task.abort();
+        count
+    }
+
+    // A parent-owned child releases its kernel at the idle park.
+    assert_eq!(parked_releases(1, false, false).await, 1);
+    // A root session keeps its kernel (the release is for RLM
+    // children only).
+    assert_eq!(parked_releases(0, false, false).await, 0);
+    // An attached client keeps the kernel resident.
+    assert_eq!(parked_releases(1, true, false).await, 0);
+    // An in-flight compaction keeps the kernel resident.
+    assert_eq!(parked_releases(1, false, true).await, 0);
 }
