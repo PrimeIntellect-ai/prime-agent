@@ -90,7 +90,7 @@ impl CompactionMock {
                 let Ok(stream) = stream else { continue };
                 let requests = Arc::clone(&requests_for_thread);
                 std::thread::spawn(move || {
-                    let _ = serve(stream, requests);
+                    let _ = serve(stream, &requests);
                 });
             }
         });
@@ -106,7 +106,7 @@ impl CompactionMock {
     }
 }
 
-fn chunk(delta: Value, finish_reason: Option<&str>, usage: Value) -> String {
+fn chunk(delta: &Value, finish_reason: Option<&str>, usage: &Value) -> String {
     json!({
         "id": "chatcmpl-test",
         "object": "chat.completion.chunk",
@@ -158,7 +158,7 @@ fn is_summarizer_request(body: &Value) -> bool {
     })
 }
 
-fn serve(mut stream: TcpStream, requests: Arc<Mutex<Vec<Value>>>) -> std::io::Result<()> {
+fn serve(mut stream: TcpStream, requests: &Arc<Mutex<Vec<Value>>>) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut head = String::new();
     loop {
@@ -195,16 +195,16 @@ fn serve(mut stream: TcpStream, requests: Arc<Mutex<Vec<Value>>>) -> std::io::Re
                 payload,
                 "data: {}\n\n",
                 chunk(
-                    json!({"role": "assistant", "content": piece}),
+                    &json!({"role": "assistant", "content": piece}),
                     None,
-                    Value::Null
+                    &Value::Null
                 )
             );
         }
         let _ = write!(
             payload,
             "data: {}\n\n",
-            chunk(json!({}), Some("stop"), small_usage())
+            chunk(&json!({}), Some("stop"), &small_usage())
         );
         payload.push_str("data: [DONE]\n\n");
     } else {
@@ -218,11 +218,11 @@ fn serve(mut stream: TcpStream, requests: Arc<Mutex<Vec<Value>>>) -> std::io::Re
         };
         for data in [
             chunk(
-                json!({"role": "assistant", "content": "parity reply"}),
+                &json!({"role": "assistant", "content": "parity reply"}),
                 None,
-                small_usage(),
+                &small_usage(),
             ),
-            chunk(json!({}), Some("stop"), usage.clone()),
+            chunk(&json!({}), Some("stop"), usage),
             json!({
                 "id": "chatcmpl-test",
                 "object": "chat.completion.chunk",
@@ -297,7 +297,7 @@ impl Client {
         client
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -431,7 +431,7 @@ fn threshold_compaction_streams_summary_deltas_to_attached_clients() {
 
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -452,7 +452,7 @@ fn threshold_compaction_streams_summary_deltas_to_attached_clients() {
 
     client.send_command(
         "a1",
-        json!({ "type": "attach", "activeSessionId": session_id }),
+        &json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let attached = client.read_response("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
@@ -460,7 +460,7 @@ fn threshold_compaction_streams_summary_deltas_to_attached_clients() {
     // Seed turn (small usage): the compaction threshold stays silent.
     client.send_command(
         "p1",
-        json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "seed turn"}),
+        &json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "seed turn"}),
     );
     let seeded = client.read_response("p1");
     assert_eq!(seeded["success"], true, "seed prompt failed: {seeded}");
@@ -476,7 +476,7 @@ fn threshold_compaction_streams_summary_deltas_to_attached_clients() {
     // than this single-history-chunk script).
     client.send_command(
         "p2",
-        json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": format!("crossing turn {}", "x".repeat(4_000))}),
+        &json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": format!("crossing turn {}", "x".repeat(4_000))}),
     );
     let crossed = client.read_response("p2");
     assert_eq!(

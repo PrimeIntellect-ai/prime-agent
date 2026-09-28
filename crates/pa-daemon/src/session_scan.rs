@@ -161,10 +161,10 @@ mod tests {
             session.append_session_info(name);
         }
         for turn in 0..message_count {
-            session.append_message(json!({
+            session.append_message(&json!({
                 "role": "user", "content": format!("user {turn}"), "timestamp": (turn + 1) as u64
             }));
-            session.append_message(json!({
+            session.append_message(&json!({
                 "role": "assistant", "content": format!("assistant {turn}"),
                 "provider": "p", "model": "m", "timestamp": (turn + 1) as u64
             }));

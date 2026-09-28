@@ -143,7 +143,7 @@ impl Client {
         }
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -259,7 +259,7 @@ fn setup(name: &str) -> Harness {
     let mut client = Client::connect(&socket);
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -280,7 +280,7 @@ fn setup(name: &str) -> Harness {
     // goal_update announcements are observable.
     client.send_command(
         "a1",
-        json!({ "type": "attach", "activeSessionId": session_id }),
+        &json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let attached = client.request("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
@@ -330,7 +330,7 @@ impl Harness {
     fn prompt(&mut self, id: &str, message: &str) {
         self.client.send_command(
             id,
-            json!({
+            &json!({
                 "type": "prompt_and_wait",
                 "activeSessionId": self.session_id,
                 "message": message,
@@ -349,7 +349,7 @@ impl Harness {
     fn prompt_racing_the_loop(&mut self, id: &str, message: &str) {
         self.client.send_command(
             id,
-            json!({
+            &json!({
                 "type": "prompt_and_wait",
                 "activeSessionId": self.session_id,
                 "message": message,
@@ -476,7 +476,7 @@ fn killed_mid_goal_worker_rehydrates_the_goal_with_counts() {
     harness.prompt_racing_the_loop("r1", "/goal resume");
     harness.client.send_command(
         "c2",
-        json!({ "type": "compact", "activeSessionId": harness.session_id }),
+        &json!({ "type": "compact", "activeSessionId": harness.session_id }),
     );
     let compact = harness.client.request("c2");
     assert_eq!(compact["success"], true, "compact failed: {compact}");
@@ -484,7 +484,7 @@ fn killed_mid_goal_worker_rehydrates_the_goal_with_counts() {
     harness.client.drain_events(Duration::from_secs(1));
     harness.client.send_command(
         "w2",
-        json!({ "type": "wait_for_idle", "activeSessionId": harness.session_id }),
+        &json!({ "type": "wait_for_idle", "activeSessionId": harness.session_id }),
     );
     let idle = harness.client.request("w2");
     assert_eq!(idle["success"], true, "never went idle: {idle}");
@@ -508,7 +508,7 @@ fn killed_mid_goal_worker_rehydrates_the_goal_with_counts() {
     // The daemon's own session summary names the live worker pid.
     harness.client.send_command(
         "st1",
-        json!({ "type": "get_state", "activeSessionId": harness.session_id }),
+        &json!({ "type": "get_state", "activeSessionId": harness.session_id }),
     );
     let state = harness.client.request("st1");
     assert_eq!(state["success"], true, "get_state failed: {state}");
@@ -531,7 +531,7 @@ fn killed_mid_goal_worker_rehydrates_the_goal_with_counts() {
         assert!(Instant::now() < deadline, "the session never recovered");
         harness.client.send_command(
             "rp",
-            json!({
+            &json!({
                 "type": "prompt_and_wait",
                 "activeSessionId": harness.session_id,
                 "message": "keep working after the crash",
@@ -556,7 +556,7 @@ fn killed_mid_goal_worker_rehydrates_the_goal_with_counts() {
     // `_emitGoalUpdate`): the rehydrated count never resets.
     harness.client.send_command(
         "st2",
-        json!({
+        &json!({
             "type": "get_connection_state",
             "activeSessionId": harness.session_id,
         }),
@@ -629,7 +629,7 @@ fn killed_mid_goal_worker_rehydrates_the_goal_with_counts() {
     harness.prompt_racing_the_loop("rf", "/goal resume");
     harness.client.send_command(
         "c3",
-        json!({ "type": "compact", "activeSessionId": harness.session_id }),
+        &json!({ "type": "compact", "activeSessionId": harness.session_id }),
     );
     let compact = harness.client.request("c3");
     assert_eq!(
@@ -639,7 +639,7 @@ fn killed_mid_goal_worker_rehydrates_the_goal_with_counts() {
     harness.prompt_racing_the_loop("rfp", "/goal pause");
     harness.client.send_command(
         "w3",
-        json!({ "type": "wait_for_idle", "activeSessionId": harness.session_id }),
+        &json!({ "type": "wait_for_idle", "activeSessionId": harness.session_id }),
     );
     let idle = harness.client.request("w3");
     assert_eq!(idle["success"], true, "never went idle: {idle}");

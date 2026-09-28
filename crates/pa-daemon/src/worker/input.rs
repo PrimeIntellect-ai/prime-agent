@@ -128,7 +128,7 @@ impl Worker {
                 Lane::Steering => enqueue_priority(&mut core.steering, item),
                 Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
             }
-            let snapshot = self.snapshot_locked(&core);
+            let snapshot = Self::snapshot_locked(&core);
             (snapshot, queued_behind_work)
         };
         // The admission checkpoint (TS `prompt_accepted`, busy=true): the
@@ -215,7 +215,7 @@ impl Worker {
             Lane::Steering => enqueue_priority(&mut core.steering, item),
             Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
         }
-        let snapshot = self.snapshot_locked(&core);
+        let snapshot = Self::snapshot_locked(&core);
         drop(core);
         // The queue-write checkpoint (busy=true): an undelivered lane is
         // live work. The operation names are TS's journal strings
@@ -398,7 +398,7 @@ impl Worker {
                 Lane::Steering => enqueue_priority(&mut core.steering, item),
                 Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
             }
-            let snapshot = self.snapshot_locked(&core);
+            let snapshot = Self::snapshot_locked(&core);
             (id, queued, snapshot, target)
         };
         // The delivery checkpoint (busy=true): the queued agent message is

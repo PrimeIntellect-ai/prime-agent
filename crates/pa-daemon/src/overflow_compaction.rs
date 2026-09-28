@@ -556,7 +556,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = faux_engine_with_settings(
-            json!({
+            &json!({
                 "responses": [
                     {"text": "seed reply"},
                     overflow_error(0),
@@ -661,7 +661,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = faux_engine_with_settings(
-            json!({
+            &json!({
                 "responses": [
                     {"text": "seed reply"},
                     overflow_error(0),
@@ -711,7 +711,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = faux_engine_with_settings(
-            json!({
+            &json!({
                 "responses": [
                     {"text": "seed reply"},
                     combined_limit_error(0),
@@ -811,7 +811,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = faux_engine_with_settings(
-            json!({
+            &json!({
                 "responses": [
                     {"text": "seed reply"},
                     overflow_error(0),
@@ -883,7 +883,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = faux_engine_with_settings(
-            json!({
+            &json!({
                 "responses": [
                     {"text": "seed reply"},
                     {"text": "", "stopReason": "error", "errorMessage": "529 overloaded"},
@@ -916,7 +916,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = faux_engine_with_settings(
-            json!({
+            &json!({
                 "responses": [
                     {"text": "seed reply"},
                     overflow_error(0),

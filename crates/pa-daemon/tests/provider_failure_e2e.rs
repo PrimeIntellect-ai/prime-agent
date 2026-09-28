@@ -86,7 +86,7 @@ impl FailingMock {
                 let Ok(stream) = stream else { continue };
                 let requests = Arc::clone(&requests_for_thread);
                 std::thread::spawn(move || {
-                    let _ = serve(stream, failures, answer, rejection, requests);
+                    let _ = serve(stream, failures, answer, rejection, &requests);
                 });
             }
         });
@@ -102,7 +102,7 @@ impl FailingMock {
     }
 }
 
-fn chunk(delta: Value, finish_reason: Option<&str>) -> String {
+fn chunk(delta: &Value, finish_reason: Option<&str>) -> String {
     json!({
         "id": "chatcmpl-test",
         "object": "chat.completion.chunk",
@@ -118,7 +118,7 @@ fn serve(
     failures: usize,
     answer: &str,
     rejection: MockRejection,
-    requests: Arc<Mutex<usize>>,
+    requests: &Arc<Mutex<usize>>,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut head = String::new();
@@ -182,8 +182,8 @@ fn serve(
     }
     let mut payload = String::new();
     for data in [
-        chunk(json!({"role": "assistant", "content": answer}), None),
-        chunk(json!({}), Some("stop")),
+        chunk(&json!({"role": "assistant", "content": answer}), None),
+        chunk(&json!({}), Some("stop")),
     ] {
         write!(payload, "data: {data}\n\n").expect("write to String");
     }
@@ -278,7 +278,7 @@ impl Client {
         }
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -402,7 +402,7 @@ fn setup_with_rejection(
     let mut client = Client::connect(&socket);
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -421,7 +421,7 @@ fn setup_with_rejection(
         .to_string();
     client.send_command(
         "a1",
-        json!({ "type": "attach", "activeSessionId": session_id }),
+        &json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let attached = client.request("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
@@ -441,7 +441,7 @@ fn provider_failure_is_retried_then_surfaced_to_attached_clients() {
     let (_dir, mock, _supervisor, mut client, session_id) = setup("failing", 5, "never reached");
     client.send_command(
         "p1",
-        json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "hi" }),
+        &json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "hi" }),
     );
     let done = client.request("p1");
     assert_eq!(done["success"], false, "prompt must fail: {done}");
@@ -608,7 +608,7 @@ fn storm_429_caps_requests_honors_retry_after_and_leaves_one_outcome_row() {
     );
     client.send_command(
         "p1",
-        json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "hi" }),
+        &json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "hi" }),
     );
     let done = client.request("p1");
     assert_eq!(done["success"], true, "prompt must recover: {done}");
@@ -690,7 +690,7 @@ fn storm_429_caps_requests_honors_retry_after_and_leaves_one_outcome_row() {
     // collapse is a TUI presentation rule) plus exactly ONE outcome row.
     client.send_command(
         "g1",
-        json!({ "type": "get_messages", "activeSessionId": session_id }),
+        &json!({ "type": "get_messages", "activeSessionId": session_id }),
     );
     let messages = client.request("g1");
     let list = messages["data"]["messages"].as_array().expect("messages");
@@ -839,7 +839,7 @@ fn provider_failure_surfaces_on_the_direct_transport_path() {
     // Ticket -> peer_auth -> attach on the worker's own socket.
     client.send_command(
         "ticket",
-        json!({ "type": "get_direct_worker_transport", "activeSessionId": session_id }),
+        &json!({ "type": "get_direct_worker_transport", "activeSessionId": session_id }),
     );
     let ticket = client.request("ticket");
     assert_eq!(ticket["success"], true, "ticket failed: {ticket}");
@@ -946,7 +946,7 @@ fn provider_failure_recovered_by_retry_settles_the_turn() {
     let (_dir, mock, _supervisor, mut client, session_id) = setup("healing", 2, "recovered reply");
     client.send_command(
         "p1",
-        json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "hi" }),
+        &json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "hi" }),
     );
     let done = client.request("p1");
     assert_eq!(done["success"], true, "prompt must succeed: {done}");

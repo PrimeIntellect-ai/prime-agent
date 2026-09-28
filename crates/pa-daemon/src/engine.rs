@@ -1087,7 +1087,7 @@ impl ScriptedEngine {
     /// Never errors (the script shape is total and every field defaults);
     /// the `Result` return keeps the constructor uniform with the other
     /// builders.
-    pub fn from_value(script: Value) -> Result<Self> {
+    pub fn from_value(script: &Value) -> Result<Self> {
         let responses = script
             .get("responses")
             .and_then(Value::as_array)

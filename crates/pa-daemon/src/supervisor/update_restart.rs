@@ -269,7 +269,7 @@ impl Supervisor {
                 created_at_ms: now,
                 ledger: &ledger,
             },
-            snapshots,
+            &snapshots,
         )?;
         let marker = UpdatePreparedMarker {
             update_id: update_id.clone(),

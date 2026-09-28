@@ -397,7 +397,7 @@ impl Supervisor {
         // content-diff guard (which would drop a byte-identical replay)
         // does not apply here — the identity gate above is this path's
         // own unchanged-row filter.
-        self.push_roster_update_unguarded(changed, Vec::new());
+        self.push_roster_update_unguarded(&changed, Vec::new());
     }
 
     /// Whether the roster still holds exactly the given seeded row (the

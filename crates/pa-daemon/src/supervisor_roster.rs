@@ -84,7 +84,6 @@ impl Supervisor {
 
     /// `roster_unsubscribe`.
     pub(crate) fn handle_roster_unsubscribe(
-        &self,
         command_id: &str,
         type_name: &str,
     ) -> DaemonResponse {
@@ -484,7 +483,7 @@ impl Supervisor {
             return;
         }
         let update = DaemonOutbound::RosterUpdate {
-            changed: serde_json::to_value(&changed).unwrap_or(Value::Null),
+            changed: serde_json::to_value(changed).unwrap_or(Value::Null),
             removed: (!removed.is_empty()).then_some(removed),
             resync: None,
             rest: Map::default(),
@@ -509,7 +508,7 @@ impl Supervisor {
     /// and a later removal of the row correctly passes the guard.
     pub(crate) fn push_roster_update_unguarded(
         &self,
-        changed: Vec<AgentRosterEntry>,
+        changed: &[AgentRosterEntry],
         removed: Vec<String>,
     ) {
         if changed.is_empty() && removed.is_empty() {
@@ -519,7 +518,7 @@ impl Supervisor {
         // baseline update and its broadcast are one serialized operation
         // (the same ordering guarantee the guarded arm holds).
         let mut last = self.last_published_roster.lock().unwrap();
-        for entry in &changed {
+        for entry in changed {
             if let Ok(published) = serde_json::to_value(entry) {
                 last.insert(entry.agent_id.clone(), published);
             }
@@ -531,7 +530,7 @@ impl Supervisor {
             last.remove(id);
         }
         let update = DaemonOutbound::RosterUpdate {
-            changed: serde_json::to_value(&changed).unwrap_or(Value::Null),
+            changed: serde_json::to_value(changed).unwrap_or(Value::Null),
             removed: (!removed.is_empty()).then_some(removed),
             resync: None,
             rest: Map::default(),

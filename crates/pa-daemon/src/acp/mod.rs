@@ -500,7 +500,7 @@ async fn session_new(
         "configOptions": *config.published.lock().await,
     });
     if let Some(cwd_mismatch) = cwd_mismatch {
-        result["_meta"] = meta::prime_agent_meta(PrimeAgentSessionMeta {
+        result["_meta"] = meta::prime_agent_meta(&PrimeAgentSessionMeta {
             cwd: Some(cwd_mismatch),
             ..Default::default()
         });

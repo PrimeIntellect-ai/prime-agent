@@ -1190,7 +1190,7 @@ mod tests {
         write_session(&deleted_dir, deleted_session, "stop");
         let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions, |_| {});
         ledger
-            .append_spawn(crate::rlm_ledger::RlmSpawnInput {
+            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
                 child_id: "sub-deadbeef".to_string(),
                 parent: session_file.display().to_string(),
                 child: deleted_dir.display().to_string(),

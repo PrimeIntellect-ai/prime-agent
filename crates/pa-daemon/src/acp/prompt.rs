@@ -80,7 +80,7 @@ pub(super) async fn handle_session_prompt(
         Ok(prompt) => prompt,
         Err(error) => {
             session.producer().finish_prompt(turn_id).await;
-            let _ = tx.send(session::prompt_block_error(&id, error));
+            let _ = tx.send(session::prompt_block_error(&id, &error));
             return;
         }
     };

@@ -162,7 +162,7 @@ fn summary_lifecycle_is_message_based() {
         session.session_id(),
     ));
     session.set_path(path);
-    session.append_message(serde_json::json!({
+    session.append_message(&serde_json::json!({
         "role": "user", "content": "hi", "timestamp": 1u64
     }));
     session.rewrite().unwrap();

@@ -689,7 +689,7 @@ async fn handle_session_new(
     if let Some(requested) = params.cwd.as_deref().filter(|cwd| !cwd.is_empty()) {
         let actual = options.actual_cwd.display().to_string();
         if !super::same_cwd(Path::new(requested), &options.actual_cwd) {
-            result["_meta"] = meta::prime_agent_meta(PrimeAgentSessionMeta {
+            result["_meta"] = meta::prime_agent_meta(&PrimeAgentSessionMeta {
                 cwd: Some(meta::PrimeAgentCwdMeta {
                     requested: requested.to_string(),
                     actual,
@@ -753,7 +753,7 @@ async fn handle_session_prompt(
     let admitted = match super::session::AdmittedPrompt::parse(&params.prompt) {
         Ok(admitted) => admitted,
         Err(error) => {
-            let _ = tx.send(super::session::prompt_block_error(&id, error));
+            let _ = tx.send(super::session::prompt_block_error(&id, &error));
             return;
         }
     };
@@ -905,7 +905,7 @@ async fn handle_session_prompt(
     // The boundary, completion, and terminal quiescence frames match the
     // in-process settlement because both serve the same captures.
     let boundary = types::AcpSessionUpdate::SessionInfoUpdate {
-        meta: meta::prime_agent_meta(PrimeAgentSessionMeta {
+        meta: meta::prime_agent_meta(&PrimeAgentSessionMeta {
             terminal_quiescence_expected: Some(true),
             ..Default::default()
         }),
@@ -922,7 +922,7 @@ async fn handle_session_prompt(
     // autonomous accounting rides the quiescence event, then the terminal
     // quiescence envelope repeats the observation.
     let quiescence = types::AcpSessionUpdate::SessionInfoUpdate {
-        meta: meta::prime_agent_meta(PrimeAgentSessionMeta {
+        meta: meta::prime_agent_meta(&PrimeAgentSessionMeta {
             autonomous: autonomous_meta.clone(),
             quiescence: Some(meta::PrimeAgentQuiescenceMeta {
                 outstanding_subagents: 0,
@@ -935,7 +935,7 @@ async fn handle_session_prompt(
         .publish(&quiescence, turn_id, PrimeAgentEventPhase::Event, None)
         .await;
     let terminal = types::AcpSessionUpdate::SessionInfoUpdate {
-        meta: meta::prime_agent_meta(PrimeAgentSessionMeta {
+        meta: meta::prime_agent_meta(&PrimeAgentSessionMeta {
             autonomous: autonomous_meta.clone(),
             quiescence: Some(meta::PrimeAgentQuiescenceMeta {
                 outstanding_subagents: 0,

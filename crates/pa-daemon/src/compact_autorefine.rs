@@ -156,7 +156,7 @@ mod tests {
         reserve_tokens: u64,
         with_session_file: bool,
     ) -> (AgentSessionEngine, tempfile::TempDir) {
-        let (engine, dir) = faux_engine_with_settings(script, reserve_tokens);
+        let (engine, dir) = faux_engine_with_settings(&script, reserve_tokens);
         if with_session_file {
             let sessions = dir.path().join("sessions");
             std::fs::create_dir_all(&sessions).unwrap();
@@ -199,7 +199,7 @@ mod tests {
     /// below, the big turns cross, environment-independently.
     fn crossing_headroom() -> u64 {
         let (probe, _probe_dir) =
-            faux_engine_with_settings(json!({ "responses": [{"text": "seed reply"}] }), 1);
+            faux_engine_with_settings(&json!{ "responses": [{"text": "seed reply"}] }), 1);
         let mut probe_events: Vec<EngineEvent> = Vec::new();
         admit(&probe, "seed turn".to_string(), &mut probe_events);
         let baseline = probe_events

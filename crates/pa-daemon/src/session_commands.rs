@@ -31,7 +31,7 @@ use crate::engine::EngineEvent;
 /// emitter asked to stop (abort): the host must not emit a `Done`.
 pub(crate) fn run_session_command(
     engine: &AgentSessionEngine,
-    command: SessionSlashCommand,
+    command: &SessionSlashCommand,
     emit: &mut dyn FnMut(EngineEvent) -> bool,
 ) -> Option<SessionCommandExecution> {
     let is_compact = command.name == "compact";

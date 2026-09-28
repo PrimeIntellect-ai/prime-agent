@@ -1016,7 +1016,7 @@ mod tests {
     /// verification (TS `isPersistedCronJobRunnable`) reads.
     fn write_active_session(dir: &std::path::Path) -> (String, std::path::PathBuf) {
         let mut session = crate::session_store::SessionFile::create("/w", None, 0);
-        session.append_message(serde_json::json!({
+        session.append_message(&serde_json::json!({
             "role": "user", "content": "hi", "timestamp": 1u64
         }));
         let path = dir.join(crate::session_store::session_file_name(

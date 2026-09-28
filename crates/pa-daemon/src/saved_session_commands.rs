@@ -968,7 +968,7 @@ mod tombstone_usage_tests {
         let mut session = SessionFile::create("/work", None, 0);
         let path = dir.join(format!("{}.jsonl", session.session_id()));
         session.set_path(path.clone());
-        session.append_message(json!({"role": "user", "content": "hi", "timestamp": 1u64}));
+        session.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
         session.rewrite().unwrap();
         let usage_row = json!({
             "type": "message", "id": "m1",

@@ -99,7 +99,7 @@ impl Client {
         client
     }
 
-    fn send_command(&mut self, id: &str, command: serde_json::Value) {
+    fn send_command(&mut self, id: &str, command: &serde_json::Value) {
         let value = serde_json::json!({
             "type": "command",
             "id": id,
@@ -229,7 +229,7 @@ fn the_saved_catalog_streams_per_file_during_the_scan() {
     let started = Instant::now();
     client.send_command(
         "s1",
-        serde_json::json!({ "type": "list_saved_sessions", "cwd": "/tmp" }),
+        &serde_json::json!({ "type": "list_saved_sessions", "cwd": "/tmp" }),
     );
 
     let mut first_item: Option<Duration> = None;

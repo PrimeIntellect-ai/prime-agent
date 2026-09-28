@@ -153,7 +153,7 @@ impl Client {
         }
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -308,7 +308,7 @@ fn setup(name: &str) -> Harness {
     let mut client = Client::connect(&socket);
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -374,7 +374,7 @@ fn thinking_level_changes_reach_the_roster_push() {
     std::fs::create_dir_all(&child_dir).expect("child dir");
     harness.client.send_command(
         "cc",
-        json!({
+        &json!({
             "type": "create",
             "name": "roster-child",
             "config": {
@@ -416,7 +416,7 @@ fn thinking_level_changes_reach_the_roster_push() {
     // Probe: a plain child read answers before the switch (routing sanity).
     harness.client.send_command(
         "gs-child",
-        json!({ "type": "get_state", "activeSessionId": child_id }),
+        &json!({ "type": "get_state", "activeSessionId": child_id }),
     );
     let probed = harness.client.request("gs-child");
     assert_eq!(probed["success"], true, "child get_state failed: {probed}");
@@ -424,7 +424,7 @@ fn thinking_level_changes_reach_the_roster_push() {
     // Subscribe: the snapshot carries both rows at low.
     harness
         .client
-        .send_command("rs", json!({ "type": "roster_subscribe" }));
+        .send_command("rs", &json!({ "type": "roster_subscribe" }));
     let subscribed = harness.client.request("rs");
     assert_eq!(
         subscribed["success"], true,
@@ -460,7 +460,7 @@ fn thinking_level_changes_reach_the_roster_push() {
     // after the raise, never the stale low).
     harness.client.send_command(
         "stl-child",
-        json!({ "type": "set_thinking_level", "activeSessionId": child_id, "level": "high" }),
+        &json!({ "type": "set_thinking_level", "activeSessionId": child_id, "level": "high" }),
     );
     let raised = harness.client.request("stl-child");
     assert_eq!(
@@ -488,7 +488,7 @@ fn thinking_level_changes_reach_the_roster_push() {
     // The top-level raise rides the same push path.
     harness.client.send_command(
         "stl-parent",
-        json!({ "type": "set_thinking_level", "activeSessionId": parent_id, "level": "high" }),
+        &json!({ "type": "set_thinking_level", "activeSessionId": parent_id, "level": "high" }),
     );
     let raised = harness.client.request("stl-parent");
     assert_eq!(
@@ -509,7 +509,7 @@ fn thinking_level_changes_reach_the_roster_push() {
     // model and the clamped level (TS `set_model` schedules the flush).
     harness.client.send_command(
         "sm",
-        json!({
+        &json!({
             "type": "set_model",
             "activeSessionId": parent_id,
             "provider": "battery",
@@ -562,7 +562,7 @@ fn unchanged_thinking_level_answers_without_a_roster_push() {
 
     harness
         .client
-        .send_command("rs", json!({ "type": "roster_subscribe" }));
+        .send_command("rs", &json!({ "type": "roster_subscribe" }));
     let subscribed = harness.client.request("rs");
     assert_eq!(
         subscribed["success"], true,
@@ -579,7 +579,7 @@ fn unchanged_thinking_level_answers_without_a_roster_push() {
     // low again: no change, success, and no push inside the quiet window.
     harness.client.send_command(
         "stl-same",
-        json!({ "type": "set_thinking_level", "activeSessionId": parent_id, "level": "low" }),
+        &json!({ "type": "set_thinking_level", "activeSessionId": parent_id, "level": "low" }),
     );
     let applied = harness.client.request("stl-same");
     assert_eq!(

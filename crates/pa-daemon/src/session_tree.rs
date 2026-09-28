@@ -427,7 +427,7 @@ mod tests {
     use super::*;
 
     fn message_entry(store: &mut SessionFile, role: &str, text: &str) -> String {
-        store.append_message(json!({
+        store.append_message(&json!({
             "role": role,
             "content": text,
             "timestamp": 0,

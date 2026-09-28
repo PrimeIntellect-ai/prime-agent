@@ -213,7 +213,7 @@ impl SessionSubscribers {
     /// stall-cycle transition is returned for the daemon log; a closed
     /// queue prunes its entry (the receiver left; its cleanup either ran
     /// or lost the race, and the prune is the backstop).
-    pub(crate) fn publish(&self, active_session_id: &str, payload: Arc<Value>) -> PublishOutcome {
+    pub(crate) fn publish(&self, active_session_id: &str, payload: &Arc<Value>) -> PublishOutcome {
         let mut outcome = PublishOutcome::default();
         let mut sessions = self.sessions.lock().unwrap();
         let Some(subscribers) = sessions.get_mut(active_session_id) else {
@@ -271,7 +271,7 @@ mod tests {
         let first = ClientSubscriptions::new("first".into(), first_tx);
         let second = ClientSubscriptions::new("second".into(), second_tx);
         first.attach(&registry, "session-1");
-        let outcome = registry.publish("session-1", frame("hello"));
+        let outcome = registry.publish("session-1", &frame("hello"));
         assert_eq!(outcome.delivered, 1);
         assert!(outcome.lagged.is_empty());
         // An unattached connection's queue stays empty: the frame never
@@ -279,12 +279,12 @@ mod tests {
         assert!(drained(&mut second_rx).is_empty());
         assert_eq!(drained(&mut first_rx).len(), 1);
         second.attach(&registry, "session-1");
-        let outcome = registry.publish("session-1", frame("again"));
+        let outcome = registry.publish("session-1", &frame("again"));
         assert_eq!(outcome.delivered, 2);
         assert_eq!(drained(&mut first_rx).len(), 1);
         assert_eq!(drained(&mut second_rx).len(), 1);
         // A session nobody attached never registers an entry.
-        registry.publish("session-2", frame("nobody"));
+        registry.publish("session-2", &frame("nobody"));
         assert!(drained(&mut first_rx).is_empty());
     }
 
@@ -295,7 +295,7 @@ mod tests {
         let client = ClientSubscriptions::new("client".into(), tx);
         client.attach(&registry, "session-1");
         client.detach(&registry, "session-1");
-        let outcome = registry.publish("session-1", frame("late"));
+        let outcome = registry.publish("session-1", &frame("late"));
         assert_eq!(outcome.delivered, 0);
         assert!(drained(&mut rx).is_empty());
         assert!(!client.contains("session-1"));
@@ -308,9 +308,9 @@ mod tests {
         let client = ClientSubscriptions::new("client".into(), tx);
         client.attach(&registry, "stale");
         assert!(client.rebind(&registry, "stale", "current"));
-        let outcome = registry.publish("stale", frame("old-id"));
+        let outcome = registry.publish("stale", &frame("old-id"));
         assert_eq!(outcome.delivered, 0);
-        let outcome = registry.publish("current", frame("new-id"));
+        let outcome = registry.publish("current", &frame("new-id"));
         assert_eq!(outcome.delivered, 1);
         assert!(client.contains("current"));
         assert!(!client.contains("stale"));
@@ -330,7 +330,7 @@ mod tests {
         // cycle reports once (the log cadence the ring's Lagged had).
         let mut lagged_lines = 0;
         for index in 0..5 {
-            let outcome = registry.publish("session-1", frame(&format!("f{index}")));
+            let outcome = registry.publish("session-1", &frame(&format!("f{index}")));
             lagged_lines += outcome.lagged.len();
         }
         assert_eq!(lagged_lines, 1);
@@ -340,11 +340,11 @@ mod tests {
         assert_eq!(frames[0]["type"], "f0");
         assert_eq!(frames[1]["type"], "f1");
         // A drained queue resets the cycle: the next stall reports again.
-        let outcome = registry.publish("session-1", frame("f5"));
+        let outcome = registry.publish("session-1", &frame("f5"));
         assert_eq!(outcome.delivered, 1);
-        let outcome = registry.publish("session-1", frame("f6"));
+        let outcome = registry.publish("session-1", &frame("f6"));
         assert!(outcome.lagged.is_empty());
-        let outcome = registry.publish("session-1", frame("f7"));
+        let outcome = registry.publish("session-1", &frame("f7"));
         assert_eq!(outcome.lagged.len(), 1);
     }
 
@@ -355,12 +355,12 @@ mod tests {
         let client = ClientSubscriptions::new("gone".into(), tx);
         client.attach(&registry, "session-1");
         drop(rx);
-        let outcome = registry.publish("session-1", frame("after-close"));
+        let outcome = registry.publish("session-1", &frame("after-close"));
         assert_eq!(outcome.delivered, 0);
         // The prune freed the session entry: the list stays consistent for
         // disconnect cleanup.
         client.detach_all(&registry);
-        let outcome = registry.publish("session-1", frame("after-prune"));
+        let outcome = registry.publish("session-1", &frame("after-prune"));
         assert_eq!(outcome.delivered, 0);
     }
 
@@ -372,14 +372,14 @@ mod tests {
         client.attach(&registry, "a");
         client.attach(&registry, "a");
         client.attach(&registry, "b");
-        let outcome = registry.publish("a", frame("one"));
+        let outcome = registry.publish("a", &frame("one"));
         assert_eq!(
             outcome.delivered, 1,
             "a duplicate attach must not double-deliver"
         );
         assert_eq!(drained(&mut rx).len(), 1);
         client.detach_all(&registry);
-        assert_eq!(registry.publish("b", frame("late")).delivered, 0);
+        assert_eq!(registry.publish("b", &frame("late")).delivered, 0);
         assert!(drained(&mut rx).is_empty());
     }
 }

@@ -97,7 +97,7 @@ impl Client {
         self.writer.flush().expect("flush");
     }
 
-    fn send_command(&mut self, id: &str, command: serde_json::Value) {
+    fn send_command(&mut self, id: &str, command: &serde_json::Value) {
         self.send(&serde_json::json!({
             "type": "command",
             "id": id,
@@ -232,7 +232,7 @@ fn scripted_session(
     .expect("write script");
     client.send_command(
         "create-1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.to_string_lossy(),
@@ -265,7 +265,7 @@ fn wave_b6_rlm_surface_wire_shapes() {
     // cancelRlmChildRun on an unmatched id), never an error.
     client.send_command(
         "r1",
-        json!({ "type": "cancel_rlm_child", "activeSessionId": session_id, "childId": "ghost" }),
+        &json!({ "type": "cancel_rlm_child", "activeSessionId": session_id, "childId": "ghost" }),
     );
     let response = client.read_response("r1");
     assert_eq!(response["success"], true, "{response}");
@@ -275,7 +275,7 @@ fn wave_b6_rlm_surface_wire_shapes() {
     // "not_found" outcome).
     client.send_command(
         "r2",
-        json!({ "type": "delete_rlm_subagent", "activeSessionId": session_id, "childId": "ghost" }),
+        &json!({ "type": "delete_rlm_subagent", "activeSessionId": session_id, "childId": "ghost" }),
     );
     let response = client.read_response("r2");
     assert_eq!(response["success"], true, "{response}");
@@ -284,7 +284,7 @@ fn wave_b6_rlm_surface_wire_shapes() {
     // set_rlm_max_depth: the TS SetRlmMaxDepthResult shape.
     client.send_command(
         "r3",
-        json!({ "type": "set_rlm_max_depth", "activeSessionId": session_id, "maxDepth": 3 }),
+        &json!({ "type": "set_rlm_max_depth", "activeSessionId": session_id, "maxDepth": 3 }),
     );
     let response = client.read_response("r3");
     assert_eq!(response["success"], true, "{response}");
@@ -310,12 +310,12 @@ fn wave_b7_agent_messages_wire_shapes() {
         let socket = dir.path().join("daemon.sock");
         let _daemon = spawn_daemon(&socket, &agent_dir);
         let (mut client, _hello) = Client::connect(&socket);
-        client.send_command("s0", json!({ "type": "agent_messages_status" }));
+        client.send_command("s0", &json!({ "type": "agent_messages_status" }));
         let response = client.read_response("s0");
         assert_eq!(response["success"], true, "{response}");
         assert_eq!(response["data"], json!({ "paused": false, "limits": {} }));
 
-        client.send_command("p0", json!({ "type": "agent_messages_pause" }));
+        client.send_command("p0", &json!({ "type": "agent_messages_pause" }));
         let response = client.read_response("p0");
         assert_eq!(response["success"], true, "{response}");
         assert_eq!(response["data"], Value::Null);
@@ -325,7 +325,7 @@ fn wave_b7_agent_messages_wire_shapes() {
     // it and answer the worker's safety status.
     {
         let (_daemon, mut client, session_id, _socket) = scripted_session(dir.path(), &agent_dir);
-        client.send_command("s1", json!({ "type": "agent_messages_status" }));
+        client.send_command("s1", &json!({ "type": "agent_messages_status" }));
         let response = client.read_response("s1");
         assert_eq!(response["success"], true, "{response}");
         assert_eq!(
@@ -339,7 +339,7 @@ fn wave_b7_agent_messages_wire_shapes() {
             })
         );
 
-        client.send_command("p1", json!({ "type": "agent_messages_pause" }));
+        client.send_command("p1", &json!({ "type": "agent_messages_pause" }));
         let response = client.read_response("p1");
         assert_eq!(response["success"], true, "{response}");
         assert_eq!(response["data"]["paused"], json!(true));
@@ -347,7 +347,7 @@ fn wave_b7_agent_messages_wire_shapes() {
         // A delivery while paused fails with the TS gate error.
         client.send_command(
             "m1",
-            json!({
+            &json!({
                 "type": "send_message",
                 "targetActiveSessionId": session_id,
                 "message": "while paused",
@@ -357,7 +357,7 @@ fn wave_b7_agent_messages_wire_shapes() {
         assert_eq!(response["success"], false, "{response}");
         assert_eq!(response["error"], "Agent messaging is paused");
 
-        client.send_command("r1", json!({ "type": "agent_messages_resume" }));
+        client.send_command("r1", &json!({ "type": "agent_messages_resume" }));
         let response = client.read_response("r1");
         assert_eq!(response["success"], true, "{response}");
         assert_eq!(response["data"]["paused"], json!(false));
@@ -365,7 +365,7 @@ fn wave_b7_agent_messages_wire_shapes() {
         // The per-session clear answers the TS removed-prompts shape.
         client.send_command(
             "m2",
-            json!({
+            &json!({
                 "type": "send_message",
                 "targetActiveSessionId": session_id,
                 "message": "hello again",
@@ -375,7 +375,7 @@ fn wave_b7_agent_messages_wire_shapes() {
         assert_eq!(response["success"], true, "{response}");
         client.send_command(
             "c1",
-            json!({ "type": "agent_messages_clear", "activeSessionId": session_id }),
+            &json!({ "type": "agent_messages_clear", "activeSessionId": session_id }),
         );
         let response = client.read_response("c1");
         assert_eq!(response["success"], true, "{response}");
@@ -399,7 +399,7 @@ fn wave_b8_session_input_pause_wire_shapes() {
     // An unknown session answers the TS unknown-session error.
     client.send_command(
         "pa-0",
-        json!({ "type": "acquire_session_input_pause", "activeSessionId": "bogus-1", "leaseKey": "k" }),
+        &json!({ "type": "acquire_session_input_pause", "activeSessionId": "bogus-1", "leaseKey": "k" }),
     );
     let response = client.read_response("pa-0");
     assert_eq!(response["success"], false, "{response}");
@@ -409,7 +409,7 @@ fn wave_b8_session_input_pause_wire_shapes() {
     // the same pause id (the supervisor's own dedupe record).
     client.send_command(
         "pa-1",
-        json!({ "type": "acquire_session_input_pause", "activeSessionId": session_id, "leaseKey": "lease-a" }),
+        &json!({ "type": "acquire_session_input_pause", "activeSessionId": session_id, "leaseKey": "lease-a" }),
     );
     let response = client.read_response("pa-1");
     assert_eq!(response["success"], true, "{response}");
@@ -421,7 +421,7 @@ fn wave_b8_session_input_pause_wire_shapes() {
 
     client.send_command(
         "pa-2",
-        json!({ "type": "acquire_session_input_pause", "activeSessionId": session_id, "leaseKey": "lease-a" }),
+        &json!({ "type": "acquire_session_input_pause", "activeSessionId": session_id, "leaseKey": "lease-a" }),
     );
     let response = client.read_response("pa-2");
     assert_eq!(response["success"], true, "{response}");
@@ -430,7 +430,7 @@ fn wave_b8_session_input_pause_wire_shapes() {
     // A release naming another session answers the TS session error.
     client.send_command(
         "pa-3",
-        json!({ "type": "release_session_input_pause", "activeSessionId": "other-session", "pauseId": pause_id }),
+        &json!({ "type": "release_session_input_pause", "activeSessionId": "other-session", "pauseId": pause_id }),
     );
     let response = client.read_response("pa-3");
     assert_eq!(response["success"], false, "{response}");
@@ -443,13 +443,13 @@ fn wave_b8_session_input_pause_wire_shapes() {
     // answers the plain TS success (unknown pause id).
     client.send_command(
         "pa-4",
-        json!({ "type": "release_session_input_pause", "activeSessionId": session_id, "pauseId": pause_id }),
+        &json!({ "type": "release_session_input_pause", "activeSessionId": session_id, "pauseId": pause_id }),
     );
     let response = client.read_response("pa-4");
     assert_eq!(response["success"], true, "{response}");
     client.send_command(
         "pa-5",
-        json!({ "type": "release_session_input_pause", "activeSessionId": session_id, "pauseId": pause_id }),
+        &json!({ "type": "release_session_input_pause", "activeSessionId": session_id, "pauseId": pause_id }),
     );
     let response = client.read_response("pa-5");
     assert_eq!(response["success"], true, "{response}");
@@ -483,7 +483,7 @@ fn wave_b8_held_pause_gates_queued_input() {
     .expect("write script");
     client.send_command(
         "create-1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -503,12 +503,12 @@ fn wave_b8_held_pause_gates_queued_input() {
     // Start a turn (busy) and queue a steer behind it.
     client.send_command(
         "p-1",
-        json!({ "type": "prompt", "activeSessionId": session_id, "message": "go" }),
+        &json!({ "type": "prompt", "activeSessionId": session_id, "message": "go" }),
     );
     let _ = client.read_response("p-1");
     client.send_command(
         "s-1",
-        json!({ "type": "steer", "activeSessionId": session_id, "message": "queued text" }),
+        &json!({ "type": "steer", "activeSessionId": session_id, "message": "queued text" }),
     );
     let response = client.read_response("s-1");
     assert_eq!(response["success"], true, "{response}");
@@ -517,7 +517,7 @@ fn wave_b8_held_pause_gates_queued_input() {
     // start: after the first turn settles, the queue keeps one item.
     client.send_command(
         "pa-1",
-        json!({ "type": "acquire_session_input_pause", "activeSessionId": session_id, "leaseKey": "gate" }),
+        &json!({ "type": "acquire_session_input_pause", "activeSessionId": session_id, "leaseKey": "gate" }),
     );
     let response = client.read_response("pa-1");
     assert_eq!(response["success"], true, "{response}");
@@ -532,7 +532,7 @@ fn wave_b8_held_pause_gates_queued_input() {
     std::thread::sleep(Duration::from_millis(700));
     client.send_command(
         "q-1",
-        json!({ "type": "get_queue", "activeSessionId": session_id }),
+        &json!({ "type": "get_queue", "activeSessionId": session_id }),
     );
     let response = client.read_response("q-1");
     assert_eq!(response["success"], true, "{response}");
@@ -545,19 +545,19 @@ fn wave_b8_held_pause_gates_queued_input() {
     // The release lifts the gate; the queued item admits.
     client.send_command(
         "pa-2",
-        json!({ "type": "release_session_input_pause", "activeSessionId": session_id, "pauseId": pause_id }),
+        &json!({ "type": "release_session_input_pause", "activeSessionId": session_id, "pauseId": pause_id }),
     );
     let response = client.read_response("pa-2");
     assert_eq!(response["success"], true, "{response}");
     client.send_command(
         "w-2",
-        json!({ "type": "wait_for_idle", "activeSessionId": session_id }),
+        &json!({ "type": "wait_for_idle", "activeSessionId": session_id }),
     );
     let response = client.read_response("w-2");
     assert_eq!(response["success"], true, "{response}");
     client.send_command(
         "q-2",
-        json!({ "type": "get_queue", "activeSessionId": session_id }),
+        &json!({ "type": "get_queue", "activeSessionId": session_id }),
     );
     let response = client.read_response("q-2");
     assert_eq!(response["data"]["steering"], json!([]), "{response}");
@@ -576,7 +576,7 @@ fn wave_b9_session_navigation_wire_shapes() {
     // new_session answers the TS `{ cancelled: false }`.
     client.send_command(
         "n-1",
-        json!({ "type": "new_session", "activeSessionId": session_id }),
+        &json!({ "type": "new_session", "activeSessionId": session_id }),
     );
     let response = client.read_response("n-1");
     assert_eq!(response["success"], true, "{response}");
@@ -585,7 +585,7 @@ fn wave_b9_session_navigation_wire_shapes() {
     // import_jsonl answers the TS import error for a missing input.
     client.send_command(
         "i-0",
-        json!({ "type": "import_jsonl", "activeSessionId": session_id, "inputPath": "/tmp/no-such-import.jsonl" }),
+        &json!({ "type": "import_jsonl", "activeSessionId": session_id, "inputPath": "/tmp/no-such-import.jsonl" }),
     );
     let response = client.read_response("i-0");
     assert_eq!(response["success"], false, "{response}");
@@ -607,7 +607,7 @@ fn wave_b9_session_navigation_wire_shapes() {
     .expect("write import");
     client.send_command(
         "i-1",
-        json!({ "type": "import_jsonl", "activeSessionId": session_id, "inputPath": imported.to_string_lossy() }),
+        &json!({ "type": "import_jsonl", "activeSessionId": session_id, "inputPath": imported.to_string_lossy() }),
     );
     let response = client.read_response("i-1");
     assert_eq!(response["success"], true, "{response}");
@@ -617,14 +617,14 @@ fn wave_b9_session_navigation_wire_shapes() {
     // existing session file and the failure for a missing one.
     client.send_command(
         "s-1",
-        json!({ "type": "switch_session", "activeSessionId": session_id, "sessionPath": imported.to_string_lossy() }),
+        &json!({ "type": "switch_session", "activeSessionId": session_id, "sessionPath": imported.to_string_lossy() }),
     );
     let response = client.read_response("s-1");
     assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["data"], json!({ "cancelled": false }));
     client.send_command(
         "s-2",
-        json!({ "type": "switch_session", "activeSessionId": session_id, "sessionPath": "/tmp/missing-switch.jsonl" }),
+        &json!({ "type": "switch_session", "activeSessionId": session_id, "sessionPath": "/tmp/missing-switch.jsonl" }),
     );
     let response = client.read_response("s-2");
     assert_eq!(response["success"], false, "{response}");
@@ -656,7 +656,7 @@ fn wave_b9_prompt_admission_wire_shapes() {
     .expect("write script");
     client.send_command(
         "create-1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -676,7 +676,7 @@ fn wave_b9_prompt_admission_wire_shapes() {
     // An unregistered admission answers the TS `unknown` status.
     client.send_command(
         "c-0",
-        json!({ "type": "cancel_prompt_admission", "activeSessionId": session_id, "admissionId": "never-registered" }),
+        &json!({ "type": "cancel_prompt_admission", "activeSessionId": session_id, "admissionId": "never-registered" }),
     );
     let response = client.read_response("c-0");
     assert_eq!(response["success"], true, "{response}");
@@ -685,7 +685,7 @@ fn wave_b9_prompt_admission_wire_shapes() {
     // An empty admission id answers the TS parse error.
     client.send_command(
         "p-0",
-        json!({ "type": "prompt", "activeSessionId": session_id, "message": "x", "admissionId": "" }),
+        &json!({ "type": "prompt", "activeSessionId": session_id, "message": "x", "admissionId": "" }),
     );
     let response = client.read_response("p-0");
     assert_eq!(response["success"], false, "{response}");
@@ -695,7 +695,7 @@ fn wave_b9_prompt_admission_wire_shapes() {
     // Start the slow turn, then queue an admitted prompt behind it.
     client.send_command(
         "p-1",
-        json!({ "type": "prompt", "activeSessionId": session_id, "message": "go" }),
+        &json!({ "type": "prompt", "activeSessionId": session_id, "message": "go" }),
     );
     let _ = client.read_response("p-1");
     // prompt_and_wait keeps its admission open for the whole turn (the
@@ -703,7 +703,7 @@ fn wave_b9_prompt_admission_wire_shapes() {
     // admitted prompt is in its cancel window here.
     client.send_command(
         "p-2",
-        json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "queued behind", "admissionId": "adm-1" }),
+        &json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "queued behind", "admissionId": "adm-1" }),
     );
     // Give the admitted prompt's route its start (the TS single-loop
     // daemon registers an admission synchronously at parse time; this
@@ -714,7 +714,7 @@ fn wave_b9_prompt_admission_wire_shapes() {
     // The cancel answers `cancelled` and the queued prompt never runs.
     client.send_command(
         "c-1",
-        json!({ "type": "cancel_prompt_admission", "activeSessionId": session_id, "admissionId": "adm-1" }),
+        &json!({ "type": "cancel_prompt_admission", "activeSessionId": session_id, "admissionId": "adm-1" }),
     );
     // The cancelled wait's failure response may land before the cancel's
     // own response (both frames traverse the same worker pipe, and the
@@ -739,7 +739,7 @@ fn wave_b9_prompt_admission_wire_shapes() {
     std::thread::sleep(Duration::from_millis(700));
     client.send_command(
         "q-1",
-        json!({ "type": "get_queue", "activeSessionId": session_id }),
+        &json!({ "type": "get_queue", "activeSessionId": session_id }),
     );
     let response = client.read_response("q-1");
     assert_eq!(response["data"]["steering"], json!([]), "{response}");
@@ -748,7 +748,7 @@ fn wave_b9_prompt_admission_wire_shapes() {
     // A cancel for a fresh id answers `unknown` (nothing registered).
     client.send_command(
         "c-2",
-        json!({ "type": "cancel_prompt_admission", "activeSessionId": session_id, "admissionId": "adm-2" }),
+        &json!({ "type": "cancel_prompt_admission", "activeSessionId": session_id, "admissionId": "adm-2" }),
     );
     let response = client.read_response("c-2");
     assert_eq!(response["data"], json!({ "status": "unknown" }));
@@ -776,7 +776,7 @@ fn wave_b9_owned_session_lifecycle_wire_shapes() {
     .expect("write script");
     client.send_command(
         "create-1",
-        json!({
+        &json!({
             "type": "create",
             "lifecycle": "client_owned",
             "config": {
@@ -797,7 +797,7 @@ fn wave_b9_owned_session_lifecycle_wire_shapes() {
     // Promote: the ownership clears and the summary answers.
     client.send_command(
         "pr-1",
-        json!({ "type": "promote_owned_session", "activeSessionId": session_id }),
+        &json!({ "type": "promote_owned_session", "activeSessionId": session_id }),
     );
     let response = client.read_response("pr-1");
     assert_eq!(response["success"], true, "{response}");
@@ -808,7 +808,7 @@ fn wave_b9_owned_session_lifecycle_wire_shapes() {
     let (mut foreign, _hello) = Client::connect(&socket);
     foreign.send_command(
         "pr-2",
-        json!({ "type": "promote_owned_session", "activeSessionId": session_id }),
+        &json!({ "type": "promote_owned_session", "activeSessionId": session_id }),
     );
     let response = foreign.read_response("pr-2");
     assert_eq!(response["success"], false, "{response}");
@@ -817,7 +817,7 @@ fn wave_b9_owned_session_lifecycle_wire_shapes() {
     // The promoting client's repeat promote stays the TS no-op success.
     client.send_command(
         "pr-3",
-        json!({ "type": "promote_owned_session", "activeSessionId": session_id }),
+        &json!({ "type": "promote_owned_session", "activeSessionId": session_id }),
     );
     let response = client.read_response("pr-3");
     assert_eq!(response["success"], true, "{response}");
@@ -827,7 +827,7 @@ fn wave_b9_owned_session_lifecycle_wire_shapes() {
     // fix: the supervisor arm, not the worker route).
     client.send_command(
         "rt-1",
-        json!({ "type": "retry_worker", "activeSessionId": session_id }),
+        &json!({ "type": "retry_worker", "activeSessionId": session_id }),
     );
     let response = client.read_response("rt-1");
     assert_eq!(response["success"], true, "{response}");
@@ -836,7 +836,7 @@ fn wave_b9_owned_session_lifecycle_wire_shapes() {
     // complete_owned_session on an unowned session answers the TS error.
     client.send_command(
         "co-1",
-        json!({ "type": "complete_owned_session", "activeSessionId": session_id }),
+        &json!({ "type": "complete_owned_session", "activeSessionId": session_id }),
     );
     let response = client.read_response("co-1");
     assert_eq!(response["success"], false, "{response}");

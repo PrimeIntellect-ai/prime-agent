@@ -235,7 +235,7 @@ pub fn acp_stop_reason_for_status(
 }
 
 /// Wrap a prime-agent payload in its reverse-domain `_meta` envelope.
-pub fn prime_agent_meta(payload: PrimeAgentSessionMeta) -> Value {
+pub fn prime_agent_meta(payload: &PrimeAgentSessionMeta) -> Value {
     json!({ PRIME_AGENT_META_NAMESPACE: payload })
 }
 
@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     fn meta_wraps_under_the_namespace_key() {
-        let wrapped = prime_agent_meta(PrimeAgentSessionMeta {
+        let wrapped = prime_agent_meta(&PrimeAgentSessionMeta {
             prompt_turn_id: Some(1),
             event_sequence: Some(2),
             phase: Some(PrimeAgentEventPhase::ResponseBoundary),
@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn quiescence_serializes_camel_case() {
-        let wrapped = prime_agent_meta(PrimeAgentSessionMeta {
+        let wrapped = prime_agent_meta(&PrimeAgentSessionMeta {
             quiescence: Some(PrimeAgentQuiescenceMeta {
                 outstanding_subagents: 0,
                 remaining_autonomous_continuations: 0,

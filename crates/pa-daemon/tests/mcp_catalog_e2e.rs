@@ -154,7 +154,7 @@ impl Client {
         self.writer.flush().expect("flush");
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         self.send(&json!({
             "type": "command",
             "id": id,
@@ -201,7 +201,7 @@ impl Client {
     /// resident worker (no orphaned workers race the next daemon in the
     /// suite), then exits. The `Drop` SIGKILL stays as the safety net.
     fn shutdown_daemon(&mut self) {
-        self.send_command("shutdown", json!({ "type": "shutdown" }));
+        self.send_command("shutdown", &json!({ "type": "shutdown" }));
         let _ = self.read_response("shutdown");
     }
 }
@@ -248,7 +248,7 @@ fn seeded_catalog_document() -> Value {
 /// envelope `{url, scope, fetchedAt, payload}` the cache reader validates
 /// (a bare catalog document at the cache path never serves — proven by the
 /// pa-core remote-source tests).
-fn snapshot_envelope(payload: Value) -> String {
+fn snapshot_envelope(payload: &Value) -> String {
     serde_json::to_string(&json!({
         "url": pa_models::fetch::MCP_SERVICE_CATALOG_URL,
         "scope": pa_models::cache::PUBLIC_SCOPE,
@@ -274,7 +274,7 @@ fn catalog_surfaces_and_paste_installs_through_the_daemon() {
     // pa-core).
     std::fs::write(
         agent_dir.join("mcp-service-catalog.v2.json"),
-        snapshot_envelope(seeded_catalog_document()),
+        snapshot_envelope(&seeded_catalog_document()),
     )
     .expect("write disk cache");
 
@@ -286,7 +286,7 @@ fn catalog_surfaces_and_paste_installs_through_the_daemon() {
 
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -306,7 +306,7 @@ fn catalog_surfaces_and_paste_installs_through_the_daemon() {
     // paste fixture), linear/notion reserved, the fixture row pasteable.
     client.send_command(
         "m1",
-        json!({ "type": "get_mcp_connections", "activeSessionId": session_id }),
+        &json!({ "type": "get_mcp_connections", "activeSessionId": session_id }),
     );
     let roster = client.read_response("m1");
     assert_eq!(
@@ -353,7 +353,7 @@ fn catalog_surfaces_and_paste_installs_through_the_daemon() {
     // the unreachable endpoint fails closed with the network category.
     client.send_command(
         "p1",
-        json!({
+        &json!({
             "type": "set_mcp_static_token",
             "activeSessionId": session_id,
             "server": "paste-fixture",
@@ -405,7 +405,7 @@ fn catalog_surfaces_and_paste_installs_through_the_daemon() {
     // account (pending verification), and the connections roster lists it.
     client.send_command(
         "m2",
-        json!({ "type": "get_mcp_connections", "activeSessionId": session_id }),
+        &json!({ "type": "get_mcp_connections", "activeSessionId": session_id }),
     );
     let roster = client.read_response("m2");
     let services = roster["data"]["services"]
@@ -434,7 +434,7 @@ fn catalog_surfaces_and_paste_installs_through_the_daemon() {
     // The disconnect: the credential and the record leave together.
     client.send_command(
         "r1",
-        json!({
+        &json!({
             "type": "remove_mcp_connection",
             "activeSessionId": session_id,
             "server": "paste-fixture",
@@ -455,7 +455,7 @@ fn catalog_surfaces_and_paste_installs_through_the_daemon() {
     );
     client.send_command(
         "m3",
-        json!({ "type": "get_mcp_connections", "activeSessionId": session_id }),
+        &json!({ "type": "get_mcp_connections", "activeSessionId": session_id }),
     );
     let roster = client.read_response("m3");
     let services = roster["data"]["services"]
@@ -511,7 +511,7 @@ fn pinned_hint_needs_a_snapshot_to_claim_the_source_unavailable() {
     });
     std::fs::write(
         agent_dir.join("mcp-service-catalog.v2.json"),
-        snapshot_envelope(cache),
+        snapshot_envelope(&cache),
     )
     .expect("write disk cache");
     let record = json!({
@@ -585,7 +585,7 @@ fn pinned_hint_needs_a_snapshot_to_claim_the_source_unavailable() {
 fn pinned_service_view(client: &mut Client, dir: &std::path::Path, id: &str) -> Value {
     client.send_command(
         &format!("c-{id}"),
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.to_string_lossy(),
@@ -602,7 +602,7 @@ fn pinned_service_view(client: &mut Client, dir: &std::path::Path, id: &str) -> 
         .to_string();
     client.send_command(
         &format!("m-{id}"),
-        json!({ "type": "get_mcp_connections", "activeSessionId": session_id }),
+        &json!({ "type": "get_mcp_connections", "activeSessionId": session_id }),
     );
     let roster = client.read_response(&format!("m-{id}"));
     assert_eq!(roster["success"], true, "get_mcp_connections: {roster}");

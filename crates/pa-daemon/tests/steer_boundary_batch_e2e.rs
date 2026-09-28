@@ -216,7 +216,7 @@ impl Client {
         }
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -274,7 +274,7 @@ impl Client {
         }
     }
 
-    fn send(&mut self, id: &str, command: Value) -> Value {
+    fn send(&mut self, id: &str, command: &Value) -> Value {
         self.send_command(id, command);
         self.request(id)
     }
@@ -300,7 +300,7 @@ fn multi_steer_parked_mid_run_co_delivers_as_one_batched_turn() {
     let mut client = Client::connect(&socket);
     let created = client.send(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": cwd.to_string_lossy(),
@@ -316,14 +316,14 @@ fn multi_steer_parked_mid_run_co_delivers_as_one_batched_turn() {
         .to_string();
     let attached = client.send(
         "a1",
-        json!({ "type": "attach", "activeSessionId": session_id }),
+        &json!({ "type": "attach", "activeSessionId": session_id }),
     );
     assert_eq!(attached["success"], true, "attach failed: {attached}");
 
     // The long turn starts: its first model response runs the sleep cell.
     let started = client.send(
         "p1",
-        json!({ "type": "prompt", "activeSessionId": session_id, "message": "run the sleeps" }),
+        &json!({ "type": "prompt", "activeSessionId": session_id, "message": "run the sleeps" }),
     );
     assert_eq!(started["success"], true, "prompt failed: {started}");
     // Park the steers strictly mid-tool: the cell writes its start marker,
@@ -348,14 +348,14 @@ fn multi_steer_parked_mid_run_co_delivers_as_one_batched_turn() {
     ] {
         let steered = client.send(
             id,
-            json!({ "type": "steer", "activeSessionId": session_id, "message": message }),
+            &json!({ "type": "steer", "activeSessionId": session_id, "message": message }),
         );
         assert_eq!(steered["success"], true, "{id} failed: {steered}");
     }
     // The follow-up parks behind the steering lane (never merges in).
     let follow = client.send(
         "f1",
-        json!({ "type": "follow_up", "activeSessionId": session_id, "message": "follow up last" }),
+        &json!({ "type": "follow_up", "activeSessionId": session_id, "message": "follow up last" }),
     );
     assert_eq!(follow["success"], true, "follow_up failed: {follow}");
 

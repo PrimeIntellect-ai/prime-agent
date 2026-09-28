@@ -111,7 +111,7 @@ impl Client {
         client
     }
 
-    fn send_command(&mut self, id: &str, command: serde_json::Value) {
+    fn send_command(&mut self, id: &str, command: &serde_json::Value) {
         let mut line = serde_json::to_string(&serde_json::json!({
             "type": "command",
             "id": id,
@@ -174,7 +174,7 @@ impl Client {
 
     /// Drive one prompt to its final scripted text: send, await the ack,
     /// then read streamed session events to the turn end.
-    fn prompt_and_final_text(&mut self, id: &str, command: serde_json::Value) -> String {
+    fn prompt_and_final_text(&mut self, id: &str, command: &serde_json::Value) -> String {
         self.send_command(id, command);
         let mut final_text = String::new();
         let mut acked = false;
@@ -234,7 +234,7 @@ fn stale_active_id_rebinds_after_worker_replacement() {
     let mut attached_client = Client::connect(&socket);
     attached_client.send_command(
         "c1",
-        serde_json::json!({ "type": "create", "config": create_config }),
+        &serde_json::json!({ "type": "create", "config": create_config }),
     );
     let created = attached_client.read_response("c1");
     assert_eq!(created["success"], true, "create failed: {created}");
@@ -245,7 +245,7 @@ fn stale_active_id_rebinds_after_worker_replacement() {
         .to_string();
     attached_client.send_command(
         "a1",
-        serde_json::json!({ "type": "attach", "activeSessionId": created_id }),
+        &serde_json::json!({ "type": "attach", "activeSessionId": created_id }),
     );
     let attached = attached_client.read_response("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
@@ -257,7 +257,7 @@ fn stale_active_id_rebinds_after_worker_replacement() {
         .to_string();
     attached_client.send_command(
         "s1",
-        serde_json::json!({ "type": "get_session_stats", "activeSessionId": old_id }),
+        &serde_json::json!({ "type": "get_session_stats", "activeSessionId": old_id }),
     );
     let stats = attached_client.read_response("s1");
     let session_file = stats["data"]["sessionFile"]
@@ -271,13 +271,13 @@ fn stale_active_id_rebinds_after_worker_replacement() {
     let mut driver = Client::connect(&socket);
     driver.send_command(
         "k1",
-        serde_json::json!({ "type": "kill", "activeSessionId": old_id }),
+        &serde_json::json!({ "type": "kill", "activeSessionId": old_id }),
     );
     let killed = driver.read_response("k1");
     assert_eq!(killed["success"], true, "kill failed: {killed}");
     driver.send_command(
         "c2",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "sessionPath": session_file,
             "config": create_config,
@@ -310,7 +310,7 @@ fn stale_active_id_rebinds_after_worker_replacement() {
     // this client - the rebind retargeted the connection's event routing.
     let first = attached_client.prompt_and_final_text(
         "p1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "prompt",
             "activeSessionId": old_id,
             "message": "hi",
@@ -324,7 +324,7 @@ fn stale_active_id_rebinds_after_worker_replacement() {
     // one (a double delivery would have consumed both).
     let second = attached_client.prompt_and_final_text(
         "p2",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "prompt",
             "activeSessionId": new_active,
             "message": "again",
@@ -337,7 +337,7 @@ fn stale_active_id_rebinds_after_worker_replacement() {
     let mut restarted_pane = Client::connect(&socket);
     restarted_pane.send_command(
         "a2",
-        serde_json::json!({ "type": "attach", "activeSessionId": old_id }),
+        &serde_json::json!({ "type": "attach", "activeSessionId": old_id }),
     );
     let reattached = restarted_pane.read_response("a2");
     assert_eq!(
@@ -350,7 +350,7 @@ fn stale_active_id_rebinds_after_worker_replacement() {
     // rebind only applies to superseded ids with a live successor.
     driver.send_command(
         "p3",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "prompt",
             "activeSessionId": "no-such-session",
             "message": "hi",

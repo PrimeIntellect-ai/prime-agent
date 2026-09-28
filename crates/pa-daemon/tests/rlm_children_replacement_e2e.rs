@@ -170,7 +170,7 @@ impl Client {
         (client, hello)
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -236,7 +236,7 @@ fn wait_until<T>(
 
 /// The supervisor roster's session summaries (the `list` wire surface).
 fn roster_summaries(client: &mut Client, id: &str) -> Vec<Value> {
-    client.send_command(id, json!({ "type": "list" }));
+    client.send_command(id, &json!({ "type": "list" }));
     let list = client.read_response(id);
     assert_eq!(list["success"], true, "list failed: {list}");
     list["data"]["sessions"]
@@ -249,7 +249,7 @@ fn roster_summaries(client: &mut Client, id: &str) -> Vec<Value> {
 fn rlm_children_rows(client: &mut Client, id: &str, parent: &str) -> Vec<Value> {
     client.send_command(
         id,
-        json!({ "type": "get_rlm_children", "activeSessionId": parent }),
+        &json!({ "type": "get_rlm_children", "activeSessionId": parent }),
     );
     let response = client.read_response(id);
     assert_eq!(
@@ -266,14 +266,14 @@ fn rlm_children_rows(client: &mut Client, id: &str, parent: &str) -> Vec<Value> 
 fn run_turn(client: &mut Client, session_id: &str, message: &str, id: &str) {
     client.send_command(
         id,
-        json!({ "type": "prompt", "activeSessionId": session_id, "message": message }),
+        &json!({ "type": "prompt", "activeSessionId": session_id, "message": message }),
     );
     let prompted = client.read_response(id);
     assert_eq!(prompted["success"], true, "prompt failed: {prompted}");
     let idle_id = format!("{id}-idle");
     client.send_command(
         &idle_id,
-        json!({ "type": "wait_for_idle", "activeSessionId": session_id }),
+        &json!({ "type": "wait_for_idle", "activeSessionId": session_id }),
     );
     let idle = client.read_response(&idle_id);
     assert_eq!(idle["success"], true, "wait_for_idle failed: {idle}");
@@ -377,7 +377,7 @@ fn create_parent(
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
     client.send_command(
         id,
-        json!({
+        &json!({
             "type": "create",
             "name": "parent",
             "config": {
@@ -475,7 +475,7 @@ fn new_session_closes_the_spawned_child_and_empties_the_roster() {
     // The replacement (TS disposes the runtime, then the hosted children).
     client.send_command(
         "n1",
-        json!({ "type": "new_session", "activeSessionId": parent_id }),
+        &json!({ "type": "new_session", "activeSessionId": parent_id }),
     );
     let replaced = client.read_response("n1");
     assert_eq!(replaced["success"], true, "new_session failed: {replaced}");
@@ -588,7 +588,7 @@ fn new_session_keeps_a_created_root_session_running() {
     // The replacement closes the parent's children only.
     client.send_command(
         "n1",
-        json!({ "type": "new_session", "activeSessionId": parent_id }),
+        &json!({ "type": "new_session", "activeSessionId": parent_id }),
     );
     let replaced = client.read_response("n1");
     assert_eq!(replaced["success"], true, "new_session failed: {replaced}");

@@ -204,7 +204,7 @@ impl Client {
         (client, hello)
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         self.write_line(&json!({
             "type": "command",
             "id": id,
@@ -293,7 +293,7 @@ fn create_session_with_kernel(client: &mut Client, dir: &Path, script: &Path, id
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
     client.send_command(
         id,
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.to_string_lossy(),
@@ -312,14 +312,14 @@ fn create_session_with_kernel(client: &mut Client, dir: &Path, script: &Path, id
     let prompt_id = format!("{id}-prompt");
     client.send_command(
         &prompt_id,
-        json!({ "type": "prompt", "activeSessionId": session_id, "message": "run the cell" }),
+        &json!({ "type": "prompt", "activeSessionId": session_id, "message": "run the cell" }),
     );
     let prompted = client.read_response(&prompt_id);
     assert_eq!(prompted["success"], true, "prompt failed: {prompted}");
     let idle_id = format!("{id}-idle");
     client.send_command(
         &idle_id,
-        json!({ "type": "wait_for_idle", "activeSessionId": session_id }),
+        &json!({ "type": "wait_for_idle", "activeSessionId": session_id }),
     );
     let idle = client.read_response(&idle_id);
     assert_eq!(idle["success"], true, "wait_for_idle failed: {idle}");
@@ -374,7 +374,7 @@ fn kill_disposes_the_session_kernel() {
     // stops the worker right after, so the whole path is exercised).
     client.send_command(
         "k1",
-        json!({ "type": "kill", "activeSessionId": session_id }),
+        &json!({ "type": "kill", "activeSessionId": session_id }),
     );
     let killed = client.read_response("k1");
     assert_eq!(killed["success"], true, "kill failed: {killed}");
@@ -410,7 +410,7 @@ fn shutdown_disposes_session_kernels_before_the_worker_exits() {
 
     // Daemon stop: the supervisor routes `shutdown` to the workers and
     // then exits itself.
-    client.send_command("sd", json!({ "type": "shutdown" }));
+    client.send_command("sd", &json!({ "type": "shutdown" }));
     let shutdown = client.read_response("sd");
     assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");
 

@@ -423,7 +423,7 @@ impl Worker {
                     }
                 }
                 Some(script) => std::sync::Arc::new(
-                    ScriptedEngine::from_value(script.clone()).unwrap_or_default(),
+                    ScriptedEngine::from_value(script).unwrap_or_default(),
                 ),
                 None => {
                     let cwd =
@@ -623,7 +623,7 @@ impl Worker {
                         &notice_recovery,
                         &notice_core,
                         &notice_notify,
-                        notice,
+                        &notice,
                         // Revalidated inside the admission's own lock
                         // section: the close paths mark the session
                         // BEFORE clearing the lanes, so a notice that
@@ -635,7 +635,7 @@ impl Worker {
                 let withdraw_core = Arc::clone(&core);
                 let withdraw_recovery = Arc::clone(&recovery);
                 let consumed: crate::engine::BashConsumedSink = Arc::new(move |notice| {
-                    withdraw_bash_completion_notice(&withdraw_recovery, &withdraw_core, notice);
+                    withdraw_bash_completion_notice(&withdraw_recovery, &withdraw_core, &notice);
                 });
                 concrete.set_bash_notice_sinks(completion, consumed);
             }

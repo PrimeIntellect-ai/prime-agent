@@ -542,7 +542,7 @@ impl Worker {
         let mut core = self.core.lock().unwrap();
         let steering: Vec<String> = core.steering.drain(..).map(|item| item.message).collect();
         let follow_up: Vec<String> = core.follow_up.drain(..).map(|item| item.message).collect();
-        let snapshot = self.snapshot_locked(&core);
+        let snapshot = Self::snapshot_locked(&core);
         drop(core);
         // The cleared lanes are idle again: the verdict refresh rides the
         // same checkpoint as the snapshot (a stale busy=true from the

@@ -142,7 +142,7 @@ impl Client {
         }
     }
 
-    fn request(&mut self, id: &str, command: Value) -> Value {
+    fn request(&mut self, id: &str, command: &Value) -> Value {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -166,7 +166,7 @@ impl Client {
 
     /// The active sessions the supervisor lists (active id + session id).
     fn listed_sessions(&mut self) -> Vec<(String, String)> {
-        let response = self.request("list", json!({ "type": "list" }));
+        let response = self.request("list", &json!({ "type": "list" }));
         assert_eq!(response["success"], true, "list failed: {response}");
         response["data"]["sessions"]
             .as_array()
@@ -209,7 +209,7 @@ fn create_session(
     std::fs::create_dir_all(&sessions_dir).expect("session dir");
     let created = client.request(
         id,
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.to_string_lossy(),
@@ -365,7 +365,7 @@ fn kill_cancels_goal_and_heartbeat_and_no_wake_revives_the_session() {
     // lane-liveness heartbeat.
     let started = client.request(
         "a-goal",
-        json!({
+        &json!({
             "type": "prompt_and_wait",
             "activeSessionId": a.active_id,
             "message": format!("/goal {OBJECTIVE}"),
@@ -378,7 +378,7 @@ fn kill_cancels_goal_and_heartbeat_and_no_wake_revives_the_session() {
     );
     let heartbeat = client.request(
         "a-hb",
-        json!({
+        &json!({
             "type": "heartbeat_set",
             "activeSessionId": a.active_id,
             "schedule": "every 10s",
@@ -394,7 +394,7 @@ fn kill_cancels_goal_and_heartbeat_and_no_wake_revives_the_session() {
     // B: the crashed sibling — a heartbeat, no stop.
     let heartbeat = client.request(
         "b-hb",
-        json!({
+        &json!({
             "type": "heartbeat_set",
             "activeSessionId": b.active_id,
             "schedule": "every 10s",
@@ -411,7 +411,7 @@ fn kill_cancels_goal_and_heartbeat_and_no_wake_revives_the_session() {
     // (TS cancelScheduledJobsForSession) and its file archives.
     let killed = client.request(
         "a-kill",
-        json!({ "type": "kill", "activeSessionId": a.active_id }),
+        &json!({ "type": "kill", "activeSessionId": a.active_id }),
     );
     assert_eq!(killed["success"], true, "kill failed: {killed}");
     let deadline = Instant::now() + Duration::from_secs(10);

@@ -61,7 +61,7 @@ impl SessionFile {
         id
     }
 
-    pub fn append_message(&mut self, message: Value) -> String {
+    pub fn append_message(&mut self, message: &Value) -> String {
         self.append_entry("message", serde_json::json!({ "message": message }))
     }
 

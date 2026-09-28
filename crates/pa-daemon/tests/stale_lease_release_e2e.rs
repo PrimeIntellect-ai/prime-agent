@@ -185,7 +185,7 @@ impl Client {
         client
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let mut line = serde_json::to_string(&json!({
             "type": "command",
             "id": id,
@@ -252,7 +252,7 @@ fn create_session(
     let script_path = write_script(dir, "script.json", &["turn-1"]);
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.to_string_lossy(),
@@ -270,7 +270,7 @@ fn create_session(
         .to_string();
     client.send_command(
         "a1",
-        json!({ "type": "attach", "activeSessionId": session_id }),
+        &json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let attached = client.read_response("a1");
     assert_eq!(attached["success"], true, "attach failed");
@@ -434,7 +434,7 @@ fn the_revived_worker_stays_supervised_and_the_session_reopens() {
         &sessions_dir,
         &reopen_script,
     );
-    client2.send_command(&reopen_id, reopen_command);
+    client2.send_command(&reopen_id, &reopen_command);
     let reopened = client2.read_response(&reopen_id);
     assert_eq!(
         reopened["success"], true,
@@ -513,7 +513,7 @@ fn a_worker_that_fails_to_death_releases_the_session_hold() {
         &sessions_dir,
         &reopen_script,
     );
-    client2.send_command(&reopen_id, reopen_command);
+    client2.send_command(&reopen_id, &reopen_command);
     let reopened = client2.read_response(&reopen_id);
     assert_eq!(
         reopened["success"], true,

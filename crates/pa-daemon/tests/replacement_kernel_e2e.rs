@@ -232,7 +232,7 @@ impl Client {
         (client, hello)
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         self.write_line(&json!({
             "type": "command",
             "id": id,
@@ -350,7 +350,7 @@ fn create_session(client: &mut Client, dir: &Path, script: &Path, id: &str) -> S
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
     client.send_command(
         id,
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.to_string_lossy(),
@@ -372,14 +372,14 @@ fn create_session(client: &mut Client, dir: &Path, script: &Path, id: &str) -> S
 fn run_turn(client: &mut Client, session_id: &str, message: &str, id: &str) {
     client.send_command(
         id,
-        json!({ "type": "prompt", "activeSessionId": session_id, "message": message }),
+        &json!({ "type": "prompt", "activeSessionId": session_id, "message": message }),
     );
     let prompted = client.read_response(id);
     assert_eq!(prompted["success"], true, "prompt failed: {prompted}");
     let idle_id = format!("{id}-idle");
     client.send_command(
         &idle_id,
-        json!({ "type": "wait_for_idle", "activeSessionId": session_id }),
+        &json!({ "type": "wait_for_idle", "activeSessionId": session_id }),
     );
     let idle = client.read_response(&idle_id);
     assert_eq!(idle["success"], true, "wait_for_idle failed: {idle}");
@@ -412,7 +412,7 @@ fn await_receipt_text(receipt: &Path) -> String {
 fn first_user_entry_id(client: &mut Client, session_id: &str, id: &str) -> String {
     client.send_command(
         id,
-        json!({ "type": "get_user_messages_for_forking", "activeSessionId": session_id }),
+        &json!({ "type": "get_user_messages_for_forking", "activeSessionId": session_id }),
     );
     let messages = client.read_response(id);
     assert_eq!(messages["success"], true, "fork points failed: {messages}");
@@ -451,7 +451,7 @@ fn new_session_disposes_the_kernel_and_starts_cold() {
     // The replacement: TS disposes the old runtime first.
     client.send_command(
         "n1",
-        json!({ "type": "new_session", "activeSessionId": session_id }),
+        &json!({ "type": "new_session", "activeSessionId": session_id }),
     );
     let replaced = client.read_response("n1");
     assert_eq!(replaced["success"], true, "new_session failed: {replaced}");
@@ -496,7 +496,7 @@ fn switch_session_disposes_the_kernel_and_a_failed_target_keeps_it() {
     // its kernel stay untouched (no teardown on a failed prepare).
     client.send_command(
         "s1",
-        json!({
+        &json!({
             "type": "switch_session",
             "activeSessionId": session_id,
             "sessionPath": "/tmp/definitely-missing-replacement.jsonl",
@@ -534,7 +534,7 @@ fn switch_session_disposes_the_kernel_and_a_failed_target_keeps_it() {
     .expect("write switch target");
     client.send_command(
         "s2",
-        json!({
+        &json!({
             "type": "switch_session",
             "activeSessionId": session_id,
             "sessionPath": target.to_string_lossy(),
@@ -584,7 +584,7 @@ fn fork_disposes_the_kernel_and_starts_cold() {
     let entry_id = first_user_entry_id(&mut client, &session_id, "f0");
     client.send_command(
         "f1",
-        json!({
+        &json!({
             "type": "fork",
             "activeSessionId": session_id,
             "entryId": entry_id,
@@ -658,7 +658,7 @@ fn switch_session_rebinds_the_kernel_cwd_onto_the_target_session() {
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": alpha.to_string_lossy(),
@@ -692,7 +692,7 @@ fn switch_session_rebinds_the_kernel_cwd_onto_the_target_session() {
     .expect("write switch target");
     client.send_command(
         "s1",
-        json!({
+        &json!({
             "type": "switch_session",
             "activeSessionId": session_id,
             "sessionPath": target.to_string_lossy(),
@@ -744,7 +744,7 @@ fn navigate_tree_keeps_the_kernel_warm() {
     let entry_id = first_user_entry_id(&mut client, &session_id, "m0");
     client.send_command(
         "m1",
-        json!({
+        &json!({
             "type": "navigate_tree",
             "activeSessionId": session_id,
             "targetId": entry_id,

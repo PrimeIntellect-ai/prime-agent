@@ -74,7 +74,7 @@ impl RecordingMock {
                 let Ok(stream) = stream else { continue };
                 let bodies = Arc::clone(&bodies_for_thread);
                 std::thread::spawn(move || {
-                    let _ = serve(stream, bodies);
+                    let _ = serve(stream, &bodies);
                 });
             }
         });
@@ -90,7 +90,7 @@ impl RecordingMock {
     }
 }
 
-fn chunk(delta: Value, finish_reason: Option<&str>) -> String {
+fn chunk(delta: &Value, finish_reason: Option<&str>) -> String {
     json!({
         "id": "chatcmpl-test",
         "object": "chat.completion.chunk",
@@ -101,7 +101,7 @@ fn chunk(delta: Value, finish_reason: Option<&str>) -> String {
     .to_string()
 }
 
-fn serve(mut stream: TcpStream, bodies: Arc<Mutex<Vec<Value>>>) -> std::io::Result<()> {
+fn serve(mut stream: TcpStream, bodies: &Arc<Mutex<Vec<Value>>>) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut head = String::new();
     loop {
@@ -130,8 +130,8 @@ fn serve(mut stream: TcpStream, bodies: Arc<Mutex<Vec<Value>>>) -> std::io::Resu
     let answer = "thinking propagated";
     let mut payload = String::new();
     for data in [
-        chunk(json!({"role": "assistant", "content": answer}), None),
-        chunk(json!({}), Some("stop")),
+        chunk(&json!({"role": "assistant", "content": answer}), None),
+        chunk(&json!({}), Some("stop")),
     ] {
         write!(payload, "data: {data}\n\n").expect("write to String");
     }
@@ -224,7 +224,7 @@ impl Client {
         }
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -340,7 +340,7 @@ fn setup(name: &str, thinking: Option<&str>) -> Harness {
     if let Some(thinking) = thinking {
         config["thinking"] = json!(thinking);
     }
-    client.send_command("c1", json!({ "type": "create", "config": config }));
+    client.send_command("c1", &json!({ "type": "create", "config": config }));
     let created = client.request("c1");
     assert_eq!(created["success"], true, "create failed: {created}");
     let session_id = created["data"]["id"]
@@ -350,7 +350,7 @@ fn setup(name: &str, thinking: Option<&str>) -> Harness {
         .to_string();
     client.send_command(
         "a1",
-        json!({ "type": "attach", "activeSessionId": session_id }),
+        &json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let attached = client.request("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
@@ -370,7 +370,7 @@ impl Harness {
     fn prompt(&mut self, id: &str, message: &str) -> Value {
         self.client.send_command(
             id,
-            json!({ "type": "prompt_and_wait", "activeSessionId": self.session_id, "message": message }),
+            &json!({ "type": "prompt_and_wait", "activeSessionId": self.session_id, "message": message }),
         );
         let done = self.client.request(id);
         self.client.drain_events(Duration::from_secs(1));
@@ -533,7 +533,7 @@ fn invalid_thinking_level_fails_the_create() {
     let mut client = Client::connect(&socket);
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -573,7 +573,7 @@ fn session_summaries_carry_the_thinking_level_for_both_session_kinds() {
     // The top-level summary carries the level SetThinkingLevel applies.
     harness.client.send_command(
         "stl",
-        json!({ "type": "set_thinking_level", "activeSessionId": top_level, "level": "high" }),
+        &json!({ "type": "set_thinking_level", "activeSessionId": top_level, "level": "high" }),
     );
     let applied = harness.client.request("stl");
     assert_eq!(
@@ -582,7 +582,7 @@ fn session_summaries_carry_the_thinking_level_for_both_session_kinds() {
     );
     harness.client.send_command(
         "gs1",
-        json!({ "type": "get_state", "activeSessionId": top_level }),
+        &json!({ "type": "get_state", "activeSessionId": top_level }),
     );
     let state = harness.client.request("gs1");
     assert_eq!(state["success"], true, "get_state failed: {state}");
@@ -617,7 +617,7 @@ fn session_summaries_carry_the_thinking_level_for_both_session_kinds() {
     std::fs::create_dir_all(&child_dir).expect("child dir");
     harness.client.send_command(
         "cc",
-        json!({
+        &json!({
             "type": "create",
             "name": "summary-child",
             "config": {
@@ -659,9 +659,10 @@ fn session_summaries_carry_the_thinking_level_for_both_session_kinds() {
     // The subagent's live roster row carries the level; after its worker
     // stops (a plain kill, no ledger tombstone), the ledger-seeded roster
     // row still carries the model and the persisted level.
-    harness
-        .client
-        .send_command("ck", json!({ "type": "kill", "activeSessionId": child_id }));
+    harness.client.send_command(
+        "ck",
+        &json!({ "type": "kill", "activeSessionId": child_id }),
+    );
     let killed = harness.client.request("ck");
     assert_eq!(killed["success"], true, "child kill failed: {killed}");
     let seeded = {
@@ -669,7 +670,7 @@ fn session_summaries_carry_the_thinking_level_for_both_session_kinds() {
         for _ in 0..50 {
             harness
                 .client
-                .send_command("rs", json!({ "type": "roster_subscribe" }));
+                .send_command("rs", &json!({ "type": "roster_subscribe" }));
             let roster = harness.client.request("rs");
             for entry in roster["data"]["roster"]
                 .as_array()
@@ -704,7 +705,7 @@ fn session_summaries_carry_the_thinking_level_for_both_session_kinds() {
     // SetThinkingLevel command persisted.
     harness.client.send_command(
         "tk",
-        json!({ "type": "kill", "activeSessionId": top_level }),
+        &json!({ "type": "kill", "activeSessionId": top_level }),
     );
     let top_killed = harness.client.request("tk");
     assert_eq!(
@@ -713,7 +714,7 @@ fn session_summaries_carry_the_thinking_level_for_both_session_kinds() {
     );
     harness.client.send_command(
         "la",
-        json!({ "type": "list", "all": true, "sessionDir": harness.session_dir.to_string_lossy() }),
+        &json!({ "type": "list", "all": true, "sessionDir": harness.session_dir.to_string_lossy() }),
     );
     let listed = harness.client.request("la");
     assert_eq!(listed["success"], true, "list failed: {listed}");

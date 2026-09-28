@@ -552,7 +552,7 @@ impl Worker {
                         if let Ok(value) = serde_json::to_value(
                             pa_types::session::AgentMessage::Custom(outcome_row),
                         ) {
-                            self.emit_custom_row(value);
+                            self.emit_custom_row(&value);
                         }
                         if result.applied_edits.iter().any(|edit| edit.applied) {
                             let notice =
@@ -563,7 +563,7 @@ impl Worker {
                             if let Ok(value) = serde_json::to_value(
                                 pa_types::session::AgentMessage::Custom(notice),
                             ) {
-                                self.emit_custom_row(value);
+                                self.emit_custom_row(&value);
                             }
                         }
                     }

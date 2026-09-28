@@ -769,7 +769,7 @@ mod tests {
             let mut core = worker.core.lock().unwrap();
             let store = core.store.as_mut().expect("created store");
             let entry_id =
-                store.append_message(json!({ "role": "user", "content": "hi", "timestamp": 1u64 }));
+                store.append_message(&json!({ "role": "user", "content": "hi", "timestamp": 1u64 }));
             let _ = store.rewrite();
             entry_id
         };

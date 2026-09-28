@@ -339,7 +339,7 @@ pub(crate) struct UpdateRosterInputs<'a> {
 /// snapshots, the RLM ledger, and the scheduled-jobs scan.
 pub(crate) fn build_update_roster(
     inputs: UpdateRosterInputs<'_>,
-    workers: Vec<WorkerSnapshot>,
+    workers: &[WorkerSnapshot],
 ) -> Result<UpdateRoster> {
     let UpdateRosterInputs {
         update_id,

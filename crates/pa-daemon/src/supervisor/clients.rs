@@ -613,7 +613,7 @@ impl Supervisor {
             }
             DaemonCommand::RosterUnsubscribe { .. } => {
                 roster_subscribed.store(false, std::sync::atomic::Ordering::SeqCst);
-                let response = self.handle_roster_unsubscribe(&command_id, &type_name);
+                let response = Self::handle_roster_unsubscribe(&command_id, &type_name);
                 (vec![response_line(&response)], false)
             }
             DaemonCommand::WorkerRosterDelta {

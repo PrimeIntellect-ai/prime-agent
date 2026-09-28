@@ -148,7 +148,7 @@ impl Client {
         (client, hello)
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -201,7 +201,7 @@ impl Client {
 
 /// The supervisor roster's session summaries (the `list` wire surface).
 fn roster_summaries(client: &mut Client, id: &str) -> Vec<Value> {
-    client.send_command(id, json!({ "type": "list" }));
+    client.send_command(id, &json!({ "type": "list" }));
     let list = client.read_response(id);
     assert_eq!(list["success"], true, "list failed: {list}");
     list["data"]["sessions"]

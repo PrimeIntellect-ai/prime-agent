@@ -144,7 +144,7 @@ impl Client {
         self.writer.flush().expect("flush");
     }
 
-    fn send_command(&mut self, id: &str, command: serde_json::Value) {
+    fn send_command(&mut self, id: &str, command: &serde_json::Value) {
         self.send(&serde_json::json!({
             "type": "command",
             "id": id,
@@ -183,7 +183,7 @@ impl Client {
 fn scripted_turn(client: &mut Client, session_id: &str, text: &str, id: &str) {
     client.send_command(
         id,
-        serde_json::json!({ "type": "prompt", "activeSessionId": session_id, "message": text }),
+        &serde_json::json!({ "type": "prompt", "activeSessionId": session_id, "message": text }),
     );
     let response = client.read_response(id);
     assert_eq!(
@@ -259,7 +259,7 @@ fn get_context_tree_answers_from_memory_on_a_grown_store() {
     .expect("write script");
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -309,7 +309,7 @@ fn get_context_tree_answers_from_memory_on_a_grown_store() {
     // the operator's chat surface attaching at open.
     client.send_command(
         "a1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "attach",
             "activeSessionId": active_session_id,
             "clientId": "latency-guard",
@@ -330,7 +330,7 @@ fn get_context_tree_answers_from_memory_on_a_grown_store() {
         let id = format!("ctx{reads}");
         client.send_command(
             &id,
-            serde_json::json!({
+            &serde_json::json!({
                 "type": "get_context_tree",
                 "activeSessionId": active_session_id,
             }),

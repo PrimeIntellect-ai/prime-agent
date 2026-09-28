@@ -201,7 +201,7 @@ async fn the_action_snapshot_flags_parked_child_status_notices() {
     }
     let snapshot = {
         let core = worker.core.lock().unwrap();
-        worker.snapshot_locked(&core)
+        Worker::snapshot_locked(&core)
     };
     assert_eq!(
         snapshot.steering,
@@ -283,7 +283,7 @@ async fn a_follow_up_notice_parks_with_typed_provenance() {
     assert!(plain.success, "the plain follow-up parks: {plain:?}");
     let snapshot = {
         let core = worker.core.lock().unwrap();
-        worker.snapshot_locked(&core)
+        Worker::snapshot_locked(&core)
     };
     assert_eq!(
         snapshot.follow_ups,
@@ -379,7 +379,7 @@ async fn reserved_kind_spoofs_reject_and_lookalikes_park_unflagged() {
     }
     let snapshot = {
         let core = worker.core.lock().unwrap();
-        worker.snapshot_locked(&core)
+        Worker::snapshot_locked(&core)
     };
     assert_eq!(
         snapshot.follow_ups.len(),
@@ -458,7 +458,7 @@ async fn restored_lane_rows_keep_the_child_status_provenance() {
     }
     let snapshot = {
         let core = worker.core.lock().unwrap();
-        worker.snapshot_locked(&core)
+        Worker::snapshot_locked(&core)
     };
     assert_eq!(snapshot.rlm_child_status.steering, vec![0]);
 }

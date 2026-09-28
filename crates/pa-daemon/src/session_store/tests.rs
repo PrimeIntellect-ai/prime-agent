@@ -22,7 +22,7 @@ fn captured_attribution_fixture() -> PathBuf {
 fn bounded_header_matches_the_line_read() {
     let dir = temp_dir();
     let mut session = SessionFile::create("/repo", None, 0);
-    session.append_message(json!({"role": "user", "content": "hi", "timestamp": 1u64}));
+    session.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
     let path = dir.join(session_file_name(session.session_id()));
     session.set_path(path.clone());
     session.rewrite().unwrap();
@@ -115,8 +115,8 @@ fn open_folds_captured_child_usage_attributions() {
 #[test]
 fn append_entry_folds_a_live_child_usage_attribution() {
     let mut store = SessionFile::create("/tmp", None, 0);
-    store.append_message(json!({"role": "user", "content": "hi", "timestamp": 1u64}));
-    let assistant = store.append_message(json!({
+    store.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
+    let assistant = store.append_message(&json!({
         "role": "assistant", "content": "hello", "provider": "p", "model": "m",
         "timestamp": 2u64,
         "usage": {"input": 10, "output": 2, "cacheRead": 0, "cacheWrite": 0,
@@ -152,8 +152,8 @@ fn append_entry_folds_a_live_child_usage_attribution() {
 #[test]
 fn a_malformed_aggregate_does_not_zero_the_target_row() {
     let mut store = SessionFile::create("/tmp", None, 0);
-    store.append_message(json!({"role": "user", "content": "hi", "timestamp": 1u64}));
-    let assistant = store.append_message(json!({
+    store.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
+    let assistant = store.append_message(&json!({
         "role": "assistant", "content": "hello", "provider": "p", "model": "m",
         "timestamp": 2u64,
         "usage": {"input": 10, "output": 2, "cacheRead": 0, "cacheWrite": 0,
@@ -263,8 +263,8 @@ fn creates_and_loads_a_session() {
     let path = dir.join(session_file_name(session.session_id()));
     session.set_path(path.clone());
     session.append_session_state("active");
-    session.append_message(json!({"role": "user", "content": "hi", "timestamp": 1u64}));
-    session.append_message(json!({"role": "assistant", "content": "hello", "provider": "p", "model": "m", "timestamp": 2u64}));
+    session.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
+    session.append_message(&json!({"role": "assistant", "content": "hello", "provider": "p", "model": "m", "timestamp": 2u64}));
     session.rewrite().unwrap();
 
     let loaded = SessionFile::open(&path).unwrap();
@@ -292,8 +292,8 @@ fn creates_and_loads_a_session() {
 #[test]
 fn a_cyclic_parent_chain_terminates_the_branch_walk() {
     let mut session = SessionFile::create("/tmp", None, 0);
-    session.append_message(json!({"role": "user", "content": "a", "timestamp": 1u64}));
-    session.append_message(json!({"role": "user", "content": "b", "timestamp": 2u64}));
+    session.append_message(&json!({"role": "user", "content": "a", "timestamp": 1u64}));
+    session.append_message(&json!({"role": "user", "content": "b", "timestamp": 2u64}));
     // Forge the cycle: the two entries point at each other.
     let first = session.entries[0].id.clone();
     let second = session.entries[1].id.clone();
@@ -547,15 +547,15 @@ fn scan_builds_transcript_search_text() {
     let path = dir.join(session_file_name(session.session_id()));
     session.set_path(path.clone());
     session
-        .append_message(json!({"role": "user", "content": "fix the login bug", "timestamp": 1u64}));
-    session.append_message(json!({
+        .append_message(&json!({"role": "user", "content": "fix the login bug", "timestamp": 1u64}));
+    session.append_message(&json!({
         "role": "assistant",
         "content": [{ "type": "text", "text": "fixed in auth.rs" }],
         "provider": "p", "model": "m", "timestamp": 2u64
     }));
     // Tool traffic is counted but never enters the search corpus.
     session
-        .append_message(json!({"role": "toolResult", "content": "tool noise", "timestamp": 3u64}));
+        .append_message(&json!({"role": "toolResult", "content": "tool noise", "timestamp": 3u64}));
     session.rewrite().unwrap();
 
     let info = read_session_info(&path).unwrap();
@@ -575,7 +575,7 @@ fn scan_folds_the_saved_row_usage_summary() {
     let mut session = SessionFile::create("/tmp", None, 0);
     let path = dir.join(session_file_name(session.session_id()));
     session.set_path(path.clone());
-    let assistant_id = session.append_message(json!({
+    let assistant_id = session.append_message(&json!({
             "role": "assistant",
             "content": [{ "type": "text", "text": "run it" }],
             "provider": "p", "model": "m", "timestamp": 1u64,
@@ -638,8 +638,8 @@ fn scan_keeps_messages_with_partial_usage_objects() {
     let mut session = SessionFile::create("/tmp", None, 0);
     let path = dir.join(session_file_name(session.session_id()));
     session.set_path(path.clone());
-    session.append_message(json!({"role": "user", "content": "run it", "timestamp": 1u64}));
-    session.append_message(json!({
+    session.append_message(&json!({"role": "user", "content": "run it", "timestamp": 1u64}));
+    session.append_message(&json!({
         "role": "assistant",
         "content": [{ "type": "text", "text": "done" }],
         "provider": "p", "model": "m", "timestamp": 2u64,
@@ -670,7 +670,7 @@ fn scan_omits_usage_without_billable_work() {
     let mut session = SessionFile::create("/tmp", None, 0);
     let path = dir.join(session_file_name(session.session_id()));
     session.set_path(path.clone());
-    session.append_message(json!({"role": "user", "content": "hi", "timestamp": 1u64}));
+    session.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
     session.rewrite().unwrap();
 
     let info = read_session_info(&path).unwrap();
@@ -686,7 +686,7 @@ fn transcript_search_text_caps_at_the_ts_limit() {
     session.set_path(path.clone());
     for round in 0..3 {
         let message = "x".repeat(30 * 1024);
-        session.append_message(json!({
+        session.append_message(&json!({
             "role": "user", "content": format!("{round} {message}"), "timestamp": round + 1
         }));
     }
@@ -918,7 +918,7 @@ fn durable_first_kept_entry_id_pins_the_boundary_the_read_retains() {
     // session file. The durable re-cut must pin the boundary the
     // `messages()` read recognizes, or the retained tail is lost.
     let mut session = SessionFile::create("/tmp", None, 0);
-    session.append_message(json!({"role": "user", "content": "first", "timestamp": 1u64}));
+    session.append_message(&json!({"role": "user", "content": "first", "timestamp": 1u64}));
     let usage = json!({
         "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
         "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0 }
@@ -931,9 +931,9 @@ fn durable_first_kept_entry_id_pins_the_boundary_the_read_retains() {
             "usage": usage, "stopReason": "stop", "timestamp": timestamp
         })
     };
-    session.append_message(assistant(format!("history {}", "word ".repeat(40)), 2u64));
-    session.append_message(json!({"role": "user", "content": "second turn", "timestamp": 3u64}));
-    session.append_message(assistant("second turn done".to_string(), 4u64));
+    session.append_message(&assistant(format!("history {}", "word ".repeat(40)), 2u64));
+    session.append_message(&json!({"role": "user", "content": "second turn", "timestamp": 3u64}));
+    session.append_message(&assistant("second turn done".to_string(), 4u64));
 
     let durable_id = session.durable_first_kept_entry_id(5);
     // The cut keeps the whole second turn: its user message is the

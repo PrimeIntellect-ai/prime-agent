@@ -786,7 +786,10 @@ async fn family_edges_never_cross_families_end_to_end() {
     assert_eq!(hello["type"], "daemon_hello");
 
     let mut roots = Vec::new();
-    for (name, script) in [("parent-a", parent_a_script), ("parent-b", sibling_root_script)] {
+    for (name, script) in [
+        ("parent-a", parent_a_script),
+        ("parent-b", sibling_root_script),
+    ] {
         client.send_command(
             &format!("create-{name}"),
             &json!({
@@ -1180,9 +1183,9 @@ async fn family_edges_never_cross_families_end_to_end() {
     let child_row = by_id(kid_a_active);
     assert_eq!(child_row["relationship"], "child", "{child_row:?}");
     assert!(
-        !roster
-            .iter()
-            .any(|summary| { summary["activeSessionId"].as_str() == Some(second_kid_active.as_str()) }),
+        !roster.iter().any(|summary| {
+            summary["activeSessionId"].as_str() == Some(second_kid_active.as_str())
+        }),
         "another family's subagent is never in the observe roster: {roster:?}"
     );
     // The grandchild never renders top-level in the root's view: it is

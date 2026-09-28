@@ -468,7 +468,7 @@ pub async fn publish_completion_envelope(
         ..Default::default()
     };
     let completion = AcpSessionUpdate::SessionInfoUpdate {
-        meta: super::meta::prime_agent_meta(info_meta.clone()),
+        meta: super::meta::prime_agent_meta(&info_meta),
     };
     if !session
         .producer()
@@ -478,7 +478,7 @@ pub async fn publish_completion_envelope(
         anyhow::bail!("Failed to publish ACP completion update");
     }
     let terminal = AcpSessionUpdate::SessionInfoUpdate {
-        meta: super::meta::prime_agent_meta(info_meta),
+        meta: super::meta::prime_agent_meta(&info_meta),
     };
     if !session
         .producer()
@@ -505,7 +505,7 @@ pub async fn publish_response_boundary(
     outcome: PrimeAgentOutcome,
 ) -> anyhow::Result<()> {
     let boundary = AcpSessionUpdate::SessionInfoUpdate {
-        meta: super::meta::prime_agent_meta(PrimeAgentSessionMeta {
+        meta: super::meta::prime_agent_meta(&PrimeAgentSessionMeta {
             terminal_quiescence_expected: Some(expected),
             ..Default::default()
         }),
@@ -528,7 +528,7 @@ pub async fn publish_response_boundary(
 /// Render a prompt-block failure as the ACP invalid-params error. The TS
 /// SDK validates the request schema; the Rust port validates the blocks it
 /// actually reads.
-pub fn prompt_block_error(id: &Value, error: PromptBlockError) -> Value {
+pub fn prompt_block_error(id: &Value, error: &PromptBlockError) -> Value {
     jsonrpc::error_response(
         id,
         jsonrpc::INVALID_PARAMS,

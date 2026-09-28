@@ -90,7 +90,7 @@ mod tests {
         if let Some(name) = name {
             session.append_session_info(name);
         }
-        session.append_message(serde_json::json!({
+        session.append_message(&serde_json::json!({
             "role": "user", "content": "hi", "timestamp": 1u64
         }));
         let path = dir.join(session_file_name(session.session_id()));

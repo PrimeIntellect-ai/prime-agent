@@ -89,7 +89,7 @@ impl SlowMock {
                 let Ok(stream) = stream else { continue };
                 let requests = Arc::clone(&requests_for_thread);
                 std::thread::spawn(move || {
-                    let _ = serve(stream, requests);
+                    let _ = serve(stream, &requests);
                 });
             }
         });
@@ -105,7 +105,7 @@ impl SlowMock {
     }
 }
 
-fn chunk(delta: Value, finish_reason: Option<&str>) -> String {
+fn chunk(delta: &Value, finish_reason: Option<&str>) -> String {
     json!({
         "id": "chatcmpl-test",
         "object": "chat.completion.chunk",
@@ -116,7 +116,7 @@ fn chunk(delta: Value, finish_reason: Option<&str>) -> String {
     .to_string()
 }
 
-fn serve(mut stream: TcpStream, requests: Arc<Mutex<usize>>) -> std::io::Result<()> {
+fn serve(mut stream: TcpStream, requests: &Arc<Mutex<usize>>) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut head = String::new();
     loop {
@@ -150,7 +150,7 @@ fn serve(mut stream: TcpStream, requests: Arc<Mutex<usize>>) -> std::io::Result<
     write!(
         payload,
         "data: {}\n\n",
-        chunk(json!({"role": "assistant", "content": "streaming"}), None)
+        chunk(&json!({"role": "assistant", "content": "streaming"}), None)
     )
     .expect("write to String");
     stream.write_all(
@@ -161,7 +161,7 @@ fn serve(mut stream: TcpStream, requests: Arc<Mutex<usize>>) -> std::io::Result<
     )?;
     std::thread::sleep(Duration::from_millis(TURN_HOLD_MS));
     let mut tail = String::new();
-    write!(tail, "data: {}\n\n", chunk(json!({}), Some("stop"))).expect("write to String");
+    write!(tail, "data: {}\n\n", chunk(&json!({}), Some("stop"))).expect("write to String");
     tail.push_str("data: [DONE]\n\n");
     stream.write_all(tail.as_bytes())
 }
@@ -244,7 +244,7 @@ impl Client {
         }
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -261,7 +261,7 @@ impl Client {
     /// Send a command and measure the time until its response arrives;
     /// session events observed along the way are collected like
     /// [`Self::request`].
-    fn timed_request(&mut self, id: &str, command: Value) -> (Value, Duration) {
+    fn timed_request(&mut self, id: &str, command: &Value) -> (Value, Duration) {
         let started = Instant::now();
         self.send_command(id, command);
         let response = self.request(id);
@@ -357,7 +357,7 @@ fn run_matrix(client: &mut Client, session_id: &str, phase: &str) -> Vec<Measure
         if *command == "get_tool_definition" {
             command_value["name"] = json!("bash");
         }
-        let (response, elapsed) = client.timed_request(&id, command_value);
+        let (response, elapsed) = client.timed_request(&id, &command_value);
         measurements.push(Measurement {
             command: format!("{command} ({surface})"),
             elapsed,
@@ -419,7 +419,7 @@ fn client_commands_answer_fast_while_a_turn_streams() {
     let mut client = Client::connect(&socket);
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -438,7 +438,7 @@ fn client_commands_answer_fast_while_a_turn_streams() {
         .to_string();
     client.send_command(
         "a1",
-        json!({ "type": "attach", "activeSessionId": session_id }),
+        &json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let attached = client.request("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
@@ -460,7 +460,7 @@ fn client_commands_answer_fast_while_a_turn_streams() {
     // while the assistant message is streaming (the dogfood window).
     client.send_command(
         "p1",
-        json!({ "type": "prompt", "activeSessionId": session_id, "message": "hello" }),
+        &json!({ "type": "prompt", "activeSessionId": session_id, "message": "hello" }),
     );
     let queued = client.request("p1");
     assert_eq!(queued["success"], true, "prompt rejected: {queued}");

@@ -192,7 +192,7 @@ impl Client {
         self.writer.flush().expect("flush");
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         self.send(&json!({
             "type": "command",
             "id": id,
@@ -265,7 +265,7 @@ fn control_plane_stays_responsive_while_a_large_adoption_pass_recovers() {
     for index in 0..SESSIONS {
         client.send_command(
             &format!("c{index}"),
-            json!({
+            &json!({
                 "type": "create",
                 "config": {
                     "cwd": dir.path().to_string_lossy(),
@@ -330,7 +330,7 @@ fn control_plane_stays_responsive_while_a_large_adoption_pass_recovers() {
     // list answers mid-recovery too: it serves the registered rows instead
     // of queueing behind the rest of the pass.
     let list_start = Instant::now();
-    client.send_command("list-mid-recovery", json!({ "type": "list" }));
+    client.send_command("list-mid-recovery", &json!({ "type": "list" }));
     let list_response = client.read_response("list-mid-recovery");
     let list_latency = list_start.elapsed();
     assert_eq!(
@@ -368,7 +368,7 @@ fn control_plane_stays_responsive_while_a_large_adoption_pass_recovers() {
     // the recovered sessions.
     client.send_command(
         "attach-recovered",
-        json!({ "type": "attach", "activeSessionId": session_ids[0] }),
+        &json!({ "type": "attach", "activeSessionId": session_ids[0] }),
     );
     let attached = client.read_response("attach-recovered");
     assert_eq!(

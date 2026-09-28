@@ -84,7 +84,7 @@ impl MegaMock {
                 let Ok(stream) = stream else { continue };
                 let requests = Arc::clone(&requests_for_thread);
                 std::thread::spawn(move || {
-                    let _ = serve(stream, requests);
+                    let _ = serve(stream, &requests);
                 });
             }
         });
@@ -96,7 +96,7 @@ impl MegaMock {
     }
 }
 
-fn chunk(delta: Value, finish_reason: Option<&str>, usage: Value) -> String {
+fn chunk(delta: &Value, finish_reason: Option<&str>, usage: &Value) -> String {
     json!({
         "id": "chatcmpl-test",
         "object": "chat.completion.chunk",
@@ -128,7 +128,7 @@ fn crossing_usage() -> Value {
     })
 }
 
-fn serve(mut stream: TcpStream, requests: Arc<Mutex<Vec<Value>>>) -> std::io::Result<()> {
+fn serve(mut stream: TcpStream, requests: &Arc<Mutex<Vec<Value>>>) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut head = String::new();
     loop {
@@ -209,11 +209,11 @@ fn serve(mut stream: TcpStream, requests: Arc<Mutex<Vec<Value>>>) -> std::io::Re
     let mut payload = String::new();
     for data in [
         chunk(
-            json!({"role": "assistant", "content": reply}),
+            &json!({"role": "assistant", "content": reply}),
             None,
-            small_usage(),
+            &small_usage(),
         ),
-        chunk(json!({}), Some("stop"), usage.clone()),
+        chunk(&json!({}), Some("stop"), &usage),
         json!({
             "id": "chatcmpl-test",
             "object": "chat.completion.chunk",
@@ -292,7 +292,7 @@ impl TimedClient {
         client
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -411,7 +411,7 @@ fn mega_session_threshold_compaction_phase_measurement() {
 
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -432,7 +432,7 @@ fn mega_session_threshold_compaction_phase_measurement() {
 
     client.send_command(
         "a1",
-        json!({ "type": "attach", "activeSessionId": session_id }),
+        &json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let attached = client.read_response("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
@@ -441,7 +441,7 @@ fn mega_session_threshold_compaction_phase_measurement() {
     // fattening turns grow the session.
     client.send_command(
         "p0",
-        json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "seed turn"}),
+        &json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "seed turn"}),
     );
     let seeded = client.read_response("p0");
     assert_eq!(seeded["success"], true, "seed prompt failed: {seeded}");
@@ -452,7 +452,7 @@ fn mega_session_threshold_compaction_phase_measurement() {
         let id = format!("f{turn}");
         client.send_command(
             &id,
-            json!({
+            &json!({
                 "type": "prompt_and_wait",
                 "activeSessionId": session_id,
                 "message": format!("fattening turn {turn}"),
@@ -468,7 +468,7 @@ fn mega_session_threshold_compaction_phase_measurement() {
     let crossing_started = Instant::now();
     client.send_command(
         "px",
-        json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "crossing turn"}),
+        &json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "crossing turn"}),
     );
     let crossed = client.read_response("px");
     let crossing_total = crossing_started.elapsed();

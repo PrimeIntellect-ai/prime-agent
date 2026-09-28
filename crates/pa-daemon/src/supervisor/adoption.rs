@@ -668,7 +668,7 @@ impl Supervisor {
             );
         let ledger = self.rlm_spawn_ledger_for(None).await?;
         ledger
-            .append_spawn(crate::rlm_ledger::RlmSpawnInput {
+            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
                 child_id: child_id.clone(),
                 parent: parent.to_string(),
                 child: child.to_string(),

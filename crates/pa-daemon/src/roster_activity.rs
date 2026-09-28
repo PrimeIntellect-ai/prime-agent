@@ -164,7 +164,7 @@ impl RosterPushQueue {
 /// flows through the worker's event pump enqueues a flush request. The
 /// watcher owns a receiver on the pump's broadcast, so it ends with the
 /// worker's process (a worker serves one session for its lifetime).
-pub(crate) fn spawn_roster_activity_watch(events: Arc<EventPump>, queue: RosterPushQueue) {
+pub(crate) fn spawn_roster_activity_watch(events: &Arc<EventPump>, queue: RosterPushQueue) {
     if queue.inner.is_none() {
         return;
     }

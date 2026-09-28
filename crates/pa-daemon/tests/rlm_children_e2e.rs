@@ -121,7 +121,7 @@ impl Client {
         (client, hello)
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -207,12 +207,7 @@ fn write_script(dir: &Path, answer: &str) -> PathBuf {
 
 /// Children registry bound to the running supervisor, with a parent identity
 /// rooted at `agent_dir`.
-fn children(
-    socket: &Path,
-    agent_dir: &Path,
-    script: &Path,
-    depth: u32,
-) -> SupervisorChildSessions {
+fn children(socket: &Path, agent_dir: &Path, script: &Path, depth: u32) -> SupervisorChildSessions {
     let sessions = SupervisorChildSessions::new(
         Arc::new(SupervisorLink::new(socket.to_path_buf())),
         agent_dir.to_path_buf(),
@@ -334,7 +329,7 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
 
     // The supervisor roster shows the child as a depth-1 subagent session.
     let roster_summary = wait_until(Duration::from_secs(10), || {
-        client.send_command("l1", json!({ "type": "list" }));
+        client.send_command("l1", &json!({ "type": "list" }));
         let list = client.read_response("l1");
         list["data"]["sessions"].as_array().and_then(|sessions| {
             sessions
@@ -412,7 +407,7 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
     let remaining = children.list_subagents().await.expect("list after delete");
     assert!(remaining.is_empty(), "child removed from the parent roster");
     wait_until(Duration::from_secs(10), || {
-        client.send_command("l2", json!({ "type": "list" }));
+        client.send_command("l2", &json!({ "type": "list" }));
         let list = client.read_response("l2");
         list["data"]["sessions"]
             .as_array()
@@ -520,7 +515,7 @@ async fn rlm_create_session_spawns_a_prompted_depth_zero_session() {
     assert_eq!(handle.model, "scripted/faux-1");
 
     // A depth-0 resident session, not a subagent roster row.
-    client.send_command("l1", json!({ "type": "list" }));
+    client.send_command("l1", &json!({ "type": "list" }));
     let list = client.read_response("l1");
     let sessions = list["data"]["sessions"].as_array().expect("sessions");
     assert_eq!(sessions.len(), 1);
@@ -537,7 +532,7 @@ async fn rlm_create_session_spawns_a_prompted_depth_zero_session() {
     let answer = wait_until(Duration::from_secs(10), || {
         client.send_command(
             "g1",
-            json!({ "type": "get_last_assistant_text", "activeSessionId": active_id }),
+            &json!({ "type": "get_last_assistant_text", "activeSessionId": active_id }),
         );
         let final_answer = client.read_response("g1");
         final_answer["data"]["text"]
@@ -550,12 +545,12 @@ async fn rlm_create_session_spawns_a_prompted_depth_zero_session() {
     // Killing the session removes it from the supervisor roster.
     client.send_command(
         "k1",
-        json!({ "type": "kill", "activeSessionId": active_id }),
+        &json!({ "type": "kill", "activeSessionId": active_id }),
     );
     let killed = client.read_response("k1");
     assert_eq!(killed["success"], true, "kill failed: {killed}");
     wait_until(Duration::from_secs(10), || {
-        client.send_command("l2", json!({ "type": "list" }));
+        client.send_command("l2", &json!({ "type": "list" }));
         let list = client.read_response("l2");
         list["data"]["sessions"]
             .as_array()
@@ -662,7 +657,7 @@ async fn parallel_same_name_subagent_creates_admit_exactly_one() {
     // in sequence.
     let ids = ["c1", "c2", "c3", "c4"];
     for id in ids {
-        client.send_command(id, subagent_create(&format!("sub-{id}")));
+        client.send_command(id, &subagent_create(&format!("sub-{id}")));
     }
     let deadline = Instant::now() + Duration::from_secs(90);
     let mut responses: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
@@ -700,7 +695,7 @@ async fn parallel_same_name_subagent_creates_admit_exactly_one() {
         .expect("winner active id");
     client.send_command(
         "k1",
-        json!({ "type": "kill", "activeSessionId": active_id }),
+        &json!({ "type": "kill", "activeSessionId": active_id }),
     );
     let killed = client.read_response_slow("k1");
     assert!(
@@ -708,14 +703,14 @@ async fn parallel_same_name_subagent_creates_admit_exactly_one() {
         "kill winner: {killed}"
     );
     wait_until(Duration::from_secs(10), || {
-        client.send_command("l1", json!({ "type": "list" }));
+        client.send_command("l1", &json!({ "type": "list" }));
         let list = client.read_response("l1");
         list["data"]["sessions"]
             .as_array()
             .filter(|sessions| sessions.is_empty())
             .map(|_| ())
     });
-    client.send_command("c5", subagent_create("sub-c5"));
+    client.send_command("c5", &subagent_create("sub-c5"));
     let retry = client.read_response_slow("c5");
     assert!(
         retry["success"].as_bool().unwrap_or(false),

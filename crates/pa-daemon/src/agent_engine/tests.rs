@@ -159,7 +159,7 @@ fn write_compaction_settings(dir: &std::path::Path, reserve_tokens: u64) {
 /// One faux-driven engine over its own tempdir (settings written before
 /// the first prompt so the session build resolves them).
 pub(crate) fn faux_engine_with_settings(
-    script: serde_json::Value,
+    script: &serde_json::Value,
     reserve_tokens: u64,
 ) -> (AgentSessionEngine, tempfile::TempDir) {
     let dir = tempfile::TempDir::new().unwrap();
@@ -398,8 +398,8 @@ fn recovered_engine_compaction_walk_sees_the_durable_history() {
     let mut store = crate::session_store::SessionFile::create("/tmp", None, 0);
     let session_path = dir.path().join("session.jsonl");
     store.set_path(session_path.clone());
-    store.append_message(wire_user_message(format!("work turn one {long}")));
-    store.append_message(wire_assistant_message(format!("reply one {long}")));
+    store.append_message(&wire_user_message(format!("work turn one {long}")));
+    store.append_message(&wire_assistant_message(format!("reply one {long}")));
     store.rewrite().expect("write session file");
     let engine = AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.path().to_path_buf(),
@@ -472,7 +472,7 @@ fn post_compaction_goal_continuation_mint() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "goal turn reply"}] }),
+        &serde_json::json!({ "responses": [{"text": "goal turn reply"}] }),
         1,
     );
     let engine = std::sync::Arc::new(engine);
@@ -708,7 +708,7 @@ fn paused_goal_mints_no_turn_end_continuation() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [
+        &serde_json::json!({ "responses": [
             {"text": "start turn reply"},
             {"text": "paused turn reply"},
         ]}),
@@ -758,7 +758,7 @@ fn budget_exhausted_stops_with_the_ts_budget_steer() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "crossing turn reply"}] }),
+        &serde_json::json!({ "responses": [{"text": "crossing turn reply"}] }),
         1,
     );
     let engine = std::sync::Arc::new(engine);
@@ -827,7 +827,7 @@ fn queued_input_defers_the_turn_end_mint() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "first"}, {"text": "second"}] }),
+        &serde_json::json!({ "responses": [{"text": "first"}, {"text": "second"}] }),
         1,
     );
     let engine = std::sync::Arc::new(engine);
@@ -996,7 +996,7 @@ fn injected_custom_turn_holds_one_representation() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "notice acknowledged"}] }),
+        &serde_json::json!({ "responses": [{"text": "notice acknowledged"}] }),
         1,
     );
     let notice_text = "[child-exited: no-reply child:lane]";
@@ -1103,7 +1103,7 @@ fn goal_start_continuation_holds_one_representation() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "goal turn reply"}] }),
+        &serde_json::json!({ "responses": [{"text": "goal turn reply"}] }),
         1,
     );
     let mut events: Vec<EngineEvent> = Vec::new();
@@ -1178,7 +1178,7 @@ fn threshold_crossing_auto_compacts_with_the_event_pair() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Probe: the baseline turn's total usage (system prompt included).
     let (probe, _probe_dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "seed reply"}] }),
+        &serde_json::json!({ "responses": [{"text": "seed reply"}] }),
         1,
     );
     let mut probe_events: Vec<EngineEvent> = Vec::new();
@@ -1203,7 +1203,7 @@ fn threshold_crossing_auto_compacts_with_the_event_pair() {
     // shape: reserveTokens so exactly the seeded crossing fires).
     let headroom = baseline + big_tokens / 2;
     let (engine, _engine_dir) = faux_engine_with_settings(
-        serde_json::json!({
+        &serde_json::json!({
             "responses": [
                 {"text": "seed reply"},
                 {"text": "crossing reply"},
@@ -1647,7 +1647,7 @@ fn threshold_compaction_counts_into_the_run_telemetry() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Probe: the baseline turn's total usage (system prompt included).
     let (probe, _probe_dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "seed reply"}] }),
+        &serde_json::json!({ "responses": [{"text": "seed reply"}] }),
         1,
     );
     let mut probe_events: Vec<EngineEvent> = Vec::new();
@@ -1665,7 +1665,7 @@ fn threshold_compaction_counts_into_the_run_telemetry() {
     let big_tokens = (48_000 + "seed turn  crossing".len() as u64).div_ceil(4);
     let headroom = baseline + big_tokens / 2;
     let (engine, dir) = faux_engine_with_settings(
-        serde_json::json!({
+        &serde_json::json!({
             "responses": [
                 {"text": "seed reply"},
                 {"text": "crossing reply"},
@@ -1708,7 +1708,7 @@ fn requested_compaction_counts_into_the_run_telemetry() {
     // A tiny reserve keeps the threshold arm silent (TS reserve 1 means
     // the context must nearly fill the window).
     let (engine, dir) = faux_engine_with_settings(
-        serde_json::json!({
+        &serde_json::json!({
             "responses": [
                 {"text": "seed reply"},
                 {"text": "second reply"},
@@ -1766,7 +1766,7 @@ fn manual_wire_compaction_counts_into_the_run_telemetry() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, dir) = faux_engine_with_settings(
-        serde_json::json!({
+        &serde_json::json!({
             "responses": [
                 {"text": "seed reply"},
                 {"text": "second reply"},
@@ -1916,7 +1916,7 @@ fn threshold_skip_records_the_durable_outcome_row() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Probe: the baseline turn's total usage (system prompt included).
     let (probe, _probe_dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "seed reply"}] }),
+        &serde_json::json!({ "responses": [{"text": "seed reply"}] }),
         1,
     );
     let mut probe_events: Vec<EngineEvent> = Vec::new();
@@ -1936,7 +1936,7 @@ fn threshold_skip_records_the_durable_outcome_row() {
     let big_tokens = (48_000 + "seed turn  crossing".len() as u64).div_ceil(4);
     let headroom = baseline + big_tokens / 2;
     let (engine, _engine_dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "crossing reply"}] }),
+        &serde_json::json!({ "responses": [{"text": "crossing reply"}] }),
         128_000u64
             .saturating_sub(FAUX_REQUEST_BUDGET + headroom)
             .max(1),
@@ -2174,7 +2174,7 @@ fn threshold_compaction_aborted_mid_run_records_the_cancelled_outcome() {
     // threshold crossing test; the headroom sits between the two
     // turns' usage).
     let (probe, _probe_dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "seed reply"}] }),
+        &serde_json::json!({ "responses": [{"text": "seed reply"}] }),
         1,
     );
     let mut probe_events: Vec<EngineEvent> = Vec::new();
@@ -2192,7 +2192,7 @@ fn threshold_compaction_aborted_mid_run_records_the_cancelled_outcome() {
     let big_tokens = (48_000 + "seed turn  crossing".len() as u64).div_ceil(4);
     let headroom = baseline + big_tokens / 2;
     let (engine, _engine_dir) = faux_engine_with_settings(
-        serde_json::json!({
+        &serde_json::json!({
             "responses": [
                 {"text": "seed reply"},
                 {"text": "crossing reply"},
@@ -2261,7 +2261,7 @@ fn requested_compaction_aborted_mid_run_records_the_cancelled_outcome() {
     // the whole window) while the 10-token keep-recent budget leaves
     // the turns summarizable for the requested run.
     let (engine, _engine_dir) = faux_engine_with_settings(
-        serde_json::json!({
+        &serde_json::json!({
             "responses": [
                 {"text": "seed reply"},
                 {"text": "second reply"},
@@ -3105,7 +3105,7 @@ async fn a_compacted_session_restores_its_post_compaction_model() {
     ));
     session.set_path(path.clone());
     session.append_model_change("battery", "mock-reason");
-    let kept = session.append_message(serde_json::json!({
+    let kept = session.append_message(&serde_json::json!({
         "role": "assistant",
         "provider": "battery",
         "model": "mock-plain",
@@ -3687,7 +3687,7 @@ fn settled_turn_emits_the_terminal_turn_end_payload() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "settled reply"}] }),
+        &serde_json::json!({ "responses": [{"text": "settled reply"}] }),
         1,
     );
     let mut events: Vec<EngineEvent> = Vec::new();
@@ -3737,7 +3737,7 @@ fn settled_turn_emits_the_run_agent_end_payload() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "settled reply"}] }),
+        &serde_json::json!({ "responses": [{"text": "settled reply"}] }),
         1,
     );
     let mut events: Vec<EngineEvent> = Vec::new();
@@ -4438,7 +4438,7 @@ async fn replacement_teardown_retires_the_session_and_the_funnel_adopts_the_bran
     // The replacement tail parks the moved branch on the unbuilt engine
     // (the worker parks it on a blocking thread; so does the test).
     let mut store = crate::session_store::SessionFile::create("/tmp", None, 0);
-    store.append_message(json!({
+    store.append_message(&json!({
         "role": "user",
         "content": "moved branch marker",
         "timestamp": 1u64,
@@ -4571,7 +4571,7 @@ async fn live_branch_rebuild_reloads_the_goal_state_from_the_moved_branch() {
 
     // A pre-goal branch: no `thread_goal_state` entry anywhere.
     let mut store = crate::session_store::SessionFile::create("/tmp", None, 0);
-    store.append_message(json!({
+    store.append_message(&json!({
         "role": "user",
         "content": "moved branch marker",
         "timestamp": 1u64,
@@ -6125,13 +6125,13 @@ fn oracle_session() -> (
 #[test]
 fn saved_context_windowed_matches_full_parse_without_a_boundary() {
     let (mut file, path, _dir) = oracle_session();
-    file.append_message(json!({"role":"user","content":"hello","timestamp":0}));
+    file.append_message(&json!({"role":"user","content":"hello","timestamp":0}));
     file.append_entry(
         "model_change",
         json!({"provider":"battery","modelId":"mock-1"}),
     );
     file.append_entry("thinking_level_change", json!({"thinkingLevel":"medium"}));
-    file.append_message(json!({
+    file.append_message(&json!({
         "role":"assistant","provider":"battery","model":"mock-1","api":"openai-responses",
         "content":[{"type":"text","text":"hi"}],"stopReason":"stop","timestamp":1
     }));
@@ -6145,7 +6145,7 @@ fn saved_context_windowed_matches_full_parse_with_changes_inside_the_window() {
     let mut kept = String::new();
     for i in 0..12 {
         let id = file
-            .append_message(json!({"role":"user","content":format!("message {i}"),"timestamp":i}));
+            .append_message(&json!({"role":"user","content":format!("message {i}"),"timestamp":i}));
         if i == 4 {
             kept = id;
         }
@@ -6173,7 +6173,7 @@ fn saved_context_windowed_matches_full_parse_with_model_only_before_the_boundary
     let mut kept = String::new();
     for i in 0..12 {
         let id = file
-            .append_message(json!({"role":"user","content":format!("message {i}"),"timestamp":i}));
+            .append_message(&json!({"role":"user","content":format!("message {i}"),"timestamp":i}));
         if i == 4 {
             kept = id;
         }
@@ -6195,7 +6195,7 @@ fn saved_context_windowed_matches_full_parse_with_thinking_only_before_the_bound
     let mut kept = String::new();
     for i in 0..12 {
         let id = file
-            .append_message(json!({"role":"user","content":format!("message {i}"),"timestamp":i}));
+            .append_message(&json!({"role":"user","content":format!("message {i}"),"timestamp":i}));
         if i == 4 {
             kept = id;
         }
@@ -6216,7 +6216,7 @@ fn saved_context_windowed_falls_back_to_the_full_open_on_a_malformed_retained_ro
     let mut kept = String::new();
     for i in 0..12 {
         let id = file
-            .append_message(json!({"role":"user","content":format!("message {i}"),"timestamp":i}));
+            .append_message(&json!({"role":"user","content":format!("message {i}"),"timestamp":i}));
         if i == 4 {
             kept = id;
         }

@@ -182,7 +182,7 @@ pub fn wire_updates(event: &Value, state: &mut WireMappingState) -> Vec<AcpSessi
                 }),
                 content: text.map(|text| vec![super::types::ToolCallContent::new(text)]),
                 meta: rich.map(|rich| {
-                    prime_agent_meta(PrimeAgentSessionMeta {
+                    prime_agent_meta(&PrimeAgentSessionMeta {
                         ipython: Some(rich),
                         ..Default::default()
                     })
@@ -193,7 +193,7 @@ pub fn wire_updates(event: &Value, state: &mut WireMappingState) -> Vec<AcpSessi
         "goal_update" => {
             let goal = event.get("goal");
             vec![AcpSessionUpdate::SessionInfoUpdate {
-                meta: prime_agent_meta(PrimeAgentSessionMeta {
+                meta: prime_agent_meta(&PrimeAgentSessionMeta {
                     goal: Some(super::meta::PrimeAgentGoalMeta {
                         status: goal
                             .and_then(|goal| goal.get("status"))
@@ -218,7 +218,7 @@ pub fn wire_updates(event: &Value, state: &mut WireMappingState) -> Vec<AcpSessi
         "compaction_end" => {
             let result = event.get("result");
             vec![AcpSessionUpdate::SessionInfoUpdate {
-                meta: prime_agent_meta(PrimeAgentSessionMeta {
+                meta: prime_agent_meta(&PrimeAgentSessionMeta {
                     compaction: Some(PrimeAgentCompactionMeta {
                         tokens_before: result
                             .and_then(|result| result.get("tokensBefore"))

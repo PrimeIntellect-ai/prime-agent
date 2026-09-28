@@ -108,7 +108,7 @@ impl Client {
         }
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -180,7 +180,7 @@ struct Harness {
     gate: String,
 }
 
-fn setup(name: &str, responses: Value) -> Harness {
+fn setup(name: &str, responses: &Value) -> Harness {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
@@ -204,7 +204,7 @@ fn setup(name: &str, responses: Value) -> Harness {
     let mut client = Client::connect(&socket);
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -222,7 +222,7 @@ fn setup(name: &str, responses: Value) -> Harness {
         .to_string();
     client.send_command(
         "a1",
-        json!({ "type": "attach", "activeSessionId": session_id }),
+        &json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let attached = client.request("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
@@ -240,7 +240,7 @@ impl Harness {
     fn prompt(&mut self, id: &str, message: &str) {
         self.client.send_command(
             id,
-            json!({
+            &json!({
                 "type": "prompt_and_wait",
                 "activeSessionId": self.session_id,
                 "message": message,
@@ -333,7 +333,7 @@ fn durable_autonomous_rows(harness: &Harness, prefix: &str) -> Vec<Value> {
 fn autonomous_gate_failure_then_pass_stops_the_run_in_run() {
     let mut harness = setup(
         "gate",
-        json!([{ "text": "first attempt" }, { "text": "fixed it" }]),
+        &json!([{ "text": "first attempt" }, { "text": "fixed it" }]),
     );
     harness.prompt(
         "enable",
@@ -437,7 +437,7 @@ fn autonomous_gate_failure_then_pass_stops_the_run_in_run() {
 fn autonomous_limit_reached_stops_the_run_without_a_row() {
     let mut harness = setup(
         "limit",
-        json!([{ "text": "still working" }, { "text": "more work" }]),
+        &json!([{ "text": "still working" }, { "text": "more work" }]),
     );
     harness.prompt(
         "enable",

@@ -446,7 +446,7 @@ fn delivered_rows(events: &[Value]) -> Vec<(String, String)> {
 #[tokio::test]
 async fn steering_mode_all_batches_the_queued_prefix_into_one_turn() {
     let engine: Arc<dyn SessionEngine> = Arc::new(
-        ScriptedEngine::from_value(json!({ "responses": ["batched reply"] })).unwrap_or_default(),
+        ScriptedEngine::from_value(&json!({ "responses": ["batched reply"] })).unwrap_or_default(),
     );
     let runner = burst_runner(Arc::clone(&engine));
     {
@@ -496,7 +496,7 @@ async fn steering_mode_all_batches_the_queued_prefix_into_one_turn() {
 #[tokio::test]
 async fn the_default_mode_co_delivers_the_queued_steering_prefix() {
     let engine: Arc<dyn SessionEngine> = Arc::new(
-        ScriptedEngine::from_value(json!({ "responses": ["batched reply"] })).unwrap_or_default(),
+        ScriptedEngine::from_value(&json!({ "responses": ["batched reply"] })).unwrap_or_default(),
     );
     let runner = burst_runner(Arc::clone(&engine));
     {
@@ -548,7 +548,7 @@ async fn one_at_a_time_delivers_each_queued_steer_as_its_own_turn() {
     // 0): the turns are discriminated by the agent_start count and
     // the user-row order, not the reply text.
     let engine: Arc<dyn SessionEngine> = Arc::new(
-        ScriptedEngine::from_value(json!({ "responses": ["settled reply"] })).unwrap_or_default(),
+        ScriptedEngine::from_value(&json!({ "responses": ["settled reply"] })).unwrap_or_default(),
     );
     let runner = burst_runner(Arc::clone(&engine));
     {
@@ -595,7 +595,7 @@ async fn forced_batch_delivers_the_armed_prefix_as_one_turn() {
     // (The burst harness serves the first scripted response for every
     // turn — see one_at_a_time above.)
     let engine: Arc<dyn SessionEngine> = Arc::new(
-        ScriptedEngine::from_value(json!({ "responses": ["batch reply"] })).unwrap_or_default(),
+        ScriptedEngine::from_value(&json!({ "responses": ["batch reply"] })).unwrap_or_default(),
     );
     let runner = burst_runner(Arc::clone(&engine));
     {
@@ -652,7 +652,7 @@ async fn mode_all_never_batches_across_policy_classes() {
     // (The burst harness serves the first scripted response for every
     // turn — see one_at_a_time above.)
     let engine: Arc<dyn SessionEngine> = Arc::new(
-        ScriptedEngine::from_value(json!({ "responses": ["lane reply"] })).unwrap_or_default(),
+        ScriptedEngine::from_value(&json!({ "responses": ["lane reply"] })).unwrap_or_default(),
     );
     let runner = burst_runner(Arc::clone(&engine));
     {
@@ -694,7 +694,7 @@ async fn mode_all_never_batches_across_policy_classes() {
 #[tokio::test]
 async fn follow_up_mode_all_batches_the_follow_up_lane() {
     let engine: Arc<dyn SessionEngine> = Arc::new(
-        ScriptedEngine::from_value(json!({ "responses": ["follow-up batch reply"] }))
+        ScriptedEngine::from_value(&json!({ "responses": ["follow-up batch reply"] }))
             .unwrap_or_default(),
     );
     let runner = burst_runner(Arc::clone(&engine));
@@ -1102,7 +1102,7 @@ async fn abort_and_send_queued_acks_before_the_follow_up_delivery() {
 #[tokio::test]
 async fn the_waiting_prompt_resolves_only_after_the_turn_settles() {
     let engine: Arc<dyn SessionEngine> = Arc::new(
-        ScriptedEngine::from_value(json!({ "responses": ["settled reply"] })).unwrap_or_default(),
+        ScriptedEngine::from_value(&json!({ "responses": ["settled reply"] })).unwrap_or_default(),
     );
     let runner = burst_runner(Arc::clone(&engine));
     let (done_tx, mut done_rx) = oneshot::channel();
@@ -1218,7 +1218,7 @@ fn live_feed_runner(engine: Arc<dyn SessionEngine>, socket: std::path::PathBuf) 
             roster_delta_sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             roster_push_order: Arc::new(std::sync::Mutex::new(())),
         });
-    crate::roster_activity::spawn_roster_activity_watch(Arc::clone(&events), roster_pushes.clone());
+    crate::roster_activity::spawn_roster_activity_watch(&events, roster_pushes.clone());
     TurnRunner {
         recovery: Arc::new(Mutex::new(None)),
         core,
@@ -1245,7 +1245,7 @@ async fn roster_feed_publishes_live_tool_activity() {
     let socket = dir.path().join("sup.sock");
     let (recorded, server) = fake_supervisor(socket.clone());
     let engine: Arc<dyn SessionEngine> = Arc::new(
-        ScriptedEngine::from_value(json!({
+        ScriptedEngine::from_value(&json!({
             "responses": [{
                 "text": "ran the tool",
                 "toolCalls": [{
@@ -1423,7 +1423,7 @@ async fn turn_session_events_with_custom_message(
 #[tokio::test]
 async fn an_injected_custom_turn_replaces_the_user_row() {
     let engine = Arc::new(
-        ScriptedEngine::from_value(json!({
+        ScriptedEngine::from_value(&json!({
             "responses": ["notice acknowledged"],
         }))
         .unwrap_or_default(),
@@ -1528,7 +1528,7 @@ async fn a_delivered_agent_message_turn_emits_the_custom_row() {
         .pop_front()
         .expect("the delivery parked on the steering lane");
     let engine: Arc<dyn SessionEngine> =
-        Arc::new(ScriptedEngine::from_value(json!({ "responses": ["ack"] })).unwrap_or_default());
+        Arc::new(ScriptedEngine::from_value(&json!({ "responses": ["ack"] })).unwrap_or_default());
     let runner = burst_runner(Arc::clone(&engine));
     let mut subscription = runner.events.subscribe();
     runner.run_turn(engine, vec![item]).await;
@@ -1573,7 +1573,7 @@ async fn a_delivered_agent_message_turn_emits_the_custom_row() {
 #[tokio::test]
 async fn a_settled_turn_broadcasts_the_engine_agent_end_with_its_messages() {
     let engine = Arc::new(
-        ScriptedEngine::from_value(json!({ "responses": ["settled reply"] })).unwrap_or_default(),
+        ScriptedEngine::from_value(&json!({ "responses": ["settled reply"] })).unwrap_or_default(),
     );
     let events = turn_session_events(engine).await;
     let agent_ends = positions_of(&events, "agent_end");

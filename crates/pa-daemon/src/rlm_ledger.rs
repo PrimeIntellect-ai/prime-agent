@@ -442,7 +442,7 @@ impl RlmSpawnLedger {
     /// live edge already claims the child session path, when the ledger
     /// replay fails (an oversized or malformed ledger), or when the
     /// record cannot be appended.
-    pub fn append_spawn(&self, input: RlmSpawnInput) -> Result<()> {
+    pub fn append_spawn(&self, input: &RlmSpawnInput) -> Result<()> {
         if input.child_id.is_empty()
             || input.parent.is_empty()
             || input.child.is_empty()
@@ -1466,7 +1466,7 @@ mod tests {
         fs::write(&parent, "{\"type\":\"session\",\"id\":\"p\"}").unwrap();
         fs::write(&child, "{\"type\":\"session\",\"id\":\"c\"}").unwrap();
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "sub-1".into(),
                 parent: parent.to_string_lossy().into(),
                 child: child.to_string_lossy().into(),
@@ -1507,7 +1507,7 @@ mod tests {
         fs::write(&child, "{}").unwrap();
         let child_path = child.to_string_lossy().into_owned();
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "sub-1".into(),
                 parent: parent.to_string_lossy().into_owned(),
                 child: child_path.clone(),
@@ -1534,7 +1534,7 @@ mod tests {
         fs::write(&other_child, "{}").unwrap();
         let other_path = other_child.to_string_lossy().into_owned();
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "sub-1".into(),
                 parent: parent.to_string_lossy().into_owned(),
                 child: other_path,
@@ -1566,7 +1566,7 @@ mod tests {
         fs::write(&parent, "{}").unwrap();
         fs::write(&child, "{}").unwrap();
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "sub-1".into(),
                 parent: parent.to_string_lossy().into(),
                 child: child.to_string_lossy().into(),
@@ -1606,7 +1606,7 @@ mod tests {
         fs::write(&live_parent, "{}").unwrap();
         fs::write(&live_child, "{}").unwrap();
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "sub-1".into(),
                 parent: recorded_parent.into(),
                 child: recorded_child.into(),
@@ -1654,7 +1654,7 @@ mod tests {
         fs::write(&parent, "{}").unwrap();
         fs::write(&child, "{}").unwrap();
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "sub-1".into(),
                 parent: parent.to_string_lossy().into(),
                 child: child.to_string_lossy().into(),
@@ -1662,7 +1662,7 @@ mod tests {
                 name: "w".into(),
             })
             .unwrap();
-        let duplicate = ledger.append_spawn(RlmSpawnInput {
+        let duplicate = ledger.append_spawn(&RlmSpawnInput {
             child_id: "sub-2".into(),
             parent: parent.to_string_lossy().into(),
             child: child.to_string_lossy().into(),
@@ -1670,7 +1670,7 @@ mod tests {
             name: "w".into(),
         });
         assert!(duplicate.is_err());
-        let depth_zero = ledger.append_spawn(RlmSpawnInput {
+        let depth_zero = ledger.append_spawn(&RlmSpawnInput {
             child_id: "sub-3".into(),
             parent: parent.to_string_lossy().into(),
             child: child.to_string_lossy().into(),
@@ -1853,7 +1853,7 @@ mod tests {
         fs::write(&parent, "{}").unwrap();
         fs::write(&child, "{}").unwrap();
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "sub-1".into(),
                 parent: parent.to_string_lossy().into(),
                 child: child.to_string_lossy().into(),
@@ -1927,7 +1927,7 @@ mod tests {
         fs::write(&parent, "{}").unwrap();
         fs::write(&child, "{}").unwrap();
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "neg".into(),
                 parent: parent.to_string_lossy().into(),
                 child: child.to_string_lossy().into(),
@@ -1977,7 +1977,7 @@ mod tests {
         fs::write(&child, "{}").unwrap();
         for child_id in ["sub-1", "sub-2"] {
             ledger
-                .append_spawn(RlmSpawnInput {
+                .append_spawn(&RlmSpawnInput {
                     child_id: child_id.into(),
                     parent: parent.to_string_lossy().into(),
                     child: child.to_string_lossy().into(),
@@ -2035,7 +2035,7 @@ mod tests {
         }
         let spawn = |child_id: &str, parent: &Path, child: &Path, depth: u32| {
             ledger
-                .append_spawn(RlmSpawnInput {
+                .append_spawn(&RlmSpawnInput {
                     child_id: child_id.into(),
                     parent: parent.to_string_lossy().into(),
                     child: child.to_string_lossy().into(),
@@ -2132,7 +2132,7 @@ mod tests {
         fs::write(&parent, "{}").unwrap();
         fs::write(&child, assistant_usage_row("m1", 0.25)).unwrap();
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "sub-1".into(),
                 parent: parent.to_string_lossy().into(),
                 child: child.to_string_lossy().into(),
@@ -2257,7 +2257,7 @@ mod tests {
         fs::write(&parent, "{}").unwrap();
         fs::write(&child, "{}").unwrap();
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "old".into(),
                 parent: parent.to_string_lossy().into(),
                 child: child.to_string_lossy().into(),
@@ -2275,7 +2275,7 @@ mod tests {
             .unwrap();
         // A fresh child spawns at the same path: the path is live again.
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "new".into(),
                 parent: parent.to_string_lossy().into(),
                 child: child.to_string_lossy().into(),

@@ -146,7 +146,7 @@ impl Worker {
         // runner (TS `resumeQueuedWork` after delete/replace; move only
         // emits the queue update).
         let core = self.core.lock().unwrap();
-        let snapshot = self.snapshot_locked(&core);
+        let snapshot = Self::snapshot_locked(&core);
         drop(core);
         // The edit refreshed the lanes: the verdict follows them (a delete
         // of the last queued item settles the session back to idle).
