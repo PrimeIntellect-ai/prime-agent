@@ -226,7 +226,7 @@ describe("selectHeadlessTerminalResult", () => {
 });
 
 describe("runPrintMode exit codes", () => {
-	it.each([
+	const cases = [
 		["assistant output", () => [createAssistantMessage({ text: "done" })], 0],
 		["a successful session command result", () => [sessionCommandResult("No active goal.", true)], 0],
 		["a failed session command result", () => [sessionCommandResult("Command failed: bad arguments", false)], 1],
@@ -245,6 +245,7 @@ describe("runPrintMode exit codes", () => {
 			() => [createAssistantMessage({ text: "done" }), refinementOutcome()],
 			0,
 		],
+		["an aborted assistant", () => [createAssistantMessage({ stopReason: "aborted" })], 1],
 		["an outcome-only failure", () => [compactionOutcome("Context overflow recovery failed", "failed")], 1],
 		[
 			"a session command result followed by a compaction outcome",
@@ -254,11 +255,13 @@ describe("runPrintMode exit codes", () => {
 			],
 			0,
 		],
-	])("exits %s => %s", async (_label, makeMessages, expected) => {
+	] as const;
+	const modes = cases.flatMap((row) => (["text", "json"] as const).map((mode) => [mode, ...row] as const));
+	it.each(modes)("%s: %s (#2404)", async (mode, _label, makeMessages, expected) => {
 		const runtimeHost = createRuntimeHost(makeMessages());
 		vi.spyOn(console, "error").mockImplementation(() => {});
 
-		await expect(run(runtimeHost)).resolves.toBe(expected);
+		await expect(run(runtimeHost, { mode })).resolves.toBe(expected);
 	});
 
 	it.each([
@@ -273,11 +276,13 @@ describe("runPrintMode exit codes", () => {
 			{ images: [{ type: "image", mimeType: "image/png", data: "abc" }] },
 		],
 		["json", { mode: "json" as const, messages: ["hello"] }, "hello", {}],
-	])("forwards the initial prompt in %s mode", async (_mode, options, expectedMessage, expectedOptions) => {
+	])("forwards the initial prompt in %s mode", async (outputMode, options, expectedMessage, expectedOptions) => {
 		const runtimeHost = createRuntimeHost([createAssistantMessage({ text: "done" })]);
+		output.write.mockClear();
 
 		await expect(run(runtimeHost, options)).resolves.toBe(0);
 		expect(runtimeHost.session.promptAndWait).toHaveBeenCalledWith(expectedMessage, expectedOptions);
+		expect(output.write.mock.calls).toEqual(outputMode === "text" ? [["done\n"]] : []);
 	});
 
 	it("disposes the connection before exiting on SIGINT", async () => {

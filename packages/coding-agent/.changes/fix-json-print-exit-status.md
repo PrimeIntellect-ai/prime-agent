@@ -1,0 +1,1 @@
+- Fixed JSON print mode reporting success after terminal assistant, session-command, or compaction failures.
