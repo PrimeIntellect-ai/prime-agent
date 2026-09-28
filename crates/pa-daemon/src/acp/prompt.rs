@@ -591,7 +591,7 @@ async fn settle_turn(
         // with the protocol stop reason and no boundary frames.
         session.producer().finish_prompt(turn_id).await;
         let _ = tx.send(jsonrpc::response(
-            &id,
+            id,
             &stop_reason_response(AcpStopReason::Cancelled),
         ));
         clear_prompt_slot(state, session_id).await;
@@ -669,7 +669,7 @@ async fn settle_turn(
     };
     let response = match turn_failure {
         Some(failure) => internal_error(id, &format!("prime-agent turn failed: {failure}")),
-        None => jsonrpc::response(&id, &stop_reason_response(stop_reason)),
+        None => jsonrpc::response(id, &stop_reason_response(stop_reason)),
     };
     let _ = tx.send(response);
     clear_prompt_slot(state, session_id).await;

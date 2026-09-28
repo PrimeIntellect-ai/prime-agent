@@ -132,13 +132,13 @@ impl WireConfigError {
     fn response(self, id: &Value) -> Value {
         match self {
             WireConfigError::InvalidParams(reason) => jsonrpc::error_response(
-                &id,
+                id,
                 jsonrpc::INVALID_PARAMS,
                 "Invalid params",
                 Some(&json!({ "reason": reason })),
             ),
             WireConfigError::Internal(details) => jsonrpc::error_response(
-                &id,
+                id,
                 jsonrpc::INTERNAL_ERROR,
                 "Internal error",
                 Some(&json!({ "details": details })),

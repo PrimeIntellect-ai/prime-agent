@@ -311,12 +311,12 @@ async fn handle_request(
 }
 
 fn handle_initialize(id: &Value, params: &Value, product_version: &str, tx: &producer::FrameSink) {
-    if let Err(error_response) = validate_initialize(&id, params) {
+    if let Err(error_response) = validate_initialize(id, params) {
         let _ = tx.send(error_response);
         return;
     }
     let result = serde_json::to_value(initialize_result(product_version)).expect("serializes");
-    let _ = tx.send(jsonrpc::response(&id, &result));
+    let _ = tx.send(jsonrpc::response(id, &result));
 }
 
 /// The `initialize` schema check the TS SDK performs: the protocol version
@@ -420,7 +420,7 @@ async fn handle_session_new(
             state.session_new_in_flight = false;
             state.session = Some(entry);
             drop(state);
-            let _ = tx.send(jsonrpc::response(&id, &result));
+            let _ = tx.send(jsonrpc::response(id, &result));
             producer.commit_session_new_response().await;
         }
     }

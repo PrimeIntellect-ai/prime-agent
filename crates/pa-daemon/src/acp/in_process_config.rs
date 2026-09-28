@@ -151,12 +151,12 @@ impl ConfigOptionError {
     fn response(self, id: &Value) -> Value {
         match self {
             ConfigOptionError::InvalidParams(reason) => jsonrpc::error_response(
-                &id,
+                id,
                 jsonrpc::INVALID_PARAMS,
                 "Invalid params",
                 Some(&json!({ "reason": reason })),
             ),
-            ConfigOptionError::Internal(details) => internal_error(&id, &details),
+            ConfigOptionError::Internal(details) => internal_error(id, &details),
         }
     }
 }

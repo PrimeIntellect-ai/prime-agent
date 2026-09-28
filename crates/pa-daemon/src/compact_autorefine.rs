@@ -156,7 +156,7 @@ mod tests {
         reserve_tokens: u64,
         with_session_file: bool,
     ) -> (AgentSessionEngine, tempfile::TempDir) {
-        let (engine, dir) = faux_engine_with_settings(&script, reserve_tokens);
+        let (engine, dir) = faux_engine_with_settings(script, reserve_tokens);
         if with_session_file {
             let sessions = dir.path().join("sessions");
             std::fs::create_dir_all(&sessions).unwrap();

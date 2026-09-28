@@ -57,9 +57,7 @@ impl Supervisor {
     /// queue drops the frame and the stall-cycle transition lands in the
     /// daemon log (finding 4a visibility).
     pub(crate) fn publish_session_event(&self, active_session_id: &str, payload: &Arc<Value>) {
-        let outcome = self
-            .session_subscribers
-            .publish(active_session_id, &payload);
+        let outcome = self.session_subscribers.publish(active_session_id, payload);
         if !outcome.lagged.is_empty() {
             self.log_line(&format!(
                 "clients {} lagged on the session event queue: frames dropped (session {active_session_id})",

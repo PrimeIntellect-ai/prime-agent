@@ -1152,7 +1152,7 @@ async fn the_waiting_prompt_resolves_only_after_the_turn_settles() {
 fn fake_supervisor(
     socket: &std::path::Path,
 ) -> (Arc<Mutex<Vec<Value>>>, tokio::task::JoinHandle<()>) {
-    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let listener = tokio::net::UnixListener::bind(socket).unwrap();
     let recorded = Arc::new(Mutex::new(Vec::<Value>::new()));
     let sink = Arc::clone(&recorded);
     let server = tokio::spawn(async move {

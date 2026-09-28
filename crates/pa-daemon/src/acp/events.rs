@@ -375,7 +375,7 @@ pub fn acp_updates_for_event(
 /// A `session_info_update` carrying one namespaced payload.
 fn session_info_update(meta: &PrimeAgentSessionMeta) -> AcpSessionUpdate {
     AcpSessionUpdate::SessionInfoUpdate {
-        meta: super::meta::prime_agent_meta(&meta),
+        meta: super::meta::prime_agent_meta(meta),
     }
 }
 

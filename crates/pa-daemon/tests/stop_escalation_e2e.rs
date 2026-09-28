@@ -157,7 +157,7 @@ impl Client {
     }
 
     fn request(&mut self, id: &str, command: &Value) -> Value {
-        self.send_command(id, &command);
+        self.send_command(id, command);
         loop {
             let response = self.read_line();
             if response.get("id").and_then(Value::as_str) == Some(id) {
