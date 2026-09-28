@@ -315,7 +315,7 @@ mod tests {
     /// model pinned by the create config and the vision image model.
     fn image_route_engine(
         dir: &std::path::Path,
-        settings: serde_json::Value,
+        settings: &serde_json::Value,
     ) -> AgentSessionEngine {
         let agent_dir = dir.join("agent");
         write_image_pair_models_json(&agent_dir);
