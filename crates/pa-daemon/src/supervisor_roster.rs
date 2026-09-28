@@ -455,36 +455,34 @@ impl Supervisor {
     /// frame: a changed row still reaches subscribers alongside an
     /// unchanged sibling in one push.
     pub(crate) fn push_roster_update(&self, changed: Vec<AgentRosterEntry>, removed: Vec<String>) {
-        let (changed, removed) = {
-            let mut last = self.last_published_roster.lock().unwrap();
-            let mut changed = changed;
-            changed.retain(|entry| {
-                let Some(published) = serde_json::to_value(entry).ok() else {
-                    return true; // an unserializable entry always ships
-                };
-                let id = entry.agent_id.clone();
-                let is_new = match last.get(&id) {
-                    Some(previous) => *previous != published,
-                    None => true,
-                };
-                if is_new {
-                    last.insert(id, published);
-                }
-                is_new
-            });
-            let mut removed = removed;
-            removed.retain(|id| last.remove(id).is_some());
-            (changed, removed)
-        };
+        // ONE lock acquisition spans the diff decision, the baseline
+        // rebase, and the send: two concurrent pushes cannot interleave
+        // as A-diff+A-rebase, B-diff+B-rebase+B-send, A-send —
+        // subscribers would apply stale A after B while the map records
+        // B (and then suppresses the correction). The broadcast send is
+        // sync (the tokio broadcast channel delivers in send order), so
+        // holding the std mutex across it serializes the pushes exactly.
+        let mut last = self.last_published_roster.lock().unwrap();
+        let mut changed = changed;
+        changed.retain(|entry| {
+            let Some(published) = serde_json::to_value(entry).ok() else {
+                return true; // an unserializable entry always ships
+            };
+            let id = entry.agent_id.clone();
+            let is_new = match last.get(&id) {
+                Some(previous) => *previous != published,
+                None => true,
+            };
+            if is_new {
+                last.insert(id, published);
+            }
+            is_new
+        });
+        let mut removed = removed;
+        removed.retain(|id| last.remove(id).is_some());
         if changed.is_empty() && removed.is_empty() {
             return;
         }
-        // The guarded arm's serial point: hold the map lock through the
-        // broadcast so the diff decision, the baseline rebase, and the
-        // send are one serialized operation — two concurrent pushes
-        // cannot interleave as A-baseline, B-baseline+B-send, A-send
-        // (subscribers would apply stale A after B). The unguarded arm
-        // serializes on the same lock below.
         let update = DaemonOutbound::RosterUpdate {
             changed: serde_json::to_value(&changed).unwrap_or(Value::Null),
             removed: (!removed.is_empty()).then_some(removed),
@@ -494,7 +492,6 @@ impl Supervisor {
         let Ok(payload) = serde_json::to_value(&update) else {
             return;
         };
-        let _order = self.last_published_roster.lock().unwrap();
         let _ = self.events.send((
             ClientRouting::RosterSubscribers,
             std::sync::Arc::new(payload),
