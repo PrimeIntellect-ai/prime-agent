@@ -1155,8 +1155,11 @@ enum DaemonProbe {
     Absent,
     /// A supervisor answered whose protocol/schema matches this build.
     Current,
-    /// A supervisor answered with a different protocol/schema.
-    Stale(pa_tui::daemon_client::DaemonClient),
+    /// A supervisor answered with a different protocol/schema. The client
+    /// rides boxed: its size is platform-dependent (the win32 transport
+    /// carries the pipe handles), and the box keeps the enum's other
+    /// arms paying nothing for the largest one.
+    Stale(Box<pa_tui::daemon_client::DaemonClient>),
 }
 
 /// Probe the socket once: connect, read the hello, and classify it.
@@ -1175,7 +1178,7 @@ async fn probe_daemon(socket_path: &Path) -> DaemonProbe {
         client.close();
         DaemonProbe::Current
     } else {
-        DaemonProbe::Stale(client)
+        DaemonProbe::Stale(Box::new(client))
     }
 }
 
@@ -1191,7 +1194,7 @@ async fn probe_daemon(socket_path: &Path) -> DaemonProbe {
 pub async fn ensure_daemon_running(socket_path: &Path, spawn_cwd: &Path) -> Result<()> {
     match probe_daemon(socket_path).await {
         DaemonProbe::Current => return Ok(()),
-        DaemonProbe::Stale(client) => shutdown_stale_daemon(client, socket_path).await?,
+        DaemonProbe::Stale(client) => shutdown_stale_daemon(*client, socket_path).await?,
         DaemonProbe::Absent => {}
     }
     let exe = std::env::current_exe().context("resolve the prime-agent executable")?;

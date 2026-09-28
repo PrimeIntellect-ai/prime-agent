@@ -104,8 +104,7 @@ use crate::session_store::list_sessions;
 use crate::snapshot_stream::{attach_client_capabilities, stream_attach, wants_chunked};
 use crate::update_prepare::{
     marker_expires_at_iso, update_gate_refuses, write_prepared_artifacts, AbortOutcome,
-    BeginOutcome, MutationDrainLatch, PrepareCoordinator, PrepareOp,
-    UPDATE_PREPARING_MESSAGE
+    BeginOutcome, MutationDrainLatch, PrepareCoordinator, PrepareOp, UPDATE_PREPARING_MESSAGE,
 };
 // The drain-state machine that names it is the unix signal path.
 #[cfg(unix)]
