@@ -84,7 +84,7 @@ while True:
     hello = {
         "type": "daemon_hello",
         "socketPath": socket_path,
-        "protocol": {"name": "prime-agent-daemon", "version": 7},
+        "protocol": {"name": "prime-agent.daemon", "version": 7},
         "schemaId": "protocol-7-schema-29-a5c9d20f8b13",
         "appVersion": "9.9.9",
         "supervisorPid": os.getpid(),
@@ -341,7 +341,7 @@ assert_eq "case 1 (b) session file byte-identical" "$session_hash_before" "$sess
 # (c) the TS daemon was stopped cleanly, via the schema-id stop-when-idle path
 assert_contains "case 1 (c) idle probe sent a list request" "$mach/logs/daemon-mock.log" '"type": "list"'
 assert_contains "case 1 (c) the probe rides the command envelope" "$mach/logs/daemon-mock.log" '"type": "command"'
-assert_contains "case 1 (c) the envelope carries protocol 7" "$mach/logs/daemon-mock.log" '"name": "prime-agent-daemon", "version": 7'
+assert_contains "case 1 (c) the envelope carries the real protocol name" "$mach/logs/daemon-mock.log" '"name": "prime-agent.daemon", "version": 7'
 assert_not_contains "case 1 (c) no bare command ever reached the strict mock" "$mach/logs/daemon-mock.log" "require the protocol envelope"
 assert_contains "case 1 (c) clean shutdown requested (force:false)" "$mach/logs/daemon-mock.log" '"force": false' 
 assert_contains "case 1 (c) mock daemon shut itself down" "$mach/logs/daemon-mock.log" "SHUTDOWN"
@@ -678,6 +678,32 @@ assert_eq "case 9 the third --update run completed" 0 "$rc9"
 assert_eq "case 9 the user-copied payload backup survived the sweep" "yes" \
   "$([ -f "$mach9/home/.local/share/prime-agent.old.mycopy/prime-agent" ] && echo yes || echo no)"
 assert_eq "case 9 the store is untouched" "$store_before_c" "$(store_snapshot "$mach9")"
+
+# ==============================================================================
+echo "== case 10: an unrecognized prime-agent-rust dir does not block a first install =="
+mach10="$(new_machine unowned-old-layout)"
+write_gh_mock "$mach10/mocks/gh"
+write_npm_mock "$mach10/mocks/npm"
+build_fixture "$mach10" "$FIXTURE_TRIPLE"
+seed_store "$mach10"
+# An old-name dir failing the shape check (executable but no runtime dir):
+# not the publish target, so the install proceeds and leaves it alone.
+mkdir -p "$mach10/home/.local/share/prime-agent-rust"
+printf '#!/bin/sh\necho partial\n' > "$mach10/home/.local/share/prime-agent-rust/prime-agent"
+chmod 0755 "$mach10/home/.local/share/prime-agent-rust/prime-agent"
+printf 'partial leftover\n' > "$mach10/home/.local/share/prime-agent-rust/keep.txt"
+store_before_10="$(store_snapshot "$mach10")"
+run_installer "$mach10"
+rc10=$?
+assert_eq "case 10 the first install proceeds past the unrecognized old-name dir" 0 "$rc10"
+assert_contains "case 10 the install notes the leftover" "$mach10/install.log" "left in place"
+assert_eq "case 10 the unrecognized tree is untouched" "yes" \
+  "$([ -f "$mach10/home/.local/share/prime-agent-rust/keep.txt" ] && echo yes || echo no)"
+assert_eq "case 10 no migration slot was created from it" "none" \
+  "$(for d in "$mach10"/home/.local/share/prime-agent.old.*; do [ -e "$d" ] && echo some; done; echo none | head -1)"
+assert_eq "case 10 the launcher installed" "yes" \
+  "$([ -f "$mach10/home/.local/bin/prime-agent" ] && echo yes || echo no)"
+assert_eq "case 10 the store is untouched" "$store_before_10" "$(store_snapshot "$mach10")"
 
 echo
 echo "passed: $passed  failed: $failures"

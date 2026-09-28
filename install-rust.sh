@@ -417,7 +417,7 @@ def envelope(request_id, body):
     return json.dumps({
         "type": "command",
         "id": request_id,
-        "protocol": {"name": "prime-agent-daemon", "version": 7},
+        "protocol": {"name": "prime-agent.daemon", "version": 7},
         "clientId": "install-rust-sh",
         "command": dict(body, id=request_id),
     }) + "\n"
@@ -710,13 +710,19 @@ if [ -d "$old_layout_dir" ] && [ ! -d "$share_dir" ]; then
   # auto-delete ever rides on it. The migrated tree is PRESERVED in its
   # .old slot (the user removes it when they are done with the rollback).
   if ! ts_owned_old_layout "$old_layout_dir"; then
-    die "refusing to move ${old_layout_dir}: it is not this installer's payload tree"
+    # Not our tree and not the publish target: leave it in place and
+    # continue — an unrecognized or partial directory at the old name must
+    # not block installing into ${share_dir} (the same rule the leftover
+    # path applies after the publish).
+    echo "note: ${old_layout_dir} is not this installer's payload tree; it was"
+    echo "  left in place (no migration, no rollback from it)"
+  else
+    mv "$old_layout_dir" "$old"
+    migrated_old_layout="$old"
+    echo "the old prime-agent-rust install migrated to the rollback slot ${old}"
+    echo "  (it is kept — the sweep only removes marker-stamped generations; remove"
+    echo "   the slot by hand once you no longer need the rollback)"
   fi
-  mv "$old_layout_dir" "$old"
-  migrated_old_layout="$old"
-  echo "the old prime-agent-rust install migrated to the rollback slot ${old}"
-  echo "  (it is kept — the sweep only removes marker-stamped generations; remove"
-  echo "   the slot by hand once you no longer need the rollback)"
 fi
 if [ -d "$share_dir" ]; then
   had_share_dir=1
