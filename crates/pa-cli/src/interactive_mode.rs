@@ -1382,7 +1382,7 @@ mod tests {
         std::fs::write(&file, "{}\n").expect("write file");
         session.resume = Some(file.to_string_lossy().to_string());
         assert_eq!(
-            session_selection(&session, &Some(session_dir)).unwrap(),
+            session_selection(&session, Some(session_dir.as_path())),
             SessionSelection::Resume(file)
         );
     }
