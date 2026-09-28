@@ -404,7 +404,6 @@ async fn an_externally_replaced_manifest_defeats_the_fresh_skip() {
     manager.kill().await;
 }
 
-
 #[tokio::test]
 async fn an_internal_state_request_does_not_defeat_the_fresh_skip() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -427,14 +426,14 @@ async fn an_internal_state_request_does_not_defeat_the_fresh_skip() {
     // The compact-time namespace listing settles like any request but never
     // changes the namespace: a fresh window capture after it is still fresh
     // (this is the arm the compact-then-dispose sequence rides).
-    let names = manager
-        .list_namespace_names(None)
-        .await
-        .expect("listing");
+    let names = manager.list_namespace_names(None).await.expect("listing");
     assert!(names.iter().any(|name| name == "alpha"));
 
     tokio::time::sleep(Duration::from_millis(5)).await;
-    let skipped = manager.snapshot_state().await.expect("capture after the listing");
+    let skipped = manager
+        .snapshot_state()
+        .await
+        .expect("capture after the listing");
     assert_eq!(skipped, committed, "the listing must not defeat the memo");
     assert_eq!(
         file_bytes(&manifest_path),
