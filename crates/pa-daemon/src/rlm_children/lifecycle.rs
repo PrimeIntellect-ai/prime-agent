@@ -11,7 +11,7 @@ struct CreatedSessionIds {
     session_name: Option<String>,
 }
 
-struct CreatedChild {
+pub(super) struct CreatedChild {
     pub(super) active_session_id: String,
     pub(super) session_id: Option<String>,
     pub(super) session_file: Option<String>,
