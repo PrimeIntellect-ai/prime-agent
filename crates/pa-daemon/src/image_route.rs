@@ -357,7 +357,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let engine = image_route_engine(
             dir.path(),
-            serde_json::json!({ "imageModel": "battery/mock-vision" }),
+            &serde_json::json!({ "imageModel": "battery/mock-vision" }),
         );
         let route = engine
             .resolve_image_turn_route(true)
@@ -377,7 +377,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         // Without imageModel the turn fails with the TS refusal naming the
         // setting and the session model.
-        let engine = image_route_engine(dir.path(), serde_json::json!({}));
+        let engine = image_route_engine(dir.path(), &serde_json::json!({}));
         let error = engine
             .resolve_image_turn_route(true)
             .expect_err("no imageModel configured");
@@ -394,7 +394,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let engine = image_route_engine(
             dir.path(),
-            serde_json::json!({ "imageModel": "nope/nothere" }),
+            &serde_json::json!({ "imageModel": "nope/nothere" }),
         );
         let error = engine
             .resolve_image_turn_route(true)
@@ -407,7 +407,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let engine = image_route_engine(
             dir.path(),
-            serde_json::json!({
+            &serde_json::json!({
                 "imageModel": "battery/mock-vision",
                 "images": { "blockImages": true }
             }),
@@ -466,7 +466,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let engine = image_route_engine(
             dir.path(),
-            serde_json::json!({ "imageModel": "battery/mock-vision" }),
+            &serde_json::json!({ "imageModel": "battery/mock-vision" }),
         );
         let mut events = Vec::new();
         engine.run_prompt(
@@ -540,7 +540,7 @@ mod tests {
             ),
         )]);
         let dir = tempfile::TempDir::new().unwrap();
-        let engine = image_route_engine(dir.path(), serde_json::json!({}));
+        let engine = image_route_engine(dir.path(), &serde_json::json!({}));
         let mut events = Vec::new();
         engine.run_prompt(
             0,
