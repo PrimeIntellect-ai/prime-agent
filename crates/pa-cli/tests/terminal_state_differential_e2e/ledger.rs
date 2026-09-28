@@ -34,17 +34,17 @@ struct ModeTally {
 #[derive(Debug, Default)]
 pub(crate) struct ModeLedger {
     /// Every DEC private mode (`ESC[?NNNh`/`l`) the stream wrote.
-    dec_modes: BTreeMap<u32, ModeTally>,
+    pub(crate) dec_modes: BTreeMap<u32, ModeTally>,
     /// The kitty keyboard protocol's flags stack (a push deepens it, a
     /// pop shallows it; the process must hand back depth zero).
     kitty_depth: usize,
-    kitty_pushes: usize,
+    pub(crate) kitty_pushes: usize,
     kitty_pops: usize,
     /// The last kitty stack write was a push (a re-arm after the final
     /// pop — the exact leak shape the exit release guards).
     kitty_re_armed: bool,
     /// Absolute kitty sets (`ESC[=Nu`): the flags value left behind.
-    kitty_sets: Vec<u32>,
+    pub(crate) kitty_sets: Vec<u32>,
     /// modifyOtherKeys (`ESC[>4;Nm`): the value left behind (zero is the
     /// reset; a nonzero value arms xterm encoding a shell would leak).
     modify_other_keys: u32,
@@ -260,7 +260,7 @@ impl ModeLedger {
     /// dim), so the param cursor advances past what each form owns.
     pub(crate) fn classify_sgr(&mut self, params: &[u8]) {
         let text = String::from_utf8_lossy(params);
-        let parts: Vec<u16> = text
+        let parts: Vec<Option<u16>> = text
             .split(';')
             .map(|part| {
                 part.split(':')

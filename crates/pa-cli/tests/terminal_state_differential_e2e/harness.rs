@@ -12,20 +12,14 @@ use std::time::{Duration, Instant};
 
 use nix::fcntl::{fcntl, FcntlArg::F_SETFL, OFlag};
 use nix::pty::{openpty, Winsize};
-use nix::sys::signal::{kill, Signal};
-use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-use nix::unistd::Pid;
 use serde_json::{json, Value};
 
-use pa_tui::agents_view::{AgentsViewOptions, AgentsViewUiMode};
-use pa_tui::interactive::{
-    run_interactive, InteractiveOptions, ModelSelection, SessionSelection, UiMode,
-};
+use pa_tui::agents_view::AgentsViewOptions;
+use pa_tui::interactive::{InteractiveOptions, ModelSelection, SessionSelection};
 
 use crate::ledger::ModeLedger;
 use crate::{
-    CHILD_MODE_ENV, CHILD_REPLAY_FLAGS_ENV, CHILD_SELECTOR_FLAGS_ENV, CHILD_SOCKET_ENV,
-    CHILD_TERM, KITTY_ANSWER, KITTY_FLAGS_PUSH, KITTY_QUERY,
+    CHILD_MODE_ENV, CHILD_SOCKET_ENV, CHILD_TERM, KITTY_ANSWER, KITTY_FLAGS_PUSH, KITTY_QUERY,
 };
 
 // ---------------------------------------------------------------------------
@@ -37,7 +31,7 @@ use crate::{
 /// reads non-blockingly, and a termios snapshot taken before the child
 /// spawns (the raw-mode differential rides on it).
 pub(crate) struct DifferentialHarness {
-    child: Child,
+    pub(crate) child: Child,
     pub(crate) master: PtyReader,
     /// The mock-supervisor listener the harness owns (a route may shut
     /// it down to refuse later connections).
@@ -195,7 +189,7 @@ impl DifferentialHarness {
 }
 
 impl Drop for DifferentialHarness {
-    pub(crate) fn drop(&mut self) {
+    fn drop(&mut self) {
         // A panicking wait must never leak the pty child: it owns the
         // controlling terminal of its own session and outlives the
         // harness.

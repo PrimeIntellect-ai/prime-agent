@@ -46,28 +46,31 @@
 //! daemon refusal (which must restore NOTHING — nothing was armed).
 #![cfg(unix)]
 
-use std::collections::BTreeMap;
-use std::io::{BufRead, Read, Write};
-use std::os::fd::{AsRawFd, OwnedFd};
-use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+mod harness;
+mod ledger;
+
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use nix::fcntl::{fcntl, FcntlArg::F_SETFL, OFlag};
+use harness::{
+    child_options, find_subsequence, harness_lock, quiet_child_epilogue, spawn_child,
+    view_options, ChildSpec, DifferentialHarness, PtyReader, Termios,
+};
+use ledger::ModeLedger;
+
 use nix::pty::{openpty, Winsize};
 use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
-use serde_json::{json, Value};
 
-use pa_tui::agents_view::{AgentsViewOptions, AgentsViewUiMode};
+use pa_tui::agents_view::{run_agents_view, AgentsViewUiMode, AgentsViewOptions};
+use pa_tui::app::{run_app, AppOptions};
 use pa_tui::config_selector::{
     run_config_selector, ConfigSelector, ConfigSelectorOptions, SelectorRow,
 };
-use pa_tui::interactive::{
-    run_interactive, InteractiveOptions, ModelSelection, SessionSelection, UiMode,
-};
+use pa_tui::keybindings::{KeybindingsConfig, KeybindingsManager};
+use pa_tui::session::JsonlSessionStream;
+use pa_tui::interactive::{run_interactive, UiMode};
 
 /// The kitty flags push (`1|2|4`, the TS `ProcessTerminal` set): the arm
 /// proof every mounted surface must show.
@@ -94,15 +97,6 @@ const CHILD_SELECTOR_FLAGS_ENV: &str = "PA_DIFF_CHILD_SELECTOR_FLAGS";
 /// TERM the children run with: a terminal that answers the kitty query
 /// but takes no capability shortcut.
 const CHILD_TERM: &str = "xterm-256color";
-
-mod harness;
-mod ledger;
-
-use harness::{
-    child_options, find_subsequence, sigtstp_session_runner, sigtstp_stops_processes,
-    wait_for_stopped, ChildSpec, DifferentialHarness, Termios,
-};
-use ledger::ModeLedger;
 
 /// The chat child: the real interactive surface against the harness's
 /// mock supervisor, then — when the exit came through agents-back — the
