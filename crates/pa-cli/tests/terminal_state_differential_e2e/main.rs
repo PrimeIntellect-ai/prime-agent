@@ -1,3 +1,17 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures by
+// design on hot paths; 64-bit targets - the narrowing sits at OS/protocol
+// boundaries where the values are bounded (pid syscalls, epoch/elapsed
+// milliseconds), and checked conversions would add panic paths where silent
+// wrap was deliberate.
+#![allow(
+    clippy::large_futures,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    clippy::too_many_lines
+)]
+
 //! The terminal-state differential: a recording mock terminal over a
 //! real pty asserts that EVERY terminal mode the TUI arms comes back
 //! off on EVERY exit route.

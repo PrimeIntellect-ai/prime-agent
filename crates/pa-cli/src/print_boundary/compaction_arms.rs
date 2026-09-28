@@ -3,7 +3,11 @@
 //! (Case 1) with its three state enums, and the requested/threshold
 //! compaction arms — the child cut of the `print_boundary` facade.
 
-use super::*;
+use super::{
+    compaction_end_success_event, compaction_start_event, is_context_overflow_failure,
+    json_round_trip, CompactOutcome, CompactionOutcomeKind, CompactionOutcomeReason, Model,
+    SessionAgentMessage, SessionEngine, TrailingAssistantFilter, TurnBoundary,
+};
 
 /// The TS failure text when one compact-and-retry attempt could not save
 /// the turn (`_checkCompaction`'s reported state).

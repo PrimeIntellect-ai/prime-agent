@@ -1,3 +1,17 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures by
+// design on hot paths; 64-bit targets - the narrowing sits at OS/protocol
+// boundaries where the values are bounded (pid syscalls, epoch/elapsed
+// milliseconds), and checked conversions would add panic paths where silent
+// wrap was deliberate.
+#![allow(
+    clippy::large_futures,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    clippy::too_many_lines
+)]
+
 //! The pty harness: one recording mock terminal (the master reader), the
 //! pty's termios differential, the mock supervisor the surfaces attach
 //! to, and the child-mode plumbing (this binary re-executed under the
@@ -47,14 +61,14 @@ impl DifferentialHarness {
     /// Spawn a child (this binary re-executed in a child mode) on a
     /// fresh pty against a mock supervisor that answers every daemon
     /// request except the ones a route stalls.
-    pub(crate) fn start(spec: ChildSpec) -> DifferentialHarness {
+    pub(crate) fn start(spec: &ChildSpec) -> DifferentialHarness {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let socket = dir.path().join("tui.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind mock socket");
         let server = std::thread::spawn({
             let listener = listener.try_clone().expect("clone mock listener");
             let stall = spec.stall;
-            move || MockSupervisor::serve(listener, stall)
+            move || MockSupervisor::serve(&listener, stall)
         });
 
         let pty = openpty(
@@ -313,7 +327,7 @@ impl Termios {
     pub(crate) fn capture(fd: std::os::fd::RawFd) -> Termios {
         let mut raw: libc::termios = unsafe { std::mem::zeroed() };
         // SAFETY: `tcgetattr` only reads the line discipline into `raw`.
-        let rc = unsafe { libc::tcgetattr(fd, &mut raw) };
+        let rc = unsafe { libc::tcgetattr(fd, std::ptr::from_mut(&mut raw)) };
         assert!(rc == 0, "the harness could not read the pty's termios");
         Termios {
             iflag: raw.c_iflag,
@@ -361,7 +375,7 @@ impl MockSupervisor {
     /// roster-failure route's refusal is deterministic), and a served
     /// connection (the chat's) stays alive while the loop moves on.
     pub(crate) fn serve(
-        listener: std::os::unix::net::UnixListener,
+        listener: &std::os::unix::net::UnixListener,
         stall: &'static [&'static str],
     ) {
         for stream in listener.incoming() {

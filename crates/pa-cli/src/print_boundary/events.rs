@@ -3,7 +3,10 @@
 //! event builders and the json-mode emission methods, the child cut
 //! of the `print_boundary` facade (text mode rides the durable rows).
 
-use super::*;
+use super::{
+    json, CompactRun, CompactionOutcomeKind, CompactionOutcomeReason, SessionEngine, TurnBoundary,
+    Value,
+};
 
 /// The `compaction_start` event (TS `_runAutoCompaction`): the reason plus
 /// the consumed request's instructions when it carried any.
