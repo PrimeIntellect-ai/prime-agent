@@ -767,6 +767,12 @@ impl SessionManager {
     /// The returned future errors when the historical read fails (see
     /// [`Self::history_snapshot`]); the retained-serving arms cannot
     /// fail.
+    ///
+    /// # Panics
+    ///
+    /// The read arm's `expect` cannot fire: it is reached only when the
+    /// retained-serving arms did not run, and the snapshot is captured in
+    /// exactly that case.
     pub fn refine_transcript_parts(
         &self,
     ) -> impl std::future::Future<Output = anyhow::Result<RefineTranscriptParts>> + Send + 'static

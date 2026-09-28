@@ -840,6 +840,14 @@ Reviewer instructions: record it"
         rows.into_iter().map(|row| row.to_string() + "\n").collect()
     }
 
+    /// One captured refiner request (the seam's view of the model inputs).
+    #[derive(Debug, Clone, PartialEq)]
+    struct CapturedRequest {
+        max_tokens: u64,
+        system: &'static str,
+        user: String,
+    }
+
     /// The frozen surface is the refine model's exact request. The same
     /// fixture session must yield a byte-identical `(max_tokens, system,
     /// user prompt)` whether the transcript served from the retained
@@ -853,7 +861,7 @@ Reviewer instructions: record it"
     #[tokio::test]
     async fn refine_request_is_identical_across_extraction_paths() {
         let body = oracle_fixture();
-        let mut captured: Vec<(u64, &'static str, String)> = Vec::new();
+        let mut captured: Vec<CapturedRequest> = Vec::new();
         for leg in ["full-reader", "windowed-leased", "windowed-unleased"] {
             let dir = TempDir::new().unwrap();
             let path = dir.path().join("session.jsonl");
@@ -879,9 +887,8 @@ Reviewer instructions: record it"
                 messages,
                 refinement_history,
             } = parts.await.unwrap();
-            let captures: std::sync::Arc<
-                std::sync::Mutex<Vec<(u64, &'static str, String)>>,
-            > = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let captures: std::sync::Arc<std::sync::Mutex<Vec<CapturedRequest>>> =
+                std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let sink = std::sync::Arc::clone(&captures);
             let reply = r#"{"summary":"bench","edits":[]}"#.to_string();
             let result = execute_refinement(
@@ -895,7 +902,11 @@ Reviewer instructions: record it"
                 &RefineOptions::default(),
                 RefinementSource::User,
                 Box::new(move |model, system, prompt| {
-                    sink.lock().unwrap().push((model.max_tokens, system, prompt));
+                    sink.lock().unwrap().push(CapturedRequest {
+                        max_tokens: model.max_tokens,
+                        system,
+                        user: prompt,
+                    });
                     let reply = reply;
                     Box::pin(async move { Ok(text_assistant(&reply)) })
                 }),
@@ -908,35 +919,30 @@ Reviewer instructions: record it"
             captured.push(got[0].clone());
         }
         for (a, b) in captured.iter().zip(captured.iter().skip(1)) {
-            assert_eq!(a.0, b.0, "max_tokens diverged between extraction paths");
-            assert_eq!(a.1, b.1, "system prompt diverged between extraction paths");
-            assert_eq!(
-                a.2, b.2,
-                "user prompt diverged between extraction paths (the frozen surface)"
-            );
+            assert_eq!(a, b, "the refiner request diverged between extraction paths (the frozen surface)");
         }
         // The seeded audit row and the fixture's conversation rode the
         // transcript on every path (history_for_prompt renders the audit
         // id and summary; conversation_text serializes the messages).
         assert!(
-            captured[0].2.contains("[refine_0] seed"),
+            captured[0].user.contains("[refine_0] seed"),
             "the fixture's audit history must appear in the prompt"
         );
         assert!(
-            captured[0].2.contains("hello 4"),
+            captured[0].user.contains("hello 4"),
             "the fixture's conversation must appear in the prompt"
         );
 
         // The read-leg proof: the unleased window's extraction must
         // serve an out-of-band audit row (the historical read), which
         // changes the prompt's history section.
+        use std::io::Write as _;
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
         std::fs::write(&path, &body).unwrap();
         let session = SessionManager::open_windowed(dir.path(), dir.path(), &path)
             .await
             .unwrap();
-        use std::io::Write as _;
         let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
         file.write_all(
             br#"{"type":"custom","id":"oob-audit","parentId":"audit","customType":"prime-agent.refinement","data":{"id":"refine_oob","summary":"oob","rationale":"r","expectedOutcome":"o","appliedEdits":[],"harnessStatePath":""}}"#

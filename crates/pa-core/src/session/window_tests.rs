@@ -963,12 +963,12 @@ async fn full_history_snapshot_without_lease_keeps_the_historical_read() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("unleased-full.jsonl");
     std::fs::write(&path, full_history_fixture()).unwrap();
+    use std::io::Write as _;
     let manager =
         super::super::manager::SessionManager::open_windowed(dir.path(), dir.path(), &path)
             .await
             .unwrap();
     // An out-of-band append (the unleased world's other writer).
-    use std::io::Write as _;
     let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
     file.write_all(b"{\"type\":\"message\",\"id\":\"oob\",\"parentId\":\"audit\",\"message\":{\"role\":\"user\",\"content\":\"external\",\"timestamp\":0}}\n").unwrap();
     drop(file);
