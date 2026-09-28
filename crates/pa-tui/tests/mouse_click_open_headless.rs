@@ -303,7 +303,7 @@ fn link_position() -> (usize, usize) {
 /// The dock's detail row — plain text, never a link — as a click target.
 fn plain_position() -> (usize, usize) {
     let (frames, _, _) = run_plan(vec![HeadlessStep::ScrollTop]);
-    let (_, row, col, _) = locate(&frames, "Details mode").expect("the detail row rendered");
+    let (_, row, col, _) = locate(&frames, "Collapsed mode").expect("the detail row rendered");
     (row, col)
 }
 

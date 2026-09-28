@@ -2688,22 +2688,22 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
     let rendered = outcome.frames.join("\n");
 
     // The hint renders the user's binding, not the default, at the
-    // startup detail level (TS #2447: chats start at the middle
-    // `details` level).
+    // collapsed startup detail level (the overview mode; operator
+    // directive 2026-09-28).
     assert!(
-        rendered.contains("Details mode (Ctrl+Alt+X to expand)"),
+        rendered.contains("Collapsed mode (Ctrl+Alt+X to expand)"),
         "the prompt-context hint renders the override:\n{rendered}"
     );
     // The override key fired the action: the detail cycled to the
-    // expanded level.
+    // thinking-reveal level.
     assert!(
-        rendered.contains("Expanded mode (Ctrl+Alt+X to collapse)"),
+        rendered.contains("Details mode (Ctrl+Alt+X to expand)"),
         "the override key cycled conversation detail:\n{rendered}"
     );
-    // The default key leaves the detail unchanged: the cycle never wraps
-    // back to the collapsed overview mode.
+    // The default key leaves the detail unchanged: the default ctrl+o is
+    // no longer bound, so the level never reaches the expanded mode.
     assert!(
-        !rendered.contains("Collapsed mode (Ctrl+Alt+X to expand)"),
+        !rendered.contains("Expanded mode (Ctrl+Alt+X to collapse)"),
         "the default ctrl+o must not cycle after the override:\n{rendered}"
     );
     // The scripted turn still ran under the custom bindings.
@@ -2738,7 +2738,7 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
         "the hotkeys guide never lands in the transcript:\n{last}"
     );
     assert!(
-        last.contains("Expanded mode (Ctrl+Alt+X to collapse)"),
+        last.contains("Details mode (Ctrl+Alt+X to expand)"),
         "the dock returned after the panel closed:\n{last}"
     );
     drop(supervisor);

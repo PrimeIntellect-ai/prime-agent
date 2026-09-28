@@ -165,6 +165,9 @@ pub trait ClientSettings: Send + Sync {
     fn set_default_service_tier(&self, tier: &str) -> Result<()>;
     /// `chatDetail` (`overview`/`details`/`all`; TS #2709 default
     /// `details`): the conversation-detail level the chat starts at.
+    /// `chatDetail` (`overview`/`details`/`all`; the default reads as
+    /// `overview`, the collapse mode): the conversation-detail level the
+    /// chat starts at.
     fn chat_detail(&self) -> String;
     /// Persists `chatDetail` to the global scope (TS #2709: the Ctrl+O
     /// cycle saves the level; every later chat re-reads it).

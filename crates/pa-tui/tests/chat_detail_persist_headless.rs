@@ -3,7 +3,8 @@
 //! level as the `chatDetail` setting, and a later chat — the same session
 //! re-entered or a brand-new one, both a fresh process re-reading the
 //! settings store — opens at the saved level instead of resetting to the
-//! `details` startup default.
+//! `overview` startup default (the collapse mode, operator directive
+//! 2026-09-28).
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -273,8 +274,9 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
         Ok(())
     }
     fn chat_detail(&self) -> String {
-        // TS `getChatDetail`: unset reads as the `details` startup level.
-        self.stored().unwrap_or_else(|| "details".to_string())
+        // `getChatDetail`: unset reads as the `overview` startup level
+        // (the collapse mode; operator directive 2026-09-28).
+        self.stored().unwrap_or_else(|| "overview".to_string())
     }
     fn set_chat_detail(&self, detail: &str) -> Result<()> {
         *self.chat_detail.lock().expect("chat detail lock") = Some(detail.to_string());
@@ -391,8 +393,10 @@ fn wait_label(label: &str) -> HeadlessStep {
 /// level applies to that chat too.
 #[test]
 fn ctrl_o_pick_persists_and_a_later_chat_reopens_at_it() {
-    // Run one: an unset store, so the chat starts at the TS startup
-    // level `details`; one Ctrl+O cycles to `all` and saves it.
+    // Run one: an unset store, so the chat starts at the `overview`
+    // startup level (the collapse mode - thinking hidden, every activity
+    // item rendered); one Ctrl+O reveals the thinking (the
+    // details-with-thinking level) and saves it.
     let run_one = Arc::new(StubSettings::default());
     let frames = run_plan(
         run_one.clone(),
@@ -402,32 +406,32 @@ fn ctrl_o_pick_persists_and_a_later_chat_reopens_at_it() {
             name: "detail persist session",
         },
         vec![
-            wait_label(DETAILS_LABEL),
+            wait_label(OVERVIEW_LABEL),
             HeadlessStep::Key(ctrl_o()),
-            wait_label(ALL_LABEL),
+            wait_label(DETAILS_LABEL),
         ],
     );
     let all = frames.join("\n");
     assert!(
-        all.contains(DETAILS_LABEL),
-        "the chat starts at the details startup level: {all}"
+        all.contains(OVERVIEW_LABEL),
+        "the chat starts at the collapsed startup level: {all}"
     );
     assert!(
-        all.contains(ALL_LABEL),
-        "ctrl+o cycles the visible level to all: {all}"
+        all.contains(DETAILS_LABEL),
+        "ctrl+o reveals the thinking level: {all}"
     );
     assert_eq!(
         run_one.stored().as_deref(),
-        Some("all"),
+        Some("details"),
         "the ctrl+o pick saves the chatDetail setting"
     );
 
     // Run two: a fresh process whose settings store carries the saved
     // level (the file the first run wrote), opening a different chat.
-    // TS #2709 (`next = createMode(harness)`): it starts at `all`, with
-    // no key pressed, and nothing re-saves.
+    // TS #2709 (`next = createMode(harness)`): it starts at `details`,
+    // with no key pressed, and nothing re-saves.
     let run_two = Arc::new(StubSettings {
-        chat_detail: Mutex::new(Some("all".to_string())),
+        chat_detail: Mutex::new(Some("details".to_string())),
     });
     let frames = run_plan(
         run_two.clone(),
@@ -436,20 +440,20 @@ fn ctrl_o_pick_persists_and_a_later_chat_reopens_at_it() {
             wire: "sess-2",
             name: "the next chat",
         },
-        vec![wait_label(ALL_LABEL)],
+        vec![wait_label(DETAILS_LABEL)],
     );
     let all = frames.join("\n");
     assert!(
-        !all.contains(DETAILS_LABEL),
-        "a later chat opens at the saved level, not the details default: {all}"
+        !all.contains(OVERVIEW_LABEL),
+        "a later chat opens at the saved level, not the collapsed default: {all}"
     );
     assert!(
-        all.contains(ALL_LABEL),
-        "a later chat renders the saved all level: {all}"
+        all.contains(DETAILS_LABEL),
+        "a later chat renders the saved details level: {all}"
     );
     assert_eq!(
         run_two.stored().as_deref(),
-        Some("all"),
+        Some("details"),
         "opening at the saved level re-saves nothing"
     );
 }

@@ -293,7 +293,7 @@ plain click fired one of the clickable surfaces' actions.
 
 | property | type | notes |
 |---|---|---|
-| `surface` | string | `transcript` (a card or condensed-run expand click) / `editor` (a prompt-bar caret placement) / `picker` (a menu row select) |
+| `surface` | string | `transcript` (a card expand click) / `editor` (a prompt-bar caret placement) / `picker` (a menu row select) |
 
 ### `tui enhanced keys`
 
