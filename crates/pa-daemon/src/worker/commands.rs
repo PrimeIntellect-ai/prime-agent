@@ -394,14 +394,18 @@ impl Worker {
         // (steer/follow-up, agent-message deliveries, prompt-behind-work,
         // heartbeat fires) survive parked - the suspension defers the
         // pump, it never drops the queue (the abort-ownership probe).
+        let mut dropped_goal_context = false;
         {
             let mut core = self.core.lock().unwrap();
-            let cancel = |lane: &mut VecDeque<QueuedItem>| {
+            let cancel = |lane: &mut VecDeque<QueuedItem>, dropped_goal_context: &mut bool| {
                 let mut kept = VecDeque::new();
                 while let Some(item) = lane.pop_front() {
                     if item.queue_visible {
                         kept.push_back(item);
                     } else {
+                        if is_goal_context_item(&item) {
+                            *dropped_goal_context = true;
+                        }
                         if let Some(id) = &item.admission_id {
                             let _ = self.prompt_admissions.cancel(id);
                         }
@@ -414,9 +418,16 @@ impl Worker {
                 }
                 *lane = kept;
             };
-            cancel(&mut core.steering);
-            cancel(&mut core.follow_up);
-        };
+            cancel(&mut core.steering, &mut dropped_goal_context);
+            cancel(&mut core.follow_up, &mut dropped_goal_context);
+        }
+        // A withdrawn minted goal continuation never reaches a turn: the
+        // driver's pending guard releases with it (TS
+        // `_cancelSessionActions` drops the queued continuation; the
+        // goal keeps its consumed slot and resumes at the next boundary).
+        if dropped_goal_context {
+            self.engine.clear_pending_goal_continuation();
+        }
         // TS `requestAbort()` also aborts the compaction in flight (manual
         // and automatic): the interrupt key cancels a compacting session.
         self.compaction.abort();

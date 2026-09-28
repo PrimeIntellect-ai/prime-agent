@@ -519,6 +519,7 @@ impl Worker {
                 let sink_events = events.clone();
                 let sink_notify = Arc::clone(&work_notify);
                 let sink_recovery = Arc::clone(&recovery);
+                let sink_engine = Arc::clone(concrete);
                 let sink: crate::engine::GoalAdmissionSink = Arc::new(move |work| {
                     admit_goal_follow_up(
                         &sink_recovery,
@@ -527,6 +528,13 @@ impl Worker {
                         &sink_notify,
                         work,
                     );
+                    // The queue admitted the minted continuation: the
+                    // driver's pending guard releases at the admission
+                    // (the owed flag clears at the queue, TS
+                    // `_admitSessionInput`'s follow-up), so the next
+                    // boundary may mint again — the queued row's own
+                    // wait is guarded by the session-input probe.
+                    sink_engine.clear_pending_goal_continuation();
                 });
                 // TS `_clearQueuedGoalContexts`: withdraw queued minted
                 // goal-context turns (the pause/clear/start commands and

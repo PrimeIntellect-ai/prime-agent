@@ -570,13 +570,22 @@ impl PrintGoalSurface {
             return NaturalContinuation::ThresholdDue;
         }
         // The natural continuation mint: the goal's context turn runs
-        // as the next turn of the same run (TS pendingMessages).
+        // as the next turn of the same run (TS pendingMessages). The
+        // handoff to the run loop is the admission: the driver's pending
+        // guard releases here (a row that cannot convert drops the mint
+        // with the guard — the next boundary re-mints).
         match engine.mint_goal_continuation().await {
             Some(message) => {
                 self.publish_goal_update(engine).await;
                 match custom_message_to_loop_row(&message) {
-                    Some(row) => NaturalContinuation::GoalRow(Box::new(row)),
-                    None => NaturalContinuation::FallThrough,
+                    Some(row) => {
+                        engine.clear_pending_goal_continuation().await;
+                        NaturalContinuation::GoalRow(Box::new(row))
+                    }
+                    None => {
+                        engine.clear_pending_goal_continuation().await;
+                        NaturalContinuation::FallThrough
+                    }
                 }
             }
             None => NaturalContinuation::FallThrough,
@@ -710,6 +719,11 @@ impl PrintGoalSurface {
         global_harness_dir: std::path::PathBuf,
         message: &CustomMessage,
     ) -> Result<(), String> {
+        // The queued goal turn's run completes its admission: the held
+        // threshold continuation leaves the hold, so the driver's pending
+        // guard releases before the boundary's next consult (the budget
+        // steer consumed no slot — releasing is a no-op for it).
+        engine.clear_pending_goal_continuation().await;
         let label = compact_rlm_text(&custom_message_text(message), 160);
         self.emit_action_preparing(&label).await;
         self.emit_action_committing(&label).await;

@@ -102,20 +102,29 @@ impl SessionEngine for AgentSessionEngine {
                 return None;
             }
             let mut session = handles.session.lock().await;
-            // The mint persists the `thread_goal_state` entry (TS
-            // `_setGoalState`) and consumes one continuation slot; an
-            // inactive or objective-less goal mints nothing. A failed
-            // persist ends the boundary without a continuation (TS
-            // `_maybeResumeGoalContinuationAfterRlmWork`'s catch: the
-            // hook must not reject; the unchanged count retries).
-            let message = match driver.next_continuation_message(&mut session) {
+            // TS `compact()`'s didCompact branch is the OWED delivery, not
+            // a fresh mint:
+            //   `this._goalContinuationAwaitsRlmWork ||= !this.agent.hasQueuedMessages();
+            //    this.resumeQueuedWork();`
+            // Arming then taking keeps exactly one continuation per owed
+            // boundary — the pre-fix fresh mint left an already-armed flag
+            // behind (the mint consumed a slot TS never charges) and the
+            // settle/resume sites delivered a second continuation for the
+            // same boundary. The mint persists the `thread_goal_state`
+            // entry (TS `_setGoalState`) and consumes one slot; an inactive
+            // or objective-less goal drops the deferral without minting. A
+            // failed persist ends the boundary without a continuation (TS
+            // `_maybeResumeGoalContinuationAfterRlmWork`'s catch: the hook
+            // must not reject; the unchanged count retries).
+            driver.mark_continuation_owed();
+            let message = match driver.take_owed_continuation(&mut session) {
                 Ok(message) => message,
                 Err(error) => {
                     eprintln!("pa-daemon: goal continuation mint persist failed: {error:#}");
                     None
                 }
             }?;
-            let goal_update = self.publish_goal_state(driver.state());
+            let goal_update = self.publish_goal_state(&driver.state_with_creation_elapsed());
             Some((
                 crate::engine::PromptRequest {
                     batch: Vec::new(),
@@ -133,6 +142,10 @@ impl SessionEngine for AgentSessionEngine {
             request,
             goal_update,
         })
+    }
+
+    fn clear_pending_goal_continuation(&self) {
+        AgentSessionEngine::clear_pending_goal_continuation(self)
     }
 
     fn autonomous_status(
@@ -781,7 +794,7 @@ impl SessionEngine for AgentSessionEngine {
             let session = engine.session.shared_persistence();
             let manager = session.lock().await;
             driver.reload_from_branch(&manager, goal_reload);
-            let announcement = self.publish_goal_state(driver.state());
+            let announcement = self.publish_goal_state(&driver.state_with_creation_elapsed());
             *self
                 .reloaded_goal_update
                 .lock()

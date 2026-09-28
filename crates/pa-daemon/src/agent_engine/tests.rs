@@ -185,16 +185,22 @@ pub(crate) fn faux_engine_with_settings(
 
 /// The goal-admission collector: installs the turn-end seam (a probe
 /// reporting no queued input plus a sink capturing minted work) on an
-/// engine built without a worker.
+/// engine built without a worker. The collector's push IS the admission
+/// for the harness: the driver's pending-continuation guard releases at
+/// the sink exactly like the worker's queue lane does.
 pub(crate) fn goal_admission_collector(
     engine: &std::sync::Arc<AgentSessionEngine>,
 ) -> std::sync::Arc<std::sync::Mutex<Vec<crate::engine::GoalTurnEndWork>>> {
     let collected: std::sync::Arc<std::sync::Mutex<Vec<crate::engine::GoalTurnEndWork>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink = std::sync::Arc::clone(&collected);
+    let sink_engine = std::sync::Arc::clone(engine);
     engine.set_goal_admission(
         std::sync::Arc::new(|| false),
-        std::sync::Arc::new(move |work| sink.lock().unwrap().push(work)),
+        std::sync::Arc::new(move |work| {
+            sink.lock().unwrap().push(work);
+            sink_engine.clear_pending_goal_continuation();
+        }),
         std::sync::Arc::new(|| {}),
     );
     collected
@@ -529,6 +535,9 @@ fn post_compaction_goal_continuation_mint() {
     let goal_update = minted.goal_update.expect("the mint moved the state");
     assert_eq!(goal_update["status"], "active");
     assert_eq!(goal_update["continuationsUsed"], 2);
+    // The minted continuation's admission releases the driver's pending
+    // guard (the worker's queue push is the admission on the live path).
+    engine.clear_pending_goal_continuation();
     // TS #2465: a live background bash handle holds the post-compaction
     // mint the same way (the TS resume site's gate): the mint defers
     // (owed, not consumed) until the handle settles.
@@ -567,6 +576,86 @@ fn post_compaction_goal_continuation_mint() {
     assert!(
         engine.mint_post_compaction_goal_continuation().is_none(),
         "a paused goal minted a continuation"
+    );
+}
+
+/// The operator's continuation-spam regression (2026-09-28): a
+/// post-compaction mint over an ALREADY-armed deferral delivers the
+/// OWED continuation exactly once (TS `compact()`'s `||=` +
+/// `resumeQueuedWork()` — arm, then deliver the one token). The
+/// pre-fix fresh mint left the armed flag behind and the settle sites
+/// delivered a SECOND continuation for the same owed boundary.
+#[test]
+fn post_compaction_mint_delivers_the_armed_deferral_once() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (engine, _engine_dir) = faux_engine_with_settings(
+        serde_json::json!({ "responses": [{"text": "goal turn reply"}] }),
+        1,
+    );
+    let engine = std::sync::Arc::new(engine);
+    let goal_work = goal_admission_collector(&engine);
+    let mut events: Vec<EngineEvent> = Vec::new();
+    admit(
+        &engine,
+        "/goal ship the armed deferral".to_string(),
+        &mut events,
+    );
+    assert_eq!(engine.goal_state_value()["status"], "active");
+    // The natural turn end minted (and the collector admitted) slot 1.
+    assert_eq!(engine.goal_state_value()["continuationsUsed"], 1);
+    // A live deferral arms behind unsettled descendant work (the natural
+    // boundary's quiescence arm).
+    let handles = engine
+        .goal_runtime
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("goal runtime");
+    engine
+        .runtime
+        .block_on(async { handles.driver.lock().await.mark_continuation_owed() });
+    // The post-compaction mint is the OWED delivery — slot 2, and the
+    // armed flag is consumed with it.
+    let minted = engine
+        .mint_post_compaction_goal_continuation()
+        .expect("the armed deferral mints");
+    assert!(minted.request.message.contains("[goal: continuation]"));
+    assert_eq!(
+        minted
+            .goal_update
+            .as_ref()
+            .expect("the mint moved the state")["continuationsUsed"],
+        2
+    );
+    assert!(
+        !engine
+            .runtime
+            .block_on(async { handles.driver.lock().await.owes_continuation() }),
+        "the post-compaction delivery consumed the armed deferral"
+    );
+    // The settle-site retry (a child settling, a resume site) delivers
+    // nothing more: the boundary's one owed continuation delivered
+    // exactly once, and the mint's own admission consumed the pending
+    // guard on the worker's path.
+    engine.retry_owed_goal_continuation();
+    for _ in 0..200 {
+        if goal_work.lock().unwrap().len() > 1 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let work = goal_work.lock().unwrap();
+    assert_eq!(
+        work.len(),
+        1,
+        "the armed boundary delivered exactly one continuation: {work:?}"
+    );
+    assert_eq!(
+        engine.goal_state_value()["continuationsUsed"],
+        2,
+        "no second mint after the owed delivery"
     );
 }
 

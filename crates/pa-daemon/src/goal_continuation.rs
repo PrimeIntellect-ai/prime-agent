@@ -209,14 +209,16 @@ impl AgentSessionEngine {
             driver.mark_continuation_owed();
             return;
         }
-        let goal_update = self.publish_goal_state(driver.state());
+        let goal_update = self.publish_goal_state(&driver.state_with_creation_elapsed());
         drop(driver);
         // The close can land while the awaits above ran (the worker's kill
         // sets the marker before its own children close — each child's
         // settle fires this retry): a session that closed mid-mint mints
         // nothing (the driver's owed flag is already taken, so the mint is
-        // consumed — the same TS race, but the zombie never runs).
+        // consumed — the same TS race, but the zombie never runs). The
+        // unconsumed mint releases the pending guard with it.
         if self.session_is_closed() {
+            self.clear_pending_goal_continuation();
             return;
         }
         self.deliver_goal_work(GoalTurnEndWork::Continuation(GoalContinuation {
@@ -338,7 +340,7 @@ impl AgentSessionEngine {
                 }
                 return GoalBoundary::End;
             }
-            let goal_update = self.publish_goal_state(driver.state());
+            let goal_update = self.publish_goal_state(&driver.state_with_creation_elapsed());
             let message = message.expect("the mint produced a message");
             drop(driver);
             self.deliver_goal_work(GoalTurnEndWork::Continuation(GoalContinuation {
@@ -365,12 +367,12 @@ impl AgentSessionEngine {
             .clone()?;
         let message = self.runtime.block_on(async {
             let driver = handles.driver.lock().await;
-            let state = driver.state();
+            let state = driver.state_with_creation_elapsed();
             if state.status != pa_core::goals::GoalStatus::BudgetLimited {
                 return None;
             }
             pa_core::goals::create_goal_context_message(
-                state,
+                &state,
                 pa_core::goals::GoalContextKind::BudgetLimit,
             )
             .ok()
@@ -403,8 +405,11 @@ impl AgentSessionEngine {
     fn deliver_goal_work(&self, work: GoalTurnEndWork) {
         // The final gate: a closed session admits no minted goal work (the
         // worker's kill sets the marker; the runner is parked — this keeps
-        // the queue itself free of zombie rows).
+        // the queue itself free of zombie rows). The minted continuation
+        // never reaches a turn on this path, so the driver's pending guard
+        // releases with it (a wedged guard would block every later mint).
         if self.session_is_closed() {
+            self.clear_pending_goal_continuation();
             return;
         }
         let sink = self
@@ -416,6 +421,7 @@ impl AgentSessionEngine {
             Some(sink) => sink(work),
             None => {
                 eprintln!("pa-daemon: goal follow-up dropped: no admission sink wired");
+                self.clear_pending_goal_continuation();
             }
         }
     }

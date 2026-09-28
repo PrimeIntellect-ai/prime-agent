@@ -109,7 +109,11 @@ impl SessionEngine {
             GoalStatus::BudgetLimited => {}
             _ => return None,
         }
-        create_goal_context_message(driver.state(), GoalContextKind::BudgetLimit).ok()
+        create_goal_context_message(
+            &driver.state_with_creation_elapsed(),
+            GoalContextKind::BudgetLimit,
+        )
+        .ok()
     }
 
     /// Mint one goal continuation (TS `_getGoalContinuationMessages`): an
@@ -167,8 +171,19 @@ impl SessionEngine {
         )
     }
 
-    /// The current goal state (the drivers' publish-dedupe read).
+    /// The current goal state (the drivers' publish-dedupe read):
+    /// `time_used_seconds` reads the goal's creation-based age fresh
+    /// (the operator's timer contract), so the published timer ticks
+    /// without any anchor fold.
     pub async fn goal_state(&self) -> crate::goals::GoalState {
-        self.goal_driver.lock().await.state().clone()
+        self.goal_driver.lock().await.state_with_creation_elapsed()
+    }
+
+    /// Release the driver's pending-continuation guard: the calling
+    /// surface admitted (or withdrew) the minted goal continuation, so
+    /// the next boundary may mint again (the pending-never-re-arms
+    /// contract — the owed flag clears at the queue/admission).
+    pub async fn clear_pending_goal_continuation(&self) {
+        self.goal_driver.lock().await.continuation_consumed();
     }
 }

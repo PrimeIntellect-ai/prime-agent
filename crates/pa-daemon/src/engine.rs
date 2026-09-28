@@ -324,6 +324,13 @@ pub trait SessionEngine: Send + Sync {
         None
     }
 
+    /// Release the engine's pending-continuation guard: the caller
+    /// admitted (or withdrew) a minted goal continuation, so the next
+    /// boundary may mint again (the pending-never-re-arms contract —
+    /// the owed flag clears at the queue). Engines without thread goals
+    /// do nothing.
+    fn clear_pending_goal_continuation(&self) {}
+
     /// Run one prompt. `prompt_index` counts accepted prompts for this
     /// session. `aborted` is the worker's cancel probe (checked between
     /// retry waits, where no events flow to observe the flag through

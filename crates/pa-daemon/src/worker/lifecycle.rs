@@ -455,6 +455,11 @@ impl Worker {
                         eprintln!(
                             "pa-daemon: post-compaction goal continuation mint failed: {error}"
                         );
+                        // A join failure loses the minted continuation
+                        // (logged, never silent): the driver's pending
+                        // guard releases so a later boundary may mint —
+                        // the goal loop never wedges on the lost turn.
+                        self.engine.clear_pending_goal_continuation();
                         None
                     });
                     if let Some(continuation) = continuation {
@@ -511,6 +516,10 @@ impl Worker {
                         self.checkpoint_queue(QueueCheckpoint::Admitted {
                             operation: "follow_up_queued",
                         });
+                        // The queue admitted the minted continuation: the
+                        // driver's pending guard releases at the admission
+                        // (the owed flag clears at the queue).
+                        self.engine.clear_pending_goal_continuation();
                     }
                 }
                 // The resume site: clears the suspension and wakes the

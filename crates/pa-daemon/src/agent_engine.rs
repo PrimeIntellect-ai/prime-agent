@@ -155,6 +155,14 @@ pub struct AgentSessionEngine {
     /// across a turn's admission, so goal checks inside emit callbacks
     /// (which may run in async context) must not lock it.
     pub(crate) goal_runtime: std::sync::Mutex<Option<GoalRuntimeHandles>>,
+    /// The goal driver's pending-continuation guard, mirrored lock-free at
+    /// build time: the admission surfaces (the worker's queue sink, the
+    /// post-compaction queue path, the abort-cancel withdraw) release it
+    /// from contexts that cannot take the async driver lock (a spawned
+    /// settle task, a nested block_on), so the guard reads through this
+    /// atomic handle instead.
+    pub(crate) pending_goal_continuation:
+        std::sync::Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
     /// Whether this run's usage accounting crossed the goal's token budget
     /// (TS `_accountGoalUsageForAssistantMessage` returning `true` at the
     /// `message_end` hook): the natural boundary mints the budget-limit

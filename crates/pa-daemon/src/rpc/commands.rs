@@ -355,7 +355,7 @@ async fn get_state(state: &Arc<RpcState>) -> Result<ResponseData, String> {
     let goal_driver = engine.goal_driver.lock().await;
     object.insert(
         "goal".to_string(),
-        serde_json::to_value(goal_driver.state()).unwrap_or(Value::Null),
+        serde_json::to_value(goal_driver.state_with_creation_elapsed()).unwrap_or(Value::Null),
     );
     Ok(ResponseData::Present(Value::Object(object)))
 }

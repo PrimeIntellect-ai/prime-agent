@@ -151,6 +151,7 @@ impl AgentSessionEngine {
             mcp,
             published_goal: std::sync::Mutex::new(None),
             goal_runtime: std::sync::Mutex::new(None),
+            pending_goal_continuation: std::sync::Mutex::new(None),
             goal_budget_crossed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             goal_input_probe: std::sync::Mutex::new(None),
             goal_admission_sink: std::sync::Mutex::new(None),
@@ -302,7 +303,7 @@ impl AgentSessionEngine {
     /// first must adopt it, or a read-seam build would strand the parked
     /// branch and the session would start off the moved branch's entries.
     async fn adopt_built_session(&self, built: &CoreSessionEngine) -> anyhow::Result<()> {
-        self.mirror_goal_runtime(built);
+        self.mirror_goal_runtime(built).await;
         // The live compaction summary-delta sink (the worker's
         // `compaction_summary_delta` broadcast): adopted onto the built
         // session like the goal runtime mirrors, so every rebuild's

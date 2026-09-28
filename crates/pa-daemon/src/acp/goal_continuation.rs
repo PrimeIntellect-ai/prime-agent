@@ -83,6 +83,15 @@ pub(super) async fn mint_goal_continuation(
             return None;
         }
     };
+    // The minted continuation is handed to the settle loop as the very
+    // next turn of the same prompt (the in-run model, TS
+    // `pendingMessages`): the admission is immediate, so the pending
+    // guard releases here — no queued window exists on this surface. A
+    // refused mint (`Ok(None)`: the driver's pending guard held) keeps
+    // the guard armed.
+    if message.is_some() {
+        driver.continuation_consumed();
+    }
     drop(driver);
     session.publish_goal_update().await;
     message
@@ -98,10 +107,10 @@ pub(super) async fn goal_follow_up(mode: &AcpModeState, session: &AcpSession) ->
     if session.take_goal_budget_crossed() {
         let steer = {
             let driver = mode.engine.goal_driver.lock().await;
-            let state = driver.state();
+            let state = driver.state_with_creation_elapsed();
             match state.status {
                 GoalStatus::BudgetLimited => {
-                    create_goal_context_message(state, GoalContextKind::BudgetLimit).ok()
+                    create_goal_context_message(&state, GoalContextKind::BudgetLimit).ok()
                 }
                 _ => None,
             }

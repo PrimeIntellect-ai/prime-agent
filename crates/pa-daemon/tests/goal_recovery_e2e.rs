@@ -552,6 +552,26 @@ fn killed_mid_goal_worker_rehydrates_the_goal_with_counts() {
         pre_kill_count,
         "connection state goal: {connection}"
     );
+    // The creation-based timer (operator ruling 2026-09-28): the served
+    // `timeUsedSeconds` is the goal's age since `createdAt`, computed
+    // fresh on every read — never folded into an accumulating counter.
+    // A goal that survived the kill+recovery over dozens of durable rows
+    // reads seconds (the pre-ruling anchor compounding read hours for
+    // the same shape: the operator's 2h goal read 73h).
+    assert!(
+        goal["createdAt"].is_u64(),
+        "the served goal carries its creation time: {connection}"
+    );
+    let served_age = goal["timeUsedSeconds"].as_u64().unwrap();
+    assert!(
+        served_age < 600,
+        "a minutes-old goal reads its age, not folded hours: {connection}"
+    );
+    let durable_row = harness.latest_goal_row();
+    assert!(
+        durable_row["timeUsedSeconds"].as_u64().unwrap() < 600,
+        "the durable rows carry the age at write: {durable_row}"
+    );
     let recovery_announcements: Vec<u64> = harness.client.events[pre_kill_events..]
         .iter()
         .filter(|event| event.get("type").and_then(Value::as_str) == Some("goal_update"))
