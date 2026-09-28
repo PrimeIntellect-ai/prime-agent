@@ -103,9 +103,22 @@ while True:
                 line, buf = buf.split(b"\n", 1)
                 log.write("RECV " + line.decode("utf-8", "replace") + "\n")
                 try:
-                    command = json.loads(line)
+                    wire = json.loads(line)
                 except ValueError:
                     continue
+                # STRICT like the TS supervisor: commands ride the
+                # protocol envelope — bare commands are refused (the
+                # supervisor throws "Daemon commands require protocol ...
+                # or newer").
+                if wire.get("type") != "command" or not isinstance(wire.get("command"), dict):
+                    conn.sendall((json.dumps({
+                        "type": "response",
+                        "id": wire.get("id"),
+                        "success": False,
+                        "error": "Daemon commands require the protocol envelope",
+                    }) + "\n").encode())
+                    continue
+                command = wire["command"]
                 if command.get("type") == "list":
                     response = {
                         "type": "response",
@@ -326,8 +339,11 @@ session_hash_after="$(sha256sum "$mach/home/.prime/agent/sessions/sess-0001.json
 assert_eq "case 1 (b) session file byte-identical" "$session_hash_before" "$session_hash_after"
 
 # (c) the TS daemon was stopped cleanly, via the schema-id stop-when-idle path
-assert_contains "case 1 (c) idle probe sent a list request" "$mach/logs/daemon-mock.log" '"type":"list"'
-assert_contains "case 1 (c) clean shutdown requested (force:false)" "$mach/logs/daemon-mock.log" '"type":"shutdown","force":false'
+assert_contains "case 1 (c) idle probe sent a list request" "$mach/logs/daemon-mock.log" '"type": "list"'
+assert_contains "case 1 (c) the probe rides the command envelope" "$mach/logs/daemon-mock.log" '"type": "command"'
+assert_contains "case 1 (c) the envelope carries protocol 7" "$mach/logs/daemon-mock.log" '"name": "prime-agent-daemon", "version": 7'
+assert_not_contains "case 1 (c) no bare command ever reached the strict mock" "$mach/logs/daemon-mock.log" "require the protocol envelope"
+assert_contains "case 1 (c) clean shutdown requested (force:false)" "$mach/logs/daemon-mock.log" '"force": false' 
 assert_contains "case 1 (c) mock daemon shut itself down" "$mach/logs/daemon-mock.log" "SHUTDOWN"
 assert_contains "case 1 (c) mock daemon exited on its own (never killed)" "$mach/logs/daemon-mock.log" "EXIT"
 assert_not_contains "case 1 (c) no force-kill request" "$mach/logs/daemon-mock.log" '"force":true'
@@ -636,6 +652,31 @@ for d in "$mach9"/home/.local/share/prime-agent.old.*; do
   fi
 done
 ok "case 9 no rollback slot nested a tree"
+
+# fresh_slot's collision increment, driven with the child's OWN pid (the
+# child's pid name can never be predicted from the parent): the call must
+# take the .2 suffix.
+fresh_slot_case="$(mktemp "${TMPDIR:-/tmp}/fresh-slot-case.XXXXXX")"
+cat > "$fresh_slot_case" <<'FRAG'
+mkdir -p "$1.$$"
+eval "$(sed -n '/^fresh_slot()/,/^}/p' "$2")"
+fresh_slot "$1"
+FRAG
+fresh_slot_out="$(sh "$fresh_slot_case" fresh-slot-test "$REPO_ROOT/install-rust.sh" 2>/dev/null || true)"
+rm -f "$fresh_slot_case"
+case "$fresh_slot_out" in
+  fresh-slot-test.*.2) ok "case 9 fresh_slot increments past an occupied pid name ($fresh_slot_out)" ;;
+  *) fail "case 9 fresh_slot collision increment: got [$fresh_slot_out]" ;;
+esac
+
+# A user COPIES the payload into the .old namespace (marker and all): the
+# sweep's generations record (outside the tree) must keep the copy safe.
+cp -R "$mach9/home/.local/share/prime-agent" "$mach9/home/.local/share/prime-agent.old.mycopy"
+run_installer "$mach9" --update
+rc9=$?
+assert_eq "case 9 the third --update run completed" 0 "$rc9"
+assert_eq "case 9 the user-copied payload backup survived the sweep" "yes" \
+  "$([ -f "$mach9/home/.local/share/prime-agent.old.mycopy/prime-agent" ] && echo yes || echo no)"
 assert_eq "case 9 the store is untouched" "$store_before_c" "$(store_snapshot "$mach9")"
 
 echo

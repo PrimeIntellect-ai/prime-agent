@@ -409,8 +409,20 @@ if schema != TS_SCHEMA_ID:
     print("foreign:" + schema)
     sys.exit(0)
 
-# TS daemon identified: confirm it is idle before asking it to stop.
-sock.sendall(b'{"id":"installer-probe","type":"list"}\n')
+# TS daemon identified: confirm it is idle before asking it to stop. The
+# request rides the protocol-7 COMMAND ENVELOPE exactly like the products'
+# own clients (the TS supervisor refuses bare commands: "Daemon commands
+# require protocol ... or newer" — a bare `list` would kill the probe).
+def envelope(request_id, body):
+    return json.dumps({
+        "type": "command",
+        "id": request_id,
+        "protocol": {"name": "prime-agent-daemon", "version": 7},
+        "clientId": "install-rust-sh",
+        "command": dict(body, id=request_id),
+    }) + "\n"
+
+sock.sendall(envelope("installer-probe", {"type": "list"}).encode())
 deadline = time.monotonic() + PROBE_TIMEOUT_S
 count = None
 while time.monotonic() < deadline:
@@ -434,7 +446,7 @@ if count != 0:
 
 # Idle: ask for a clean stop (force:false — the graceful path, never a kill),
 # let the daemon ack, then confirm it stopped listening.
-sock.sendall(b'{"id":"installer-stop","type":"shutdown","force":false}\n')
+sock.sendall(envelope("installer-stop", {"type": "shutdown", "force": False}).encode())
 ack_deadline = time.monotonic() + PROBE_TIMEOUT_S
 while time.monotonic() < ack_deadline:
     line = read_line(sock, ack_deadline)
@@ -555,7 +567,9 @@ printf 'install-rust.sh continuous run %s\ncommit %s\n' "$RUN" "${commit:-unknow
 # a live holder still owns the publish, a dead one can never publish again —
 # remove it and take the new-name lock (this run is serialized against every
 # other new installer by the lock below).
-if [ -e "$legacy_lock" ]; then
+# -L, not -e: the lock is a symlink whose TARGET is the holder's pid —
+# always a dangling symlink, so -e alone would MISS A LIVE legacy installer.
+if [ -e "$legacy_lock" ] || [ -L "$legacy_lock" ]; then
   held_by="$(readlink "$legacy_lock" 2>/dev/null || true)"
   if [ -n "$held_by" ] && kill -0 "$held_by" 2>/dev/null; then
     die "an older prime-agent-rust installer (pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"
@@ -573,8 +587,12 @@ done
 launcher_tmp=""
 displaced_ts_root=""
 preserved_launcher=""
+migrated_old_layout=""
+migrated_old_layout=""
 on_exit() {
-  rm -f "$lock_link"
+  # Restores FIRST, lock release LAST: a second installer must not be able
+  # to publish into share_dir while this one still restores state — the
+  # restore would delete that fresh payload (cross-installer data loss).
   [ -n "$launcher_tmp" ] && rm -f "$launcher_tmp" 2>/dev/null || true
   # The user's unowned command file goes home if the Rust launcher never
   # went live (the same restore discipline as the displaced TS tree): a
@@ -586,20 +604,36 @@ on_exit() {
     fi
     preserved_launcher=""
   fi
+  # A migrated old-layout tree goes home the same way: the pre-takeover
+  # launcher (bin/prime-agent-rust) still points at the old name until this
+  # install's launcher section retires it, so an interrupted migration must
+  # put the tree back or that command breaks.
+  if [ -n "$migrated_old_layout" ] && [ -d "$migrated_old_layout" ] && [ ! -d "$old_layout_dir" ]; then
+    if mv "$migrated_old_layout" "$old_layout_dir" 2>/dev/null; then
+      echo "note: the prime-agent-rust tree was restored to ${old_layout_dir} — the install did not complete" >&2
+    fi
+    migrated_old_layout=""
+  fi
   restore_ts_root
+  rm -f "$lock_link"
 }
 trap on_exit EXIT
 
 # Sweep rollback generations from PREVIOUS installs (both name eras) before
 # this run creates its own — exactly one .old generation survives each install.
-# ONLY generations this installer stamped (the .prime-agent-install marker)
-# are swept: the rollback namespace is a glob, and a user-made directory that
-# merely RESEMBLES the name (prime-agent.old.backup) must never be deleted.
-# Pre-takeover-era crash leftovers (prime-agent-rust.old.*, never stamped)
-# are therefore left in place — harmless, and the user's to remove.
+# A generation is swept only when BOTH hold: it carries this installer's
+# .prime-agent-install marker AND its exact path is in the generations record
+# (${PREFIX}/share/.prime-agent-install-generations — written when the slot was
+# created, OUTSIDE the payload tree). The marker alone proves the TREE is a
+# payload, not that the SLOT is a rollback generation: a user who COPIES the
+# payload into the namespace (marker and all) keeps their copy. Pre-takeover-era
+# crash leftovers (prime-agent-rust.old.*, never stamped) are left in place —
+# harmless, and the user's to remove.
+generations_record="${PREFIX}/share/.prime-agent-install-generations"
 for sweep_dir in "${PREFIX}"/share/prime-agent.old.* "${PREFIX}"/share/prime-agent-rust.old.*; do
   [ -d "$sweep_dir" ] || continue
   [ -f "${sweep_dir}/.prime-agent-install" ] || continue
+  grep -qxF -- "$sweep_dir" "$generations_record" 2>/dev/null || continue
   # Best-effort: an un-sweepable generation (a mounted dir, a permission
   # wall) must not abort the install — the leftover is harmless.
   if ! rm -rf "$sweep_dir" 2>/dev/null; then
@@ -666,7 +700,6 @@ fi
 old="$(fresh_slot "${PREFIX}/share/prime-agent.old")"
 guard_preserved "$old"
 had_share_dir=0
-had_old_layout=0
 # Migration from the pre-takeover layout: an old share/prime-agent-rust tree
 # becomes this run's rollback (the install migrates to the new name).
 if [ -d "$old_layout_dir" ] && [ ! -d "$share_dir" ]; then
@@ -679,8 +712,8 @@ if [ -d "$old_layout_dir" ] && [ ! -d "$share_dir" ]; then
   if ! ts_owned_old_layout "$old_layout_dir"; then
     die "refusing to move ${old_layout_dir}: it is not this installer's payload tree"
   fi
-  had_old_layout=1
   mv "$old_layout_dir" "$old"
+  migrated_old_layout="$old"
   echo "the old prime-agent-rust install migrated to the rollback slot ${old}"
   echo "  (it is kept — the sweep only removes marker-stamped generations; remove"
   echo "   the slot by hand once you no longer need the rollback)"
@@ -688,14 +721,18 @@ fi
 if [ -d "$share_dir" ]; then
   had_share_dir=1
   mv "$share_dir" "$old"
+  # The slot is a rollback generation this installer created: record its
+  # exact path so the next install's sweep can tell it from a user-made
+  # copy of the payload (the record rides OUTSIDE the tree).
+  printf '%s\n' "$old" >> "${PREFIX}/share/.prime-agent-install-generations"
 fi
 if ! mv "$stage" "$share_dir"; then
-  if [ "$had_share_dir" = 1 ]; then
+  if [ "$had_share_dir" = 1 ] && [ -d "$old" ]; then
     mv "$old" "$share_dir"      # put the old tree back
-  elif [ "$had_old_layout" = 1 ]; then
-    mv "$old" "$old_layout_dir"  # put the migrated old layout back
   fi
   die "could not publish ${share_dir}"
+  # (a failed migration restore is the EXIT trap's job: it holds the lock
+  # until the tree is back, so no second installer can slip in between)
 fi
 # A leftover old-layout tree when a new-layout tree also existed: it is
 # superseded by the fresh publish. The ownership rule is EXACTLY the
@@ -768,6 +805,7 @@ launcher_tmp=""
 # preserved command file stays in its aside slot.
 displaced_ts_root=""
 preserved_launcher=""
+migrated_old_layout=""
 
 # Retire the launcher's own pre-takeover name (marker-checked: only ever
 # remove the shim this script wrote, never a user's file).
