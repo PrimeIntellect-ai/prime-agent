@@ -1001,7 +1001,7 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
     use std::fmt::Write as _;
     let home = path.parent().unwrap().parent().unwrap();
     let mut rows = String::new();
-    let mut push = |rows: &mut String, row: &str| {
+    let push = |rows: &mut String, row: &str| {
         rows.push_str(row);
         rows.push('\n');
     };
@@ -1067,7 +1067,7 @@ impl TimedRpcChild {
         let home = tempfile::TempDir::new().unwrap();
         let bin = env!("CARGO_BIN_EXE_prime-agent");
         let mut child = Command::new(bin)
-            .args(["--mode", "rpc", "--resume", fixture])
+            .args(["--mode", "rpc", "--resume", fixture.to_str().unwrap()])
             .env("HOME", home.path())
             .env("PRIME_AGENT_FAUX_SCRIPT", script.to_string())
             .current_dir(home.path())
@@ -1211,8 +1211,8 @@ fn rpc_compact_flushes_the_start_frame_before_the_pipeline() {
         cs_event.get("result").is_none(),
         "compaction_start carries no result (TS shape)"
     );
-    let cs_ms = sent.elapsed().saturating_sub(cs_at.duration_since(sent)).as_millis_f64();
-    let start_to_end_ms = ce_at.duration_since(cs_at).as_millis_f64();
+    let cs_ms = sent.elapsed().saturating_sub(cs_at.duration_since(sent)).as_secs_f64() * 1000.0;
+    let start_to_end_ms = ce_at.duration_since(cs_at).as_secs_f64() * 1000.0;
     // The flush: the start frame is visible to the client immediately
     // (a pipe write, microseconds) — well before the pre-summarizer span
     // (tens of milliseconds at this session size) could strand it.
