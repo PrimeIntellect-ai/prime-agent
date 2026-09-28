@@ -782,8 +782,7 @@ impl SessionManager {
                 .window
                 .as_ref()
                 .is_some_and(super::window::WindowedSessionStore::retained_whole_file)
-                && self.append_ownership
-                    == super::window::AppendOwnership::SessionLeaseHeld);
+                && self.append_ownership == super::window::AppendOwnership::SessionLeaseHeld);
         let parts = retained_serves.then(|| RefineTranscriptParts {
             messages: self
                 .file_entries

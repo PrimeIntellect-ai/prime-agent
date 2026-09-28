@@ -904,7 +904,9 @@ async fn adopted_manager_live_appends_match_full_reopen() {
 /// A no-compaction fixture: the walk retains every row, so the window
 /// covers the whole file (`retained_whole_file`).
 fn full_history_fixture() -> String {
-    let mut rows = vec![json!({"type":"session","id":"s","version":3,"cwd":"/tmp","timestamp":"2026-01-01T00:00:00Z"})];
+    let mut rows = vec![
+        json!({"type":"session","id":"s","version":3,"cwd":"/tmp","timestamp":"2026-01-01T00:00:00Z"}),
+    ];
     let mut parent: Option<String> = None;
     for i in 0..5 {
         let id = format!("u{i}");
@@ -928,11 +930,17 @@ async fn full_history_snapshot_serves_retained_rows_without_the_file() {
     let body = full_history_fixture();
     std::fs::write(&path, &body).unwrap();
     let store = WindowedSessionStore::open(&path).unwrap().unwrap();
-    assert!(store.retained_whole_file(), "no compaction boundary: the walk covered the file");
+    assert!(
+        store.retained_whole_file(),
+        "no compaction boundary: the walk covered the file"
+    );
     drop(store);
     // The flag survives the sidecar round-trip (the cache-warm open).
     let warm = WindowedSessionStore::open(&path).unwrap().unwrap();
-    assert!(warm.read_stats().cache_hit, "the second open served the sidecar");
+    assert!(
+        warm.read_stats().cache_hit,
+        "the second open served the sidecar"
+    );
     assert!(
         warm.retained_whole_file(),
         "the covered flag must round-trip through the snapshot cache"
@@ -969,7 +977,10 @@ async fn full_history_snapshot_without_lease_keeps_the_historical_read() {
             .await
             .unwrap();
     // An out-of-band append (the unleased world's other writer).
-    let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
     file.write_all(b"{\"type\":\"message\",\"id\":\"oob\",\"parentId\":\"audit\",\"message\":{\"role\":\"user\",\"content\":\"external\",\"timestamp\":0}}\n").unwrap();
     drop(file);
     let snapshot = manager.history_snapshot().await.unwrap();
@@ -988,10 +999,16 @@ async fn boundary_window_snapshot_keeps_the_historical_read() {
     let path = dir.path().join("boundary.jsonl");
     std::fs::write(&path, fixture()).unwrap();
     let store = WindowedSessionStore::open(&path).unwrap().unwrap();
-    assert!(!store.retained_whole_file(), "the boundary discarded a prefix");
+    assert!(
+        !store.retained_whole_file(),
+        "the boundary discarded a prefix"
+    );
     drop(store);
     let warm = WindowedSessionStore::open(&path).unwrap().unwrap();
-    assert!(warm.read_stats().cache_hit, "the second open served the sidecar");
+    assert!(
+        warm.read_stats().cache_hit,
+        "the second open served the sidecar"
+    );
     assert!(
         !warm.retained_whole_file(),
         "the partial flag must round-trip through the snapshot cache"

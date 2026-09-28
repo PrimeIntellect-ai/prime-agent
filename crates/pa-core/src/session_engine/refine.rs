@@ -827,9 +827,10 @@ Reviewer instructions: record it"
         );
     }
 
-
     fn oracle_fixture() -> String {
-        let mut rows = vec![serde_json::json!({"type":"session","id":"s","version":3,"cwd":"/tmp","timestamp":"2026-01-01T00:00:00Z"})];
+        let mut rows = vec![
+            serde_json::json!({"type":"session","id":"s","version":3,"cwd":"/tmp","timestamp":"2026-01-01T00:00:00Z"}),
+        ];
         let mut parent: Option<String> = None;
         for i in 0..5 {
             let id = format!("u{i}");
@@ -875,8 +876,9 @@ Reviewer instructions: record it"
                     .unwrap()
             };
             if leg == "windowed-leased" {
-                session
-                    .set_append_ownership(crate::session::window::AppendOwnership::SessionLeaseHeld);
+                session.set_append_ownership(
+                    crate::session::window::AppendOwnership::SessionLeaseHeld,
+                );
                 // The served-path proof: the shared-window extraction
                 // must not touch the file, so removing it cannot fail the
                 // parts. The file returns before the refinement's rows
@@ -924,7 +926,10 @@ Reviewer instructions: record it"
             captured.push(got[0].clone());
         }
         for (a, b) in captured.iter().zip(captured.iter().skip(1)) {
-            assert_eq!(a, b, "the refiner request diverged between extraction paths (the frozen surface)");
+            assert_eq!(
+                a, b,
+                "the refiner request diverged between extraction paths (the frozen surface)"
+            );
         }
         // The seeded audit row and the fixture's conversation rode the
         // transcript on every path (history_for_prompt renders the audit
@@ -947,7 +952,10 @@ Reviewer instructions: record it"
         let session = SessionManager::open_windowed(dir.path(), dir.path(), &path)
             .await
             .unwrap();
-        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         file.write_all(
             br#"{"type":"custom","id":"oob-audit","parentId":"audit","customType":"prime-agent.refinement","data":{"id":"refine_oob","summary":"oob","rationale":"r","expectedOutcome":"o","appliedEdits":[],"harnessStatePath":""}}"#
         )
@@ -956,11 +964,12 @@ Reviewer instructions: record it"
         drop(file);
         let parts = session.refine_transcript_parts();
         let crate::session::manager::RefineTranscriptParts {
-            refinement_history,
-            ..
+            refinement_history, ..
         } = parts.await.unwrap();
         assert!(
-            refinement_history.iter().any(|item| item.id == "refine_oob"),
+            refinement_history
+                .iter()
+                .any(|item| item.id == "refine_oob"),
             "the unleased window must keep re-reading the file (out-of-band audit visible)"
         );
     }
