@@ -10,6 +10,7 @@ use crate::engine::{
     BranchSummaryOutcome, BranchSummaryRequest, CompactionOutcome, CompactionRequest, EngineEvent,
     PromptRequest, ScriptedEngine,
 };
+use crate::worker::WorkerConfig;
 
 /// The scripted harness engine: the create-path seams keep their trait
 /// defaults (no `model_change`, `"off"` thinking), and the run seams

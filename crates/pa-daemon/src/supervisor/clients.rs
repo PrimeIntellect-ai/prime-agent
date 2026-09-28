@@ -1,7 +1,7 @@
 //! Client connections: the per-connection task - read loop, dispatch,
 //! and the parsed-command execution surface.
 use super::{
-    broadcast, clients, command_active_session_id, command_type_name, current_protocol_info,
+    broadcast, command_active_session_id, command_type_name, current_protocol_info,
     daemon_closing_shutdown_event, default_server_capabilities, input_admission_id, json, mpsc,
     options, parse_supervisor_command_line, paths, response_failure, response_line,
     response_success, routing, salvage_command_type, salvage_id, sessions, socket, subscribers,
