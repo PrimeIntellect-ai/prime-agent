@@ -1,0 +1,1 @@
+- Fixed missing Bedrock cache checkpoints for documented Claude 5 and Mythos models, including application inference profiles identified by model name.

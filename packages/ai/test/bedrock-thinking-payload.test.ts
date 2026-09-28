@@ -1,3 +1,4 @@
+import type { ConverseStreamCommandInput } from "@aws-sdk/client-bedrock-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type BedrockOptions, streamBedrock } from "../src/providers/amazon-bedrock.js";
 import type { Context, Model } from "../src/types.js";
@@ -40,14 +41,17 @@ vi.mock("@aws-sdk/client-bedrock-runtime", () => {
 			TOOL_USE: "tool_use",
 		},
 		CachePointType: { DEFAULT: "default" },
-		CacheTTL: { ONE_HOUR: "ONE_HOUR" },
+		CacheTTL: { ONE_HOUR: "1h" },
 		ConversationRole: { ASSISTANT: "assistant", USER: "user" },
 		ImageFormat: { JPEG: "jpeg", PNG: "png", GIF: "gif", WEBP: "webp" },
 		ToolResultStatus: { ERROR: "error", SUCCESS: "success" },
 	};
 });
 
-interface BedrockThinkingPayload {
+beforeEach(() => vi.stubEnv("AWS_BEDROCK_FORCE_CACHE", ""));
+afterEach(() => vi.unstubAllEnvs());
+
+interface BedrockThinkingPayload extends Pick<ConverseStreamCommandInput, "system" | "messages"> {
 	inferenceConfig?: { maxTokens?: number; temperature?: number };
 	additionalModelRequestFields?: {
 		thinking?: { type: string; budget_tokens?: number; display?: string };
@@ -58,6 +62,7 @@ interface BedrockThinkingPayload {
 
 function makeContext(): Context {
 	return {
+		systemPrompt: "You are helpful.",
 		messages: [{ role: "user", content: "Hello", timestamp: Date.now() }],
 	};
 }
@@ -214,43 +219,35 @@ describe("Application inference profile support", () => {
 		expect(payload.additionalModelRequestFields?.output_config).toEqual({ effort: "high" });
 	});
 
-	it("injects cache points when model.name identifies a supported Claude model", async () => {
-		const baseModel = getFixtureModel<"bedrock-converse-stream">(
-			"amazon-bedrock",
-			"global.anthropic.claude-opus-4-6-v1",
-		)!;
-		const model: Model<"bedrock-converse-stream"> = {
-			...baseModel,
-			id: "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/my-profile",
-			name: "Claude Sonnet 4.6",
-		};
-
-		let capturedPayload: any;
-		const s = streamBedrock(
-			model,
-			{
-				systemPrompt: "You are helpful.",
-				messages: [{ role: "user", content: "Hello", timestamp: Date.now() }],
-			},
-			{
-				signal: AbortSignal.abort(),
-				onPayload: (payload) => {
-					capturedPayload = payload;
-					return payload;
-				},
-			},
+	it.each([
+		["us.anthropic.claude-opus-5", "Claude Opus 5", "short", true],
+		["us.anthropic.claude-opus-5-5", "Claude Opus 5.5", "long", true],
+		["eu.anthropic.claude-sonnet-5", "Claude Sonnet 5", "short", true],
+		["global.anthropic.claude-fable-5", "Claude Fable 5", "short", true],
+		["us.anthropic.claude-fable-5-1", "Claude Fable 5.1", "long", true],
+		["us.anthropic.claude-mythos-5", "Claude Mythos 5", "short", true],
+		["us.anthropic.claude-mythos-5-1", "Claude Mythos 5.1", "short", true],
+		["us.anthropic.claude-mythos-preview", "Claude Mythos Preview", "short", true],
+		["us.anthropic.claude-opus-5-5", "Claude Opus 5.5", "none", false],
+		["us.anthropic.claude-sonnet-4-5-20250929-v1:0", "Claude Sonnet 4.5", "long", true],
+		["us.anthropic.claude-3-7-sonnet-20250219-v1:0", "Claude 3.7 Sonnet", "short", true],
+		["us.anthropic.claude-3-5-haiku-20241022-v1:0", "Claude 3.5 Haiku", "short", true],
+		["us.anthropic.claude-3-sonnet-20240229-v1:0", "Claude 3 Sonnet", "short", false],
+		["us.anthropic.claude-opus-5-v1:0", "profile", "short", true],
+		["custom-profile", "Claude Fable 5.1 (Global)", "long", true],
+		["us.anthropic.claude-opus-50", "Claude Opus 50", "short", false],
+		["us.anthropic.claude-opus-5-99", "Claude Opus 5.99", "short", false],
+		["amazon.nova-pro-v1:0", "Nova Pro", "short", false],
+		["arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/test", "Claude Sonnet 4.6", "short", true],
+		["arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/test", "Claude Fable 5.1", "short", true],
+	] as const)("#2548: cache checkpoints for %s (%s, %s)", async (id, name, cacheRetention, enabled) => {
+		const base = getFixtureModel<"bedrock-converse-stream">("amazon-bedrock", "global.anthropic.claude-opus-4-6-v1")!;
+		const payload = await capturePayload({ ...base, id, name }, { cacheRetention });
+		const checkpoints = [...payload.system!, ...payload.messages!.flatMap((message) => message.content ?? [])].filter(
+			(block) => block.cachePoint,
 		);
-
-		for await (const event of s) {
-			if (event.type === "error") break;
-		}
-
-		expect(capturedPayload.system).toHaveLength(2);
-		expect(capturedPayload.system[1]).toHaveProperty("cachePoint");
-
-		const lastMsg = capturedPayload.messages[capturedPayload.messages.length - 1];
-		const lastContent = lastMsg.content[lastMsg.content.length - 1];
-		expect(lastContent).toHaveProperty("cachePoint");
+		const point = { cachePoint: { type: "default", ...(cacheRetention === "long" ? { ttl: "1h" } : {}) } };
+		expect(checkpoints).toEqual(enabled ? [point, point] : []);
 	});
 
 	it("falls back to fixed-budget thinking for non-adaptive Claude via model.name", async () => {
