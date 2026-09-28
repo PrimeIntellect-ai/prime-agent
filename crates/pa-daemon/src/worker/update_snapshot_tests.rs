@@ -509,7 +509,7 @@ async fn injected_continuations_mark_their_own_rider_only() {
     }
     let snapshot = {
         let core = worker.core.lock().unwrap();
-        worker.snapshot_locked(&core)
+        Worker::snapshot_locked(&core)
     };
     assert_eq!(
         snapshot.injected_prompts.follow_up,
@@ -541,7 +541,7 @@ async fn injected_continuations_mark_their_own_rider_only() {
     }
     let snapshot = {
         let core = worker.core.lock().unwrap();
-        worker.snapshot_locked(&core)
+        Worker::snapshot_locked(&core)
     };
     assert_eq!(
         snapshot.rlm_child_status.follow_up,
@@ -581,7 +581,7 @@ async fn injected_continuations_still_project_their_lane_text() {
     }
     let snapshot = {
         let core = worker.core.lock().unwrap();
-        worker.snapshot_locked(&core)
+        Worker::snapshot_locked(&core)
     };
     assert_eq!(
         snapshot.steering,

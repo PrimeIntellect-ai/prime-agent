@@ -2,11 +2,12 @@
 //! roster push, and the event emission family.
 use super::lifecycle::active_lifecycle;
 use super::{
-    checkpoint_queue_recovery, create_daemon_event_meta, effective_service_tier,
-    is_rlm_child_status_item, json, supports_fast_mode, AgentConnectionState, Arc, DaemonOutbound,
+    checkpoint_queue_recovery, create_daemon_event_meta, is_injected_prompt_item,
+    is_rlm_child_status_item, json, AgentConnectionState, Arc, DaemonOutbound,
     DaemonSessionClosedReason, EventPump, Map, Mutex, OutboundFrame, QueueCheckpoint, QueueLanes,
     QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine, Value, Worker,
 };
+use crate::setting_switches::{effective_service_tier, supports_fast_mode};
 
 use crate::types::SessionSummary;
 
