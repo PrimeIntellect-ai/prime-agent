@@ -19,8 +19,8 @@ use pa_core::session_engine::{PromptOptions, PromptOutcome};
 use pa_types::session::CustomMessage;
 
 use super::commands::{compaction_frame, kick_queue_pump, resume_pump, RpcState};
-use super::COMPACT_FRAME_FLUSH_BUDGET;
 use super::protocol::{self, ResponseData};
+use super::COMPACT_FRAME_FLUSH_BUDGET;
 
 /// `prompt` (TS `connection.prompt(message, {images, streamingBehavior,
 /// source: "rpc"})`): admission-level success — the response fires once

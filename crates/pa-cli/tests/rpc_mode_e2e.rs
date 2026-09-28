@@ -1008,7 +1008,7 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
     }));
     let mut counter: u64 = 0;
     let mut parent = String::new();
-    let mut entry = |counter: &mut u64, parent: &mut String, fields: Value| {
+    let entry = |counter: &mut u64, parent: &mut String, fields: Value| {
         *counter += 1;
         let id = format!("{:08x}", *counter);
         let mut row = fields;
@@ -1046,7 +1046,7 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
             "message": {
                 "role": "user",
                 "content": [{ "type": "text", "text": format!("please do task number {turn}") }],
-                "timestamp": 1789584016603i64 + turn as i64,
+                "timestamp": 1_789_584_016_603_i64 + turn as i64,
             },
             "type": "message",
         }));
@@ -1073,7 +1073,7 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
                     "cost": { "input": 0.1, "output": 0.02, "cacheRead": 0, "cacheWrite": 0, "total": 0.12 },
                 },
                 "stopReason": "tool_calls",
-                "timestamp": 1789584016603i64 + turn as i64,
+                "timestamp": 1_789_584_016_603_i64 + turn as i64,
             },
             "type": "message",
         }));
@@ -1084,7 +1084,7 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
                 "toolCallId": call_id,
                 "content": [{ "type": "text", "text": format!("corpus {turn}\n[0, 1, 2]\n") }],
                 "isError": false,
-                "timestamp": 1789584016603i64 + turn as i64,
+                "timestamp": 1_789_584_016_603_i64 + turn as i64,
             },
             "type": "message",
         }));
@@ -1104,7 +1104,7 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
         "message": {
             "role": "user",
             "content": [{ "type": "text", "text": "final marker request" }],
-            "timestamp": 1789584016603i64,
+            "timestamp": 1_789_584_016_603_i64,
         },
         "type": "message",
     }));
@@ -1125,7 +1125,7 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
                 "cost": { "input": 0.1, "output": 0.02, "cacheRead": 0, "cacheWrite": 0, "total": 0.12 },
             },
             "stopReason": "stop",
-            "timestamp": 1789584016603i64,
+            "timestamp": 1_789_584_016_603_i64,
         },
         "type": "message",
     }));
@@ -1216,7 +1216,7 @@ impl TimedRpcChild {
                     Ok(n) => {
                         let arrived = Instant::now();
                         buf.extend_from_slice(&chunk[..n]);
-                        while let Some(pos) = buf.iter().position(|&b| b'\n') {
+                        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
                             let line: Vec<u8> = buf.drain(..=pos).collect();
                             let line = String::from_utf8_lossy(&line).trim().to_owned();
                             if line.is_empty() {
@@ -1304,9 +1304,7 @@ fn rpc_compact_flushes_the_start_frame_before_the_pipeline() {
     let home = tempfile::TempDir::new().unwrap();
     let fixture = home.path().join("sess").join("fixture.jsonl");
     write_corpus_fixture(&fixture, 10);
-    let mut client = TimedRpcChild::spawn(
-        &fixture,
-        &json!({
+    let script = json!({
         // The faux harness's response budget is finite (repeat-last is a
         // daemon-seam key the CLI harness ignores): the split-turn cut
         // makes two concurrent summarizer calls, so the script queues
@@ -1315,8 +1313,8 @@ fn rpc_compact_flushes_the_start_frame_before_the_pipeline() {
             { "text": "corpus history summary: the scale corpus ran" },
             { "text": "corpus turn-prefix summary: the final marker" },
         ],
-    }),
-    );
+    });
+    let mut client = TimedRpcChild::spawn(&fixture, &script);
     let (ready, _) = client.command(&json!({ "type": "get_state" }));
     let (_, _) = client.wait_response(&ready, TIMEOUT);
     let (id, sent) = client.command(&json!({ "type": "compact" }));
@@ -1329,7 +1327,10 @@ fn rpc_compact_flushes_the_start_frame_before_the_pipeline() {
             && summary.contains("corpus turn-prefix summary: the final marker"),
         "the split-turn compaction composes both summarizer answers: {summary}"
     );
-    assert!(result["tokensBefore"].is_number(), "the CompactionResult shape");
+    assert!(
+        result["tokensBefore"].is_number(),
+        "the CompactionResult shape"
+    );
     let mut cs: Option<(Instant, &Value)> = None;
     let mut ce: Option<(Instant, &Value)> = None;
     for (arrived, event) in &events {
@@ -1377,19 +1378,17 @@ fn rpc_compact_flush_is_bounded_against_a_stalled_reader() {
     let home = tempfile::TempDir::new().unwrap();
     let fixture = home.path().join("sess").join("fixture.jsonl");
     write_corpus_fixture(&fixture, 10);
-    let mut client = TimedRpcChild::spawn_stalled(
-        &fixture,
-        &json!({
-            // The faux harness's response budget is finite (repeat-last is a
-            // daemon-seam key the CLI harness ignores): the split-turn cut
-            // makes two concurrent summarizer calls, so the script queues
-            // one response each.
-            "responses": [
-                { "text": "corpus history summary: the scale corpus ran" },
-                { "text": "corpus turn-prefix summary: the final marker" },
-            ],
-        }),
-    );
+    let script = json!({
+        // The faux harness's response budget is finite (repeat-last is a
+        // daemon-seam key the CLI harness ignores): the split-turn cut
+        // makes two concurrent summarizer calls, so the script queues
+        // one response each.
+        "responses": [
+            { "text": "corpus history summary: the scale corpus ran" },
+            { "text": "corpus turn-prefix summary: the final marker" },
+        ],
+    });
+    let mut client = TimedRpcChild::spawn_stalled(&fixture, &script);
     // No reader thread touches stdout: the get_messages response (the
     // session's whole serialized context, well over the pipe capacity)
     // fills the pipe and the writer task blocks mid-write — `pending`
