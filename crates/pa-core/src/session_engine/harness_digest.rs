@@ -913,4 +913,449 @@ mod tests {
         }));
         assert_eq!(latest_context_digest_details(&[no_digest]), None);
     }
+
+    // ---- The compact digest-capture placement oracles ----
+    //
+    // TS `_performCompaction` computes `_harnessDigestWithFingerprint()`
+    // at the commit — after the summarizer, immediately before
+    // `appendCompaction`. The port captures the digest INPUTS at compact
+    // ENTER (`AgentSession::compact` -> `harness_digest_inputs()`) and
+    // renders them at the commit (`execute_compaction`), so the products
+    // agree on the render point and differ on the capture point. TS
+    // freezes the whole window — `isCompacting` spans `_performCompaction`
+    // and `_isBusyForSessionInput("pump")` defers the input pump on it —
+    // so TS's commit capture never observes rows admitted mid-compaction.
+    // The ENTER capture is strictly earlier and therefore matches TS's
+    // effective content in every class; a commit-time capture in this
+    // port would not (the turn runner defers only on admission pauses and
+    // the queued-input suspension, so a resume-site admission — a steer
+    // command, a prompt with streamingBehavior — starts a turn DURING the
+    // compaction and lands its user row on the live context). The oracles
+    // pin both halves: the frozen-class byte-identity across the two
+    // placements, and the racing class where a commit-time capture would
+    // observe rows the ENTER capture — and TS — never see.
+
+    /// One keyword-distinct harness memory for the placement fixtures.
+    fn placement_memory(
+        id: &str,
+        title: &str,
+        content: &str,
+        scope: crate::refinement::HarnessScope,
+    ) -> crate::refinement::HarnessEntry {
+        crate::refinement::HarnessEntry {
+            id: id.to_string(),
+            kind: crate::refinement::RefinementKind::Memory,
+            title: title.to_string(),
+            content: content.to_string(),
+            path: "general".to_string(),
+            scope: Some(scope),
+            reference: serde_json::Map::default(),
+            arguments: serde_json::Map::default(),
+            metadata: serde_json::Map::default(),
+            source: "refine".to_string(),
+            created_at: "2026-09-07T00:00:00.000Z".to_string(),
+            updated_at: "2026-09-07T00:00:00.000Z".to_string(),
+            version: 1,
+        }
+    }
+
+    /// The placement-oracle rig: a live context and durable entries that
+    /// agree — `u0`/`a0` plus the interrupted turn's unanswered `u1` (the
+    /// natural mid-turn `/compact` shape: TS `compact()` aborts the run
+    /// first and the aborted reply never lands) — with a persisted active
+    /// goal and two keyword-distinct harness memories on disk (at zero
+    /// query terms the render order is the entry key order, wombat before
+    /// zebra, so a ranking flip is observable). The faux summarizer's
+    /// response is held `delay_ms`, so the ENTER→commit window stays open
+    /// for mid-window sampling; `call_count()` is the served-path signal
+    /// that the summarizer request is in flight.
+    async fn placement_rig(
+        tmp: &tempfile::TempDir,
+        delay_ms: u64,
+    ) -> (
+        crate::session_engine::AgentSession,
+        pa_ai::faux::FauxProviderRegistration,
+        Option<String>,
+    ) {
+        let registration = pa_ai::faux::register_faux_provider(
+            pa_ai::faux::RegisterFauxProviderOptions {
+                models: Some(vec![pa_ai::faux::FauxModelDefinition {
+                    id: "digest-placement-m".to_string(),
+                    name: Some("Digest Placement Model".to_string()),
+                    reasoning: Some(false),
+                    input: Some(vec![pa_types::ai::ModelInput::Text]),
+                    cost: None,
+                    context_window: Some(1_000),
+                    max_tokens: Some(256),
+                }]),
+                ..Default::default()
+            },
+        );
+        registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Delayed {
+            message: pa_ai::faux::faux_assistant_text_message(
+                "## Goal\nsummarized goal",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ),
+            delay_ms,
+        }]);
+        let global_dir = tmp.path().join("agent").join("harness");
+        let local_dir = tmp
+            .path()
+            .join("session-artifacts")
+            .join("s1")
+            .join("harness");
+        let mut global = crate::refinement::empty_harness_state();
+        global
+            .entries
+            .get_mut(&crate::refinement::RefinementKind::Memory)
+            .unwrap()
+            .insert(
+                "aaa_wombat".to_string(),
+                placement_memory(
+                    "aaa_wombat",
+                    "wombat widget notes",
+                    "the wombat widget checklist lives here",
+                    crate::refinement::HarnessScope::Global,
+                ),
+            );
+        crate::refinement::save_harness_state(&global_dir, &global).unwrap();
+        let mut local = crate::refinement::empty_harness_state();
+        local
+            .entries
+            .get_mut(&crate::refinement::RefinementKind::Memory)
+            .unwrap()
+            .insert(
+                "bbb_zebra".to_string(),
+                placement_memory(
+                    "bbb_zebra",
+                    "zebra gadget notes",
+                    "the zebra gadget checklist lives here",
+                    crate::refinement::HarnessScope::Local,
+                ),
+            );
+        crate::refinement::save_harness_state(&local_dir, &local).unwrap();
+
+        // Durable entries: two settled turns plus the interrupted turn's
+        // user row, then the persisted goal state.
+        let mut session = SessionManager::in_memory(tmp.path());
+        let session_user = |text: &str| {
+            pa_types::session::AgentMessage::User(pa_types::ai::UserMessage {
+                content: UserContent::Text(text.to_string()),
+                timestamp: 0,
+                rest: serde_json::Map::default(),
+            })
+        };
+        let assistant_row = pa_types::ai::AssistantMessage {
+            content: vec![pa_types::ai::AssistantContentBlock::Text(
+                pa_types::ai::TextContent {
+                    text: "reply zero words".to_string(),
+                    text_signature: None,
+                    rest: serde_json::Map::default(),
+                },
+            )],
+            api: "openai-completions".to_string(),
+            provider: "test".to_string(),
+            model: "digest-placement-m".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: pa_types::ai::Usage {
+                input: 100,
+                output: 20,
+                cache_read: 0,
+                cache_write: 0,
+                total_tokens: 120,
+                cost: pa_types::ai::UsageCost::default(),
+            },
+            stop_reason: pa_types::ai::StopReason::Stop,
+            stop_reason_raw: None,
+            error_message: None,
+            timestamp: 0,
+            rest: serde_json::Map::default(),
+        };
+        session
+            .append_message(session_user("turn zero words"))
+            .unwrap();
+        session
+            .append_message(pa_types::session::AgentMessage::Assistant(
+                assistant_row.clone(),
+            ))
+            .unwrap();
+        session
+            .append_message(session_user("unfinished turn three words"))
+            .unwrap();
+        let goal = pa_types::goal::GoalState {
+            active: true,
+            status: pa_types::goal::GoalStatus::Active,
+            goal_id: Some("placement-goal".to_string()),
+            objective: Some("launch checklist work".to_string()),
+            ..Default::default()
+        };
+        session
+            .append_custom_entry(
+                crate::goals::GOAL_STATE_CUSTOM_TYPE,
+                Some(serde_json::to_value(&goal).unwrap()),
+            )
+            .unwrap();
+
+        // The live context mirrors the entries (the loop's wire shapes).
+        let live = vec![
+            AgentMessage::Standard(Message::User(pa_agent::types::UserMessage {
+                content: UserContent::Text("turn zero words".to_string()),
+                timestamp: 0,
+                rest: serde_json::Map::default(),
+            })),
+            AgentMessage::Standard(Message::Assistant(assistant_row)),
+            AgentMessage::Standard(Message::User(pa_agent::types::UserMessage {
+                content: UserContent::Text("unfinished turn three words".to_string()),
+                timestamp: 2,
+                rest: serde_json::Map::default(),
+            })),
+        ];
+        let agent = std::sync::Arc::new(pa_agent::agent::Agent::new(
+            pa_agent::agent::AgentOptions {
+                initial_state: pa_agent::agent::AgentInitialState {
+                    messages: Some(live),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ));
+        let mut engine = crate::session_engine::AgentSession::from_session_arc(
+            agent,
+            std::sync::Arc::new(tokio::sync::Mutex::new(session)),
+            Vec::new(),
+            Some(HarnessDigestContext {
+                global_dir,
+                local_dir: Some(local_dir),
+                include_ipython: false,
+                include_shell_examples: false,
+                include_refine: false,
+            }),
+        )
+        .await
+        .unwrap();
+        engine.set_compaction_settings(crate::session_engine::compaction::CompactionSettings {
+            keep_recent_tokens: 2,
+            ..Default::default()
+        });
+        let objective = {
+            let session = engine.session.lock().await;
+            crate::session_engine::goal_driver::GoalDriver::load_persisted(&session)
+                .state()
+                .objective
+                .clone()
+        };
+        (engine, registration, objective)
+    }
+
+    /// Spawn the rig's compaction and wait for the served-path signal: the
+    /// summarizer request is in flight (the faux call arrived) and the
+    /// compact task is unfinished — the ENTER→commit window is open.
+    async fn spawn_compact(
+        engine: std::sync::Arc<crate::session_engine::AgentSession>,
+        model: &pa_types::ai::Model,
+        registration: &pa_ai::faux::FauxProviderRegistration,
+    ) -> tokio::task::JoinHandle<
+        anyhow::Result<crate::session_engine::compact_session::CompactOutcome>,
+    > {
+        let handle = tokio::spawn(async move {
+            engine.compact(None, model, None, None).await
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while registration.call_count() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the summarizer request never arrived"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        assert!(
+            !handle.is_finished(),
+            "the compaction must still be in flight when the window is sampled"
+        );
+        handle
+    }
+
+    /// The commit-time placement's capture, sampled mid-window: the same
+    /// pieces `harness_digest_inputs()` reads, taken without the session
+    /// lock (the compaction holds it for the whole window — which is also
+    /// the structural proof the goal term is frozen in-window: every goal
+    /// mutation path serializes on that lock, so the pre-window read
+    /// equals the commit-moment value).
+    async fn commit_moment_inputs(
+        engine: &crate::session_engine::AgentSession,
+        goal_objective: Option<&str>,
+    ) -> Option<HarnessDigestInputs> {
+        let context = engine.harness_digest.clone()?;
+        let texts = engine.recent_message_texts_newest_first().await;
+        let terms = digest_query_terms(goal_objective, &texts);
+        Some(HarnessDigestInputs { context, terms })
+    }
+
+    /// Oracle A — the frozen classes: with nothing mutating the live
+    /// context inside the window, the ENTER capture and the commit-time
+    /// capture render byte-identical digests, and the durable row carries
+    /// exactly that digest. The placement is content-equivalent wherever
+    /// the window is writer-free — and TS's window always is (its input
+    /// pump defers on `isCompacting`), so the ENTER capture matches TS's
+    /// effective commit-time content in every frozen class.
+    #[tokio::test]
+    async fn compact_digest_capture_placements_match_byte_for_byte_in_frozen_windows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (engine, registration, goal) = placement_rig(&tmp, 300).await;
+        let model = registration.get_model();
+
+        // The ENTER-side capture: the same call `AgentSession::compact`
+        // makes at ENTER, taken here for the cross-check.
+        let enter_inputs = engine
+            .harness_digest_inputs()
+            .await
+            .expect("the rig wires a harness digest context");
+        let enter_digest = enter_inputs.render();
+
+        let engine = std::sync::Arc::new(engine);
+        let handle = spawn_compact(engine.clone(), &model, &registration).await;
+
+        // The commit-time capture, sampled while the summarizer holds.
+        let commit_inputs =
+            commit_moment_inputs(&engine, goal.as_deref()).await.expect("the rig wires a harness digest context");
+        // Anti-vacuity: the sample really observed the open window's
+        // term source (identical texts), not a post-hoc state.
+        assert_eq!(commit_inputs.terms, enter_inputs.terms);
+        let commit_digest = commit_inputs.render();
+
+        let outcome = handle.await.unwrap().unwrap();
+        let crate::session_engine::compact_session::CompactOutcome::Ran(run) = outcome else {
+            panic!("expected the compaction to run");
+        };
+        let committed = run
+            .entry
+            .harness_digest
+            .as_deref()
+            .expect("digest on the durable row");
+        assert_eq!(
+            committed, enter_digest,
+            "the durable row carries the ENTER capture's render"
+        );
+        assert_eq!(
+            commit_digest.as_str(),
+            committed,
+            "the two placements must be byte-identical in a frozen window"
+        );
+        assert_eq!(
+            run.entry.harness_state_fingerprint.as_deref(),
+            Some(commit_inputs.render_with_fingerprint().state_fingerprint.as_str()),
+            "the state fingerprint is placement-independent (one state read per render)"
+        );
+        // The goal term is frozen across the window (the structural proof
+        // is the lock the compaction holds; assert the freeze directly).
+        let post_goal = {
+            let session = engine.session.lock().await;
+            crate::session_engine::goal_driver::GoalDriver::load_persisted(&session)
+                .state()
+                .objective
+                .clone()
+        };
+        assert_eq!(post_goal, goal);
+        registration.unregister();
+    }
+
+    /// Oracle B — the racing class: a resume-site admission mid-compaction
+    /// (the port's turn runner starts the turn during the compaction; the
+    /// racing row is reproduced here in the writer's context shape — the
+    /// user row landing on the live context) shows the two placements
+    /// apart: the commit-time capture ranks the racing row's terms into
+    /// the digest — rows TS's commit capture never sees — while the ENTER
+    /// capture, and the durable row, keep the frozen pre-race content.
+    #[tokio::test]
+    async fn compact_digest_capture_commit_time_placement_sees_racing_rows_enter_never_does() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (engine, registration, goal) = placement_rig(&tmp, 300).await;
+        let model = registration.get_model();
+
+        let enter_inputs = engine
+            .harness_digest_inputs()
+            .await
+            .expect("the rig wires a harness digest context");
+        let enter_digest = enter_inputs.render();
+        assert!(
+            !enter_inputs.terms.contains_key("zebra"),
+            "the pre-race terms must not carry the racing keyword"
+        );
+
+        let engine = std::sync::Arc::new(engine);
+        let handle = spawn_compact(engine.clone(), &model, &registration).await;
+
+        // The racing admission's writer effect (worker input resume site
+        // -> the turn runner picks the item up mid-compaction ->
+        // `prompt_with_images` -> `agent.prompt` lands the user row on the
+        // live context): the row landing is the context shape a racing
+        // turn produces.
+        let racing_row = AgentMessage::user("urgent zebra gadget steer");
+        let mut raced = engine.agent.state().await.messages;
+        raced.push(racing_row);
+        engine.agent.set_messages(raced).await;
+        assert!(
+            !handle.is_finished(),
+            "the compaction must still be in flight after the racing row lands"
+        );
+
+        let commit_inputs =
+            commit_moment_inputs(&engine, goal.as_deref()).await.expect("the rig wires a harness digest context");
+        // Served-path: the racing row reached the commit-time capture.
+        assert!(
+            commit_inputs.terms.contains_key("zebra"),
+            "the racing row must reach the commit-time capture"
+        );
+        let commit_digest = commit_inputs.render();
+
+        // The placements come apart: the commit-time digest ranks the
+        // zebra-bearing memory first, the ENTER digest keeps the
+        // zero-term key order (wombat first).
+        assert_ne!(
+            commit_digest, enter_digest,
+            "the racing class must diverge the two placements"
+        );
+        let enter_wombat = enter_digest
+            .find("wombat widget notes")
+            .expect("the wombat memory renders at ENTER");
+        let enter_zebra = enter_digest
+            .find("zebra gadget notes")
+            .expect("the zebra memory renders at ENTER");
+        assert!(enter_wombat < enter_zebra);
+        let commit_zebra = commit_digest
+            .find("zebra gadget notes")
+            .expect("the zebra memory renders at the commit");
+        let commit_wombat = commit_digest
+            .find("wombat widget notes")
+            .expect("the wombat memory renders at the commit");
+        assert!(commit_zebra < commit_wombat);
+
+        // THE SHIELD: the durable row keeps the ENTER (TS-frozen)
+        // content — the racing row never reaches it. The divergence is
+        // the terms-driven ranking only: the state fingerprint (the
+        // harness state behind the digest, TS #2400) matches across
+        // placements — the racing row changes no harness state.
+        let outcome = handle.await.unwrap().unwrap();
+        let crate::session_engine::compact_session::CompactOutcome::Ran(run) = outcome else {
+            panic!("expected the compaction to run");
+        };
+        let committed = run
+            .entry
+            .harness_digest
+            .as_deref()
+            .expect("digest on the durable row");
+        assert_eq!(
+            committed, enter_digest,
+            "the ENTER capture shields the durable row from the racing admission"
+        );
+        let commit_fingerprint = commit_inputs.render_with_fingerprint().state_fingerprint;
+        assert_eq!(
+            run.entry.harness_state_fingerprint.as_deref(),
+            Some(commit_fingerprint.as_str()),
+            "the state fingerprint matches across placements in every class"
+        );
+        registration.unregister();
+    }
 }
