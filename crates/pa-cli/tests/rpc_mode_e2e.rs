@@ -1274,7 +1274,16 @@ fn rpc_compact_flushes_the_start_frame_before_the_pipeline() {
     write_corpus_fixture(&fixture, 10);
     let mut client = TimedRpcChild::spawn(
         &fixture,
-        &json!({ "responses": [ { "text": "corpus summary: the scale corpus ran" } ], "repeatLastResponse": true }),
+        &json!({
+        // The faux harness's response budget is finite (repeat-last is a
+        // daemon-seam key the CLI harness ignores): the split-turn cut
+        // makes two concurrent summarizer calls, so the script queues
+        // one response each.
+        "responses": [
+            { "text": "corpus history summary: the scale corpus ran" },
+            { "text": "corpus turn-prefix summary: the final marker" },
+        ],
+    }),
     );
     let (ready, _) = client.command(&json!({ "type": "get_state" }));
     let (_, _) = client.wait_response(&ready, TIMEOUT);
@@ -1282,7 +1291,7 @@ fn rpc_compact_flushes_the_start_frame_before_the_pipeline() {
     let (response, events) = client.wait_response(&id, TIMEOUT);
     assert_eq!(response["success"], true, "the response: {response}");
     let result = &response["data"];
-    assert_eq!(result["summary"], "corpus summary: the scale corpus ran");
+    assert_eq!(result["summary"], "corpus history summary: the scale corpus ran");
     assert!(result["tokensBefore"].is_number(), "the CompactionResult shape");
     let mut cs: Option<(Instant, &Value)> = None;
     let mut ce: Option<(Instant, &Value)> = None;
@@ -1333,7 +1342,16 @@ fn rpc_compact_flush_is_bounded_against_a_stalled_reader() {
     write_corpus_fixture(&fixture, 10);
     let mut client = TimedRpcChild::spawn(
         &fixture,
-        &json!({ "responses": [ { "text": "corpus summary: the scale corpus ran" } ], "repeatLastResponse": true }),
+        &json!({
+        // The faux harness's response budget is finite (repeat-last is a
+        // daemon-seam key the CLI harness ignores): the split-turn cut
+        // makes two concurrent summarizer calls, so the script queues
+        // one response each.
+        "responses": [
+            { "text": "corpus history summary: the scale corpus ran" },
+            { "text": "corpus turn-prefix summary: the final marker" },
+        ],
+    }),
     );
     // No reader thread touches stdout until the stall window closes:
     // the get_state response (the session's whole serialized context,
