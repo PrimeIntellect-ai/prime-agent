@@ -1402,10 +1402,27 @@ fn rpc_compact_flush_is_bounded_against_a_stalled_reader() {
     // compaction row is already in the session file. An unbounded drain
     // would still be spinning in its wait loop — no row, and the test
     // fails right here.
-    let session = std::fs::read_to_string(&fixture).expect("session file");
-    let compacted_behind_the_stall = session
-        .lines()
-        .any(|line| line.contains("\"type\":\"compaction\""));
+    // The compaction runs BEHIND the stalled pipe: the budget expired
+    // (50ms) instead of waiting the reader out, so the durable
+    // compaction row lands in the session file while no reader drains
+    // the child. An unbounded drain would still be spinning in its wait
+    // loop — no row ever lands while the reader is stalled, and the
+    // poll deadline fails right here. (The row's landing time varies
+    // with the pipe-stall CPU contention, hence the poll instead of a
+    // fixed sleep.)
+    let row_deadline = Instant::now() + Duration::from_secs(4);
+    let mut compacted_behind_the_stall = false;
+    while Instant::now() < row_deadline {
+        let session = std::fs::read_to_string(&fixture).expect("session file");
+        if session
+            .lines()
+            .any(|line| line.contains("\"type\":\"compaction\""))
+        {
+            compacted_behind_the_stall = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
     assert!(
         compacted_behind_the_stall,
         "the compaction never ran behind the stalled reader: the flush \
