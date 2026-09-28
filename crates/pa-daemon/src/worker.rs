@@ -872,10 +872,18 @@ pub async fn run_worker() -> Result<()> {
         return Err(anyhow!("worker mode requires {WORKER_ROLE_ENV}=1"));
     }
     let config = WorkerConfig::from_env()?;
+    let boot_key = config
+        .socket_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    crate::launch_trace::mark(&boot_key, "boot-config-parsed");
     // Self-registration: the supervisor's roster survives its own restarts
     // because workers re-present their identity (liveness watch + backoff).
     let registration = crate::registration::start(&config);
+    crate::launch_trace::mark(&boot_key, "boot-registration-started");
     let worker = Arc::new(Worker::new(config, registration));
+    crate::launch_trace::mark(&boot_key, "boot-worker-new");
     // The refused-registration self-heal: a supervisor that destroyed this
     // worker's durable identity (its descriptor) can never adopt it again,
     // so the registration loop's definitive rejection retires the worker —

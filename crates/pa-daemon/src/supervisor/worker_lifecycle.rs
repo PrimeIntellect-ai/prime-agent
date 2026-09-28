@@ -196,6 +196,7 @@ impl Supervisor {
             ));
         }
         let worker_id = util::new_display_id();
+        crate::launch_trace::mark(&worker_id, "launch-enter");
         let worker_socket = socket::worker_socket_path(&self.options.socket_path, &worker_id);
         let now = util::now_iso();
         let mut durable_rest = serde_json::Map::new();
@@ -297,6 +298,7 @@ impl Supervisor {
         let child = match self.spawn_worker_process(&resident, deadline).await {
             Ok(child) => child,
             Err(error) => {
+                crate::launch_trace::mark(&worker_id, "launch-fail phase=spawn-probe");
                 self.registry.remove(&worker_id).await;
                 // The half-launched worker's descriptor dies with the
                 // launch: a restart must not adopt it and replay its
@@ -307,6 +309,7 @@ impl Supervisor {
             }
         };
         if let Err(error) = self.connect_worker(&resident, deadline).await {
+            crate::launch_trace::mark(&worker_id, "launch-fail phase=connect-auth");
             // Never leave a spawned-but-unwired worker process behind.
             let mut child = child;
             let _ = child.kill().await;
@@ -320,6 +323,7 @@ impl Supervisor {
             create_command_payload(&descriptor.create_command)
         };
         let mut child = child;
+        crate::launch_trace::mark(&worker_id, "create-enter");
         let response = match self
             .route_command_typed(
                 &resident,
@@ -330,8 +334,12 @@ impl Supervisor {
             )
             .await
         {
-            Ok(response) => response,
+            Ok(response) => {
+                crate::launch_trace::mark(&worker_id, "create-answered");
+                response
+            }
             Err(error) => {
+                crate::launch_trace::mark(&worker_id, "launch-fail phase=create-route");
                 // The connected child dies with the failed create: an
                 // unmanaged survivor would keep the session file while a
                 // retry mints a second worker over it.
@@ -343,6 +351,7 @@ impl Supervisor {
             }
         };
         if !response.success {
+            crate::launch_trace::mark(&worker_id, "create-refused");
             let _ = child.kill().await;
             let _ = std::fs::remove_file(&descriptor_path);
             self.registry.remove(&worker_id).await;
@@ -723,11 +732,19 @@ pub(super) async fn probe_worker_socket(
     // (see `launch_budget`).
     #[cfg(not(unix))]
     let mut backoff_ms = WORKER_PROBE_BACKOFF_MIN_MS;
+    let mut attempt: u32 = 0;
     loop {
-        if socket::can_connect(socket_path, Duration::from_millis(WORKER_CONNECT_PROBE_MS)).await {
+        attempt += 1;
+        let connected = socket::can_connect(socket_path, Duration::from_millis(WORKER_CONNECT_PROBE_MS)).await;
+        if connected {
+            crate::launch_trace::mark(worker_id, &format!("probe-ok attempts={attempt}"));
             return Ok(());
         }
+        if attempt == 1 || attempt % 20 == 0 {
+            crate::launch_trace::mark(worker_id, &format!("probe-retry attempt={attempt}"));
+        }
         if tokio::time::Instant::now() >= connect_deadline {
+            crate::launch_trace::mark(worker_id, &format!("probe-budget-out attempts={attempt}"));
             return Err(anyhow!(
                 "session worker {worker_id} did not come up in time"
             ));

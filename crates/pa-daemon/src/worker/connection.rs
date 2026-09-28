@@ -201,6 +201,16 @@ impl Drop for SupervisorClaimRelease {
 }
 
 impl Worker {
+    /// The launch-trace key for this worker: the socket file's base name,
+    /// shared with the supervisor's probe side of the same launch.
+    fn boot_key(&self) -> String {
+        self.config
+            .socket_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default()
+    }
+
     /// Serve worker connections until the process is asked to shut down.
     ///
     /// # Errors
@@ -217,6 +227,7 @@ impl Worker {
         *self.recovery.lock().unwrap() = Some(WorkerRecoveryJournal::open(
             &self.config.recovery_journal_path,
         )?);
+        crate::launch_trace::mark(&self.boot_key(), "boot-recovery-open");
         // A worker spawned under a supervisor arms the orphan-exit monitor
         // (TS `startSupervisorMonitor`): nobody else reaps it if the
         // supervisor dies without a graceful stop.
@@ -224,13 +235,16 @@ impl Worker {
             crate::supervisor_lost::start(self.clone());
         }
         crate::socket::prepare_socket_path(&self.config.socket_path).await?;
+        crate::launch_trace::mark(&self.boot_key(), "boot-socket-prepared");
         let listener = bind_transport(&self.config.socket_path)
             .await
             .with_context(|| format!("bind worker socket {}", self.config.socket_path.display()))?;
+        crate::launch_trace::mark(&self.boot_key(), "boot-bound");
         crate::socket::restrict_socket_path(&self.config.socket_path);
         loop {
             let stream = match listener.accept().await {
                 Ok(accepted) => {
+                    crate::launch_trace::mark(&self.boot_key(), "boot-accept");
                     if std::env::var("PA_DAEMON_DEBUG").is_ok() {
                         eprintln!("[worker {}] accepted connection", std::process::id());
                     }
@@ -539,6 +553,9 @@ impl Worker {
         if command_type == "peer_auth" {
             return self.handle_peer_auth(payload, request_id, role, sink).await;
         }
+        if command_type == "worker_auth" {
+            crate::launch_trace::mark(&self.boot_key(), "boot-auth-received");
+        }
         if command_type != "worker_auth" {
             let failure = response_failure(
                 Some(request_id),
@@ -551,6 +568,7 @@ impl Worker {
         }
         match self.authenticate(payload) {
             Ok(()) => {
+                crate::launch_trace::mark(&self.boot_key(), "boot-auth-handled");
                 if std::env::var("PA_DAEMON_DEBUG").is_ok() {
                     eprintln!("[worker {}] auth ok", std::process::id());
                 }
