@@ -230,7 +230,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let headroom = crossing_headroom();
         let (engine, _dir) = trigger_engine(
-            json!({
+            &json!({
                 "responses": [
                     {"text": "seed reply"},
                     {"text": "crossing reply"},
@@ -296,7 +296,7 @@ mod tests {
         // reserve 1: the headroom never crosses, so only the manual
         // compaction runs.
         let (engine, _dir) = trigger_engine(
-            json!({
+            &json!({
                 "responses": [
                     {"text": "first reply"},
                     {"text": "second reply"},
@@ -375,7 +375,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let headroom = crossing_headroom();
         let (engine, _dir) = trigger_engine(
-            json!({
+            &json!({
                 "responses": [
                     {"text": "seed reply"},
                     {"text": "crossing reply"},
@@ -425,7 +425,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = trigger_engine(
-            json!({
+            &json!({
                 "responses": [
                     {"text": "first reply"},
                     {"text": "second reply"},
