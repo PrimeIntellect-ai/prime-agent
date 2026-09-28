@@ -639,8 +639,7 @@ fn headless_image_model_router(
                 .read()
                 .expect("provider target lock")
                 .as_ref()
-                .map(|target| target.model.clone())
-                .unwrap_or_else(|| session_model.clone());
+                .map_or_else(|| session_model.clone(), |target| target.model.clone());
             let settings = pa_core::settings::SettingsManager::create(&cwd, &decide_agent_dir);
             let image_model_reference = settings.get_image_model();
             let block_images = settings.get_block_images();
