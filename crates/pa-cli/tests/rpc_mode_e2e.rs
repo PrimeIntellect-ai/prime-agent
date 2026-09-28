@@ -1046,7 +1046,7 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
             "message": {
                 "role": "user",
                 "content": [{ "type": "text", "text": format!("please do task number {turn}") }],
-                "timestamp": 1789584016603 + turn,
+                "timestamp": 1789584016603i64 + turn,
             },
             "type": "message",
         }));
@@ -1073,7 +1073,7 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
                     "cost": { "input": 0.1, "output": 0.02, "cacheRead": 0, "cacheWrite": 0, "total": 0.12 },
                 },
                 "stopReason": "tool_calls",
-                "timestamp": 1789584016603 + turn,
+                "timestamp": 1789584016603i64 + turn,
             },
             "type": "message",
         }));
@@ -1084,7 +1084,7 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
                 "toolCallId": call_id,
                 "content": [{ "type": "text", "text": format!("corpus {turn}\n[0, 1, 2]\n") }],
                 "isError": false,
-                "timestamp": 1789584016603 + turn,
+                "timestamp": 1789584016603i64 + turn,
             },
             "type": "message",
         }));
@@ -1104,7 +1104,7 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
         "message": {
             "role": "user",
             "content": [{ "type": "text", "text": "final marker request" }],
-            "timestamp": 1789584016603,
+            "timestamp": 1789584016603i64,
         },
         "type": "message",
     }));
@@ -1125,7 +1125,7 @@ fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
                 "cost": { "input": 0.1, "output": 0.02, "cacheRead": 0, "cacheWrite": 0, "total": 0.12 },
             },
             "stopReason": "stop",
-            "timestamp": 1789584016603,
+            "timestamp": 1789584016603i64,
         },
         "type": "message",
     }));
