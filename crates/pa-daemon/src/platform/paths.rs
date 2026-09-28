@@ -117,6 +117,9 @@ mod tests {
             rendered.starts_with(r"\\.\pipe\prime-agent-worker-"),
             "the worker pipe namespace: {rendered}"
         );
-        assert!(rendered.ends_with("-0123456789ab"), "the 12-char id suffix: {rendered}");
+        assert!(
+            rendered.ends_with("-0123456789ab"),
+            "the 12-char id suffix: {rendered}"
+        );
     }
 }

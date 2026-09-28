@@ -1,11 +1,11 @@
 //! Worker lifecycle: the launch/probe/connect plumbing for new workers
 //! and the stop, kill, retire, and tombstone passes for resident ones.
 
+#[cfg(unix)]
+use super::launch_budget::WORKER_CONNECT_BACKOFF_MS;
 use super::launch_budget::{
     DEFAULT_WORKER_CONNECT_TIMEOUT_MS, WORKER_CONNECT_PROBE_MS, WORKER_CONNECT_TIMEOUT_ENV,
 };
-#[cfg(unix)]
-use super::launch_budget::WORKER_CONNECT_BACKOFF_MS;
 #[cfg(not(unix))]
 use super::launch_budget::{WORKER_PROBE_BACKOFF_MAX_MS, WORKER_PROBE_BACKOFF_MIN_MS};
 use super::*;
