@@ -49,7 +49,9 @@
 mod harness;
 mod ledger;
 
-use std::path::PathBuf;
+use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use harness::{
@@ -63,13 +65,10 @@ use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 
-use pa_tui::agents_view::{run_agents_view, AgentsViewUiMode, AgentsViewOptions};
-use pa_tui::app::{run_app, AppOptions};
 use pa_tui::config_selector::{
     run_config_selector, ConfigSelector, ConfigSelectorOptions, SelectorRow,
 };
-use pa_tui::keybindings::{KeybindingsConfig, KeybindingsManager};
-use pa_tui::session::JsonlSessionStream;
+use pa_tui::agents_view::AgentsViewUiMode;
 use pa_tui::interactive::{run_interactive, UiMode};
 
 /// The kitty flags push (`1|2|4`, the TS `ProcessTerminal` set): the arm
