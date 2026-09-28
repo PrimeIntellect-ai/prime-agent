@@ -8,7 +8,7 @@
 //! Divergence from TS: TS releases carry
 //! `package.json`, `install.sh`, `.archive-sha256`, and `.install-source`
 //! from the installer; the Rust release payload
-//! ships `prime-agent`, `prime-agent-runtime/`, `skills/`, `docs/`,
+//! ships `prime-agent`, `prime-agent-runtime/`, `skills/`,
 //! `LICENSE`, `README.md`, and the update flow writes `.archive-sha256` and
 //! `.install-source` itself at staging time. Validation checks the Rust
 //! payload, never the TS asset list.
@@ -97,7 +97,6 @@ pub const RELEASE_ASSETS: &[&str] = &[
     "prime-agent",
     "prime-agent-runtime",
     "skills",
-    "docs",
     "LICENSE",
     "README.md",
 ];
