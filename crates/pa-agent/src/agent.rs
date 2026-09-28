@@ -837,6 +837,21 @@ impl Agent {
         self.inner.shared.lock().await.state.messages = messages;
     }
 
+    /// Append rows to the transcript under ONE state lock: the atomic form
+    /// of the `state()` + `set_messages` read-modify-write the session
+    /// engine's push sites use, so a concurrent writer's rows cannot be
+    /// dropped between the two locks (TS's synchronous
+    /// `agent.state.messages.push`).
+    pub async fn append_messages(&self, messages: Vec<AgentMessage>) {
+        self.inner
+            .shared
+            .lock()
+            .await
+            .state
+            .messages
+            .extend(messages);
+    }
+
     /// The steering queue's mode.
     ///
     /// # Panics

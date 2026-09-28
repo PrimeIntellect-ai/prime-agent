@@ -23,7 +23,7 @@
 //!
 //! The staged layout is the TS native packaging contract (install.sh +
 //! copy-binary-assets.mjs): the binary plus `package.json` (the version
-//! manifest), the `prime-agent-runtime/` sidecar, `skills/`, and `docs/`
+//! manifest), the `prime-agent-runtime/` sidecar, and `skills/`
 //! beside it, all resolved at runtime from the executable's directory.
 
 use std::fmt::Write as _;
@@ -69,7 +69,7 @@ fn stage_packaged_layout(dir: &Path, with_runtime: bool) {
         ),
     )
     .expect("version manifest");
-    for asset in ["skills", "docs", "README.md"] {
+    for asset in ["skills", "README.md"] {
         let source = repo_root().join(asset);
         let target = dir.join(asset);
         if source.is_dir() {
@@ -633,13 +633,6 @@ fn packaging_dry_run_produces_artifact() {
         "---\nname: greet\ndescription: hi\n---\nHi.",
     )
     .unwrap();
-    let docs = tree.path().join("docs");
-    std::fs::create_dir_all(&docs).expect("docs tree");
-    // Every user-facing doc is REQUIRED payload content (SHIPPED_DOC_ENTRIES
-    // / package_release.py REQUIRED_FILES): the synthetic tree stages all three.
-    for doc in ["MODEL-SURFACE.md", "RUST_QUICKSTART.md", "keybindings.md"] {
-        std::fs::write(docs.join(doc), "# doc\n").unwrap();
-    }
     std::fs::write(tree.path().join("README.md"), "# readme\n").unwrap();
     std::fs::write(tree.path().join("LICENSE"), "Apache-2.0\n").unwrap();
     std::fs::write(

@@ -271,6 +271,12 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
     fn set_tree_filter_mode(&self, _mode: &str) -> Result<()> {
         Ok(())
     }
+    fn default_service_tier(&self) -> String {
+        "default".to_string()
+    }
+    fn set_default_service_tier(&self, _tier: &str) -> Result<()> {
+        Ok(())
+    }
     fn chat_detail(&self) -> String {
         "details".to_string()
     }
