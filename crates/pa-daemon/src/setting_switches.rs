@@ -230,13 +230,15 @@ impl Worker {
                 None,
             );
         }
+        // The new model may not keep the priority tier (TS
+        // `_clampServiceTierForModel`): the clamp runs BEFORE the roster
+        // flush so the published snapshot carries the clamped tier with
+        // the switched-to model (never the previous model's tier).
+        self.clamp_service_tier_for_model();
         // The cycled model (and any level the switch clamps) reaches the
         // roster surfaces immediately: the TS `cycle_model` daemon handler
         // schedules a roster flush after the switch, matching `set_model`.
         self.push_roster_delta();
-        // The new model may not keep the priority tier (TS
-        // `_clampServiceTierForModel`).
-        self.clamp_service_tier_for_model();
         let (thinking_level, service_tier) = {
             let core = self.core.lock().unwrap();
             (

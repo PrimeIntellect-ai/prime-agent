@@ -157,7 +157,7 @@ impl SessionUi {
                 }
             }
         }
-        self.update_fast_filter(view);
+        self.update_model_eligibility_filters(view);
         Ok(())
     }
 
@@ -244,7 +244,7 @@ impl SessionUi {
                 self.model_configured_providers.clone(),
             );
         }
-        self.update_fast_filter(view);
+        self.update_model_eligibility_filters(view);
         self.dirty = true;
     }
 

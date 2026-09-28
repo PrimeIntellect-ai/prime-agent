@@ -1020,7 +1020,11 @@ impl SessionUi {
         // stale shutdown recovery's reconnect hang.
         self.daemon_closing_notice = None;
         self.session_name.clone_from(&reconstructed.session_name);
+        // The tray badge mirrors the session-scoped tier on every attach: a
+        // session reporting no tier clears the previous session's badge
+        // instead of leaving it stranded.
         self.service_tier.clone_from(&reconstructed.service_tier);
+        view.chrome.service_tier.clone_from(&self.service_tier);
         self.session_file = attach
             .snapshot
             .get("state")

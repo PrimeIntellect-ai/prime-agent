@@ -254,6 +254,10 @@ impl SessionUi {
             values.tree_filter_mode = settings.tree_filter_mode();
             values.warnings_anthropic_extra_usage = settings.warnings_anthropic_extra_usage();
             values.theme = settings.theme().unwrap_or_else(|| "prime".to_string());
+            // TS reads the persisted default tier through the settings
+            // manager (`getDefaultServiceTier`): the tier row preselects
+            // the saved value instead of the struct default.
+            values.default_service_tier = settings.default_service_tier();
         } else {
             values.show_images = true;
             values.auto_resize_images = true;
