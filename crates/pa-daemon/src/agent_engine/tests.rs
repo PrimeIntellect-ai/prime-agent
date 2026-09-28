@@ -5921,6 +5921,14 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
         if parent.is_none() {
             row.as_object_mut().unwrap().remove("parentId");
         }
+        // The window walk requires the assistant message's provider/model
+        // pair (the leaf's model fold): an assistant row without them
+        // reads as ambiguous ancestry and the open falls back.
+        if role == "assistant" {
+            let message = row["message"].as_object_mut().unwrap();
+            message.insert("provider".into(), json!("faux"));
+            message.insert("model".into(), json!("faux-1"));
+        }
         row
     };
     let goal_row = |id: &str, parent: &str| {
@@ -5997,7 +6005,7 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
         }
         std::fs::write(&path, content).unwrap();
         let opened = pa_core::session::window::WindowedSessionStore::open(&path);
-        let window_served = opened.as_ref().is_ok_and(|window| window.is_some());
+        let window_served = opened.as_ref().is_ok_and(std::option::Option::is_some);
         assert_eq!(
             window_served, window_serves,
             "goal class {name}: the window-served outcome must match the class (the windowed classes must exercise the WINDOW path, the fallback classes the full reader)"
