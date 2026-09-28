@@ -418,6 +418,16 @@ PRIME_AGENT_RUST_PREFIX="$mach3/home/.prime/agent" \
 PATH="$mach3/mocks:$(dirname "$(command -v python3)"):/usr/bin:/bin" \
   sh "$INSTALLER" > "$mach3/install.log" 2>&1
 rcg=$?
+# Same store reached through a SYMLINKED spelling: the resolved guard must
+# abort before mkdir -p creates anything under the store.
+ln -s "$mach3/home/.prime/agent" "$mach3/home/linked-store"
+HOME="$mach3/home" TMPDIR="$mach3/tmp" GH_FIXTURE_DIR="$mach3/fixture" \
+PRIME_AGENT_RUST_PREFIX="$mach3/home/linked-store" \
+PATH="$mach3/mocks:$(dirname "$(command -v python3)"):/usr/bin:/bin" \
+  sh "$INSTALLER" > "$mach3/install-linked.log" 2>&1
+rcl=$?
+assert_eq "case 3 symlinked-store spelling aborts" 1 "$rcl"
+assert_contains "case 3 symlinked refusal names the shared store" "$mach3/install-linked.log" "refusing to touch"
 assert_eq "case 3 installer aborts" 1 "$rcg"
 assert_contains "case 3 refusal names the shared store" "$mach3/install.log" "refusing to touch"
 assert_contains "case 3 refusal explains the invariant" "$mach3/install.log" "must never be created, migrated, or deleted"
@@ -507,6 +517,30 @@ assert_eq "case 6 no half-installed payload remains" "gone" \
 assert_eq "case 6 no legacy slot remains" "gone" \
   "$([ -e "$mach6/home/.local/share/prime-agent-legacy" ] && echo here || echo gone)"
 assert_eq "case 6 the store is untouched" "$store_before_r" "$(store_snapshot "$mach6")"
+
+# ==============================================================================
+echo "== case 7: a pre-launcher failure never displaces the user's unowned command =="
+mach7="$(new_machine no-displace)"
+write_gh_mock "$mach7/mocks/gh"
+write_npm_mock "$mach7/mocks/npm"
+build_fixture "$mach7" "$FIXTURE_TRIPLE"
+seed_store "$mach7"
+mkdir -p "$mach7/home/.local/bin"
+printf '#!/bin/sh\necho my own tool\n' > "$mach7/home/.local/bin/prime-agent"
+chmod 0755 "$mach7/home/.local/bin/prime-agent"
+# A read-only share dir kills the install at the staging step — long before
+# the launcher section: the user's command file must not even be displaced.
+mkdir -p "$mach7/home/.local/share"
+chmod 0555 "$mach7/home/.local/share"
+run_installer "$mach7"
+rcs=$?
+chmod 0755 "$mach7/home/.local/share"
+assert_eq "case 7 the early failure exits nonzero" 0 "$([ "$rcs" -ne 0 ] && echo 0 || echo 1)"
+assert_contains "case 7 the user's command file is untouched" "$mach7/home/.local/bin/prime-agent" "my own tool"
+assert_eq "case 7 no pre-takeover aside file exists" "gone" \
+  "$(for f in "$mach7"/home/.local/bin/prime-agent.pre-takeover.*; do [ -e "$f" ] && echo here; done; echo gone | head -1)"
+assert_eq "case 7 our launcher never landed" "gone" \
+  "$([ -f "$mach7/home/.local/share/prime-agent/.prime-agent-install" ] && echo here || echo gone)"
 
 echo
 echo "passed: $passed  failed: $failures"

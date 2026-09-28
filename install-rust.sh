@@ -161,13 +161,12 @@ case "$PREFIX" in
   /*) ;;
   *) die "PRIME_AGENT_RUST_PREFIX must be an absolute path: ${PREFIX}" ;;
 esac
-PREFIX="$(python3 -c 'import os, sys; print(os.path.normpath(sys.argv[1]))' "$PREFIX")"
-guard_preserved "$PREFIX" "${PREFIX}/share" "${PREFIX}/bin"
-mkdir -p "${PREFIX}/share" "${PREFIX}/bin"
-# Resolve symlinks and '.'/'..' after creating the roots (the TS installer's
-# own prepare-root pattern) and re-check the guard against the resolved value.
+# Resolve PREFIX FULLY (symlinks included) BEFORE creating anything under
+# it: a prefix whose spelling hides a symlink into the shared store must
+# abort before mkdir -p ever writes there, not after.
 PREFIX="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$PREFIX")"
 guard_preserved "$PREFIX" "${PREFIX}/share" "${PREFIX}/bin"
+mkdir -p "${PREFIX}/share" "${PREFIX}/bin"
 # The guard must also see THROUGH symlinked child roots: a ${PREFIX}/share or
 # ${PREFIX}/bin that is a symlink into the shared store would otherwise let
 # the publish write under it while every lexical check passes. Resolving the
@@ -549,9 +548,20 @@ until ln -s $$ "$lock_link" 2>/dev/null; do
 done
 launcher_tmp=""
 displaced_ts_root=""
+preserved_launcher=""
 on_exit() {
   rm -f "$lock_link"
   [ -n "$launcher_tmp" ] && rm -f "$launcher_tmp" 2>/dev/null || true
+  # The user's unowned command file goes home if the Rust launcher never
+  # went live (the same restore discipline as the displaced TS tree): a
+  # failed launcher write must not leave the machine without ANY
+  # prime-agent command.
+  if [ -n "$preserved_launcher" ]; then
+    if mv "$preserved_launcher" "$launcher" 2>/dev/null; then
+      echo "note: the existing prime-agent command was restored to ${launcher} — the install did not complete" >&2
+    fi
+    preserved_launcher=""
+  fi
   restore_ts_root
 }
 trap on_exit EXIT
@@ -668,11 +678,12 @@ if [ -e "$launcher" ] || [ -L "$launcher" ]; then
   elif grep -q 'launcher written by install-rust.sh' "$launcher" 2>/dev/null; then
     :   # this installer's own previous launcher: plain replace below
   else
-    preserved_launcher="${bin_dir}/prime-agent.pre-takeover.$$"
-    mv "$launcher" "$preserved_launcher" \
+    preserved_cmd_path="${bin_dir}/prime-agent.pre-takeover.$$"
+    mv "$launcher" "$preserved_cmd_path" \
       || die "could not preserve the existing file at ${launcher}; resolve it and re-run"
+    preserved_launcher="$preserved_cmd_path"
     echo "note: an unrelated prime-agent command existed at ${launcher};"
-    echo "  it was preserved at ${preserved_launcher}"
+    echo "  it was preserved at ${preserved_cmd_path}"
   fi
 fi
 launcher_tmp="$(mktemp "${bin_dir}/.prime-agent.XXXXXX")"
@@ -698,8 +709,10 @@ chmod 0755 "$launcher_tmp"
 mv -f "$launcher_tmp" "$launcher"
 launcher_tmp=""
 # The Rust launcher is live: the takeover stands — the displaced TS tree
-# stays in its legacy slot (with the printed rollback commands).
+# stays in its legacy slot (with the printed rollback commands) and the
+# preserved command file stays in its aside slot.
 displaced_ts_root=""
+preserved_launcher=""
 
 # Retire the launcher's own pre-takeover name (marker-checked: only ever
 # remove the shim this script wrote, never a user's file).
