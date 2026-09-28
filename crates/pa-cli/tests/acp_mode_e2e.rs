@@ -224,7 +224,7 @@ fn acp_prompt_stream_completion_envelope_and_stop_reason_match_ts() {
 
     let prompt = client.request(
         "session/prompt",
-        json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "Reply with exactly: ACP-OK" }] }),
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "Reply with exactly: ACP-OK" }] }),
     );
     let (prompt_response, updates) = client.wait_response(prompt, TIMEOUT);
 
@@ -311,7 +311,7 @@ fn acp_prompt_chunk_carries_the_assistant_message_id() {
 
     let prompt = client.request(
         "session/prompt",
-        json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "hello" }] }),
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "hello" }] }),
     );
     let (_, updates) = client.wait_response(prompt, TIMEOUT);
     let chunk = updates
@@ -359,7 +359,7 @@ fn acp_error_shapes_match_the_ts_goldens() {
     // Unknown session (ts-errors.jsonl): -32603 with the details string.
     let prompt = client.request(
         "session/prompt",
-        json!({ "sessionId": "bogus-session", "prompt": [{ "type": "text", "text": "hi" }] }),
+        &json!({ "sessionId": "bogus-session", "prompt": [{ "type": "text", "text": "hi" }] }),
     );
     let (response, _) = client.wait_response(prompt, TIMEOUT);
     assert_eq!(response["error"]["code"], -32603);
@@ -413,7 +413,7 @@ fn acp_initialize_with_string_protocol_version_is_invalid_params() {
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
     let id = client.request(
         "initialize",
-        json!({ "protocolVersion": "1", "clientCapabilities": {} }),
+        &json!({ "protocolVersion": "1", "clientCapabilities": {} }),
     );
     let (response, _) = client.wait_response(id, TIMEOUT);
     assert_eq!(response["error"]["code"], -32602);
@@ -439,7 +439,7 @@ fn acp_image_block_without_mime_type_is_invalid_params() {
 
     let prompt = client.request(
         "session/prompt",
-        json!({ "sessionId": session_id, "prompt": [{ "type": "image", "data": "AAAA" }] }),
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "image", "data": "AAAA" }] }),
     );
     let (response, _) = client.wait_response(prompt, TIMEOUT);
     assert_eq!(response["error"]["code"], -32602);
@@ -491,7 +491,7 @@ fn acp_mcp_admission_accepts_valid_servers_and_close_releases() {
     let _ = client.wait_response(init, TIMEOUT);
     let new = client.request(
         "session/new",
-        json!({ "mcpServers": [
+        &json!({ "mcpServers": [
             { "name": "capture-stdio", "type": "stdio", "command": "cat", "args": [], "env": [{"name": "A", "value": "1"}] },
             { "name": "capture-http", "type": "http", "url": "https://mcp.invalid/capture", "headers": [{"name": "X-A", "value": "yes"}] },
         ]}),
@@ -514,7 +514,7 @@ fn acp_mcp_admission_rejects_a_second_session_only_when_open() {
     let _ = client.wait_response(init, TIMEOUT);
     let new = client.request(
         "session/new",
-        json!({ "mcpServers": [
+        &json!({ "mcpServers": [
             { "name": "first", "type": "stdio", "command": "cat", "args": [], "env": [] },
         ]}),
     );
@@ -527,7 +527,7 @@ fn acp_mcp_admission_rejects_a_second_session_only_when_open() {
     // internal with the raw details, exactly like the TS host.
     let second = client.request(
         "session/new",
-        json!({ "mcpServers": [
+        &json!({ "mcpServers": [
             { "name": "second", "type": "stdio", "command": "cat", "args": [], "env": [] },
         ]}),
     );
@@ -544,7 +544,7 @@ fn acp_mcp_admission_rejects_a_second_session_only_when_open() {
     assert_eq!(close_response["result"], json!({}));
     let replacement = client.request(
         "session/new",
-        json!({ "mcpServers": [
+        &json!({ "mcpServers": [
             { "name": "replacement", "type": "stdio", "command": "cat", "args": [], "env": [] },
         ]}),
     );
@@ -619,7 +619,7 @@ fn acp_mcp_schema_invalid_entries_are_dropped_like_the_sdk() {
     let new = client.request(
         "session/new",
         // No `env` (required), invalid env item, http without headers.
-        json!({ "mcpServers": [
+        &json!({ "mcpServers": [
             { "name": "no-env", "type": "stdio", "command": "cat", "args": [] },
             { "name": "bad-item", "type": "stdio", "command": "cat", "args": [], "env": [{"name": 1, "value": "x"}] },
             { "name": "no-headers", "type": "http", "url": "https://mcp.invalid/x" },
@@ -641,7 +641,7 @@ fn acp_mcp_long_names_fail_at_tool_derivation_with_internal_error() {
     let long = format!("a{}", "b".repeat(50));
     let new = client.request(
         "session/new",
-        json!({ "mcpServers": [
+        &json!({ "mcpServers": [
             { "name": long, "type": "stdio", "command": "cat", "args": [], "env": [] },
         ]}),
     );
@@ -706,7 +706,7 @@ fn acp_daemon_attached_serves_a_client_owned_session() {
         .to_string();
     let prompt = client.request(
         "session/prompt",
-        json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "Name a river." }] }),
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "Name a river." }] }),
     );
     let (prompt_response, updates) = client.wait_response(prompt, Duration::from_mins(2));
     assert_eq!(prompt_response["result"]["stopReason"], "end_turn");
@@ -762,7 +762,7 @@ fn acp_daemon_attached_admits_mcp_servers_through_the_wire() {
     // the replace_acp_mcp_servers wire command to the worker.
     let new = client.request(
         "session/new",
-        json!({ "mcpServers": [
+        &json!({ "mcpServers": [
             { "name": "capture-stdio", "type": "stdio", "command": "cat", "args": [], "env": [] },
         ]}),
     );
@@ -837,7 +837,7 @@ fn acp_daemon_attached_cancels_mid_turn() {
         .to_string();
     let prompt = client.request(
             "session/prompt",
-            json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "a slow question" }] }),
+            &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "a slow question" }] }),
         );
     // The turn is mid-delay: cancel, then wait for the prompt response.
     client.notify("session/cancel", &json!({ "sessionId": session_id }));
@@ -889,7 +889,7 @@ fn acp_compact_command_publishes_the_compaction_meta_and_end_turn() {
 
     let prompt = client.request(
         "session/prompt",
-        json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "/compact" }] }),
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "/compact" }] }),
     );
     let (prompt_response, updates) = client.wait_response(prompt, TIMEOUT);
 
@@ -943,7 +943,7 @@ fn acp_goal_command_publishes_goal_meta_and_runs_the_continuation() {
 
     let prompt = client.request(
         "session/prompt",
-        json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "/goal --budget 5 reply with exactly: GOAL-PROGRESS" }] }),
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "/goal --budget 5 reply with exactly: GOAL-PROGRESS" }] }),
     );
     let (prompt_response, updates) = client.wait_response(prompt, TIMEOUT);
 
@@ -1012,7 +1012,7 @@ fn acp_autonomous_token_limit_maps_to_max_tokens_stop_reason() {
 
     let prompt = client.request(
         "session/prompt",
-        json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "do the thing" }] }),
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "do the thing" }] }),
     );
     let (prompt_response, updates) = client.wait_response(prompt, TIMEOUT);
 
@@ -1054,7 +1054,7 @@ fn acp_autonomous_disabled_reports_end_turn_without_accounting() {
 
     let prompt = client.request(
         "session/prompt",
-        json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "hi" }] }),
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "hi" }] }),
     );
     let (prompt_response, updates) = client.wait_response(prompt, TIMEOUT);
     for update in &updates {
@@ -1126,7 +1126,7 @@ fn acp_daemon_attached_publishes_the_goal_update_meta() {
         .to_string();
     let prompt = client.request(
         "session/prompt",
-        json!({
+        &json!({
             "sessionId": session_id,
             "prompt": [{ "type": "text", "text": "/goal --budget 500 make the daemon publish goal state" }],
         }),
@@ -1207,7 +1207,7 @@ fn acp_daemon_attached_reports_autonomous_accounting_and_limit_stop_reason() {
     // Turn on the run with a one-turn budget.
     let enable = client.request(
         "session/prompt",
-        json!({
+        &json!({
             "sessionId": session_id,
             "prompt": [{ "type": "text", "text": "/autonomous on --max-turns 1" }],
         }),
@@ -1226,7 +1226,7 @@ fn acp_daemon_attached_reports_autonomous_accounting_and_limit_stop_reason() {
     // The model turn: one turn runs, the max-turns limit stops the run.
     let prompt = client.request(
         "session/prompt",
-        json!({
+        &json!({
             "sessionId": session_id,
             "prompt": [{ "type": "text", "text": "say something" }],
         }),
@@ -1381,7 +1381,7 @@ fn acp_threshold_auto_compaction_publishes_the_compaction_meta() {
     // single-turn skip published the empty payload.
     let prompt = client.request(
         "session/prompt",
-        json!({
+        &json!({
             "sessionId": session_id,
             "prompt": [{ "type": "text", "text": format!("turn one {}", "x".repeat(8_000)) }],
         }),
@@ -1401,7 +1401,7 @@ fn acp_threshold_auto_compaction_publishes_the_compaction_meta() {
     // publishes its result.
     let prompt = client.request(
         "session/prompt",
-        json!({
+        &json!({
             "sessionId": session_id,
             "prompt": [{ "type": "text", "text": "turn two" }],
         }),
@@ -1453,7 +1453,7 @@ fn acp_overflow_recovery_compacts_and_retries_the_turn() {
     // The seed turn: nothing fires (context far below the headroom).
     let prompt = client.request(
         "session/prompt",
-        json!({
+        &json!({
             "sessionId": session_id,
             "prompt": [{ "type": "text", "text": format!("seed turn {}", "x".repeat(48_000)) }],
         }),
@@ -1476,7 +1476,7 @@ fn acp_overflow_recovery_compacts_and_retries_the_turn() {
         probe_attempts += 1;
         let prompt = client.request(
             "session/prompt",
-            json!({
+            &json!({
                 "sessionId": session_id,
                 "prompt": [{ "type": "text", "text": format!("overflow probe {}", "x".repeat(2_000)) }],
             }),

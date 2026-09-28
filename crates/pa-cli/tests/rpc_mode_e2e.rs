@@ -102,7 +102,7 @@ impl RpcChild {
         let id = format!("t-{}", self.next_id);
         let mut frame = command.clone();
         frame["id"] = json!(id);
-        self.send(frame);
+        self.send(&frame);
         id
     }
 

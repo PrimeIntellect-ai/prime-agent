@@ -234,7 +234,7 @@ fn create_session(
     }
     let response = wire.request(
         id,
-        json!({ "type": "create", "name": name, "config": config }),
+        &json!({ "type": "create", "name": name, "config": config }),
     );
     assert_eq!(response["success"], true, "create failed: {response}");
     response["data"]["activeSessionId"]
