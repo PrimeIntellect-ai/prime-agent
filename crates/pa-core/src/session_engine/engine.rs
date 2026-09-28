@@ -777,6 +777,26 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // The embedding's image-model routing seam (the headless surfaces
     // install theirs; the daemon worker's turn dispatch owns routing).
     session.set_image_model_router(config.image_model_router.clone());
+    // The armed image route never outlives the run that armed it (TS
+    // `_clearModelOverrideWhenIdle`: the override drops once the turn is
+    // idle, so a picker switch between turns is live immediately — the
+    // settle's still-routed guard leaves the switched slot). The settle
+    // here is idempotent: an un-armed episode's swap restores the slot
+    // it already holds, and the next admission's own settle re-reads
+    // fresh state either way.
+    if let Some(router) = config.image_model_router.clone() {
+        agent
+            .subscribe(move |event, _signal| {
+                let router = router.clone();
+                Box::pin(async move {
+                    if matches!(event, pa_agent::types::AgentEvent::AgentEnd { .. }) {
+                        (router.swap_target)(None);
+                    }
+                    Ok(())
+                })
+            })
+            .await;
+    }
     // The boot-notice mailbox becomes the session's next-turn queue:
     // rows parked by a boot that settled mid-build merge in, and later
     // boots (a lazy first-call start) push straight into the live
