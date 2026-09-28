@@ -642,7 +642,11 @@ fn headless_image_model_router(
                 .lock()
                 .expect("armed-from lock")
                 .as_ref()
-                .map(|target| target.model.clone());
+                .map(
+                    |target: &pa_core::session_engine::provider_adapter::ProviderTarget| {
+                        target.model.clone()
+                    },
+                );
             let session_model = armed_capture
                 .or_else(|| {
                     decide_provider_target
