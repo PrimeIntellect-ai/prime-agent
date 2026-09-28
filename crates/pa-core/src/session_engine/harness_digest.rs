@@ -1040,7 +1040,7 @@ mod tests {
         let mut session = SessionManager::in_memory(tmp.path());
         let session_user = |text: &str| {
             pa_types::session::AgentMessage::User(pa_types::ai::UserMessage {
-                content: UserContent::Text(text.to_string()),
+                content: pa_types::ai::UserContent::Text(text.to_string()),
                 timestamp: 0,
                 rest: serde_json::Map::default(),
             })
@@ -1073,17 +1073,12 @@ mod tests {
             timestamp: 0,
             rest: serde_json::Map::default(),
         };
-        session
-            .append_message(session_user("turn zero words"))
-            .unwrap();
-        session
-            .append_message(pa_types::session::AgentMessage::Assistant(
-                assistant_row.clone(),
-            ))
-            .unwrap();
-        session
-            .append_message(session_user("unfinished turn three words"))
-            .unwrap();
+        let user0 = session_user("turn zero words");
+        let reply0 = pa_types::session::AgentMessage::Assistant(assistant_row.clone());
+        let user1 = session_user("unfinished turn three words");
+        session.append_message(user0.clone()).unwrap();
+        session.append_message(reply0.clone()).unwrap();
+        session.append_message(user1.clone()).unwrap();
         let goal = pa_types::goal::GoalState {
             active: true,
             status: pa_types::goal::GoalStatus::Active,
@@ -1098,20 +1093,16 @@ mod tests {
             )
             .unwrap();
 
-        // The live context mirrors the entries (the loop's wire shapes).
-        let live = vec![
-            AgentMessage::Standard(Message::User(pa_agent::types::UserMessage {
-                content: UserContent::Text("turn zero words".to_string()),
-                timestamp: 0,
-                rest: serde_json::Map::default(),
-            })),
-            AgentMessage::Standard(Message::Assistant(assistant_row)),
-            AgentMessage::Standard(Message::User(pa_agent::types::UserMessage {
-                content: UserContent::Text("unfinished turn three words".to_string()),
-                timestamp: 2,
-                rest: serde_json::Map::default(),
-            })),
-        ];
+        // The live context mirrors the entries, built through the product's
+        // own wire->loop converter (`session_message_to_loop`) so the
+        // fixture's shapes are the writer's.
+        let live: Vec<AgentMessage> = [user0, reply0, user1]
+            .iter()
+            .map(|row| {
+                crate::session_engine::session_message_to_loop(row)
+                    .expect("the rig's wire rows convert to loop rows")
+            })
+            .collect();
         let agent = std::sync::Arc::new(pa_agent::agent::Agent::new(
             pa_agent::agent::AgentOptions {
                 initial_state: pa_agent::agent::AgentInitialState {
@@ -1159,8 +1150,9 @@ mod tests {
     ) -> tokio::task::JoinHandle<
         anyhow::Result<crate::session_engine::compact_session::CompactOutcome>,
     > {
+        let model = model.clone();
         let handle = tokio::spawn(async move {
-            engine.compact(None, model, None, None).await
+            engine.compact(None, &model, None, None).await
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while registration.call_count() == 0 {
@@ -1218,8 +1210,9 @@ mod tests {
         let handle = spawn_compact(engine.clone(), &model, &registration).await;
 
         // The commit-time capture, sampled while the summarizer holds.
-        let commit_inputs =
-            commit_moment_inputs(&engine, goal.as_deref()).await.expect("the rig wires a harness digest context");
+        let commit_inputs = commit_moment_inputs(&engine, goal.as_deref())
+            .await
+            .expect("the rig wires a harness digest context");
         // Anti-vacuity: the sample really observed the open window's
         // term source (identical texts), not a post-hoc state.
         assert_eq!(commit_inputs.terms, enter_inputs.terms);
@@ -1301,8 +1294,9 @@ mod tests {
             "the compaction must still be in flight after the racing row lands"
         );
 
-        let commit_inputs =
-            commit_moment_inputs(&engine, goal.as_deref()).await.expect("the rig wires a harness digest context");
+        let commit_inputs = commit_moment_inputs(&engine, goal.as_deref())
+            .await
+            .expect("the rig wires a harness digest context");
         // Served-path: the racing row reached the commit-time capture.
         assert!(
             commit_inputs.terms.contains_key("zebra"),
