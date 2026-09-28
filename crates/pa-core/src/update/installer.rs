@@ -299,13 +299,16 @@ async fn fetch_script(url: &str) -> Result<PathBuf> {
     Ok(script)
 }
 
-/// Exec the downloaded script (`sh`, the same interpreter the curl|sh
-/// one-liner uses) and wait for it. The install prefix rides the child's
-/// environment as the installer's own knob, so the script publishes
-/// exactly where the probe looks — every other `PRIME_AGENT_RUST_*` knob
-/// and `GITHUB_TOKEN` pass through untouched. The script's own die
-/// messages already streamed with [`InstallerOutput::Inherit`]; with
-/// [`InstallerOutput::Capture`] the tail becomes the failure message.
+/// Exec the downloaded script (`/bin/sh`, the same interpreter the
+/// curl|sh one-liner uses, at the trusted absolute path so a poisoned
+/// `PATH` cannot substitute the interpreter that runs the installer with
+/// the inherited `GITHUB_TOKEN`) and wait for it. The install prefix rides
+/// the child's environment as the installer's own knob, so the script
+/// publishes exactly where the probe looks — every other
+/// `PRIME_AGENT_RUST_*` knob and `GITHUB_TOKEN` pass through untouched.
+/// The script's own die messages already streamed with
+/// [`InstallerOutput::Inherit`]; with [`InstallerOutput::Capture`] the
+/// tail becomes the failure message.
 ///
 /// # Errors
 /// Returns the failure when the script cannot start or exits nonzero.
@@ -314,7 +317,7 @@ async fn execute_script(
     prefix: &Path,
     output: InstallerOutput,
 ) -> std::result::Result<(), UpdateFailure> {
-    let mut command = tokio::process::Command::new("sh");
+    let mut command = tokio::process::Command::new("/bin/sh");
     command.arg(script).env(ENV_PREFIX, prefix);
     match output {
         InstallerOutput::Inherit => {
