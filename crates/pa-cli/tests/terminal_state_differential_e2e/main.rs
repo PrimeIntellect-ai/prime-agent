@@ -466,7 +466,7 @@ fn the_config_selector_esc_close_restores_every_mode() {
 fn the_config_selector_remapped_exit_action_restores_every_mode() {
     let _lock = harness_lock();
     let mut harness = DifferentialHarness::start(
-        ChildSpec::new("selector").env(CHILD_SELECTOR_FLAGS_ENV, "remap-exit"),
+        &ChildSpec::new("selector").env(CHILD_SELECTOR_FLAGS_ENV, "remap-exit"),
     );
     harness.answer_kitty_query();
     harness.wait_from_start(b"Resource Configuration", "the selector mounts");
@@ -495,7 +495,7 @@ fn the_config_selector_remapped_exit_action_restores_every_mode() {
 fn the_config_selector_toggle_error_restores_every_mode() {
     let _lock = harness_lock();
     let mut harness = DifferentialHarness::start(
-        ChildSpec::new("selector").env(CHILD_SELECTOR_FLAGS_ENV, "fail-toggle"),
+        &ChildSpec::new("selector").env(CHILD_SELECTOR_FLAGS_ENV, "fail-toggle"),
     );
     harness.answer_kitty_query();
     harness.wait_from_start(b"Resource Configuration", "the selector mounts");
@@ -548,7 +548,7 @@ fn the_panic_unwind_restores_every_mode() {
     let _lock = harness_lock();
     let fixture = write_replay_fixture();
     let mut harness = DifferentialHarness::start(
-        ChildSpec::new("replay")
+        &ChildSpec::new("replay")
             .env(CHILD_FIXTURE_ENV, fixture)
             .env(CHILD_REPLAY_FLAGS_ENV, "panic"),
     );
