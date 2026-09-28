@@ -2,7 +2,7 @@
 //! construction of the live session.
 use super::{
     default_server_capabilities, json, paths, response_failure, response_success,
-    restore_queue_snapshot, session_file_name, summary, Arc, EngineModelSelection, Result,
+    restore_queue_snapshot, session_file_name, Arc, EngineModelSelection, Result,
     RlmSessionIdentity, SessionEngine, SessionFile, VecDeque, Worker,
 };
 
