@@ -1096,8 +1096,8 @@ impl TimedRpcChild {
                             if line.is_empty() {
                                 continue;
                             }
-                            let frame: Value = serde_json::from_str(&line)
-                                .expect("valid JSON line");
+                            let frame: Value =
+                                serde_json::from_str(&line).expect("valid JSON line");
                             if tx.send((arrived, frame)).is_err() {
                                 return;
                             }

@@ -19,6 +19,7 @@ use super::protocol::{self, ResponseData};
 use super::session::{RpcEngineRequest, RpcSession};
 use super::session_commands;
 use super::LineWriter;
+use super::COMPACT_FRAME_FLUSH_BUDGET;
 
 /// The shared handler state: the live session plus the fixed identity and
 /// the session-scoped runtime pieces the handlers own.
