@@ -30,6 +30,34 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
+/// Wall-clock milliseconds since the epoch (auth expiry comparison).
+fn now_epoch_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(i64::MAX, |d| d.as_millis() as i64)
+}
+
+/// One OAuth refresh in flight per provider: the token fetch in
+/// [`AuthStorage::refresh_oauth`] runs outside every lock, so the
+/// in-process single-flight that TS gets from its single-threaded runtime
+/// needs its own gate. The registry mirrors the storage backend's
+/// process-lock registry (created once, lives for the process, recovered
+/// on poisoning).
+fn refresh_flight(provider: &str) -> std::sync::MutexGuard<'static, ()> {
+    static FLIGHTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, &'static std::sync::Mutex<()>>>,
+    > = std::sync::OnceLock::new();
+    let registry = FLIGHTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let lock = {
+        let mut registry = registry.lock().expect("auth refresh-flight registry");
+        *registry
+            .entry(provider.to_string())
+            .or_insert_with(|| Box::leak(Box::new(std::sync::Mutex::new(()))))
+    };
+    lock.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// One candidate credential source.
 #[derive(Clone)]
 struct AuthSourceCandidate {
@@ -285,7 +313,7 @@ impl AuthStorage {
         env_credentials: Arc<dyn EnvCredentialSource>,
     ) -> Self {
         let backend: Arc<dyn AuthStorageBackend> =
-            Arc::new(super::storage::InMemoryAuthStorageBackend::default());
+            Arc::new(crate::auth::storage::InMemoryAuthStorageBackend::default());
         let content = serde_json::to_string_pretty(&data.0).unwrap_or_default();
         backend
             .with_lock(&mut |current| {
@@ -833,30 +861,107 @@ impl AuthStorage {
             .api_key
     }
 
-    /// Refresh an expired OAuth credential under the backend lock, returning
-    /// the new credential on success.
+    /// Refresh an expired OAuth credential, returning the new credential on
+    /// success.
+    ///
+    /// Load-then-lock shape: the token fetch is a network round trip and
+    /// never runs under the document lock. The TS product runs the same
+    /// refresh inside its `withLockAsync` (its single-threaded runtime
+    /// pays nothing for holding the lock across the `await`); this engine
+    /// is threaded, and the port's [`FileAuthStorageBackend::with_lock`]
+    /// spans the whole critical section, so a fetch under the lock stalls
+    /// every other same-process auth read and write for the round trip.
+    /// The phases:
+    ///
+    /// 1. LOAD: the current document through the consolidated read arm
+    ///    (no document lock; a cache miss pays the read arm's one short
+    ///    locked read).
+    /// 2. FETCH: the OAuth integration's token call outside every lock,
+    ///    behind [`refresh_flight`]'s per-provider single-flight gate. The
+    ///    expiry is re-checked under the gate: the first flight may have
+    ///    just written a fresh credential, and a second fetch would waste
+    ///    a single-use refresh token. In-process callers therefore join
+    ///    one flight per provider — the same serialization TS's
+    ///    single-threaded runtime gives its locked refresh.
+    /// 3. WRITE: the same locked read-modify-write the TS product runs,
+    ///    now holding the lock only for the re-read, the insert, and the
+    ///    atomic write. A peer that refreshed while this fetch ran keeps
+    ///    its fresher credential: this attempt writes nothing and serves
+    ///    the peer's.
     fn refresh_oauth(&mut self, provider_id: &str) -> Option<AuthCredential> {
-        let mut refreshed: Option<AuthCredential> = None;
+        // LOAD: no document lock.
+        let Ok(content) = self.storage.read() else {
+            // The locked run failed the way the old single-lock shape
+            // failed: reload, then serve the stored credential.
+            self.reload();
+            return self
+                .data
+                .credential(provider_id)
+                .filter(|c| matches!(c, AuthCredential::Oauth { .. }));
+        };
+        let Ok(data) = parse_storage_data(content.as_deref()) else {
+            self.reload();
+            return self
+                .data
+                .credential(provider_id)
+                .filter(|c| matches!(c, AuthCredential::Oauth { .. }));
+        };
+        let Some(credential) = data.credential(provider_id) else {
+            self.reload();
+            return None;
+        };
+        let AuthCredential::Oauth { expires, .. } = &credential else {
+            self.reload();
+            return None;
+        };
+        if now_epoch_ms() < *expires {
+            self.reload();
+            return Some(credential);
+        }
+        // FETCH: outside every lock, one flight per provider.
+        let fetched = {
+            let _flight = refresh_flight(provider_id);
+            // The gate may have just released a flight that wrote a fresh
+            // credential; re-check before spending a refresh token.
+            let content = self.storage.read().unwrap_or_default();
+            if let Some(credential) = parse_storage_data(content.as_deref())
+                .ok()
+                .and_then(|data| data.credential(provider_id))
+                .filter(|credential| {
+                    matches!(
+                        credential,
+                        AuthCredential::Oauth { expires, .. } if now_epoch_ms() < *expires
+                    )
+                })
+            {
+                self.reload();
+                return Some(credential);
+            }
+            self.oauth.refresh(provider_id, &data)
+        };
+        let Some(new_credential) = fetched else {
+            // Refresh failed: keep credentials for a later retry; a peer
+            // may have refreshed meanwhile, so reload before failing.
+            self.reload();
+            return None;
+        };
+        // WRITE: the locked read-modify-write, holding the document lock
+        // only for the re-read, insert, and atomic write.
+        let mut refreshed: Option<AuthCredential> = Some(new_credential.clone());
         let result = self.storage.with_lock(&mut |current| {
             let mut data = parse_storage_data(current.as_deref())?;
-            let Some(credential) = data.credential(provider_id) else {
-                return Ok(((), None));
-            };
-            let AuthCredential::Oauth { expires, .. } = &credential else {
-                return Ok(((), None));
-            };
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(i64::MAX, |d| d.as_millis() as i64);
-            if now_ms < *expires {
+            if let Some(credential) = data.credential(provider_id).filter(|credential| {
+                matches!(
+                    credential,
+                    AuthCredential::Oauth { expires, .. } if now_epoch_ms() < *expires
+                )
+            }) {
+                // A peer refreshed while this fetch ran: its fresher
+                // credential stands and this attempt writes nothing.
                 refreshed = Some(credential);
                 return Ok(((), None));
             }
-            let Some(new_credential) = self.oauth.refresh(provider_id, &data) else {
-                return Ok(((), None));
-            };
             data.insert(provider_id, &new_credential);
-            refreshed = Some(new_credential);
             let content = serde_json::to_string_pretty(&data.0)?;
             Ok(((), Some(content)))
         });
@@ -868,12 +973,10 @@ impl AuthStorage {
                 .credential(provider_id)
                 .filter(|c| matches!(c, AuthCredential::Oauth { .. }));
         }
-        if result.is_ok() {
-            // Reload from what we wrote: the in-memory snapshot must not
-            // serve the pre-refresh credential to a later read (a rotated
-            // refresh token is single-use).
-            self.reload();
-        }
+        // Reload from what we wrote: the in-memory snapshot must not
+        // serve the pre-refresh credential to a later read (a rotated
+        // refresh token is single-use).
+        self.reload();
         refreshed
     }
 
@@ -1476,6 +1579,205 @@ mod tests {
         assert_eq!(
             auth.get_prime_inference_team_selection(),
             StoredPrimeTeam::Team(team("team-1", "Team 1"))
+        );
+    }
+
+    /// A scripted OAuth integration for the refresh-flow tests: counts
+    /// refresh calls, optionally delays inside the fetch, and serves a
+    /// fixed fresh credential.
+    struct CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize,
+        delay_ms: u64,
+    }
+
+    impl CountingOAuth {
+        fn fetched_credential() -> AuthCredential {
+            AuthCredential::Oauth {
+                access: "fetched-access".into(),
+                refresh: Some("fetched-refresh".into()),
+                expires: now_epoch_ms() + 3_600_000,
+                account_id: None,
+                enterprise_url: None,
+                endpoint: None,
+                token_endpoint: None,
+                client_id: None,
+                resource: None,
+                issuer: None,
+            }
+        }
+    }
+
+    impl OAuthIntegration for CountingOAuth {
+        fn api_key_for(&self, _provider: &str, credential: &AuthCredential) -> Option<String> {
+            match credential {
+                AuthCredential::Oauth { access, .. } => Some(access.clone()),
+                _ => None,
+            }
+        }
+
+        fn refresh(
+            &self,
+            _provider: &str,
+            _credentials: &AuthStorageData,
+        ) -> Option<AuthCredential> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.delay_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(self.delay_ms));
+            }
+            Some(Self::fetched_credential())
+        }
+    }
+
+    fn oauth_credential(access: &str, expires: i64) -> AuthCredential {
+        AuthCredential::Oauth {
+            access: access.into(),
+            refresh: Some("test-refresh".into()),
+            expires,
+            account_id: None,
+            enterprise_url: None,
+            endpoint: None,
+            token_endpoint: None,
+            client_id: None,
+            resource: None,
+            issuer: None,
+        }
+    }
+
+    fn expired_oauth(access: &str) -> AuthCredential {
+        oauth_credential(access, 1000)
+    }
+
+    fn storage_over_backend_with(
+        oauth: Arc<CountingOAuth>,
+        provider: &str,
+        credential: AuthCredential,
+    ) -> (AuthStorage, Arc<dyn AuthStorageBackend>) {
+        let backend: Arc<dyn AuthStorageBackend> =
+            Arc::new(crate::auth::storage::InMemoryAuthStorageBackend::default());
+        let mut data = AuthStorageData::default();
+        data.insert(provider, &credential);
+        let seed = serde_json::to_string_pretty(&data.0).unwrap_or_default();
+        backend
+            .with_lock(&mut |current| {
+                let _ = current;
+                Ok(((), Some(seed.clone())))
+            })
+            .ok();
+        (
+            AuthStorage::from_storage(Arc::clone(&backend), oauth),
+            backend,
+        )
+    }
+
+    #[test]
+    fn an_unexpired_oauth_credential_serves_without_a_fetch() {
+        let oauth = Arc::new(CountingOAuth {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            delay_ms: 0,
+        });
+        let (mut auth, _backend) = storage_over_backend_with(
+            oauth.clone(),
+            "x-fast",
+            oauth_credential("live-access", now_epoch_ms() + 3_600_000),
+        );
+        assert_eq!(auth.get_api_key("x-fast").as_deref(), Some("live-access"));
+        assert_eq!(
+            oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the unexpired credential serves without a token fetch"
+        );
+    }
+
+    #[test]
+    fn the_token_fetch_holds_no_document_lock_and_a_peer_write_keeps_its_fresher_credential() {
+        // The fetch runs outside every lock: a locked writer lands
+        // mid-fetch, and the write phase keeps the peer's fresher
+        // credential instead of overwriting it with this attempt's own
+        // fetched token.
+        let oauth = Arc::new(CountingOAuth {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            delay_ms: 120,
+        });
+        let (mut auth, backend) =
+            storage_over_backend_with(oauth.clone(), "x-peer", expired_oauth("old-access"));
+        let writer_backend = Arc::clone(&backend);
+        let (wrote_tx, wrote_rx) = std::sync::mpsc::channel::<std::time::Duration>();
+        std::thread::spawn(move || {
+            // Mid-fetch: the resolving thread is inside the token fetch.
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            let mut peer = AuthStorageData::default();
+            peer.insert(
+                "x-peer",
+                &oauth_credential("peer-access", now_epoch_ms() + 3_600_000),
+            );
+            let content = serde_json::to_string_pretty(&peer.0).unwrap_or_default();
+            let t0 = std::time::Instant::now();
+            writer_backend
+                .with_lock(&mut |current| {
+                    let _ = current;
+                    Ok(((), Some(content.clone())))
+                })
+                .ok();
+            wrote_tx
+                .send(t0.elapsed())
+                .expect("the test main thread still waits for the write");
+        });
+        let api_key = auth.get_api_key("x-peer");
+        let write_wall = wrote_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect(
+                "the peer's locked write completed; a token fetch must not hold the document lock",
+            );
+        assert!(
+            write_wall < std::time::Duration::from_millis(60),
+            "the concurrent locked write waited {write_wall:?}: the fetch holds no lock"
+        );
+        assert_eq!(
+            api_key.as_deref(),
+            Some("peer-access"),
+            "the peer's fresher credential wins over this attempt's own fetch"
+        );
+        let stored = auth.get_all().credential("x-peer").unwrap();
+        let AuthCredential::Oauth { access, .. } = stored else {
+            panic!("the stored credential stays OAuth");
+        };
+        assert_eq!(access, "peer-access");
+        assert_eq!(
+            oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "exactly one fetch ran"
+        );
+    }
+
+    #[test]
+    fn a_second_refresh_joins_the_first_flight_instead_of_fetching_again() {
+        // Two resolutions of the same expired provider race: the flight
+        // gate serializes them, and the second serves the first's fresh
+        // credential without spending its own token fetch.
+        let oauth = Arc::new(CountingOAuth {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            delay_ms: 80,
+        });
+        let (_, backend) =
+            storage_over_backend_with(oauth.clone(), "x-flight", expired_oauth("old-access"));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let oauth = Arc::clone(&oauth);
+            let backend = Arc::clone(&backend);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let mut auth = AuthStorage::from_storage(backend, oauth);
+                barrier.wait();
+                auth.get_api_key("x-flight")
+            }));
+        }
+        let keys: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert!(keys.iter().all(|k| k.as_deref() == Some("fetched-access")));
+        assert_eq!(
+            oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one flight per provider: the second caller served the first's fresh credential"
         );
     }
 }
