@@ -642,19 +642,6 @@ impl SessionUi {
     // /fullscreen, /reload)
     // ------------------------------------------------------------------
 
-    /// Recompute the `/fast` autocomplete filter (TS
-    /// `getAvailableCommands` drops `/fast` when the current model is not
-    /// fast-mode-eligible): call after every point the model id can move.
-    pub(super) fn update_fast_filter(&self, view: &mut AgentView) {
-        let eligible = self
-            .current_model_entry(view)
-            .is_some_and(pa_types::ai::supports_fast_mode);
-        let mut hidden = std::collections::HashSet::new();
-        if !eligible {
-            hidden.insert("fast".to_string());
-        }
-        view.editor.set_autocomplete_hidden_commands(hidden);
-    }
 
     /// `/fast` (TS `handleFastCommand`): toggle the priority service tier.
     /// The TS queue (`fastModeToggleQueue`) serializes toggles; here the
