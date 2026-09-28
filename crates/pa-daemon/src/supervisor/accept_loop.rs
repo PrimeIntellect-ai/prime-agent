@@ -196,7 +196,7 @@ mod tests {
     /// connected and vanished.
     async fn accepted_stream() -> Box<dyn TransportStream> {
         let (_, accepted) = tokio::io::duplex(4096);
-        Box::new(DuplexTransport(accepted))
+        Box::new(DuplexTransport(Mutex::new(accepted)))
     }
 
     /// A duplex end as a [`TransportStream`]: a plain memory stream has
