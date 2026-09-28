@@ -69,6 +69,17 @@ const DISABLE_BRACKETED_PASTE: &[u8] = b"\x1b[?2004l";
 const ENABLE_KITTY_FLAGS: &[u8] = b"\x1b[>7u";
 /// Pop the kitty flags stack at teardown (TS writes the bare pop).
 const POP_KITTY_FLAGS: &[u8] = b"\x1b[<u";
+/// The stale-level clear before this process's own push (the crashed-run
+/// hardening): a killed session never runs its teardown, so its pushed
+/// level stays on the terminal's stack; every later session in that
+/// terminal pushes once more and pops once — the stale level survives
+/// every exit and the shell keeps receiving CSI-u escapes for plain
+/// keys (the reported leak). Popping once before the push levels the
+/// stack: this process's own level becomes the only one, so the teardown
+/// pop lands at depth zero regardless of the entry depth. A pop against
+/// an empty stack is ignored (kitty spec), so the clear is free on a
+/// clean terminal.
+const PRE_POP_KITTY_FLAGS: &[u8] = b"\x1b[<u";
 /// Reset xterm modifyOtherKeys (TS writes the reset at teardown; this port
 /// also writes it at every start — see the module docs for why the mode-2
 /// fallback is never armed here).
@@ -267,6 +278,10 @@ pub(crate) fn enable(out: &mut Stdout) -> Result<()> {
                     KITTY_PROBED.store(true, Ordering::SeqCst);
                     record_kitty_supported();
                     if !KITTY_ACTIVE.swap(true, Ordering::SeqCst) {
+                        // The crashed-run hardening: clear a stale level
+                        // left by a killed session before this process's
+                        // own push (see PRE_POP_KITTY_FLAGS).
+                        write_all(out, PRE_POP_KITTY_FLAGS)?;
                         write_all(out, ENABLE_KITTY_FLAGS)?;
                     }
                 }
@@ -283,6 +298,10 @@ pub(crate) fn enable(out: &mut Stdout) -> Result<()> {
         }
         KittyAction::PushFlags => {
             if !KITTY_ACTIVE.swap(true, Ordering::SeqCst) {
+                // The crashed-run hardening (see PRE_POP_KITTY_FLAGS):
+                // a suspend's pop and resume's re-push stay balanced; a
+                // stale level from a killed session levels out here.
+                write_all(out, PRE_POP_KITTY_FLAGS)?;
                 write_all(out, ENABLE_KITTY_FLAGS)?;
             }
         }
@@ -474,6 +493,9 @@ fn enable_kitty(out: &mut Stdout) {
         return;
     }
     if !KITTY_ACTIVE.swap(true, Ordering::SeqCst) {
+        // The crashed-run hardening (see PRE_POP_KITTY_FLAGS): the probe
+        // answer's push levels a stale level out too.
+        let _ = write_all(out, PRE_POP_KITTY_FLAGS);
         let _ = write_all(out, ENABLE_KITTY_FLAGS);
     }
 }
