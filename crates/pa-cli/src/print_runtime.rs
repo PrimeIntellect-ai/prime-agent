@@ -614,7 +614,7 @@ fn headless_image_model_router(
     cwd: std::path::PathBuf,
     agent_dir: std::path::PathBuf,
     session_model: pa_types::ai::Model,
-    thinking_level: pa_core::session_engine::provider_adapter::ModelThinkingLevel,
+    thinking_level: pa_types::ai::ModelThinkingLevel,
 ) -> pa_core::session_engine::image_model_routing::ImageModelRouter {
     // The pre-route session target, captured at the FIRST arm (not at
     // build): a mid-run model switch rewrites the live slot, and the
