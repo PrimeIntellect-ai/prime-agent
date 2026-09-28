@@ -1,5 +1,9 @@
 //! The queue concern: browsing, reordering, and editing the parked
 //! steering/follow-up messages (TS `queueSelection`'s browse/move/apply).
+//! The browse walks every parked item (the full queue stays inspectable),
+//! but the reorder/apply gates are user-origin only (operator directive
+//! 2026-09-28: internal prompts render read-only — the system owns
+//! them); see [`crate::queued::QueueSelectionItem::internal`].
 use super::*;
 
 impl SessionUi {
@@ -87,6 +91,16 @@ impl SessionUi {
         let Some(selected) = self.queue_selection.selected().cloned() else {
             return Ok(());
         };
+        // The edit surface is user-origin only (operator directive
+        // 2026-09-28: the system owns the harness prompts — a human
+        // reorder of a child-exit notice or a continuation could
+        // mis-steer the agent): an internal item never reorders, the
+        // note says why, and the selection stays for the read-only
+        // browse.
+        if selected.internal {
+            self.note("Internal prompts are read-only; reorder not applied", view);
+            return Ok(());
+        }
         let status = self
             .queue_mutation(
                 selected.lane,
@@ -138,6 +152,23 @@ impl SessionUi {
         let Some(selected) = self.queue_selection.selected().cloned() else {
             return Ok(());
         };
+        // The edit surface is user-origin only (operator directive
+        // 2026-09-28: humans edit the human sent and queued messages;
+        // an internal prompt — a child-exit notice, a heartbeat, a
+        // continuation — is never steered, re-queued, or deleted
+        // through the browse). The refusal follows the failed-edit
+        // contract: the typed text stays in the editor, the note says
+        // why, the selection stays.
+        if selected.internal {
+            view.editor.set_text(text);
+            self.note(
+                "Internal prompts are read-only; edit kept in the editor",
+                view,
+            );
+            self.sync_queue_selection(view);
+            self.dirty = true;
+            return Ok(());
+        }
         let trimmed = text.trim();
         // `images` stays absent on a replace: the server keeps the item's
         // attachments (some markers cannot be resolved by this client).

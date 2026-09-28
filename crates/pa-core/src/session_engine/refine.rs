@@ -224,11 +224,14 @@ fn strip_display_prefixes(plan: RefinementPlan) -> RefinementPlan {
     plan
 }
 
-/// The transcript feeding the refinement planner: the conversation messages
-/// plus the (possibly pre-window) history rows the audit scan reads.
+/// The transcript feeding the refinement planner: the conversation
+/// messages plus the in-session refinement history (the audit scan's
+/// output over the full entry sequence — the caller extracts both from
+/// the session's retained rows or its historical read, so the
+/// refinement never materializes an owned copy of every entry).
 pub struct RefinementTranscript<'a> {
     pub messages: &'a [AgentMessage],
-    pub historical_entries: &'a [FileEntry],
+    pub refinement_history: &'a [crate::refinement::RefinementResult],
 }
 
 /// Run the full refinement flow: plan (LLM or rollback), re-read the target
@@ -252,7 +255,7 @@ pub async fn execute_refinement(
 ) -> anyhow::Result<RefinementResult> {
     let RefinementTranscript {
         messages,
-        historical_entries,
+        refinement_history,
     } = transcript;
     let local_harness_dir = local_harness_state_dir(session);
     let core_options = CoreRefineOptions {
@@ -288,8 +291,7 @@ pub async fn execute_refinement(
         merge_harness_states(&global_state, Some(&local_state))
     };
     let global = load_global_refinement_history(global_harness_dir);
-    let session_history = session_refinement_history(historical_entries);
-    let history = crate::refinement::merge_refinement_history(&global, &session_history);
+    let history = crate::refinement::merge_refinement_history(&global, refinement_history);
     // Baseline captured before the (slow) LLM pass, so concurrent kernel
     // writes are rejected instead of clobbered.
     let baseline_scope = options
@@ -414,32 +416,29 @@ impl AgentSession {
     ) -> anyhow::Result<Option<AutoRefineReview>> {
         // The review reads the same planning inputs the refinement run
         // plans against (TS `_reviewAutoRefine`: the live conversation,
-        // `_loadMergedHarnessState`, `_loadRefinementHistory`).
-        let (snapshot, merged_state, history) = {
+        // `_loadMergedHarnessState`, `_loadRefinementHistory`). The
+        // transcript's consumed artifacts are extracted under this lock
+        // straight from the retained rows (no owned copy of the full
+        // entry set); a boundary window's historical read runs after the
+        // release, like the refinement run's.
+        let (parts, merged_state, history) = {
             let session = self.session_handle().lock().await;
             let local_state =
                 load_harness_state(&local_harness_state_dir(&session), HarnessScope::Local);
             let global_state = load_harness_state(global_harness_dir, HarnessScope::Global);
             (
-                session.history_snapshot(),
+                session.refine_transcript_parts(),
                 merge_harness_states(&global_state, Some(&local_state)),
                 load_global_refinement_history(global_harness_dir),
             )
         };
         // Refinement deliberately reviews historical messages, unlike ordinary
-        // turns. Await its snapshot after releasing the session mutex.
-        let entries = snapshot.await?;
-        let history = crate::refinement::merge_refinement_history(
-            &history,
-            &session_refinement_history(&entries),
-        );
-        let messages: Vec<AgentMessage> = entries
-            .into_iter()
-            .filter_map(|entry| match entry {
-                FileEntry::Message { message, .. } => Some(message),
-                _ => None,
-            })
-            .collect();
+        // turns. Await the transcript parts after releasing the session mutex.
+        let crate::session::manager::RefineTranscriptParts {
+            messages,
+            refinement_history: session_history,
+        } = parts.await?;
+        let history = crate::refinement::merge_refinement_history(&history, &session_history);
         let review = review_auto_refine(
             &messages,
             &merged_state,
@@ -735,7 +734,7 @@ Reviewer instructions: record it"
             &mut session,
             RefinementTranscript {
                 messages: &[user_message("do a thing twice")],
-                historical_entries: &[],
+                refinement_history: &[],
             },
             &global_dir,
             &test_model(),
@@ -795,7 +794,7 @@ Reviewer instructions: record it"
             &mut session,
             RefinementTranscript {
                 messages: &[user_message("x")],
-                historical_entries: &[],
+                refinement_history: &[],
             },
             &global_dir,
             &test_model(),
@@ -828,6 +827,153 @@ Reviewer instructions: record it"
         );
     }
 
+    fn oracle_fixture() -> String {
+        let mut rows = vec![
+            serde_json::json!({"type":"session","id":"s","version":3,"cwd":"/tmp","timestamp":"2026-01-01T00:00:00Z"}),
+        ];
+        let mut parent: Option<String> = None;
+        for i in 0..5 {
+            let id = format!("u{i}");
+            rows.push(serde_json::json!({"type":"message","id":id.clone(),"parentId":parent,"message":{"role":"user","content":format!("hello {i}"),"timestamp":0}}));
+            parent = Some(id);
+        }
+        rows.push(serde_json::json!({"type":"custom","id":"audit","parentId":parent,"customType":"prime-agent.refinement","data":{"id":"refine_0","summary":"seed","rationale":"seeded rationale","expectedOutcome":"seeded outcome","appliedEdits":[],"harnessStatePath":""}}));
+        rows.into_iter().map(|row| row.to_string() + "\n").collect()
+    }
+
+    /// One captured refiner request (the seam's view of the model inputs).
+    #[derive(Debug, Clone, PartialEq)]
+    struct CapturedRequest {
+        max_tokens: u64,
+        system: &'static str,
+        user: String,
+    }
+
+    /// The frozen surface is the refine model's exact request. The same
+    /// fixture session must yield a byte-identical `(max_tokens, system,
+    /// user prompt)` whether the transcript served from the retained
+    /// rows of a full reader (the RPC/CLI path), a full-history window
+    /// under the sole runtime lease (the shared-window path — the file
+    /// is deleted first so a hidden fallback to the historical read
+    /// would fail: the served-path proof), or the unleased historical
+    /// read (the gate closed). A fourth leg proves the read leg really
+    /// reads: an out-of-band audit row appended to the file must reach
+    /// the prompt.
+    #[tokio::test]
+    async fn refine_request_is_identical_across_extraction_paths() {
+        use std::io::Write as _;
+        let body = oracle_fixture();
+        let mut captured: Vec<CapturedRequest> = Vec::new();
+        for leg in ["full-reader", "windowed-leased", "windowed-unleased"] {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("session.jsonl");
+            std::fs::write(&path, &body).unwrap();
+            let mut session = if leg == "full-reader" {
+                SessionManager::open(dir.path(), dir.path(), &path)
+            } else {
+                SessionManager::open_windowed(dir.path(), dir.path(), &path)
+                    .await
+                    .unwrap()
+            };
+            if leg == "windowed-leased" {
+                session.set_append_ownership(
+                    crate::session::window::AppendOwnership::SessionLeaseHeld,
+                );
+                // The served-path proof: the shared-window extraction
+                // must not touch the file, so removing it cannot fail the
+                // parts. The file returns before the refinement's rows
+                // append to it.
+                std::fs::remove_file(&path).unwrap();
+                let probe = session.refine_transcript_parts();
+                probe.await.unwrap();
+                std::fs::write(&path, &body).unwrap();
+            }
+            let global_harness_dir = dir.path().join("harness");
+            let parts = session.refine_transcript_parts();
+            let crate::session::manager::RefineTranscriptParts {
+                messages,
+                refinement_history,
+            } = parts.await.unwrap();
+            let captures: std::sync::Arc<std::sync::Mutex<Vec<CapturedRequest>>> =
+                std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = std::sync::Arc::clone(&captures);
+            let reply = r#"{"summary":"bench","edits":[]}"#.to_string();
+            let result = execute_refinement(
+                &mut session,
+                RefinementTranscript {
+                    messages: &messages,
+                    refinement_history: &refinement_history,
+                },
+                &global_harness_dir,
+                &test_model(),
+                &RefineOptions::default(),
+                RefinementSource::User,
+                Box::new(move |model, system, prompt| {
+                    sink.lock().unwrap().push(CapturedRequest {
+                        max_tokens: model.max_tokens,
+                        system,
+                        user: prompt,
+                    });
+                    let reply = reply;
+                    Box::pin(async move { Ok(text_assistant(&reply)) })
+                }),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("'{leg}' leg failed: {error:#}"));
+            assert!(result.applied_edits.is_empty());
+            let got = captures.lock().unwrap().clone();
+            assert_eq!(got.len(), 1, "'{leg}' leg: exactly one refiner call");
+            captured.push(got[0].clone());
+        }
+        for (a, b) in captured.iter().zip(captured.iter().skip(1)) {
+            assert_eq!(
+                a, b,
+                "the refiner request diverged between extraction paths (the frozen surface)"
+            );
+        }
+        // The seeded audit row and the fixture's conversation rode the
+        // transcript on every path (history_for_prompt renders the audit
+        // id and summary; conversation_text serializes the messages).
+        assert!(
+            captured[0].user.contains("[refine_0] seed"),
+            "the fixture's audit history must appear in the prompt"
+        );
+        assert!(
+            captured[0].user.contains("hello 4"),
+            "the fixture's conversation must appear in the prompt"
+        );
+
+        // The read-leg proof: the unleased window's extraction must
+        // serve an out-of-band audit row (the historical read), which
+        // changes the prompt's history section.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, &body).unwrap();
+        let session = SessionManager::open_windowed(dir.path(), dir.path(), &path)
+            .await
+            .unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"custom","id":"oob-audit","parentId":"audit","customType":"prime-agent.refinement","data":{"id":"refine_oob","summary":"oob","rationale":"r","expectedOutcome":"o","appliedEdits":[],"harnessStatePath":""}}"#
+        )
+        .unwrap();
+        file.write_all(b"\n").unwrap();
+        drop(file);
+        let parts = session.refine_transcript_parts();
+        let crate::session::manager::RefineTranscriptParts {
+            refinement_history, ..
+        } = parts.await.unwrap();
+        assert!(
+            refinement_history
+                .iter()
+                .any(|item| item.id == "refine_oob"),
+            "the unleased window must keep re-reading the file (out-of-band audit visible)"
+        );
+    }
+
     #[tokio::test]
     async fn global_refinement_appends_history() {
         let dir = TempDir::new().unwrap();
@@ -838,7 +984,7 @@ Reviewer instructions: record it"
             &mut session,
             RefinementTranscript {
                 messages: &[user_message("x")],
-                historical_entries: &[],
+                refinement_history: &[],
             },
             &global_dir,
             &test_model(),
@@ -865,7 +1011,7 @@ Reviewer instructions: record it"
             &mut session,
             RefinementTranscript {
                 messages: &[],
-                historical_entries: &[],
+                refinement_history: &[],
             },
             &global_dir,
             &test_model(),
