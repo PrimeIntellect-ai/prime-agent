@@ -705,21 +705,25 @@ fn headless_image_model_router(
                 };
                 *provider_target.write().expect("provider target lock") = Some(target);
             } else {
-                // Restore the captured session target and release the
-                // capture: a mid-run model switch rewrote the slot, and
-                // the next arm captures the switched-to target.
-                let captured = armed_from
-                    .lock()
-                    .expect("armed-from lock")
-                    .take()
-                    .or_else(|| {
-                        provider_target
-                            .read()
-                            .expect("provider target lock")
-                            .clone()
-                    });
-                if let Some(target) = captured {
-                    *provider_target.write().expect("provider target lock") = Some(target);
+                // Restore the captured session target ONLY when the slot
+                // still holds the routed target the arm wrote: a mid-run
+                // `/model` switch rewrote the slot with the new session
+                // target, and the settle must not drag requests back to
+                // the pre-route model.
+                let captured = armed_from.lock().expect("armed-from lock").take();
+                let routed = armed_to.lock().expect("armed-to lock").take();
+                let current = provider_target
+                    .read()
+                    .expect("provider target lock")
+                    .clone();
+                let still_routed = match (&current, &routed) {
+                    (Some(current), Some(routed)) => current == routed,
+                    _ => true,
+                };
+                if still_routed {
+                    if let Some(target) = captured.or(current) {
+                        *provider_target.write().expect("provider target lock") = Some(target);
+                    }
                 }
             }
         })
