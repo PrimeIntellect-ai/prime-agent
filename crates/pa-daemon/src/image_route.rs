@@ -74,14 +74,17 @@ impl AgentSessionEngine {
         // time and fails the turn before any request leaves; the port
         // refuses the reference up front).
         let pinned_api_key = self.current_selection().api_key.is_some();
-        let resolvable_auth: std::collections::HashSet<String> = available
+        // Keyed (provider, id): one provider's authenticated row must not
+        // vouch for another provider's same-id model (the catalog allows
+        // shared ids across providers).
+        let resolvable_auth: std::collections::HashSet<(String, String)> = available
             .iter()
             .filter(|model| {
                 registry
                     .get_api_key_and_headers(model, model.headers.as_ref())
                     .ok
             })
-            .map(|model| model.id.clone())
+            .map(|model| (model.provider.clone(), model.id.clone()))
             .collect();
         let route = pa_core::models::resolve_image_model_override(
             &pa_core::models::ImageModelRoutingInputs {
@@ -90,7 +93,13 @@ impl AgentSessionEngine {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
                 image_model_reference: image_model_reference.as_deref(),
                 available_models: &available,
-                has_configured_auth: &|model| pinned_api_key || resolvable_auth.contains(&model.id),
+                // Keyed (provider, id): one provider's authenticated row
+                // must not vouch for another provider's same-id model
+                // (the catalog allows shared ids across providers).
+                has_configured_auth: &|model| {
+                    pinned_api_key
+                        || resolvable_auth.contains(&(model.provider.clone(), model.id.clone()))
+                },
                 block_images,
             },
         )
