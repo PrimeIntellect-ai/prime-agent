@@ -260,7 +260,7 @@ fn acp_in_process_config_option_advertises_and_applies() {
         // a set-but-empty env var is a missing credential.
         &[("PROBE_LOCKED_KEY".to_string(), String::new())],
     );
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
     let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
@@ -515,7 +515,7 @@ fn acp_in_process_failed_settings_persist_keeps_the_session_coherent() {
     // The global settings file as a directory: every settings write
     // fails at its read step, deterministically.
     std::fs::create_dir_all(client.home.path().join("agent").join("settings.json")).unwrap();
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
     let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
@@ -655,7 +655,7 @@ fn acp_daemon_attached_config_option_pickers() {
             home,
         }
     };
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
     let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
