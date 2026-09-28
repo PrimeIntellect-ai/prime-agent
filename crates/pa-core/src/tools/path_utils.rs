@@ -536,7 +536,11 @@ mod tests {
         assert_eq!(expand_path_platform("@~/f", Some("/h")), "/h/f");
     }
 
+    /// POSIX dispatcher semantics; the win32 sibling lives below (the
+    /// dispatcher is platform-picked, so a POSIX expectation is a
+    /// not-windows test).
     #[test]
+    #[cfg(not(windows))]
     fn resolve_relative() {
         assert_eq!(resolve_to_cwd("a/b", "/cwd"), "/cwd/a/b");
         assert_eq!(resolve_to_cwd("../a", "/cwd/sub"), "/cwd/a");
@@ -544,6 +548,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn node_resolve_matches_node_semantics() {
         assert_eq!(node_path_resolve("/a/b", "c/../d"), "/a/b/d");
         assert_eq!(node_path_resolve("/a/b", "/x"), "/x");
