@@ -6,6 +6,11 @@ use super::*;
 /// message (TS resolves the same promise from the gh process result).
 pub(crate) type ShareNote = Result<GistOutcome, String>;
 
+/// The background `/update` run's report: the new build's version line,
+/// or the failure message (the same funnel `prime-agent update` runs —
+/// the runner the composition root owns).
+pub(crate) type UpdateNote = std::result::Result<String, String>;
+
 /// The `/traces upload-all` sweep's reports: the live progress counter and
 /// the settled summary (TS `onProgress`'s status row + the arm's awaited
 /// result).
@@ -42,82 +47,46 @@ impl SessionUi {
     // Update (/update)
     // ------------------------------------------------------------------
 
-    /// Whether an update run parked for the run loop (the terminal handoff
-    /// seam).
-    pub(crate) fn pending_update(&self) -> bool {
-        self.pending_update.is_some()
-    }
-
-    /// The parked update run (TS `handleUpdateCommand`'s child phase):
-    /// run with the terminal handed over — package updates first, the
-    /// self update last (it replaces this process on success). The
-    /// relaunch preserves an explicit session selection, else it resumes
-    /// this session by file.
-    pub(crate) async fn run_update(&mut self, view: &mut AgentView) -> Result<()> {
-        let Some(plan) = self.pending_update.take() else {
-            return Ok(());
-        };
+    /// The confirmed update: spawn the download+install OUT-OF-BAND. The
+    /// run replaces only the on-disk binary (the running binary is
+    /// in-memory — replacing it is safe), so nothing here blocks or tears
+    /// down: the TUI stays mounted, the daemon keeps running, and the
+    /// outcome lands as a row through [`Self::update_notes`] when the
+    /// task finishes.
+    pub(super) fn spawn_update(&mut self, view: &mut AgentView) {
         let Some(update) = self.update_commands.clone() else {
             self.note("/update is not available in this client yet", view);
-            return Ok(());
+            return;
         };
-        if let Some(package) = &plan.package {
-            let mut args = vec!["package".to_string(), "update".to_string()];
-            match package {
-                crate::update_command::PackageUpdate::All => args.push("--extensions".to_string()),
-                crate::update_command::PackageUpdate::Source(source) => args.push(source.clone()),
+        let notes = self.update_notes.clone();
+        self.update_in_flight = true;
+        self.note(
+            "Updating — downloading and installing the latest Rust build…",
+            view,
+        );
+        tokio::spawn(async move {
+            let outcome = update.0.run_update().await;
+            let _ = notes.send(outcome);
+        });
+    }
+
+    /// The background update run's landed outcome: the success row names
+    /// the new build (restart runs it — the running binary keeps serving
+    /// this session until then), else the error row carries the
+    /// installer's failure.
+    pub(crate) fn apply_update_note(&mut self, outcome: UpdateNote, view: &mut AgentView) {
+        self.update_in_flight = false;
+        match outcome {
+            Ok(version) => {
+                self.note(
+                    &format!("updated to {version} — restart prime-agent to run it"),
+                    view,
+                );
             }
-            match update.0.run_cli_child(args).await {
-                Err(error) => {
-                    self.error_row(&format!("Update failed: {error}"), view);
-                    return Ok(());
-                }
-                Ok(code) if code != 0 => {
-                    self.error_row(&format!("Update exited with code {code}"), view);
-                    return Ok(());
-                }
-                Ok(_) => {}
-            }
-            if !plan.includes_self {
-                // TS reloads resources after the child persisted settings;
-                // `/reload` stays unported in this client.
-                self.note("Packages updated. Reloading resources...", view);
-                return Ok(());
-            }
-        }
-        // The self-update child (TS passes the interactive-child marker;
-        // the split CLI needs no target flags here).
-        let mut args = vec!["update".to_string()];
-        args.extend(plan.flags.clone());
-        let child_result = update.0.run_cli_child(args).await;
-        // TS skips the relaunch when the interactive child exits with the
-        // not-attempted code (75): a declined confirmation or a no-change
-        // skip keeps the running client as-is, so the session is not torn
-        // down and restarted for nothing.
-        if matches!(child_result, Ok(75)) {
-            return Ok(());
-        }
-        match child_result {
-            Err(error) => {
-                eprintln!("Update failed: {error}");
-                eprintln!("Relaunching Prime Agent...");
-            }
-            Ok(code) if code != 0 => {
-                eprintln!("Update exited with code {code}");
-                eprintln!("Relaunching Prime Agent...");
-            }
-            Ok(_) => {}
-        }
-        // The relaunch (TS `buildUpdateRelaunchArgs`: this run's args plus
-        // a session resume when the invocation did not select one).
-        let mut relaunch_args: Vec<String> = std::env::args().skip(1).collect();
-        if !crate::update_command::args_include_session_selection(&relaunch_args) {
-            if let Some(session_file) = self.session_file.clone() {
-                relaunch_args.push("--resume".to_string());
-                relaunch_args.push(session_file);
+            Err(message) => {
+                self.error_row(&message, view);
             }
         }
-        update.0.relaunch(relaunch_args)
     }
 
     // ------------------------------------------------------------------

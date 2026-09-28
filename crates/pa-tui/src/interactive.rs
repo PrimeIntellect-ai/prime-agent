@@ -1729,6 +1729,9 @@ async fn run_interactive_surface(
     // The `/share` upload task reports here; the loop folds the outcome
     // into the transcript and clears the loader.
     let (share_tx, mut share_rx) = mpsc::unbounded_channel::<crate::session_ui::ShareNote>();
+    // The background `/update` run (the installer funnel) reports here;
+    // the loop folds the outcome into the success note or the error row.
+    let (update_tx, mut update_rx) = mpsc::unbounded_channel::<crate::session_ui::UpdateNote>();
     // The `/reload` task reports here; the loop folds the client-side
     // re-reads (keybindings, theme) and the outcome row.
     let (reload_tx, mut reload_rx) = mpsc::unbounded_channel::<crate::session_ui::ReloadNote>();
@@ -1863,6 +1866,7 @@ async fn run_interactive_surface(
             let share_tx = share_tx.clone();
             let reload_tx = reload_tx.clone();
             let traces_upload_tx = traces_upload_tx.clone();
+            let update_tx = update_tx.clone();
             let catalog_tx = catalog_tx.clone();
             let auth_panel_tx = auth_panel_tx.clone();
             let heartbeats_tx = heartbeats_tx.clone();
@@ -1883,6 +1887,7 @@ async fn run_interactive_surface(
                     prompt_tx,
                     share_tx,
                     reload_tx,
+                    update_tx,
                     traces_upload_tx,
                     catalog_tx,
                     auth_panel_tx,
@@ -2366,14 +2371,6 @@ async fn run_interactive_surface(
                         if session.pending_traces_login() {
                             session.run_traces_login(&mut view);
                         }
-                        // A `/update` run: the child processes own the plain
-                        // terminal, and a successful self-update replaces this
-                        // process with the updated CLI (never returns).
-                        if session.pending_update() {
-                            renderer.suspend(&mut view)?;
-                            session.run_update(&mut view).await?;
-                            renderer.resume()?;
-                        }
                         if session.take_suspend_request() && renderer.is_terminal_mut().is_some() {
                             match crate::suspend::suspend_cycle(
                                 &mut crate::suspend::ProcessSignals,
@@ -2448,14 +2445,6 @@ async fn run_interactive_surface(
                             session.error_row(&format!("{error:#}"), &mut view);
                             view.editor.set_text(&text);
                             session.dirty = true;
-                        }
-                        // A `/update` run parked by the submission: the child
-                        // processes own the plain terminal, and a successful
-                        // self-update replaces this process (never returns).
-                        if session.pending_update() {
-                            renderer.suspend(&mut view)?;
-                            session.run_update(&mut view).await?;
-                            renderer.resume()?;
                         }
                         // A parked `/traces login` (or the enable arm's
                         // login-first step): mount the inline auth panel and
@@ -2865,6 +2854,11 @@ async fn run_interactive_surface(
             maybe_share = share_rx.recv() => {
                 if let Some(outcome) = maybe_share {
                     session.apply_share_outcome(outcome, &mut view);
+                }
+            }
+            maybe_update = update_rx.recv() => {
+                if let Some(outcome) = maybe_update {
+                    session.apply_update_note(outcome, &mut view);
                 }
             }
             maybe_reload = reload_rx.recv() => {
