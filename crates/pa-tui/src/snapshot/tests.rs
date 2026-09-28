@@ -450,11 +450,9 @@ fn an_unmatched_replay_result_keeps_its_standalone_card() {
         ChatEntry::Tool(card) => {
             assert_eq!(card.id, "orphan");
             assert_eq!(card.name, "bash");
-            assert!(card.unmatched_result, "the orphan never joins a run");
-            assert_eq!(
-                card.ended_ms,
-                Some(123),
-                "the wire timestamp rides the card"
+            assert!(
+                card.result.is_some(),
+                "the orphan keeps its own result card"
             );
         }
         other => panic!("the orphan is a card: {other:?}"),
@@ -486,7 +484,7 @@ fn a_bulk_replay_never_drops_an_orphan_result() {
         ChatEntry::Tool(card) => {
             assert_eq!(card.id, "orphan");
             assert_eq!(card.name, "bash");
-            assert!(card.unmatched_result, "the bulk orphan never joins a run");
+            assert!(card.result.is_some(), "the bulk orphan keeps its own card");
         }
         other => panic!("the orphan is a card: {other:?}"),
     }
@@ -636,7 +634,7 @@ fn an_orphan_result_keeps_its_wire_position() {
     ]);
     assert_eq!(chat.len(), 3, "the orphan card sits between: {chat:?}");
     match &chat[1] {
-        ChatEntry::Tool(card) => assert!(card.unmatched_result),
+        ChatEntry::Tool(card) => assert!(card.result.is_some()),
         other => panic!("the orphan sits at its wire position: {other:?}"),
     }
     assert!(matches!(&chat[2], ChatEntry::User { text } if text == "after"));
@@ -707,7 +705,7 @@ fn a_leftover_settle_keeps_its_own_orphan_card() {
     let leftover = cards[1];
     assert_eq!(leftover.id, "dup");
     assert!(
-        leftover.unmatched_result,
+        leftover.result.is_some(),
         "the leftover keeps its own orphan card"
     );
     assert_eq!(
@@ -722,7 +720,7 @@ fn a_leftover_settle_keeps_its_own_orphan_card() {
     // The second invocation's card stays pending (its result arrives
     // later or never).
     let second_call = chat.iter().rev().find_map(|entry| match entry {
-        ChatEntry::Tool(card) if !card.unmatched_result => Some(card.as_ref()),
+        ChatEntry::Tool(card) if card.result.is_none() => Some(card.as_ref()),
         _ => None,
     });
     let Some(second) = second_call else {
@@ -1560,7 +1558,7 @@ fn transcript_replay_completes_tool_cards() {
         panic!("orphan card at its wire position (index 3): {chat:?}");
     };
     assert_eq!(orphan.id, "orphan");
-    assert!(orphan.unmatched_result, "the orphan never joins a run");
+    assert!(orphan.result.is_some(), "the orphan keeps its own card");
 }
 
 /// A pending card (result absent) replays with no result, like a turn

@@ -315,7 +315,7 @@ fn top_layout() -> (usize, usize, usize, usize, usize, usize) {
     let (_, answer_row, answer_col, _) =
         locate(&probe, "answer 1").expect("answer 1 rendered below row 0");
     let (_, ctx_row, ctx_col, _) =
-        locate(&probe, "Details mode").expect("the prompt-context row rendered");
+        locate(&probe, "Collapsed mode").expect("the prompt-context row rendered");
     (row0, col0, answer_row, answer_col, ctx_row, ctx_col)
 }
 
@@ -393,13 +393,14 @@ fn click_without_drag_copies_nothing() {
 #[test]
 fn dock_press_drag_copies_the_frame_region() {
     let (_, _, _, _, ctx_row, ctx_col) = top_layout();
-    // The right-aligned detail label (TS #2447's middle-level startup:
-    // "Details mode (Ctrl+O to expand)", 2 columns shorter than the old
-    // collapsed label) renders at 25:68.
+    // The right-aligned detail label (the collapsed startup level,
+    // operator directive 2026-09-28: "Collapsed mode (Ctrl+O to
+    // expand)", 2 columns longer than the details label) renders at
+    // 25:66.
     assert_eq!(
         (ctx_row, ctx_col),
-        (25, 68),
-        "the context row renders at 25:68"
+        (25, 66),
+        "the context row renders at 25:66"
     );
     let steps = vec![
         // Mount the window at the transcript top: the probe layout is the
@@ -410,7 +411,7 @@ fn dock_press_drag_copies_the_frame_region() {
         HeadlessStep::Mouse(release(ctx_col + 7, ctx_row + 1)),
     ];
     let (_, copies) = run_plan(steps, true);
-    assert_eq!(copies, vec!["Detail".to_string()], "the dock span copied");
+    assert_eq!(copies, vec!["Collap".to_string()], "the dock span copied");
 }
 
 /// With the `terminal.fullscreenMouse` setting off, tracking never enables

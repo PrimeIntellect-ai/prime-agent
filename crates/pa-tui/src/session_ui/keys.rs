@@ -96,10 +96,9 @@ impl SessionUi {
     /// link handling while mouse reporting is active, so clicks the TUI
     /// consumes must open their OSC 8 targets themselves), and with no
     /// link there it fires the click target under the press (TS
-    /// `dispatchFullscreenClick`, the `click_dispatch` module): cards and
-    /// condensed run blocks cycle the conversation detail, the editor's
-    /// content rows place the caret, and a picker's rows move its
-    /// selection. Reports are consumed even while a picker, selector, or
+    /// `dispatchFullscreenClick`, the `click_dispatch` module): cards
+    /// toggle their own expansion, the editor's content rows place the
+    /// caret, and a picker's rows move its selection. Reports are consumed even while a picker, selector, or
     /// loader owns the frame (the TS overlay-focus gate) — the wheel
     /// never scrolls behind one, but its rows select; while tracking is
     /// inactive every report is consumed without a dispatch. The
