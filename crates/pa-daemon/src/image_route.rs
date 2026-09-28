@@ -302,7 +302,7 @@ mod tests {
         .unwrap();
     }
 
-    fn write_image_settings(dir: &std::path::Path, settings: serde_json::Value) {
+    fn write_image_settings(dir: &std::path::Path, settings: &serde_json::Value) {
         std::fs::create_dir_all(dir.join("agent")).unwrap();
         std::fs::write(
             dir.join("agent").join("settings.json"),
@@ -319,7 +319,7 @@ mod tests {
     ) -> AgentSessionEngine {
         let agent_dir = dir.join("agent");
         write_image_pair_models_json(&agent_dir);
-        write_image_settings(dir, settings);
+        write_image_settings(dir, &settings);
         let engine = AgentSessionEngine::new(AgentEngineConfig {
             cwd: dir.to_path_buf(),
             agent_dir,

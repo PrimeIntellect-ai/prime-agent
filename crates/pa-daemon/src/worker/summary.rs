@@ -7,7 +7,6 @@ use super::{
     DaemonSessionClosedReason, EventPump, Map, Mutex, OutboundFrame, QueueCheckpoint, QueueLanes,
     QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine, Value, Worker,
 };
-use crate::setting_switches::effective_service_tier;
 
 use crate::types::SessionSummary;
 
