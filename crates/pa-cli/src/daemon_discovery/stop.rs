@@ -2,7 +2,7 @@
 //! half): the pure action planners, the safe re-probing executors, and the
 //! three command drivers (`status`/`doctor`/`shutdown` output).
 //!
-//! Divergences from TS, deliberate and documented in PORTING-NOTES:
+//! Divergences from TS, deliberate:
 //! - TS's `stopHiddenSupervisors` loop kills duplicate daemons it finds
 //!   listening on one socket path (a handoff-era artifact); the Rust
 //!   supervisor's socket lease makes two owners of one path impossible, so

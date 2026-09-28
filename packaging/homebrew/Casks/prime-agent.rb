@@ -1,7 +1,7 @@
 # Homebrew cask sketch for Prime Agent (Rust rewrite).
 #
 # Living draft: a cask is only installable once this repo is public or a
-# token-authenticated tap exists (see docs/installer-ci-design.md §12).
+# token-authenticated tap exists.
 # The sha256 stanzas are refreshed per release from SHA256SUMS.
 cask "prime-agent" do
   version "0.1.0"

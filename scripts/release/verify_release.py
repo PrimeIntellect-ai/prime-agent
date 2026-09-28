@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Verify an assembled release tarball (host build) end to end.
 
-The local mirror of the CI build-job gates (docs/installer-ci-design.md §9):
+The local mirror of the CI build-job gates:
 the archive must contain exactly the designed payload at the tarball root,
 checksums must match SHA256SUMS and manifest.json, and the staged binary must
 report the release version from a scratch cwd with `PI_PACKAGE_DIR` unset

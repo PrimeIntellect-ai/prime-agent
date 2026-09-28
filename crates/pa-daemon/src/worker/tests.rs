@@ -995,8 +995,7 @@ async fn goal_turn_end_loop_runs_to_completion() {
     assert!(idle.success, "the goal loop never settled: {idle:?}");
     let events = session_events_since(&mut subscription);
     // A gate run without the kernel environment (uv on PATH and
-    // PI_PACKAGE_DIR at the checkout — docs/parity-battery.md,
-    // "Sandbox-built rust binary + kernel runtime") fails the
+    // PI_PACKAGE_DIR at the checkout) fails the
     // completing ipython cell: the goal stays active and the loop
     // keeps minting (TS parity: goal continuations are unbounded while
     // the goal is active) until the faux script runs dry. Fail with
@@ -1010,9 +1009,7 @@ async fn goal_turn_end_loop_runs_to_completion() {
     if let Some(failure) = kernel_failure {
         panic!(
             "the completing ipython cell failed — this test needs the kernel \
-                 environment (uv on PATH and PI_PACKAGE_DIR at the checkout; \
-                 docs/parity-battery.md, \"Sandbox-built rust binary + kernel \
-                 runtime\"): {failure:?}"
+                 environment (uv on PATH and PI_PACKAGE_DIR at the checkout): {failure:?}"
         );
     }
     // Each minted continuation ran as a queued follow-up turn: the

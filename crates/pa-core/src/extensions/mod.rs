@@ -1,5 +1,4 @@
-//! Extension host: the Node sidecar that runs user-authored TS/JS extensions
-//! (design doc `docs/extensions-runner-design.md`).
+//! Extension host: the Node sidecar that runs user-authored TS/JS extensions.
 //!
 //! One sidecar process per session, NDJSON JSON over stdio (protocol
 //! [`pa_types::extension_rpc`]), with the host script and vendored jiti

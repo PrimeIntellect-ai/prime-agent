@@ -15,7 +15,7 @@
 //!
 //! Linux-only by construction (`/proc/self/statm`, `AF_UNIX` mock sockets);
 //! the whole file compiles to nothing elsewhere (Windows RSS regression
-//! needs its own counter path; see docs/windows-readiness.md).
+//! needs its own counter path).
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
