@@ -840,6 +840,9 @@ mod tests {
         };
         assert!(text.contains("- status: active"));
         assert_eq!(driver.state().continuations_used, 1);
+        // The first mint's admission (its surface consumed it) releases the
+        // pending guard: the next boundary mints again.
+        driver.continuation_consumed();
         assert!(driver
             .next_continuation_message(&mut session)
             .unwrap()
