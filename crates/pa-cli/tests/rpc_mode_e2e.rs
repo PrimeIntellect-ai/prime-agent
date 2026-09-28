@@ -1326,7 +1326,7 @@ fn rpc_compact_flushes_the_start_frame_before_the_pipeline() {
         cs_event.get("result").is_none(),
         "compaction_start carries no result (TS shape)"
     );
-    let cs_ms = sent.elapsed().saturating_sub(cs_at.duration_since(sent)).as_secs_f64() * 1000.0;
+    let cs_ms = cs_at.duration_since(sent).as_secs_f64() * 1000.0;
     let start_to_end_ms = ce_at.duration_since(cs_at).as_secs_f64() * 1000.0;
     // The flush: the start frame is visible to the client immediately
     // (a pipe write, microseconds) — well before the pre-summarizer span
