@@ -76,7 +76,10 @@ pub fn handle_goal_host_request(
     match request_type {
         // The creation-based timer: the served state reads the goal's age
         // fresh from `created_at` on every read.
-        "goal.get" => Ok(goal_host_response(&driver.state_with_creation_elapsed(), false)),
+        "goal.get" => Ok(goal_host_response(
+            &driver.state_with_creation_elapsed(),
+            false,
+        )),
         "goal.create" => {
             let Some(objective) = record.get("objective").and_then(Value::as_str) else {
                 anyhow::bail!("goal.create objective must be a string");

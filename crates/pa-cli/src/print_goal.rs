@@ -572,24 +572,17 @@ impl PrintGoalSurface {
         // The natural continuation mint: the goal's context turn runs
         // as the next turn of the same run (TS pendingMessages). The
         // handoff to the run loop is the admission: the driver's pending
-        // guard releases here (a row that cannot convert drops the mint
-        // with the guard — the next boundary re-mints).
-        match engine.mint_goal_continuation().await {
-            Some(message) => {
-                self.publish_goal_update(engine).await;
-                match custom_message_to_loop_row(&message) {
-                    Some(row) => {
-                        engine.clear_pending_goal_continuation().await;
-                        NaturalContinuation::GoalRow(Box::new(row))
-                    }
-                    None => {
-                        engine.clear_pending_goal_continuation().await;
-                        NaturalContinuation::FallThrough
-                    }
-                }
-            }
-            None => NaturalContinuation::FallThrough,
+        // guard releases here — a row that cannot convert drops the mint
+        // with the guard (the next boundary re-mints).
+        if let Some(message) = engine.mint_goal_continuation().await {
+            self.publish_goal_update(engine).await;
+            engine.clear_pending_goal_continuation().await;
+            return match custom_message_to_loop_row(&message) {
+                Some(row) => NaturalContinuation::GoalRow(Box::new(row)),
+                None => NaturalContinuation::FallThrough,
+            };
         }
+        NaturalContinuation::FallThrough
     }
 
     /// The settled boundary's goal drain (the print driver's queue loop):

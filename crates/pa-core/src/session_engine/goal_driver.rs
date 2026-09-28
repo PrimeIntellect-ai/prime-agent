@@ -1252,7 +1252,9 @@ mod tests {
     fn creation_based_timer_reads_the_goals_age() {
         let mut session = persisted_session();
         let mut driver = GoalDriver::new();
-        driver.start(&mut session, "make the visualizer", None).unwrap();
+        driver
+            .start(&mut session, "make the visualizer", None)
+            .unwrap();
         // The goal was created 2 hours ago (a rehydrated driver adopts the
         // persisted `created_at`).
         let two_hours_ago = now_millis().saturating_sub(2 * 60 * 60 * 1000);
@@ -1287,7 +1289,7 @@ mod tests {
             reloaded.state().time_used_seconds
         );
         // The idle state reads zero: no `created_at`, no age.
-        let mut idle = GoalDriver::new();
+        let idle = GoalDriver::new();
         assert_eq!(idle.state_with_creation_elapsed().time_used_seconds, 0);
     }
 
@@ -1386,7 +1388,10 @@ mod tests {
         assert!(driver.pending_continuation());
         // A second mint refuses while the first is pending.
         assert!(
-            driver.next_continuation_message(&mut session).unwrap().is_none(),
+            driver
+                .next_continuation_message(&mut session)
+                .unwrap()
+                .is_none(),
             "a pending continuation must not re-arm another"
         );
         assert_eq!(driver.state().continuations_used, 1);
@@ -1394,7 +1399,10 @@ mod tests {
         // deferral stays armed instead of minting beside it.
         driver.mark_continuation_owed();
         assert!(driver.owes_continuation());
-        assert!(driver.take_owed_continuation(&mut session).unwrap().is_none());
+        assert!(driver
+            .take_owed_continuation(&mut session)
+            .unwrap()
+            .is_none());
         assert!(driver.owes_continuation());
         assert_eq!(driver.state().continuations_used, 1);
         // The admission releases the guard; the owed delivery mints next.
@@ -1410,18 +1418,27 @@ mod tests {
         assert!(!driver.pending_continuation());
         assert_eq!(driver.state().continuations_used, 1);
         // Pausing drops a pending mint with the queued contexts.
-        assert!(driver.next_continuation_message(&mut session).unwrap().is_some());
+        assert!(driver
+            .next_continuation_message(&mut session)
+            .unwrap()
+            .is_some());
         assert!(driver.pending_continuation());
         driver.pause(&mut session, "Paused by user").unwrap();
         assert!(!driver.pending_continuation());
         assert!(
-            driver.next_continuation_message(&mut session).unwrap().is_none(),
+            driver
+                .next_continuation_message(&mut session)
+                .unwrap()
+                .is_none(),
             "an inactive goal mints nothing"
         );
         // A fresh start resets the guard with the queued contexts.
         driver.start(&mut session, "again", None).unwrap();
         assert!(!driver.pending_continuation());
-        assert!(driver.next_continuation_message(&mut session).unwrap().is_some());
+        assert!(driver
+            .next_continuation_message(&mut session)
+            .unwrap()
+            .is_some());
         driver.clear(&mut session).unwrap();
         assert!(!driver.pending_continuation());
     }

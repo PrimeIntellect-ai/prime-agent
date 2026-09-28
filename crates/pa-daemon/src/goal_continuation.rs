@@ -417,12 +417,11 @@ impl AgentSessionEngine {
             .lock()
             .expect("goal sink lock")
             .clone();
-        match sink {
-            Some(sink) => sink(work),
-            None => {
-                eprintln!("pa-daemon: goal follow-up dropped: no admission sink wired");
-                self.clear_pending_goal_continuation();
-            }
+        if let Some(sink) = sink {
+            sink(work);
+        } else {
+            eprintln!("pa-daemon: goal follow-up dropped: no admission sink wired");
+            self.clear_pending_goal_continuation();
         }
     }
 }

@@ -159,7 +159,7 @@ pub struct AgentSessionEngine {
     /// build time: the admission surfaces (the worker's queue sink, the
     /// post-compaction queue path, the abort-cancel withdraw) release it
     /// from contexts that cannot take the async driver lock (a spawned
-    /// settle task, a nested block_on), so the guard reads through this
+    /// settle task, a nested `block_on`), so the guard reads through this
     /// atomic handle instead.
     pub(crate) pending_goal_continuation:
         std::sync::Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,

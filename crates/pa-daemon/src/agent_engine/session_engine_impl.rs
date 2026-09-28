@@ -145,7 +145,7 @@ impl SessionEngine for AgentSessionEngine {
     }
 
     fn clear_pending_goal_continuation(&self) {
-        AgentSessionEngine::clear_pending_goal_continuation(self)
+        AgentSessionEngine::clear_pending_goal_continuation(self);
     }
 
     fn autonomous_status(
