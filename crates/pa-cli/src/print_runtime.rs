@@ -673,10 +673,8 @@ fn headless_image_model_router(
                     // so only the arm preceding them holds it).
                     let mut armed_from = armed_from.lock().expect("armed-from lock");
                     if armed_from.is_none() {
-                        *armed_from = provider_target
-                            .read()
-                            .expect("provider target lock")
-                            .clone();
+                        armed_from
+                            .clone_from(&provider_target.read().expect("provider target lock"));
                     }
                     // The routed model's request auth resolves like the
                     // session model's did at startup (registry + headers).
