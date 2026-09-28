@@ -176,8 +176,10 @@ fn saved_session_summaries_carry_the_parent_binding() {
     bound.rewrite().unwrap();
     let bound_info = crate::session_store::read_session_info(&bound_path).unwrap();
     let summary = saved_session_summary(&bound_info);
-    assert_eq!(summary["parentSessionPath"], json!("/s/p.jsonl"));
-    assert_eq!(summary["rlmDepth"], json!(1));
+    assert_eq!(
+        (summary.get("parentSessionPath"), summary.get("rlmDepth")),
+        (Some(&json!("/s/p.jsonl")), Some(&json!(1)))
+    );
 
     let mut root = crate::session_store::SessionFile::create("/tmp", None, 0);
     let root_path = dir.join(format!("{}.jsonl", root.session_id()));
@@ -186,8 +188,10 @@ fn saved_session_summaries_carry_the_parent_binding() {
     root.rewrite().unwrap();
     let root_info = crate::session_store::read_session_info(&root_path).unwrap();
     let summary = saved_session_summary(&root_info);
-    assert_eq!(summary["rlmDepth"], json!(0));
-    assert!(summary.get("parentSessionPath").is_none());
+    assert_eq!(
+        (summary.get("parentSessionPath"), summary.get("rlmDepth")),
+        (None, Some(&json!(0)))
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
