@@ -170,7 +170,7 @@ impl TerminalMcpAuth {
         }
     }
 
-    async fn logout_inner(&self, server: &str) -> Result<String> {
+    fn logout_inner(&self, server: &str) -> Result<String> {
         let provider = format!("mcp:{server}");
         let mut auth = AuthStorage::create(&self.agent_dir);
         // TS: `isAuthed` reads the store; a missing credential is a no-op
@@ -201,7 +201,7 @@ impl ClientAuthCommands for TerminalMcpAuth {
 
     fn logout(&self, server: &str) -> AuthFuture {
         let (auth, server) = (self.clone(), server.to_string());
-        Box::pin(async move { auth.logout_inner(&server).await })
+        Box::pin(async move { auth.logout_inner(&server) })
     }
 }
 
@@ -444,7 +444,7 @@ mod tests {
         );
 
         let hook = TerminalMcpAuth::new(dir.path().to_path_buf(), agent_dir.clone());
-        let status = hook.logout_inner("linear").await?;
+        let status = hook.logout_inner("linear")?;
         assert_eq!(
             status,
             "Disconnected linear. Its skill deactivates in new sessions (/new)."
@@ -457,7 +457,7 @@ mod tests {
             "the credential was removed"
         );
         // A second logout reports the TS not-connected notice.
-        let status = hook.logout_inner("linear").await?;
+        let status = hook.logout_inner("linear")?;
         assert_eq!(status, "linear is not connected.");
         Ok(())
     }

@@ -370,7 +370,7 @@ impl ScriptedProviderAuth {
 
     /// The Prime Inference row (the panel-driven flow the team picker
     /// test drives).
-    fn prime_row(&self) -> ProviderRow {
+    fn prime_row() -> ProviderRow {
         ProviderRow {
             id: PRIME_INFERENCE_PROVIDER_ID.to_string(),
             name: "Prime Inference".to_string(),
@@ -391,7 +391,7 @@ impl ProviderAuthCommands for ScriptedProviderAuth {
         let row = self.openai_row("OpenAI", AuthType::ApiKey);
         // TS sorts prime-inference first among the configured rows.
         let rows = if self.prime_row {
-            vec![self.prime_row(), row]
+            vec![Self::prime_row(), row]
         } else {
             vec![row]
         };

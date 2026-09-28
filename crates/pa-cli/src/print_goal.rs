@@ -226,7 +226,7 @@ impl PrintGoalSurface {
 
     /// The snapshot of a queue holding one minted goal turn (the queued
     /// preview is the full row text, TS `queuedAgentMessagePreview`).
-    async fn queued_snapshot(&self, turn: &QueuedGoalTurn) -> Value {
+    fn queued_snapshot(&self, turn: &QueuedGoalTurn) -> Value {
         let preview = turn.preview_text();
         match turn.lane {
             QueueLane::Steering => json!({
@@ -245,7 +245,7 @@ impl PrintGoalSurface {
     /// Queue one minted goal turn (TS `_queuePreparedPrompt` at the mint
     /// site): the queue snapshot publishes at the moment of the mint.
     async fn queue_turn(&self, turn: QueuedGoalTurn) {
-        let snapshot = self.queued_snapshot(&turn).await;
+        let snapshot = self.queued_snapshot(&turn);
         *self.queued.lock().await = Some(turn);
         self.emit_action_snapshot(snapshot).await;
     }

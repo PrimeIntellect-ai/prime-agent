@@ -124,7 +124,9 @@ impl AcpChild {
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     panic!("timed out waiting for response {id}")
                 }
-                Err(_) => panic!("ACP server closed stdout"),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("ACP server closed stdout")
+                }
             }
         }
     }

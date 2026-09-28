@@ -287,7 +287,7 @@ async fn run_headless_bounded(
     .await
     {
         Ok(outcome) => outcome,
-        Err(_expired) => panic!(
+        Err(tokio::time::error::Elapsed { .. }) => panic!(
             "the headless run exceeded the {HEADLESS_RUN_BOUND:?} wall after {:?}: the wedge class - a turn never settled and the idle gate never opened",
             started.elapsed()
         ),

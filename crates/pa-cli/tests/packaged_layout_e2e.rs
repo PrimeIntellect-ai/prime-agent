@@ -861,7 +861,7 @@ fn sha256(data: &[u8]) -> [u8; 32] {
         0xbef9_a3f7,
         0xc671_78f2,
     ];
-    let mut h: [u32; 8] = [
+    let mut hash_words: [u32; 8] = [
         0x6a09_e667,
         0xbb67_ae85,
         0x3c6e_f372,
@@ -896,7 +896,7 @@ fn sha256(data: &[u8]) -> [u8; 32] {
                 .wrapping_add(s1);
         }
         let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
-            (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+            (hash_words[0], hash_words[1], hash_words[2], hash_words[3], hash_words[4], hash_words[5], hash_words[6], hash_words[7]);
         for index in 0..64 {
             let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
             let ch = (e & f) ^ ((!e) & g);
@@ -917,17 +917,17 @@ fn sha256(data: &[u8]) -> [u8; 32] {
             b = a;
             a = temp1.wrapping_add(temp2);
         }
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g);
-        h[7] = h[7].wrapping_add(hh);
+        hash_words[0] = hash_words[0].wrapping_add(a);
+        hash_words[1] = hash_words[1].wrapping_add(b);
+        hash_words[2] = hash_words[2].wrapping_add(c);
+        hash_words[3] = hash_words[3].wrapping_add(d);
+        hash_words[4] = hash_words[4].wrapping_add(e);
+        hash_words[5] = hash_words[5].wrapping_add(f);
+        hash_words[6] = hash_words[6].wrapping_add(g);
+        hash_words[7] = hash_words[7].wrapping_add(hh);
     }
     let mut digest = [0u8; 32];
-    for (index, word) in h.iter().enumerate() {
+    for (index, word) in hash_words.iter().enumerate() {
         digest[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
     }
     digest

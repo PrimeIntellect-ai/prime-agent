@@ -184,6 +184,9 @@ pub struct Args {
     pub autonomous_timeout_ms: Option<u64>,
     pub goal: Option<String>,
     pub goal_token_budget: Option<u32>,
+    /// The `--list-models` flag's tri-state (None = absent,
+    /// Some(None) = the bare flag, Some(Some(x)) = with a value).
+    #[allow(clippy::option_option)] // the CLI flag's tri-state is genuinely a double Option
     pub list_models: Option<Option<String>>,
     pub offline: bool,
     pub verbose: bool,
