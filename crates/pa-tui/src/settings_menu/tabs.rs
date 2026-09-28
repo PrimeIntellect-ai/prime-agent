@@ -39,7 +39,7 @@ const TAB_LAYOUT: &[TabLayout] = &[
     },
     TabLayout {
         name: "Models",
-        ids: &["thinking", "transport"],
+        ids: &["thinking", "transport", "default-service-tier"],
     },
     TabLayout {
         name: "Display",
