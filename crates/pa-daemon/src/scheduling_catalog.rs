@@ -209,12 +209,19 @@ impl Supervisor {
         // Compare-and-swap publish (TS `storePassiveScheduledJobs`): a
         // newer epoch means an invalidation raced the scan; the caller
         // keeps its rows for this response, but the snapshot does not
-        // republish them.
-        if self.passive_catalog_epoch.load(Ordering::SeqCst) == epoch {
-            *self.passive_catalog.lock().unwrap() = Some(PassiveCatalogSnapshot {
-                rows: rows.clone(),
-                scanned_at: std::time::Instant::now(),
-            });
+        // republish them. The epoch check runs UNDER the snapshot lock:
+        // the TS site is single-threaded, so its check-and-store is
+        // atomic — an invalidation that claims a newer epoch between the
+        // check and the store would otherwise let this scan republish
+        // its pre-mutation rows over the invalidation's cleared snapshot.
+        {
+            let mut snapshot = self.passive_catalog.lock().unwrap();
+            if self.passive_catalog_epoch.load(Ordering::SeqCst) == epoch {
+                *snapshot = Some(PassiveCatalogSnapshot {
+                    rows: rows.clone(),
+                    scanned_at: std::time::Instant::now(),
+                });
+            }
         }
         rows
     }
