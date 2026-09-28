@@ -36,10 +36,32 @@ const CATALOG_FORWARD_TIMEOUT_MS: u64 = 5000;
 /// session has no live worker (TS `{ rootSessionFile, job, info }`; the
 /// root-session walk feeds the TS wake timers, which this port keeps out
 /// of the protocol arms).
-struct PassiveJob {
-    job: AgentCronJob,
-    info: crate::session_store::SessionInfo,
+#[derive(Clone)]
+pub(crate) struct PassiveJob {
+    pub(crate) job: AgentCronJob,
+    pub(crate) info: crate::session_store::SessionInfo,
 }
+
+/// The supervisor-side passive scheduled-jobs snapshot the catalog READ
+/// paths serve (TS #2487 `passiveScheduledJobs`): the artifacts-tree scan
+/// runs once per generation instead of once per request, so N concurrent
+/// catalog requests share one scan instead of enqueuing N. Daemon-owned
+/// mutations drop it; a served snapshot older than
+/// [`PASSIVE_CATALOG_REFRESH_MS`] re-scans in the background
+/// (stale-while-revalidate: requests that arrive during the refresh keep
+/// answering from bounded-stale rows).
+pub(crate) struct PassiveCatalogSnapshot {
+    /// Every passive job the scan saw, before the active-status filter:
+    /// `include_inactive` callers filter per read, so one snapshot serves
+    /// both catalog spellings.
+    pub(crate) rows: Vec<PassiveJob>,
+    /// When the scan completed.
+    pub(crate) scanned_at: std::time::Instant,
+}
+
+/// How long a served passive snapshot may stay served before a background
+/// refresh re-scans (TS `PASSIVE_SCHEDULED_JOBS_REFRESH_MS`).
+const PASSIVE_CATALOG_REFRESH_MS: u64 = 5_000;
 
 /// TS `sortCronJobs`: by next run time, jobs without one last. The ISO
 /// timestamps share one format, so the string compare matches the TS
@@ -99,6 +121,107 @@ impl Supervisor {
         out
     }
 
+    /// The passive rows a catalog READ serves (TS #2487
+    /// `catalogPassiveScheduledJobs`): the shared snapshot when present
+    /// (re-scanning in the background once past the refresh window), or
+    /// one shared in-flight scan when cold. Mutation arms keep the fresh
+    /// scan (TS `collectPassiveScheduledJobs` durable truth).
+    pub(crate) async fn passive_catalog_rows(
+        self: &Arc<Self>,
+        include_inactive: bool,
+    ) -> Vec<PassiveJob> {
+        let cached = self
+            .passive_catalog
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|snapshot| snapshot.scanned_at);
+        if let Some(scanned_at) = cached {
+            if scanned_at.elapsed() >= std::time::Duration::from_millis(PASSIVE_CATALOG_REFRESH_MS)
+                && !self.shutting_down.load(Ordering::SeqCst)
+            {
+                // Stale-while-revalidate (TS #2487): serve the bounded-stale
+                // rows now, refresh in the background without dropping them;
+                // a failure only logs, the next read retries.
+                self.spawn_shared_passive_scan();
+            }
+            self.filter_passive_rows(include_inactive)
+        } else {
+            let rows = self.shared_passive_scan().await;
+            Self::filter_passive_rows_with(include_inactive, &rows)
+        }
+    }
+
+    /// The active-status filter over the stored snapshot's raw rows (one
+    /// snapshot serves both `include_inactive` spellings).
+    fn filter_passive_rows(&self, include_inactive: bool) -> Vec<PassiveJob> {
+        let snapshot = self.passive_catalog.lock().unwrap();
+        match snapshot.as_ref() {
+            Some(snapshot) => Self::filter_passive_rows_with(include_inactive, &snapshot.rows),
+            None => Vec::new(),
+        }
+    }
+
+    /// The active-status filter over raw scan rows (TS
+    /// `activeScheduledJobs`): the default spelling keeps active and
+    /// paused rows, `include_inactive` keeps everything.
+    fn filter_passive_rows_with(include_inactive: bool, rows: &[PassiveJob]) -> Vec<PassiveJob> {
+        if include_inactive {
+            return rows.to_vec();
+        }
+        rows.iter()
+            .filter(|passive| matches!(passive.job.status, JobStatus::Active | JobStatus::Paused))
+            .cloned()
+            .collect()
+    }
+
+    /// The shared passive scan (TS `passiveScheduledJobsScan ??=`): one
+    /// scan at a time; callers that waited behind the first scan's gate
+    /// serve the snapshot it just stored instead of scanning again.
+    async fn shared_passive_scan(self: &Arc<Self>) -> Vec<PassiveJob> {
+        let _gate = self.passive_scan_gate.lock().await;
+        // Double-check: the scan that finished while this caller waited on
+        // the gate refreshed the snapshot already.
+        let still_fresh = self
+            .passive_catalog
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|snapshot| {
+                snapshot.scanned_at.elapsed()
+                    < std::time::Duration::from_millis(PASSIVE_CATALOG_REFRESH_MS)
+            });
+        if still_fresh {
+            if let Some(snapshot) = self.passive_catalog.lock().unwrap().as_ref() {
+                return snapshot.rows.clone();
+            }
+        }
+        let rows = self.collect_passive_scheduled_jobs(true).await;
+        *self.passive_catalog.lock().unwrap() = Some(PassiveCatalogSnapshot {
+            rows: rows.clone(),
+            scanned_at: std::time::Instant::now(),
+        });
+        rows
+    }
+
+    /// Kick the background stale-while-revalidate refresh (the gate keeps
+    /// concurrent kicks to one in-flight scan; a failure only logs, the
+    /// next read retries).
+    fn spawn_shared_passive_scan(self: &Arc<Self>) {
+        let supervisor = Arc::clone(self);
+        tokio::spawn(async move {
+            let _ = supervisor.shared_passive_scan().await;
+        });
+    }
+
+    /// Drop the passive snapshot (TS #2487 `invalidatePassiveScheduledJobs`):
+    /// every daemon-owned scheduled-job mutation and the saved-session
+    /// delete/rename paths call this, so the next read rescans instead of
+    /// serving pre-mutation rows.
+    pub(crate) fn invalidate_passive_catalog(&self) {
+        *self.passive_catalog.lock().unwrap() = None;
+    }
+
     /// A passive job's artifact store (TS `AgentCronJobStore
     /// .forSessionArtifacts()` + `registerSessionArtifact`): the same
     /// partitioned store the owning worker uses, so a passive mutation is
@@ -111,11 +234,16 @@ impl Supervisor {
         store
     }
 
-    /// `broadcastHeartbeatsChanged`: the daemon-global event every client
-    /// sees when a heartbeat catalog changes (TS `broadcastGlobal`).
+    /// `broadcastHeartbeatsChanged` (TS #2487): only the clients that
+    /// opened a scheduling surface see the change (the subscription
+    /// filter — a daemon-side scheduled-job mutation no longer wakes
+    /// every connection's catalog refresh), and the passive snapshot
+    /// drops so the next read rescans instead of serving pre-mutation
+    /// rows.
     fn broadcast_heartbeats_changed(&self) {
+        self.invalidate_passive_catalog();
         let _ = self.events.send((
-            crate::supervisor::ClientRouting::Broadcast,
+            crate::supervisor::ClientRouting::HeartbeatSubscribers,
             std::sync::Arc::new(json!({ "type": "heartbeats_changed" })),
         ));
     }
@@ -153,7 +281,7 @@ impl Supervisor {
     /// Selector-less `cron_list` (TS supervisor arm): merge every live
     /// worker's jobs with the passive ones and answer the sorted catalog.
     pub(crate) async fn handle_cron_list_catalog(
-        &self,
+        self: &Arc<Self>,
         command: &DaemonCommand,
         client_id: &str,
         command_id: &str,
@@ -168,35 +296,60 @@ impl Supervisor {
         let mut jobs: Vec<AgentCronJob> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         for resident in self.live_workers_in_creation_order().await {
-            let response = self
-                .forward_with_catalog_timeout(&resident, command, client_id)
-                .await;
-            if !response.success {
-                self.log_line(&format!(
-                    "Could not list scheduled jobs from a worker: {}",
-                    response.error.unwrap_or_default()
-                ));
-                continue;
-            }
-            let Some(list) = response
-                .data
-                .as_ref()
-                .and_then(|data| data.get("jobs"))
-                .and_then(Value::as_array)
-                .cloned()
-            else {
-                continue;
+            // TS #2487: the supervisor serves each worker's own catalog
+            // slice while it is current, so a `cron_list` consults a worker
+            // at most once per generation (the worker's `heartbeats_changed`
+            // bumps the generation and forces the next consult).
+            let generation = resident
+                .heartbeat_snapshot_generation
+                .load(Ordering::Relaxed);
+            let served_slice = {
+                let snapshot = resident.cron_snapshot.lock().await;
+                snapshot
+                    .as_ref()
+                    .filter(|snapshot| snapshot.generation == generation)
+                    .map(|snapshot| snapshot.jobs.clone())
             };
-            for job in list {
-                let Ok(job) = serde_json::from_value::<AgentCronJob>(job) else {
-                    continue;
-                };
+            let worker_jobs: Option<Vec<AgentCronJob>> = if let Some(jobs) = served_slice {
+                Some(jobs)
+            } else {
+                let response = self
+                    .forward_with_catalog_timeout(&resident, command, client_id)
+                    .await;
+                if response.success {
+                    let list = response
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.get("jobs"))
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut parsed = Vec::new();
+                    for job in list {
+                        let Ok(job) = serde_json::from_value::<AgentCronJob>(job) else {
+                            continue;
+                        };
+                        parsed.push(job);
+                    }
+                    resident
+                        .store_cron_snapshot(parsed.clone(), generation)
+                        .await;
+                    Some(parsed)
+                } else {
+                    self.log_line(&format!(
+                        "Could not list scheduled jobs from a worker: {}",
+                        response.error.unwrap_or_default()
+                    ));
+                    None
+                }
+            };
+            for job in worker_jobs.unwrap_or_default() {
                 if seen.insert(job.id.clone()) {
                     jobs.push(job);
                 }
             }
         }
-        for passive in self.collect_passive_scheduled_jobs(include_inactive).await {
+        for passive in self.passive_catalog_rows(include_inactive).await {
             if seen.insert(passive.job.id.clone()) {
                 jobs.push(passive.job);
             }
@@ -227,7 +380,7 @@ impl Supervisor {
     /// `failed`), so the client keeps its own last catalog instead of
     /// reading a partial merge as an emptied one.
     pub(crate) async fn handle_heartbeats_list_catalog(
-        &self,
+        self: &Arc<Self>,
         command: &DaemonCommand,
         client_id: &str,
         command_id: &str,
@@ -245,42 +398,65 @@ impl Supervisor {
             let generation = resident
                 .heartbeat_snapshot_generation
                 .load(Ordering::Relaxed);
-            let response = self
-                .forward_with_catalog_timeout(&resident, command, client_id)
-                .await;
-            // TS `heartbeatsFromResponse`: a success without a rows array is
-            // an empty catalog (a good snapshot), not a failure.
-            let list = if response.success {
-                Some(
-                    response
-                        .data
-                        .as_ref()
-                        .and_then(|data| data.get("heartbeats"))
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_default(),
-                )
-            } else {
-                self.log_line(&format!(
-                    "Could not list heartbeats from a worker: {}",
-                    response.error.clone().unwrap_or_default()
-                ));
-                None
-            };
-            let list = if let Some(list) = list {
-                list
-            } else {
+            // TS #2487: the supervisor serves the worker's own catalog
+            // slice while its generation is current, so a `heartbeats_list`
+            // consults a worker at most once per generation (the worker's
+            // `heartbeats_changed` bumps the generation and forces the
+            // next consult). A stale or missing slice forwards once —
+            // under the generation-discipline store below — and the
+            // busy-worker fallback keeps serving the last-good rows.
+            let served_slice = {
                 let snapshot = resident.heartbeat_snapshot.lock().await;
-                if let Some(snapshot) = snapshot.as_ref().filter(|snapshot| {
-                    snapshot.generation
-                        == resident
-                            .heartbeat_snapshot_generation
-                            .load(Ordering::Relaxed)
-                }) {
-                    snapshot.rows.clone()
+                snapshot
+                    .as_ref()
+                    .filter(|snapshot| {
+                        snapshot.generation
+                            == resident
+                                .heartbeat_snapshot_generation
+                                .load(Ordering::Relaxed)
+                    })
+                    .map(|snapshot| snapshot.rows.clone())
+            };
+            let list = if let Some(rows) = served_slice {
+                rows
+            } else {
+                let response = self
+                    .forward_with_catalog_timeout(&resident, command, client_id)
+                    .await;
+                // TS `heartbeatsFromResponse`: a success without a rows array is
+                // an empty catalog (a good snapshot), not a failure.
+                let list = if response.success {
+                    Some(
+                        response
+                            .data
+                            .as_ref()
+                            .and_then(|data| data.get("heartbeats"))
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default(),
+                    )
                 } else {
-                    failed.get_or_insert(response);
-                    continue;
+                    self.log_line(&format!(
+                        "Could not list heartbeats from a worker: {}",
+                        response.error.clone().unwrap_or_default()
+                    ));
+                    None
+                };
+                if let Some(list) = list {
+                    list
+                } else {
+                    let snapshot = resident.heartbeat_snapshot.lock().await;
+                    if let Some(snapshot) = snapshot.as_ref().filter(|snapshot| {
+                        snapshot.generation
+                            == resident
+                                .heartbeat_snapshot_generation
+                                .load(Ordering::Relaxed)
+                    }) {
+                        snapshot.rows.clone()
+                    } else {
+                        failed.get_or_insert(response);
+                        continue;
+                    }
                 }
             };
             // The stored snapshot carries the generation captured before
@@ -316,8 +492,9 @@ impl Supervisor {
             return (vec![response_line(&response)], false);
         }
         // Passivated sessions keep their armed heartbeats; no worker can
-        // list them.
-        for passive in self.collect_passive_scheduled_jobs(false).await {
+        // list them (the snapshot-served passive rows, TS #2487: the scan
+        // runs once per generation, not per request).
+        for passive in self.passive_catalog_rows(false).await {
             if !is_heartbeat_cron_job(&passive.job) || !seen.insert(passive.job.id.clone()) {
                 continue;
             }

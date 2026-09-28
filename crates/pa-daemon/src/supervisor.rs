@@ -161,7 +161,7 @@ pub struct Supervisor {
     /// #2396 `createRlmSubagentRuntime`), so a concurrent rename or spawn
     /// of the same name in the same scope fails the second caller.
     pub(crate) pending_session_names: std::sync::Mutex<std::collections::HashSet<String>>,
-    shutting_down: AtomicBool,
+    pub(crate) shutting_down: AtomicBool,
     /// Whether some path has taken ownership of the one terminal stop pass.
     /// `shutting_down` flips synchronously when the shutdown command is
     /// accepted; this flag ensures exactly one connection runs
@@ -205,6 +205,21 @@ pub struct Supervisor {
     /// The session input-pause leases (wave b8): pause id -> lease, the
     /// bookkeeping behind `acquire`/`release_session_input_pause`.
     pub(crate) input_pauses: crate::input_pause_lease::SupervisorPauseTable,
+    /// The supervisor-side passive scheduled-jobs snapshot the catalog
+    /// READ paths serve (TS #2487 `passiveScheduledJobs`): the
+    /// session-artifacts tree scans once per generation instead of once
+    /// per request. Daemon-owned mutations (and the saved-session
+    /// delete/rename paths) drop it through
+    /// `invalidate_passive_catalog`; a served snapshot older than the
+    /// refresh window re-scans in the background
+    /// (stale-while-revalidate). The mutation arms keep the fresh scan
+    /// (TS `collectPassiveScheduledJobs` durable truth).
+    pub(crate) passive_catalog:
+        std::sync::Mutex<Option<crate::scheduling_catalog::PassiveCatalogSnapshot>>,
+    /// One passive-catalog scan at a time (TS
+    /// `passiveScheduledJobsScan ??=`): concurrent cold reads share one
+    /// in-flight scan instead of each enqueueing its own.
+    pub(crate) passive_scan_gate: tokio::sync::Mutex<()>,
     /// The terminal-compaction journal (the abort supervision): the
     /// supervisor's own durable record of compactions it declared aborted
     /// when the worker could not answer — feeds the replacement-worker
@@ -272,6 +287,8 @@ impl Supervisor {
             update_budget: UpdateTimeoutBudget::from_env(),
             restore: crate::update_restore::RestoreProgress::new(),
             input_pauses: crate::input_pause_lease::SupervisorPauseTable::default(),
+            passive_catalog: std::sync::Mutex::new(None),
+            passive_scan_gate: tokio::sync::Mutex::new(()),
             compaction_journal: std::sync::Mutex::new(compaction_journal),
         })
     }

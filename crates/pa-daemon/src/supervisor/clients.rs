@@ -125,6 +125,15 @@ impl Supervisor {
         // tasks (`roster_subscribe` flips it; the event arm filters pushes).
         let roster_subscribed: Arc<std::sync::atomic::AtomicBool> =
             Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Scheduling-surface subscription flag shared with the per-command
+        // dispatch tasks (TS #2487's subscription filter): the first
+        // scheduling-catalog command a connection issues — a catalog read or
+        // a scheduling mutation — opts the connection into
+        // `heartbeats_changed` pushes, so a daemon-side scheduled-job
+        // mutation reaches the surfaces that read the catalog, not every
+        // connected socket.
+        let heartbeats_subscribed: Arc<std::sync::atomic::AtomicBool> =
+            Arc::new(std::sync::atomic::AtomicBool::new(false));
         // Per-connection pause-lease state (wave b8): the connection id
         // lease keys embed, the detach epoch, and the detaching sessions.
         let connection = Arc::new(crate::input_pause_lease::ClientConnectionState::new());
@@ -174,6 +183,7 @@ impl Supervisor {
                     let effective_client_id = Arc::clone(&effective_client_id);
                     let attached = Arc::clone(&attached);
                     let roster_subscribed = Arc::clone(&roster_subscribed);
+                    let heartbeats_subscribed = Arc::clone(&heartbeats_subscribed);
                     let connection = Arc::clone(&connection);
                     let dispatch_tx = dispatch_tx.clone();
                     // The stream clone a mid-handler streaming command
@@ -189,6 +199,7 @@ impl Supervisor {
                                 &effective_client_id,
                                 &attached,
                                 &roster_subscribed,
+                                &heartbeats_subscribed,
                                 &connection,
                                 &connection_id,
                                 &stream_tx,
@@ -298,6 +309,9 @@ impl Supervisor {
                                 ClientRouting::RosterSubscribers => {
                                     roster_subscribed.load(std::sync::atomic::Ordering::SeqCst)
                                 }
+                                ClientRouting::HeartbeatSubscribers => {
+                                    heartbeats_subscribed.load(std::sync::atomic::Ordering::SeqCst)
+                                }
                             };
                             if deliver {
                                 if let Err(error) = write_line(&mut writer, &payload).await {
@@ -393,6 +407,7 @@ impl Supervisor {
         effective_client_id: &Arc<std::sync::Mutex<String>>,
         attached: &Arc<crate::supervisor::subscribers::ClientSubscriptions>,
         roster_subscribed: &Arc<std::sync::atomic::AtomicBool>,
+        heartbeats_subscribed: &Arc<std::sync::atomic::AtomicBool>,
         connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
         connection_id: &str,
         stream: &tokio::sync::mpsc::Sender<(Vec<Outbound>, bool)>,
@@ -515,6 +530,7 @@ impl Supervisor {
                 effective_client_id,
                 attached,
                 roster_subscribed,
+                heartbeats_subscribed,
                 connection,
                 connection_id,
                 command_id,
@@ -543,6 +559,7 @@ impl Supervisor {
         effective_client_id: &Arc<std::sync::Mutex<String>>,
         attached: &Arc<crate::supervisor::subscribers::ClientSubscriptions>,
         roster_subscribed: &Arc<std::sync::atomic::AtomicBool>,
+        heartbeats_subscribed: &Arc<std::sync::atomic::AtomicBool>,
         connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
         connection_id: &str,
         command_id: String,
@@ -956,7 +973,10 @@ impl Supervisor {
                 active_session_id, ..
             } if active_session_id.is_none() => {
                 // Selector-less `cron_list` (wave b10, TS supervisor arm):
-                // merge the live workers' jobs with the passive ones.
+                // merge the live workers' jobs with the passive ones. The
+                // scheduling surface opened: this connection opts into
+                // `heartbeats_changed` pushes (TS #2487's filter).
+                heartbeats_subscribed.store(true, std::sync::atomic::Ordering::SeqCst);
                 let client_id = effective_client_id.lock().unwrap().clone();
                 self.handle_cron_list_catalog(command, &client_id, &command_id, &type_name)
                     .await
@@ -965,7 +985,10 @@ impl Supervisor {
                 active_session_id, ..
             } if active_session_id.is_none() => {
                 // Selector-less `heartbeats_list` (wave b10): the merged
-                // heartbeat catalog.
+                // heartbeat catalog. The scheduling surface opened: this
+                // connection opts into `heartbeats_changed` pushes (TS
+                // #2487's filter).
+                heartbeats_subscribed.store(true, std::sync::atomic::Ordering::SeqCst);
                 let client_id = effective_client_id.lock().unwrap().clone();
                 self.handle_heartbeats_list_catalog(command, &client_id, &command_id, &type_name)
                     .await
@@ -974,7 +997,9 @@ impl Supervisor {
                 active_session_id, ..
             } if active_session_id.is_none() => {
                 // Selector-less `cron_cancel` (wave b10): the owner-worker
-                // search, then the passive store, then the TS error.
+                // search, then the passive store, then the TS error. The
+                // scheduling surface opened (TS #2487's filter).
+                heartbeats_subscribed.store(true, std::sync::atomic::Ordering::SeqCst);
                 let client_id = effective_client_id.lock().unwrap().clone();
                 self.handle_cron_cancel_catalog(command, &client_id, &command_id, &type_name)
                     .await
@@ -982,7 +1007,9 @@ impl Supervisor {
             DaemonCommand::HeartbeatManage { .. } => {
                 // `heartbeat_manage` (wave b10, TS supervisor arm): passive
                 // jobs are managed against their durable store, live ones
-                // route to their worker.
+                // route to their worker. The scheduling surface opened
+                // (TS #2487's filter).
+                heartbeats_subscribed.store(true, std::sync::atomic::Ordering::SeqCst);
                 let client_id = effective_client_id.lock().unwrap().clone();
                 self.handle_heartbeat_manage_catalog(
                     command,
@@ -995,14 +1022,18 @@ impl Supervisor {
             }
             DaemonCommand::CronAdd { .. } => {
                 // `cron_add` (wave b10): the routed add plus the
-                // ownership promotion the command may ask for.
+                // ownership promotion the command may ask for. The
+                // scheduling surface opened (TS #2487's filter).
+                heartbeats_subscribed.store(true, std::sync::atomic::Ordering::SeqCst);
                 let client_id = effective_client_id.lock().unwrap().clone();
                 self.handle_cron_add_catalog(command, &client_id, attached, &command_id, &type_name)
                     .await
             }
             DaemonCommand::HeartbeatSet { .. } => {
                 // `heartbeat_set` (wave b10): the same
-                // forward-and-promote path as `cron_add`.
+                // forward-and-promote path as `cron_add`. The scheduling
+                // surface opened (TS #2487's filter).
+                heartbeats_subscribed.store(true, std::sync::atomic::Ordering::SeqCst);
                 let client_id = effective_client_id.lock().unwrap().clone();
                 self.handle_heartbeat_set_catalog(
                     command,

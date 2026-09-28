@@ -739,6 +739,243 @@ fn wave_b10_heartbeat_snapshot_fallback() {
     cont(pid);
 }
 
+/// TS #2487, the single-worker catalog: the served slice is the worker's
+/// own answer, so the merged `heartbeats_list`/`cron_list` responses are
+/// byte-identical to the fresh-forward catalog while a re-consult is
+/// unnecessary — a frozen worker between two lists still answers through
+/// its slice, and the two responses match row for row.
+#[test]
+fn wave_b10_single_worker_slice_is_byte_identical() {
+    let _serial = serial_lock();
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let (_daemon, mut client, session_id, _socket) = scripted_session(dir.path(), &agent_dir);
+    client.send_command(
+        "add",
+        json!({
+            "type": "cron_add", "activeSessionId": session_id,
+            "schedule": "in 10m", "prompt": "run me"
+        }),
+    );
+    let response = client.read_response("add");
+    assert_eq!(response["success"], true, "{response}");
+    client.send_command(
+        "set",
+        json!({
+            "type": "heartbeat_set", "activeSessionId": session_id,
+            "schedule": "every 10m", "prompt": "check in"
+        }),
+    );
+    let response = client.read_response("set");
+    assert_eq!(response["success"], true, "{response}");
+
+    client.send_command("fresh1", json!({ "type": "heartbeats_list" }));
+    let first = client.read_response("fresh1");
+    assert_eq!(first["success"], true, "{first}");
+    client.send_command("cron1", json!({ "type": "cron_list" }));
+    let first_cron = client.read_response("cron1");
+    assert_eq!(first_cron["success"], true, "{first_cron}");
+
+    // Freeze the worker: the served slices answer both catalogs fast, and
+    // the responses are byte-identical to the fresh-forward ones.
+    let pid = worker_pid(&agent_dir);
+    stop(pid);
+    let started = Instant::now();
+    client.send_command("fresh2", json!({ "type": "heartbeats_list" }));
+    let second = client.read_response("fresh2");
+    let served = started.elapsed();
+    assert_eq!(second["success"], true, "{second}");
+    assert_eq!(second["data"], first["data"], "slice != fresh forward");
+    assert!(
+        served < Duration::from_secs(2),
+        "a re-forward would hold the 5s timeout: {served:?}"
+    );
+    client.send_command("cron2", json!({ "type": "cron_list" }));
+    let second_cron = client.read_response("cron2");
+    assert_eq!(second_cron["success"], true, "{second_cron}");
+    assert_eq!(
+        second_cron["data"], first_cron["data"],
+        "slice != fresh forward"
+    );
+    cont(pid);
+}
+
+/// TS #2487: the supervisor serves each worker's own catalog slice from its
+/// snapshot instead of forwarding every request to every worker — a
+/// `heartbeats_list` consults a worker at most once per generation. Two
+/// live workers each own a heartbeat; the merged catalog carries both
+/// slices; a second list serves both from the slices (the workers are not
+/// re-consulted — a frozen worker that cannot answer a fresh forward still
+/// appears through its slice, so the round answers fast instead of waiting
+/// out the 5s catalog-forward timeout); a worker-side mutation bumps that
+/// worker's generation, so the next list consults it again (a frozen
+/// worker with no fresh slice fails the response, TS `failed`, instead of
+/// serving the pre-mutation rows).
+#[test]
+fn wave_b10_catalog_slices_served_without_reforwarding() {
+    let _serial = serial_lock();
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let socket = dir.path().join("daemon.sock");
+    let _daemon = spawn_daemon(&socket, &agent_dir);
+    let (mut client_a, _hello_a) = Client::connect(&socket);
+    let (mut client_b, _hello_b) = Client::connect(&socket);
+    let session_a = create_scripted_session(&mut client_a, &agent_dir, dir.path(), "a");
+    let session_b = create_scripted_session(&mut client_b, &agent_dir, dir.path(), "b");
+    for (client, session, suffix) in [
+        (&mut client_a, &session_a, "a"),
+        (&mut client_b, &session_b, "b"),
+    ] {
+        client.send_command(
+            "set",
+            json!({
+                "type": "heartbeat_set", "activeSessionId": session,
+                "schedule": "every 10m", "prompt": format!("check in {suffix}")
+            }),
+        );
+        let response = client.read_response("set");
+        assert_eq!(response["success"], true, "{response}");
+    }
+
+    // The merged catalog carries each worker's own slice.
+    client_a.send_command("list1", json!({ "type": "heartbeats_list" }));
+    let response = client_a.read_response("list1");
+    assert_eq!(response["success"], true, "{response}");
+    let prompts = heartbeat_prompts(&response);
+    assert_eq!(prompts.len(), 2, "{prompts:?}");
+    assert!(
+        prompts.iter().any(|prompt| prompt == "check in a"),
+        "{prompts:?}"
+    );
+    assert!(
+        prompts.iter().any(|prompt| prompt == "check in b"),
+        "{prompts:?}"
+    );
+
+    // Both slices serve without re-consulting: both workers frozen, the
+    // second list still answers fast (each frozen worker would hold the
+    // 5s catalog-forward timeout on a fresh forward).
+    let pid_a = worker_pid(&agent_dir);
+    let pid_b = second_worker_pid(&agent_dir, pid_a);
+    stop(pid_a);
+    stop(pid_b);
+    let started = Instant::now();
+    client_a.send_command("list2", json!({ "type": "heartbeats_list" }));
+    let response = client_a.read_response("list2");
+    let served = started.elapsed();
+    assert_eq!(response["success"], true, "{response}");
+    let prompts = heartbeat_prompts(&response);
+    assert_eq!(prompts.len(), 2, "{prompts:?}");
+    assert!(
+        served < Duration::from_secs(2),
+        "a re-forward to a frozen worker would hold the 5s timeout: {served:?}"
+    );
+
+    // A worker-side mutation bumps that worker's generation: its slice is
+    // stale, so the next list consults it again — the frozen mutated
+    // worker fails the response (TS `failed`), not the stale pre-mutation
+    // rows.
+    cont(pid_a);
+    cont(pid_b);
+    client_b.send_command(
+        "pause",
+        json!({
+            "type": "heartbeat_update", "activeSessionId": session_b,
+            "action": "pause"
+        }),
+    );
+    let response = client_b.read_response("pause");
+    assert_eq!(response["success"], true, "{response}");
+    stop(pid_a);
+    stop(pid_b);
+    client_a.send_command("list3", json!({ "type": "heartbeats_list" }));
+    let response = client_a.read_response("list3");
+    assert_eq!(response["success"], false, "{response}");
+    cont(pid_a);
+    cont(pid_b);
+}
+
+/// The paused/active prompts in a merged `heartbeats_list` response.
+fn heartbeat_prompts(response: &Value) -> Vec<String> {
+    response["data"]["heartbeats"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .filter_map(|heartbeat| heartbeat["job"]["prompt"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// A second resident worker's pid (distinct from `first`).
+fn second_worker_pid(agent_dir: &std::path::Path, first: u32) -> u32 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let mut pids = Vec::new();
+        for entry in std::fs::read_dir(agent_dir.join("daemon-workers")).expect("dir") {
+            let Ok(entry) = entry else { continue };
+            for descriptor in std::fs::read_dir(entry.path()).expect("worker dir") {
+                let Ok(descriptor) = descriptor else { continue };
+                let path = descriptor.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let Ok(value): Result<Value, _> = serde_json::from_str(&text) else {
+                    continue;
+                };
+                if let Some(pid) = value["pid"].as_u64().filter(|pid| *pid as u32 != first) {
+                    pids.push(pid as u32);
+                }
+            }
+        }
+        if let Some(pid) = pids.first() {
+            return *pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "second worker descriptor never appeared"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Create one scripted live session on `client` (the `scripted_session`
+/// helper's shape, for a second session on a shared daemon).
+fn create_scripted_session(
+    client: &mut Client,
+    agent_dir: &std::path::Path,
+    dir: &std::path::Path,
+    suffix: &str,
+) -> String {
+    let script_path = dir.join(format!("script-{suffix}.json"));
+    std::fs::write(
+        &script_path,
+        json!({ "responses": [ { "text": "ack", "delayMs": 10 } ] }).to_string(),
+    )
+    .expect("write script");
+    client.send_command(
+        format!("create-{suffix}").as_str(),
+        json!({
+            "type": "create",
+            "config": {
+                "cwd": dir.to_string_lossy(),
+                "sessionDir": agent_dir.join("sessions").to_string_lossy(),
+                "script": script_path.to_string_lossy(),
+            },
+        }),
+    );
+    let created = client.read_response(format!("create-{suffix}").as_str());
+    assert_eq!(created["success"], true, "create failed: {created}");
+    created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["sessionId"].as_str())
+        .expect("session id")
+        .to_string()
+}
+
 /// The resident worker's pid from its persisted descriptor.
 fn worker_pid(agent_dir: &std::path::Path) -> u32 {
     let deadline = Instant::now() + Duration::from_secs(10);

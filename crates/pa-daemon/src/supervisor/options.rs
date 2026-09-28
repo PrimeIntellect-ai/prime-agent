@@ -25,4 +25,10 @@ pub(crate) enum ClientRouting {
     BroadcastExcept { connection_id: String },
     /// Clients holding a roster subscription (`roster_subscribe`).
     RosterSubscribers,
+    /// Clients that opened a scheduling surface (`cron_list`,
+    /// `heartbeats_list`, and the scheduling mutations): the
+    /// `heartbeats_changed` pushes reach only these (TS #2487's
+    /// subscription filter — a daemon-side scheduled-job mutation no
+    /// longer wakes every connection's catalog refresh).
+    HeartbeatSubscribers,
 }
