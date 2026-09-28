@@ -5945,11 +5945,7 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
     let classes: Vec<(&str, Vec<serde_json::Value>, bool, bool)> = [
         (
             "windowed_with_goal",
-            vec![
-                header(),
-                message("m1", None, "user"),
-                goal_row("g1", "m1"),
-            ],
+            vec![header(), message("m1", None, "user"), goal_row("g1", "m1")],
             true,
             true,
         ),
@@ -5976,11 +5972,7 @@ fn shared_window_goal_seed_matches_persisted_goal_state() {
         ),
         (
             "fallback_with_goal",
-            vec![
-                header(),
-                message("m1", None, "user"),
-                goal_row("g1", "m1"),
-            ],
+            vec![header(), message("m1", None, "user"), goal_row("g1", "m1")],
             false,
             false,
         ),
