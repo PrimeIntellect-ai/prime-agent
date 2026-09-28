@@ -107,10 +107,25 @@ fn classify_from(exe: Option<&Path>, own_exe: Option<&Path>) -> HolderFlavor {
             return HolderFlavor::ThisBuild;
         }
     }
-    let components: Vec<String> = exe
+    let mut components: Vec<String> = exe
         .components()
         .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
         .collect();
+    // Linux `/proc/<pid>/exe` appends " (deleted)" for an unlinked image
+    // (a daemon still running from a swept rollback tree); the suffix is
+    // a procfs artifact, not part of the file name, so the payload binary
+    // keeps its claims.
+    if components
+        .last()
+        .is_some_and(|last| last.ends_with(" (deleted)"))
+    {
+        let stripped = components
+            .last()
+            .unwrap()
+            .trim_end_matches(" (deleted)")
+            .to_string();
+        *components.last_mut().unwrap() = stripped;
+    }
     if components
         .iter()
         .any(|component| component == "prime-agent-rust")
@@ -128,12 +143,14 @@ fn classify_from(exe: Option<&Path>, own_exe: Option<&Path>) -> HolderFlavor {
     // rollback or stage tree) — carry the same claim.
     if components.len() >= 2 && components.last().map(String::as_str) == Some("prime-agent") {
         let parent = components[components.len() - 2].as_str();
-        let under_releases = components[..components.len() - 2]
-            .iter()
-            .any(|component| component == "releases");
+        // The parent alone is the layout signal: a TS release binary always
+        // sits one level deeper (`releases/<name>/prime-agent` — its parent
+        // is the release name, never `prime-agent`), so no ancestor scan is
+        // needed — and an ancestor scan would mis-reject a Rust install
+        // under a prefix that happens to contain a `releases` component.
         let is_publish_byproduct =
             parent.starts_with("prime-agent.old.") || parent.starts_with("prime-agent.stage.");
-        if (parent == "prime-agent" && !under_releases) || is_publish_byproduct {
+        if parent == "prime-agent" || is_publish_byproduct {
             return HolderFlavor::ThisBuild;
         }
     }
@@ -337,12 +354,17 @@ the same daemon, so this build cannot open the file while that process holds it.
             // from the holder's live process image; it survives the takeover
             // wherever the installer preserved it.
             match (holder_exe, id) {
-                // The holder binary rides quoted, and only when its path is
-                // control-free: a hostile process image with a newline must
-                // never reach a command line (it would make the next
-                // message line a new pasted command) — those holders fall
-                // back to the takeover wording below.
-                (Some(exe), Some(id)) if !exe.to_string_lossy().chars().any(char::is_control) => {
+                // The holder binary rides quoted, and only when the image IS
+                // the TypeScript payload binary: control-free (a hostile
+                // image with a newline must never reach a command line) and
+                // named `prime-agent` — a source/npm holder runs under
+                // node/bun/deno, and `'/usr/bin/node' --resume` would be a
+                // broken command, so those fall back to the takeover
+                // wording below.
+                (Some(exe), Some(id))
+                    if !exe.to_string_lossy().chars().any(char::is_control)
+                        && exe.file_name().is_some_and(|name| name == "prime-agent") =>
+                {
                     lines.push(format!(
                         "  {} --resume {}",
                         shell_quote(&exe.display().to_string()),
@@ -511,17 +533,35 @@ Session: ts01ab";
             "the newline image drops the kill annotation entirely: {message}"
         );
 
-        // A clean holder binary rides quoted, and the hostile id still
-        // rides as one quoted word behind it.
+        // A clean payload-named holder binary (here in a spaced directory)
+        // rides quoted, and the hostile id still rides as one quoted word
+        // behind it.
         let message = refusal_for_flavor(
             HolderFlavor::TypeScriptProduct,
             &hold,
             None,
-            Some(std::path::Path::new("/opt/hold bin")),
+            Some(std::path::Path::new("/opt/hold bin/prime-agent")),
         );
         assert!(
-            message.contains("'/opt/hold bin' --resume 'evil'\\''; rm -rf ~'"),
+            message.contains("'/opt/hold bin/prime-agent' --resume 'evil'\\''; rm -rf ~'"),
             "the binary and the id each ride as one quoted word: {message}"
+        );
+
+        // A runtime image (a source/npm holder under node/bun/deno) never
+        // renders as the resume command — the takeover wording carries it.
+        let message = refusal_for_flavor(
+            HolderFlavor::TypeScriptProduct,
+            &hold,
+            None,
+            Some(std::path::Path::new("/usr/bin/node")),
+        );
+        assert!(
+            !message.contains("--resume"),
+            "a runtime image never becomes the resume command: {message}"
+        );
+        assert!(
+            message.contains("the prime-agent keyword launches this Rust build"),
+            "the runtime holder gets the takeover wording: {message}"
         );
 
         let hold = HoldIdentity {
@@ -532,10 +572,10 @@ Session: ts01ab";
             HolderFlavor::TypeScriptProduct,
             &hold,
             None,
-            Some(std::path::Path::new("/bin/hold")),
+            Some(std::path::Path::new("/opt/ts/prime-agent")),
         );
         assert!(
-            message.contains("'/bin/hold' --resume 'li ne'"),
+            message.contains("'/opt/ts/prime-agent' --resume 'li ne'"),
             "control characters in the id collapse before quoting: {message}"
         );
     }
@@ -711,6 +751,29 @@ Session: ts01ab";
         assert_eq!(
             classify_from(Some(Path::new("/work/prime-agent/node")), Some(own)),
             HolderFlavor::TypeScriptProduct
+        );
+        // A prefix that happens to CONTAIN a `releases` component does not
+        // mis-reject the flat takeover layout (the parent, not an ancestor,
+        // is the signal).
+        assert_eq!(
+            classify_from(
+                Some(Path::new(
+                    "/opt/releases/user/share/prime-agent/prime-agent"
+                )),
+                Some(own)
+            ),
+            HolderFlavor::ThisBuild
+        );
+        // Linux /proc/<pid>/exe appends " (deleted)" for an unlinked image:
+        // a daemon still running from a swept rollback tree keeps the claim.
+        assert_eq!(
+            classify_from(
+                Some(Path::new(
+                    "/Users/k/.local/share/prime-agent.old.123/prime-agent (deleted)"
+                )),
+                Some(own)
+            ),
+            HolderFlavor::ThisBuild
         );
         // The TS public-bin symlink shape inside a dir NAMED prime-agent
         // (a pre-takeover TS root): still the TS product, never ours —

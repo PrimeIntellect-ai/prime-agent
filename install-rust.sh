@@ -141,7 +141,10 @@ esac
 # config). No step of this installer may write, rename, or delete under it.
 # guard_preserved aborts when a target path resolves under the store —
 # the realistic trigger is a mis-set PRIME_AGENT_RUST_PREFIX.
-PRESERVED_STORE="${HOME}/.prime/agent"
+# Resolved like PREFIX below: when $HOME is a symlink, a PREFIX spelled in the
+# physical form must still compare equal to the store, or the guard would
+# pass two different spellings of the same directory.
+PRESERVED_STORE="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${HOME}/.prime/agent")"
 guard_preserved() {
   for guarded_path in "$@"; do
     case "$guarded_path" in
@@ -544,7 +547,14 @@ until ln -s $$ "$lock_link" 2>/dev/null; do
   die "a previous install-rust.sh (pid ${held_by:-unknown}) left a stale publication lock (a crashed install; its cleanup trap cannot have run). Remove it and retry:
   rm -f ${lock_link}"
 done
-trap 'rm -f "$lock_link"' EXIT
+launcher_tmp=""
+displaced_ts_root=""
+on_exit() {
+  rm -f "$lock_link"
+  [ -n "$launcher_tmp" ] && rm -f "$launcher_tmp" 2>/dev/null || true
+  restore_ts_root
+}
+trap on_exit EXIT
 
 # Sweep rollback generations from PREVIOUS installs (both name eras) before
 # this run creates its own — exactly one .old generation survives each install.
@@ -554,13 +564,34 @@ rm -rf "${PREFIX}"/share/prime-agent.old.* "${PREFIX}"/share/prime-agent-rust.ol
 # occupies this installer's share dir under a legacy name (Pi's legacy-pi
 # precedent), never delete it. Rollback = rename back and re-link the
 # public bin symlink. The keyword changes hands either way: the launcher
-# write below replaces the TS public symlink.
+# write below replaces the TS public symlink. While the displaced tree sits
+# in the legacy slot, `displaced_ts_root` names it: every failure from here
+# until the Rust launcher is live puts it BACK (restore_ts_root, wired into
+# the EXIT trap), so a half-finished install never leaves the machine with
+# no working prime-agent — the TS public symlink keeps resolving the whole
+# time and the TS tree returns to its original path if this install dies.
+restore_ts_root() {
+  if [ -n "$displaced_ts_root" ]; then
+    if [ -d "$share_dir" ]; then
+      # The half-installed Rust payload occupies the TS root's old path: it
+      # is disposable (a re-download restores it); the TS tree is not.
+      rm -rf "$share_dir"
+    fi
+    if mv "$displaced_ts_root" "$share_dir" 2>/dev/null; then
+      echo "note: the TypeScript install was restored to ${share_dir} — the install did not complete" >&2
+    else
+      echo "warning: could not restore the TypeScript install from ${displaced_ts_root}; restore it with: mv '${displaced_ts_root}' '${share_dir}'" >&2
+    fi
+    displaced_ts_root=""
+  fi
+}
 if [ -d "$share_dir" ] && ts_managed "$share_dir"; then
   preserved_to="$legacy_dir"
   if [ -e "$preserved_to" ]; then preserved_to="${legacy_dir}.$$"; fi
   guard_preserved "$preserved_to"
   mv "$share_dir" "$preserved_to" \
     || die "could not preserve the TypeScript install at ${share_dir}; nothing was deleted — resolve and re-run"
+  displaced_ts_root="$preserved_to"
   echo "the TypeScript native install at ${share_dir} was preserved at:"
   echo "  ${preserved_to}"
   echo "  rollback: mv '${preserved_to}' '${share_dir}' &&"
@@ -665,6 +696,10 @@ exec "$(dirname "$0")/../share/prime-agent/prime-agent" "$@"
 EOF
 chmod 0755 "$launcher_tmp"
 mv -f "$launcher_tmp" "$launcher"
+launcher_tmp=""
+# The Rust launcher is live: the takeover stands — the displaced TS tree
+# stays in its legacy slot (with the printed rollback commands).
+displaced_ts_root=""
 
 # Retire the launcher's own pre-takeover name (marker-checked: only ever
 # remove the shim this script wrote, never a user's file).

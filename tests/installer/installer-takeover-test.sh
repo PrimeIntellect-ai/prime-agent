@@ -410,6 +410,7 @@ echo "== case 3: the guard refuses PRIME_AGENT_RUST_PREFIX inside the shared sto
 mach3="$(new_machine guard)"
 write_daemon_mock "$mach3/ts-daemon-mock.py"
 write_gh_mock "$mach3/mocks/gh"
+write_npm_mock "$mach3/mocks/npm"
 build_fixture "$mach3" "$FIXTURE_TRIPLE"
 seed_store "$mach3"
 HOME="$mach3/home" TMPDIR="$mach3/tmp" GH_FIXTURE_DIR="$mach3/fixture" \
@@ -430,6 +431,7 @@ echo "== case 4: an unowned share dir is refused (never adopted, never swept) ==
 mach4="$(new_machine unowned)"
 write_daemon_mock "$mach4/ts-daemon-mock.py"
 write_gh_mock "$mach4/mocks/gh"
+write_npm_mock "$mach4/mocks/npm"
 build_fixture "$mach4" "$FIXTURE_TRIPLE"
 seed_store "$mach4"
 mkdir -p "$mach4/home/.local/share/prime-agent"
@@ -453,6 +455,7 @@ assert_eq "case 4 the store is untouched by the refusal" "$store_before_u" "$(st
 echo "== case 5: an unowned regular file at bin/prime-agent is preserved, not destroyed =="
 mach5="$(new_machine unowned-bin)"
 write_gh_mock "$mach5/mocks/gh"
+write_npm_mock "$mach5/mocks/npm"
 build_fixture "$mach5" "$FIXTURE_TRIPLE"
 seed_store "$mach5"
 mkdir -p "$mach5/home/.local/bin"
@@ -474,6 +477,36 @@ assert_eq "case 5 our launcher took the keyword" "yes" \
   "$([ -f "$mach5/home/.local/bin/prime-agent" ] && [ ! -L "$mach5/home/.local/bin/prime-agent" ] && echo yes || echo no)"
 assert_contains "case 5 our launcher is the installed shim" "$mach5/home/.local/bin/prime-agent" "launcher written by install-rust.sh"
 assert_eq "case 5 the store is untouched" "$store_before_p" "$(store_snapshot "$mach5")"
+assert_not_contains "case 5 no npm uninstall fired" "$mach5/logs/npm-mock.log" "uninstall -g prime-agent"
+
+# ==============================================================================
+echo "== case 6: a post-displacement failure restores the displaced TS tree and its command link =="
+mach6="$(new_machine restore)"
+write_daemon_mock "$mach6/ts-daemon-mock.py"
+write_gh_mock "$mach6/mocks/gh"
+write_npm_mock "$mach6/mocks/npm"
+build_fixture "$mach6" "$FIXTURE_TRIPLE"
+seed_ts_native "$mach6"
+seed_store "$mach6"
+store_before_r="$(store_snapshot "$mach6")"
+# A read-only bin dir kills the launcher write AFTER the publish (mktemp in
+# bin fails) while the share tree stays writable — the exact window in which
+# the displaced TS tree must go home.
+chmod 0555 "$mach6/home/.local/bin"
+run_installer "$mach6"
+rcr=$?
+chmod 0755 "$mach6/home/.local/bin"
+assert_eq "case 6 the failed install exits nonzero" 0 "$([ "$rcr" -ne 0 ] && echo 0 || echo 1)"
+assert_contains "case 6 the exit notes the TS restore" "$mach6/install.log" "restored to"
+assert_eq "case 6 the TS tree is back at the share path" "yes" \
+  "$([ -f "$mach6/home/.local/share/prime-agent/.managed" ] && echo yes || echo no)"
+assert_eq "case 6 the TS command link resolves again" "yes" \
+  "$([ -e "$mach6/home/.local/bin/prime-agent" ] && echo yes || echo no)"
+assert_eq "case 6 no half-installed payload remains" "gone" \
+  "$([ -e "$mach6/home/.local/share/prime-agent/package.json" ] && echo here || echo gone)"
+assert_eq "case 6 no legacy slot remains" "gone" \
+  "$([ -e "$mach6/home/.local/share/prime-agent-legacy" ] && echo here || echo gone)"
+assert_eq "case 6 the store is untouched" "$store_before_r" "$(store_snapshot "$mach6")"
 
 echo
 echo "passed: $passed  failed: $failures"
