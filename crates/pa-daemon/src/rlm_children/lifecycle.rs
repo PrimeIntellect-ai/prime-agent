@@ -2,7 +2,7 @@
 //! prompt/kill/close routing, settle watching with its notices, and the
 //! spawn-admission outbox types (`CreatedSessionIds`, `CreatedChild`).
 use super::{
-    anyhow, compact_rlm_text, create_rlm_child_terminal_notice, json, now_ms, usage, Arc,
+    anyhow, compact_rlm_text, create_rlm_child_terminal_notice, json, now_ms, Arc,
     ChildCloseReason, ChildRecord, Context, DaemonCommand, DaemonSessionLifecycle, Duration, Map,
     Mutex, ParentIdentity, Path, PromptInput, Result, RlmChildTerminalNotice,
     SupervisorChildSessionsInner, Value, CREATE_TIMEOUT_MS, IDLE_WAIT_GRACE_MS, KILL_TIMEOUT_MS,

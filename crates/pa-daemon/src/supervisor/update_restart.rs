@@ -1,11 +1,11 @@
 //! The update/restart flow: prepare/commit/abort transactions, the prepared
 //! dir + watchdog, exit-for-update, and the attach-stream salvage helpers.
 use super::{
-    anyhow, build_update_roster, join_all, json, marker_expires_at_iso, options, paths,
-    response_failure, response_line, response_success, sessions, socket, stop_workers_gracefully,
-    stream_attach, supervision, supervisor_identity, util, write_prepared_artifacts, AbortOutcome,
-    Arc, BeginOutcome, ClientRouting, DaemonCommand, DaemonErrorInfo, DaemonResponse, Duration,
-    Map, Ordering, Path, PathBuf, PrepareOp, Result, RouteAdmission, SnapshotPurpose, Supervisor,
+    anyhow, build_update_roster, join_all, json, marker_expires_at_iso, paths, response_failure,
+    response_line, response_success, sessions, socket, stop_workers_gracefully, stream_attach,
+    supervision, supervisor_identity, util, write_prepared_artifacts, AbortOutcome, Arc,
+    BeginOutcome, ClientRouting, DaemonCommand, DaemonErrorInfo, DaemonResponse, Duration, Map,
+    Ordering, Path, PathBuf, PrepareOp, Result, RouteAdmission, SnapshotPurpose, Supervisor,
     UpdateId, UpdatePreparedMarker, UpdateRosterInputs, Value, WorkerSnapshot, WorkerStopVerdict,
     DAEMON_APP_VERSION, WORKER_REQUEST_TIMEOUT_MS,
 };

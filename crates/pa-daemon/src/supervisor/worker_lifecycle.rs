@@ -6,7 +6,7 @@ use super::launch_budget::{
     WORKER_CONNECT_TIMEOUT_ENV,
 };
 use super::{
-    anyhow, bail, clients, create_command_payload, json, launch_budget, options, persist_worker,
+    anyhow, clients, create_command_payload, json, launch_budget, options, persist_worker,
     sessions, socket, util, Arc, Context, DaemonCommand, DaemonWorkerDescriptor,
     DaemonWorkerLifecycle, DurableDaemonCreateCommand, Duration, EngineModelSelection, Map,
     Ordering, Path, ResidentWorker, Result, RouteAdmission, Supervisor, TypedCreateRejection,

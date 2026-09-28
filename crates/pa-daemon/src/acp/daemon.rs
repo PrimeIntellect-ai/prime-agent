@@ -375,7 +375,7 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
     }
 
     let mut stdin = BufReader::new(tokio::io::stdin());
-    let mut line = String::new();
+    let mut input_line = String::new();
     loop {
         input_line.clear();
         match stdin.read_line(&mut input_line).await {

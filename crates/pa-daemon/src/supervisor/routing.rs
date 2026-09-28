@@ -2,7 +2,7 @@
 //! per-request deadlines, and the worker-not-connected refusal.
 use super::{
     anyhow, attach_client_capabilities, bail, client_command_payload, command_active_session_id,
-    json, mpsc, oneshot, response_failure, response_line, response_success, routing, socket,
+    json, mpsc, oneshot, response_failure, response_line, response_success, socket,
     streamed_attach_lines, subscribers, wants_chunked, Arc, DaemonCommand, DaemonResponse,
     Duration, Outbound, ResidentWorker, Result, RouteAdmission, SnapshotPurpose, Supervisor, Value,
     WorkerReply, WorkerRequest,

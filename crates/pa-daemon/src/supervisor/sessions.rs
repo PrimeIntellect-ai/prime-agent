@@ -3,7 +3,7 @@
 //! builders.
 use super::{
     anyhow, bail, json, list_sessions, mpsc, name_unavailable_error, paths, reservation_key,
-    response_failure, response_line, response_success, sessions, subscribers, Arc, DaemonCommand,
+    response_failure, response_line, response_success, subscribers, Arc, DaemonCommand,
     DaemonResponse, DaemonSessionLifecycle, NameScope, Outbound, Path, PathBuf, ResidentWorker,
     Result, RouteAdmission, Supervisor, Value, ROUTE_TIMEOUT_MS,
 };

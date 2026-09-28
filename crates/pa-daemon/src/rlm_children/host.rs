@@ -3,7 +3,7 @@
 //! `collect`) over the supervisor's child-sessions registry, with the
 //! spawn-admission helpers only this surface uses.
 use super::{
-    assert_thinking_supported, bail, create_default_rlm_subagent_session_name, host, json, now_ms,
+    assert_thinking_supported, bail, create_default_rlm_subagent_session_name, json, now_ms,
     registry, resolve_child_model, rlm_child_label, spawn_name_unavailable, usage, Arc,
     ChildCloseReason, ChildRecord, Context, DaemonCommand, Duration, Instant, Mutex, Path, PathBuf,
     Result, RlmChildResult, RlmChildTerminalNotice, RlmCreateSessionHandle,

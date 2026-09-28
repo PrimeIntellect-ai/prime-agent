@@ -2,7 +2,7 @@
 //! resume, compaction triggers, and the wait-for-settled arms.
 use super::{
     anyhow, config, connection, create, env, input, json, lifecycle, paths, queue, queue_lanes,
-    response_failure, response_success, session_snapshot, summary, turn, DaemonResponse, PathBuf,
+    response_failure, response_success, session_snapshot, summary, turn, DaemonResponse,
     QueueCheckpoint, QueuePriority, QueuedItem, Result, RlmSessionIdentity, SessionFile,
     TurnPolicy, Value, Worker, SIDE_QUESTION_SETTLE_TIMEOUT,
 };

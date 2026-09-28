@@ -4,8 +4,8 @@
 //! seam, and the persisted max-depth read.
 
 use super::{
-    model, turn, AgentSessionEngine, EngineModelSelection, Model, RestoredSessionModel,
-    SessionEngine, Value,
+    turn, AgentSessionEngine, EngineModelSelection, Model, RestoredSessionModel, SessionEngine,
+    Value,
 };
 
 impl AgentSessionEngine {
