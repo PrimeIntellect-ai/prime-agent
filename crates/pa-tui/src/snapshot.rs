@@ -90,9 +90,8 @@ impl Reconstructed {
                         started: true,
                         ended_ms: (view.timestamp > 0).then_some(view.timestamp),
                         result: Some(view.view),
-                        // An orphan keeps its own standalone row: it
-                        // never joins a condensed run (it is not a
-                        // call).
+                        // An orphan keeps its own standalone row
+                        // (it is not a call).
                         unmatched_result: true,
                         ..Default::default()
                     })));
@@ -112,7 +111,7 @@ struct ToolResultReplay {
     tool_name: String,
     view: crate::chat::ToolResultView,
     /// The message's wire `timestamp` (Unix milliseconds; 0 when absent):
-    /// reading an existing field for the condensed runs' wall-clock - no
+    /// an existing field the orphan card's own duration rows read - no
     /// schema change.
     timestamp: u64,
 }

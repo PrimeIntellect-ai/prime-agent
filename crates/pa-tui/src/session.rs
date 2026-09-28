@@ -28,8 +28,8 @@ pub enum TranscriptItem {
         name: String,
         arguments: String,
         /// The parent assistant message's wire `timestamp` (Unix
-        /// milliseconds): reading an existing field for the condensed
-        /// runs' wall-clock - no schema change.
+        /// milliseconds): an existing field the cards' own duration
+        /// rows read on replay - no schema change.
         timestamp: u64,
     },
     ToolResult {

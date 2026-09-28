@@ -3,8 +3,8 @@
 //! press records the click target under it — a hyperlink or a
 //! shift/alt/ctrl press records nothing, so those stay selection-only —
 //! and a plain release on the same row fires the target's action. A
-//! card or condensed run block toggles its own expansion (the clicked
-//! card's content, operator directive 2026-09-26 — not the keyboard's
+//! card toggles its own expansion (the clicked card's content,
+//! operator directive 2026-09-26 — not the keyboard's
 //! `app.tools.expand` cycle, which from `overview` would only expand
 //! the thinking blocks around the card), an editor content row places
 //! the caret, and a picker row moves the picker's selection.

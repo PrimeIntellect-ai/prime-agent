@@ -28,8 +28,7 @@ pub struct ToolCallCard {
     pub name: String,
     pub args: Value,
     /// A result that matched no pending call (an orphan replayed from
-    /// the wire): renders as its own standalone card and never joins a
-    /// condensed run.
+    /// the wire): renders as its own standalone card.
     pub unmatched_result: bool,
     /// `tool_execution_start` seen (live only; replayed cards infer it from
     /// the result).
@@ -45,8 +44,8 @@ pub struct ToolCallCard {
     /// The wire `timestamp` (Unix milliseconds) of the assistant message
     /// the call hangs off, when the transcript carries it (the replay
     /// path; live events carry no timestamps). Read from the unchanged
-    /// stored messages - the condensed runs derive their wall-clock from
-    /// the same fields the entries already hold.
+    /// stored messages - the card's own duration rows derive from the
+    /// same fields the entries already hold.
     pub started_ms: Option<u64>,
     /// The wire `timestamp` (Unix milliseconds) of the call's stored
     /// toolResult message, when the transcript carries it.

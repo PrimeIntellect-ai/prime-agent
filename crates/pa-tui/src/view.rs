@@ -27,7 +27,6 @@ mod geometry;
 mod layout;
 pub(crate) mod lazy;
 mod restyle;
-mod runs;
 
 use click::{
     EditorClickSurface, PickerClickSurface, PickerKind, EFFORT_PICKER_CHROME_ROWS,
@@ -68,24 +67,6 @@ impl Default for ShareLoader {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// The run-shape inputs one in-place mutation can move (the
-/// `prepare_entry_mutation`/`mark_entry_stale` pair's capture): an
-/// assistant flips its glue state (a boundary flip merges or splits
-/// runs); an ipython card's parseable receipt ids are a condensing
-/// threshold input (a result landing receipts can qualify a short
-/// run, and a same-count id swap changes the dedupe); a card with no
-/// receipt-bearing potential moves only its own rows - the run map's
-/// shape never changes for it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum RunShapeInputs {
-    /// The assistant's glue state before the mutation.
-    AssistantGlue(bool),
-    /// The card's parseable receipt ids before the mutation (the
-    /// threshold's change detector: a count change OR a same-count id
-    /// swap re-derives the run map - the dedupe keys on ids).
-    Receipts(Vec<Option<String>>),
 }
 
 pub struct AgentView {
@@ -257,25 +238,7 @@ pub struct AgentView {
     /// `mark_entry_stale` to grow the sparse window's tail bookkeeping by
     /// the mutation's delta instead of resolving the whole geometry.
     sparse_mutation: Option<(usize, usize)>,
-    /// The condensed tool runs' suffix capture for one in-place mutation
-    /// (the `prepare_entry_mutation`/`mark_entry_stale` pair): the
-    /// affected run's start index and the suffix's row count before the
-    /// mutation. The block's row-count change folds into the sparse
-    /// window's tail bookkeeping through the run's owning index, except
-    /// an assistant mutation that keeps the glue boundary (a streaming
-    /// grow), which folds at the entry's own slot.
-    runs_prepare: Option<(usize, usize)>,
-    /// The run-shape input captured before one in-place mutation,
-    /// independent of the sparse-window fold above (a top-anchored
-    /// window folds nothing, but the run map still re-derives when the
-    /// input moves); `mark_entry_stale` consumes it.
-    runs_shape: Option<RunShapeInputs>,
     sparse_entries: std::collections::BTreeSet<usize>,
-    /// The condensed tool runs (a purely render-time grouping, never
-    /// stored): one slot per chat entry. Rebuilt from the earliest
-    /// point a mutation can move a run's shape (the run map's own
-    /// suffix protocol).
-    pub(crate) run_map: crate::tool_runs::ToolRuns,
     /// Per-assistant-entry markdown block caches (TS `Markdown.blockCache`,
     /// one per component instance): a streaming message re-renders every
     /// frame, so its settled blocks replay from the cache instead of
@@ -377,10 +340,12 @@ impl AgentView {
             queue_selected: None,
             chat: Vec::new(),
             pending_bash: Vec::new(),
-            // TS #2447: a chat starts at the middle conversation-detail
-            // level (edit diffs expanded, thinking visible, tool output
-            // collapsed); Ctrl+O keeps cycling overview -> details -> all.
-            detail: Detail::Details,
+            // A chat starts at the collapsed conversation-detail level
+            // (operator directive 2026-09-28): every activity item
+            // renders exactly as `details` does, with only the thinking
+            // blocks hidden; Ctrl+O keeps cycling overview -> details
+            // -> all, so the first press reveals the thinking.
+            detail: Detail::Overview,
             working: None,
             compaction: None,
             compaction_generation: 0,
@@ -433,9 +398,6 @@ impl AgentView {
             selection: crate::selection::SelectionState::default(),
             selection_restyle: restyle::SelectionRestyle::default(),
             sparse_mutation: None,
-            runs_prepare: None,
-            runs_shape: None,
-            run_map: crate::tool_runs::ToolRuns::default(),
             click: click::ClickSurface::default(),
         }
     }
@@ -489,67 +451,9 @@ impl AgentView {
     /// the append folds into the sparse window's tail bookkeeping (TS
     /// keeps `scrollTop` while content appends), never a geometry resolve.
     pub fn push_entry(&mut self, entry: ChatEntry) {
-        // A glue-or-tool push can extend or newly qualify a tail run:
-        // capture the affected suffix's rows BEFORE the push, rebuild
-        // the run map from the sequence's start, and fold the whole
-        // row-count change (the pushed entry's own rows plus the block's
-        // growth or first condensation) through the run's owning index.
-        // Any other entry renders on its own: the plain append fold.
-        let glued = crate::tool_runs::is_run_glue(&entry);
-        let captured = glued.then(|| {
-            // The pushed glue can only extend a run that ends at the
-            // very tail: a non-glue last entry ends every earlier run,
-            // so the affected suffix starts at the push's own slot. The
-            // walk must not skip past that boundary row into the
-            // earlier run's start - a paused window would fold the
-            // append in above the content it is holding still.
-            let start = if self.chat.last().is_some_and(crate::tool_runs::is_run_glue) {
-                self.member_start(self.chat.len().saturating_sub(1))
-            } else {
-                self.chat.len()
-            };
-            let before = self
-                .sparse_window_is_tail_anchored()
-                .then(|| (start, self.suffix_rows(start, self.layout_width)));
-            (start, before)
-        });
         self.chat.push(entry);
         self.entry_layout.push([None, None, None]);
-        if let Some((start, before)) = captured {
-            if self.run_map.append_tail(&self.chat) {
-                // The in-place tail patch widened the owning run's extent:
-                // only its block's cached rows (at the start slot)
-                // re-render - the members' rows never left their empty
-                // caches, and the pushed slot has none yet.
-                if let Some(slot) = self.entry_layout.get_mut(start) {
-                    *slot = [None, None, None];
-                }
-                if let Some(slot) = self.entry_heights.get_mut(start) {
-                    *slot = [None, None, None];
-                }
-            } else {
-                self.run_map.rebuild_from(&self.chat, start);
-                self.invalidate_run_suffix(start);
-            }
-            if let Some((start, before)) = before {
-                let after = self.suffix_rows(start, self.layout_width);
-                // A qualifying run grew its block - the run's owning
-                // index carries the whole change. Without one (a short
-                // uncondensed sequence, or a standalone card) the push's
-                // own slot owns its rows: the fold lands there, never
-                // at the sequence's first card.
-                let fold = match self.run_map.run_at(start) {
-                    Some(_) => start,
-                    None => self.chat.len() - 1,
-                };
-                self.sparse_tail_delta(after as isize - before as isize, fold);
-            }
-        } else {
-            // A non-glue entry never joins a run: keep the map in
-            // lockstep with the chat vector (the push's own slot).
-            self.run_map.rebuild_from(&self.chat, self.chat.len() - 1);
-            self.sparse_note_append();
-        }
+        self.sparse_note_append();
     }
 
     /// The number of chat entries (the status-row in-place update checks
@@ -565,60 +469,15 @@ impl AgentView {
     /// the entry's rows, mirroring `push_entry`'s growth note.
     pub fn pop_chat_entry(&mut self) -> Option<ChatEntry> {
         let index = self.chat.len().checked_sub(1)?;
-        // A glue-or-tool pop can shrink a tail run below the condensing
-        // threshold (the block dissolves back into card rows): fold the
-        // affected suffix's whole row-count change through the run's
-        // owning index, exactly the push path in reverse. Any other
-        // entry folds its own rows only.
-        let captured = crate::tool_runs::is_run_glue(&self.chat[index]).then(|| {
-            let start = self.member_start(index);
-            let before = self
-                .sparse_window_is_tail_anchored()
-                .then(|| (start, self.suffix_rows(start, self.layout_width)));
-            (start, before)
-        });
-        match &captured {
-            Some((start, _)) => {
-                if let Some(slot) = self.entry_layout.get_mut(*start) {
-                    *slot = [None, None, None];
-                }
-            }
-            None => {
-                if self.sparse_window_is_tail_anchored() && self.layout_width > 0 {
-                    let rows = self.count_entry_rows(index, self.layout_width);
-                    self.sparse_tail_delta(-(rows as isize), index);
-                }
-            }
+        if self.sparse_window_is_tail_anchored() && self.layout_width > 0 {
+            let rows = self.count_entry_rows(index, self.layout_width);
+            self.sparse_tail_delta(-(rows as isize), index);
         }
         self.md_caches.borrow_mut().remove(&index);
         self.sparse_entries.remove(&index);
         self.entry_heights.pop();
         self.entry_layout.pop();
-        let popped = self.chat.pop();
-        if let Some((start, before)) = captured {
-            self.run_map.rebuild_from(&self.chat, start);
-            self.invalidate_run_suffix(start);
-            if let Some((start, before)) = before {
-                let after = self.suffix_rows(start, self.layout_width);
-                // A qualifying run shrank its block - the run's owning
-                // index carries the whole change. Without one (a solo
-                // card leaving a short uncondensed sequence) the popped
-                // slot owns its rows: the fold lands there, never at
-                // the sequence's first card.
-                let fold = match self.run_map.run_at(start) {
-                    Some(_) => start,
-                    None => index,
-                };
-                self.sparse_tail_delta(after as isize - before as isize, fold);
-            }
-        } else {
-            // A non-glue pop (the retry-episode error row) left the
-            // map one slot long: truncate it back into lockstep - the
-            // entries before the popped row never moved, but a stale
-            // slot would let the next tail append misread the tail.
-            self.run_map.truncate_tail(&self.chat);
-        }
-        popped
+        self.chat.pop()
     }
 
     /// Replace the text and tone of the status entry at `index` (TS
@@ -710,8 +569,8 @@ impl AgentView {
                 started: true,
                 ended_ms: (*timestamp > 0).then_some(*timestamp),
                 result: Some(view),
-                // An orphan keeps its own standalone row: it never
-                // joins a condensed run (it is not a call).
+                // An orphan keeps its own standalone row (it is not
+                // a call).
                 unmatched_result: true,
                 ..Default::default()
             })));
@@ -736,9 +595,6 @@ impl AgentView {
         self.chat.clear();
         self.entry_layout.clear();
         self.entry_heights.clear();
-        self.run_map.rebuild_from(&self.chat, 0);
-        self.runs_prepare = None;
-        self.runs_shape = None;
         self.md_caches.borrow_mut().clear();
         // A rebuilt transcript has no pending hold (TS
         // `resetCurrentSessionRenderState` clears `pendingBashComponents`).
@@ -752,41 +608,8 @@ impl AgentView {
     /// entry's rows, never the transcript). Top-anchored windows are
     /// absolute already and need nothing.
     pub fn prepare_entry_mutation(&mut self, index: usize) {
-        // The run-shape capture is independent of the sparse-window fold
-        // below: a top-anchored window folds nothing, but the run map
-        // still re-derives when the shape input moves (a result landing
-        // agent-message receipts can qualify a short run while the user
-        // is scrolled away), so `mark_entry_stale` reads this capture
-        // regardless of the window mode.
-        self.runs_shape = match self.chat.get(index) {
-            Some(ChatEntry::Assistant(_)) => Some(RunShapeInputs::AssistantGlue(
-                crate::tool_runs::is_run_glue(&self.chat[index]),
-            )),
-            Some(ChatEntry::Tool(card)) => Some(RunShapeInputs::Receipts(
-                crate::tool_runs::card_receipt_ids(card),
-            )),
-            _ => None,
-        };
         if self.sparse_window_is_tail_anchored() && self.layout_width > 0 {
-            // A glue-or-tool entry's mutation moves its run's block, not
-            // just its own rows: capture the affected suffix so
-            // `mark_entry_stale` folds the whole change through the
-            // run's owning index (the per-entry capture never sees the
-            // block, which lives on the run's first entry). An assistant
-            // mutates the same way: it can cross the glue boundary in
-            // either direction (a streamed message gains text and its
-            // run splits; a rebuilt one loses it and the runs merge), so
-            // its capture is the run-aware suffix too.
-            let assistant = matches!(self.chat[index], ChatEntry::Assistant(_));
-            if assistant || crate::tool_runs::is_run_glue(&self.chat[index]) {
-                let start = self.member_start(index);
-                let before = self.suffix_rows(start, self.layout_width);
-                self.sparse_mutation = None;
-                self.runs_prepare = Some((start, before));
-                return;
-            }
             let rows = self.count_entry_rows(index, self.layout_width);
-            self.runs_prepare = None;
             self.sparse_mutation = Some((index, rows));
         }
     }
@@ -800,76 +623,7 @@ impl AgentView {
     /// mutation point, which is the animating tail in the streaming case,
     /// not the whole transcript.
     pub fn mark_entry_stale(&mut self, index: usize) {
-        // A mutated assistant message can cross the run-glue boundary (a
-        // streamed message gains text and its run splits; a rebuilt one
-        // loses it), and a tool result landing agent-message receipts
-        // moves the condensing threshold (the receipts are items):
-        // rebuild the run map's affected suffix so the grouping always
-        // matches the entries it reads.
-        let inputs = self.runs_shape.take();
-        let rebuild = match self.chat.get(index) {
-            Some(ChatEntry::Assistant(_)) => Some(self.member_start(index)),
-            Some(ChatEntry::Tool(card)) => match inputs.as_ref() {
-                Some(RunShapeInputs::Receipts(before))
-                    if crate::tool_runs::card_receipt_ids(card) != before.as_slice() =>
-                {
-                    Some(self.member_start(index))
-                }
-                _ => None,
-            },
-            _ => None,
-        };
-        if let Some(start) = rebuild {
-            self.run_map.rebuild_from(&self.chat, start);
-        }
-        // The sparse-window fold: a glue-or-tool mutation folded its run's
-        // whole suffix (the block's change included) through the run's
-        // owning index; any other mutation folds its own rows.
-        if let Some((start, before)) = self.runs_prepare.take() {
-            if self.layout_width > 0 {
-                let after = self.suffix_rows(start, self.layout_width);
-                // An assistant that kept its glue state only grew its
-                // own rows (the streaming case): fold at the entry's
-                // own slot, exactly like every other self-contained
-                // mutation. A boundary flip (the merge/split), a
-                // receipt change that crossed the threshold, or a
-                // member card's state change folds through the run's
-                // owning index - the block's shape moved there.
-                let fold = match inputs {
-                    Some(RunShapeInputs::AssistantGlue(was))
-                        if crate::tool_runs::is_run_glue(&self.chat[index]) == was =>
-                    {
-                        index
-                    }
-                    // A boundary flip (the merge/split) or a receipt
-                    // change that re-derived the run map reshapes the
-                    // block at the captured suffix start - a formed,
-                    // dissolved, or re-counted run moves its rows there
-                    // (and the standalone card's own start IS its index).
-                    Some(RunShapeInputs::AssistantGlue(_) | RunShapeInputs::Receipts(_))
-                        if rebuild.is_some() =>
-                    {
-                        start
-                    }
-                    // Everything else is a bare content/state change:
-                    // a member card moves the BLOCK's rows (they live at
-                    // the run's start); a solo card (a short uncondensed
-                    // sequence, or a standalone card) moves only its own
-                    // rows - the fold lands there, never at the
-                    // sequence's first card.
-                    Some(RunShapeInputs::AssistantGlue(_) | RunShapeInputs::Receipts(_)) | None => {
-                        match self.run_map.slot(index) {
-                            Some(
-                                crate::tool_runs::RunSlot::Start(_)
-                                | crate::tool_runs::RunSlot::Member,
-                            ) => start,
-                            _ => index,
-                        }
-                    }
-                };
-                self.sparse_tail_delta(after as isize - before as isize, fold);
-            }
-        } else if let Some((pending, before)) = self.sparse_mutation.take() {
+        if let Some((pending, before)) = self.sparse_mutation.take() {
             if pending == index && self.layout_width > 0 {
                 let after = self.count_entry_rows(index, self.layout_width);
                 self.sparse_tail_delta(after as isize - before as isize, index);
@@ -893,17 +647,6 @@ impl AgentView {
                     *slot = [None, None, None];
                 }
             }
-        }
-        // A mutation inside a condensed run re-renders the block itself
-        // (its counts, wall-clock, and status glyph read the run's
-        // cards), and an assistant flip re-rendered every entry the
-        // rebuild reclassified: drop the whole affected suffix's caches.
-        let invalidate_from = match rebuild {
-            Some(start) => Some(start),
-            None => self.run_map.block_owner(index),
-        };
-        if let Some(start) = invalidate_from {
-            self.invalidate_run_suffix(start);
         }
     }
 
@@ -1083,12 +826,6 @@ impl AgentView {
     ) -> Vec<Line> {
         #[cfg(test)]
         layout::ENTRY_RENDERS.with(|count| count.set(count.get() + 1));
-        // A condensed run's block renders in place of its entries in the
-        // collapsed detail mode (the members render nothing); every other
-        // detail mode renders each entry exactly as before.
-        if let Some(rows) = self.render_condensed(index, width) {
-            return rows;
-        }
         let detail = self.detail;
         match entry {
             ChatEntry::Status { text, kind } => {
@@ -2315,22 +2052,23 @@ mod tests {
     /// the shared `format_key_text`, so the row shows `Alt+\u{2191}` on
     /// Linux/Windows hosts and `Option+\u{2191}` on macOS (TS
     /// `formatKeyPart`'s darwin branch).
-    /// TS #2447: a fresh chat starts at the middle conversation-detail
-    /// level (`details`: edit diffs expanded, thinking visible, tool
-    /// output collapsed) instead of the most-collapsed overview; the
-    /// Ctrl+O cycle from there is unchanged (details -> all -> overview).
+    /// A fresh chat starts at the collapsed conversation-detail level
+    /// (operator directive 2026-09-28): the collapse mode renders every
+    /// activity item exactly as `details` does, with only the thinking
+    /// blocks hidden - so thinking is hidden BY DEFAULT, and the
+    /// Ctrl+O cycle from there is unchanged (overview -> details ->
+    /// all -> overview; the first press reveals the thinking).
     #[test]
-    fn a_chat_starts_at_the_middle_detail_level() {
+    fn a_chat_starts_at_the_collapsed_detail_level() {
         let mut v = view();
-        assert_eq!(v.detail, Detail::Details, "the startup level is details");
-        assert!(v.detail.show_thinking());
-        assert!(v.detail.edit_diffs_expanded());
+        assert_eq!(v.detail, Detail::Overview, "the startup level is overview");
+        assert!(!v.detail.show_thinking());
         assert!(!v.detail.tool_output_expanded());
+        assert_eq!(v.detail.next(), Detail::Details);
+        v.detail = v.detail.next();
         assert_eq!(v.detail.next(), Detail::All);
         v.detail = v.detail.next();
         assert_eq!(v.detail.next(), Detail::Overview);
-        v.detail = v.detail.next();
-        assert_eq!(v.detail.next(), Detail::Details);
     }
 
     /// The `!`/`!!` prompt (TS `getBashPromptInfo` + `formatPromptPrefix`):
@@ -2501,7 +2239,7 @@ mod tests {
         assert!(frame.iter().all(|l| str_width(&text_of(l)) <= 80));
         let joined = frame.iter().map(text_of).collect::<Vec<_>>().join("\n");
         assert!(joined.contains("prime agent v0.0.0"));
-        assert!(joined.contains("Details mode (Ctrl+O to expand)"));
+        assert!(joined.contains("Collapsed mode (Ctrl+O to expand)"));
         assert!(joined.contains('>'));
     }
 
@@ -2862,34 +2600,37 @@ mod tests {
     /// re-styles nothing.
     #[test]
     fn the_hover_affordance_brightens_the_hovered_card_row() {
-        // The condensed run block paints its summary row Muted (the
-        // count text) and its breakdown Dim — the affordance's exact
-        // input.
-        let mut view = condensed_view(run_cards(3));
+        // A settled tool card paints its header row Muted (the tool
+        // name) with the separator Dim — the affordance's exact input.
+        let mut view = collapsed_view(settled_cards(1));
         let plain = view.render_frame(80, 24);
         let muted = view.theme.fg_style(crate::theme::ThemeColor::Muted).fg;
         let text = view.theme.fg_style(crate::theme::ThemeColor::Text).fg;
-        // The block's summary row (the "3 tool calls" count row), not the
+        // The card's header row (the "bash \u{b7} done" row), not the
         // entry's leading spacer: the affordance's visible surface.
-        let block_row = (0..plain.len())
-            .find(|&row| {
-                plain[row]
-                    .iter()
-                    .any(|span| span.content.contains("3 tool calls"))
-            })
-            .expect("the block's summary row renders");
+        // The header's spans are split (name, separator, status), so the
+        // search joins each row's spans first.
+        let row_text = |row: usize| -> String {
+            plain[row]
+                .iter()
+                .map(|span| span.content.as_str())
+                .collect()
+        };
+        let card_row = (0..plain.len())
+            .find(|&row| row_text(row).contains("bash \u{b7} done"))
+            .expect("the card's header row renders");
         assert!(
-            plain[block_row].iter().any(|span| span.style.fg == muted),
-            "the block's summary row paints muted: {:?}",
-            plain[block_row]
+            plain[card_row].iter().any(|span| span.style.fg == muted),
+            "the card's header row paints muted: {:?}",
+            plain[card_row]
         );
-        // Hovering onto the block row changes the state and the paint.
-        assert!(view.note_hover(block_row, 2));
-        assert_eq!(view.hover_pos, Some((block_row, 2)));
+        // Hovering onto the card row changes the state and the paint.
+        assert!(view.note_hover(card_row, 2));
+        assert_eq!(view.hover_pos, Some((card_row, 2)));
         let hovered = view.render_frame(80, 24);
         let dim = view.theme.fg_style(crate::theme::ThemeColor::Dim).fg;
         let bright = view.theme.fg_style(crate::theme::ThemeColor::Muted);
-        for (hovered_span, plain_span) in hovered[block_row].iter().zip(&plain[block_row]) {
+        for (hovered_span, plain_span) in hovered[card_row].iter().zip(&plain[card_row]) {
             if plain_span.style.fg == muted {
                 assert_eq!(
                     hovered_span.style.fg, text,
@@ -2904,48 +2645,17 @@ mod tests {
         }
         // A motion across the same row changes nothing (the cell rides
         // along; the affordance is row-level).
-        assert!(!view.note_hover(block_row, 5));
-        assert_eq!(view.hover_pos, Some((block_row, 5)));
+        assert!(!view.note_hover(card_row, 5));
+        assert_eq!(view.hover_pos, Some((card_row, 5)));
         // Moving onto a non-clickable row clears the hover and restores
         // the paint with the next frame.
         assert!(view.note_hover(0, 2));
         assert_eq!(view.hover_pos, None);
         let restored = view.render_frame(80, 24);
         assert!(
-            restored[block_row]
-                .iter()
-                .any(|span| span.style.fg == muted),
-            "the block's muted paint returns with the hover"
+            restored[card_row].iter().any(|span| span.style.fg == muted),
+            "the card's muted paint returns with the hover"
         );
-        // The block's breakdown row (the dim branch gutter below the
-        // summary) pins the Dim -> Muted conversion on its own paint:
-        // the entry's whole span is the clickable target, and hovering
-        // it steps the dim spans up exactly one tier.
-        let breakdown_row = (0..plain.len())
-            .find(|&row| {
-                plain[row]
-                    .iter()
-                    .any(|span| span.content.contains("3 bash"))
-            })
-            .expect("the block's breakdown row renders");
-        assert!(
-            plain[breakdown_row].iter().any(|span| span.style.fg == dim),
-            "the breakdown row paints dim: {:?}",
-            plain[breakdown_row]
-        );
-        assert!(view.note_hover(breakdown_row, 2));
-        let hovered_breakdown = view.render_frame(80, 24);
-        for (hovered_span, plain_span) in hovered_breakdown[breakdown_row]
-            .iter()
-            .zip(&plain[breakdown_row])
-        {
-            if plain_span.style.fg == dim {
-                assert_eq!(
-                    hovered_span.style.fg, bright.fg,
-                    "the hovered breakdown's dim span stepped up to muted"
-                );
-            }
-        }
     }
 
     /// The render-side revalidation (the review bots' finding): the
@@ -2955,31 +2665,33 @@ mod tests {
     /// landed there.
     #[test]
     fn a_scrolled_layout_revalidates_the_hover() {
-        // A transcript TALLER than the window (the run's block at the
-        // top, user rows below): the window can actually scroll, so the
+        // A transcript TALLER than the window (tool cards at the top,
+        // user rows below): the window can actually scroll, so the
         // revalidation is exercised by a real layout move, not a clamp.
-        let mut entries = run_cards(3);
+        let mut entries = settled_cards(3);
         for index in 0..10 {
             entries.push(crate::chat::ChatEntry::User {
                 text: format!("later user line {index}"),
             });
         }
-        let mut view = condensed_view(entries);
+        let mut view = collapsed_view(entries);
         view.render_frame(80, 24);
         view.scroll_to_top();
         let plain = view.render_frame(80, 24);
         let muted = view.theme.fg_style(crate::theme::ThemeColor::Muted).fg;
-        let block_row = (0..plain.len())
-            .find(|&row| {
-                plain[row]
-                    .iter()
-                    .any(|span| span.content.contains("3 tool calls"))
-            })
-            .expect("the block's summary row renders");
-        assert!(view.note_hover(block_row, 2));
+        let row_text = |row: usize| -> String {
+            plain[row]
+                .iter()
+                .map(|span| span.content.as_str())
+                .collect()
+        };
+        let card_row = (0..plain.len())
+            .find(|&row| row_text(row).contains("bash \u{b7} done"))
+            .expect("the card's header row renders");
+        assert!(view.note_hover(card_row, 2));
         let text = view.theme.fg_style(crate::theme::ThemeColor::Text).fg;
         let hovered = view.render_frame(80, 24);
-        for (hovered_span, plain_span) in hovered[block_row].iter().zip(&plain[block_row]) {
+        for (hovered_span, plain_span) in hovered[card_row].iter().zip(&plain[card_row]) {
             if plain_span.style.fg == muted {
                 assert_eq!(
                     hovered_span.style.fg, text,
@@ -2987,25 +2699,25 @@ mod tests {
                 );
             }
         }
-        // Scroll down past the block's whole span: user rows land on the
-        // recorded screen row, and the revalidation clears the hover
-        // with the next frame (a stale coordinate never brightens the
-        // user content that moved onto it).
-        view.scroll_by(6);
+        // Scroll down past every card's span (the three cards stack 24+
+        // rows): user rows land on the recorded screen row, and the
+        // revalidation clears the hover with the next frame (a stale
+        // coordinate never brightens the user content that moved onto
+        // it).
+        view.scroll_by(24);
         let scrolled = view.render_frame(80, 24);
         assert_eq!(
             view.hover_pos, None,
             "the scroll cleared the stale hover coordinate"
         );
-        // The position the block vacated carries different content
-        // (the user block's rows moved onto it — border, text, border):
-        // no hover affordance survives the move onto non-card rows.
+        let scrolled_text: String = scrolled[card_row]
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect();
         assert!(
-            !scrolled[block_row]
-                .iter()
-                .any(|span| span.content.contains("3 tool calls")),
-            "the block's summary vacated the recorded position: {:?}",
-            scrolled[block_row]
+            !scrolled_text.contains("bash \u{b7} done"),
+            "the card's rows vacated the recorded position: {:?}",
+            scrolled[card_row]
         );
         assert!(
             (0..scrolled.len()).any(|row| scrolled[row]
@@ -3127,7 +2839,7 @@ mod tests {
         assert!(frame.len() == 24 && inline.len() != frame.len());
         // The dock rows ride at the end (prompt context, editor, tray).
         let joined = inline.iter().map(text_of).collect::<Vec<_>>().join("\n");
-        assert!(joined.contains("Details mode"));
+        assert!(joined.contains("Collapsed mode"));
     }
 
     #[test]
@@ -3140,7 +2852,7 @@ mod tests {
         assert_eq!(frame.len(), 40);
         // The editor prompt sits above the (empty) tray row.
         let joined = frame.iter().map(text_of).collect::<Vec<_>>().join("\n");
-        assert!(joined.contains("Details mode"));
+        assert!(joined.contains("Collapsed mode"));
     }
 
     fn view_with(entries: Vec<ChatEntry>) -> AgentView {
@@ -3312,8 +3024,8 @@ mod tests {
             error: None,
             aborted: false,
         }))]);
-        // The hidden-thinking scenario starts at the collapsed overview
-        // level (the startup level is the middle details since TS #2447).
+        // The hidden-thinking scenario sits at the collapsed overview
+        // level (the startup level since the 2026-09-28 directive).
         view.detail = Detail::Overview;
         let overview = transcript_text(&mut view, 80);
         view.detail = view.detail.next();
@@ -3334,15 +3046,25 @@ mod tests {
             tokens_before: 12345,
             custom_instructions: Some("the goal".to_string()),
         }]);
-        // Collapsed at the startup `details` (TS #2447): the header plus
-        // the whitespace-collapsed EventSummary, never the token metadata.
+        // Collapsed at the collapsed startup level (the overview mode):
+        // the header plus the whitespace-collapsed EventSummary, never
+        // the token metadata.
         let collapsed = transcript_text(&mut view, 80);
         assert!(collapsed.contains("\u{25c6} Context compacted"));
         assert!(collapsed.contains("## Summary the session story, first line"));
         assert!(!collapsed.contains("Compacted from"));
         // The row is cacheable; the first render stored it. A detail
         // change must re-flow it (the cache drops wholesale), or the
-        // block would stay collapsed forever.
+        // block would stay collapsed forever. The cycle's first step
+        // is the thinking reveal (`details`): the block stays
+        // collapsed there too.
+        view.detail = view.detail.next();
+        let at_details = transcript_text(&mut view, 80);
+        assert_eq!(view.detail, Detail::Details);
+        assert!(
+            !at_details.contains("Compacted from"),
+            "the middle `details` level keeps the block collapsed too: {at_details}"
+        );
         view.detail = view.detail.next();
         let expanded = transcript_text(&mut view, 80);
         assert!(
@@ -3355,19 +3077,14 @@ mod tests {
             expanded.contains("Summary"),
             "the expanded markdown body renders: {expanded}"
         );
-        // The cycle wraps through `overview` (the other collapsed level):
-        // the block collapses again.
+        // The cycle wraps through the collapsed startup level: the
+        // block collapses again.
         view.detail = view.detail.next();
         let collapsed_again = transcript_text(&mut view, 80);
+        assert_eq!(view.detail, Detail::Overview);
         assert!(
             !collapsed_again.contains("Compacted from"),
             "the cycle back to `overview` collapses the block: {collapsed_again}"
-        );
-        view.detail = Detail::Details;
-        let at_details = transcript_text(&mut view, 80);
-        assert!(
-            !at_details.contains("Compacted from"),
-            "the middle `details` level keeps the block collapsed too: {at_details}"
         );
     }
 
@@ -3851,10 +3568,15 @@ mod tests {
         );
     }
     // ------------------------------------------------------------------
-    // Condensed tool runs (the collapsed-view condensing, tool_runs.rs)
+    // The collapsed view (the overview detail level) - the undo of the
+    // 2026-09-25 condensed activity runs (operator directive
+    // 2026-09-28): "collapse mode should just be details mode, but
+    // WITHOUT THINKING BLOCKS". Every activity item renders exactly as
+    // `details` does; only the thinking blocks are hidden, and the
+    // Ctrl+O cycle from the collapsed startup reveals the thinking.
     // ------------------------------------------------------------------
 
-    fn condensed_view(entries: Vec<ChatEntry>) -> AgentView {
+    fn collapsed_view(entries: Vec<ChatEntry>) -> AgentView {
         let mut view = view_with(entries);
         view.detail = Detail::Overview;
         view
@@ -3870,377 +3592,93 @@ mod tests {
         }))
     }
 
-    fn run_cards(count: usize) -> Vec<ChatEntry> {
+    fn settled_cards(count: usize) -> Vec<ChatEntry> {
         (0..count)
-            .map(|index| settled_tool_card(&format!("run_c{index}")))
+            .map(|index| settled_tool_card(&format!("card{index}")))
             .collect()
     }
 
+    /// The operator's new contract: the collapsed view renders EVERY
+    /// activity item exactly as `details` does - every tool card, every
+    /// notice, every agent-message row - with ONLY the thinking blocks
+    /// hidden; nothing condenses (the "N tool calls" summary block is
+    /// gone at every level).
     #[test]
-    fn three_items_condense_into_the_block_two_do_not() {
-        let mut three = condensed_view(run_cards(3));
-        let text = transcript_text(&mut three, 80);
+    fn the_collapsed_view_renders_every_activity_item_as_details_does() {
+        let mut entries = settled_cards(3);
+        entries.push(thinking_only());
+        entries.push(agent_message_row());
+        entries.push(crate::chat::ChatEntry::User {
+            text: "go".to_string(),
+        });
+        entries.extend(settled_cards(2));
+        let mut view = collapsed_view(entries);
+        let text = transcript_text(&mut view, 80);
         assert!(
-            text.contains("3 tool calls"),
-            "the block's summary row renders: {text}"
+            text.matches("bash \u{b7} done").count() == 5,
+            "every tool card renders its own panel rows: {text}"
         );
         assert!(
-            text.contains("\u{2570}\u{2500} 3 bash"),
-            "the breakdown row hangs on the branch gutter: {text}"
+            text.contains("Agent message \u{b7} \u{2193} lane"),
+            "the agent-message notice keeps its own row: {text}"
         );
         assert!(
-            !text.contains("to expand"),
-            "no drill-in hint rides the breakdown row: {text}"
-        );
-        assert!(
-            !text.contains("bash \u{b7} done"),
-            "the cards' own panel rows are gone in overview: {text}"
-        );
-
-        let mut two = condensed_view(run_cards(2));
-        let text = transcript_text(&mut two, 80);
-        assert!(
-            text.contains("bash \u{b7} done"),
-            "two cards render their own rows: {text}"
+            !text.contains("hi"),
+            "the collapsed notice row carries no body preview: {text}"
         );
         assert!(
             !text.contains("tool calls"),
-            "nothing condenses at or below two items: {text}"
-        );
-    }
-
-    #[test]
-    fn condensing_is_overview_only_and_ctrl_o_reveals_every_item() {
-        // The Ctrl+O cycle owns the whole story: overview condenses the
-        // run into one block and hides the thinking; details/all render
-        // every card, every notice, and the thinking itself.
-        let mut entries = run_cards(3);
-        entries.push(thinking_only());
-        entries.push(agent_message_row());
-        let mut view = condensed_view(entries);
-        let text = transcript_text(&mut view, 80);
-        assert!(
-            text.contains("3 tool calls \u{b7} 1 agent message"),
-            "overview condenses the mixed run: {text}"
-        );
-        assert!(
-            text.contains("1 agent messages received"),
-            "the notice merges into the block's breakdown: {text}"
-        );
-        assert!(
-            !text.contains("Agent message \u{b7} \u{2193}"),
-            "the notice's own row is gone in overview: {text}"
+            "no condensed-run summary block renders: {text}"
         );
         assert!(
             !text.contains("hmm"),
-            "collapsed hides the thinking: {text}"
+            "the collapsed view hides the thinking: {text}"
         );
-        for detail in [Detail::Details, Detail::All] {
-            view.detail = detail;
-            let text = transcript_text(&mut view, 80);
-            assert!(
-                !text.contains("tool calls"),
-                "no block at {detail:?}: {text}"
-            );
-            assert!(
-                text.contains("bash \u{b7}"),
-                "the cards render their own rows at {detail:?}: {text}"
-            );
-            assert!(
-                text.contains("Agent message \u{b7} \u{2193} lane"),
-                "the notice keeps its own row at {detail:?}: {text}"
-            );
-            assert!(
-                text.contains("hmm"),
-                "the thinking is visible at {detail:?}: {text}"
-            );
-        }
-        view.detail = Detail::Overview;
-        let text = transcript_text(&mut view, 80);
-        assert!(text.contains("3 tool calls"), "overview condenses: {text}");
-    }
-
-    #[test]
-    fn a_received_notice_merges_into_the_block_and_short_groups_stay_solo() {
-        // The operator's screenshot fix: tool calls, hidden thinking,
-        // and received notices in one stretch condense into ONE block -
-        // the notice neither breaks the run nor renders its own row;
-        // a genuine short group (one card, one notice) keeps both rows.
-        let mut entries = run_cards(3);
-        entries.push(thinking_only());
-        entries.push(agent_message_row());
-        entries.extend(run_cards(2));
-        let mut view = condensed_view(entries);
-        let text = transcript_text(&mut view, 80);
+        // The ONLY difference from `details` is the thinking: the
+        // Ctrl+O cycle from the collapsed startup is the
+        // thinking-visibility toggle (details-with-thinking).
+        view.detail = view.detail.next();
+        assert_eq!(view.detail, Detail::Details);
+        let details = transcript_text(&mut view, 80);
         assert!(
-            text.contains("5 tool calls \u{b7} 1 agent message"),
-            "one aggregate spans the whole interleaved stretch: {text}"
+            details.matches("bash \u{b7} done").count() == 5,
+            "every card keeps its own rows at details: {details}"
         );
         assert!(
-            text.contains("1 agent messages received"),
-            "the notice's count rides the breakdown: {text}"
+            details.contains("Agent message \u{b7} \u{2193} lane"),
+            "the notice keeps its own row at details: {details}"
         );
         assert!(
-            !text.contains("Agent message \u{b7} \u{2193}"),
-            "the notice renders nothing of its own inside the run: {text}"
-        );
-        assert!(
-            text.matches("tool calls").count() == 1,
-            "exactly one block, no tiny groups: {text}"
-        );
-
-        let short = vec![run_cards(1).pop().unwrap(), agent_message_row()];
-        let mut view = condensed_view(short);
-        let text = transcript_text(&mut view, 80);
-        assert!(
-            text.contains("Agent message \u{b7} \u{2193} lane"),
-            "a two-item group keeps the notice's own row: {text}"
-        );
-        // The collapsed row carries no body preview (the operator's
-        // 2026-09-25 directive): the content only opens on expand.
-        assert!(
-            !text.contains("hi"),
-            "the collapsed row never previews the body: {text}"
-        );
-        assert!(
-            text.contains("bash \u{b7} done"),
-            "a two-item group keeps the card's own rows: {text}"
+            details.contains("hmm"),
+            "the thinking is visible at details"
         );
     }
 
+    /// The count/render parity holds for every entry at every level -
+    /// the plain per-entry geometry the condensing used to replace in
+    /// the collapsed mode.
     #[test]
-    fn the_live_block_updates_between_frames() {
-        let mut view = condensed_view(Vec::new());
-        view.push_entry(crate::chat::ChatEntry::User {
-            text: "go".to_string(),
-        });
-        let running = ChatEntry::Tool(Box::new(ToolCallCard {
-            id: "run_r".to_string(),
-            name: "bash".to_string(),
-            args: serde_json::json!({"command": "sleep 1"}),
-            started: true,
-            started_at: Some(std::time::Instant::now()),
-            ended_at: None,
-            result: None,
-            result_partial: false,
-            ..Default::default()
-        }));
-        // Four settled cards plus one running: the block is live and its
-        // glyph animates with the pulse frame.
-        let mut entries = run_cards(4);
-        entries.push(running);
-        for entry in entries {
-            view.push_entry(entry);
-        }
-        view.pulse_frame = 0;
-        let frame0 = transcript_text(&mut view, 80);
-        assert!(frame0.contains("5 tool calls"), "the live block: {frame0}");
-        assert!(
-            frame0.contains(crate::chat::working_icon_frame(0)),
-            "the working icon rides the summary row: {frame0}"
-        );
-        view.pulse_frame = 2;
-        let frame1 = transcript_text(&mut view, 80);
-        assert!(
-            frame1.contains(crate::chat::working_icon_frame(2)),
-            "the icon advanced with the pulse: {frame1}"
-        );
-        // The last card settles: the glyph flips to the settled check.
-        let index = view.chat.len() - 1;
-        view.prepare_entry_mutation(index);
-        if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
-            card.result = Some(ToolResultView {
-                content: vec![serde_json::json!({ "type": "text", "text": "done" })],
-                details: serde_json::Value::Null,
-                is_error: false,
-            });
-            card.result_partial = false;
-            card.ended_at = Some(std::time::Instant::now());
-        }
-        view.mark_entry_stale(index);
-        let settled = transcript_text(&mut view, 80);
-        assert!(
-            settled.contains("\u{2713} 5 tool calls"),
-            "the settled glyph: {settled}"
-        );
-    }
-
-    #[test]
-    fn the_block_appears_at_the_third_streamed_card_before_results() {
-        // Staged streaming: the run row first appears when the THIRD
-        // named/id card streams in - before any `tool_execution_end` -
-        // and the count increments immediately on the fourth. The
-        // threshold crossing and the O(1) tail patch both keep the
-        // block's rows current while the run is still running.
-        let streamed = |id: &str| {
-            ChatEntry::Tool(Box::new(ToolCallCard {
-                id: id.to_string(),
-                name: "bash".to_string(),
-                args: serde_json::json!({"command": "echo done"}),
-                started: true,
-                started_at: Some(std::time::Instant::now()),
-                ..Default::default()
-            }))
-        };
-        let mut view = condensed_view(Vec::new());
-        view.push_entry(crate::chat::ChatEntry::User {
-            text: "go".to_string(),
-        });
-        view.push_entry(streamed("c0"));
-        view.push_entry(streamed("c1"));
-        let two = transcript_text(&mut view, 80);
-        assert!(
-            !two.contains("tool calls"),
-            "two streamed cards wait for the third: {two}"
-        );
-        view.push_entry(streamed("c2"));
-        let three = transcript_text(&mut view, 80);
-        assert!(
-            three.contains("3 tool calls"),
-            "the block appears at the third streamed card, results pending: {three}"
-        );
-        view.push_entry(streamed("c3"));
-        let four = transcript_text(&mut view, 80);
-        assert!(
-            four.contains("4 tool calls"),
-            "the count increments immediately on the fourth: {four}"
-        );
-    }
-
-    #[test]
-    fn a_landing_result_with_receipts_qualifies_the_short_run() {
-        // `tool_execution_end` replays a result whose sentAgentMessages
-        // carry two receipts: the one-card-plus-receipts run crosses
-        // the >=3 threshold the moment the result lands (prepare
-        // captured the pre-mutation receipt count, mark re-derives the
-        // map), and the block replaces the card's rows in overview.
-        let mut view = condensed_view(Vec::new());
-        view.push_entry(crate::chat::ChatEntry::User {
-            text: "go".to_string(),
-        });
-        let mut cell = settled_tool_card("cell0");
-        if let ChatEntry::Tool(card) = &mut cell {
-            card.name = "ipython".to_string();
-            card.args = serde_json::json!({"code": "print(1)"});
-        }
-        view.push_entry(cell);
-        let before = transcript_text(&mut view, 80);
-        assert!(
-            !before.contains("agent message"),
-            "one streamed cell without receipts stays solo: {before}"
-        );
-        let index = view.chat.len() - 1;
-        view.prepare_entry_mutation(index);
-        if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
-            card.result = Some(ToolResultView {
-                content: vec![serde_json::json!({"type": "text", "text": "done"})],
-                details: serde_json::json!({
-                    "sentAgentMessages": [
-                        { "id": "m1", "message": "a", "deliveryStatus": "delivered", "receiverRole": "parent" },
-                        { "id": "m2", "message": "b", "deliveryStatus": "delivered", "receiverRole": "parent" }
-                    ]
-                }),
-                is_error: false,
-            });
-        }
-        view.mark_entry_stale(index);
-        let after = transcript_text(&mut view, 80);
-        assert!(
-            after.contains("1 tool call \u{b7} 2 agent messages"),
-            "the landed receipts qualify the run: {after}"
-        );
-        assert!(
-            after.contains("2 agent messages sent"),
-            "the breakdown carries the receipt class: {after}"
-        );
-    }
-
-    #[test]
-    fn a_landing_receipt_qualifies_the_run_while_the_window_is_top_anchored() {
-        // The top-anchored window (the user scrolled up) folds nothing on
-        // a mutation, but the run-shape capture is independent of the
-        // sparse fold: a result landing agent-message receipts re-derives
-        // the run map immediately, and the block forms without waiting
-        // for the next tail push.
-        let mut view = condensed_view(Vec::new());
-        for index in 0..40 {
-            view.push_entry(crate::chat::ChatEntry::Status {
-                text: format!("row {index}"),
-                kind: crate::chat::StatusKind::Info,
-            });
-        }
-        let mut cell = settled_tool_card("cell0");
-        if let ChatEntry::Tool(card) = &mut cell {
-            card.name = "ipython".to_string();
-            card.args = serde_json::json!({"code": "print(1)"});
-        }
-        view.push_entry(cell);
-        view.push_entry(settled_tool_card("card1"));
-        let _ = view.render_frame(80, 12);
-        view.scroll_to_top();
-        assert!(
-            !view.sparse_window_is_tail_anchored(),
-            "the window holds the top, not the tail"
-        );
-        let frame = view.render_frame(80, 12);
-        let rendered: Vec<String> = frame
-            .iter()
-            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
-            .collect();
-        assert!(
-            rendered.iter().any(|row| row.contains("prime agent v")),
-            "the top-anchored frame holds the transcript's splash: {rendered:?}"
-        );
-        let index = view.chat.len() - 2;
-        view.prepare_entry_mutation(index);
-        if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
-            card.result = Some(ToolResultView {
-                content: vec![serde_json::json!({"type": "text", "text": "done"})],
-                details: serde_json::json!({
-                    "sentAgentMessages": [
-                        { "id": "m1", "message": "a", "deliveryStatus": "delivered", "receiverRole": "parent" },
-                        { "id": "m2", "message": "b", "deliveryStatus": "delivered", "receiverRole": "parent" }
-                    ]
-                }),
-                is_error: false,
-            });
-        }
-        view.mark_entry_stale(index);
-        assert!(
-            view.run_map.run_at(index).is_some(),
-            "the block formed while the window was scrolled away"
-        );
-        assert!(
-            view.runs_shape.is_none(),
-            "the shape capture is consumed by the stale pass"
-        );
-        let after = transcript_text(&mut view, 80);
-        assert!(
-            after.contains("2 tool calls \u{b7} 2 agent messages"),
-            "the block renders with both kinds counted: {after}"
-        );
-    }
-
-    #[test]
-    fn condensed_geometry_matches_the_render() {
-        for calls in [3usize, 8] {
-            let mut view = condensed_view(run_cards(calls));
+    fn entry_geometry_matches_the_render() {
+        for calls in [1usize, 3, 8] {
+            let mut view = collapsed_view(settled_cards(calls));
             for width in [0, 1, 10, 40, 80] {
                 for detail in [Detail::Overview, Detail::Details, Detail::All] {
                     view.detail = detail;
                     for index in 0..view.chat.len() {
                         let entry = &view.chat[index];
+                        let preceded = index > 0 && view.is_compact_neighbor(&view.chat[index - 1]);
                         assert_eq!(
                             view.count_entry_rows(index, width),
-                            view.render_entry(index, entry, width, false, false).len(),
+                            view.render_entry(index, entry, width, index == 0, preceded)
+                                .len(),
                             "calls {calls} index {index} width {width} detail {detail:?}"
                         );
                     }
                 }
             }
         }
-        // A mixed run (a notice and a receipt-carrying cell) keeps the
-        // same count/render parity on every index.
+        // A mixed transcript (a notice and a receipt-carrying cell)
+        // keeps the same count/render parity on every index.
         let mut cell = settled_tool_card("mix0");
         if let ChatEntry::Tool(card) = &mut cell {
             card.name = "ipython".to_string();
@@ -4255,15 +3693,17 @@ mod tests {
                 is_error: false,
             });
         }
-        let mut view = condensed_view(vec![agent_message_row(), thinking_only(), cell]);
+        let mut view = collapsed_view(vec![agent_message_row(), thinking_only(), cell]);
         for width in [0, 1, 10, 40, 80] {
             for detail in [Detail::Overview, Detail::Details, Detail::All] {
                 view.detail = detail;
                 for index in 0..view.chat.len() {
                     let entry = &view.chat[index];
+                    let preceded = index > 0 && view.is_compact_neighbor(&view.chat[index - 1]);
                     assert_eq!(
                         view.count_entry_rows(index, width),
-                        view.render_entry(index, entry, width, false, false).len(),
+                        view.render_entry(index, entry, width, index == 0, preceded)
+                            .len(),
                         "mixed index {index} width {width} detail {detail:?}"
                     );
                 }
@@ -4271,20 +3711,154 @@ mod tests {
         }
     }
 
+    /// A live card animates on every pulse frame (the working icon) -
+    /// the card's own rows, never a condensed block's summary.
     #[test]
-    fn the_block_survives_a_cache_roundtrip() {
-        // The settled block is cacheable: a second render serves the
-        // cached rows and they match a fresh render byte for byte.
-        let mut view = condensed_view(run_cards(3));
+    fn a_running_card_updates_between_frames() {
+        let mut view = collapsed_view(Vec::new());
+        view.push_entry(crate::chat::ChatEntry::User {
+            text: "go".to_string(),
+        });
+        view.push_entry(ChatEntry::Tool(Box::new(ToolCallCard {
+            id: "run_r".to_string(),
+            name: "bash".to_string(),
+            args: serde_json::json!({"command": "sleep 1"}),
+            started: true,
+            started_at: Some(std::time::Instant::now()),
+            ended_at: None,
+            result: None,
+            result_partial: false,
+            ..Default::default()
+        })));
+        view.pulse_frame = 0;
+        let frame0 = transcript_text(&mut view, 80);
+        assert!(
+            frame0.contains("running"),
+            "the running card renders its own rows: {frame0}"
+        );
+        view.pulse_frame = 1;
+        let frame1 = transcript_text(&mut view, 80);
+        assert_ne!(
+            frame0, frame1,
+            "the working icon animates with the pulse frame"
+        );
+        assert!(
+            !frame1.contains("tool calls"),
+            "no condensed block renders while the run is live: {frame1}"
+        );
+    }
+
+    /// Streamed cards render their own rows as they arrive - the first
+    /// card is visible at once (the old condensing waited for the
+    /// third item before the block appeared).
+    #[test]
+    fn streamed_cards_render_their_own_rows_immediately() {
+        let streamed = |id: &str| {
+            ChatEntry::Tool(Box::new(ToolCallCard {
+                id: id.to_string(),
+                name: "bash".to_string(),
+                args: serde_json::json!({"command": "ls"}),
+                started: true,
+                started_at: Some(std::time::Instant::now()),
+                ..Default::default()
+            }))
+        };
+        let mut view = collapsed_view(Vec::new());
+        view.push_entry(crate::chat::ChatEntry::User {
+            text: "go".to_string(),
+        });
+        view.push_entry(streamed("c0"));
+        let one = transcript_text(&mut view, 80);
+        assert!(
+            one.contains("running"),
+            "the first streamed card renders at once: {one}"
+        );
+        view.push_entry(streamed("c1"));
+        view.push_entry(streamed("c2"));
+        let three = transcript_text(&mut view, 80);
+        assert_eq!(
+            three.matches("running").count(),
+            3,
+            "every streamed card keeps its own row: {three}"
+        );
+        assert!(
+            !three.contains("tool calls"),
+            "no summary block ever forms: {three}"
+        );
+    }
+
+    /// A result landing sent/queued agent-message receipts used to
+    /// re-derive the condensed run map (the receipts were condensing
+    /// threshold inputs); now the landing just settles the card and
+    /// its own rows render - the receipts ride the cell's result
+    /// details, and nothing else moves.
+    #[test]
+    fn a_landing_result_with_receipts_settles_the_card() {
+        let mut view = collapsed_view(Vec::new());
+        view.push_entry(crate::chat::ChatEntry::User {
+            text: "go".to_string(),
+        });
+        view.push_entry(ChatEntry::Tool(Box::new(ToolCallCard {
+            id: "cell".to_string(),
+            name: "ipython".to_string(),
+            args: serde_json::json!({"code": "print(1)"}),
+            started: true,
+            started_at: Some(std::time::Instant::now()),
+            ..Default::default()
+        })));
+        let index = view.chat.len() - 1;
+        view.prepare_entry_mutation(index);
+        if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
+            card.result = Some(ToolResultView {
+                content: vec![serde_json::json!({"type": "text", "text": "done"})],
+                details: serde_json::json!({
+                    "sentAgentMessages": [
+                        { "id": "m1", "message": "a", "deliveryStatus": "delivered", "receiverRole": "parent" }
+                    ]
+                }),
+                is_error: false,
+            });
+        }
+        view.mark_entry_stale(index);
+        let text = transcript_text(&mut view, 80);
+        assert!(
+            text.contains("python \u{b7} print(1)"),
+            "the settled cell renders its own rows: {text}"
+        );
+        assert!(
+            text.contains("Agent message"),
+            "the landed receipt's notice row renders: {text}"
+        );
+        assert!(
+            !text.contains("tool calls"),
+            "no condensed block forms on the landing: {text}"
+        );
+        // The same rows render at `details` (only the thinking would
+        // differ, and this transcript has none).
+        view.detail = Detail::Details;
+        let details = transcript_text(&mut view, 80);
+        let collapsed_body = text.replace("Collapsed mode (Ctrl+O to expand)", "MODE");
+        let details_body = details.replace("Details mode (Ctrl+O to expand)", "MODE");
+        assert_eq!(
+            collapsed_body, details_body,
+            "the collapsed view renders the activity exactly as details does"
+        );
+    }
+
+    /// The settled rows are cacheable: a second render serves the
+    /// cached rows and they match a fresh render byte for byte.
+    #[test]
+    fn settled_rows_survive_a_cache_roundtrip() {
+        let mut view = collapsed_view(settled_cards(3));
         let first = transcript_text(&mut view, 80);
         let second = transcript_text(&mut view, 80);
-        assert_eq!(first, second, "the cached block rows are stable");
-        let mut fresh = condensed_view(run_cards(3));
+        assert_eq!(first, second, "the cached card rows are stable");
+        let mut fresh = collapsed_view(settled_cards(3));
         let fresh_text = transcript_text(&mut fresh, 80);
         assert_eq!(
             first.replace("0s", "").replace("0.0s", ""),
             fresh_text.replace("0s", "").replace("0.0s", ""),
-            "a fresh view renders the same block (the wall clock may move)"
+            "a fresh view renders the same rows (the Took clock may move)"
         );
     }
 }
