@@ -785,12 +785,25 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // it already holds, and the next admission's own settle re-reads
     // fresh state either way.
     if let Some(router) = config.image_model_router.clone() {
+        // A weak agent reference: the listener lives ON the agent, so a
+        // strong edge would cycle and pin a dropped session's agent.
+        let agent_at_end = std::sync::Arc::downgrade(&agent);
         agent
             .subscribe(move |event, _signal| {
                 let router = router.clone();
+                let agent_at_end = agent_at_end.clone();
                 Box::pin(async move {
                     if matches!(event, pa_agent::types::AgentEvent::AgentEnd { .. }) {
                         (router.swap_target)(None);
+                        // The agent's per-run override clears with the
+                        // route (TS `_clearModelOverrideWhenIdle` drops
+                        // it once the turn is idle): a leftover override
+                        // would leak into a later `continue_run`'s loop
+                        // config — the retry would snapshot the image
+                        // model while the stream serves the session one.
+                        if let Some(agent) = agent_at_end.upgrade() {
+                            agent.set_model_override(None);
+                        }
                     }
                     Ok(())
                 })
