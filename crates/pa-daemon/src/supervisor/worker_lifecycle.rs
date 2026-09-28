@@ -737,7 +737,9 @@ pub(super) async fn probe_worker_socket(
         #[cfg(not(unix))]
         {
             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-            backoff_ms = backoff_ms.saturating_mul(2).min(WORKER_PROBE_BACKOFF_MAX_MS);
+            backoff_ms = backoff_ms
+                .saturating_mul(2)
+                .min(WORKER_PROBE_BACKOFF_MAX_MS);
         }
     }
 }

@@ -203,10 +203,7 @@ mod tests {
                 ("PRIME_AGENT_CODING_AGENT_DIR", Some(r"~\state")),
             ],
             || {
-                assert_eq!(
-                    agent_dir(),
-                    Some(PathBuf::from(r"C:\Users\tester\state"))
-                );
+                assert_eq!(agent_dir(), Some(PathBuf::from(r"C:\Users\tester\state")));
             },
         );
     }
