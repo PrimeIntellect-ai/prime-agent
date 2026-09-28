@@ -430,11 +430,9 @@ impl Supervisor {
         // (`spawnHidden(..., { detached: true })`): the worker leaves the
         // supervisor's console group and shows no fresh console.
         pa_core::platform::process::set_new_process_group(command.as_std_mut());
-        crate::launch_trace::mark(&resident.worker_id, "fork-enter");
         let child = command
             .spawn()
             .with_context(|| format!("spawn session worker {}", resident.worker_id))?;
-        crate::launch_trace::mark(&resident.worker_id, &format!("fork-ok pid={:?}", child.id()));
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_millis() as u64);
@@ -490,7 +488,6 @@ impl Supervisor {
         let stream = connect_transport(&socket_path)
             .await
             .with_context(|| format!("connect worker socket {}", socket_path.display()))?;
-        crate::launch_trace::mark(&resident.worker_id, "connect-ok");
         let (reader, mut writer) = stream.split();
         // Bounded at the in-flight capacity (the admission seam in
         // `route_command` refuses or waits before enqueueing): no
@@ -755,7 +752,22 @@ impl Supervisor {
                 }
             });
         }
-        *resident.cmd_tx.lock().await = Some(cmd_tx);
+        // The handshake owns the channel privately (TS `pendingClient`):
+        // the channel is NOT installed for routing until the auth answer
+        // proves the connection — the worker answers any command other
+        // than `worker_auth` as the unauthenticated FIRST command with the
+        // authentication refusal and closes the connection, so a route
+        // that wins the enqueue race against the handshake (the
+        // registration path's roster refresh under a concurrent-launch
+        // storm) would kill the connection and strand the handshake for
+        // the whole connect budget — a fully-healthy worker failing its
+        // launch "did not come up in time". A pre-auth route finds no
+        // installed channel (`route_command` fails fast with the
+        // retryable not-connected error) and the callers that tolerate it
+        // (the roster refresh) skip; the install below is the
+        // `worker.client = client` boundary, epoch-guarded against a
+        // superseded connect installing over a live one.
+        let auth_tx = cmd_tx.clone();
 
         // Authenticate against the worker within the remaining connect
         // budget (TS `handshakeBudgetMs`: probes, connect, and auth share one
@@ -770,10 +782,10 @@ impl Supervisor {
             .saturating_duration_since(tokio::time::Instant::now())
             .as_millis()
             .max(WORKER_AUTH_FLOOR_MS.into()) as u64;
-        crate::launch_trace::mark(&resident.worker_id, &format!("auth-enter budget_ms={auth_budget_ms}"));
         let response = self
-            .route_command_typed(
+            .route_command_on_typed(
                 resident,
+                auth_tx,
                 "worker_auth",
                 json!({
                     "token": token,
@@ -794,7 +806,6 @@ impl Supervisor {
                 // what actually happened (never the generic route timeout
                 // text, which pointed triage at the wrong seam).
                 if error.to_string() == "Session worker timed out" {
-                    crate::launch_trace::mark(&resident.worker_id, "auth-budget-out");
                     // The worker answered nothing inside the launch budget:
                     // its captured stderr tail rides the failure (the same
                     // evidence the probe arm carries).
@@ -809,14 +820,17 @@ impl Supervisor {
                     error
                 }
             })?;
-        crate::launch_trace::mark(&resident.worker_id, "auth-answered");
         if !response.success {
-            crate::launch_trace::mark(&resident.worker_id, "auth-rejected");
             return Err(anyhow!(
                 "worker authentication failed: {}",
                 response.error.unwrap_or_default()
             ));
         }
+        // The handshake answered: install the channel for routing (TS
+        // `worker.client = client`, after `authenticateWorker`). A
+        // superseded connect (a replacement already owns a newer
+        // connection) never installs over it.
+        resident.install_command_channel(connection_epoch, cmd_tx);
         // Peer-transport capability rides on the worker instance id (the TS
         // worker only advertises `direct_peer_transport` with one).
         let peer_transport_capable = response
