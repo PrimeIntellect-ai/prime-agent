@@ -512,7 +512,7 @@ fn login_blocking(
             provider_row.name
         ));
     };
-    let mut auth = pa_core::auth::AuthStorage::create(agent_dir);
+    let mut auth = pa_core::auth::AuthStorage::create(&agent_dir);
     auth.set(
         &provider_row.id,
         AuthCredential::ApiKey {
