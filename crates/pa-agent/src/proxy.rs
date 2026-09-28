@@ -1124,10 +1124,13 @@ mod tests {
                     break;
                 }
                 request.push_str(&String::from_utf8_lossy(&buffer[..n]));
-                let header_end = request.find("\r\n\r\n").expect("headers terminator");
-                if let Some(len) = content_length(&request[..header_end]) {
-                    if request.len() - header_end - 4 >= len {
-                        break;
+                // The terminator may not be in this read yet (a fragmented
+                // request): only inspect the content length once it is.
+                if let Some(header_end) = request.find("\r\n\r\n") {
+                    if let Some(len) = content_length(&request[..header_end]) {
+                        if request.len() - header_end - 4 >= len {
+                            break;
+                        }
                     }
                 }
             }
