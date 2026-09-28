@@ -123,10 +123,10 @@ fn child_pids_of(ppid: u32) -> Vec<u32> {
     let mut pids = Vec::new();
     let entries = std::fs::read_dir("/proc").expect("read /proc");
     for entry in entries.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+        let Ok(entry_pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
             continue;
         };
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{entry_pid}/stat")) else {
             continue;
         };
         // `comm` can contain spaces and parens, so parse after the last ')'.
@@ -139,7 +139,7 @@ fn child_pids_of(ppid: u32) -> Vec<u32> {
             continue;
         };
         if parent == ppid {
-            pids.push(pid);
+            pids.push(entry_pid);
         }
     }
     pids
@@ -353,7 +353,7 @@ fn sweep_orphan_test_daemons() {
         let Some((_, rest)) = stat.rsplit_once(')') else {
             continue;
         };
-        let Ok(ppid) = rest
+        let Ok(parsed_ppid) = rest
             .split_whitespace()
             .nth(1)
             .unwrap_or_default()
@@ -361,7 +361,7 @@ fn sweep_orphan_test_daemons() {
         else {
             continue;
         };
-        if ppid != 1 && process_alive(ppid) {
+        if parsed_ppid != 1 && process_alive(parsed_ppid) {
             continue; // a live run's daemon: its test binary is still up
         }
         unsafe {

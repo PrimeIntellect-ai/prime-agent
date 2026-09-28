@@ -72,6 +72,7 @@ pub struct InitialGoal {
 /// `AgentSessionRuntimeConfig`. This is the API boundary the pa-core/pa-ai
 /// crates consume at merge time.
 #[derive(Debug, Clone, Default)]
+#[allow(clippy::struct_excessive_bools)] // the mirrored `AgentSessionRuntimeConfig` API shape is deliberate
 pub struct RuntimeConfig {
     pub cwd: PathBuf,
     pub agent_dir: PathBuf,
@@ -105,6 +106,7 @@ pub struct RuntimeConfig {
 
 /// Session selection options that stay client-side.
 #[derive(Debug, Clone, Default)]
+#[allow(clippy::struct_excessive_bools)] // the selection's flag set is the deliberate client-side surface
 pub struct SessionOptions {
     /// `--continue`/`-c`: the launch surfaces the newest saved session for
     /// the cwd through the agents view (preselected, never a blind reopen)

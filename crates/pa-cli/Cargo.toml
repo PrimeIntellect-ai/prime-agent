@@ -43,6 +43,24 @@ nix = { version = "0.29", features = ["term", "signal", "fs"] }
 url = "2"
 
 [lints.clippy]
+# --- The Tier-C/D ruling (fleet-uniform, 2026-09-28) ---
+# Stack-resident futures by design on hot paths; boxing 130 fns is
+# allocation-churn with zero correctness gain.
+large_futures = "allow"
+# The fn-length threshold is a style gate, not correctness; the e2e harness
+# fns are intentionally linear (a fn-level structure campaign is a separate
+# mission if the operator ever calls for it).
+too_many_lines = "allow"
+# 64-bit targets; the narrowing sits at OS/protocol boundaries where the
+# values are bounded (pid syscalls, epoch/elapsed milliseconds, calendar
+# math, guarded parses) - checked conversions would add panic paths where
+# silent wrap was deliberate. Per-site triage: the one genuinely-suspect
+# family (args.rs's parse_positive_u32 lacking its u32::MAX bound) is
+# flagged in the lane dossier for the conductor.
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
 redundant_clone = "warn"
 clone_on_copy = "warn"
 assigning_clones = "warn"

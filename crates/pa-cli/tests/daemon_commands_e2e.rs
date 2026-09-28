@@ -1021,9 +1021,9 @@ fn ts_daemon_differential_cli_output() {
     );
     // TS stops the primary session, the Rust CLI stops the secondary one:
     // both must print the same golden output.
-    let stop_ts: Vec<&str> = vec!["stop", primary.as_str()];
-    let stop_rs: Vec<&str> = vec!["stop", tertiary.as_str()];
-    compare(&mut failures, &stop_ts, &stop_rs, "stop");
+    let ts_stop_args: Vec<&str> = vec!["stop", primary.as_str()];
+    let rust_stop_args: Vec<&str> = vec!["stop", tertiary.as_str()];
+    compare(&mut failures, &ts_stop_args, &rust_stop_args, "stop");
 
     // Saved-session wake on the TS daemon (ground truth): each CLI sends to
     // a session stopped earlier by its own name; both must wake it and

@@ -139,6 +139,7 @@ impl AutonomousConfig {
 
 /// Parsed CLI arguments, mirroring `Args` in `cli/args.ts`.
 #[derive(Debug, Clone, Default)]
+#[allow(clippy::struct_excessive_bools)] // the TS `Args` surface mirrored verbatim
 pub struct Args {
     pub provider: Option<String>,
     pub model: Option<String>,
@@ -191,6 +192,7 @@ pub struct Args {
     pub offline: bool,
     pub verbose: bool,
     pub messages: Vec<String>,
+    #[allow(clippy::struct_field_names)] // the trailing _args matches the TS `fileArgs` wire surface
     pub file_args: Vec<String>,
     /// Unknown long flags (extension flags): flag name to value.
     pub unknown_flags: HashMap<String, UnknownFlagValue>,

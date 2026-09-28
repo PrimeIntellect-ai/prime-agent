@@ -78,6 +78,7 @@ impl UpdateTarget {
 }
 
 #[derive(Debug, Default)]
+#[allow(clippy::struct_excessive_bools)] // the package command's flag set is the deliberate surface
 struct PackageCommandOptions {
     local: bool,
     help: bool,
