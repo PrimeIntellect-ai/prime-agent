@@ -925,6 +925,8 @@ mod agent_message_tests;
 mod prompt_image_tests;
 
 #[cfg(test)]
+mod compaction_admission_tests;
+#[cfg(test)]
 mod recovery_verdict_tests;
 #[cfg(test)]
 mod replacement_gate_tests;
