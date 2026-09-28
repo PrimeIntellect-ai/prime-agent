@@ -125,7 +125,7 @@ fn early_typing_inside_the_probe_window_renders_before_the_settle() {
     // The in-window key: 30ms after the query bytes, the single-hold window
     // still parks it (the settle is 250ms out); the sliced window delivers
     // it within a slice.
-    Self::sleep_until(t_query + Duration::from_millis(30));
+    EarlyTypingHarness::sleep_until(t_query + Duration::from_millis(30));
     harness.write(EARLY_KEY);
     let latency = harness
         .time_until_painted_since(EARLY_KEY, Duration::from_secs(5))
@@ -159,13 +159,13 @@ fn a_kitty_terminal_upgrades_and_a_da1_terminal_settles_without_flags() {
     let t_query = kitty
         .chunk_time_of(KITTY_QUERY)
         .expect("the kitty capability query is on the wire");
-    Self::sleep_until(t_query + Duration::from_millis(20));
+    EarlyTypingHarness::sleep_until(t_query + Duration::from_millis(20));
     kitty.write(KITTY_ANSWER);
     let mark = kitty.mark();
     kitty.wait_from(mark, KITTY_FLAGS_PUSH, "the kitty flags push");
     // An answered terminal settles at the answer, so a key after it
     // renders immediately on either side of the probe implementation.
-    Self::sleep_until(t_query + Duration::from_millis(80));
+    EarlyTypingHarness::sleep_until(t_query + Duration::from_millis(80));
     kitty.write(EARLY_KEY);
     let latency = kitty
         .time_until_painted_since(EARLY_KEY, Duration::from_secs(5))
@@ -186,16 +186,16 @@ fn a_kitty_terminal_upgrades_and_a_da1_terminal_settles_without_flags() {
     let t_query = da1
         .chunk_time_of(KITTY_QUERY)
         .expect("the kitty capability query is on the wire");
-    Self::sleep_until(t_query + Duration::from_millis(20));
+    EarlyTypingHarness::sleep_until(t_query + Duration::from_millis(20));
     da1.write(DA1_ANSWER);
-    Self::sleep_until(t_query + Duration::from_millis(500));
+    EarlyTypingHarness::sleep_until(t_query + Duration::from_millis(500));
     da1.drain_until_quiet(10);
     assert!(
         !contains(&da1.output(), KITTY_FLAGS_PUSH),
         "a DA1-only answer pushed the kitty flags — the early-exit contract \
          broke: the terminal proved itself non-kitty"
     );
-    Self::sleep_until(t_query + Duration::from_millis(520));
+    EarlyTypingHarness::sleep_until(t_query + Duration::from_millis(520));
     da1.write(EARLY_KEY);
     let latency = da1
         .time_until_painted_since(EARLY_KEY, Duration::from_secs(5))
