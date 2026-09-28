@@ -26,13 +26,17 @@ impl SessionManager {
     }
     /// Capture a historical read request while locked; await it after releasing
     /// the session mutex. Current unpersisted rows are merged into the snapshot.
+    /// A full-history window under the session's sole runtime lease serves
+    /// the retained rows directly instead of re-reading and re-parsing a
+    /// file whose rows the manager already holds.
     ///
     /// # Errors
     ///
     /// The returned future errors when reading the session file fails, or
     /// when the file read panics and the blocking task fails to join. When
-    /// the manager holds no windowed store, the retained entries are
-    /// returned without touching the disk.
+    /// the manager holds no windowed store — or holds the sole lease over
+    /// a full-history window — the retained entries are returned without
+    /// touching the disk.
     pub fn history_snapshot(
         &self,
     ) -> impl std::future::Future<Output = anyhow::Result<Vec<FileEntry>>> + Send + 'static {
