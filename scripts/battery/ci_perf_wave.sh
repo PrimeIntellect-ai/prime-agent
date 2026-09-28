@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# CI entry for the perf wave (driven by ci/workflows/benchmark.yml).
+# Entry point for the perf wave (the local mirror is `make perf-wave`; the
+# former staged ci/workflows/benchmark.yml copy was removed with the
+# 2026-09-28 CI unification — .github/workflows/ is the one home for
+# workflow files, and no registered runner carries the self-hosted
+# `prime-sandbox` labels the workflow needed).
 #
 # Creates an ephemeral Prime sandbox (4 CPU / 16 GB, the same spec class the
 # baseline was recorded on), installs the deployed TS binary plus a fresh

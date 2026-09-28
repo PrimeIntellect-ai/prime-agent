@@ -1,8 +1,11 @@
 # CI gates for the prime-agent Rust port: the tip-compiles-tests guarantee
 # plus PR gating, in one workflow (the shape of the TS product's ci.yml).
 #
-# Promoted from ci/workflows/ci.yml (see ci/workflows/README.md; promotion
-# needs a push credential with the `workflow` scope). Two triggers, one
+# Promoted from the former staged copy at ci/workflows/ (2026-09-23); the
+# staged-copy era ended 2026-09-28 when the operator authorized the
+# workflow-scope push: the staged windows-cross/windows/deny jobs are folded
+# in below and ci/workflows/ is gone — `.github/workflows/` is the one home.
+# Two triggers, one
 # gate set mirroring `make check` exactly (fmt --all --check, clippy --workspace
 # --all-targets -- -D warnings, cargo test --workspace) on the pinned
 # toolchain (1.98.1) and runner image the continuous/release builds use:
@@ -37,10 +40,15 @@
 # assigned unit executed — and merges the failure reports into one table
 # naming the failing binaries; the gate is green only when all shards are.
 #
-# Strictly read-only: contents: read, persist-credentials: false, no secrets.
-# The windows-cross/windows/deny jobs remain staged at ci/workflows/ci.yml
-# until windows-readiness lands and a deny policy decision is made (see
-# ci/workflows/README.md).
+# Strictly read-only: contents: read, persist-credentials: false, no secrets
+# (the trust job's vouch step reads the GitHub API with the ambient
+# GITHUB_TOKEN). The contributor-trust gate (the `trust` job, ported from
+# main's ci.yml — the vouch mechanism) precedes every job: push events are
+# always allowed; PR authors must be a bot, a collaborator with write
+# access, or a vouched contributor (mitchellh/vouch; the vouched list
+# resolves from the repo's default branch — `.github/VOUCHED.td` on main,
+# nothing local on this branch), so unvouched PR authors never bill a
+# runner minute. The auto-close enforcement lives in contribution-gate.yml.
 #
 name: ci
 
@@ -66,13 +74,35 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  # The contributor-trust gate (ported from main's ci.yml): the `allowed`
+  # output every job below keys on — push events are always allowed, PR
+  # authors must be a bot, a collaborator with write access, or vouched.
+  # allow-fail keeps this job green: the gate is the output, not the step.
+  trust:
+    name: contributor trust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      allowed: ${{ github.event_name == 'push' || steps.vouch.outputs.vouched == 'true' }}
+    steps:
+      - name: Check pull request author
+        id: vouch
+        if: github.event_name == 'pull_request'
+        uses: mitchellh/vouch/action/check-user@d66fa29a64600490892131ad87597c30c91fcac4 # v1
+        with:
+          user: ${{ github.event.pull_request.user.login }}
+          allow-fail: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   fmt:
     name: fmt
+    needs: trust
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     # Draft PRs do not gate (no billing on work-in-progress pushes); the
     # ready_for_review trigger runs the gates once a draft is marked ready.
-    if: github.event_name == 'push' || !github.event.pull_request.draft
+    if: needs.trust.outputs.allowed == 'true' && (github.event_name == 'push' || !github.event.pull_request.draft)
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -85,9 +115,10 @@ jobs:
 
   clippy-test:
     name: check + clippy (workspace)
+    needs: trust
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    if: github.event_name == 'push' || !github.event.pull_request.draft
+    if: needs.trust.outputs.allowed == 'true' && (github.event_name == 'push' || !github.event.pull_request.draft)
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -119,9 +150,10 @@ jobs:
   # the shards is exactly the old serial `cargo test --workspace`.
   test-shard:
     name: test shard ${{ matrix.shard }}/4
+    needs: trust
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    if: github.event_name == 'push' || !github.event.pull_request.draft
+    if: needs.trust.outputs.allowed == 'true' && (github.event_name == 'push' || !github.event.pull_request.draft)
     strategy:
       # One red shard must not cancel the others: their own conclusions are
       # the per-shard signal the summary merges.
@@ -173,8 +205,8 @@ jobs:
     name: test summary
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    needs: [test-shard]
-    if: always() && (github.event_name == 'push' || !github.event.pull_request.draft)
+    needs: [trust, test-shard]
+    if: always() && needs.trust.outputs.allowed == 'true' && (github.event_name == 'push' || !github.event.pull_request.draft)
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -187,6 +219,86 @@ jobs:
       - name: Audit the shards and merge their failure reports
         run: python3 scripts/ci_test_shard_summary.py --total 4 --dir manifests
 
-  # windows-cross runs here once validated green at the tip (the staged
-  # ci/workflows/ci.yml carries it until then); the real windows-latest test
-  # job and cargo-deny stay staged as well — see ci/workflows/README.md.
+  # The Windows job set + the supply-chain deny gate, promoted from the
+  # former staged copy at ci/workflows/ci.yml (2026-09-28, the
+  # operator-authorized workflow-scope push):
+  #
+  #   windows-cross — the cfg-hygiene cross-target gate, the CI mirror of
+  #   `make windows-cross` (docs/windows-readiness.md). The Sep-23..25
+  #   unix-only test regressions that broke it were fixed by #2833, so it
+  #   type-checks every crate (including the cfg(windows) implementations
+  #   and the Windows-only tests) for x86_64-pc-windows-gnu; ring's C needs
+  #   the mingw cross compiler even for check builds.
+  #
+  #   windows — the real windows-latest runner: the portable tests plus the
+  #   Windows-only platform tests (named pipes, process identity, locks
+  #   mtime probe, shell ordering). Linux-only e2e verifiers are
+  #   `#![cfg(unix)]`-gated and compile out here, and the kernel e2e tests
+  #   that need a Python bootstrap are unix-gated too, so no uv step is
+  #   needed.
+  #
+  #   deny — cargo-deny advisories + licenses, the CI mirror of `make deny`,
+  #   the same check continuous.yml's deny job runs on every push.
+  #   Promoted on the operator's 2026-09-28 policy decision: the advisory
+  #   DB drifts daily, so a drifted advisory can gate PRs — that is the
+  #   accepted trade.
+  windows-cross:
+    name: windows cross-check + clippy (x86_64-pc-windows-gnu)
+    needs: trust
+    if: needs.trust.outputs.allowed == 'true' && (github.event_name == 'push' || !github.event.pull_request.draft)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; toolchain pinned below
+        with:
+          toolchain: "1.98.1"
+          targets: x86_64-pc-windows-gnu
+          components: clippy
+      - name: Install the mingw-w64 cross toolchain (ring C for the target)
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: windows-cross
+      - run: cargo check --locked --workspace --target x86_64-pc-windows-gnu --all-targets
+      - run: cargo clippy --locked --workspace --target x86_64-pc-windows-gnu --all-targets -- -D warnings
+
+  windows:
+    name: windows build + clippy + test (windows-latest)
+    needs: trust
+    if: needs.trust.outputs.allowed == 'true' && (github.event_name == 'push' || !github.event.pull_request.draft)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; toolchain pinned below
+        with:
+          toolchain: "1.98.1"
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: windows
+      - run: cargo build --locked --workspace
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+
+  deny:
+    name: deny (cargo-deny advisories + licenses)
+    needs: trust
+    if: needs.trust.outputs.allowed == 'true' && (github.event_name == 'push' || !github.event.pull_request.draft)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Dependency audit (cargo-deny advisories + licenses)
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --all-features --workspace
+          command-arguments: advisories licenses

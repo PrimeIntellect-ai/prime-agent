@@ -934,7 +934,8 @@ model-surface row still compares against the TS binary:
   workspace root replaces them and never resolves on a user machine).
 - Relation to the installer-ci lane's `scripts/release/assemble_artifacts.py`
   (merged in #114): that script assembles the CI distribution tarball +
-  `manifest.json` (release-pipeline contract, staged at `ci/workflows/`),
+  `manifest.json` (release-pipeline contract; staged at `ci/workflows/` at
+  the time, since promoted to `.github/workflows/`),
   while `scripts/package_release.py` is the TS-installer-packaging dry run
   (exe-adjacent layout, dev-cache exclusions, version pin, `SHA256SUMS` +
   `binaries.json`); `make release-dry-run` runs the former, `make package`

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Local runner for the perf wave: run it exactly the way the CI workflow
-# does (see .github/workflows/benchmark.yml), on this machine.
+# Local runner for the perf wave: run it exactly the way the perf-wave
+# methodology prescribes (the local entry is `make perf-wave`; the former
+# staged ci/workflows/benchmark.yml was removed with the 2026-09-28 CI
+# unification — there is no workflow file), on this machine.
 #
 #   scripts/battery/run_perf_wave.sh [extra perf_wave.py args]
 #

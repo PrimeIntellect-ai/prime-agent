@@ -5,7 +5,28 @@ on:
 permissions:
   contents: read
 jobs:
+  # The contributor-trust gate (ported from main's ci.yml — the vouch
+  # mechanism): unvouched PR authors never bill a runner minute, not even
+  # for guidance-only jobs. allow-fail keeps the job green; the gate is the
+  # `allowed` output the loc job keys on.
+  trust:
+    name: contributor trust
+    runs-on: ubuntu-latest
+    outputs:
+      allowed: ${{ github.event_name == 'push' || steps.vouch.outputs.vouched == 'true' }}
+    steps:
+      - name: Check pull request author
+        id: vouch
+        if: github.event_name == 'pull_request'
+        uses: mitchellh/vouch/action/check-user@d66fa29a64600490892131ad87597c30c91fcac4 # v1
+        with:
+          user: ${{ github.event.pull_request.user.login }}
+          allow-fail: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   loc:
+    needs: trust
+    if: needs.trust.outputs.allowed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2

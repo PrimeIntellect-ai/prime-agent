@@ -259,8 +259,9 @@ No platform coupling found (loop policy only; no process/socket code).
   `make windows-cross` - the same cross-target check plus
   `clippy --target x86_64-pc-windows-gnu --all-targets -- -D warnings`
   (it caught the lock_dir dead-code and a clippy::err_expect in the
-  Windows-only tests). The staged ci.yml carries the matching
-  `windows-cross` job and a real `windows` job (`windows-latest` runner)
-  that runs the portable tests plus every Windows-only platform test;
-  promotion happens with the rest of ci/workflows/ once the token gains
-  `workflow` scope.
+  Windows-only tests). The live ci.yml (`.github/workflows/ci.yml`)
+  carries the matching `windows-cross` job and a real `windows` job
+  (`windows-latest` runner) that runs the portable tests plus every
+  Windows-only platform test; both were promoted from the staged
+  ci/workflows/ copy on 2026-09-28 (the operator-authorized
+  workflow-scope push that ended the staging pattern).

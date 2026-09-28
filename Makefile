@@ -16,23 +16,18 @@ deny:
 
 # Windows cfg-hygiene gate (docs/windows-readiness.md): cross-target check +
 # clippy at -D warnings for every crate and test, the local mirror of the
-# staged ci.yml windows-cross job. Fails loudly when the target is missing
-# instead of silently skipping the gate.
+# ci.yml windows-cross job (.github/workflows/ci.yml). Fails loudly when the
+# target is missing instead of silently skipping the gate.
 windows-cross:
 	@rustup target list --installed | grep -q x86_64-pc-windows-gnu || { echo "x86_64-pc-windows-gnu target not installed (rustup target add x86_64-pc-windows-gnu)"; exit 1; }
 	cargo check --workspace --target x86_64-pc-windows-gnu --all-targets
 	cargo clippy --workspace --target x86_64-pc-windows-gnu --all-targets -- -D warnings
 
-# Lints the live workflow files (.github/workflows/; promoted from
-# ci/workflows/ via make activate-workflows) plus the still-staged
-# ci/workflows/ci.yml, which is clean under actionlint. The staged
-# benchmark.yml still carries pre-existing findings (the custom
-# self-hosted `prime-sandbox` label needs an actionlint.yaml labels
-# config; SC2012 info) and stays out of this gate until its lane owner
-# cleans it up.
+# Lints every workflow file (.github/workflows/ is the one home since the
+# 2026-09-28 unification removed the staged ci/workflows/ copies).
 actionlint:
 	@command -v actionlint >/dev/null 2>&1 || { echo "actionlint not installed (see rhysd/actionlint releases)"; exit 1; }
-	actionlint .github/workflows/ci.yml .github/workflows/continuous.yml .github/workflows/release.yml ci/workflows/ci.yml
+	actionlint .github/workflows/ci.yml .github/workflows/codebase-health.yml .github/workflows/contribution-gate.yml .github/workflows/continuous.yml .github/workflows/release.yml
 
 # GLIBC baseline gate (the continuous.yml/release.yml build-gnu jobs): a
 # GNU/Linux artifact must not require symbols above GLIBC_2.35, the Ubuntu
@@ -56,7 +51,10 @@ glibc-gate:
 		fi \
 		;; esac
 
-# Perf wave + regression gate (benchmark.yml job, the local mirror): runs the
+# Perf wave + regression gate (local only; the former staged
+# ci/workflows/benchmark.yml copy was removed with the 2026-09-28 CI
+# unification — it needed self-hosted `prime-sandbox` runner labels no
+# runner carries): runs the
 # TS binary and a fresh release build side by side in a fresh Prime sandbox
 # (both sides on one quiet machine, the methodology BENCHMARKS.md requires)
 # and gates the rust medians against scripts/battery/perf-baseline.json.
@@ -163,17 +161,4 @@ package:
 catalog-assets-gates:
 	python3 scripts/release/test_catalog_assets.py
 
-# OPERATOR STEP (Kevin): promote the staged workflows to .github/workflows/.
-# Needs a push credential with the GitHub `workflow` scope — run from a
-# machine that has it (the dev box's token does NOT; a scoped-token push gets
-# remote-rejected). Requires a clean `main` checkout; pushes straight to main.
-activate-workflows:
-	@git rev-parse --abbrev-ref HEAD | grep -qx main || { echo "run on a main checkout (got $$(git rev-parse --abbrev-ref HEAD))"; exit 1; }
-	@git diff --quiet && git diff --cached --quiet || { echo "main has uncommitted changes; commit or stash first"; exit 1; }
-	git pull --ff-only
-	git mv ci/workflows/continuous.yml ci/workflows/release.yml .github/workflows/
-	git commit -m "ci: activate the continuous + release workflows (.github/workflows/)"
-	git push origin main
-	@echo "workflows live: verify with gh workflow list (continuous + release active)"
-
-.PHONY: check deny windows-cross actionlint perf-wave glibc-gate release-dry-run continuous-dry-run audit-build package activate-workflows catalog-assets catalog-assets-fixture catalog-assets-gates
+.PHONY: check deny windows-cross actionlint perf-wave glibc-gate release-dry-run continuous-dry-run audit-build package catalog-assets catalog-assets-fixture catalog-assets-gates

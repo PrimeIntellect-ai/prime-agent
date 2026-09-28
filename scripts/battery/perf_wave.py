@@ -24,8 +24,8 @@ Dimensions (each writes evidence under <run>/<dim>/<side>/):
 
 Runs on the mission box or in a perf sandbox; timings are only comparable
 when both sides run on the same quiet machine, so the intended execution is
-a fresh Prime sandbox (see .github/workflows/benchmark.yml and
-scripts/battery/run_perf_wave.sh).
+a fresh Prime sandbox (see scripts/battery/run_perf_wave.sh and
+scripts/battery/ci_perf_wave.sh).
 
 Not part of the product.
 

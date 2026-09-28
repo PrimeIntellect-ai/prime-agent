@@ -57,9 +57,15 @@ Rust rewrite state:
   merges, the assembly script takes an explicit `--runtime-dir` (the local gate points at the
   kernel-packaging worktree); after the merge the default path just works.
 
-## 3. Operational constraint (workflow scope)
+## 3. Operational constraint (workflow scope) — resolved 2026-09-28
 
-The GitHub token on this box lacks the `workflow` scope. Therefore:
+The operator authorized workflow-scope pushes: every staged copy under
+`ci/workflows/` is gone (the ci.yml remainder promoted into
+`.github/workflows/ci.yml`, benchmark.yml removed with the directory) and
+`.github/workflows/` is the one home for workflow files. The text below is
+the historical constraint that created the staging pattern.
+
+The GitHub token on this box lacked the `workflow` scope. Therefore:
 
 - The workflows land as **committed files, byte-identical to their final form, staged at
   `ci/workflows/`** — neither this lane's token nor the orchestrator's can push or merge
@@ -405,9 +411,9 @@ container, so every GNU release binary is proven to start on 22.04 before promot
 | file | purpose |
 |---|---|
 | `docs/installer-ci-design.md` | this document |
-| `ci/workflows/ci.yml` | PR/push gates (fmt/clippy/test/deny), read-only; promoted to `.github/workflows/` on scope grant |
-| `ci/workflows/release.yml` | tag-check -> build matrix -> promotion -> release attach; activated via `make activate-workflows` |
-| `ci/workflows/continuous.yml` | rolling `continuous` release on every push to main (§13); activated via `make activate-workflows` |
+| `.github/workflows/ci.yml` | PR/push gates (fmt/clippy/test + the promoted windows-cross/windows/deny set) + the vouch trust gate; one home since the 2026-09-28 unification |
+| `.github/workflows/release.yml` | tag-check -> build matrix -> promotion -> release attach; live since the operator promotion |
+| `.github/workflows/continuous.yml` | rolling `continuous` release on every push to main/rust (§13); live since the operator promotion |
 | `deny.toml` | cargo-deny advisories + license allowlist |
 | `scripts/release/assemble_artifacts.py` | staging + deterministic tar + SHA256SUMS + manifest (TS-parity manifest fields) |
 | `packaging/homebrew/Casks/prime-agent.rb` | cask sketch (living draft until we have a tap) |
@@ -441,7 +447,8 @@ Open items (operator decisions, non-blocking):
 
 ## 13. Continuous channel (rolling prebuilt binaries for coworkers)
 
-`ci/workflows/continuous.yml` (staged, same promotion constraint as §3) is the
+`.github/workflows/continuous.yml` (live; the staged-copy era ended with the
+2026-09-28 promotion — see §3) is the
 coworker-sharing channel Kevin asked for (2026-09-21): a compiled install for
 every push to `main`.
 
@@ -467,9 +474,9 @@ every push to `main`.
 - Consumer docs: README.md "Continuous builds" (per-platform install
   one-liners). Note the `macos-13` Intel runner label was retired by GitHub;
   both workflows use `macos-15-intel` for `x86_64-apple-darwin` now.
-- Activation (operator step, after the lane merges): `make activate-workflows`
-  from a workflow-scoped machine (Kevin's Mac) moves the file to
-  `.github/workflows/continuous.yml` and pushes main. Post-activation
-  verification: `gh workflow list --repo PrimeIntellect-ai/prime-agent`
+- Activation (historical): `continuous.yml` is live at `.github/workflows/`
+  (the 2026-09-28 unification removed the staged copies and the
+  `make activate-workflows` operator step with them). Verification:
+  `gh workflow list --repo PrimeIntellect-ai/prime-agent`
   shows `continuous` (and `release`) active; the next push to `main` publishes
   the first `continuous` release.
