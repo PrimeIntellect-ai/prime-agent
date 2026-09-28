@@ -290,12 +290,12 @@ fn run_kill(client: &mut DaemonClient, args: &[String], json: bool) -> Result<()
         active_session_id,
         rest: serde_json::Map::new(),
     })?;
-    print_response_data(response, json)
+    print_response_data(&response, json)
 }
 
 /// `printResponseData`: pretty-print the response data (the whole response as
 /// JSON when there is none and `--json` was asked), else `ok`.
-fn print_response_data(response: pa_types::daemon::DaemonResponse, json: bool) -> Result<()> {
+fn print_response_data(response: &pa_types::daemon::DaemonResponse, json: bool) -> Result<()> {
     let data = require_success(response.clone())?;
     if json || data.is_some() {
         let value = data.unwrap_or_else(|| response_value(&response));

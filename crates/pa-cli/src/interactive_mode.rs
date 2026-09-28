@@ -840,6 +840,7 @@ async fn run_agents_view_flow(
 
 /// `--daemon-socket` value, the `PRIME_AGENT_DAEMON_SOCKET` environment,
 /// or the per-user default socket path (precedence in that order).
+#[must_use]
 pub fn resolve_socket_path(daemon_socket: Option<&str>) -> PathBuf {
     config::resolve_daemon_socket_path(daemon_socket)
 }
@@ -1045,7 +1046,7 @@ fn fork_startup_selection(
     let expanded = config::expand_tilde_path(selector);
     let selector = expanded.to_string_lossy();
     let resolved = resolve_session_path(&selector, cwd, dir)
-        .map_err(|error| anyhow!(crate::print_runtime::render_selector_error(error)))?;
+        .map_err(|error| anyhow!(crate::print_runtime::render_selector_error(&error)))?;
     let source = match resolved {
         ResolvedSession::Path(path)
         | ResolvedSession::Local(path)

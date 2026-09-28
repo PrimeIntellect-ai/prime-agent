@@ -135,7 +135,7 @@ fn get_global_mcp_servers() -> BTreeMap<String, McpServerConfig> {
         .unwrap_or_default()
 }
 
-fn set_global_mcp_server(name: &str, config: McpServerConfig) -> Result<()> {
+fn set_global_mcp_server(name: &str, config: &McpServerConfig) -> Result<()> {
     let value = serde_json::to_value(&config)?;
     mutate_global_settings(|settings| {
         let servers = settings
@@ -205,7 +205,7 @@ pub fn run_mcp_management_command(args: &[String]) -> Result<String> {
     match action {
         "list" => {
             require_count(args, 1, "mcp list")?;
-            Ok(format_mcp_server_list(get_global_mcp_servers()))
+            Ok(format_mcp_server_list(&get_global_mcp_servers()))
         }
         "get" => {
             require_count(args, 2, "mcp get <name>")?;
@@ -233,7 +233,7 @@ pub fn run_mcp_management_command(args: &[String]) -> Result<String> {
                 bail!("MCP server \"{name}\" already exists. Use --force to replace it.");
             }
             drop_server_credentials(name)?;
-            set_global_mcp_server(name, config)?;
+            set_global_mcp_server(name, &config)?;
             Ok(format!(
                 "{} MCP server \"{name}\".",
                 if replaced { "Replaced" } else { "Added" }
@@ -243,7 +243,7 @@ pub fn run_mcp_management_command(args: &[String]) -> Result<String> {
     }
 }
 
-fn format_mcp_server_list(servers: BTreeMap<String, McpServerConfig>) -> String {
+fn format_mcp_server_list(servers: &BTreeMap<String, McpServerConfig>) -> String {
     if servers.is_empty() {
         return "No user-configured MCP servers.".to_string();
     }

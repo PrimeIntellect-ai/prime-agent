@@ -15,6 +15,7 @@ impl UpdateReport {
     /// The TS report rules, kept verbatim: a `failed` status warns even
     /// before the counts; `complete` reports restored/resumed/failed counts
     /// and every per-session failure.
+    #[must_use]
     pub fn build(status: &UpdateStatus) -> Self {
         let mut report = Self::default();
         if status.state == UpdateState::Failed {

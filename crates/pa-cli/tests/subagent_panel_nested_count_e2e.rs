@@ -102,7 +102,7 @@ impl Client {
         client
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -151,7 +151,7 @@ impl Client {
 
     /// The full roster snapshot (`roster_subscribe`).
     fn roster(&mut self, id: &str) -> Vec<Value> {
-        self.send_command(id, json!({ "type": "roster_subscribe" }));
+        self.send_command(id, &json!({ "type": "roster_subscribe" }));
         let response = self.read_response(id);
         assert!(response["success"].as_bool().unwrap_or(false), "{response}");
         response["data"]["roster"]

@@ -74,7 +74,7 @@ pub fn spawn_supervisor(
     let child = command
         .spawn()
         .with_context(|| format!("spawn the successor supervisor from {}", exe.display()))?;
-    Ok(child.id() as u64)
+    Ok(u64::from(child.id()))
 }
 
 /// Connect and complete the `daemon_hello` handshake, bounded by `budget_ms`

@@ -32,7 +32,7 @@ fn fixture_package(cwd: &Path) -> PathBuf {
     pkg
 }
 
-fn sandbox(settings: serde_json::Value) -> Sandbox {
+fn sandbox(settings: &serde_json::Value) -> Sandbox {
     let home = tempfile::TempDir::new().unwrap();
     let cwd = home.path().join("work");
     let agent_dir = home.path().join("agent");
@@ -86,14 +86,14 @@ fn package_provided_skill_appears_in_created_session_skill_list() {
     let script = serde_json::json!({ "responses": [{"systemPrompt": true}] });
 
     // No package configured: the skill stays absent.
-    let bare = sandbox(serde_json::json!({}));
+    let bare = sandbox(&serde_json::json!({}));
     let (stdout, stderr, code) = run(&bare, &script);
     assert_eq!(code, 0, "stderr: {stderr}");
     let text = assistant_text(&stdout);
     assert!(!text.contains("e-greeting"), "no skill without the package");
 
     // The configured package contributes its skill to the session.
-    let configured = sandbox(serde_json::json!({"packages": ["../work/fixture-pkg"]}));
+    let configured = sandbox(&serde_json::json!({"packages": ["../work/fixture-pkg"]}));
     let (stdout, stderr, code) = run(&configured, &script);
     assert_eq!(code, 0, "stderr: {stderr}");
     let text = assistant_text(&stdout);
@@ -108,7 +108,7 @@ fn package_provided_skill_appears_in_created_session_skill_list() {
     );
 
     // An explicit empty skills filter disables the package's skills.
-    let filtered = sandbox(serde_json::json!({"packages": [{
+    let filtered = sandbox(&serde_json::json!({"packages": [{
         "source": "../work/fixture-pkg",
         "skills": [],
         "prompts": [],

@@ -270,7 +270,7 @@ async fn agents_view_round_trip_reattaches_under_the_ceiling() {
     // The multi-hundred-message transcript, written directly (the
     // operator-scale attach snapshot ships the whole history): a parent-
     // chained user/assistant run.
-    let durable = format!("01a0vs-{:012x}", std::process::id() as u64);
+    let durable = format!("01a0vs-{:012x}", u64::from(std::process::id()));
     let transcript_path = session_dir.join(format!("{durable}.jsonl"));
     {
         let filler = "a".repeat(1024);

@@ -8,7 +8,7 @@
 //! flows, the token exchanges, and the credential writes). The Prime
 //! browser logins (the RSA `auth_challenge` flow) are not ported yet.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use pa_core::auth::{AuthCredential, AuthSource, AuthStatus};
 use pa_core::models::ModelRegistry;
@@ -277,7 +277,7 @@ impl ProviderAuthCommands for ProviderAuth {
         Box::pin(async move {
             // The auth-store writes and the MCP manager locks stay off
             // the async workers.
-            tokio::task::spawn_blocking(move || login_blocking(provider_row, agent_dir, api_key))
+            tokio::task::spawn_blocking(move || login_blocking(&provider_row, agent_dir, api_key))
                 .await
                 .expect("the login task ran")
         })
@@ -301,7 +301,7 @@ impl ProviderAuthCommands for ProviderAuth {
             // panel round-trips stay off the async workers (a prompt's
             // answer arrives from the TUI loop's thread).
             tokio::task::spawn_blocking(move || {
-                login_blocking_on_panel(provider_row, cwd, agent_dir, panel)
+                login_blocking_on_panel(&provider_row, cwd, agent_dir, panel)
             })
             .await
             .expect("the login task ran")
@@ -338,7 +338,7 @@ impl ProviderAuthCommands for ProviderAuth {
         let provider_row = provider.clone();
         let agent_dir = self.agent_dir.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || logout_blocking(provider_row, agent_dir))
+            tokio::task::spawn_blocking(move || logout_blocking(&provider_row, &agent_dir))
                 .await
                 .expect("the logout task ran")
         })

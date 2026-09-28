@@ -23,15 +23,15 @@ impl Drop for Supervisor {
         let _ = self.child.kill();
         let _ = self.child.wait();
         for pid in worker_pids {
-            kill_worker(&pid);
+            kill_worker(pid);
         }
         let _ = std::fs::remove_file(&self.socket);
     }
 }
 
-fn kill_worker(pid: &u32) {
+fn kill_worker(pid: u32) {
     unsafe {
-        libc::kill(*pid as i32, libc::SIGKILL);
+        libc::kill(pid as i32, libc::SIGKILL);
     }
     let deadline = Instant::now() + Duration::from_secs(5);
     while process_alive(*pid) {

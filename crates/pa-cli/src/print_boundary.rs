@@ -528,7 +528,7 @@ impl TurnBoundary {
                             (self.sink)(&json!({ "type": event_type, "message": value }));
                         }
                     }
-                    self.emit_json(json!({
+                    self.emit_json(&json!({
                         "type": "refine_complete",
                         "result": serde_json::to_value(result)
                             .unwrap_or(serde_json::Value::Null),
@@ -538,7 +538,7 @@ impl TurnBoundary {
             Err(error) => {
                 if emit {
                     if self.json_mode {
-                        self.emit_json(json!({
+                        self.emit_json(&json!({
                             "type": "refine_failed",
                             "error": format!("{error}"),
                         }));
@@ -568,7 +568,7 @@ impl TurnBoundary {
     ) -> Result<(), String> {
         let scheduled = engine.turn_boundary.scheduled_compaction().await;
         if let Some(pending) = &scheduled {
-            self.emit_json(compaction_start_event(
+            self.emit_json(&compaction_start_event(
                 CompactionOutcomeReason::Requested.wire(),
                 pending.instructions.as_deref(),
             ));
@@ -588,7 +588,7 @@ impl TurnBoundary {
                 // the next serialized checkpoint (or the disposal drain).
                 self.compact_auto_refine_pending = true;
                 self.emit_ipython_state_row(&run);
-                self.emit_json(compaction_end_success_event(
+                self.emit_json(&compaction_end_success_event(
                     CompactionOutcomeReason::Requested.wire(),
                     &run,
                     false,
@@ -632,7 +632,7 @@ impl TurnBoundary {
                 // persists in the session entries the headless terminal
                 // result reads in text mode).
                 if engine.session.auto_compaction_due(model).await {
-                    self.emit_json(compaction_start_event(
+                    self.emit_json(&compaction_start_event(
                         CompactionOutcomeReason::Threshold.wire(),
                         None,
                     ));
@@ -650,7 +650,7 @@ impl TurnBoundary {
                             // serialized checkpoint (or the disposal drain).
                             self.compact_auto_refine_pending = true;
                             self.emit_ipython_state_row(&run);
-                            self.emit_json(compaction_end_success_event(
+                            self.emit_json(&compaction_end_success_event(
                                 CompactionOutcomeReason::Threshold.wire(),
                                 &run,
                                 false,
@@ -813,7 +813,7 @@ impl TurnBoundary {
             .take_compaction()
             .await
             .and_then(|pending| pending.instructions);
-        self.emit_json(compaction_start_event(
+        self.emit_json(&compaction_start_event(
             CompactionOutcomeReason::Overflow.wire(),
             custom_instructions.as_deref(),
         ));
@@ -834,7 +834,7 @@ impl TurnBoundary {
                 }
                 // The wire result is the TS `CompactionResult` shape; the
                 // end event carries `willRetry: true` (the turn re-issues).
-                self.emit_json(compaction_end_success_event(
+                self.emit_json(&compaction_end_success_event(
                     CompactionOutcomeReason::Overflow.wire(),
                     &run,
                     true,
@@ -944,7 +944,7 @@ impl TurnBoundary {
                 }
             }
             Err(error) => {
-                self.emit_json(json!({ "type": "error", "message": error.to_string() }));
+                self.emit_json(&json!({ "type": "error", "message": error.to_string() }));
             }
         }
         let mut event = json!({
@@ -960,11 +960,11 @@ impl TurnBoundary {
         if let Some(instructions) = custom_instructions {
             event["customInstructions"] = json!(instructions);
         }
-        self.emit_json(event);
+        self.emit_json(&event);
     }
 
     /// Stream one session event in json mode (text mode stays quiet here).
-    fn emit_json(&self, event: Value) {
+    fn emit_json(&self, event: &Value) {
         if self.json_mode {
             (self.sink)(&event);
         }

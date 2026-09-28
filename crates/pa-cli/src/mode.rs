@@ -22,6 +22,7 @@ pub enum AppMode {
 impl AppMode {
     /// Resolve the execution mode from parsed args and stdin TTY state,
     /// mirroring `resolveAppMode`.
+    #[must_use]
     pub fn resolve(parsed: &Args, stdin_is_tty: bool) -> AppMode {
         match parsed.mode {
             Some(Mode::Daemon) => AppMode::Daemon,
@@ -38,6 +39,7 @@ impl AppMode {
         }
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             AppMode::Interactive => "interactive",
@@ -50,6 +52,7 @@ impl AppMode {
     }
 
     /// The print output mode, mirroring `toPrintOutputMode`.
+    #[must_use]
     pub fn print_output_mode(&self) -> Mode {
         match self {
             AppMode::Json => Mode::Json,
@@ -151,6 +154,7 @@ pub enum MissingSubsystem {
 }
 
 impl MissingSubsystem {
+    #[must_use]
     pub fn subsystem_name(&self) -> &'static str {
         match self {
             MissingSubsystem::SessionEngine => "the session engine (pa-core)",
@@ -159,6 +163,7 @@ impl MissingSubsystem {
         }
     }
 
+    #[must_use]
     pub fn error_message(&self) -> String {
         format!(
             "this invocation needs {}, which is not linked into the binary yet",

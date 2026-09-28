@@ -20,6 +20,7 @@ pub struct ActivationState {
 }
 
 impl ActivationState {
+    #[must_use]
     pub fn render(&self) -> String {
         format!(
             "{}\n{}\n{}\n",

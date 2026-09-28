@@ -37,7 +37,7 @@ pub(crate) fn parse_incident_time_bound(
             }
             // Today's UTC midnight plus the given time of day.
             let midnight = now_ms.div_euclid(86_400_000) * 86_400_000;
-            return Ok(midnight + hour as i64 * 3_600_000 + minute as i64 * 60_000);
+            return Ok(midnight + i64::from(hour) * 3_600_000 + i64::from(minute) * 60_000);
         }
     }
     // `^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}(?::?\d{2})?)?$`
@@ -118,14 +118,14 @@ pub(crate) fn parse_incident_time_bound(
         // `(?::?\d{2})?` — optional minutes behind an optional colon.
         let zone_minute = if let Some(after_colon) = rest.strip_prefix(':') {
             rest = after_colon;
-            take_digits(&mut rest, 2).ok_or_else(invalid)? as i64
+            i64::from(take_digits(&mut rest, 2).ok_or_else(invalid)?)
         } else {
-            take_digits(&mut rest, 2).map_or(0, |minute| minute as i64)
+            take_digits(&mut rest, 2).map_or(0, i64::from)
         };
         if !rest.is_empty() {
             return Err(invalid());
         }
-        let offset = zone_hour as i64 * 60 + zone_minute;
+        let offset = i64::from(zone_hour) * 60 + zone_minute;
         // RFC 3339 offsets allow minutes 00-59 and hours 00-23 (TS rejects
         // `+00:60` so it cannot shift by an hour).
         if offset >= 24 * 60 || zone_minute >= 60 {
@@ -137,9 +137,9 @@ pub(crate) fn parse_incident_time_bound(
         return Err(invalid());
     };
     let base_ms = days * 86_400_000
-        + hour.map_or(0, |h| h as i64 * 3_600_000)
-        + minute.map_or(0, |m| m as i64 * 60_000)
-        + second as i64 * 1_000
+        + hour.map_or(0, |h| i64::from(h) * 3_600_000)
+        + minute.map_or(0, |m| i64::from(m) * 60_000)
+        + i64::from(second) * 1_000
         + millis;
     // The date must round-trip: `2026-02-31` is not a day, and an hour or
     // minute that rolls over (`25:00`) mismatches on the way back.
@@ -199,8 +199,8 @@ pub(crate) fn format_incident_time(ms: EpochMs) -> String {
 /// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's
 /// `days_from_civil`); `None` outside the supported year range.
 fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
-    let month = month as i64;
-    let day = day as i64;
+    let month = i64::from(month);
+    let day = i64::from(day);
     if !(-999_999_999..=999_999_999).contains(&year) {
         return None;
     }

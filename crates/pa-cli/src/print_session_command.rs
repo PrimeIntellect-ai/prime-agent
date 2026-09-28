@@ -463,7 +463,7 @@ mod tests {
         None
     }
 
-    fn script(responses: Value) -> Value {
+    fn script(responses: &Value) -> Value {
         json!({
             "engine": "faux",
             "modelId": "faux-1",
@@ -477,7 +477,7 @@ mod tests {
     #[tokio::test]
     async fn goal_status_stream_matches_ts() {
         let _guard = FAUX_TEST_LOCK.lock().await;
-        let test = bed(script(json!([]))).await;
+        let test = bed(script(&json!([]))).await;
         assert_eq!(run_command(&test, "/goal status").await, None);
         assert_eq!(
             trace(&test.frames),
@@ -522,7 +522,7 @@ mod tests {
     #[tokio::test]
     async fn goal_start_admits_the_continuation() {
         let _guard = FAUX_TEST_LOCK.lock().await;
-        let test = bed(script(json!([{"text": "goal turn reply"}]))).await;
+        let test = bed(script(&json!([{"text": "goal turn reply"}]))).await;
         assert_eq!(run_command(&test, "/goal ship it").await, None);
         // The queued continuation ran to the faux queue's exhaustion and
         // the terminal error failed the goal.
@@ -568,7 +568,7 @@ mod tests {
         // the next mint hits the exhausted faux queue, and the goal fails
         // — a goal record (objective held) is exactly what a clear
         // removes.
-        let test = bed(script(json!([{"text": "goal turn reply"}]))).await;
+        let test = bed(script(&json!([{"text": "goal turn reply"}]))).await;
         assert_eq!(run_command(&test, "/goal ship it").await, None);
         let rows = custom_rows(&test.engine).await;
         assert_eq!(rows[1].1, "Goal active: ship it");
@@ -613,7 +613,7 @@ mod tests {
     #[tokio::test]
     async fn compact_skip_warns_without_a_row() {
         let _guard = FAUX_TEST_LOCK.lock().await;
-        let test = bed(script(json!([]))).await;
+        let test = bed(script(&json!([]))).await;
         assert_eq!(run_command(&test, "/compact").await, None);
         // A skip records nothing beyond the echo (TS CompactionSkippedError
         // catch arm) and the end event carries the warning.
@@ -644,7 +644,7 @@ mod tests {
             "compaction": {"enabled": true, "reserveTokens": 1, "keepRecentTokens": 10}
         });
         let test =
-            bed_with_settings(script(json!([{"text": "r1"}, {"text": "r2"}])), settings).await;
+            bed_with_settings(script(&json!([{"text": "r1"}, {"text": "r2"}])), settings).await;
         let long_seed = "seed turn one ".to_string() + &"x".repeat(15000);
         test.engine
             .session

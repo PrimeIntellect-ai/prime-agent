@@ -60,7 +60,7 @@ impl Mode {
         }
     }
 
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Mode::Text => "text",
             Mode::Json => "json",
@@ -212,7 +212,7 @@ fn parse_positive_u32(value: &str, flag: &str, diagnostics: &mut Vec<Diagnostic>
     // Number() accepts arbitrary precision, so parse as i128 to cover the
     // full accepted range before the integer/positivity check.
     match value.trim().parse::<i128>() {
-        Ok(parsed) if parsed > 0 && parsed <= u64::MAX as i128 => Some(parsed as u64),
+        Ok(parsed) if parsed > 0 && parsed <= i128::from(u64::MAX) => Some(parsed as u64),
         _ => {
             diagnostics.push(Diagnostic::error(format!(
                 "{flag} must be a positive integer"

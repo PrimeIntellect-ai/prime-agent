@@ -45,7 +45,7 @@ impl Drop for Supervisor {
         let _ = self.child.kill();
         let _ = self.child.wait();
         for pid in worker_pids {
-            kill_worker(&pid);
+            kill_worker(pid);
         }
         let _ = std::fs::remove_file(&self.socket);
     }
@@ -53,7 +53,7 @@ impl Drop for Supervisor {
 
 /// Kill a leaked worker process (SIGKILL; it already failed the graceful
 /// path) and wait briefly for it to disappear.
-fn kill_worker(pid: &u32) {
+fn kill_worker(pid: u32) {
     // The worker pid is a child of the supervisor we just killed, so it is
     // not our child and cannot be waited on directly; poll /proc liveness.
     // Best effort by design: this runs inside `Drop` (a failing test's
@@ -64,16 +64,16 @@ fn kill_worker(pid: &u32) {
     // worker is re-killed and reported to stderr instead.
     for round in 0..2 {
         unsafe {
-            libc::kill(*pid as i32, libc::SIGKILL);
+            libc::kill(pid as i32, libc::SIGKILL);
         }
         let deadline = Instant::now() + Duration::from_secs(5);
-        while process_alive(*pid) {
+        while process_alive(pid) {
             if Instant::now() >= deadline {
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        if !process_alive(*pid) {
+        if !process_alive(pid) {
             return;
         }
         eprintln!("worker {pid} survived teardown kill round {round}; re-killing");
@@ -111,7 +111,7 @@ impl Drop for DetachedDaemon {
                 std::thread::sleep(Duration::from_millis(20));
             }
             for worker in worker_pids {
-                kill_worker(&worker);
+                kill_worker(worker);
             }
         }
         let _ = std::fs::remove_file(&self.socket);

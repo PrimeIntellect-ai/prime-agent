@@ -79,7 +79,7 @@ pub fn confirm_nightly_switch(
 /// command's `Error: …` line and exit 1 — including the installer-ownership
 /// message a binary the Prime Agent installer does not own produces verbatim
 /// (the actionable, install-method-specific instruction).
-pub fn run(options: &SelfUpdateOptions, persisted_wire: Option<String>) -> i32 {
+pub fn run(options: &SelfUpdateOptions, persisted_wire: Option<&str>) -> i32 {
     // The effective channel: an explicit flag wins, else the persisted
     // one, else the running version infers it.
     let channel = options

@@ -211,7 +211,7 @@ impl Client {
         }
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -405,7 +405,7 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
 
     // Before the family's worker ever registers, the roster snapshot is
     // clean of the dead family (nothing anchors it).
-    client.send_command("r0", json!({ "type": "roster_subscribe" }));
+    client.send_command("r0", &json!({ "type": "roster_subscribe" }));
     let before = client.request("r0");
     assert_eq!(before["success"], true, "roster_subscribe: {before}");
     assert_eq!(
@@ -440,7 +440,7 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
         .expect("the active session id")
         .to_string();
     client.drain_roster_pushes(Duration::from_millis(500));
-    client.send_command("r1", json!({ "type": "roster_subscribe" }));
+    client.send_command("r1", &json!({ "type": "roster_subscribe" }));
     let resident = client.request("r1");
     assert_eq!(
         family_rows(&roster_of(&resident), &parent_file, "sub-"),
@@ -462,7 +462,7 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
     let killed = client.request("k1");
     assert_eq!(killed["success"], true, "kill failed: {killed}");
     client.drain_roster_pushes(Duration::from_millis(500));
-    client.send_command("r2", json!({ "type": "roster_subscribe" }));
+    client.send_command("r2", &json!({ "type": "roster_subscribe" }));
     let departed = client.request("r2");
     let departed_roster = roster_of(&departed);
     let seeded_children = departed_roster
@@ -636,7 +636,7 @@ async fn a_stopped_session_stays_visible_in_the_view() {
     client.drain_roster_pushes(Duration::from_millis(500));
 
     // The snapshot serves the passivated row (the view's roster half).
-    client.send_command("r1", json!({ "type": "roster_subscribe" }));
+    client.send_command("r1", &json!({ "type": "roster_subscribe" }));
     let roster = client.request("r1");
     assert_eq!(roster["success"], true, "roster_subscribe: {roster}");
     let entries = roster["data"]["roster"]

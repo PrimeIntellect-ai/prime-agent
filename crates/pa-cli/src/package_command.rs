@@ -44,7 +44,7 @@ enum PackageCommand {
 }
 
 impl PackageCommand {
-    fn usage(&self) -> String {
+    fn usage(self) -> String {
         match self {
             PackageCommand::Install => format!("{APP_NAME} package install <source> [--local]"),
             PackageCommand::Remove => format!("{APP_NAME} package remove <source> [--local]"),

@@ -166,10 +166,12 @@ impl StatusWriter {
         self.persist()
     }
 
+    #[must_use]
     pub fn state(&self) -> UpdateState {
         self.status.state
     }
 
+    #[must_use]
     pub fn current(&self) -> &UpdateStatus {
         &self.status
     }
@@ -221,10 +223,11 @@ impl StatusWriter {
 }
 
 /// This coordinator process's identity (the TS `getProcessStartId` contract).
+#[must_use]
 pub fn coordinator_identity() -> UpdateProcessIdentity {
     let pid = std::process::id();
     UpdateProcessIdentity {
-        pid: pid as u64,
+        pid: u64::from(pid),
         process_start_id: pa_daemon::lease::get_process_start_id(pid),
         supervisor_generation: None,
         supervisor_owner_token: None,
@@ -236,6 +239,7 @@ pub fn coordinator_identity() -> UpdateProcessIdentity {
 /// coordinator decides what a missing status means — a not-yet-started
 /// coordinator or a corrupt write both surface as "keep waiting" while the
 /// holder lives).
+#[must_use]
 pub fn read_status(path: &Path) -> Option<UpdateStatus> {
     let content = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&content).ok()

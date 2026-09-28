@@ -664,7 +664,7 @@ fn run_update(args: &[String]) -> PublicCommandResult {
     ) {
         return handled_with_exit(abort_code);
     }
-    handled_with_exit(crate::self_update::run(&options, persisted_wire))
+    handled_with_exit(crate::self_update::run(&options, persisted_wire.as_deref()))
 }
 
 fn run_attach(rest: &[String]) -> PublicCommandResult {

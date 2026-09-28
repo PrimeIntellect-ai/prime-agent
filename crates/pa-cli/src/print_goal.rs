@@ -205,7 +205,7 @@ impl PrintGoalSurface {
             }
         };
         if changed {
-            self.emit(json!({
+            self.emit(&json!({
                 "type": "goal_update",
                 "goal": serde_json::to_value(&goal).unwrap_or(Value::Null),
             }));
@@ -221,7 +221,7 @@ impl PrintGoalSurface {
         }
         *last = snapshot.clone();
         drop(last);
-        self.emit(json!({ "type": "session_action_update", "actions": snapshot }));
+        self.emit(&json!({ "type": "session_action_update", "actions": snapshot }));
     }
 
     /// The snapshot of a queue holding one minted goal turn (the queued
@@ -402,7 +402,7 @@ impl PrintGoalSurface {
     pub(crate) fn emit_row_pair(&self, row: &CustomMessage) {
         let value = crate::headless_autonomous::custom_row_wire_value(row);
         for event_type in ["message_start", "message_end"] {
-            self.emit(json!({ "type": event_type, "message": value }));
+            self.emit(&json!({ "type": event_type, "message": value }));
         }
     }
 
@@ -410,7 +410,7 @@ impl PrintGoalSurface {
     /// `compaction_start`, `compaction_end`, `refine_complete`,
     /// `refine_failed`).
     pub(crate) fn emit_stream_event(&self, event: Value) {
-        self.emit(event);
+        self.emit(&event);
     }
 
     /// The unconditional goal-state publish (TS `_emitGoalUpdate` in the
@@ -419,7 +419,7 @@ impl PrintGoalSurface {
     pub(crate) async fn publish_goal_update_forced(&self, engine: &SessionEngine) {
         let goal = engine.goal_state().await;
         *self.last_published_goal.lock().await = goal.clone();
-        self.emit(json!({
+        self.emit(&json!({
             "type": "goal_update",
             "goal": serde_json::to_value(&goal).unwrap_or(Value::Null),
         }));
@@ -1001,7 +1001,7 @@ mod tests {
         }
     }
 
-    fn script(responses: Value, context_window: u64) -> Value {
+    fn script(responses: &Value, context_window: u64) -> Value {
         json!({
             "engine": "faux",
             "modelId": "faux-1",
@@ -1024,7 +1024,7 @@ mod tests {
     async fn seed_rides_the_first_turn_and_stays_silent() {
         let _guard = FAUX_TEST_LOCK.lock().await;
         let bed = goal_bed(
-            script(json!(["first reply"]), 128_000),
+            script(&json!(["first reply"]), 128_000),
             no_compaction(),
             Some(("finish the work", Some(1_000_000))),
         )
@@ -1110,7 +1110,7 @@ mod tests {
     async fn seeding_respects_the_branch() {
         let _guard = FAUX_TEST_LOCK.lock().await;
         let bed = goal_bed(
-            script(json!(["first reply", "second reply"]), 128_000),
+            script(&json!(["first reply", "second reply"]), 128_000),
             no_compaction(),
             None,
         )
@@ -1138,7 +1138,7 @@ mod tests {
     async fn natural_loop_mints_continuations_inside_one_run() {
         let _guard = FAUX_TEST_LOCK.lock().await;
         let bed = goal_bed(
-            script(json!(["turn one reply", "turn two reply"]), 128_000),
+            script(&json!(["turn one reply", "turn two reply"]), 128_000),
             no_compaction(),
             Some(("finish the work", Some(1_000_000))),
         )
@@ -1193,7 +1193,7 @@ mod tests {
     async fn budget_steer_drains_as_its_own_run() {
         let _guard = FAUX_TEST_LOCK.lock().await;
         let bed = goal_bed(
-            script(json!(["goal turn reply", "wrap-up reply"]), 128_000),
+            script(&json!(["goal turn reply", "wrap-up reply"]), 128_000),
             no_compaction(),
             Some(("finish the work", Some(5))),
         )
@@ -1252,7 +1252,7 @@ mod tests {
         // input+output ceiling satisfiable (threshold 13_904: window
         // minus the 2_000 budget and the 4_096 estimate-error floor).
         let mut model_script = script(
-            json!([
+            &json!([
                 "crossing reply",
                 "the compaction summary",
                 "continuation reply",

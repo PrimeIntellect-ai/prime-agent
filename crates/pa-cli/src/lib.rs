@@ -62,7 +62,7 @@ pub use interactive_mode::{
 /// Entry point shared by the binary and the integration tests. Returns the
 /// process exit code.
 pub fn main_with_runtime(args: Vec<String>, runtime: &dyn mode::Runtime) -> i32 {
-    match main_impl(args, runtime) {
+    match main_impl(&args, runtime) {
         Ok(code) => code,
         Err(error) => {
             eprintln!("Error: {error}");
@@ -71,7 +71,7 @@ pub fn main_with_runtime(args: Vec<String>, runtime: &dyn mode::Runtime) -> i32 
     }
 }
 
-fn main_impl(args: Vec<String>, runtime: &dyn mode::Runtime) -> Result<i32, String> {
+fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String> {
     use std::io::IsTerminal;
 
     let offline_mode = args.iter().any(|arg| arg == "--offline")

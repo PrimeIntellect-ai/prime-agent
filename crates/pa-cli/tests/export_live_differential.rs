@@ -61,15 +61,15 @@ impl Drop for Supervisor {
         let _ = self.child.kill();
         let _ = self.child.wait();
         for pid in workers {
-            kill_worker(&pid);
+            kill_worker(pid);
         }
         let _ = std::fs::remove_file(&self.socket);
     }
 }
 
-fn kill_worker(pid: &u32) {
+fn kill_worker(pid: u32) {
     unsafe {
-        libc::kill(*pid as i32, libc::SIGKILL);
+        libc::kill(pid as i32, libc::SIGKILL);
     }
     let deadline = Instant::now() + Duration::from_secs(5);
     while process_alive(*pid) {
@@ -204,7 +204,7 @@ impl Wire {
         Wire { reader, writer }
     }
 
-    fn request(&mut self, command: Value) -> Value {
+    fn request(&mut self, command: &Value) -> Value {
         let id = command
             .get("id")
             .and_then(Value::as_str)
@@ -346,7 +346,7 @@ fn live_export(binary: &Path, base: &Path, ts_side: bool) -> Value {
             "script": script.to_string_lossy(),
         })
     };
-    let create = wire.request(json!({
+    let create = wire.request(&json!({
         "id": "c1", "type": "create",
         "sessionPath": fixture.to_string_lossy(),
         "name": "export-diff",
@@ -359,7 +359,7 @@ fn live_export(binary: &Path, base: &Path, ts_side: bool) -> Value {
         .expect("session id")
         .to_string();
     let out = base.join("out.html");
-    let export = wire.request(json!({
+    let export = wire.request(&json!({
         "id": "x1", "type": "export_html",
         "activeSessionId": session_id,
         "outputPath": out.to_string_lossy(),

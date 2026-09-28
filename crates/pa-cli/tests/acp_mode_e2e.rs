@@ -95,22 +95,22 @@ impl AcpChild {
         }
     }
 
-    fn send(&mut self, frame: Value) {
+    fn send(&mut self, frame: &Value) {
         let mut line = serde_json::to_string(&frame).unwrap();
         line.push('\n');
         self.stdin.write_all(line.as_bytes()).unwrap();
         self.stdin.flush().unwrap();
     }
 
-    fn request(&mut self, method: &str, params: Value) -> u64 {
+    fn request(&mut self, method: &str, params: &Value) -> u64 {
         self.next_id += 1;
         let id = self.next_id;
-        self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
+        self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
         id
     }
 
-    fn notify(&mut self, method: &str, params: Value) {
-        self.send(json!({ "jsonrpc": "2.0", "method": method, "params": params }));
+    fn notify(&mut self, method: &str, params: &Value) {
+        self.send(&json!({ "jsonrpc": "2.0", "method": method, "params": params }));
     }
 
     /// Read frames until the request `id` answers; returns the answer with
@@ -215,7 +215,7 @@ fn acp_prompt_stream_completion_envelope_and_stop_reason_match_ts() {
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let session_id = new_response["result"]["sessionId"]
         .as_str()
@@ -291,7 +291,7 @@ fn acp_prompt_stream_completion_envelope_and_stop_reason_match_ts() {
     sorted.dedup();
     assert_eq!(sequences, sorted, "eventSequence strictly increases");
 
-    let close = client.request("session/close", json!({ "sessionId": session_id }));
+    let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, TIMEOUT);
     assert_eq!(close_response["result"], json!({}));
 }
@@ -302,7 +302,7 @@ fn acp_prompt_chunk_carries_the_assistant_message_id() {
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let session_id = new_response["result"]["sessionId"]
         .as_str()
@@ -338,7 +338,7 @@ fn acp_cwd_mismatch_is_reported_not_adopted() {
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "cwd": "/tmp", "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "cwd": "/tmp", "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let meta = &new_response["result"]["_meta"]["ai.primeintellect.prime-agent"]["cwd"];
     assert_eq!(meta["requested"], "/tmp");
@@ -369,14 +369,14 @@ fn acp_error_shapes_match_the_ts_goldens() {
         "Unknown ACP session: bogus-session"
     );
 
-    let close = client.request("session/close", json!({ "sessionId": "bogus-session" }));
+    let close = client.request("session/close", &json!({ "sessionId": "bogus-session" }));
     let (response, _) = client.wait_response(close, TIMEOUT);
     assert_eq!(
         response["error"]["data"]["details"],
         "Unknown ACP session: bogus-session"
     );
 
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let session_id = new_response["result"]["sessionId"]
         .as_str()
@@ -384,7 +384,7 @@ fn acp_error_shapes_match_the_ts_goldens() {
         .to_string();
 
     // Second session/new on a live connection (ts-errors.jsonl).
-    let again = client.request("session/new", json!({ "mcpServers": [] }));
+    let again = client.request("session/new", &json!({ "mcpServers": [] }));
     let (response, _) = client.wait_response(again, TIMEOUT);
     assert_eq!(response["error"]["code"], -32603);
     assert_eq!(
@@ -393,7 +393,7 @@ fn acp_error_shapes_match_the_ts_goldens() {
     );
 
     // Unknown method (ts-errors.jsonl): -32601 with the observed message.
-    let unknown = client.request("unknown/method", json!({}));
+    let unknown = client.request("unknown/method", &json!({}));
     let (response, _) = client.wait_response(unknown, TIMEOUT);
     assert_eq!(response["error"]["code"], -32601);
     assert_eq!(
@@ -402,7 +402,7 @@ fn acp_error_shapes_match_the_ts_goldens() {
     );
     assert_eq!(response["error"]["data"]["method"], "unknown/method");
 
-    let close = client.request("session/close", json!({ "sessionId": session_id }));
+    let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (response, _) = client.wait_response(close, TIMEOUT);
     assert_eq!(response["result"], json!({}));
 }
@@ -430,7 +430,7 @@ fn acp_image_block_without_mime_type_is_invalid_params() {
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let session_id = new_response["result"]["sessionId"]
         .as_str()
@@ -456,16 +456,16 @@ fn acp_cancel_without_an_active_turn_is_a_noop() {
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let session_id = new_response["result"]["sessionId"]
         .as_str()
         .unwrap()
         .to_string();
 
-    client.notify("session/cancel", json!({ "sessionId": session_id }));
+    client.notify("session/cancel", &json!({ "sessionId": session_id }));
     // The no-op cancel answers nothing; the session still closes cleanly.
-    let close = client.request("session/close", json!({ "sessionId": session_id }));
+    let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, notifications) = client.wait_response(close, TIMEOUT);
     assert!(notifications.is_empty(), "a no-op cancel publishes nothing");
     assert_eq!(close_response["result"], json!({}));
@@ -501,7 +501,7 @@ fn acp_mcp_admission_accepts_valid_servers_and_close_releases() {
         .as_str()
         .expect("admission succeeds")
         .to_string();
-    let close = client.request("session/close", json!({ "sessionId": session_id }));
+    let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, TIMEOUT);
     assert_eq!(close_response["result"], json!({}));
 }
@@ -539,7 +539,7 @@ fn acp_mcp_admission_rejects_a_second_session_only_when_open() {
         "prime-agent ACP mode hosts one session per connection; start another prime-agent process for a second session"
     );
     // Close, then a replacement admission with a different server list.
-    let close = client.request("session/close", json!({ "sessionId": session_id }));
+    let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, TIMEOUT);
     assert_eq!(close_response["result"], json!({}));
     let replacement = client.request(
@@ -599,7 +599,7 @@ fn acp_mcp_admission_rejects_invalid_params_with_the_ts_reasons() {
         let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
         let init = client.request("initialize", initialize_params());
         let _ = client.wait_response(init, TIMEOUT);
-        let new = client.request("session/new", json!({ "mcpServers": servers }));
+        let new = client.request("session/new", &json!({ "mcpServers": servers }));
         let (response, _) = client.wait_response(new, TIMEOUT);
         assert_eq!(response["error"]["code"], -32602, "case {reason}");
         assert_eq!(response["error"]["message"], "Invalid params");
@@ -694,7 +694,7 @@ fn acp_daemon_attached_serves_a_client_owned_session() {
     let mut client = AcpChild::adopt(child);
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, Duration::from_mins(1));
     assert!(
         new_response["result"]["sessionId"].is_string(),
@@ -714,7 +714,7 @@ fn acp_daemon_attached_serves_a_client_owned_session() {
         .iter()
         .find(|update| update["params"]["update"]["sessionUpdate"] == "agent_message_chunk");
     assert!(chunk.is_some(), "the daemon stream maps to ACP chunks");
-    let close = client.request("session/close", json!({ "sessionId": session_id }));
+    let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, Duration::from_mins(1));
     assert_eq!(close_response["result"], json!({}));
     drop(client);
@@ -778,7 +778,7 @@ fn acp_daemon_attached_admits_mcp_servers_through_the_wire() {
         .as_str()
         .unwrap()
         .to_string();
-    let close = client.request("session/close", json!({ "sessionId": close_id }));
+    let close = client.request("session/close", &json!({ "sessionId": close_id }));
     let (close_response, _) = client.wait_response(close, Duration::from_mins(1));
     assert_eq!(close_response["result"], json!({}));
     drop(client);
@@ -829,7 +829,7 @@ fn acp_daemon_attached_cancels_mid_turn() {
     let mut client = AcpChild::adopt(child);
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, Duration::from_mins(1));
     let session_id = new_response["result"]["sessionId"]
         .as_str()
@@ -840,14 +840,14 @@ fn acp_daemon_attached_cancels_mid_turn() {
             json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "a slow question" }] }),
         );
     // The turn is mid-delay: cancel, then wait for the prompt response.
-    client.notify("session/cancel", json!({ "sessionId": session_id }));
+    client.notify("session/cancel", &json!({ "sessionId": session_id }));
     let (prompt_response, updates) = client.wait_response(prompt, Duration::from_mins(1));
     assert_eq!(prompt_response["result"]["stopReason"], "cancelled");
     assert!(
         updates.is_empty(),
         "a cancelled turn publishes no boundary frames after the cancel"
     );
-    let close = client.request("session/close", json!({ "sessionId": session_id }));
+    let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, Duration::from_mins(1));
     assert_eq!(close_response["result"], json!({}));
     drop(client);
@@ -880,7 +880,7 @@ fn acp_compact_command_publishes_the_compaction_meta_and_end_turn() {
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let session_id = new_response["result"]["sessionId"]
         .as_str()
@@ -934,7 +934,7 @@ fn acp_goal_command_publishes_goal_meta_and_runs_the_continuation() {
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let session_id = new_response["result"]["sessionId"]
         .as_str()
@@ -1003,7 +1003,7 @@ fn acp_autonomous_token_limit_maps_to_max_tokens_stop_reason() {
     );
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let session_id = new_response["result"]["sessionId"]
         .as_str()
@@ -1045,7 +1045,7 @@ fn acp_autonomous_disabled_reports_end_turn_without_accounting() {
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let session_id = new_response["result"]["sessionId"]
         .as_str()
@@ -1114,7 +1114,7 @@ fn acp_daemon_attached_publishes_the_goal_update_meta() {
     let mut client = AcpChild::adopt(child);
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, Duration::from_mins(1));
     assert!(
         new_response["result"]["sessionId"].is_string(),
@@ -1142,7 +1142,7 @@ fn acp_daemon_attached_publishes_the_goal_update_meta() {
     assert_eq!(goal["objective"], "make the daemon publish goal state");
     assert_eq!(goal["tokenBudget"], 500);
     assert_eq!(goal["tokensUsed"], 0);
-    let close = client.request("session/close", json!({ "sessionId": session_id }));
+    let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, Duration::from_mins(1));
     assert_eq!(close_response["result"], json!({}));
     drop(client);
@@ -1194,7 +1194,7 @@ fn acp_daemon_attached_reports_autonomous_accounting_and_limit_stop_reason() {
     let mut client = AcpChild::adopt(child);
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, Duration::from_mins(1));
     assert!(
         new_response["result"]["sessionId"].is_string(),
@@ -1259,7 +1259,7 @@ fn acp_daemon_attached_reports_autonomous_accounting_and_limit_stop_reason() {
         Some(json!(9_007_199_254_740_991u64)),
         "the run's unlimited continuation budget minus used"
     );
-    let close = client.request("session/close", json!({ "sessionId": session_id }));
+    let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, Duration::from_mins(1));
     assert_eq!(close_response["result"], json!({}));
     drop(client);
@@ -1370,7 +1370,7 @@ fn acp_threshold_auto_compaction_publishes_the_compaction_meta() {
     );
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let session_id = new_response["result"]["sessionId"]
         .as_str()
@@ -1443,7 +1443,7 @@ fn acp_overflow_recovery_compacts_and_retries_the_turn() {
         spawn_with_compaction_settings(&["--mode", "acp", "--no-session"], &script, 1, 10);
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let session_id = new_response["result"]["sessionId"]
         .as_str()

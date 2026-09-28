@@ -197,28 +197,28 @@ fn a_clean_run_shows_no_anomalies() {
         supervisor_line(
             "2026-09-10T20:00:05.000Z",
             "Prime Agent daemon supervisor e14de15c listening on /tmp/prime-agent-501/daemon.sock",
-            json!({}),
+            &json!({}),
         ),
         supervisor_line(
             "2026-09-10T20:01:00.000Z",
             "Session worker 477fef4e85a8 stderr: Prime Agent daemon listening on /tmp/prime-agent-501/worker-a-477fef4e85a8.sock",
-            json!({}),
+            &json!({}),
         ),
-        supervisor_line("2026-09-10T20:02:00.000Z", "Migrated 2 scheduled jobs into session artifacts", json!({})),
+        supervisor_line("2026-09-10T20:02:00.000Z", "Migrated 2 scheduled jobs into session artifacts", &json!({})),
         supervisor_line(
             "2026-09-10T20:10:00.000Z",
             "Session worker 477fef4e85a8 stderr: shutdown command received over socket; 1 active session(s) will be closed",
-            json!({}),
+            &json!({}),
         ),
         supervisor_line(
             "2026-09-10T20:10:01.000Z",
             "Session worker 477fef4e85a8 stderr: shutting down (exit 0); closing 1 active session(s)",
-            json!({}),
+            &json!({}),
         ),
         supervisor_line(
             "2026-09-10T20:11:00.000Z",
             "Evicted empty session worker 477fef4e85a8 root=01a0-abc on last client detach",
-            json!({}),
+            &json!({}),
         ),
     ]);
     assert!(text.contains("Supervisor events"));
@@ -320,7 +320,7 @@ fn matches_session_names_quoted_in_log_messages() {
         &[supervisor_line(
             "2026-09-10T20:05:00.000Z",
             r#"Supervisor command set_session_name failed: Error: Agent name "Faerie" is unavailable"#,
-            json!({}),
+            &json!({}),
         )],
         &options,
     );
@@ -422,7 +422,7 @@ fn the_report_layout_matches_the_ts_shape() {
     let lines = vec![supervisor_line(
         "2026-09-10T20:00:05.000Z",
         "Prime Agent daemon supervisor e14de15c listening on /tmp/prime-agent-501/daemon.sock",
-        json!({}),
+        &json!({}),
     )];
     let text = build_incident_report(&entries(&lines), &options).text;
     let severity = format!("{:<8}", "info");
