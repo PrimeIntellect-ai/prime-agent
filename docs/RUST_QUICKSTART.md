@@ -121,8 +121,14 @@ does not have it; the move happens when you run the curl|sh URL above or
 `prime-agent update` (after the Rust install exists). Restart `prime-agent`
 after the update to run the new build.
 
-## The TypeScript takeover — what the installer does
+The fetch source flips to the official domain install endpoint
+(`https://app.primeintellect.ai/prime-agent/install.sh`) at the
+rust-to-main merge — the operator ships the Rust installer through the
+domain itself then, and the command's contract stays "fetch from the
+official source, run it" (`PRIME_AGENT_RUST_INSTALLER_URL` overrides the
+source for testing).
 
+## The TypeScript takeover — what the installer does
 The keyword belongs to the Rust port. On a machine that also has the
 TypeScript product installed, the installer (run for install or update —
 the steps are idempotent):
