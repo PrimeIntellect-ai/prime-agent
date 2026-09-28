@@ -18,7 +18,6 @@ use super::{
     Value,
     anyhow,
     bail,
-    clients,
     json,
     list_sessions,
     mpsc,

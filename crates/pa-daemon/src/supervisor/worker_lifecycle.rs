@@ -7,8 +7,8 @@ use super::launch_budget::{
 };
 use super::{
     Arc,
+    Context,
     DaemonCommand,
-    DaemonErrorInfo,
     DaemonWorkerDescriptor,
     DaemonWorkerLifecycle,
     DurableDaemonCreateCommand,

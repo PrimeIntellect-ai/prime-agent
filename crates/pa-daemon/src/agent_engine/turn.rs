@@ -5,7 +5,6 @@
 use super::{
     AbortController,
     AgentSessionEngine,
-    Arc,
     AutoCompactionRun,
     BoundaryRun,
     DaemonAllowlist,

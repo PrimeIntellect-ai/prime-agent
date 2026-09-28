@@ -4,7 +4,6 @@ use super::lifecycle::active_lifecycle;
 use super::{
     AgentConnectionState,
     Arc,
-    AtomicU64,
     DaemonOutbound,
     DaemonSessionClosedReason,
     Duration,

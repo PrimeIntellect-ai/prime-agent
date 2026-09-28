@@ -4,8 +4,8 @@
 //! and the unleased fallback) that serializes writers onto the file.
 
 use super::{
+    Context,
     HashMap,
-    Map,
     PathBuf,
     Result,
     Serialize,

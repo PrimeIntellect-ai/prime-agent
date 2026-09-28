@@ -21,7 +21,6 @@ use super::{
     SessionEngine,
     SideQuestionOutcome,
     SideQuestionRequest,
-    SupervisorChildSessions,
     TurnPrompt,
     Value,
     artifact_reference,

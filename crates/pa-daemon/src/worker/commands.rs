@@ -1,7 +1,6 @@
 //! The dispatch surface: command routing, the command handlers,
 //! and the abort family.
 use super::{
-    Arc,
     KillCloseReason,
     Lane,
     PROMPT_ABORTED_BEFORE_DELIVERY,

@@ -9,7 +9,6 @@ use super::{
     RouteAdmission,
     Supervisor,
     Value,
-    clients,
     json,
 };
 

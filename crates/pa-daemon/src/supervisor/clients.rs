@@ -3,7 +3,6 @@
 use super::{
     Arc,
     AsyncWriteExt,
-    AtomicBool,
     BufReader,
     ClientRouting,
     DAEMON_APP_VERSION,

@@ -4,7 +4,6 @@
 //! most-recent-session lookup.
 
 use super::{
-    BufRead,
     Cow,
     Deserialize,
     HashMap,

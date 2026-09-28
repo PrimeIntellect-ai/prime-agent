@@ -3,6 +3,7 @@
 //! file-layout helpers, and the in-memory create.
 
 use super::{
+    Context,
     HashMap,
     Map,
     Path,
@@ -17,7 +18,6 @@ use super::{
     anyhow,
     fold_child_usage_attributions,
     fs,
-    index,
     message_text,
     read,
 };

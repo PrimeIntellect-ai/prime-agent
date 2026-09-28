@@ -5,7 +5,6 @@ use super::{
     Result,
     Supervisor,
     Value,
-    adoption,
     clients,
     notes,
     options,

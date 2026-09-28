@@ -1,7 +1,6 @@
 //! Session lifecycle on the worker: shutdown, replacement handoff,
 //! resume, compaction triggers, and the wait-for-settled arms.
 use super::{
-    Arc,
     DaemonResponse,
     Duration,
     PathBuf,

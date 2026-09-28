@@ -12,7 +12,6 @@ use super::{
     Value,
     VecDeque,
     WorkerRecoveryJournal,
-    broadcast,
     commands,
     emit_worker_event_with,
     input,

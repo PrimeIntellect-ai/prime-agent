@@ -2,7 +2,6 @@
 //! engine, and settles the result.
 use super::{
     ABORTED_TURN_SETTLE_ERROR,
-    ConnectionSink,
     DaemonOutbound,
     EngineEvent,
     EventPump,

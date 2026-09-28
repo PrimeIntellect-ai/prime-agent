@@ -8,7 +8,6 @@ use super::{
     EngineEvent,
     GoalRuntimeHandles,
     Value,
-    config,
     json,
     turn,
 };

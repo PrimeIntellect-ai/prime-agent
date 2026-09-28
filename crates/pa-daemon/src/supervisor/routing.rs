@@ -2,7 +2,6 @@
 //! per-request deadlines, and the worker-not-connected refusal.
 use super::{
     Arc,
-    Command,
     DaemonCommand,
     DaemonResponse,
     Duration,

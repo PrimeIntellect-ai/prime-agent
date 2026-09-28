@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use super::{
+    Context,
     DaemonCommand,
     DaemonResponse,
     DaemonWorkerLifecycle,
@@ -16,7 +17,6 @@ use super::{
     Supervisor,
     Value,
     WorkerRegistration,
-    adoption,
     anyhow,
     clients,
     json,

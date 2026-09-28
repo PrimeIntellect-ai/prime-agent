@@ -27,7 +27,6 @@ use super::{
     WorkerSnapshot,
     WorkerStopVerdict,
     anyhow,
-    bail,
     build_update_roster,
     clients,
     join_all,

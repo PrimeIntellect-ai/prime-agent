@@ -9,7 +9,6 @@ use super::{
     SessionFile,
     VecDeque,
     Worker,
-    anyhow,
     config,
     connection,
     create,
