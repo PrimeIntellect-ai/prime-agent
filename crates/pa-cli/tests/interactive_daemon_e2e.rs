@@ -6,7 +6,7 @@
 //! rendered frames plus the daemon-side session state.
 //!
 //! The scripted engine seam (`create` config `script`) is the same faux
-//! provider contract `pa-daemon/tests/supervisor_e2e.rs` uses; the product
+//! provider contract `pa-daemon/tests/supervisor_e2e/main.rs` uses; the product
 //! never sets it.
 #![cfg(unix)]
 

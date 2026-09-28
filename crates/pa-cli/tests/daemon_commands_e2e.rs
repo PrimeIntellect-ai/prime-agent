@@ -145,7 +145,7 @@ fn spawn_daemon(binary: &Path, socket: &Path, agent_dir: &Path) -> Daemon {
 }
 
 /// A raw JSONL protocol client, mirroring the harness in
-/// `crates/pa-daemon/tests/supervisor_e2e.rs`.
+/// `crates/pa-daemon/tests/supervisor_e2e/main.rs`.
 struct Wire {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
