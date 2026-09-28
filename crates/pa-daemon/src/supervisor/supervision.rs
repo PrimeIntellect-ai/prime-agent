@@ -123,6 +123,14 @@ impl Supervisor {
                 resident.note_retired();
                 self.registry.remove(&resident.worker_id).await;
                 self.registry.forget(&resident.worker_id).await;
+                // The residency change lands in the scheduled-jobs
+                // invalidation (TS `broadcastHeartbeatsChanged`: "every
+                // daemon-owned scheduled-job mutation and worker residency
+                // change"): the dead worker's durable jobs are passive from
+                // here on, so a snapshot that excluded them while the
+                // worker was live must not be served for the rest of the
+                // refresh window.
+                self.broadcast_heartbeats_changed();
                 // The give-up settles the dead worker's rows exactly like
                 // a stop (every owned non-ephemeral, non-queued row
                 // passivates and keeps its model/thinking/cwd). No ledger
@@ -703,18 +711,16 @@ impl Supervisor {
                         // for an in-flight pass; Rust bumps the generation,
                         // so an in-flight read keeps an older generation
                         // and can never publish itself as fresh over this
-                        // invalidation), and the scheduling-surface clients
-                        // re-read the catalog (TS #2487's subscription
-                        // filter: the re-broadcast reaches the connections
-                        // that opened a scheduling surface, not every
-                        // socket).
+                        // invalidation), and every client re-reads the
+                        // catalog (TS `broadcastHeartbeatsChanged`
+                        // re-broadcast: the TS site writes the frame to
+                        // each client in its set, so a session-scoped
+                        // catalog view refreshes on the same push).
                         reader_resident
                             .heartbeat_snapshot_generation
                             .fetch_add(1, Ordering::Relaxed);
-                        let _ = events.send((
-                            ClientRouting::HeartbeatSubscribers,
-                            std::sync::Arc::new(payload),
-                        ));
+                        let _ =
+                            events.send((ClientRouting::Broadcast, std::sync::Arc::new(payload)));
                     } else if outbound_type == "model_catalog_changed" {
                         // A worker's background catalog refresh changed
                         // the served snapshot: every client re-fetches

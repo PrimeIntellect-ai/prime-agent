@@ -130,36 +130,40 @@ impl Supervisor {
         self: &Arc<Self>,
         include_inactive: bool,
     ) -> Vec<PassiveJob> {
-        let cached = self
-            .passive_catalog
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|snapshot| snapshot.scanned_at);
-        if let Some(scanned_at) = cached {
-            if scanned_at.elapsed() >= std::time::Duration::from_millis(PASSIVE_CATALOG_REFRESH_MS)
-                && !self.shutting_down.load(Ordering::SeqCst)
-            {
-                // Stale-while-revalidate (TS #2487): serve the bounded-stale
-                // rows now, refresh in the background without dropping them;
-                // a failure only logs, the next read retries.
-                self.spawn_shared_passive_scan();
+        // The snapshot decision and the serve-side filter read under ONE
+        // lock: an invalidation that lands between them cannot turn a
+        // cached hit into an empty catalog (the cold scan below is the
+        // only way to a `None` read).
+        {
+            let snapshot = self.passive_catalog.lock().unwrap();
+            if let Some(snapshot) = snapshot.as_ref() {
+                if snapshot.scanned_at.elapsed()
+                    >= std::time::Duration::from_millis(PASSIVE_CATALOG_REFRESH_MS)
+                    && !self.shutting_down.load(Ordering::SeqCst)
+                {
+                    // Stale-while-revalidate (TS #2487): serve the
+                    // bounded-stale rows now, refresh in the background
+                    // without dropping them; a failure only logs, the
+                    // next read retries.
+                    self.spawn_shared_passive_scan();
+                }
+                return Self::filter_passive_rows_with(include_inactive, &snapshot.rows);
             }
-            self.filter_passive_rows(include_inactive)
-        } else {
-            let rows = self.shared_passive_scan().await;
-            Self::filter_passive_rows_with(include_inactive, &rows)
         }
+        let rows = self.shared_passive_scan().await;
+        Self::filter_passive_rows_with(include_inactive, &rows)
     }
 
-    /// The active-status filter over the stored snapshot's raw rows (one
-    /// snapshot serves both `include_inactive` spellings).
-    fn filter_passive_rows(&self, include_inactive: bool) -> Vec<PassiveJob> {
-        let snapshot = self.passive_catalog.lock().unwrap();
-        match snapshot.as_ref() {
-            Some(snapshot) => Self::filter_passive_rows_with(include_inactive, &snapshot.rows),
-            None => Vec::new(),
+    /// The active-status cut over a worker slice's unfiltered jobs (the
+    /// worker's own default `cron_list` rule): the default spelling keeps
+    /// active and paused rows, `include_inactive` keeps everything.
+    fn filter_cron_rows(include_inactive: bool, jobs: Vec<AgentCronJob>) -> Vec<AgentCronJob> {
+        if include_inactive {
+            return jobs;
         }
+        jobs.into_iter()
+            .filter(|job| matches!(job.status, JobStatus::Active | JobStatus::Paused))
+            .collect()
     }
 
     /// The active-status filter over raw scan rows (TS
@@ -177,7 +181,11 @@ impl Supervisor {
 
     /// The shared passive scan (TS `passiveScheduledJobsScan ??=`): one
     /// scan at a time; callers that waited behind the first scan's gate
-    /// serve the snapshot it just stored instead of scanning again.
+    /// serve the snapshot it just stored instead of scanning again. The
+    /// scan claims the publish epoch when it starts (TS
+    /// `claimPassiveScheduledJobsEpoch`): it may store only while it still
+    /// owns the newest epoch, so a scan that raced an invalidation never
+    /// republishes its pre-mutation rows as a fresh snapshot.
     async fn shared_passive_scan(self: &Arc<Self>) -> Vec<PassiveJob> {
         let _gate = self.passive_scan_gate.lock().await;
         // Double-check: the scan that finished while this caller waited on
@@ -196,29 +204,46 @@ impl Supervisor {
                 return snapshot.rows.clone();
             }
         }
+        let epoch = self.passive_catalog_epoch.fetch_add(1, Ordering::SeqCst) + 1;
         let rows = self.collect_passive_scheduled_jobs(true).await;
-        *self.passive_catalog.lock().unwrap() = Some(PassiveCatalogSnapshot {
-            rows: rows.clone(),
-            scanned_at: std::time::Instant::now(),
-        });
+        // Compare-and-swap publish (TS `storePassiveScheduledJobs`): a
+        // newer epoch means an invalidation raced the scan; the caller
+        // keeps its rows for this response, but the snapshot does not
+        // republish them.
+        if self.passive_catalog_epoch.load(Ordering::SeqCst) == epoch {
+            *self.passive_catalog.lock().unwrap() = Some(PassiveCatalogSnapshot {
+                rows: rows.clone(),
+                scanned_at: std::time::Instant::now(),
+            });
+        }
         rows
     }
 
-    /// Kick the background stale-while-revalidate refresh (the gate keeps
-    /// concurrent kicks to one in-flight scan; a failure only logs, the
-    /// next read retries).
+    /// Kick the background stale-while-revalidate refresh (TS `??=`'s one
+    /// in-flight scan): a reader that arrives while a refresh is already
+    /// queued shares it instead of spawning another task; a failure only
+    /// logs, the next read retries.
     fn spawn_shared_passive_scan(self: &Arc<Self>) {
+        if self.passive_scan_pending.swap(true, Ordering::SeqCst) {
+            return;
+        }
         let supervisor = Arc::clone(self);
         tokio::spawn(async move {
             let _ = supervisor.shared_passive_scan().await;
+            supervisor
+                .passive_scan_pending
+                .store(false, Ordering::SeqCst);
         });
     }
 
-    /// Drop the passive snapshot (TS #2487 `invalidatePassiveScheduledJobs`):
-    /// every daemon-owned scheduled-job mutation and the saved-session
-    /// delete/rename paths call this, so the next read rescans instead of
-    /// serving pre-mutation rows.
+    /// Invalidate the passive snapshot (TS #2487
+    /// `invalidatePassiveScheduledJobs`): claim the publish epoch so an
+    /// in-flight scan can no longer store, then drop the snapshot — every
+    /// daemon-owned scheduled-job mutation, the saved-session
+    /// delete/rename paths, and a worker-residency change call this, so
+    /// the next read rescans instead of serving pre-mutation rows.
     pub(crate) fn invalidate_passive_catalog(&self) {
+        self.passive_catalog_epoch.fetch_add(1, Ordering::SeqCst);
         *self.passive_catalog.lock().unwrap() = None;
     }
 
@@ -234,16 +259,18 @@ impl Supervisor {
         store
     }
 
-    /// `broadcastHeartbeatsChanged` (TS #2487): only the clients that
-    /// opened a scheduling surface see the change (the subscription
-    /// filter — a daemon-side scheduled-job mutation no longer wakes
-    /// every connection's catalog refresh), and the passive snapshot
-    /// drops so the next read rescans instead of serving pre-mutation
-    /// rows.
-    fn broadcast_heartbeats_changed(&self) {
+    /// `broadcastHeartbeatsChanged` (TS #2487): every daemon-owned
+    /// scheduled-job mutation AND a worker-residency change lands here —
+    /// the passive snapshot drops (claiming its epoch) so the next read
+    /// rescans instead of serving pre-mutation rows, and every connected
+    /// client re-reads the catalog (the TS site writes the
+    /// `heartbeats_changed` frame to each client in its set, with no
+    /// scheduling-surface filter: a re-read that arrives on any
+    /// connection is what keeps a session-scoped catalog view fresh too).
+    pub(crate) fn broadcast_heartbeats_changed(&self) {
         self.invalidate_passive_catalog();
         let _ = self.events.send((
-            crate::supervisor::ClientRouting::HeartbeatSubscribers,
+            crate::supervisor::ClientRouting::Broadcast,
             std::sync::Arc::new(json!({ "type": "heartbeats_changed" })),
         ));
     }
@@ -295,6 +322,19 @@ impl Supervisor {
         };
         let mut jobs: Vec<AgentCronJob> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
+        // The slice stores the worker's UNFILTERED answer (the passive
+        // snapshot's pattern: one row set serves every caller's filter), so
+        // the listing forward opens the inactive cut — exactly like the
+        // `cron_cancel` owner search — and the serve-side filter below
+        // applies the request's `include_inactive` (the worker's own
+        // default cut is the same Active|Paused rule, so a served slice is
+        // byte-identical to a fresh default forward).
+        let listing_command = DaemonCommand::CronList {
+            id: None,
+            active_session_id: None,
+            include_inactive: Some(true),
+            rest: Map::default(),
+        };
         for resident in self.live_workers_in_creation_order().await {
             // TS #2487: the supervisor serves each worker's own catalog
             // slice while it is current, so a `cron_list` consults a worker
@@ -307,14 +347,25 @@ impl Supervisor {
                 let snapshot = resident.cron_snapshot.lock().await;
                 snapshot
                     .as_ref()
-                    .filter(|snapshot| snapshot.generation == generation)
+                    // The freshness test re-reads the generation while the
+                    // snapshot lock is held: an invalidation that landed
+                    // between the capture above and this lock cannot be
+                    // served as current (the stored generation was
+                    // captured before the forward, so the STORE keeps the
+                    // generation-discipline against mid-read mutations).
+                    .filter(|snapshot| {
+                        snapshot.generation
+                            == resident
+                                .heartbeat_snapshot_generation
+                                .load(Ordering::Relaxed)
+                    })
                     .map(|snapshot| snapshot.jobs.clone())
             };
             let worker_jobs: Option<Vec<AgentCronJob>> = if let Some(jobs) = served_slice {
                 Some(jobs)
             } else {
                 let response = self
-                    .forward_with_catalog_timeout(&resident, command, client_id)
+                    .forward_with_catalog_timeout(&resident, &listing_command, client_id)
                     .await;
                 if response.success {
                     let list = response
@@ -343,6 +394,8 @@ impl Supervisor {
                     None
                 }
             };
+            let worker_jobs =
+                worker_jobs.map(|jobs| Self::filter_cron_rows(include_inactive, jobs));
             for job in worker_jobs.unwrap_or_default() {
                 if seen.insert(job.id.clone()) {
                     jobs.push(job);
