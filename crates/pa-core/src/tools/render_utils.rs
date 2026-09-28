@@ -283,7 +283,9 @@ mod tests {
     // everywhere the home resolves.
     #[test]
     fn shorten_path_replaces_home() {
-        let home = pa_types::platform::home_dir().expect("the platform home resolves");
+        let home = pa_types::platform::home_dir()
+            .expect("the platform home resolves")
+            .to_string_lossy();
         assert_eq!(shorten_path(&format!("{home}/a/b")), "~/a/b");
         assert_eq!(shorten_path("/etc/passwd"), "/etc/passwd");
     }
