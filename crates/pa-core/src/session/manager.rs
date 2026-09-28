@@ -20,6 +20,14 @@ use super::{migrate_to_current_version, parse_session_entries, CURRENT_SESSION_V
 #[cfg(test)]
 mod tests;
 
+// The git-context concern (the quiet git probes and the header capture)
+// moved to the child module at the same tree position
+// (session::manager::git); the re-export keeps the pub API path stable
+// (manager_ext.rs + the git-context integration tests) and the
+// constructors bare calls.
+mod git;
+pub use git::capture_git_context;
+
 // The crash-repair + load concern (the serialized entry wire, the
 // bounded damage scan, the torn-tail repair, and the header-validating
 // load) moved to the child module at the same tree position
@@ -85,49 +93,6 @@ pub fn format_iso(millis: i64) -> String {
     let second = (time_ms / 1_000) % 60;
     let ms = time_ms % 1_000;
     format!("{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{ms:03}Z")
-}
-
-/// One quiet git probe: `--no-optional-locks`, stdio ignore/pipe/ignore,
-/// `None` on any failure or empty output (TS `runGit` in utils/git.ts).
-fn run_git_probe(cwd: &Path, args: &[&str]) -> Option<String> {
-    std::process::Command::new("git")
-        .arg("--no-optional-locks")
-        .args(args)
-        .current_dir(cwd)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|stdout| stdout.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-/// Capture git context for the header (best effort; None outside a repo).
-///
-/// Contract (TS `captureGitContext`): every field is independently optional;
-/// the context exists when at least one probe succeeds. `branch` is
-/// `--show-current`, so a detached HEAD yields no branch. The remote URL is
-/// normalized through the git-source parser when it parses, else kept
-/// verbatim.
-pub fn capture_git_context(cwd: &Path) -> Option<GitContext> {
-    let commit = run_git_probe(cwd, &["rev-parse", "HEAD"]);
-    let branch = run_git_probe(cwd, &["branch", "--show-current"]);
-    let remote = run_git_probe(cwd, &["remote", "get-url", "origin"]);
-    if commit.is_none() && branch.is_none() && remote.is_none() {
-        return None;
-    }
-    Some(GitContext {
-        repo_url: remote.map(|url| {
-            crate::packages::parse_git_url(&url)
-                .map(|source| source.repo)
-                .unwrap_or(url)
-        }),
-        commit,
-        branch,
-    })
 }
 
 /// Read just the header of a session file (first line).
