@@ -162,7 +162,7 @@ mod tests {
     /// One assistant message row; `stop_reason` defaults to `toolUse`
     /// (completions mid-run), and the usage block is a real captured
     /// shape.
-    fn assistant_row(id: &str, usage: Value, stop_reason: &str) -> SessionEntry {
+    fn assistant_row(id: &str, usage: &Value, stop_reason: &str) -> SessionEntry {
         row(
             "message",
             id,
@@ -170,7 +170,7 @@ mod tests {
         )
     }
 
-    fn custom_message_row(id: &str, custom_type: &str, details: Value) -> SessionEntry {
+    fn custom_message_row(id: &str, custom_type: &str, details: &Value) -> SessionEntry {
         row(
             "custom_message",
             id,
@@ -203,18 +203,18 @@ mod tests {
             user_row("u1"),
             assistant_row(
                 "a1",
-                captured_usage(50_208, 2_929, 53_137, 0.008_995_7),
+                &captured_usage(50_208, 2_929, 53_137, 0.008_995_7),
                 "toolUse",
             ),
             custom_message_row(
                 "c1",
                 "agent_message",
-                json!({"id": "agentmsg_1", "message": "follow up"}),
+                &json!({"id": "agentmsg_1", "message": "follow up"}),
             ),
-            assistant_row("a2", captured_usage(1_000, 100, 1_100, 0.001), "stop"),
+            assistant_row("a2", &captured_usage(1_000, 100, 1_100, 0.001), "stop"),
             user_row("u2"),
-            assistant_row("a3", captured_usage(200, 50, 250, 0.0005), "stop"),
-            assistant_row("a4", captured_usage(999, 9, 1_008, 9.9), "aborted"),
+            assistant_row("a3", &captured_usage(200, 50, 250, 0.0005), "stop"),
+            assistant_row("a4", &captured_usage(999, 9, 1_008, 9.9), "aborted"),
         ];
         let (batches, cursor) = child_usage_batches(&entries, 0);
         assert_eq!(cursor, entries.len());
@@ -251,9 +251,9 @@ mod tests {
         grown.push(custom_message_row(
             "c2",
             "agent_message",
-            json!({"id": "agentmsg_2", "message": "more"}),
+            &json!({"id": "agentmsg_2", "message": "more"}),
         ));
-        grown.push(assistant_row("a5", captured_usage(5, 1, 6, 0.0), "stop"));
+        grown.push(assistant_row("a5", &captured_usage(5, 1, 6, 0.0), "stop"));
         let (delta, next) = child_usage_batches(&grown, entries.len());
         assert_eq!(next, grown.len());
         assert_eq!(delta.len(), 1);
@@ -269,8 +269,8 @@ mod tests {
     fn batches_sum_across_completions_of_one_origin() {
         let entries = vec![
             user_row("u1"),
-            assistant_row("a1", captured_usage(10, 5, 0, 0.01), "toolUse"),
-            assistant_row("a2", captured_usage(20, 8, 0, 0.02), "stop"),
+            assistant_row("a1", &captured_usage(10, 5, 0, 0.01), "toolUse"),
+            assistant_row("a2", &captured_usage(20, 8, 0, 0.02), "stop"),
         ];
         let (batches, cursor) = child_usage_batches(&entries, 0);
         assert_eq!(cursor, 3);

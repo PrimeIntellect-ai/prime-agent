@@ -399,7 +399,7 @@ mod tests {
         json!({ "name": name, "type": "stdio", "command": "cat", "args": [], "env": [] })
     }
 
-    fn http(name: &str, url: &str, headers: Value) -> Value {
+    fn http(name: &str, url: &str, headers: &Value) -> Value {
         json!({ "name": name, "type": "http", "url": url, "headers": headers })
     }
 
@@ -469,7 +469,7 @@ mod tests {
         let err = resolve_acp_mcp_servers(&[stdio("-bad")], Path::new("/tmp")).unwrap_err();
         assert!(err.contains("must start with an alphanumeric"));
         let err = resolve_acp_mcp_servers(
-            &[stdio("dup"), http("dup", "https://x.invalid", json!([]))],
+            &[stdio("dup"), http("dup", "https://x.invalid", &json!([]))],
             Path::new("/tmp"),
         )
         .unwrap_err();
@@ -532,7 +532,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(err, "MCP server a2 uses unsupported acp transport");
         let err = resolve_acp_mcp_servers(
-            &[http("c", "https://user:pw@x.invalid", json!([]))],
+            &[http("c", "https://user:pw@x.invalid", &json!([]))],
             Path::new("/tmp"),
         )
         .unwrap_err();
@@ -540,7 +540,7 @@ mod tests {
             err,
             "MCP server c must use an HTTP(S) URL without embedded credentials"
         );
-        let err = resolve_acp_mcp_servers(&[http("h", "not a url", json!([]))], Path::new("/tmp"))
+        let err = resolve_acp_mcp_servers(&[http("h", "not a url", &json!([]))], Path::new("/tmp"))
             .unwrap_err();
         assert_eq!(err, "MCP server h has an invalid HTTP URL");
     }
@@ -551,7 +551,7 @@ mod tests {
             &[http(
                 "hdr",
                 "https://x.invalid",
-                json!([{"name": "X-A", "value": "1"}, {"name": "x-a", "value": "2"}]),
+                &json!([{"name": "X-A", "value": "1"}, {"name": "x-a", "value": "2"}]),
             )],
             Path::new("/tmp"),
         )

@@ -138,10 +138,10 @@ impl Supervisor {
             ..
         } = command
         else {
-            return self.pause_failure(command_id, type_name, "invalid command");
+            return Self::pause_failure(command_id, type_name, "invalid command");
         };
         if connection.is_detaching(active_session_id) {
-            return self.pause_failure(
+            return Self::pause_failure(
                 command_id,
                 type_name,
                 &format!("Session is detaching: {active_session_id}"),
@@ -159,12 +159,12 @@ impl Supervisor {
                 let message = self
                     .restore_failure_for(active_session_id)
                     .unwrap_or_else(|| format!("Unknown active session: {active_session_id}"));
-                return self.pause_failure(command_id, type_name, &message);
+                return Self::pause_failure(command_id, type_name, &message);
             }
         };
         let resolved = resident.worker_id.clone();
         if connection.is_detaching(active_session_id) || connection.is_detaching(&resolved) {
-            return self.pause_failure(
+            return Self::pause_failure(
                 command_id,
                 type_name,
                 &format!("Session is detaching: {active_session_id}"),
@@ -182,7 +182,7 @@ impl Supervisor {
                     && entry.active_session_id == resolved
                     && entry.lease_key == *lease_key
                 {
-                    return self.pause_success(command_id, type_name, pause_id);
+                    return Self::pause_success(command_id, type_name, pause_id);
                 }
             }
         }
@@ -207,7 +207,7 @@ impl Supervisor {
         {
             Ok(response) => response,
             Err(error) => {
-                return self.pause_failure(command_id, type_name, &error.to_string());
+                return Self::pause_failure(command_id, type_name, &error.to_string());
             }
         };
         response.id = Some(command_id.to_string());
@@ -221,7 +221,7 @@ impl Supervisor {
             .and_then(Value::as_str)
             .map(str::to_string)
         else {
-            return self.pause_failure(
+            return Self::pause_failure(
                 command_id,
                 type_name,
                 "Worker returned an invalid session input pause id",
@@ -243,7 +243,7 @@ impl Supervisor {
             // it, but the client sees the TS invalidation error (the
             // supervisor re-keyed its connection bookkeeping under the
             // acquiring round trip).
-            return self.pause_failure(
+            return Self::pause_failure(
                 command_id,
                 type_name,
                 "Session input pause acquisition was invalidated before completion",
@@ -271,16 +271,16 @@ impl Supervisor {
             ..
         } = command
         else {
-            return self.pause_failure(command_id, type_name, "invalid command");
+            return Self::pause_failure(command_id, type_name, "invalid command");
         };
         let mut pauses = self.input_pauses.leases.lock().await;
         let Some(entry) = pauses.get(pause_id).cloned() else {
             drop(pauses);
-            return self.pause_plain_success(command_id, type_name);
+            return Self::pause_plain_success(command_id, type_name);
         };
         if entry.owner_connection_id != connection.connection_id() {
             drop(pauses);
-            return self.pause_failure(
+            return Self::pause_failure(
                 command_id,
                 type_name,
                 &format!("Session input pause is owned by another client: {pause_id}"),
@@ -290,7 +290,7 @@ impl Supervisor {
             && *active_session_id != entry.requested_active_session_id
         {
             drop(pauses);
-            return self.pause_failure(
+            return Self::pause_failure(
                 command_id,
                 type_name,
                 &format!("Session input pause belongs to another session: {pause_id}"),
@@ -301,7 +301,7 @@ impl Supervisor {
         let Some(resident) = self.registry.get(&entry.worker_id).await else {
             pauses.remove(pause_id);
             drop(pauses);
-            return self.pause_plain_success(command_id, type_name);
+            return Self::pause_plain_success(command_id, type_name);
         };
         let payload = json!({
             "activeSessionId": entry.active_session_id,
@@ -321,7 +321,7 @@ impl Supervisor {
             Ok(response) => response,
             Err(error) => {
                 drop(pauses);
-                return self.pause_failure(command_id, type_name, &error.to_string());
+                return Self::pause_failure(command_id, type_name, &error.to_string());
             }
         };
         response.id = Some(command_id.to_string());
@@ -422,7 +422,7 @@ impl Supervisor {
             .await;
     }
 
-    fn pause_failure(&self, command_id: &str, type_name: &str, error: &str) -> (Vec<Value>, bool) {
+    fn pause_failure(command_id: &str, type_name: &str, error: &str) -> (Vec<Value>, bool) {
         (
             vec![response_line(&response_failure(
                 Some(command_id),
@@ -434,12 +434,7 @@ impl Supervisor {
         )
     }
 
-    fn pause_success(
-        &self,
-        command_id: &str,
-        type_name: &str,
-        pause_id: &str,
-    ) -> (Vec<Value>, bool) {
+    fn pause_success(command_id: &str, type_name: &str, pause_id: &str) -> (Vec<Value>, bool) {
         (
             vec![response_line(&response_success(
                 Some(command_id),
@@ -450,7 +445,7 @@ impl Supervisor {
         )
     }
 
-    fn pause_plain_success(&self, command_id: &str, type_name: &str) -> (Vec<Value>, bool) {
+    fn pause_plain_success(command_id: &str, type_name: &str) -> (Vec<Value>, bool) {
         (
             vec![response_line(&response_success(
                 Some(command_id),

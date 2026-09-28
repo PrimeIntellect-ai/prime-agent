@@ -26,12 +26,12 @@ impl BurstStreamEngine {
         })
     }
 
-    fn delta_text(&self, index: usize) -> String {
+    fn delta_text(index: usize) -> String {
         "x".repeat((index + 1) * 4)
     }
 
     fn full_text(&self) -> String {
-        self.delta_text(self.deltas)
+        Self::delta_text(self.deltas)
     }
 }
 
@@ -101,7 +101,7 @@ impl SessionEngine for BurstStreamEngine {
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) {
         for index in 0..=self.deltas {
-            let message = Self::message_with(&self.delta_text(index));
+            let message = Self::message_with(&Self::delta_text(index));
             let stream_event = if index == 0 {
                 json!({ "type": "start" })
             } else {
@@ -1149,7 +1149,7 @@ async fn the_waiting_prompt_resolves_only_after_the_turn_settles() {
 /// A fake supervisor link endpoint: every `worker_roster_delta`
 /// command's summary is recorded in arrival order.
 #[cfg(unix)]
-async fn fake_supervisor(
+fn fake_supervisor(
     socket: std::path::PathBuf,
 ) -> (Arc<Mutex<Vec<Value>>>, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -1243,7 +1243,7 @@ fn live_feed_runner(engine: Arc<dyn SessionEngine>, socket: std::path::PathBuf) 
 async fn roster_feed_publishes_live_tool_activity() {
     let dir = tempfile::TempDir::new().unwrap();
     let socket = dir.path().join("sup.sock");
-    let (recorded, server) = fake_supervisor(socket.clone()).await;
+    let (recorded, server) = fake_supervisor(socket.clone());
     let engine: Arc<dyn SessionEngine> = Arc::new(
         ScriptedEngine::from_value(json!({
             "responses": [{

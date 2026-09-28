@@ -81,8 +81,8 @@ impl SessionBindingTable {
             session_id: session_id.filter(|id| !id.is_empty()).map(str::to_string),
             session_file: Some(canonical_binding_path(session_file)),
         });
-        let mut by_active_id = self.locked(&self.by_active_id);
-        let mut by_session_file = self.locked(&self.by_session_file);
+        let mut by_active_id = Self::locked(&self.by_active_id);
+        let mut by_session_file = Self::locked(&self.by_session_file);
         by_active_id.insert(active_session_id.to_string(), Arc::clone(&binding));
         // Every id still holding an older binding for this same durable
         // session is superseded - not just the immediately previous one,
@@ -118,7 +118,7 @@ impl SessionBindingTable {
         if active_session_id.is_empty() {
             return None;
         }
-        self.locked(&self.by_active_id)
+        Self::locked(&self.by_active_id)
             .get(active_session_id)
             .cloned()
     }
@@ -131,8 +131,8 @@ impl SessionBindingTable {
     /// of live files stay (a stopped worker's session can be re-opened -
     /// that rebind is this table's purpose).
     pub(crate) fn forget_file(&self, session_file: &str) {
-        let mut by_active_id = self.locked(&self.by_active_id);
-        let mut by_session_file = self.locked(&self.by_session_file);
+        let mut by_active_id = Self::locked(&self.by_active_id);
+        let mut by_session_file = Self::locked(&self.by_session_file);
         by_session_file.remove(session_file);
         by_active_id.retain(|_, bound| bound.session_file.as_deref() != Some(session_file));
     }
@@ -141,7 +141,7 @@ impl SessionBindingTable {
 impl SessionBindingTable {
     /// Poisoning-tolerant lock (the supervisor's std-Mutex pattern): the
     /// tables' invariants survive a panic between lock and unlock.
-    fn locked<'a, T>(&self, mutex: &'a Mutex<T>) -> std::sync::MutexGuard<'a, T> {
+    fn locked<'a, T>(mutex: &'a Mutex<T>) -> std::sync::MutexGuard<'a, T> {
         mutex
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

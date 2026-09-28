@@ -232,7 +232,7 @@ impl Supervisor {
             })
             .unwrap_or(false);
         if cancelled {
-            return self.admission_failure(
+            return Self::admission_failure(
                 &command_id,
                 &type_name,
                 "Prompt admission was cancelled.",
@@ -296,7 +296,7 @@ impl Supervisor {
                                 .unwrap_or_else(|| {
                                     format!("Unknown active session: {active_session_id}")
                                 });
-                        return self.admission_failure(&command_id, &type_name, &message);
+                        return Self::admission_failure(&command_id, &type_name, &message);
                     }
                 }
             }
@@ -310,7 +310,7 @@ impl Supervisor {
             })
             .unwrap_or(false);
         if cancelled {
-            return self.admission_failure(
+            return Self::admission_failure(
                 &command_id,
                 &type_name,
                 "Prompt admission was cancelled.",
@@ -323,7 +323,7 @@ impl Supervisor {
         let (command_type, mut payload) = match client_command_payload(command, client_id) {
             Ok(payload) => payload,
             Err(error) => {
-                return self.admission_failure(&command_id, &type_name, &error.to_string())
+                return Self::admission_failure(&command_id, &type_name, &error.to_string())
             }
         };
         payload["admissionId"] = json!(worker_admission_id);
@@ -353,7 +353,7 @@ impl Supervisor {
                 // The route failed: the admission clears with it (TS
                 // deletes in the finally).
                 connection.prompt_admissions.remove(&key);
-                return self.admission_failure(&command_id, &type_name, &error.to_string());
+                return Self::admission_failure(&command_id, &type_name, &error.to_string());
             }
         };
         if response.success {
@@ -385,7 +385,7 @@ impl Supervisor {
             ..
         } = command
         else {
-            return self.admission_failure(command_id, type_name, "invalid command");
+            return Self::admission_failure(command_id, type_name, "invalid command");
         };
         let mut key = prompt_admission_key(active_session_id, admission_id);
         if connection.prompt_admissions.with(&key, |_| ()).is_none() {
@@ -427,11 +427,11 @@ impl Supervisor {
             .prompt_admissions
             .with(&key, |admission| admission.status)
         else {
-            return self.admission_status(command_id, type_name, "unknown");
+            return Self::admission_status(command_id, type_name, "unknown");
         };
         match status {
-            AdmissionStatus::Cancelled => self.admission_status(command_id, type_name, "cancelled"),
-            AdmissionStatus::Owned => self.admission_status(command_id, type_name, "owned"),
+            AdmissionStatus::Cancelled => Self::admission_status(command_id, type_name, "cancelled"),
+            AdmissionStatus::Owned => Self::admission_status(command_id, type_name, "owned"),
             AdmissionStatus::Waiting => {
                 // The route is in flight: forward the cancellation to the
                 // worker with the rewritten ids and map its status.
@@ -443,16 +443,16 @@ impl Supervisor {
                     )
                 });
                 let Some((worker_admission_id, worker_active, worker_id)) = fields else {
-                    return self.admission_status(command_id, type_name, "cancelled");
+                    return Self::admission_status(command_id, type_name, "cancelled");
                 };
                 let Some(worker_active) = worker_active else {
-                    return self.admission_status(command_id, type_name, "cancelled");
+                    return Self::admission_status(command_id, type_name, "cancelled");
                 };
                 let Some(worker_id) = worker_id else {
-                    return self.admission_status(command_id, type_name, "cancelled");
+                    return Self::admission_status(command_id, type_name, "cancelled");
                 };
                 let Some(resident) = self.registry.get(&worker_id).await else {
-                    return self.admission_status(command_id, type_name, "cancelled");
+                    return Self::admission_status(command_id, type_name, "cancelled");
                 };
                 let mut payload = json!({
                     "activeSessionId": worker_active,
@@ -473,7 +473,7 @@ impl Supervisor {
                 {
                     Ok(response) => response,
                     Err(error) => {
-                        return self.admission_failure(command_id, type_name, &error.to_string())
+                        return Self::admission_failure(command_id, type_name, &error.to_string())
                     }
                 };
                 // The mapped status updates the supervisor record (TS
@@ -503,7 +503,6 @@ impl Supervisor {
     }
 
     fn admission_failure(
-        &self,
         command_id: &str,
         type_name: &str,
         error: &str,
@@ -520,7 +519,6 @@ impl Supervisor {
     }
 
     fn admission_status(
-        &self,
         command_id: &str,
         type_name: &str,
         status: &str,

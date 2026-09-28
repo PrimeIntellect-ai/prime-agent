@@ -99,7 +99,7 @@ impl QueueHooks {
     /// session file present, still the job's session, still carrying the
     /// `active` state. A killed (`archived`) or deleted session fails the
     /// check.
-    fn persisted_target_gone(&self, job: &AgentCronJob) -> bool {
+    fn persisted_target_gone(job: &AgentCronJob) -> bool {
         if job.session_file.is_empty() {
             return true;
         }
@@ -131,7 +131,7 @@ impl AgentCronSchedulerHooks for QueueHooks {
         // longer live (killed — state `archived` — or deleted) cancels the
         // session's jobs and skips, so a fire can never revive a stopped
         // session (the zombie fix's delivery-side gate).
-        if self.persisted_target_gone(job) {
+        if Self::persisted_target_gone(job) {
             self.cancel_jobs_for_dead_target(job);
             return Ok(Some("skipped"));
         }

@@ -255,7 +255,7 @@ mod tests {
         std::sync::Arc::new(serde_json::json!({ "type": tag }))
     }
 
-    async fn drained(rx: &mut mpsc::Receiver<Arc<Value>>) -> Vec<Value> {
+    fn drained(rx: &mut mpsc::Receiver<Arc<Value>>) -> Vec<Value> {
         let mut seen = Vec::new();
         while let Ok(payload) = rx.try_recv() {
             seen.push((*payload).clone());
@@ -276,16 +276,16 @@ mod tests {
         assert!(outcome.lagged.is_empty());
         // An unattached connection's queue stays empty: the frame never
         // even reaches it (the send-time routing set is the attached set).
-        assert!(drained(&mut second_rx).await.is_empty());
-        assert_eq!(drained(&mut first_rx).await.len(), 1);
+        assert!(drained(&mut second_rx).is_empty());
+        assert_eq!(drained(&mut first_rx).len(), 1);
         second.attach(&registry, "session-1");
         let outcome = registry.publish("session-1", frame("again"));
         assert_eq!(outcome.delivered, 2);
-        assert_eq!(drained(&mut first_rx).await.len(), 1);
-        assert_eq!(drained(&mut second_rx).await.len(), 1);
+        assert_eq!(drained(&mut first_rx).len(), 1);
+        assert_eq!(drained(&mut second_rx).len(), 1);
         // A session nobody attached never registers an entry.
         registry.publish("session-2", frame("nobody"));
-        assert!(drained(&mut first_rx).await.is_empty());
+        assert!(drained(&mut first_rx).is_empty());
     }
 
     #[tokio::test]
@@ -297,7 +297,7 @@ mod tests {
         client.detach(&registry, "session-1");
         let outcome = registry.publish("session-1", frame("late"));
         assert_eq!(outcome.delivered, 0);
-        assert!(drained(&mut rx).await.is_empty());
+        assert!(drained(&mut rx).is_empty());
         assert!(!client.contains("session-1"));
     }
 
@@ -315,7 +315,7 @@ mod tests {
         assert!(client.contains("current"));
         assert!(!client.contains("stale"));
         // The binding notice rides the new id's subscription.
-        assert_eq!(drained(&mut rx).await.len(), 1);
+        assert_eq!(drained(&mut rx).len(), 1);
         // A rebind of a connection that was never attached stays one.
         assert!(!client.rebind(&registry, "other", "fresh"));
     }
@@ -335,7 +335,7 @@ mod tests {
         }
         assert_eq!(lagged_lines, 1);
         // The frames that fit arrive in publish order.
-        let frames = drained(&mut rx).await;
+        let frames = drained(&mut rx);
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0]["type"], "f0");
         assert_eq!(frames[1]["type"], "f1");
@@ -377,9 +377,9 @@ mod tests {
             outcome.delivered, 1,
             "a duplicate attach must not double-deliver"
         );
-        assert_eq!(drained(&mut rx).await.len(), 1);
+        assert_eq!(drained(&mut rx).len(), 1);
         client.detach_all(&registry);
         assert_eq!(registry.publish("b", frame("late")).delivered, 0);
-        assert!(drained(&mut rx).await.is_empty());
+        assert!(drained(&mut rx).is_empty());
     }
 }

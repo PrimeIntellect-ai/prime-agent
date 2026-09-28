@@ -468,9 +468,9 @@ fn base64_byte_length(data: &str) -> usize {
 mod tests {
     use super::*;
 
-    fn update_values(event: AcpEngineEvent) -> Vec<Value> {
+    fn update_values(event: &AcpEngineEvent) -> Vec<Value> {
         let mut state = MappingState::default();
-        acp_updates_for_event(&event, &mut state)
+        acp_updates_for_event(event, &mut state)
             .iter()
             .map(AcpSessionUpdate::to_bare_value)
             .collect()
@@ -518,12 +518,12 @@ mod tests {
 
     #[test]
     fn assistant_deltas_map_to_distinct_chunk_kinds() {
-        let values = update_values(AcpEngineEvent::AssistantDelta {
+        let values = update_values(&AcpEngineEvent::AssistantDelta {
             thinking: true,
             delta: "think".into(),
         });
         assert_eq!(values[0]["sessionUpdate"], "agent_thought_chunk");
-        let values = update_values(AcpEngineEvent::AssistantDelta {
+        let values = update_values(&AcpEngineEvent::AssistantDelta {
             thinking: false,
             delta: "say".into(),
         });
@@ -828,7 +828,7 @@ mod tests {
 
     #[test]
     fn non_assistant_roles_map_to_nothing() {
-        let values = update_values(AcpEngineEvent::MessageStart {
+        let values = update_values(&AcpEngineEvent::MessageStart {
             role: "user".into(),
         });
         assert!(values.is_empty());

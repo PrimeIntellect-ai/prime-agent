@@ -522,7 +522,7 @@ mod tests {
         (ledger, sessions_dir)
     }
 
-    fn write_scheduled_jobs(agent_dir: &Path, session_id: &str, jobs: Value) {
+    fn write_scheduled_jobs(agent_dir: &Path, session_id: &str, jobs: &Value) {
         let dir = agent_dir.join("session-artifacts").join(session_id);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("scheduled-jobs.json"), jobs.to_string()).unwrap();
@@ -560,7 +560,7 @@ mod tests {
         write_scheduled_jobs(
             agent_dir,
             "p1",
-            json!({"jobs": [
+            &json!({"jobs": [
                 {"id": "j1", "status": "active", "sessionId": "p1", "activeSessionId": "active-p1",
                  "sessionFile": "/tmp/sessions/p1.jsonl", "cwd": "/w", "prompt": "check",
                  "label": "watch", "deliveryMode": "follow_up",

@@ -198,7 +198,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    fn session_event_frame(event: serde_json::Value) -> OutboundFrame {
+    fn session_event_frame(event: &serde_json::Value) -> OutboundFrame {
         let payload = json!({
             "type": "session_event",
             "activeSessionId": "session-1",
@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn every_ts_trigger_event_type_flushes() {
         for event_type in ROSTER_SESSION_EVENT_TRIGGERS {
-            let frame = session_event_frame(json!({ "type": event_type }));
+            let frame = session_event_frame(&json!({ "type": event_type }));
             assert!(
                 frame_triggers_roster_flush(&frame),
                 "{event_type} must trigger a roster flush"
@@ -229,7 +229,7 @@ mod tests {
             "goal_update",
             "ipython_sent_agent_message",
         ] {
-            let frame = session_event_frame(json!({ "type": event_type }));
+            let frame = session_event_frame(&json!({ "type": event_type }));
             assert!(
                 !frame_triggers_roster_flush(&frame),
                 "{event_type} must not trigger a roster flush"

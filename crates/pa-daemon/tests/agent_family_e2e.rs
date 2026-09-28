@@ -156,7 +156,7 @@ impl Client {
         (client, hello)
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -206,7 +206,7 @@ impl Client {
     fn wait_idle(&mut self, id: &str, active_session_id: &str) {
         self.send_command(
             id,
-            json!({ "type": "wait_for_idle", "activeSessionId": active_session_id }),
+            &json!({ "type": "wait_for_idle", "activeSessionId": active_session_id }),
         );
         let response = self.read_response(id);
         assert_eq!(
@@ -218,7 +218,7 @@ impl Client {
     fn messages(&mut self, id: &str, active_session_id: &str) -> String {
         self.send_command(
             id,
-            json!({ "type": "get_messages", "activeSessionId": active_session_id }),
+            &json!({ "type": "get_messages", "activeSessionId": active_session_id }),
         );
         let response = self.read_response(id);
         assert_eq!(response["success"], true, "get_messages failed: {response}");
@@ -286,7 +286,7 @@ fn child_responses(receipts_dir: &Path) -> Value {
 }
 
 /// One faux-engine script written to disk.
-fn write_faux_script(dir: &Path, name: &str, responses: Value) -> PathBuf {
+fn write_faux_script(dir: &Path, name: &str, responses: &Value) -> PathBuf {
     let path = dir.join(format!("{name}.json"));
     std::fs::write(
         &path,
@@ -398,14 +398,14 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
     let parent_script = write_faux_script(
         dir.path(),
         "parent",
-        json!([
+        &json!([
             { "text": "parent turn done" },
             { "text": "parent turn done" },
             { "text": "parent turn done" },
             { "text": "parent turn done" },
         ]),
     );
-    let child_script = write_faux_script(dir.path(), "child", child_responses(&receipts_dir));
+    let child_script = write_faux_script(dir.path(), "child", &child_responses(&receipts_dir));
 
     // The supervisor passes the kernel python to the workers it launches.
     let _daemon = spawn_supervisor(&socket, &agent_dir, &kernel_python);
@@ -415,7 +415,7 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
 
     client.send_command(
         "create-parent",
-        json!({
+        &json!({
             "type": "create",
             "name": "parent",
             "config": {
@@ -723,7 +723,7 @@ async fn family_edges_never_cross_families_end_to_end() {
     let parent_a_script = write_faux_script(
         dir.path(),
         "parent-a",
-        json!([
+        &json!([
             { "content": [
                 { "type": "toolCall", "name": "ipython", "arguments": { "code": parent_a_cell } },
             ] },
@@ -733,10 +733,10 @@ async fn family_edges_never_cross_families_end_to_end() {
         ]),
     );
     // Parent-b only absorbs turns (a sibling root on the receiving side).
-    let parent_b_script = write_faux_script(
+    let sibling_root_script = write_faux_script(
         dir.path(),
         "parent-b",
-        json!([{ "text": "parent-b turn done" }]),
+        &json!([{ "text": "parent-b turn done" }]),
     );
     // Kid-a's kernel turns: the cross-family sibling probe (must fail),
     // the parent reply (must reach the true parent), its own broadcast
@@ -778,7 +778,7 @@ async fn family_edges_never_cross_families_end_to_end() {
         kid_responses.push(turn[0].clone());
         kid_responses.push(turn[1].clone());
     }
-    let kid_script = write_faux_script(dir.path(), "kid", json!(kid_responses));
+    let kid_script = write_faux_script(dir.path(), "kid", &json!(kid_responses));
 
     let _daemon = spawn_supervisor(&socket, &agent_dir, &kernel_python);
     wait_socket_ready(&socket);
@@ -786,10 +786,10 @@ async fn family_edges_never_cross_families_end_to_end() {
     assert_eq!(hello["type"], "daemon_hello");
 
     let mut roots = Vec::new();
-    for (name, script) in [("parent-a", parent_a_script), ("parent-b", parent_b_script)] {
+    for (name, script) in [("parent-a", parent_a_script), ("parent-b", sibling_root_script)] {
         client.send_command(
             &format!("create-{name}"),
-            json!({
+            &json!({
                 "type": "create",
                 "name": name,
                 "config": {
@@ -818,7 +818,7 @@ async fn family_edges_never_cross_families_end_to_end() {
         ));
     }
     let (parent_a_active, parent_a_session, _parent_a_file) = &roots[0];
-    let (parent_b_active, _parent_b_session, _parent_b_file) = &roots[1];
+    let (sibling_root_active, _parent_b_session, _parent_b_file) = &roots[1];
 
     // Each root spawns its own child; the second family's child name is
     // one the first family might address (the historical misroute landed
@@ -920,7 +920,7 @@ async fn family_edges_never_cross_families_end_to_end() {
         ));
     }
     let (kid_a_active, kid_a_session, kid_a_file) = &kids[0];
-    let kid_b_active = &kids[1].0;
+    let second_kid_active = &kids[1].0;
 
     // Parent-a's first turn runs the cell that sends the broadcast, and
     // the kid's script accounts for that broadcast draining into its
@@ -938,11 +938,11 @@ async fn family_edges_never_cross_families_end_to_end() {
     // matter when the drain fires.
     client.send_command(
         "to-parent-a-cells",
-        json!({
+        &json!({
             "type": "send_message",
             "targetActiveSessionId": parent_a_active,
             "message": "drive the parent cell turn",
-            "fromActiveSessionId": parent_b_active,
+            "fromActiveSessionId": sibling_root_active,
             "agentOrigin": true,
         }),
     );
@@ -959,7 +959,7 @@ async fn family_edges_never_cross_families_end_to_end() {
     let drive_kid_turn = |client: &mut Client, id: &str, message: &str| {
         client.send_command(
             id,
-            json!({
+            &json!({
                 "type": "send_message",
                 "targetActiveSessionId": kid_a_active,
                 "message": message,
@@ -1094,8 +1094,8 @@ async fn family_edges_never_cross_families_end_to_end() {
         "the child's broadcast reaches its parent: {kid_broadcast}"
     );
     assert!(
-        !kid_targets.contains(&kid_b_active.as_str())
-            && !kid_targets.contains(&parent_b_active.as_str()),
+        !kid_targets.contains(&second_kid_active.as_str())
+            && !kid_targets.contains(&sibling_root_active.as_str()),
         "the child's broadcast never crosses families: {kid_broadcast}"
     );
     if let Ok(error) = std::fs::read_to_string(receipts_dir.join("kid-observe.error")) {
@@ -1138,8 +1138,8 @@ async fn family_edges_never_cross_families_end_to_end() {
     assert_eq!(grandkid_row["relationship"], "child", "{grandkid_row:?}");
     assert!(
         !kid_roster.iter().any(
-            |summary| summary["activeSessionId"] == kid_b_active.as_str()
-                || summary["activeSessionId"] == parent_b_active.as_str()
+            |summary| summary["activeSessionId"] == second_kid_active.as_str()
+                || summary["activeSessionId"] == sibling_root_active.as_str()
         ),
         "the other family never enters kid-a's roster: {kid_roster:?}"
     );
@@ -1175,14 +1175,14 @@ async fn family_edges_never_cross_families_end_to_end() {
     let self_row = by_id(parent_a_session);
     assert_eq!(self_row["isCurrent"], true, "{self_row:?}");
     assert_eq!(self_row["relationship"], Value::Null, "{self_row:?}");
-    let sibling_row = by_id(parent_b_active);
+    let sibling_row = by_id(sibling_root_active);
     assert_eq!(sibling_row["relationship"], "sibling", "{sibling_row:?}");
     let child_row = by_id(kid_a_active);
     assert_eq!(child_row["relationship"], "child", "{child_row:?}");
     assert!(
         !roster
             .iter()
-            .any(|summary| { summary["activeSessionId"].as_str() == Some(kid_b_active.as_str()) }),
+            .any(|summary| { summary["activeSessionId"].as_str() == Some(second_kid_active.as_str()) }),
         "another family's subagent is never in the observe roster: {roster:?}"
     );
     // The grandchild never renders top-level in the root's view: it is
@@ -1212,7 +1212,7 @@ async fn family_edges_never_cross_families_end_to_end() {
         })
         .collect();
     parent_targets.sort_unstable();
-    let mut expected = vec![parent_b_active.as_str(), kid_a_active.as_str()];
+    let mut expected = vec![sibling_root_active.as_str(), kid_a_active.as_str()];
     expected.sort_unstable();
     assert_eq!(
         parent_targets, expected,
@@ -1234,11 +1234,11 @@ async fn family_edges_never_cross_families_end_to_end() {
     );
     client.send_command(
         "probe-from-kid-b",
-        json!({
+        &json!({
             "type": "send_message",
             "targetActiveSessionId": parent_a_active,
             "message": "foreign probe",
-            "fromActiveSessionId": kid_b_active,
+            "fromActiveSessionId": second_kid_active,
             "agentOrigin": true,
         }),
     );

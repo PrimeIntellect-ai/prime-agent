@@ -814,7 +814,7 @@ fn emit_refinement_row(
     core: &Arc<Mutex<SessionCore>>,
     events: &Arc<EventPump>,
     review_session_id: &str,
-    message: Value,
+    message: &Value,
 ) -> bool {
     {
         let mut core = core.lock().unwrap();

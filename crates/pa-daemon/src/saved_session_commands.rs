@@ -344,7 +344,7 @@ impl Supervisor {
     /// The name-reservation input (TS `savedSessionNameReservationInput`):
     /// the live roster row for the path, else the saved session info;
     /// a miss answers `Session not found`.
-    async fn saved_session_name_scope(
+    fn saved_session_name_scope(
         &self,
         session_path: &str,
         name: String,
@@ -420,10 +420,7 @@ impl Supervisor {
                 false,
             );
         };
-        let scope = match self
-            .saved_session_name_scope(session_path, name.trim().to_string())
-            .await
-        {
+        let scope = match self.saved_session_name_scope(session_path, name.trim().to_string()) {
             Ok(scope) => scope,
             Err(error) => {
                 return (

@@ -177,16 +177,16 @@ pub async fn run_rpc_mode(options: RpcOptions) -> anyhow::Result<i32> {
             pa_core::models::ModelRegistry::create(auth, options.agent_dir.join("models.json"));
         let _ = registry.refresh_available_models().await;
     });
-    spawn_signal_handlers(Arc::clone(&session), writer.clone());
+    spawn_signal_handlers(&session, writer.clone());
     Ok(serve_stdin(state).await)
 }
 
 /// SIGTERM exits 143, SIGHUP 129 (unix; the TS mode handles exactly this
 /// pair): abort the running turn, settle it, dispose the kernel, drain
 /// the queued frames, exit.
-fn spawn_signal_handlers(session: Arc<RpcSession>, writer: LineWriter) {
+fn spawn_signal_handlers(session: &Arc<RpcSession>, writer: LineWriter) {
     use tokio::signal::unix::{signal, SignalKind};
-    let terminate_session = Arc::clone(&session);
+    let terminate_session = Arc::clone(session);
     let terminate_writer = writer.clone();
     tokio::spawn(async move {
         if let Ok(mut stream) = signal(SignalKind::terminate()) {
@@ -216,7 +216,7 @@ fn spawn_signal_handlers(session: Arc<RpcSession>, writer: LineWriter) {
             exit_with(SIGTERM_EXIT);
         }
     });
-    let hangup_session = Arc::clone(&session);
+    let hangup_session = Arc::clone(session);
     let hangup_writer = writer;
     tokio::spawn(async move {
         if let Ok(mut stream) = signal(SignalKind::hangup()) {

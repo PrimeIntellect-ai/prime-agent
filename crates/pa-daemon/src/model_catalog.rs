@@ -300,7 +300,7 @@ mod tests {
         }
     }
 
-    fn ok_json(body: String) -> Vec<u8> {
+    fn ok_json(body: &str) -> Vec<u8> {
         format!(
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
             body.len()
@@ -539,9 +539,9 @@ mod tests {
     /// the team-a private entitlement), and the matching authorization.
     fn create_phase_answers() -> Vec<Answer> {
         vec![
-            Answer::Raw(ok_json(catalog_aggregate(&["probe-v1"]))),
-            Answer::Raw(ok_json(pi_snapshot_payload("live/team-a-marker"))),
-            Answer::Raw(ok_json(private_payload(&["internal/team-a-private"]))),
+            Answer::Raw(ok_json(&catalog_aggregate(&["probe-v1"]))),
+            Answer::Raw(ok_json(&pi_snapshot_payload("live/team-a-marker"))),
+            Answer::Raw(ok_json(&private_payload(&["internal/team-a-private"]))),
         ]
     }
 
@@ -616,7 +616,7 @@ mod tests {
                 Ok(Ok(frame)) if frame.outbound_type == "model_catalog_changed" => return,
                 Ok(Ok(_)) => {}
                 Ok(Err(error)) => panic!("event stream error: {error}"),
-                Err(_elapsed) => panic!("model_catalog_changed never landed"),
+                Err(error) => panic!("model_catalog_changed never landed: {error}"),
             }
         }
     }
@@ -637,12 +637,12 @@ mod tests {
         write_auth_json(&fixture.agent_dir, "sk-account-b", "team-b");
         let (release, held) = gate();
         fixture.server.push(held);
-        fixture.server.push(Answer::Raw(ok_json(pi_snapshot_payload(
+        fixture.server.push(Answer::Raw(ok_json(&pi_snapshot_payload(
             "live/team-b-marker",
         ))));
         fixture
             .server
-            .push(Answer::Raw(ok_json(private_payload(&[]))));
+            .push(Answer::Raw(ok_json(&private_payload(&[]))));
         let requests_before = fixture.server.request_count();
 
         let started = Instant::now();
@@ -668,7 +668,7 @@ mod tests {
 
         // Release the held fetch: the background refresh lands the new
         // account's catalog and broadcasts the change.
-        let _ = release.send(ok_json(catalog_aggregate(&["probe-v1", "probe-v2"])));
+        let _ = release.send(ok_json(&catalog_aggregate(&["probe-v1", "probe-v2"])));
         await_catalog_changed(&mut fixture.events).await;
         let fresh = get_model_catalog(&fixture.worker, "catalog-session").await;
         assert!(
@@ -741,12 +741,12 @@ mod tests {
         write_auth_json(&fixture.agent_dir, "sk-account-b", "team-b");
         let (release, held) = gate();
         fixture.server.push(held);
-        fixture.server.push(Answer::Raw(ok_json(pi_snapshot_payload(
+        fixture.server.push(Answer::Raw(ok_json(&pi_snapshot_payload(
             "live/team-b-marker",
         ))));
         fixture
             .server
-            .push(Answer::Raw(ok_json(private_payload(&[]))));
+            .push(Answer::Raw(ok_json(&private_payload(&[]))));
         let requests_before = fixture.server.request_count();
 
         let (first, second, third, fourth, fifth) = tokio::join!(
@@ -790,7 +790,7 @@ mod tests {
         // Release the held fetch: the one refresh cycle lands (provider +
         // snapshot + entitlement = 3 requests total), the queued trailing
         // re-arm finds every gate warm and fetches nothing.
-        let _ = release.send(ok_json(catalog_aggregate(&["probe-v1", "probe-v2"])));
+        let _ = release.send(ok_json(&catalog_aggregate(&["probe-v1", "probe-v2"])));
         await_catalog_changed(&mut fixture.events).await;
         assert_eq!(
             fixture.server.request_count() - requests_before,

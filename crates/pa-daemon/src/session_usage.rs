@@ -363,7 +363,7 @@ mod tests {
         scan.summary()
     }
 
-    fn message(id: &str, role: &str, usage: Value) -> Value {
+    fn message(id: &str, role: &str, usage: &Value) -> Value {
         json!({ "type": "message", "id": id, "message": { "role": role, "usage": usage } })
     }
 
@@ -384,7 +384,7 @@ mod tests {
             message(
                 "a",
                 "assistant",
-                json!({
+                &json!({
                     "input": 100, "output": 10, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 110,
                     "cost": { "input": 0.0, "output": 1.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 1.0 }
                 }),
@@ -394,7 +394,7 @@ mod tests {
             message(
                 "b",
                 "assistant",
-                json!({
+                &json!({
                     "input": 50, "output": 5, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 55,
                     "cost": { "input": 0.0, "output": 0.5, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.5 }
                 }),
@@ -418,7 +418,7 @@ mod tests {
         let assistant = message(
             "a",
             "assistant",
-            json!({
+            &json!({
                 "input": 40, "output": 4, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 44,
                 "cost": { "input": 0.0, "output": 0.4, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.4 }
             }),
@@ -458,7 +458,7 @@ mod tests {
             message(
                 "a",
                 "assistant",
-                json!({
+                &json!({
                     "input": 100, "output": 10, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 110,
                     "cost": { "input": 0.0, "output": 1.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 1.0 }
                 }),
@@ -499,12 +499,12 @@ mod tests {
                 message(
                     "u",
                     "user",
-                    json!({ "input": 10, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 10, "cost": { "input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.0 } })
+                    &json!({ "input": 10, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 10, "cost": { "input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.0 } })
                 ),
                 message(
                     "a",
                     "assistant",
-                    json!({ "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cost": { "input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.0 } })
+                    &json!({ "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cost": { "input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.0 } })
                 ),
             ]),
             None
@@ -519,7 +519,7 @@ mod tests {
             message(
                 "a",
                 "assistant",
-                json!({
+                &json!({
                     "input": 10, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 11,
                     "cost": { "input": 0.0, "output": 0.1, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.1 }
                 }),
@@ -540,7 +540,7 @@ mod tests {
             message(
                 id,
                 "assistant",
-                json!({
+                &json!({
                     "input": 10, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 11,
                     "cost": { "input": 0.0, "output": cost, "cacheRead": 0.0, "cacheWrite": 0.0, "total": cost }
                 }),
@@ -559,11 +559,11 @@ mod tests {
     #[test]
     fn partial_usage_objects_keep_the_row() {
         let summary = scan_summary(&[
-            message("u", "user", json!(null)),
+            message("u", "user", &json!(null)),
             message(
                 "a",
                 "assistant",
-                json!({ "input": 5, "output": 1, "totalTokens": 6 }),
+                &json!({ "input": 5, "output": 1, "totalTokens": 6 }),
             ),
         ]);
         assert_eq!(
@@ -584,7 +584,7 @@ mod tests {
             message(
                 id,
                 "assistant",
-                json!({
+                &json!({
                     "input": u64::MAX, "output": 1, "cacheRead": 0, "cacheWrite": 0,
                     "totalTokens": u64::MAX,
                     "cost": { "input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.0 }

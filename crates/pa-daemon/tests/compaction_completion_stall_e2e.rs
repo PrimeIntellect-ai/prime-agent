@@ -212,15 +212,15 @@ impl StallMock {
                 std::thread::spawn(move || {
                     let _ = serve(
                         stream,
-                        requests,
-                        turn_requests,
-                        turn_bodies,
-                        review_request,
-                        review_replied,
-                        summarizer_delay,
-                        review_delay,
-                        approve_review,
-                        turn_delay,
+                        &requests,
+                        &turn_requests,
+                        &turn_bodies,
+                        &review_request,
+                        &review_replied,
+                        &summarizer_delay,
+                        &review_delay,
+                        &approve_review,
+                        &turn_delay,
                     );
                 });
             }
@@ -248,7 +248,7 @@ impl StallMock {
     }
 }
 
-fn chunk(delta: Value, finish_reason: Option<&str>, usage: Value) -> String {
+fn chunk(delta: &Value, finish_reason: Option<&str>, usage: &Value) -> String {
     json!({
         "id": "chatcmpl-test",
         "object": "chat.completion.chunk",
@@ -355,15 +355,15 @@ fn read_body(reader: &mut BufReader<TcpStream>) -> std::io::Result<Value> {
     serde_json::from_slice(&body_bytes).map_err(|_| std::io::Error::other("bad body"))
 }
 
-fn write_sse(stream: &mut TcpStream, reply: String, usage: Value) -> std::io::Result<()> {
+fn write_sse(stream: &mut TcpStream, reply: &str, usage: &Value) -> std::io::Result<()> {
     let mut payload = String::new();
     for data in [
         chunk(
-            json!({"role": "assistant", "content": reply}),
+            &json!({"role": "assistant", "content": reply}),
             None,
-            small_usage(),
+            &small_usage(),
         ),
-        chunk(json!({}), Some("stop"), usage.clone()),
+        chunk(&json!({}), Some("stop"), usage),
         json!({
             "id": "chatcmpl-test",
             "object": "chat.completion.chunk",
@@ -391,15 +391,15 @@ fn write_sse(stream: &mut TcpStream, reply: String, usage: Value) -> std::io::Re
 #[allow(clippy::too_many_arguments)]
 fn serve(
     mut stream: TcpStream,
-    requests: Arc<Mutex<Vec<Value>>>,
-    turn_requests: Arc<Mutex<Vec<Instant>>>,
-    turn_bodies: Arc<Mutex<Vec<Value>>>,
-    review_request_at: Arc<Mutex<Option<Instant>>>,
-    review_replied_at: Arc<Mutex<Option<Instant>>>,
-    summarizer_delay_ms: Arc<AtomicU64>,
-    review_delay_ms: Arc<AtomicU64>,
-    approve_review: Arc<AtomicBool>,
-    turn_delay_ms: Arc<AtomicU64>,
+    requests: &Arc<Mutex<Vec<Value>>>,
+    turn_requests: &Arc<Mutex<Vec<Instant>>>,
+    turn_bodies: &Arc<Mutex<Vec<Value>>>,
+    review_request_at: &Arc<Mutex<Option<Instant>>>,
+    review_replied_at: &Arc<Mutex<Option<Instant>>>,
+    summarizer_delay_ms: &Arc<AtomicU64>,
+    review_delay_ms: &Arc<AtomicU64>,
+    approve_review: &Arc<AtomicBool>,
+    turn_delay_ms: &Arc<AtomicU64>,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let body = read_body(&mut reader)?;
@@ -414,20 +414,20 @@ fn serve(
         } else {
             REVIEW_DECLINE
         };
-        return write_sse(&mut stream, reply.to_string(), small_usage());
+        return write_sse(&mut stream, reply, &small_usage());
     }
     if is_refine_plan_request(&body) {
-        return write_sse(&mut stream, REFINE_EMPTY_PLAN.to_string(), small_usage());
+        return write_sse(&mut stream, REFINE_EMPTY_PLAN, &small_usage());
     }
     if is_summarizer_request(&body) {
         let delay = summarizer_delay_ms.load(Ordering::SeqCst);
         if delay > 0 {
             std::thread::sleep(Duration::from_millis(delay));
         }
-        return write_sse(&mut stream, CHECKPOINT_SUMMARY.to_string(), small_usage());
+        return write_sse(&mut stream, CHECKPOINT_SUMMARY, &small_usage());
     }
     if is_status_line_request(&body) {
-        return write_sse(&mut stream, "idle".to_string(), small_usage());
+        return write_sse(&mut stream, "idle", &small_usage());
     }
     let turn_delay = turn_delay_ms.load(Ordering::SeqCst);
     if turn_delay > 0 {
@@ -453,7 +453,7 @@ fn serve(
         index if index == crossing_index => ("crossing reply".to_string(), crossing_usage()),
         _ => ("post-review reply".to_string(), small_usage()),
     };
-    write_sse(&mut stream, reply, usage)
+    write_sse(&mut stream, &reply, &usage)
 }
 
 /// The daemon child's stderr lands beside the trace (its `eprintln`
@@ -521,7 +521,7 @@ impl TimedClient {
         client
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -684,7 +684,7 @@ fn write_fixture(agent_dir: &Path, session_dir: &Path, mock_url: &str) {
 fn create_and_attach(client: &mut TimedClient, session_dir: &Path) -> String {
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": session_dir.to_string_lossy(),
@@ -704,7 +704,7 @@ fn create_and_attach(client: &mut TimedClient, session_dir: &Path) -> String {
         .to_string();
     client.send_command(
         "a1",
-        json!({ "type": "attach", "activeSessionId": session_id }),
+        &json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let attached = client.read_response("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
@@ -714,7 +714,7 @@ fn create_and_attach(client: &mut TimedClient, session_dir: &Path) -> String {
 fn prompt_and_wait(client: &mut TimedClient, id: &str, session_id: &str, message: &str) -> Value {
     client.send_command(
         id,
-        json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": message}),
+        &json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": message}),
     );
     let response = client.read_response(id);
     assert_eq!(response["success"], true, "prompt {id} failed: {response}");
@@ -916,7 +916,7 @@ fn interrupted_threshold_compaction_settles_consistent() {
     // The crossing turn: the threshold arm's summarizer is held.
     client.send_command(
         "px",
-        json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "crossing turn"}),
+        &json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "crossing turn"}),
     );
 
     // The compaction_start broadcast arrives (the loader), then the
@@ -942,13 +942,13 @@ fn interrupted_threshold_compaction_settles_consistent() {
     let mut second = TimedClient::connect(&socket);
     second.send_command(
         "a2",
-        json!({ "type": "attach", "activeSessionId": session_id }),
+        &json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let attached = second.read_response("a2");
     assert_eq!(attached["success"], true, "second attach: {attached}");
     second.send_command(
         "ab1",
-        json!({ "type": "abort_compaction", "activeSessionId": session_id }),
+        &json!({ "type": "abort_compaction", "activeSessionId": session_id }),
     );
     let aborted = second.read_response("ab1");
     assert_eq!(aborted["success"], true, "abort failed: {aborted}");
@@ -1067,7 +1067,7 @@ fn approving_review_while_a_turn_streams_defers_its_refinement() {
     // reply).
     client.send_command(
         "pn",
-        json!({
+        &json!({
             "type": "prompt_and_wait",
             "activeSessionId": session_id,
             "message": "next turn over the in-flight review",

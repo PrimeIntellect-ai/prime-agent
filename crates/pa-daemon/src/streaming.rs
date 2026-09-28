@@ -211,7 +211,7 @@ mod tests {
         (pump, rx)
     }
 
-    fn session_event_of(frame: std::sync::Arc<OutboundFrame>) -> Value {
+    fn session_event_of(frame: &std::sync::Arc<OutboundFrame>) -> Value {
         serde_json::from_slice::<Value>(&frame.payload).expect("session event payload")
     }
 
@@ -226,10 +226,10 @@ mod tests {
         // The parked update waits for the flusher until a direct frame
         // arrives: the direct send must broadcast the parked snapshot first.
         coalescer.send_direct(&[event_payload(&json!({ "type": "message_end" }))], &pump);
-        let first = session_event_of(rx.try_recv().unwrap());
+        let first = session_event_of(&rx.try_recv().unwrap());
         assert_eq!(first["event"]["type"], "message_update");
         assert_eq!(first["event"]["message"]["text"], "partial");
-        let second = session_event_of(rx.try_recv().unwrap());
+        let second = session_event_of(&rx.try_recv().unwrap());
         assert_eq!(second["event"]["type"], "message_end");
         assert!(rx.try_recv().is_err(), "no further frames");
     }
@@ -250,7 +250,7 @@ mod tests {
             3
         ));
         assert!(coalescer.flush_pending(&pump));
-        let flushed = session_event_of(rx.try_recv().unwrap());
+        let flushed = session_event_of(&rx.try_recv().unwrap());
         assert_eq!(flushed["event"]["message"]["text"], "The Thames flows");
         assert_eq!(
             flushed["event"]["assistantMessageEvent"]["delta"],
@@ -274,13 +274,13 @@ mod tests {
         assert!(coalescer.park_update(json!({ "text": "think" }), "thinking_delta", "think", 1));
         assert!(coalescer.park_update(json!({ "text": "thinkanswer" }), "text_delta", "answer", 2));
         coalescer.send_direct(&[event_payload(&json!({ "type": "turn_end" }))], &pump);
-        let flushed = session_event_of(rx.try_recv().unwrap());
+        let flushed = session_event_of(&rx.try_recv().unwrap());
         assert_eq!(
             flushed["event"]["assistantMessageEvent"]["type"],
             "text_delta"
         );
         assert_eq!(flushed["event"]["assistantMessageEvent"]["delta"], "answer");
-        let direct = session_event_of(rx.try_recv().unwrap());
+        let direct = session_event_of(&rx.try_recv().unwrap());
         assert_eq!(direct["event"]["type"], "turn_end");
         assert!(
             rx.try_recv().is_err(),

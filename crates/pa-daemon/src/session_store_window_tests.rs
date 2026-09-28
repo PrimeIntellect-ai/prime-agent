@@ -321,7 +321,7 @@ fn assert_scan_matches_fold(label: &str, store: &SessionFile) {
     assert_eq!(scalars.message_count, count, "{label}: message count");
 }
 
-fn assistant(usage: Value, timestamp: u64) -> Value {
+fn assistant(usage: &Value, timestamp: u64) -> Value {
     json!({
         "role": "assistant",
         "content": [{"type": "text", "text": "work"}],
@@ -356,7 +356,7 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
         let mut store = SessionFile::create("/tmp", None, 0);
         store.set_path(path);
         store.append_message(json!({"role": "user", "content": "hi", "timestamp": 500u64}));
-        store.append_message(assistant(usage_of(10, 2, 3, 0.1), 300));
+        store.append_message(assistant(&usage_of(10, 2, 3, 0.1), 300));
         store.append_entry(
             "custom_message",
             json!({"customType": "goal_context", "content": "ctx", "usage": usage_of(999, 999, 0, 99.0)}),
@@ -365,7 +365,7 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
             "custom",
             json!({"customType": "thread_goal_state", "data": {"x": 1}}),
         );
-        store.append_message(assistant(usage_of(7, 1, 0, 0.2), 400));
+        store.append_message(assistant(&usage_of(7, 1, 0, 0.2), 400));
         store.append_message(json!({"role": "toolResult", "toolCallId": "c", "content": []}));
         assert_scan_matches_fold("plain", &store);
     }
@@ -376,7 +376,7 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
         let path = dir.path().join("nonmonotonic.jsonl");
         let mut store = SessionFile::create("/tmp", None, 0);
         store.set_path(path);
-        store.append_message(assistant(usage_of(1, 1, 0, 0.0), 900));
+        store.append_message(assistant(&usage_of(1, 1, 0, 0.0), 900));
         store.append_message(json!({"role": "user", "content": "late", "timestamp": 200u64}));
         assert_scan_matches_fold("non-monotonic tail", &store);
         let scalars = store.scan_message_scalars();
@@ -393,12 +393,12 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
         store.append_message(json!({"role": "user", "content": "gone", "timestamp": 1u64}));
         let kept =
             store.append_message(json!({"role": "user", "content": "kept", "timestamp": 50u64}));
-        store.append_message(assistant(usage_of(4, 5, 6, 0.3), 60));
+        store.append_message(assistant(&usage_of(4, 5, 6, 0.3), 60));
         store.append_entry(
             "compaction",
             json!({"summary": "s", "firstKeptEntryId": kept, "tokensBefore": 1000}),
         );
-        store.append_message(assistant(usage_of(8, 9, 1, 0.4), 70));
+        store.append_message(assistant(&usage_of(8, 9, 1, 0.4), 70));
         assert_scan_matches_fold("compaction kept on message row", &store);
         let scalars = store.scan_message_scalars();
         assert_eq!(scalars.last_timestamp_ms, Some(70));
@@ -414,12 +414,12 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
         let mut store = SessionFile::create("/tmp", None, 0);
         store.set_path(path);
         let marker = store.append_entry("custom", json!({"customType": "thread_goal_state"}));
-        store.append_message(assistant(usage_of(5, 5, 0, 0.5), 10));
+        store.append_message(assistant(&usage_of(5, 5, 0, 0.5), 10));
         store.append_entry(
             "compaction",
             json!({"summary": "s", "firstKeptEntryId": marker, "tokensBefore": 100}),
         );
-        store.append_message(assistant(usage_of(2, 2, 0, 0.25), 20));
+        store.append_message(assistant(&usage_of(2, 2, 0, 0.25), 20));
         assert_scan_matches_fold("kept id on non-bearing row", &store);
         let scalars = store.scan_message_scalars();
         assert_eq!(scalars.input_tokens, 2);
@@ -431,7 +431,7 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
         let path = dir.path().join("kept-missing.jsonl");
         let mut store = SessionFile::create("/tmp", None, 0);
         store.set_path(path);
-        store.append_message(assistant(usage_of(50, 50, 0, 5.0), 1));
+        store.append_message(assistant(&usage_of(50, 50, 0, 5.0), 1));
         store.append_entry(
             "compaction",
             json!({"summary": "s", "firstKeptEntryId": "does-not-exist", "tokensBefore": 10}),
@@ -448,13 +448,13 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
         let path = dir.path().join("stacked.jsonl");
         let mut store = SessionFile::create("/tmp", None, 0);
         store.set_path(path);
-        store.append_message(assistant(usage_of(1, 1, 0, 0.0), 1));
+        store.append_message(assistant(&usage_of(1, 1, 0, 0.0), 1));
         let kept = store.append_message(json!({"role": "user", "content": "k", "timestamp": 2u64}));
         store.append_entry(
             "compaction",
             json!({"summary": "old", "firstKeptEntryId": kept, "tokensBefore": 5}),
         );
-        store.append_message(assistant(usage_of(3, 3, 0, 0.0), 3));
+        store.append_message(assistant(&usage_of(3, 3, 0, 0.0), 3));
         store.append_entry(
             "compaction",
             json!({"summary": "new", "firstKeptEntryId": kept, "tokensBefore": 6}),
@@ -482,7 +482,7 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
         let mut store = SessionFile::create("/tmp", None, 0);
         store.set_path(path);
         store.append_entry("message", json!({"note": "no message payload"}));
-        store.append_message(assistant(usage_of(6, 7, 0, 0.6), 42));
+        store.append_message(assistant(&usage_of(6, 7, 0, 0.6), 42));
         assert_scan_matches_fold("degenerate message row", &store);
         let scalars = store.scan_message_scalars();
         assert_eq!(scalars.message_count, 1);
@@ -510,7 +510,7 @@ fn walk_pins_the_compaction_boundary_sequences() {
         "custom_message",
         json!({"customType": "goal_context", "content": "ctx"}),
     );
-    store.append_message(assistant(usage_of(1, 1, 0, 0.0), 3));
+    store.append_message(assistant(&usage_of(1, 1, 0, 0.0), 3));
     store.append_entry(
         "compaction",
         json!({"summary": "sum", "firstKeptEntryId": kept, "tokensBefore": 9}),

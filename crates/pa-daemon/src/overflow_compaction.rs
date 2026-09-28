@@ -454,8 +454,8 @@ mod tests {
     /// settings (the `keepRecentTokens` cut decides whether the overflow
     /// recovery can actually compact).
     fn faux_engine_with_compaction_settings(
-        script: Value,
-        settings: Value,
+        script: &Value,
+        settings: &Value,
     ) -> (AgentSessionEngine, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().unwrap();
         let agent_dir = dir.path().join("agent");
@@ -765,8 +765,8 @@ mod tests {
         // `keepRecentTokens` beyond the whole session: the cut keeps
         // everything, so the compaction has no history to summarize.
         let (engine, _dir) = faux_engine_with_compaction_settings(
-            json!({ "responses": [overflow_error(0)] }),
-            json!({ "compaction": { "enabled": true, "reserveTokens": 1, "keepRecentTokens": 100_000 } }),
+            &json!({ "responses": [overflow_error(0)] }),
+            &json!({ "compaction": { "enabled": true, "reserveTokens": 1, "keepRecentTokens": 100_000 } }),
         );
         let mut events: Vec<EngineEvent> = Vec::new();
         admit(&engine, "overflow probe".to_string(), &mut events);
@@ -991,14 +991,14 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = faux_engine_with_compaction_settings(
-            json!({
+            &json!({
                 "responses": [
                     {"text": "seed reply"},
                     overflow_error(0),
                     {"text": "the summary"},
                 ]
             }),
-            json!({ "compaction": { "enabled": false, "reserveTokens": 1, "keepRecentTokens": 10 } }),
+            &json!({ "compaction": { "enabled": false, "reserveTokens": 1, "keepRecentTokens": 10 } }),
         );
         let mut events: Vec<EngineEvent> = Vec::new();
         admit(&engine, "seed turn".to_string(), &mut events);

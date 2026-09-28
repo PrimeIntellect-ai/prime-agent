@@ -471,7 +471,7 @@ impl RlmSpawnLedger {
                 );
             }
         }
-        self.append_record(json!({
+        self.append_record(&json!({
             "v": 1,
             "op": "spawn",
             "at": now_iso(),
@@ -491,7 +491,7 @@ impl RlmSpawnLedger {
     /// ledger directory, open, serialization, write, or sync fails).
     pub fn append_rename(&self, child_id: &str, child: &str, name: &str) -> Result<()> {
         let child_path = canonical_session_path(Path::new(child));
-        self.append_record(json!({
+        self.append_record(&json!({
             "v": 1,
             "op": "rename",
             "at": now_iso(),
@@ -513,7 +513,7 @@ impl RlmSpawnLedger {
         let state = self.replay_cached()?;
         for edge in &state.edges {
             if edge.deleted.is_none() && canonical_session_path(Path::new(&edge.child)) == target {
-                self.append_record(json!({
+                self.append_record(&json!({
                     "v": 1,
                     "op": "rename",
                     "at": now_iso(),
@@ -540,7 +540,7 @@ impl RlmSpawnLedger {
         reason: RlmLedgerDeleteReason,
     ) -> Result<()> {
         let child_path = canonical_session_path(Path::new(child));
-        self.append_record(json!({
+        self.append_record(&json!({
             "v": 1,
             "op": "delete",
             "at": now_iso(),
@@ -586,7 +586,7 @@ impl RlmSpawnLedger {
         }
         let usage = serde_json::to_value(usage)
             .with_context(|| "serialize the deleted child usage snapshot")?;
-        self.append_record(json!({
+        self.append_record(&json!({
             "v": 1,
             "op": "delete",
             "at": now_iso(),
@@ -1013,7 +1013,7 @@ impl RlmSpawnLedger {
 
     /// One durable append; the first record in a fresh file is the meta
     /// header (the same line `seed` publishes).
-    fn append_record(&self, record: Value) -> Result<()> {
+    fn append_record(&self, record: &Value) -> Result<()> {
         self.seed_once()?;
         if let Some(parent) = self.path.parent() {
             crate::paths::ensure_dir(parent)?;

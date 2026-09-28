@@ -4080,7 +4080,7 @@ struct KernelEnvOverride {
 
 #[cfg(test)]
 impl KernelEnvOverride {
-    fn apply(pairs: Vec<(&str, Option<String>)>) -> Self {
+    fn apply(pairs: &[(&str, Option<String>)]) -> Self {
         let saved = pairs
             .iter()
             .map(|(key, _)| ((*key).to_string(), std::env::var(key).ok()))
@@ -4154,7 +4154,7 @@ fn abort_in_flight_turn_cancels_a_running_kernel_cell() {
     let Some(release) = live_release_dir() else {
         return;
     };
-    let _env = KernelEnvOverride::apply(vec![
+    let _env = KernelEnvOverride::apply(&[
         (
             "PRIME_AGENT_KERNEL_PYTHON",
             Some(kernel_python.display().to_string()),
@@ -4260,7 +4260,7 @@ fn abort_in_flight_turn_cancels_a_running_kernel_cell() {
 /// faux lock while the engine runs.
 #[cfg(test)]
 fn run_prompts(
-    script: serde_json::Value,
+    script: &serde_json::Value,
     prompts: &[&str],
 ) -> (std::sync::Arc<AgentSessionEngine>, Vec<EngineEvent>) {
     let _faux = FAUX_TEST_LOCK
@@ -4413,7 +4413,7 @@ async fn replacement_teardown_retires_the_session_and_the_funnel_adopts_the_bran
     let engine = {
         let (engine, _events) = tokio::task::spawn_blocking(|| {
             run_prompts(
-                json!({ "engine": "faux", "responses": [{ "text": "first" }] }),
+                &json!({ "engine": "faux", "responses": [{ "text": "first" }] }),
                 &["hello"],
             )
         })
@@ -4520,7 +4520,7 @@ async fn live_branch_rebuild_reloads_the_goal_state_from_the_moved_branch() {
     let engine = {
         let (engine, _events) = tokio::task::spawn_blocking(|| {
             run_prompts(
-                json!({
+                &json!({
                     "engine": "faux",
                     "responses": (0..4).map(|index| json!({ "text": format!("reply {index}") })).collect::<Vec<_>>(),
                 }),
@@ -4781,7 +4781,7 @@ fn compaction_events(events: &[EngineEvent]) -> Vec<serde_json::Value> {
 #[test]
 fn compact_session_command_emits_the_ts_event_pair_on_a_skip() {
     let (_engine, events) = run_prompts(
-        serde_json::json!({ "responses": ["unused"] }),
+        &serde_json::json!({ "responses": ["unused"] }),
         &["/compact"],
     );
     // The echo row precedes the events (TS `_executeSelectedSessionCommand`
@@ -4826,7 +4826,7 @@ fn compact_session_command_emits_the_result_on_success() {
     let filler = "history ".repeat(6_000); // ~48k chars = ~12k tokens each
     let big_second = format!("second {}", "padded ".repeat(6_000)); // ~10.5k tokens
     let (_engine, events) = run_prompts(
-        serde_json::json!({
+        &serde_json::json!({
             "responses": [
                 { "text": filler },
                 { "text": filler },
@@ -4885,7 +4885,7 @@ fn compact_session_command_emits_the_result_on_success() {
 #[test]
 fn autonomous_on_enables_the_driver_loop() {
     let (engine, events) = run_prompts(
-        serde_json::json!({ "responses": ["unused"] }),
+        &serde_json::json!({ "responses": ["unused"] }),
         &["/autonomous on --max-continuations 1 --max-turns 5"],
     );
     // The enable prompt runs the session command (echo + status rows) and
@@ -4908,7 +4908,7 @@ fn autonomous_on_enables_the_driver_loop() {
 #[test]
 fn autonomous_limit_stops_the_run_without_a_row() {
     let (engine, events) = run_prompts(
-        serde_json::json!({ "responses": ["first", "second"] }),
+        &serde_json::json!({ "responses": ["first", "second"] }),
         &["/autonomous on --max-continuations 1 --max-turns 5", "go"],
     );
     // The continuation churns INSIDE the one run (the TS in-run shape,
@@ -5666,7 +5666,7 @@ fn persisted_rlm_max_depth_reference(path: Option<&str>) -> Option<u64> {
         })
 }
 
-fn depth_override_row(id: &str, depth: serde_json::Value) -> String {
+fn depth_override_row(id: &str, depth: &serde_json::Value) -> String {
     json!({
         "type": "custom",
         "id": id,
@@ -5739,14 +5739,14 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
         ("absent", [header(), message()].join("\n")),
         (
             "present_last",
-            [header(), message(), depth_override_row("d1", json!(5))].join("\n"),
+            [header(), message(), depth_override_row("d1", &json!(5))].join("\n"),
         ),
         (
             "present_mid",
             [
                 header(),
                 message(),
-                depth_override_row("d1", json!(5)),
+                depth_override_row("d1", &json!(5)),
                 message(),
             ]
             .join("\n"),
@@ -5759,8 +5759,8 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
             [
                 header(),
                 message(),
-                depth_override_row("d1", json!(5)),
-                depth_override_row("d2", json!("many")),
+                depth_override_row("d1", &json!(5)),
+                depth_override_row("d2", &json!("many")),
             ]
             .join("\n"),
         ),
@@ -5769,7 +5769,7 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
             [
                 header(),
                 message(),
-                depth_override_row("d1", json!(5)),
+                depth_override_row("d1", &json!(5)),
                 missing_bound_row(),
             ]
             .join("\n"),
@@ -5779,7 +5779,7 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
             [
                 header(),
                 malformed(),
-                depth_override_row("d1", json!(9)),
+                depth_override_row("d1", &json!(9)),
                 malformed(),
             ]
             .join("\n"),
@@ -5794,7 +5794,7 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
         ),
         (
             "crlf_lines",
-            [header(), message(), depth_override_row("d1", json!(11))].join("\r\n"),
+            [header(), message(), depth_override_row("d1", &json!(11))].join("\r\n"),
         ),
         (
             "unicode_content_absent",
@@ -5805,7 +5805,7 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
             [
                 header(),
                 unicode_message(),
-                depth_override_row("d1", json!(3)),
+                depth_override_row("d1", &json!(3)),
             ]
             .join("\n"),
         ),
@@ -5865,7 +5865,7 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
             "{}\n{}\n{}\n",
             header(),
             message(),
-            depth_override_row("d1", json!(5))
+            depth_override_row("d1", &json!(5))
         )
         .into_bytes();
         bytes.push(0xff);

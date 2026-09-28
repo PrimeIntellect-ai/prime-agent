@@ -95,10 +95,10 @@ fn child_pids_of(ppid: u32) -> Vec<u32> {
     let mut pids = Vec::new();
     let entries = std::fs::read_dir("/proc").expect("read /proc");
     for entry in entries.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+        let Ok(entry_pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
             continue;
         };
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{entry_pid}/stat")) else {
             continue;
         };
         let Some((_, rest)) = stat.rsplit_once(')') else {
@@ -110,7 +110,7 @@ fn child_pids_of(ppid: u32) -> Vec<u32> {
             continue;
         };
         if parent == ppid {
-            pids.push(pid);
+            pids.push(entry_pid);
         }
     }
     pids

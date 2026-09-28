@@ -189,7 +189,7 @@ mod tests {
     /// One end of a local socket pair as the accepted stream: the
     /// dispatch writes its hello and parks on the unread peer, like an
     /// idle client.
-    async fn accepted_stream() -> Box<dyn TransportStream> {
+    fn accepted_stream() -> Box<dyn TransportStream> {
         let (_, accepted) = tokio::net::UnixStream::pair().expect("socket pair");
         Box::new(accepted)
     }
@@ -209,7 +209,7 @@ mod tests {
                     accept_error(ErrorKind::ConnectionAborted, "aborted"),
                     accept_error(ErrorKind::ConnectionReset, "reset"),
                     accept_error(ErrorKind::Interrupted, "interrupted"),
-                    Ok(accepted_stream().await),
+                    Ok(accepted_stream()),
                 ]
                 .into(),
             ),
@@ -243,7 +243,7 @@ mod tests {
         for _ in 0..(2 * GIVE_UP_AFTER) {
             results.push_back(accept_error(ErrorKind::ConnectionAborted, "storm"));
         }
-        results.push_back(Ok(accepted_stream().await));
+        results.push_back(Ok(accepted_stream()));
         let scripted = ScriptedAccepts {
             results: Mutex::new(results),
             supervisor: Arc::clone(&supervisor),
@@ -279,7 +279,7 @@ mod tests {
             results: Mutex::new(
                 vec![
                     accept_error(ErrorKind::Other, "too many open files"),
-                    Ok(accepted_stream().await),
+                    Ok(accepted_stream()),
                 ]
                 .into(),
             ),
@@ -317,7 +317,7 @@ mod tests {
         for _ in 0..burst {
             results.push_back(accept_error(ErrorKind::Other, "transient"));
         }
-        results.push_back(Ok(accepted_stream().await));
+        results.push_back(Ok(accepted_stream()));
         for _ in 0..burst {
             results.push_back(accept_error(ErrorKind::Other, "transient"));
         }
