@@ -2011,7 +2011,7 @@ impl SessionEngine for AdmitProbeEngine {
         _aborted: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) {
-        self.prompts.lock().unwrap().push(request.message.clone());
+        self.prompts.lock().unwrap().push(request.message);
         emit(EngineEvent::Done(Ok(())));
     }
 

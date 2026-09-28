@@ -70,7 +70,10 @@ fn part_text(part: &Value) -> &str {
 /// landed user or assistant row takes (a plain user row carries its
 /// content as the string, an assistant reply as content parts).
 fn delivered_row_with_text(event: &Value, text: &str) -> bool {
-    let frame = event.get("type").and_then(Value::as_str).unwrap_or_default();
+    let frame = event
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if frame != "message_start" && frame != "message_end" {
         return false;
     }
