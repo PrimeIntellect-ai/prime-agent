@@ -706,7 +706,9 @@ async fn an_unpersisted_session_keeps_its_live_selection() {
 
     // The in-memory fork's replacement restore: an empty path is a
     // no-op — the switch survives (never reset to the runtime config).
-    engine.restore_session_model(std::path::Path::new(""), None).await;
+    engine
+        .restore_session_model(std::path::Path::new(""), None)
+        .await;
     let resolved = engine.resolve_registry_model().expect("live selection");
     assert_eq!(
         (resolved.provider.as_str(), resolved.id.as_str()),
@@ -1208,14 +1210,11 @@ async fn a_pre_read_saved_context_restores_like_the_file_read() {
     let agent_dir = dir.path().join("agent");
     write_thinking_pair_models_json(&agent_dir, "http://127.0.0.1:9");
 
-    let mut session = crate::session_store::SessionFile::create(
-        dir.path().to_str().unwrap_or("/tmp"),
-        None,
-        0,
-    );
-    let path = dir
-        .path()
-        .join(crate::session_store::session_file_name(session.session_id()));
+    let mut session =
+        crate::session_store::SessionFile::create(dir.path().to_str().unwrap_or("/tmp"), None, 0);
+    let path = dir.path().join(crate::session_store::session_file_name(
+        session.session_id(),
+    ));
     session.set_path(path.clone());
     session.append_model_change("battery", "mock-reason");
     session.append_thinking_level_change("low");

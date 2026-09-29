@@ -203,7 +203,10 @@ fn saved_context_from_the_open_store_matches_the_file_read_and_the_reference() {
         .unwrap_or_else(|| panic!("the file-read path must answer"));
     let reference = full_parse_saved_session_context(&path)
         .unwrap_or_else(|| panic!("the reference reader must answer"));
-    assert_eq!(from_store, file_read, "the from-store reader is the file read");
+    assert_eq!(
+        from_store, file_read,
+        "the from-store reader is the file read"
+    );
     assert_eq!(
         from_store.model, reference.model,
         "the from-store saved (provider, model) must match the reference"
