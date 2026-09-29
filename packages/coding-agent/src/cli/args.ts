@@ -2,6 +2,7 @@
  * CLI argument parsing and help display
  */
 
+import { isIP } from "node:net";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { APP_NAME } from "../config.js";
 import { THINKING_LEVELS } from "../core/thinking-levels.js";
@@ -22,6 +23,8 @@ export interface Args {
 	version?: boolean;
 	mode?: Mode;
 	daemonSocket?: string;
+	daemonPort?: number;
+	daemonBindHost?: string;
 	noSession?: boolean;
 	fork?: string;
 	sessionDir?: string;
@@ -118,6 +121,32 @@ export function parseArgs(args: string[]): Args {
 		} else if (arg === "--daemon-socket") {
 			if (hasRequiredOptionValue(args, i, arg, result)) {
 				result.daemonSocket = args[++i];
+			}
+		} else if (arg === "--daemon-port") {
+			if (hasRequiredOptionValue(args, i, arg, result)) {
+				const port = Number(args[++i]);
+				if (!Number.isInteger(port) || port < 1 || port > 65535) {
+					result.diagnostics.push({
+						type: "error",
+						message: `Invalid --daemon-port "${args[i]}": expected an integer between 1 and 65535`,
+					});
+				} else {
+					result.daemonPort = port;
+				}
+			}
+		} else if (arg === "--daemon-bind") {
+			if (hasRequiredOptionValue(args, i, arg, result)) {
+				const host = args[++i]!.trim();
+				// An IP literal binds exactly one interface; a hostname would resolve
+				// through DNS at listen time and could dodge the tailnet-only default.
+				if (isIP(host) === 0) {
+					result.diagnostics.push({
+						type: "error",
+						message: `Invalid --daemon-bind "${args[i]}": expected an IP address (e.g. the tailnet address of this machine)`,
+					});
+				} else {
+					result.daemonBindHost = host;
+				}
 			}
 		} else if (arg === "--continue" || arg === "-c") {
 			result.continue = true;

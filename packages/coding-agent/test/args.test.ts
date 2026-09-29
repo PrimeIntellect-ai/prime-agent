@@ -222,6 +222,11 @@ const parseCases: Array<[string, string[], Expected]> = [
 		["--model", "claude-sonnet-4-5", "--fork", "abc"],
 		{ model: "claude-sonnet-4-5", fork: "abc" },
 	],
+	[
+		"--daemon-port and --daemon-bind take a port and an address",
+		["--daemon-port", "4100", "--daemon-bind", "100.101.102.103"],
+		{ daemonPort: 4100, daemonBindHost: "100.101.102.103" },
+	],
 ];
 
 /** argv -> one diagnostic the parser must report as a hard error. */
@@ -279,9 +284,23 @@ const errorCases: Array<[string, string[], string]> = [
 	["--goal-token-budget without --goal", ["--goal-token-budget", "50000"], "--goal-token-budget requires --goal"],
 	["non-positive --goal-token-budget", ["--goal-token-budget", "0"], "--goal-token-budget must be a positive integer"],
 	["--goal-token-budget without a value", ["--goal-token-budget"], "--goal-token-budget requires a value"],
+	[
+		"non-address --daemon-bind",
+		["--daemon-bind", "daemon.tailnet.ts.net"],
+		'Invalid --daemon-bind "daemon.tailnet.ts.net": expected an IP address (e.g. the tailnet address of this machine)',
+	],
 ];
 
-const VALUE_FLAGS = ["--provider", "--api-key", "--cwd", "--fork", "--session-dir", "--models", "--daemon-socket"];
+const VALUE_FLAGS = [
+	"--provider",
+	"--api-key",
+	"--cwd",
+	"--fork",
+	"--session-dir",
+	"--models",
+	"--daemon-socket",
+	"--daemon-bind",
+];
 const AUTONOMOUS_VALUE_FLAGS = [
 	"--autonomous-gate",
 	"--autonomous-gate-retries",

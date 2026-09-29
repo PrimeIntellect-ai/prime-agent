@@ -327,8 +327,14 @@ Normally the package manager's global modules location is queried using `root -g
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `idleEvictionMinutes` | number or `"off"` | `90` | Idle threshold in minutes for whole-tree worker eviction and individual idle-child passivation; `"off"` disables both. |
+| `daemonPort` | number | - | TCP port for the optional daemon mesh listener. When set, the daemon also listens on the machine's Tailscale address at this port for remote agents. |
+| `daemonTcpBindHost` | string | the machine's Tailscale address | Address the daemon mesh listener binds. Set it only to a trusted interface: TCP carries the per-machine token in plaintext, so `0.0.0.0` exposes it to every on-path peer. |
 
 `idleEvictionMinutes` is a global daemon policy and is read only from `~/.prime/agent/settings.json`. Set it to a positive number to configure the idle threshold.
+
+`daemonPort` is a global daemon policy read only from `~/.prime/agent/settings.json`. The TCP listener speaks the same JSONL protocol as the unix socket and is disabled when unset. The `--daemon-port` CLI flag and `PRIME_AGENT_DAEMON_PORT` env var override it (flag > env > setting). Every command line sent over TCP must carry the per-machine identity token in a top-level `auth: { token }` field; the token is generated on first daemon start and stored in `~/.prime/agent/daemon-tcp-token` (mode `0600`).
+
+`daemonTcpBindHost` is a global daemon policy read only from `~/.prime/agent/settings.json`. It follows the same override order as the port: `--daemon-bind <address>` > `PRIME_AGENT_DAEMON_BIND_HOST` > `daemonTcpBindHost` > the machine's Tailscale address. The address must be an IP literal. Because the token and every authenticated command cross TCP in plaintext, the listener binds the tailnet by default: Tailscale encrypts node-to-node traffic, while a wildcard address would hand the same token to every on-path peer on the LAN. When the port is set and this machine has no Tailscale address, the daemon refuses to start and says so, so unset `daemonPort` (or set an explicit bind host) to run without a mesh listener.
 
 ### Sessions
 
