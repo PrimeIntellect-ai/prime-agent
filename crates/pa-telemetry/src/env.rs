@@ -11,6 +11,7 @@
 /// Parse a truthy/falsy string per the TS product: `1/true/yes/on` and
 /// `0/false/no/off` (case-insensitive, trimmed); anything else is not an
 /// override.
+#[must_use]
 pub fn parse_bool_override(value: Option<&str>) -> Option<bool> {
     let normalized = value?.trim().to_ascii_lowercase();
     match normalized.as_str() {
@@ -22,6 +23,7 @@ pub fn parse_bool_override(value: Option<&str>) -> Option<bool> {
 
 /// Env verdict for telemetry. `Some(false)` disables, `Some(true)` enables,
 /// `None` defers to settings.
+#[must_use]
 pub fn env_telemetry_override() -> Option<bool> {
     override_verdict(
         parse_bool_override(std::env::var("PI_OFFLINE").ok().as_deref()),

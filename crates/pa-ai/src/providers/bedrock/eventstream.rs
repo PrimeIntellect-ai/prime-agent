@@ -29,7 +29,8 @@ pub struct EventStreamDecoder {
 fn crc32(bytes: &[u8]) -> u32 {
     let mut table = [0u32; 256];
     for (i, entry) in table.iter_mut().enumerate() {
-        let mut value = i as u32;
+        // The table's iterate is 0..=255; the index is the u32 polynomial seed.
+        let mut value = u32::try_from(i).expect("CRC table index is 0..=255");
         for _ in 0..8 {
             value = if value & 1 != 0 {
                 (value >> 1) ^ 0xEDB8_8320
@@ -41,7 +42,7 @@ fn crc32(bytes: &[u8]) -> u32 {
     }
     let mut crc = 0xFFFF_FFFFu32;
     for byte in bytes {
-        crc = table[((crc ^ *byte as u32) & 0xFF) as usize] ^ (crc >> 8);
+        crc = table[((crc ^ u32::from(*byte)) & 0xFF) as usize] ^ (crc >> 8);
     }
     !crc
 }
@@ -186,9 +187,12 @@ mod tests {
     fn frame(event_type: &str, payload: &[u8]) -> Vec<u8> {
         let mut headers = Vec::new();
         let mut push_header = |name: &str, value: &str| {
+            // The framed test headers use the fixed protocol literals (lengths < 256); the wire's length fields are u8/u16.
+            #[allow(clippy::cast_possible_truncation)]
             headers.push(name.len() as u8);
             headers.extend_from_slice(name.as_bytes());
             headers.push(7);
+            #[allow(clippy::cast_possible_truncation)]
             headers.extend_from_slice(&(value.len() as u16).to_be_bytes());
             headers.extend_from_slice(value.as_bytes());
         };
@@ -197,7 +201,10 @@ mod tests {
         push_header(":event-type", event_type);
         let mut message = Vec::new();
         let total_len = 12 + headers.len() + payload.len() + 4;
+        // Test frames are tiny; the event-stream wire lengths are u32.
+        #[allow(clippy::cast_possible_truncation)]
         message.extend_from_slice(&(total_len as u32).to_be_bytes());
+        #[allow(clippy::cast_possible_truncation)]
         message.extend_from_slice(&(headers.len() as u32).to_be_bytes());
         message.extend_from_slice(&crc32(&message[..8]).to_be_bytes());
         message.extend_from_slice(&headers);

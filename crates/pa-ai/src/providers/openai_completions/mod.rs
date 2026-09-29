@@ -97,6 +97,8 @@ impl OpenAICompatCacheControl {
 }
 
 /// Fully resolved compat settings (`ResolvedOpenAICompletionsCompat`).
+// A flat capability-flag contract mirroring the upstream compat table; reshaping is an API change.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedCompat {
     pub supports_store: bool,

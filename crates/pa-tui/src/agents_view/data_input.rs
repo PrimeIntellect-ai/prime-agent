@@ -633,6 +633,24 @@ impl AgentsViewMode {
         if !crate::mouse_tracking::active() {
             return;
         }
+        // A buttonless motion report is the hover (operator directive
+        // 2026-09-29, `?1003` any-event tracking): the row under the
+        // mouse carries the light hover band while it resolves to a
+        // session row — the render revalidates the row against each
+        // frame's click surface, so a roster rebuild that moves the
+        // rows re-aims the band and a row that scrolled away clears
+        // it. Motion never disturbs the click grammar: a pending
+        // press keeps its row (only a left-button drag marks it).
+        if event.button == crate::mouse::BUTTON_NONE && event.motion {
+            let row = event.y.saturating_sub(1) as usize;
+            let hover = self
+                .click_rows
+                .iter()
+                .any(|(click_row, _)| *click_row == row)
+                .then_some(row);
+            self.hover_row = hover;
+            return;
+        }
         if event.button != crate::mouse::BUTTON_LEFT {
             return;
         }

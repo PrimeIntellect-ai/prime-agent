@@ -276,6 +276,8 @@ fn build_params(model: &Model, context: &Context, options: &OpenAIResponsesOptio
     Value::Object(params)
 }
 
+// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+#[allow(clippy::too_many_lines)]
 async fn run_stream(
     model: &Model,
     context: &Context,
@@ -503,6 +505,8 @@ mod tests {
 
     /// A responses-served model with a wire `compat` object (the whole
     /// model need not be responses-shaped for the compat resolution).
+    // Test-only helper; adapting its signature and call sites would churn test fixtures.
+    #[allow(clippy::needless_pass_by_value)]
     fn compat_model(raw: serde_json::Value) -> Model {
         serde_json::from_value(serde_json::json!({
             "id": "m", "name": "m", "api": "openai-responses", "provider": "xai",

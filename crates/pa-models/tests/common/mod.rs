@@ -122,7 +122,8 @@ async fn run(listener: TcpListener, requests: RequestLog, responses: ResponseQue
 }
 
 /// Convenience builders for raw HTTP responses.
-pub fn ok_json(body: String, etag: Option<&str>) -> Vec<u8> {
+pub fn ok_json(body: impl AsRef<str>, etag: Option<&str>) -> Vec<u8> {
+    let body = body.as_ref();
     let etag = etag
         .map(|etag| format!("etag: {etag}\r\n"))
         .unwrap_or_default();
@@ -155,7 +156,8 @@ pub fn oversized_stream() -> Vec<u8> {
     let mut response = b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n".to_vec();
     let chunk = format!("{:x}\r\n", 1024 * 1024);
     response.extend_from_slice(chunk.as_bytes());
-    response.extend_from_slice(&[b'a'; 1024 * 1024]);
+    // Heap, not stack: the 1 MiB chunk is fixture payload, identical bytes.
+    response.extend_from_slice(&vec![b'a'; 1024 * 1024]);
     response.extend_from_slice(b"\r\n");
     response
 }

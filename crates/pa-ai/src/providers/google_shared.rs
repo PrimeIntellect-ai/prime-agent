@@ -72,7 +72,10 @@ pub fn get_google_thinking_budget(
         GoogleBudgetThinkingLevel::High => custom_budgets.and_then(|b| b.high),
     };
     if let Some(custom) = custom {
-        return custom as i64;
+        // A custom thinking budget is a token count; the wire field is i64 and `as` is the lenient TS-number mapping.
+        #[allow(clippy::cast_possible_wrap)]
+        let budget = custom as i64;
+        return budget;
     }
 
     let (minimal, low, medium, high): (i64, i64, i64, i64) = if model_id.contains("2.5-pro") {
@@ -164,6 +167,8 @@ fn supports_multimodal_function_response(model_id: &str) -> bool {
 
 /// Convert internal context to Google `contents[]`, preserving replayable
 /// signatures only when protocol-valid.
+// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+#[allow(clippy::too_many_lines)]
 pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
     use crate::types::{Message, UserMessageContent, UserOrToolContent};
     let mut contents: Vec<Value> = Vec::new();

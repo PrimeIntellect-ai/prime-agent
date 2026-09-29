@@ -446,6 +446,13 @@ struct AgentsViewMode {
     /// action), so the recorded span is exactly the rows the last frame
     /// painted. Rebuilt on every render; empty while no row is visible.
     click_rows: Vec<(usize, usize)>,
+    /// The frame row under the mouse (the hover affordance, operator
+    /// directive 2026-09-29): a row that resolves against the last
+    /// frame's click surface, `None` over anything else. Revalidated
+    /// against each render's click rows, so content that moves under
+    /// the mouse re-aims the band and a row that scrolled away clears
+    /// it.
+    hover_row: Option<usize>,
     /// The left press a release may fire (TS's press/release click
     /// grammar): the pressed row and whether the press turned into a
     /// drag — a dragged release never opens.
@@ -534,6 +541,7 @@ impl AgentsViewMode {
             saved_catalog_loaded: false,
             incident_notice_state,
             click_rows: Vec::new(),
+            hover_row: None,
             pressed_click: None,
         }
     }

@@ -119,7 +119,8 @@ fn now_utc_parts() -> (String, String) {
 
 /// Convert a Unix timestamp to civil UTC date-time (Howard Hinnant's algorithm).
 fn civil_from_unix(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
-    let days = (secs / 86_400) as i64;
+    // u64::MAX / 86_400 is ~2.1e14; the day count always fits i64.
+    let days = i64::try_from(secs / 86_400).expect("days since the epoch fit i64");
     let secs_of_day = secs % 86_400;
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -128,8 +129,9 @@ fn civil_from_unix(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    // Howard Hinnant's algorithm: day 1..=31, month 1..=12 for any input day count.
+    let d = u32::try_from(doy - (153 * mp + 2) / 5 + 1).expect("day of month is 1..=31");
+    let m = u32::try_from(if mp < 10 { mp + 3 } else { mp - 9 }).expect("month is 1..=12");
     let year = if m <= 2 { y + 1 } else { y };
     (
         year,
