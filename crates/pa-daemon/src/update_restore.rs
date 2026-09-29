@@ -441,16 +441,21 @@ fn sort_rows_bottom_up(rows: &mut [&UpdateRosterSession]) {
 /// contract ends the old scheduled-work re-arm: NOT-RUNNING sessions stay
 /// down at every boot (normal and update alike), so this pass never
 /// creates a worker for a due scheduled job — it only reports how many
-/// are dormant. Finally the pass settles the shared state, waking the
-/// queued attaches and unblocking the `update_restore_status` poll.
+/// are dormant. THE REPORT'S ORDER (the bots' finding): on an update boot
+/// it runs AFTER the roster replay, so a due job on a session the user
+/// asked to restore is NOT reported dormant right before its own
+/// scheduler arms with the restored worker — only sessions that stay
+/// down after the replay are dormant. Finally the pass settles the
+/// shared state, waking the queued attaches and unblocking the
+/// `update_restore_status` poll.
 pub(crate) async fn restore_pass(
     supervisor: &std::sync::Arc<Supervisor>,
     adoption: tokio::task::JoinHandle<()>,
     roster: Option<UpdateRoster>,
 ) {
     let _ = adoption.await;
-    report_dormant_scheduled_jobs(supervisor).await;
     let Some(roster) = roster else {
+        report_dormant_scheduled_jobs(supervisor).await;
         supervisor
             .restore
             .settle(UpdateStatusCounts::default(), Vec::new());
@@ -505,6 +510,11 @@ pub(crate) async fn restore_pass(
             },
         }
     }
+    // The update boot's dormant report runs here, AFTER the replay: the
+    // roster's restored sessions are live now, so a due job they own is
+    // NOT dormant (its scheduler armed with the worker); only the
+    // sessions that stayed down count.
+    report_dormant_scheduled_jobs(supervisor).await;
     supervisor.restore.settle(counts, failures);
 }
 

@@ -263,6 +263,27 @@ if [ "$uv_under_store" = "yes" ]; then
   say "uv target: ${HOME}/.local resolves inside the shared session store;"
   say "  uv installs payload-adjacent at ${uv_bin_dir} instead"
 fi
+# THE FALLBACK'S OWN GUARD (the store guard cannot cover this write: the
+# astral install runs BEFORE the guard does): the computed target must
+# itself resolve OUTSIDE the shared store. The default prefix under the
+# alias shape IS the store (~/.local is the alias), and a
+# PRIME_AGENT_RUST_PREFIX pointing into the store (refused by the guard
+# only later) must not become the uv target either. With no safe target,
+# uv is NOT installed from here — a skipped uv beats a write under the
+# shared store; the system-python fallback carries the install, and a
+# machine with neither is the die path that names uv.
+uv_target_root="$(physical_path "${uv_bin_dir}")"
+uv_target_unsafe="no"
+case "${uv_target_root}/" in
+  "${uv_store_root}/"*) uv_target_unsafe="yes" ;;
+esac
+if [ "$uv_target_unsafe" = "yes" ]; then
+  note "warning: the uv target ${uv_bin_dir} resolves inside the shared session"
+  note "  store (a PRIME_AGENT_RUST_PREFIX pointing into the store, or the"
+  note "  default prefix under the ~/.local alias); uv is NOT installed from"
+  note "  here — the store is never written by this installer"
+  uv_bin_dir=""
+fi
 uv_bin=""
 if command -v uv >/dev/null 2>&1; then
   uv_bin="$(command -v uv)"
@@ -278,7 +299,8 @@ else
   # alias — which also overrides any inherited value pointing into the
   # shared session store (it would place uv there BEFORE the store guard
   # runs).
-  if uv_install_out="$(curl -fsSLsS https://astral.sh/uv/install.sh)" \
+  if [ -n "$uv_bin_dir" ] \
+     && uv_install_out="$(curl -fsSLsS https://astral.sh/uv/install.sh)" \
      && printf '%s\n' "$uv_install_out" \
         | env -u UV_UNMANAGED_INSTALL UV_INSTALL_DIR="$uv_bin_dir" sh >/dev/null 2>&1 \
      && [ -x "${uv_bin_dir}/uv" ]; then
@@ -566,13 +588,20 @@ say "checksum verified: ${asset_name} (built from ${commit:-unknown commit})"
 # ts_stop_summary accumulates the summary line(s); the success block
 # prints them with the other takeover facts.
 ts_stop_summary=""
-ts_stop_stopped=""
 ts_stop_found_any=""
 ts_stop_refused=""
 ts_stop_rust_stopped=""
 ts_socket="${TMPDIR:-/tmp}/prime-agent-$(id -u)/daemon.sock"
 rust_socket="${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock"
 env_socket="${PRIME_AGENT_DAEMON_SOCKET:-}"
+# THE TILDE EXPANSION (the CLI's own spelling: the products' clients
+# expand a leading ~/ in PRIME_AGENT_DAEMON_SOCKET before connecting, so
+# a profile exporting "~/..." names the real socket; a literal tilde path
+# would read as absent here and the daemon would be left running through
+# the update).
+case "$env_socket" in
+  "~/"*) env_socket="${HOME}${env_socket#\~}" ;;
+esac
 # THE SELF-SOCKET REFUSAL (the fleet-kill class, twice in the field: an
 # installer run UNDER a daemon probed that daemon's own socket through
 # the inherited PRIME_AGENT_DAEMON_SOCKET and stopped it — the running
@@ -589,21 +618,29 @@ live_daemon_socket="${PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET:-}"
 if [ -z "$live_daemon_socket" ] && [ "${PRIME_AGENT_INTERNAL_DAEMON_WORKER:-}" = "1" ]; then
   live_daemon_socket="${PRIME_AGENT_DAEMON_SOCKET:-}"
 fi
-# The probe list: the TS-classified candidates (the TS default socket, a
-# profile-exported env socket). The pinned rust socket is probed ONCE, as
-# ours, after them — never as a schema guess (an installer older than the
-# daemon build must still stop it, and the pinned path is the identity).
-ts_stop_candidates="$ts_socket"
+case "$live_daemon_socket" in
+  "~/"*) live_daemon_socket="${HOME}${live_daemon_socket#\~}" ;;
+esac
+# THE CANDIDATES ride named variables, never a space-joined list (the
+# bots' finding): a socket path containing whitespace would word-split
+# into phantom candidates (and an unquoted iteration would glob too), so
+# the probe list is the three named paths probed in order — the TS
+# default socket, a profile-exported env socket, this product's pinned
+# rust socket — deduped by string equality, each probed exactly once.
+# ts_candidate_report names every candidate for the no-silent-skips
+# ruling (a report string may carry the spaces; the probes do not).
+ts_candidate_report="$ts_socket"
+env_socket_probe="no"
 if [ -n "$env_socket" ] && [ "$env_socket" != "$ts_socket" ] && [ "$env_socket" != "$rust_socket" ]; then
-  ts_stop_candidates="$ts_stop_candidates $env_socket"
+  env_socket_probe="yes"
+  ts_candidate_report="$ts_candidate_report, $env_socket"
 fi
-# The report list names every candidate (the no-silent-skips ruling):
-# the pinned rust socket is always a candidate when it is not the TS
-# default (a PRIME_AGENT_DAEMON_SOCKET export pointing at the pin is the
-# same probe - the pin, as ours - never a second one).
-ts_candidate_report="$ts_stop_candidates"
+# The pin is probed as OURS whenever it is not the TS default; an env
+# export pointing AT the pin is the same socket (one probe, as ours).
+rust_socket_probe="no"
 if [ "$rust_socket" != "$ts_socket" ]; then
-  ts_candidate_report="$ts_candidate_report $rust_socket"
+  rust_socket_probe="yes"
+  ts_candidate_report="$ts_candidate_report, $rust_socket"
 fi
 # The daemon probe rides a FILE, not a heredoc inside a command
 # substitution: macOS ships bash 3.2 as /bin/sh, and its POSIX-mode parser
@@ -849,6 +886,10 @@ PROBE_PY
 stop_daemon_candidate() {
   socket_path="$1"
   candidate_kind="$2"
+  # The caller reads this after each probe to run the post-stop verify on
+  # exactly the sockets a stop verdict was recorded for (per candidate,
+  # never through a path list).
+  last_stop_recorded="no"
   # THE SELF-SOCKET REFUSAL: the candidate that is the daemon DRIVING this
   # very install is never probed — not even the hello — unless the
   # explicit override is set (a deliberate in-daemon update). The refusal
@@ -873,7 +914,7 @@ stop_daemon_candidate() {
   case "$verdict" in
     ts:stopped:0)
       ts_stop_found_any="yes"
-      ts_stop_stopped="$ts_stop_stopped $socket_path"
+      last_stop_recorded="yes"
       say "the TypeScript daemon on ${socket_path} stopped cleanly (idle; no signal sent)"
       ts_stop_summary="${ts_stop_summary}ts daemon: stopped cleanly on ${socket_path} (idle; no signal sent; verified down)
 "
@@ -881,7 +922,7 @@ stop_daemon_candidate() {
     ts:stopped:*)
       sessions="${verdict##*:}"
       ts_stop_found_any="yes"
-      ts_stop_stopped="$ts_stop_stopped $socket_path"
+      last_stop_recorded="yes"
       say "the TypeScript daemon on ${socket_path} stopped (${sessions} session(s) were live;"
       say "  the graceful request settled it; no signal sent)"
       ts_stop_summary="${ts_stop_summary}ts daemon: stopped on ${socket_path} (serving ${sessions} session(s); the graceful request settled it; verified down)
@@ -890,7 +931,7 @@ stop_daemon_candidate() {
     ts:stopped-forced:*)
       sessions="${verdict##*:}"
       ts_stop_found_any="yes"
-      ts_stop_stopped="$ts_stop_stopped $socket_path"
+      last_stop_recorded="yes"
       say "the TypeScript daemon on ${socket_path} stopped (${sessions} session(s) were live;"
       say "  forced after the graceful request; no signal sent)"
       ts_stop_summary="${ts_stop_summary}ts daemon: stopped on ${socket_path} (serving ${sessions} session(s); forced after the graceful request; verified down)
@@ -898,7 +939,7 @@ stop_daemon_candidate() {
       ;;
     rust:stopped:0)
       ts_stop_found_any="yes"
-      ts_stop_stopped="$ts_stop_stopped $socket_path"
+      last_stop_recorded="yes"
       ts_stop_rust_stopped="yes"
       say "the Rust daemon on ${socket_path} stopped for the update (idle; no signal sent)"
       ts_stop_summary="${ts_stop_summary}rust daemon: stopped for the update on ${socket_path} (idle; no signal sent; verified down)
@@ -907,7 +948,7 @@ stop_daemon_candidate() {
     rust:stopped:*)
       sessions="${verdict##*:}"
       ts_stop_found_any="yes"
-      ts_stop_stopped="$ts_stop_stopped $socket_path"
+      last_stop_recorded="yes"
       ts_stop_rust_stopped="yes"
       say "the Rust daemon on ${socket_path} stopped for the update (${sessions} session(s)"
       say "  were live; the graceful request settled it; no signal sent)"
@@ -917,7 +958,7 @@ stop_daemon_candidate() {
     rust:stopped-forced:*)
       sessions="${verdict##*:}"
       ts_stop_found_any="yes"
-      ts_stop_stopped="$ts_stop_stopped $socket_path"
+      last_stop_recorded="yes"
       ts_stop_rust_stopped="yes"
       say "the Rust daemon on ${socket_path} stopped for the update (${sessions} session(s)"
       say "  were live; forced after the graceful request; no signal sent)"
@@ -1293,33 +1334,45 @@ fi
 # The TS native tree's move to the legacy name cannot be deferred (it
 # occupies this installer's publish path); it runs inside the lock with its
 # own restore-on-failure and printed rollback instead.
-# Every candidate is probed (the default TS socket, the profile-exported
-# PRIME_AGENT_DAEMON_SOCKET, this product's pinned rust socket) — no
-# silent skips, except the one the self-socket refusal protects. The TS
-# candidates classify by identity first, then the schema family; the
-# pinned rust socket is OUR daemon by construction (the update flow: a
-# running rust daemon holds the old binary and venv state, the update
-# needs it down, the next invocation boots the new daemon).
-for stop_candidate in $ts_stop_candidates; do
-  stop_daemon_candidate "$stop_candidate" ts
-done
-if [ "$rust_socket" != "$ts_socket" ]; then
+# Every candidate is probed by its named variable (the default TS
+# socket, the profile-exported PRIME_AGENT_DAEMON_SOCKET, this product's
+# pinned rust socket) — no silent skips, except the one the self-socket
+# refusal protects, and no word-split iteration: each named path is
+# passed QUOTED, exactly once, so a socket path containing whitespace
+# stays one candidate (the bots' finding). The TS candidates classify by
+# identity first, then the schema family; the pinned rust socket is OUR
+# daemon by construction (the update flow: a running rust daemon holds
+# the old binary and venv state, the update needs it down, the next
+# invocation boots the new daemon).
+last_stop_recorded=""
+stop_daemon_candidate "$ts_socket" ts
+ts_stop_stopped_ts="$last_stop_recorded"
+if [ "$env_socket_probe" = "yes" ]; then
+  stop_daemon_candidate "$env_socket" ts
+  ts_stop_stopped_env="$last_stop_recorded"
+fi
+if [ "$rust_socket_probe" = "yes" ]; then
   stop_daemon_candidate "$rust_socket" ours
+  ts_stop_stopped_rust="$last_stop_recorded"
 fi
 
 # THE VERIFY (the field contract: the TS daemon is DOWN before the install
 # finishes): every socket a stop verdict was recorded for is re-checked
 # once more — a daemon that came back between its confirm poll and here
 # (a restart loop, a supervisor re-exec) reads as a leftover and gets the
-# loud warning instead of a stop line alone.
-for verified_socket in $ts_stop_stopped; do
-  if [ "$("$UVPY" "$probe_py" --listening "$verified_socket" 2>/dev/null)" = "up" ]; then
-    note "WARNING: the daemon on ${verified_socket} answered the post-stop"
-    note "  verification; it is treated as still running (see the install summary)"
-    ts_stop_summary="${ts_stop_summary}daemon: WARNING still running on ${verified_socket} (it answered the post-stop verification; stop it by hand: prime-agent shutdown --force)
+# loud warning instead of a stop line alone. The per-candidate flags keep
+# the verify off any path list (the same whitespace ruling).
+verify_stopped_socket() {
+  if [ "$("$UVPY" "$probe_py" --listening "$1" 2>/dev/null)" = "up" ]; then
+    note "WARNING: the daemon on $1 answered the post-stop verification;"
+    note "  it is treated as still running (see the install summary)"
+    ts_stop_summary="${ts_stop_summary}daemon: WARNING still running on $1 (it answered the post-stop verification; stop it by hand: prime-agent shutdown --force)
 "
   fi
-done
+}
+if [ "${ts_stop_stopped_ts:-}" = "yes" ]; then verify_stopped_socket "$ts_socket"; fi
+if [ "${ts_stop_stopped_env:-}" = "yes" ]; then verify_stopped_socket "$env_socket"; fi
+if [ "${ts_stop_stopped_rust:-}" = "yes" ]; then verify_stopped_socket "$rust_socket"; fi
 
 # The TS npm package: uninstalled (operator directive — the Rust port owns the
 # keyword), with the restore command printed. Exact package `prime-agent`
@@ -1355,11 +1408,26 @@ fi
 # precedent) creates the venv now; both steps are best-effort — an offline
 # machine still gets a successful install, and the first session retries
 # the bootstrap online per the product's own guidance.
-if command -v uv >/dev/null 2>&1 || [ -x "${uv_bin_dir}/uv" ]; then
+# THE PRE-WARM'S PATH FIX (the bots' finding): the product's own ensure_uv
+# searches PATH and ~/.local/bin/uv, so a payload-adjacent uv (the
+# store-alias fallback) is invisible to the launcher unless the prefix's
+# bin dir rides PATH — the pre-warm's child inherits this PATH, and the
+# profile note below tells the user to make it permanent.
+if [ -n "$uv_bin_dir" ] && [ "$uv_bin_dir" != "${HOME}/.local/bin" ]; then
+  PATH="${uv_bin_dir}:${PATH}"
+  export PATH
+fi
+if command -v uv >/dev/null 2>&1 \
+   || { [ -n "$uv_bin_dir" ] && [ -x "${uv_bin_dir}/uv" ]; }; then
   say "uv found (the kernel venv's package manager)"
 else
-  say "installing uv (the kernel venv's package manager — the command the"
-  say "product's own error message names):"
+  if [ -n "$uv_bin_dir" ]; then
+    say "installing uv (the kernel venv's package manager — the command the"
+    say "product's own error message names):"
+  else
+    say "uv was not installed (no target outside the shared session store;"
+    say "  the first session needs uv on PATH or at ~/.local/bin/uv):"
+  fi
   # The fetch and the script run are checked SEPARATELY: a plain
   # `curl | sh` pipeline reports the SCRIPT's status, so a dead network
   # (curl fails, sh reads nothing and exits 0) would masquerade as success.
@@ -1367,18 +1435,20 @@ else
   # normal case, the payload-adjacent prefix bin dir under the store
   # alias — the store-alias fallback above), which also overrides any
   # inherited value pointing into the shared session store.
-  if curl_out="$(curl -LsSf https://astral.sh/uv/install.sh)" \
+  if [ -n "$uv_bin_dir" ] \
+     && curl_out="$(curl -LsSf https://astral.sh/uv/install.sh)" \
      && printf '%s\n' "$curl_out" \
         | env -u UV_UNMANAGED_INSTALL UV_INSTALL_DIR="$uv_bin_dir" sh; then
     [ -x "${uv_bin_dir}/uv" ] \
       || note "warning: the uv installer reported success but ${uv_bin_dir}/uv is missing; the first session may need to install uv itself"
   else
-    note "warning: could not install uv (offline?); the kernel pre-warm was"
-    note "  skipped. The first session needs uv — install it with:"
+    note "warning: could not install uv; the kernel pre-warm was skipped."
+    note "  The first session needs uv — install it with:"
     note "  curl -LsSf https://astral.sh/uv/install.sh | sh"
   fi
 fi
-if command -v uv >/dev/null 2>&1 || [ -x "${uv_bin_dir}/uv" ]; then
+if command -v uv >/dev/null 2>&1 \
+   || { [ -n "$uv_bin_dir" ] && [ -x "${uv_bin_dir}/uv" ]; }; then
   if bootstrap_out="$("$launcher" --prime-agent-bootstrap 2>&1)"; then
     say "kernel pre-warmed: the first session's Python kernel is ready"
     say "$bootstrap_out"

@@ -436,6 +436,16 @@ impl Supervisor {
             }
         };
         let command_id = envelope.id.clone();
+        // THE REQUEST'S OWN CLIENT ID, captured at parse time (the bots'
+        // finding): `effective_client_id` is per-connection state a later
+        // command on the same connection can overwrite while this
+        // dispatch is still running, and the shutdown attribution must
+        // name the client that SENT the shutdown, not whoever spoke next.
+        // An envelope without a clientId rides the connection's sticky id.
+        let request_client_id = envelope
+            .client_id
+            .clone()
+            .unwrap_or_else(|| effective_client_id.lock().unwrap().clone());
         if let Some(client_id) = envelope.client_id.clone() {
             *effective_client_id.lock().unwrap() = client_id;
         }
@@ -522,6 +532,7 @@ impl Supervisor {
             .execute_parsed_command(
                 &envelope.command,
                 effective_client_id,
+                &request_client_id,
                 attached,
                 roster_subscribed,
                 connection,
@@ -550,6 +561,7 @@ impl Supervisor {
         self: &Arc<Self>,
         command: &DaemonCommand,
         effective_client_id: &Arc<std::sync::Mutex<String>>,
+        request_client_id: &str,
         attached: &Arc<crate::supervisor::subscribers::ClientSubscriptions>,
         roster_subscribed: &Arc<std::sync::atomic::AtomicBool>,
         connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
@@ -567,12 +579,15 @@ impl Supervisor {
                 // command id land in the daemon log the moment the drain
                 // commits, so the client that stopped the daemon - the
                 // installer, an agent session, a person - is nameable
-                // from the log alone.
+                // from the log alone. The id is the REQUEST's own (parse-
+                // time capture, not the connection's mutable effective
+                // id), and both values are newline-stripped: the log is
+                // line-structured, and a client-chosen id carrying \n
+                // must not forge attribution lines (the bots' finding).
+                let logged_client = request_client_id.replace(['\n', '\r'], " ");
+                let logged_command = command_id.replace(['\n', '\r'], " ");
                 self.log_line(&format!(
-                    "{} requested by client {} (command {})",
-                    type_name,
-                    *effective_client_id.lock().unwrap(),
-                    command_id
+                    "{type_name} requested by client {logged_client} (command {logged_command})"
                 ));
                 let response = response_success(Some(&command_id), &type_name, None);
                 let mut lines = vec![response_line(&response)];
