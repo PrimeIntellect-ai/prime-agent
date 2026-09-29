@@ -480,7 +480,10 @@ fn a_failed_prefix_check_rescans_from_byte_zero() {
 /// whole-row equality against the full fold, including a prefix-targeted
 /// attribution (the resumed fold must find the prefix id in the persisted
 /// per-id map). A replacement file (a new inode) rejects the stale sidecar
-/// and rescans whole.
+/// and rescans whole. Unix-only: a state is certified into the process
+/// cache (and so persistable) only on Unix - `read_session_info_from`'s
+/// store gate - so no sidecar exists to load elsewhere.
+#[cfg(unix)]
 #[test]
 fn a_persisted_scan_state_resumes_like_the_full_fold() {
     let dir = test_dir();
