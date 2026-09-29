@@ -9,12 +9,12 @@
 //! Operator directive (2026-09-28): a parent with descendants carries ONE
 //! summary line — `"{total} subagents ({running} running)"` — that
 //! expands to the FULL roster in one group, the running rows first (with
-//! their running state), the inactive after. This converges back to TS
-//! `createSubagentSummaryRow`'s one-line shape (`"{n} subagents running"`
-//! / `"{n} subagents"` expanding to every child) with the operator's
-//! both-counts label, and retires the 2026-09-25 two-line split (the
-//! `"{direct}, {nested} running"` line plus the `"{n} inactive
-//! subagent(s)"` line) and its flatten-through machinery.
+//! their running state), the inactive after, every child rendering in
+//! place with its own nested line. TS parity: TS
+//! `createSubagentSummaryRow` titles one `"{n} subagents running"` /
+//! `"{n} subagents"` line that expands to every child — the same
+//! one-line shape, with the operator's both-counts label as a
+//! sanctioned divergence.
 
 use std::collections::{HashMap, HashSet};
 
@@ -596,10 +596,6 @@ struct BaseRow {
     descendant_cost: f64,
     descendant_count: usize,
     running_subagent_count: usize,
-    /// Direct children currently roster-running: the `direct` number of
-    /// the running line's `"{direct}, {nested} running"` title (the
-    /// nested number is the recursive running count minus this).
-    direct_running: usize,
     record: usize,
     search_score: Option<f64>,
 }
@@ -691,7 +687,6 @@ pub fn build_rows(
             descendant_cost: rollup.descendants,
             descendant_count: rollup.descendant_count,
             running_subagent_count: 0,
-            direct_running: 0,
             summary,
             record: position,
         });
@@ -759,20 +754,15 @@ pub fn build_rows(
     }
     for index in tally_order.iter().rev() {
         let mut running = 0;
-        let mut direct_running = 0;
         let mut descendants = 0;
         let mut descendants_cost = 0.0;
         for child in children_by_parent.get(index).into_iter().flatten() {
-            if base[*child].section == Section::Running {
-                direct_running += 1;
-            }
             running += (base[*child].section == Section::Running) as usize
                 + base[*child].running_subagent_count;
             descendants += 1 + base[*child].descendant_count;
             descendants_cost += base[*child].recursive_cost;
         }
         base[*index].running_subagent_count = running;
-        base[*index].direct_running = direct_running;
         // Rollups follow the unfiltered hierarchy; the per-pass walk is the
         // fallback when the caller passed none (TS `rollup ?? descendants`).
         if !rollups.contains_key(&base[*index].identity) {
@@ -837,15 +827,11 @@ struct RowForest<'a> {
 
 impl RowForest<'_> {
     /// Emit one row, then its ONE summary line, then its expanded
-    /// children (TS `emit`, the operator's 2026-09-28 one-group
-    /// merge): depth and parent identity come from the walk. The line
-    /// expands to the FULL roster in one group — the running children
-    /// first (each carrying its own running state and its own nested
-    /// line), the not-running children after — so every descendant is
-    /// reachable through the nesting alone; the two-line split's
-    /// flatten-through machinery is gone (an idle middle manager
-    /// renders as a row with its own line instead of being skipped
-    /// through).
+    /// children (TS `emit`): depth and parent identity come from the
+    /// walk. The line expands to the FULL roster in one group — the
+    /// running children first (each carrying its own running state and
+    /// its own nested line), the not-running children after — so every
+    /// descendant is reachable through the nesting alone.
     fn emit(
         &self,
         index: usize,
@@ -902,62 +888,39 @@ fn agents_row(row: &BaseRow, depth: usize, parent_identity: Option<&str>) -> Age
     }
 }
 
-/// The ONE subagents line under one agent (the operator's 2026-09-28
+/// The subagents line under one agent (the operator's 2026-09-28
 /// one-dropdown directive): `"{total} subagents ({running} running)"` —
 /// `total` = the FULL descendant roster (running + inactive), `running`
 /// = the running subset — expanding to the whole roster in one group,
 /// the running rows first. TS parity: TS `createSubagentSummaryRow`
 /// titles one `"{n} subagents running"` / `"{n} subagents"` line that
 /// expands to every child — this is the same one-line shape with the
-/// operator's both-counts label (the 2026-09-25 two-line split's
-/// `"{direct}, {nested} running"` + `"{n} inactive subagent(s)"` pair is
-/// retired). The title stays count-only (the operator's 2026-09-26
-/// follow-up: the model mix left the line, the expanded children render
-/// their own Model column).
+/// operator's both-counts label, a sanctioned divergence. The title
+/// stays count-only (the expanded children render their own Model
+/// column).
+///
+/// The line reuses its parent's summary so the open action and selection
+/// keys resolve the parent. The `cost` cell is the whole descendant
+/// tree's spend — the line always renders while any descendant exists,
+/// so the aggregate never loses its row (TS `createSubagentSummaryRow`
+/// pins `recursiveCost: 0` there, a deliberate divergence) — and the
+/// line carries no age.
 fn merged_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsViewRow {
     let total = parent.descendant_count;
     let running = parent.running_subagent_count;
-    let title = format!("{total} subagents ({running} running)");
-    summary_row(
-        parent,
-        depth,
-        expanded,
-        title,
-        SUMMARY_ROW_PREFIX,
-        parent.descendant_cost,
-        running,
-    )
-}
-
-/// One summary line's row: the line reuses its parent's summary so the
-/// open action and selection keys resolve the parent. The `cost` cell
-/// is the line's aggregate — the whole descendant tree's spend
-/// (the operator's 2026-09-26 ask; the line always renders while any
-/// descendant exists, so the aggregate never loses its row — TS
-/// `createSubagentSummaryRow` pins `recursiveCost: 0` there, a
-/// deliberate divergence), and the line carries no age.
-fn summary_row(
-    parent: &BaseRow,
-    depth: usize,
-    expanded: bool,
-    title: String,
-    identity_prefix: &str,
-    cost: f64,
-    running_subagent_count: usize,
-) -> AgentsViewRow {
     AgentsViewRow {
         kind: RowKind::SubagentSummary,
         section: parent.section,
-        identity: format!("{identity_prefix}{}", parent.identity),
+        identity: format!("{SUMMARY_ROW_PREFIX}{}", parent.identity),
         parent_identity: Some(parent.identity.clone()),
         summary: parent.summary.clone(),
-        title,
+        title: format!("{total} subagents ({running} running)"),
         model: String::new(),
-        cost,
+        cost: parent.descendant_cost,
         age: String::new(),
         depth,
         descendant_count: 0,
-        running_subagent_count,
+        running_subagent_count: running,
         expanded,
     }
 }

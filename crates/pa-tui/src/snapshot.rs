@@ -399,7 +399,10 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
                 messages
                     .iter()
                     .rev()
-                    .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+                    .find(|message| {
+                        message.get("role").and_then(Value::as_str) == Some("user")
+                            && message_timestamp_ms(message).is_some()
+                    })
                     .and_then(message_timestamp_ms)
             });
     Reconstructed {

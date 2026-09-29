@@ -666,14 +666,16 @@ impl Theme {
     /// TS parity: the TS fork paints `theme.bg("selectedBg", ...)` on
     /// its focused rows (a plain dark-gray band — no purple, no bold);
     /// the purple+opaque+bold treatment is the operator's sanctioned
-    /// divergence. A theme too partial to resolve the accent falls
-    /// back to the plain selection background and then the onboarding
-    /// wash, so a selected row always reads as selected (Macroscope
-    /// PR #2908's contract).
+    /// divergence. A theme whose accent is unresolvable or explicitly
+    /// empty (the empty string resolves to `Color::Reset`, which paints
+    /// no band) falls back to the plain selection background and then
+    /// the onboarding wash, so a selected row always reads as selected
+    /// (Macroscope PR #2908's contract).
     pub fn selection_row_style(&self) -> Style {
         let purple = self
             .fg_style(ThemeColor::Accent)
             .fg
+            .filter(|color| *color != Color::Reset)
             .or_else(|| self.bg_color(ThemeBg::SelectedBg))
             .unwrap_or_else(|| crate::onboarding::highlight_wash(self));
         Style::default().bg(purple).add_modifier(Modifier::BOLD)
@@ -846,6 +848,40 @@ mod tests {
         let theme = Theme::from_json(&json, ColorMode::TrueColor);
         // Case-insensitive 6-hex, reached through a var reference.
         assert_eq!(theme.background_rgb(), Some((0x0a, 0x0b, 0x0c)));
+    }
+
+    /// An explicitly empty custom-theme `accent` resolves to
+    /// `Color::Reset` — the terminal default, a band painted with it
+    /// shows nothing. The shared selection style filters Reset before
+    /// the fallback chain (Macroscope 2026-09-28: an empty accent
+    /// must fall through, not strand the selection without a band),
+    /// so it lands on `selectedBg` and then the onboarding wash.
+    #[test]
+    fn an_empty_accent_falls_back_instead_of_painting_reset() {
+        let json = serde_json::from_str::<ThemeJson>(
+            r##"{
+                "name": "empty-accent",
+                "colors": { "text": "#f4f4f5", "accent": "", "selectedBg": "#222226" }
+            }"##,
+        )
+        .expect("valid theme json");
+        let theme = Theme::from_json(&json, ColorMode::TrueColor);
+        assert_eq!(theme.fg_style(ThemeColor::Accent).fg, Some(Color::Reset));
+        assert_eq!(
+            theme.selection_row_style().bg,
+            theme.bg_color(ThemeBg::SelectedBg),
+            "the empty accent falls back to selectedBg, never Reset"
+        );
+        let bare = serde_json::from_str::<ThemeJson>(
+            r##"{ "name": "bare", "colors": { "text": "#f4f4f5", "accent": "" } }"##,
+        )
+        .expect("valid theme json");
+        let bare = Theme::from_json(&bare, ColorMode::TrueColor);
+        assert_eq!(
+            bare.selection_row_style().bg,
+            Some(crate::onboarding::highlight_wash(&bare)),
+            "with no selectedBg either, the wash keeps the selected row readable"
+        );
     }
 
     /// The selection wash must READ (the operator's 2026-09-26 directive:

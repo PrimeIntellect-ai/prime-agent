@@ -1194,21 +1194,20 @@ impl SessionUi {
     /// PROMPT's wall-clock time (unix ms). The operator's 2026-09-28
     /// rule: the waiting/executing timer never resets on a view
     /// transition — it counts since the prompt that started the live
-    /// turn. A prompt time that is implausibly old (a placeholder
-    /// timestamp, or a clock skew) keeps the re-attach-instant anchor
-    /// instead of rewinding the clock past the process start.
+    /// turn, however long ago that was. TS
+    /// `restoreTurnStartFromMessages` anchors at the run-start
+    /// message's timestamp the same way, with no plausibility cap: a
+    /// placeholder-era timestamp anchors at its own wall time and the
+    /// elapsed reads the wire's garbage (TS clamps only the negative
+    /// display at `formatWorkingElapsed`). Only a FUTURE timestamp
+    /// keeps the re-attach-instant anchor.
     fn loader_anchor_instant(prompt_ms: u64) -> Option<std::time::Instant> {
-        const MAX_PROMPT_AGE_MS: u64 = 24 * 60 * 60 * 1000;
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|since| since.as_millis() as u64)
             .unwrap_or_default();
         let age = now_ms.checked_sub(prompt_ms)?;
-        (age <= MAX_PROMPT_AGE_MS).then(|| {
-            std::time::Instant::now()
-                .checked_sub(std::time::Duration::from_millis(age))
-                .unwrap_or_else(std::time::Instant::now)
-        })
+        std::time::Instant::now().checked_sub(std::time::Duration::from_millis(age))
     }
 
     /// Fold the pending snapshot into the view (fresh transcript, footer
@@ -2891,5 +2890,51 @@ impl SessionUi {
     /// The `tui exit` reason recorded at the point the loop stopped.
     pub(crate) fn exit_reason(&self) -> &'static str {
         self.exit_reason
+    }
+}
+
+#[cfg(test)]
+mod loader_anchor_tests {
+    use super::SessionUi;
+
+    /// The anchor clock (Macroscope 2026-09-28: a prompt's age must
+    /// not be capped — the old 24-hour cutoff reset REAL old prompts
+    /// to a zero loader): any past prompt anchors at its own instant,
+    /// however long ago; only a future timestamp falls back to the
+    /// re-attach anchor. A placeholder-era timestamp anchors at its
+    /// own wall time too — TS `restoreTurnStartFromMessages` trusts
+    /// the wire's timestamp the same way.
+    #[test]
+    fn prompts_anchor_at_their_wall_time_and_future_ones_fall_back() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_millis() as u64)
+            .unwrap_or_default();
+        // A prompt two seconds old: the anchor sits ~2s in the past.
+        let recent = SessionUi::loader_anchor_instant(now_ms - 2_000).expect("recent prompt");
+        let rewound = std::time::Instant::now().duration_since(recent).as_millis();
+        assert!(
+            (1_500..=4_000).contains(&rewound),
+            "the anchor rewinds to the prompt: {rewound}ms"
+        );
+        // A prompt older than the retired 24h cutoff anchors too.
+        let old = SessionUi::loader_anchor_instant(now_ms - 90_000_000).expect("25-hour prompt");
+        let rewound = std::time::Instant::now().duration_since(old).as_millis();
+        assert!(
+            (89_000_000..=91_000_000).contains(&rewound),
+            "a 25h-old prompt keeps its anchor: {rewound}ms"
+        );
+        // A future timestamp cannot anchor anything.
+        assert!(SessionUi::loader_anchor_instant(now_ms + 10_000).is_none());
+        // A placeholder-era timestamp anchors at its own wall time
+        // (the elapsed reads the wire's garbage, as in TS).
+        let placeholder = SessionUi::loader_anchor_instant(1).expect("placeholder anchors");
+        let rewound = std::time::Instant::now()
+            .duration_since(placeholder)
+            .as_millis();
+        assert!(
+            rewound > u128::from(now_ms - 10_000),
+            "the placeholder anchors at its wall time, not the re-attach instant: {rewound}ms"
+        );
     }
 }

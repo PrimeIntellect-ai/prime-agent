@@ -776,6 +776,47 @@ fn reconstructs_the_last_user_prompt_timestamp() {
     messages[0]["timestamp"] = json!("2026-09-28T12:00:01.000Z");
     let view = reconstruct(&attach_data_from_response(attach).unwrap());
     assert_eq!(view.last_user_prompt_ms, Some(1_790_596_801_000));
+    // A newer user prompt with NO readable time does not strand the
+    // anchor (Macroscope 2026-09-28): the scan takes the newest user
+    // message that HAS a readable time, so unreadable-tail prompts
+    // leave the older prompt anchoring the loader.
+    let mut attach = slim_attach();
+    let messages = attach
+        .get_mut("snapshot")
+        .expect("snapshot")
+        .get_mut("messages")
+        .expect("messages")
+        .as_array_mut()
+        .expect("messages array");
+    messages[0]["timestamp"] = json!(1_700_000_000_000u64);
+    messages.push(json!({
+        "role": "user",
+        "content": "newer but the time is garbage",
+        "timestamp": "not-a-time",
+    }));
+    messages.push(json!({ "role": "user", "content": "newest, no time at all" }));
+    let view = reconstruct(&attach_data_from_response(attach).unwrap());
+    assert_eq!(
+        view.last_user_prompt_ms,
+        Some(1_700_000_000_000),
+        "the newest READABLE user time wins, not the newest user message"
+    );
+    // No readable user time anywhere: the anchor stays unset and the
+    // loader keeps its re-attach instant.
+    let mut attach = slim_attach();
+    let messages = attach
+        .get_mut("snapshot")
+        .expect("snapshot")
+        .get_mut("messages")
+        .expect("messages")
+        .as_array_mut()
+        .expect("messages array");
+    messages[0]
+        .as_object_mut()
+        .expect("the user message")
+        .remove("timestamp");
+    let view = reconstruct(&attach_data_from_response(attach).unwrap());
+    assert_eq!(view.last_user_prompt_ms, None);
 }
 
 #[test]
