@@ -1,7 +1,8 @@
 //! Autocomplete: provider contract, suggestion state, and selection list
 //! rendering ported from `packages/tui/src/autocomplete.ts` +
 //! `components/select-list.ts` (the subset the interactive agent view uses:
-//! slash-command and file/path completion with a select list).
+//! slash-command and file/path completion with a select list, plus the
+//! `@` fuzzy file search — a parallel walk on a background thread).
 
 use std::collections::{HashMap, HashSet};
 
@@ -9,6 +10,9 @@ use crate::fuzzy::fuzzy_filter;
 use crate::width::str_width;
 use crate::{Line, Span};
 use pa_types::slash_commands::SlashCommandRegistry;
+
+mod fuzzy_file_search;
+pub use fuzzy_file_search::FileSearch;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionItem {
@@ -35,6 +39,15 @@ pub struct Suggestions {
     pub items: Vec<CompletionItem>,
 }
 
+/// A suggestion lookup: computed inline, or a background `@` file
+/// search (TS resolves `getSuggestions` asynchronously; only the fuzzy
+/// file walk is slow enough to need it here).
+#[derive(Debug)]
+pub enum SuggestionLookup {
+    Ready(Suggestions),
+    Searching(FileSearch),
+}
+
 /// Result of applying a completion to the editor buffer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionResult {
@@ -51,7 +64,7 @@ pub trait AutocompleteProvider: Send {
         cursor_line: usize,
         cursor_col: usize,
         force: bool,
-    ) -> Option<Suggestions>;
+    ) -> Option<SuggestionLookup>;
     fn apply_completion(
         &self,
         lines: &[String],
@@ -241,9 +254,8 @@ fn home_dir() -> std::path::PathBuf {
 }
 
 /// The `@`-attachment token at the cursor, when one is being typed (TS
-/// `extractAtPrefix`). The TS product backs it with a fuzzy `fd` search;
-/// this build has no `fd` dependency, so `@` tokens yield no suggestions —
-/// the same behavior as the TS product without `fd` on PATH.
+/// `extractAtPrefix`): the token feeds the fuzzy file search below the
+/// session cwd (or the typed scope).
 fn extract_at_prefix(text: &[char]) -> Option<String> {
     if let Some(quoted) = extract_quoted_prefix(text) {
         if quoted.starts_with("@\"") {
@@ -592,8 +604,8 @@ fn display_relative_path(display_prefix: &str, name: &str) -> String {
 }
 
 /// Apply a file/path completion: replace the prefix token with the item
-/// value, adjusting for quoted prefixes and directories (TS default and
-/// argument branches).
+/// value, adjusting for quoted prefixes, directories, and the `@`
+/// branch's trailing space (TS default, argument, and `@` branches).
 fn apply_file_completion(
     lines: &[String],
     cursor_line: usize,
@@ -615,19 +627,30 @@ fn apply_file_completion(
             after_cursor
         };
     let is_directory = item.label.ends_with('/');
+    // TS `applyCompletion`'s `@` branch: a file leaves a trailing space
+    // so the next word starts clean, a directory keeps the token open
+    // for further completion.
+    let suffix = if prefix.starts_with('@') && !is_directory {
+        " "
+    } else {
+        ""
+    };
     let has_trailing_quote = item.value.ends_with('"');
     let cursor_offset = if is_directory && has_trailing_quote {
         item.value.chars().count() - 1
     } else {
         item.value.chars().count()
     };
-    let new_line = format!("{before_prefix}{}{adjusted_after_cursor}", item.value);
+    let new_line = format!(
+        "{before_prefix}{}{suffix}{adjusted_after_cursor}",
+        item.value
+    );
     let mut new_lines = lines.to_vec();
     new_lines[cursor_line] = new_line;
     CompletionResult {
         lines: new_lines,
         cursor_line,
-        cursor_col: before_prefix.chars().count() + cursor_offset,
+        cursor_col: before_prefix.chars().count() + cursor_offset + suffix.chars().count(),
     }
 }
 
@@ -898,13 +921,14 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
         cursor_line: usize,
         cursor_col: usize,
         force: bool,
-    ) -> Option<Suggestions> {
+    ) -> Option<SuggestionLookup> {
         let line: Vec<char> = lines.get(cursor_line)?.chars().collect();
         let before: Vec<char> = line[..cursor_col.min(line.len())].to_vec();
-        // `@`-attachment completion is fd-backed in the TS product; without
-        // fd it yields nothing, and so does this build.
-        if extract_at_prefix(&before).is_some() {
-            return None;
+        if let Some(at_prefix) = extract_at_prefix(&before) {
+            return Some(SuggestionLookup::Searching(fuzzy_file_search::spawn(
+                &self.paths.base,
+                at_prefix,
+            )));
         }
         if !force {
             if let Some(context) = get_slash_command_context(lines, cursor_line, cursor_col) {
@@ -914,11 +938,11 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
                         if items.is_empty() {
                             return None;
                         }
-                        return Some(Suggestions {
+                        return Some(SuggestionLookup::Ready(Suggestions {
                             prefix: context.prefix,
                             kind: Some(SuggestionKind::SlashCommand),
                             items,
-                        });
+                        }));
                     }
                     // TS `command.getArgumentCompletions`: a command that
                     // supplies argument items offers them at its argument
@@ -939,11 +963,11 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
                         if matches.is_empty() {
                             return None;
                         }
-                        return Some(Suggestions {
+                        return Some(SuggestionLookup::Ready(Suggestions {
                             prefix: context.prefix.clone(),
                             kind: Some(SuggestionKind::SlashCommand),
                             items: matches,
-                        });
+                        }));
                     }
                 }
             }
@@ -953,11 +977,11 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
         if items.is_empty() {
             return None;
         }
-        Some(Suggestions {
+        Some(SuggestionLookup::Ready(Suggestions {
             prefix,
             kind: Some(SuggestionKind::File),
             items,
-        })
+        }))
     }
 
     fn apply_completion(

@@ -78,7 +78,11 @@ impl AgentSessionEngine {
     /// `options.model`); a session with no saved model keeps the startup
     /// chain; a restore that still misses after the window records the
     /// fallback (`model_fallback_message`, never silent).
-    pub(super) async fn restore_session_model_at(&self, session_path: &std::path::Path) {
+    pub(super) async fn restore_session_model_at(
+        &self,
+        session_path: &std::path::Path,
+        pre_read: Option<crate::engine::SavedSessionContext>,
+    ) {
         // An unpersisted session (an in-memory fork or a no-session
         // worker's replacement) has no file to read: TS restores its
         // branch context, whose `model_change` row is the live branch's
@@ -89,16 +93,24 @@ impl AgentSessionEngine {
         }
         self.reset_selection_to_spawn_fallback();
         // TS `buildSessionContext()`: the session file pins the model it
-        // last ran on and the thinking level it last set. The scan is
-        // plain file work on a potentially large session file — park it
-        // on a blocking thread.
-        let path = session_path.to_path_buf();
-        let Ok(saved) = tokio::task::spawn_blocking(move || saved_session_context(&path)).await
-        else {
-            return;
-        };
-        let Some(saved) = saved else {
-            return;
+        // last ran on and the thinking level it last set. A caller that
+        // already read the context off an open store hands it in (TS
+        // reads its loaded entries; the create's own `open_windowed`
+        // already parsed the same rows); otherwise the scan is plain
+        // file work on a potentially large session file — park it on a
+        // blocking thread.
+        let saved = if let Some(saved) = pre_read {
+            saved
+        } else {
+            let path = session_path.to_path_buf();
+            let Ok(saved) = tokio::task::spawn_blocking(move || saved_session_context(&path)).await
+            else {
+                return;
+            };
+            let Some(saved) = saved else {
+                return;
+            };
+            saved
         };
         // TS `createAgentSession` re-reads the session's saved thinking
         // level at every boot (`hasThinkingEntry ?
@@ -474,35 +486,43 @@ fn rlm_max_depth_row(line: &str) -> Option<u64> {
         .and_then(Value::as_u64)
 }
 
-/// The saved model context of a session file (TS
-/// `buildSessionContext().model`): the model the session last ran on —
-/// the last `model_change` row, else the last assistant message's
-/// provider/model. `None` when the file carries no model context (a
-/// fresh session) or cannot be read (the create flow owns that failure).
-/// The session file's saved model context (TS `buildSessionContext`): the
-/// pinned `(provider, model)` and the saved thinking level — present only
-/// when the file carries a `thinking_level_change` row (TS
-/// `hasThinkingEntry`).
-pub(crate) struct SavedSessionContext {
-    pub(crate) model: Option<(String, String)>,
-    pub(crate) thinking: Option<pa_types::ai::ModelThinkingLevel>,
-}
-
-pub(crate) fn saved_session_context(path: &std::path::Path) -> Option<SavedSessionContext> {
+/// The saved model context of a session file (TS `buildSessionContext`):
+/// the pinned `(provider, model)` the session last ran on and the saved
+/// thinking level — present only when the file carries a
+/// `thinking_level_change` row (TS `hasThinkingEntry`). `None` when the
+/// file cannot be read (the create flow owns that failure).
+pub(crate) fn saved_session_context(
+    path: &std::path::Path,
+) -> Option<crate::engine::SavedSessionContext> {
     // Reads the saved (provider, model) + thinking level from the
     // retained window (plus post-window live rows); unsupported files and
     // malformed retained rows fall back to the full open inside
     // `open_windowed`.
     let store = crate::session_store::SessionFile::open_windowed(path).ok()?;
-    let context = store.restored_settings();
-    let thinking = store
-        .has_thinking_level()
-        .then(|| pa_ai::models::thinking_level_from_str(&context.thinking_level))
-        .flatten();
-    Some(SavedSessionContext {
-        model: context.model,
-        thinking,
-    })
+    let has_thinking_level = store.has_thinking_level();
+    Some(saved_session_context_from_parts(
+        &store.restored_settings(),
+        has_thinking_level,
+    ))
+}
+
+/// The saved context derived from an already-folded `restored_settings()`
+/// value: the create path folds the context once off the store its own
+/// `open_windowed` built and hands the restore its share (TS
+/// `createAgentSession` reads the session's loaded entries once; the
+/// port's second windowed open of the same file and its duplicate fold
+/// are gone). The one derivation serves both entry points, so a pre-read
+/// context and a file-read context are identical by construction.
+pub(crate) fn saved_session_context_from_parts(
+    context: &pa_core::session::SessionContext,
+    has_thinking_level: bool,
+) -> crate::engine::SavedSessionContext {
+    crate::engine::SavedSessionContext {
+        model: context.model.clone(),
+        thinking: has_thinking_level
+            .then(|| pa_ai::models::thinking_level_from_str(&context.thinking_level))
+            .flatten(),
+    }
 }
 
 /// Register the faux provider from a script and return its model. Scripts

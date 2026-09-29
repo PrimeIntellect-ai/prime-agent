@@ -41,6 +41,21 @@ pub struct PromptBatchRow {
     pub images: Vec<pa_agent::types::ImageContent>,
 }
 
+/// The saved session context TS `createAgentSession` reads off the session's
+/// already-loaded entries (`sessionManager.buildSessionContext()` plus
+/// `getBranch().some(...)` — sdk.ts): the `(provider, model)` the file pins
+/// and the thinking level present only when the file carries a
+/// `thinking_level_change` row (TS `hasThinkingEntry`). A caller that already
+/// holds the opened store passes the pre-read context to
+/// [`SessionEngine::restore_session_model`] so the restore never re-opens the
+/// session file; `None` reads the file (the port's windowed fallback for
+/// callers without an open store).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedSessionContext {
+    pub(crate) model: Option<(String, String)>,
+    pub(crate) thinking: Option<pa_types::ai::ModelThinkingLevel>,
+}
+
 /// Explicit model selection from a session's create config (the wire
 /// `provider`/`model`/`apiKey`/`thinking` fields). `None` fields keep the
 /// engine's current selection, mirroring the TS runtime-config merge
@@ -558,10 +573,16 @@ pub trait SessionEngine: Send + Sync {
     /// startup-chain default instead of the model it was running on. The
     /// worker calls this at create, before the create-config selection;
     /// explicit flags win, a miss records the fallback (never silent).
-    /// Engines without a persisted model context do nothing.
+    ///
+    /// `saved` is the [`SavedSessionContext`] the caller already read off an
+    /// open store (TS reads its loaded entries; the create path holds the
+    /// store its own `open_windowed` built) — passing it skips the restore's
+    /// second windowed open of the same file. `None` reads the file. Engines
+    /// without a persisted model context do nothing.
     fn restore_session_model(
         &self,
         _session_path: &std::path::Path,
+        _saved: Option<SavedSessionContext>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         Box::pin(std::future::ready(()))
     }

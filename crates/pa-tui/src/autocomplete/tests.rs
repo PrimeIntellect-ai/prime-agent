@@ -4,6 +4,14 @@ fn provider(base: &str) -> CombinedAutocompleteProvider {
     CombinedAutocompleteProvider::from_registry(std::path::PathBuf::from(base))
 }
 
+/// The suggestions of a synchronous lookup (every source except `@`).
+fn ready(lookup: Option<SuggestionLookup>) -> Suggestions {
+    match lookup {
+        Some(SuggestionLookup::Ready(suggestions)) => suggestions,
+        other => panic!("expected ready suggestions, got {other:?}"),
+    }
+}
+
 fn item(value: &str) -> CompletionItem {
     CompletionItem {
         value: value.to_string(),
@@ -42,21 +50,15 @@ fn slash_context_matches_ts_positions() {
 #[test]
 fn slash_suggestions_filter_fuzzily() {
     let provider = provider("/tmp");
-    let suggestions = provider
-        .get_suggestions(&["/se".to_string()], 0, 3, false)
-        .expect("suggestions");
+    let suggestions = ready(provider.get_suggestions(&["/se".to_string()], 0, 3, false));
     assert_eq!(suggestions.kind, Some(SuggestionKind::SlashCommand));
     assert_eq!(suggestions.prefix, "/se");
     assert!(suggestions.items.iter().any(|i| i.value == "settings"));
     // Aliases join the search text: /think matches the effort command.
-    let suggestions = provider
-        .get_suggestions(&["/think".to_string()], 0, 6, false)
-        .expect("suggestions");
+    let suggestions = ready(provider.get_suggestions(&["/think".to_string()], 0, 6, false));
     assert_eq!(suggestions.items[0].value, "effort");
     // The bare '/' shows the whole registry.
-    let suggestions = provider
-        .get_suggestions(&["/".to_string()], 0, 1, false)
-        .expect("suggestions");
+    let suggestions = ready(provider.get_suggestions(&["/".to_string()], 0, 1, false));
     assert_eq!(
         suggestions.items.len(),
         SlashCommandRegistry::builtin().all().len()
@@ -67,14 +69,14 @@ fn slash_suggestions_filter_fuzzily() {
 fn hidden_commands_drop_rows_from_the_menu() {
     let mut provider = provider("/tmp");
     let visible = provider.get_suggestions(&["/f".to_string()], 0, 2, false);
-    let items = visible.expect("suggestions").items;
+    let items = ready(visible).items;
     assert!(
         items.iter().any(|item| item.value == "fast"),
         "fast lists by default: {items:?}"
     );
     provider.set_hidden_commands(std::collections::HashSet::from(["fast".to_string()]));
     let visible = provider.get_suggestions(&["/f".to_string()], 0, 2, false);
-    let items = visible.expect("suggestions").items;
+    let items = ready(visible).items;
     assert!(
         !items.iter().any(|item| item.value == "fast"),
         "hidden fast drops from the menu: {items:?}"
@@ -88,7 +90,7 @@ fn hidden_commands_drop_rows_from_the_menu() {
 fn update_lists_in_the_menu_under_every_hidden_set() {
     let mut provider = provider("/tmp");
     let visible = provider.get_suggestions(&["/up".to_string()], 0, 3, false);
-    let items = visible.expect("suggestions").items;
+    let items = ready(visible).items;
     assert!(
         items.iter().any(|item| item.value == "update"),
         "update lists by default: {items:?}"
@@ -97,7 +99,7 @@ fn update_lists_in_the_menu_under_every_hidden_set() {
     // never contains the update command.
     provider.set_hidden_commands(std::collections::HashSet::from(["fast".to_string()]));
     let visible = provider.get_suggestions(&["/up".to_string()], 0, 3, false);
-    let items = visible.expect("suggestions").items;
+    let items = ready(visible).items;
     assert!(
         items.iter().any(|item| item.value == "update"),
         "update stays listed under the fast filter: {items:?}"
@@ -130,7 +132,7 @@ fn tier_argument_completions_list_filter_and_mark_current() {
     provider.set_argument_completions("tier", tier_items("flex"));
     // No term: every tier lists, the current one marked.
     let suggestions = provider.get_suggestions(&["/tier ".to_string()], 0, 6, false);
-    let items = suggestions.expect("tier suggestions").items;
+    let items = ready(suggestions).items;
     assert_eq!(
         items
             .iter()
@@ -143,7 +145,7 @@ fn tier_argument_completions_list_filter_and_mark_current() {
         .any(|item| item.description.as_deref() == Some("tier (current)")));
     // A term filters by prefix.
     let suggestions = provider.get_suggestions(&["/tier pr".to_string()], 0, 8, false);
-    let items = suggestions.expect("tier suggestions").items;
+    let items = ready(suggestions).items;
     assert_eq!(
         items
             .iter()
@@ -179,16 +181,12 @@ fn path_completion_lists_directories_first() {
     std::fs::create_dir_all(dir.join("docs")).expect("mkdir");
     std::fs::write(dir.join("main.rs"), "fn main() {}").expect("write");
     let provider = provider(dir.to_str().unwrap());
-    let suggestions = provider
-        .get_suggestions(&["./ma".to_string()], 0, 4, false)
-        .expect("suggestions");
+    let suggestions = ready(provider.get_suggestions(&["./ma".to_string()], 0, 4, false));
     assert_eq!(suggestions.kind, Some(SuggestionKind::File));
     assert_eq!(suggestions.items.len(), 1);
     assert_eq!(suggestions.items[0].value, "./main.rs");
     // Directories first, both with trailing slashes.
-    let suggestions = provider
-        .get_suggestions(&["./".to_string()], 0, 3, false)
-        .expect("suggestions");
+    let suggestions = ready(provider.get_suggestions(&["./".to_string()], 0, 3, false));
     let values: Vec<&str> = suggestions.items.iter().map(|i| i.value.as_str()).collect();
     assert!(values.contains(&"./docs/"));
     assert!(values.contains(&"./src/"));
@@ -226,9 +224,7 @@ fn dotfiles_list_only_for_a_dot_prefix_anchor() {
     std::fs::write(base.join("main.rs"), "fn main() {}").expect("write");
     let provider = provider(base.to_str().unwrap());
     let values = |text: &str| -> Vec<String> {
-        provider
-            .get_suggestions(&[text.to_string()], 0, text.chars().count(), true)
-            .expect("suggestions")
+        ready(provider.get_suggestions(&[text.to_string()], 0, text.chars().count(), true))
             .items
             .into_iter()
             .map(|item| item.value)
@@ -262,12 +258,54 @@ fn dotfiles_list_only_for_a_dot_prefix_anchor() {
     assert_eq!(values("./."), ["./.claude/", "./.hidden"]);
 }
 
+/// The `@` fuzzy file search (the ported fd walk): nested matches list
+/// with fd's semantics — hidden entries included, `.git` pruned —
+/// the scoped `@src/par` form walks `src` and keeps the typed scope
+/// in the display, and applying a file item leaves the trailing
+/// space the TS `@` branch adds.
 #[test]
-fn at_prefix_has_no_suggestions_without_fd() {
-    let provider = provider("/tmp");
-    assert!(provider
-        .get_suggestions(&["see @src".to_string()], 0, 9, false)
-        .is_none());
+fn at_prefix_lists_nested_fuzzy_matches() {
+    let outer = tempfile::TempDir::new().expect("temp dir");
+    let base = outer.path().join("base");
+    std::fs::create_dir_all(base.join("src/deep")).expect("mkdir");
+    std::fs::create_dir_all(base.join(".hidden")).expect("mkdir");
+    std::fs::create_dir_all(base.join(".git")).expect("mkdir");
+    std::fs::write(base.join("src/deep/partial_match.rs"), "x").expect("write");
+    std::fs::write(base.join(".hidden/partial"), "x").expect("write");
+    std::fs::write(base.join(".git/partial"), "x").expect("write");
+    std::fs::write(base.join("other.md"), "x").expect("write");
+    let provider = provider(base.to_str().unwrap());
+    let values = |text: &str| -> Vec<String> {
+        match provider.get_suggestions(&[text.to_string()], 0, text.chars().count(), false) {
+            Some(SuggestionLookup::Searching(search)) => search
+                .results
+                .recv()
+                .expect("the search finishes")
+                .expect("suggestions")
+                .items
+                .into_iter()
+                .map(|item| item.value)
+                .collect(),
+            other => panic!("expected a searching lookup, got {other:?}"),
+        }
+    };
+    // The exact `.hidden/partial` name (score 100) sorts ahead of
+    // the `partial_match.rs` prefix match (80); `.git` never lists.
+    assert_eq!(
+        values("see @partial"),
+        ["@.hidden/partial", "@src/deep/partial_match.rs"]
+    );
+    assert_eq!(values("@src/par"), ["@src/deep/partial_match.rs"]);
+    let item = CompletionItem {
+        value: "@src/deep/partial_match.rs".to_string(),
+        label: "partial_match.rs".to_string(),
+        description: None,
+        argument_hint: None,
+        source_tag: None,
+    };
+    let result = provider.apply_completion(&["see @partial".to_string()], 0, 12, &item, "@partial");
+    assert_eq!(result.lines[0], "see @src/deep/partial_match.rs ");
+    assert_eq!(result.cursor_col, 31);
 }
 
 #[test]
@@ -425,9 +463,8 @@ fn skill_commands_suggest_for_the_typed_prefix_and_inline_references() {
     let items = provider.slash_suggestions("/skill:brain");
     let values: Vec<&str> = items.iter().map(|item| item.value.as_str()).collect();
     assert_eq!(values, vec!["skill:brainstorm"]);
-    let suggestions = provider
-        .get_suggestions(&["Please use /skill:brain".to_string()], 0, 23, false)
-        .expect("mid-line skill reference suggests");
+    let suggestions =
+        ready(provider.get_suggestions(&["Please use /skill:brain".to_string()], 0, 23, false));
     assert_eq!(suggestions.prefix, "/skill:brain");
     assert_eq!(
         suggestions

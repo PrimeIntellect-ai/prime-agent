@@ -674,6 +674,7 @@ impl SessionUi {
     /// events dispatch here.
     pub(crate) fn materialize_editor_autocomplete(&mut self, view: &mut AgentView) {
         let was_showing = view.editor.is_showing_autocomplete();
+        let was_pending = view.editor.has_pending_autocomplete();
         view.editor.materialize_autocomplete();
         for event in view.editor.take_events() {
             if let crate::editor::EditorEvent::Changed(text) = event {
@@ -686,6 +687,12 @@ impl SessionUi {
             }
         }
         if view.editor.is_showing_autocomplete() != was_showing {
+            self.dirty = true;
+        }
+        // A background `@` search resolving repaints even when the menu
+        // was already open: its rows are replaced in place, so the
+        // showing-state check above cannot see it.
+        if was_pending && !view.editor.has_pending_autocomplete() {
             self.dirty = true;
         }
     }

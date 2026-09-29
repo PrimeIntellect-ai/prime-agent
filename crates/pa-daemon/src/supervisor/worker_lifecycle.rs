@@ -226,12 +226,23 @@ impl Supervisor {
         if let Some(thinking) = model_selection.thinking {
             durable_rest.insert("thinking".to_string(), json!(thinking.wire_name()));
         }
-        // RLM recursion identity rides the durable create command so a
-        // respawned child keeps it (children of an RLM parent must not
-        // forget their depth). `thinking` is covered above: the validated
-        // wire name goes into the durable command, never the raw config
-        // value, so an invalid level cannot outlive the create check.
-        for key in ["rlmDepth", "rlmMaxDepth", "parentSessionPath"] {
+        // RLM recursion identity and the session flags ride the durable
+        // create command so a respawned worker rebuilds the same session.
+        // `thinking` is covered above: the validated wire name goes into the
+        // durable command, never the raw config value, so an invalid level
+        // cannot outlive the create check.
+        for key in [
+            "rlmDepth",
+            "rlmMaxDepth",
+            "parentSessionPath",
+            "systemPrompt",
+            "appendSystemPrompt",
+            "skills",
+            "promptTemplates",
+            "extensions",
+            "tools",
+            "autonomous",
+        ] {
             if let Some(value) = config_object.and_then(|config| config.get(key)) {
                 durable_rest.insert(key.to_string(), value.clone());
             }
