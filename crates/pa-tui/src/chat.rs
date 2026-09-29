@@ -583,8 +583,7 @@ pub fn render_retry(retry: &RetryState, frame: usize, theme: &Theme, width: usiz
     vec![spacer(), pad_to(row, width, Style::default())]
 }
 
-// The inline unit battery moved to the child module at the same tree
-// position (chat::tests); its use-super glob keeps resolving through the
-// facade bindings and re-exports (the campaign stage-1 precedent).
+// The unit battery lives in the child module (chat::tests); its use-super
+// glob resolves through this facade's bindings and re-exports.
 #[cfg(test)]
 mod tests;

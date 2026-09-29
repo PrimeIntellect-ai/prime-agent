@@ -1,6 +1,5 @@
-//! The chat unit battery (moved with its concerns): the detail cycle, the
-//! user/assistant row geometry, the thinking blocks, the loader/retry
-//! rows, and the width math.
+//! The chat unit battery: the detail cycle, the user/assistant row
+//! geometry, the thinking blocks, the loader/retry rows, and the width math.
 use super::*;
 use crate::osc133::RowMarkers;
 use crate::theme::{ColorMode, Theme, ThemeColor};
