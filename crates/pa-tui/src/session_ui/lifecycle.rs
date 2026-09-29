@@ -60,10 +60,6 @@ impl SessionUi {
             last_status_index: None,
             show_images: options.show_images,
             fullscreen_mouse: options.fullscreen_mouse,
-            fullscreen_enabled: options
-                .client_settings
-                .as_ref()
-                .is_none_or(|settings| settings.fullscreen()),
             service_tier: None,
             speed_display_enabled: false,
             speed_stats: None,

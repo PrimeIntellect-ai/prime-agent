@@ -734,25 +734,6 @@ impl SessionUi {
                 self.handle_rlm_max_depth_command(view, &resolved.args)
                     .await;
             }
-            // `/fullscreen [on|off]` (TS `setFullscreenMode`): persist the
-            // preference and report the TS status row. This surface always
-            // renders on the alternate screen (the Rust TUI has no inline
-            // rendering mode yet), so the toggle changes the persisted
-            // preference and the reported state, not the surface.
-            "fullscreen" => {
-                self.track_command_used("fullscreen");
-                let arg = resolved.args.trim().to_lowercase();
-                if !arg.is_empty() && arg != "on" && arg != "off" {
-                    self.error_row("Usage: /fullscreen [on|off]", view);
-                    return Ok(());
-                }
-                let enable = match arg.as_str() {
-                    "on" => true,
-                    "off" => false,
-                    _ => !self.fullscreen_enabled,
-                };
-                self.set_fullscreen_mode(enable, view);
-            }
             // `/speed [on|off]` (TS `setSpeedDisplay`): toggle the footer
             // tok/sec readout for this session — the dim dock row with the
             // latest response's rate and the session average.
