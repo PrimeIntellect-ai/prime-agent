@@ -11,6 +11,7 @@ use crate::engine::{
 // - every family drives them, and the children reach them + the worker
 // namespace through `use super::*`.
 mod broadcast;
+mod abort_idle_race;
 mod burst;
 mod feed;
 mod park;
