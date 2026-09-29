@@ -247,9 +247,27 @@ note() { printf '%s\n' "$*" >&2; }
 # prefix simply keeps uv at ~/.local, where the product's own ensure_uv
 # also looks for it.)
 # The physical-path probe is POSIX-only (cd + pwd -P): readlink -f is
-# coreutils, and macOS ships without it.
+# coreutils, and macOS ships without it. A DANGLING target (a uv target
+# directory that does not exist yet - the normal shape at install time)
+# must still resolve through its nearest EXISTING ancestor: the old
+# single-level probe returned the unresolved spelling, and a parent
+# symlink into the shared store would slip the containment check (the
+# bots' finding) - the uv binary would then be created THROUGH the
+# symlink, inside the store. The parent/base split rides parameter
+# expansion alone (no dirname/basename: the bare-machine PATH of the
+# installer's own support matrix carries neither).
 physical_path() {
-  ( cd "$1" 2>/dev/null && pwd -P ) || printf '%s' "$1"
+  case "$1" in
+    */*) phys_parent="${1%/*}" phys_base="${1##*/}" ;;
+    *)   phys_parent="." phys_base="$1" ;;
+  esac
+  if [ -d "$1" ]; then
+    ( cd "$1" 2>/dev/null && pwd -P ) || printf '%s' "$1"
+  elif [ -z "$phys_base" ]; then
+    printf '%s' "$1"
+  else
+    printf '%s/%s' "$(physical_path "$phys_parent")" "$phys_base"
+  fi
 }
 uv_store_root="$(physical_path "${HOME}/.prime/agent")"
 uv_default_root="$(physical_path "${HOME}/.local")"
@@ -681,10 +699,15 @@ PROBE_TIMEOUT_S = 5.0
 STOP_CONFIRM_TIMEOUT_S = 5.0
 # The final (post-forced) poll outlasts a healthy drain instead of a fixed
 # 5s: the field event measured a 46-worker drain at ~49s while the 5s poll
-# declared the dying daemon "still running".
+# declared the dying daemon "still running". The window is CAPPED: the
+# scaling serves a healthy drain (2s per session over the 5s floor), and a
+# daemon still up after the cap has heard BOTH requests and is not
+# draining - the stop-failed verdict + the loud manual-stop warning beat
+# blocking an install for hours on a pathological count.
 STOP_DRAIN_MINIMUM_S = 5.0
 STOP_DRAIN_PER_SESSION_S = 2.0
 STOP_DRAIN_UNKNOWN_S = 30.0
+STOP_DRAIN_CAP_S = 120.0
 
 def read_line(sock, deadline, buf):
     # One persistent buffer per connection: a daemon that answers
@@ -864,7 +887,7 @@ count_label = "?" if count is None else str(count)
 def drain_confirm_timeout_s():
     if count is None:
         return STOP_DRAIN_UNKNOWN_S
-    return STOP_DRAIN_MINIMUM_S + STOP_DRAIN_PER_SESSION_S * count
+    return min(STOP_DRAIN_MINIMUM_S + STOP_DRAIN_PER_SESSION_S * count, STOP_DRAIN_CAP_S)
 
 request({"type": "shutdown", "force": False})
 if stopped_within(STOP_CONFIRM_TIMEOUT_S):
@@ -886,10 +909,12 @@ PROBE_PY
 stop_daemon_candidate() {
   socket_path="$1"
   candidate_kind="$2"
-  # The caller reads this after each probe to run the post-stop verify on
-  # exactly the sockets a stop verdict was recorded for (per candidate,
-  # never through a path list).
+  # The caller reads these after each probe: which candidates recorded a
+  # stop (for the post-stop verify, per candidate, never through a path
+  # list), and whether the stopped daemon was ours (the update-flow
+  # next-step line must stay silent when OUR stopped daemon came back).
   last_stop_recorded="no"
+  last_stop_was_rust="no"
   # THE SELF-SOCKET REFUSAL: the candidate that is the daemon DRIVING this
   # very install is never probed — not even the hello — unless the
   # explicit override is set (a deliberate in-daemon update). The refusal
@@ -940,6 +965,7 @@ stop_daemon_candidate() {
     rust:stopped:0)
       ts_stop_found_any="yes"
       last_stop_recorded="yes"
+      last_stop_was_rust="yes"
       ts_stop_rust_stopped="yes"
       say "the Rust daemon on ${socket_path} stopped for the update (idle; no signal sent)"
       ts_stop_summary="${ts_stop_summary}rust daemon: stopped for the update on ${socket_path} (idle; no signal sent; verified down)
@@ -949,6 +975,7 @@ stop_daemon_candidate() {
       sessions="${verdict##*:}"
       ts_stop_found_any="yes"
       last_stop_recorded="yes"
+      last_stop_was_rust="yes"
       ts_stop_rust_stopped="yes"
       say "the Rust daemon on ${socket_path} stopped for the update (${sessions} session(s)"
       say "  were live; the graceful request settled it; no signal sent)"
@@ -959,6 +986,7 @@ stop_daemon_candidate() {
       sessions="${verdict##*:}"
       ts_stop_found_any="yes"
       last_stop_recorded="yes"
+      last_stop_was_rust="yes"
       ts_stop_rust_stopped="yes"
       say "the Rust daemon on ${socket_path} stopped for the update (${sessions} session(s)"
       say "  were live; forced after the graceful request; no signal sent)"
@@ -1345,34 +1373,51 @@ fi
 # the old binary and venv state, the update needs it down, the next
 # invocation boots the new daemon).
 last_stop_recorded=""
+last_stop_was_rust=""
 stop_daemon_candidate "$ts_socket" ts
 ts_stop_stopped_ts="$last_stop_recorded"
+ts_stop_was_rust_ts="$last_stop_was_rust"
 if [ "$env_socket_probe" = "yes" ]; then
   stop_daemon_candidate "$env_socket" ts
   ts_stop_stopped_env="$last_stop_recorded"
+  ts_stop_was_rust_env="$last_stop_was_rust"
 fi
 if [ "$rust_socket_probe" = "yes" ]; then
   stop_daemon_candidate "$rust_socket" ours
   ts_stop_stopped_rust="$last_stop_recorded"
+  ts_stop_was_rust_rust="$last_stop_was_rust"
 fi
 
 # THE VERIFY (the field contract: the TS daemon is DOWN before the install
 # finishes): every socket a stop verdict was recorded for is re-checked
 # once more — a daemon that came back between its confirm poll and here
 # (a restart loop, a supervisor re-exec) reads as a leftover and gets the
-# loud warning instead of a stop line alone. The per-candidate flags keep
-# the verify off any path list (the same whitespace ruling).
+# loud warning that SUPERSEDES its earlier stop line (the summary never
+# claims both). The per-candidate flags keep the verify off any path
+# list (the same whitespace ruling).
+rust_leftover="no"
 verify_stopped_socket() {
+  last_verify_leftover="no"
   if [ "$("$UVPY" "$probe_py" --listening "$1" 2>/dev/null)" = "up" ]; then
+    last_verify_leftover="yes"
+    if [ "$2" = "yes" ]; then
+      rust_leftover="yes"
+    fi
     note "WARNING: the daemon on $1 answered the post-stop verification;"
     note "  it is treated as still running (see the install summary)"
-    ts_stop_summary="${ts_stop_summary}daemon: WARNING still running on $1 (it answered the post-stop verification; stop it by hand: prime-agent shutdown --force)
+    ts_stop_summary="${ts_stop_summary}daemon: WARNING still running on $1 (it answered the post-stop verification — the earlier stop line for this socket is superseded; stop it by hand: prime-agent shutdown --force)
 "
   fi
 }
-if [ "${ts_stop_stopped_ts:-}" = "yes" ]; then verify_stopped_socket "$ts_socket"; fi
-if [ "${ts_stop_stopped_env:-}" = "yes" ]; then verify_stopped_socket "$env_socket"; fi
-if [ "${ts_stop_stopped_rust:-}" = "yes" ]; then verify_stopped_socket "$rust_socket"; fi
+if [ "${ts_stop_stopped_ts:-}" = "yes" ]; then
+  verify_stopped_socket "$ts_socket" "$ts_stop_was_rust_ts"
+fi
+if [ "${ts_stop_stopped_env:-}" = "yes" ]; then
+  verify_stopped_socket "$env_socket" "$ts_stop_was_rust_env"
+fi
+if [ "${ts_stop_stopped_rust:-}" = "yes" ]; then
+  verify_stopped_socket "$rust_socket" "$ts_stop_was_rust_rust"
+fi
 
 # The TS npm package: uninstalled (operator directive — the Rust port owns the
 # keyword), with the restore command printed. Exact package `prime-agent`
@@ -1503,9 +1548,12 @@ fi
 
 echo "next steps: the README's Install section ships inside the payload"
 echo "  ${share_dir}/README.md"
-if [ "$ts_stop_rust_stopped" = "yes" ]; then
+if [ "$ts_stop_rust_stopped" = "yes" ] && [ "$rust_leftover" != "yes" ]; then
   # The update flow's half: the stopped daemon was OURS — the next
-  # invocation boots the fresh payload this install just published.
+  # invocation boots the fresh payload this install just published. A
+  # rust daemon that answered the post-stop verification is NOT "stopped
+  # for the update": the warning line says so, and this line stays silent
+  # (the bots' finding — the summary must never claim both).
   echo "  the previous Rust daemon was stopped for this update — the next"
   echo "  prime-agent invocation boots the new daemon"
 fi
