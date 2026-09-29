@@ -858,9 +858,7 @@ fn a_cursorless_attach_reconstructs_as_unkeyed_for_the_layout_handoff() {
         .expect("the snapshot is a map");
     snapshot.remove("lastEventSequence");
     snapshot.remove("lastEventCursor");
-    let top = attach
-        .as_object_mut()
-        .expect("the slim attach is a map");
+    let top = attach.as_object_mut().expect("the slim attach is a map");
     top.remove("lastEventSequence");
     top.remove("lastEventCursor");
     let data = attach_data_from_response(attach).unwrap();

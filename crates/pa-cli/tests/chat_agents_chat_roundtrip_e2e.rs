@@ -26,7 +26,7 @@ use pa_tui::interactive::{
 
 /// The layout handoff store is process-wide: the two round-trip tests
 /// serialize through this lock so one test's stash is never adopted (or
-/// overwritten) by the other's - the unit tests' HANDOFF_TEST_LOCK
+/// overwritten) by the other's - the unit tests' `HANDOFF_TEST_LOCK`
 /// discipline applied to the e2e pair (the slot lives inside pa-tui and
 /// cannot be reset from this crate's tests).
 static HANDOFF_E2E_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

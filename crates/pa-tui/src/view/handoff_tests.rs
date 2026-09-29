@@ -301,7 +301,10 @@ fn a_post_turn_sojourn_reentry_matches_the_live_sequence_key() {
         0,
         "the held packs served the post-turn re-entry: no render_entry call"
     );
-    assert_eq!(reentry_rows, left_rows, "the served rows are byte-identical");
+    assert_eq!(
+        reentry_rows, left_rows,
+        "the served rows are byte-identical"
+    );
 
     // The pre-fix shape for the same re-entry: a stash keyed at the run's
     // own stale attach value misses the post-turn re-attach and re-renders.

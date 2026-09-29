@@ -409,7 +409,7 @@ impl AgentView {
             selection_restyle: restyle::SelectionRestyle::default(),
             sparse_mutation: None,
             pending_handoff: None,
-        handoff_seeds: 0,
+            handoff_seeds: 0,
             click: click::ClickSurface::default(),
         }
     }
