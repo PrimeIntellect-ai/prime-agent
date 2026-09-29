@@ -406,15 +406,6 @@ const TOP_LEVEL_OPTION_GROUPS: &[OptionGroup] = &[
         ],
     },
     OptionGroup {
-        heading: "Kernel auto-backgrounding (env)",
-        options: &[
-            (
-                "PRIME_AGENT_AUTOBG_MS <ms>",
-                "Degrade blocking bash awaits and python cells past <ms> to pollable handles (default: 10000; 0: off)",
-            ),
-        ],
-    },
-    OptionGroup {
         heading: "Help",
         options: &[
             ("-v, --version", "Show version and exit"),
