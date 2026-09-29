@@ -531,6 +531,7 @@ async fn an_existing_tombstone_carries_the_stop_past_its_failed_re_write() {
 /// lingering) and lets the accept loop exit. The fake worker holds
 /// its `shutdown` reply on a test-controlled settle, so a pass that
 /// does not wait for the flush barrier fails the assertions below.
+#[cfg(unix)] // the signal-drain state machine: unix signal source
 #[tokio::test]
 async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -683,6 +684,7 @@ async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
 /// shutdown command's gate, and a signal racing an update exit - the
 /// last without flipping the gate, so the update's
 /// descriptor-preserving exit never becomes a terminal stop pass.
+#[cfg(unix)] // the signal-drain state machine: unix signal source
 #[tokio::test]
 async fn a_signal_during_an_in_flight_shutdown_forces() {
     let dir = tempfile::TempDir::new().unwrap();

@@ -1,3 +1,22 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
+// by design on hot paths (boxing 130 fns is allocation-churn with zero
+// correctness gain); the fn-length threshold is a style gate, not
+// correctness (the harness fns are intentionally linear); 64-bit targets -
+// the narrowing sits at OS/protocol boundaries where the values are
+// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
+// guarded parses), and checked conversions would add panic paths where
+// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
+// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
+// dossier for the conductor).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! End-to-end verifier for the subagent panel surface of the agents view:
 //! a fixture roster (saved sessions on disk, one child under a parent and a
 //! grandchild under the child) behind a real supervisor, with the headless
@@ -262,8 +281,8 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
     // through the line.
     let collapsed = first_frame_of(&view.frames, "orchestrator chat");
     assert!(
-        collapsed.contains("\u{25b8} 2 inactive subagents"),
-        "the collapsed parent shows its tree-aggregated summary row:\n{collapsed}"
+        collapsed.contains("\u{25b8} 2 subagents (0 running)"),
+        "the collapsed parent shows its ONE tree-aggregated summary row:\n{collapsed}"
     );
     assert!(
         !collapsed.contains("worker alpha"),
@@ -275,7 +294,7 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
     // row keeps the grandchild hidden until the child expands too.
     let expanded = first_frame_of(&view.frames, "worker alpha");
     assert!(
-        expanded.contains("\u{25be} 2 inactive subagents"),
+        expanded.contains("\u{25be} 2 subagents (0 running)"),
         "the expanded summary row keeps the tree aggregate and flips its marker:\n{expanded}"
     );
     assert!(
@@ -406,8 +425,8 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
     // mount frame predates the saved rows and their summary markers).
     let returned = first_frame_of(&back.frames, "orchestrator chat");
     assert!(
-        returned.contains("\u{25b8} 2 inactive subagents"),
-        "the opened child rides the parent's aggregate (a top-level flip would leave the grandchild alone behind the summary):\n{returned}"
+        returned.contains("\u{25b8} 2 subagents (0 running)"),
+        "the opened child rides the parent's ONE aggregate (a top-level flip would leave the grandchild alone behind the summary):\n{returned}"
     );
     assert!(
         returned.contains("agents 0 running, 0 idle, 1 inactive"),
@@ -415,7 +434,7 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
     );
     let expanded = frame_of(&back.frames, "worker alpha");
     assert!(
-        expanded.contains("\u{25be} 2 inactive subagents"),
+        expanded.contains("\u{25be} 2 subagents (0 running)"),
         "the expanded parent tree carries the live child:\n{expanded}"
     );
     assert!(
@@ -423,7 +442,7 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
         "the grandchild stays hidden until the resumed child expands:\n{expanded}"
     );
     assert!(
-        expanded.contains("\u{25b8} 1 inactive subagent"),
+        expanded.contains("\u{25b8} 1 subagents (0 running)"),
         "the resumed child's own subtree stays behind its collapsed summary row:\n{expanded}"
     );
     assert!(

@@ -316,6 +316,7 @@ impl SessionScanState {
         // would instead certify an in-place rewrite as a resume.
         #[cfg(not(unix))]
         {
+            let _ = generation;
             false
         }
     }

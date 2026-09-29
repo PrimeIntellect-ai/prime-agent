@@ -21,14 +21,12 @@ impl AgentsViewMode {
         }
     }
 
-    /// Toggle the selected parent's subagent list (TS `toggleSubagentList`,
-    /// plus the operator's two-line split): alt+right and open both land
-    /// here; the target is the selected row's parent for a summary line,
-    /// the row itself otherwise. A summary line toggles its own line
-    /// (the running line's identity prefix dispatches the running set,
-    /// the inactive line's the inactive set); an agent row toggles its
-    /// first line — the running one while work runs, else the inactive
-    /// one.
+    /// Toggle the selected parent's subagent list (TS
+    /// `toggleSubagentList`, the operator's 2026-09-28 one-line merge):
+    /// alt+right and open both land here; the target is the selected
+    /// row's parent for a summary line, the row itself otherwise —
+    /// one line, one expansion set. An agent row with no descendants
+    /// keeps the insert inert (its line never renders).
     pub(super) fn toggle_subagent_list(&mut self, row: &AgentsViewRow) {
         let target = match row.kind {
             RowKind::SubagentSummary => row.parent_identity.clone(),
@@ -37,23 +35,12 @@ impl AgentsViewMode {
         let Some(target) = target else {
             return;
         };
-        let inactive_line = match row.kind {
-            RowKind::SubagentSummary => row
-                .identity
-                .starts_with(crate::agents_view_forest::INACTIVE_SUMMARY_ROW_PREFIX),
-            _ => row.running_subagent_count == 0,
-        };
-        let expanded = if inactive_line {
-            &mut self.expanded_inactive_parents
-        } else {
-            &mut self.expanded_parents
-        };
-        if expanded.remove(&target) {
+        if self.expanded_parents.remove(&target) {
             // Collapsing also hides the spawn program (TS clears
             // `programShownParents` with the expansion); the program
             // surface is not part of this lane.
         } else {
-            expanded.insert(target);
+            self.expanded_parents.insert(target);
         }
         self.rebuild_rows();
     }

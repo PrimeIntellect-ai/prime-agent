@@ -1,3 +1,17 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures by
+// design on hot paths; 64-bit targets - the narrowing sits at OS/protocol
+// boundaries where the values are bounded (pid syscalls, epoch/elapsed
+// milliseconds), and checked conversions would add panic paths where silent
+// wrap was deliberate.
+#![allow(
+    clippy::large_futures,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    clippy::too_many_lines
+)]
+
 //! The terminal-state differential: a recording mock terminal over a
 //! real pty asserts that EVERY terminal mode the TUI arms comes back
 //! off on EVERY exit route.
@@ -255,7 +269,7 @@ fn write_replay_fixture() -> String {
 #[test]
 fn parity_exit_through_slash_command_restores_every_mode() {
     let _lock = harness_lock();
-    let mut harness = DifferentialHarness::start(ChildSpec::new("chat"));
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("chat"));
     harness.answer_kitty_query();
     harness.wait_from_start(b"row 0", "the attach snapshot rendered");
 
@@ -282,7 +296,7 @@ fn parity_exit_through_slash_command_restores_every_mode() {
 #[test]
 fn parity_exit_through_the_ctrl_c_pair_restores_every_mode() {
     let _lock = harness_lock();
-    let mut harness = DifferentialHarness::start(ChildSpec::new("chat"));
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("chat"));
     harness.answer_kitty_query();
     harness.wait_from_start(b"row 0", "the attach snapshot rendered");
 
@@ -309,7 +323,7 @@ fn parity_exit_through_the_ctrl_c_pair_restores_every_mode() {
 #[test]
 fn the_detach_handoff_then_the_view_exit_restores_every_mode() {
     let _lock = harness_lock();
-    let mut harness = DifferentialHarness::start(ChildSpec::new("chat"));
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("chat"));
     harness.answer_kitty_query();
     harness.wait_from_start(b"row 0", "the attach snapshot rendered");
 
@@ -346,7 +360,7 @@ fn the_detach_handoff_then_the_view_exit_restores_every_mode() {
 #[test]
 fn the_force_quit_watchdog_restores_every_mode() {
     let _lock = harness_lock();
-    let mut harness = DifferentialHarness::start(ChildSpec::new("chat").stall(&["list"]));
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("chat").stall(&["list"]));
     harness.answer_kitty_query();
     harness.wait_from_start(b"row 0", "the attach snapshot rendered");
 
@@ -374,7 +388,7 @@ fn the_force_quit_watchdog_restores_every_mode() {
 #[test]
 fn the_agents_view_fresh_exit_restores_every_mode() {
     let _lock = harness_lock();
-    let mut harness = DifferentialHarness::start(ChildSpec::new("view"));
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("view"));
     harness.answer_kitty_query();
     harness.wait_from_start(b"Search sessions", "the agents view mounts");
 
@@ -403,7 +417,7 @@ fn the_agents_view_fresh_exit_restores_every_mode() {
 #[test]
 fn the_agents_view_roster_failure_behind_a_handoff_restores_every_mode() {
     let _lock = harness_lock();
-    let mut harness = DifferentialHarness::start(ChildSpec::new("chat"));
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("chat"));
     harness.answer_kitty_query();
     harness.wait_from_start(b"row 0", "the attach snapshot rendered");
 
@@ -428,7 +442,7 @@ fn the_agents_view_roster_failure_behind_a_handoff_restores_every_mode() {
 #[test]
 fn the_config_selector_esc_close_restores_every_mode() {
     let _lock = harness_lock();
-    let mut harness = DifferentialHarness::start(ChildSpec::new("selector"));
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("selector"));
     harness.answer_kitty_query();
     harness.wait_from_start(b"Resource Configuration", "the selector mounts");
 
@@ -452,7 +466,7 @@ fn the_config_selector_esc_close_restores_every_mode() {
 fn the_config_selector_remapped_exit_action_restores_every_mode() {
     let _lock = harness_lock();
     let mut harness = DifferentialHarness::start(
-        ChildSpec::new("selector").env(CHILD_SELECTOR_FLAGS_ENV, "remap-exit"),
+        &ChildSpec::new("selector").env(CHILD_SELECTOR_FLAGS_ENV, "remap-exit"),
     );
     harness.answer_kitty_query();
     harness.wait_from_start(b"Resource Configuration", "the selector mounts");
@@ -481,7 +495,7 @@ fn the_config_selector_remapped_exit_action_restores_every_mode() {
 fn the_config_selector_toggle_error_restores_every_mode() {
     let _lock = harness_lock();
     let mut harness = DifferentialHarness::start(
-        ChildSpec::new("selector").env(CHILD_SELECTOR_FLAGS_ENV, "fail-toggle"),
+        &ChildSpec::new("selector").env(CHILD_SELECTOR_FLAGS_ENV, "fail-toggle"),
     );
     harness.answer_kitty_query();
     harness.wait_from_start(b"Resource Configuration", "the selector mounts");
@@ -507,7 +521,7 @@ fn the_replay_surface_clean_exit_restores_every_mode() {
     let _lock = harness_lock();
     let fixture = write_replay_fixture();
     let mut harness =
-        DifferentialHarness::start(ChildSpec::new("replay").env(CHILD_FIXTURE_ENV, fixture));
+        DifferentialHarness::start(&ChildSpec::new("replay").env(CHILD_FIXTURE_ENV, fixture));
     harness.answer_kitty_query();
     harness.wait_from_start(b"replay row 0", "the replay surface mounted");
 
@@ -534,7 +548,7 @@ fn the_panic_unwind_restores_every_mode() {
     let _lock = harness_lock();
     let fixture = write_replay_fixture();
     let mut harness = DifferentialHarness::start(
-        ChildSpec::new("replay")
+        &ChildSpec::new("replay")
             .env(CHILD_FIXTURE_ENV, fixture)
             .env(CHILD_REPLAY_FLAGS_ENV, "panic"),
     );
@@ -709,7 +723,7 @@ fn the_suspend_cycle_hands_a_whole_terminal_to_the_shell_and_back() {
         Err(error) => panic!("the harness could not start a fresh session: {error}"),
     }
     let _lock = harness_lock();
-    let mut harness = DifferentialHarness::start(ChildSpec::new("chat"));
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("chat"));
     harness.answer_kitty_query();
     harness.wait_from_start(b"row 0", "the attach snapshot rendered");
     let child_id = harness.child.id();
@@ -780,7 +794,7 @@ fn the_suspend_cycle_hands_a_whole_terminal_to_the_shell_and_back() {
 #[test]
 fn the_late_kitty_answer_inside_the_exit_window_is_stood_down() {
     let _lock = harness_lock();
-    let mut harness = DifferentialHarness::start(ChildSpec::new("chat"));
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("chat"));
     harness.wait_from_start(KITTY_QUERY, "the kitty capability query");
     harness.wait_from_start(b"row 0", "the attach snapshot rendered");
 

@@ -12,8 +12,9 @@ fn temp_dir() -> PathBuf {
 }
 
 /// The captured-attribution fixture: real devbox session rows
-/// (content sanitized; ids, timestamps, and usage verbatim) — six
-/// `child_usage_attributed` entries target one assistant row.
+/// (content sanitized; cwd and repoUrl neutralized; ids, timestamps, and
+/// usage verbatim) — six `child_usage_attributed` entries target one
+/// assistant row.
 fn captured_attribution_fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/attribution-fold-captured.jsonl")
 }
