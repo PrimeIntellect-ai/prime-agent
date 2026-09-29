@@ -1,20 +1,26 @@
-# The nightly: a scheduled beta-tag cut, the codex tag-only-commit trick,
-# nightlies only (RELEASE-FLOW-PROPOSAL.md §5). No release PR for nightlies
+# The rolling beta: a per-push beta-tag cut, the codex tag-only-commit
+# trick, betas only (RELEASE-FLOW-PROPOSAL.md §5). No release PR for betas
 # - reviewer load would be absurd at a per-merge cadence - and the branch is
-# NEVER touched: the nightly is a tag-only commit whose tree differs from its
+# NEVER touched: the beta is a tag-only commit whose tree differs from its
 # parent only by the workspace version rows, and no branch head ever
 # references it.
 #
-# Cadence: daily 00:00Z. Schedule events fire ONLY from the default branch
-# (verified on this repo: the rust-only windows-runtime-triage.yml dispatch
-# 404s), so the operator mirrors this file to `main` as one config act; this
-# job resolves the rust line explicitly (the continuous runs on branch rust)
-# and never reads the ref it ran on.
+# CADENCE (the operator's ruling: the beta channel follows EVERY green
+# tip - 'nightly' meant the beta release, and the beta updates on every
+# commit, not once a night): every push to `rust` fires a cut for that
+# commit. The cut WAITS for the pushed commit's `continuous` run to
+# conclude green (the proven-built evidence: the tip CI must have greened
+# on that commit) before tagging. The SUPERSEDE cost-guard keeps busy days
+# cheap: this job's concurrency group cancels the in-flight WAIT when a
+# newer push lands (nothing has been tagged during the wait), and
+# release.yml's beta publish refuses to move the channel pointers when a
+# newer commit exists on rust - so only the LATEST green commit ever
+# advances the channel, and 20 merges cost at most a handful of actual
+# beta cuts, each the freshest green.
 #
 # The cut, in order:
-#   1. Resolve the newest SUCCESSFUL `continuous` run on rust and take its
-#      head commit: the nightly is built from a parent that already built
-#      green, never from a tip whose continuous run is still in flight.
+#   1. Resolve the parent: the pushed commit (waiting out its `continuous`
+#      run) on push events; the newest proven-green walk on dispatch.
 #   2. Read the version inputs: the workspace version at that commit (the
 #      staged next stable), the rolling `nightly` release's beta.json (the
 #      published nightly counter), and the latest stable release.
@@ -56,19 +62,25 @@
 name: nightly
 
 on:
-  schedule:
-    # 00:00 UTC daily (the proposal's cadence).
-    - cron: "0 0 * * *"
-  # For the operator's supervised first cut; behaves exactly like the cron.
+  # The rolling beta (the operator's ruling): every push to `rust` fires a
+  # cut for that commit; the cut waits out the pushed commit's continuous
+  # CI before tagging (the proven-built evidence).
+  push:
+    branches:
+      - rust
+  # The operator's supervised cut: resolves the newest proven-green commit
+  # instead of a pushed one (the walk).
   workflow_dispatch: {}
 
 permissions: {}
 
 concurrency:
-  # Serialize cuts: the exists-guard is checked once per run, so a cron/dispatch
-  # race must not interleave.
+  # THE SUPERSEDE GUARD: a newer push cancels an in-flight cut's WAIT (a
+  # cut that has not tagged yet); once the tag exists the release has
+  # fired and release.yml's own publish-side supersede check governs. This
+  # is what keeps per-push cuts from piling up on busy days.
   group: nightly-tag-cut
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   # The guard step reads this: an unconfigured release bot makes the nightly a
@@ -80,7 +92,11 @@ jobs:
   cut:
     name: "cut the nightly beta tag (tag-only commit, never a branch change)"
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # THE WAIT'S BUDGET: the pushed commit's continuous run must conclude
+    # (the CI-green wait polls up to 75 minutes for a busy queue), and the
+    # tag machinery after it is minutes — 90 covers both; the old
+    # midnight-cron 15 was sized for a dispatch-shaped walk only.
+    timeout-minutes: 90
     permissions: {}
     steps:
       - name: Guard (the release bot App gates the whole nightly flow)
@@ -101,7 +117,7 @@ jobs:
           # these.
           permission-contents: write
           permission-actions: read
-      - name: Resolve the inputs (continuous SHA, beta.json, latest stable)
+      - name: Resolve the inputs (the pushed sha's CI wait / the proven-green walk, beta.json, latest stable)
         if: env.HAS_RELEASE_BOT == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -109,50 +125,115 @@ jobs:
           set -euo pipefail
           out="${RUNNER_TEMP}/nightly"
           mkdir -p "${out}"
-          # The newest continuous run on rust whose BUILD actually ran green -
-          # not merely a successful conclusion. The staleness gate
+          # The proven-built rule in both shapes: run-level success is
+          # necessary but not sufficient evidence. The staleness gate
           # (continuous.yml, TS #2567) skips the build jobs on superseded
-          # pushes and the run still concludes success: such a commit was
-          # never built, and a nightly cut from it would tag an unproven tree
+          # pushes and the run still concludes success - such a commit was
+          # never built, and a beta cut from it would tag an unproven tree
           # (if release.yml's build then failed, the beta tag would exist
-          # with no promote and the exists-guard would stick the train). The
-          # parent selection therefore walks the successful runs newest
-          # first and accepts the first whose build-* jobs all completed
-          # green; run-level success is necessary but not sufficient
-          # evidence.
-          if ! gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/continuous.yml/runs?branch=rust&per_page=100" \
-               | jq -e -r '[.workflow_runs[]
-                           | select(.status == "completed" and .conclusion == "success")]
-                          | sort_by(.run_number) | reverse | .[]
-                          | [.id, .head_sha] | @tsv' \
-               > "${out}/candidate-runs" 2>/dev/null || [ ! -s "${out}/candidate-runs" ]; then
-            echo "::error::no successful continuous run on rust in the last 100 runs; refusing to cut a nightly off an unproven tip"
-            exit 1
-          fi
+          # with no promote and the exists-guard would stick the train).
           target_sha=""
-          while IFS="$(printf '\t')" read -r run_id candidate_sha; do
-            [ -n "${run_id}" ] && [ -n "${candidate_sha}" ] || continue
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            # THE CI-GREEN WAIT (the rolling cut): this push's commit is the
+            # cut's parent, and its continuous run must conclude green first.
+            # A newer push cancels this WAIT (the concurrency group), so the
+            # newest push's cut is the one that survives to tag.
+            target_sha="${GITHUB_SHA}"
+            run_id=""
+            deadline=$((SECONDS + 4500))
+            while :; do
+              runs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/continuous.yml/runs?branch=rust&per_page=1&head_sha=${target_sha}" 2>/dev/null || echo '{"workflow_runs":[]}')"
+              read -r status conclusion candidate_run < <(printf '%s\n' "${runs_json}" | jq -r \
+                '(.workflow_runs[0] // {}) | [(.status // "absent"), (.conclusion // "-"), (.id // "-")] | @tsv')
+              if [ "${status}" = "completed" ]; then
+                if [ "${conclusion}" != "success" ]; then
+                  echo "::error::the continuous run for ${target_sha} concluded ${conclusion}; no beta is cut from a red tip"
+                  exit 1
+                fi
+                run_id="${candidate_run}"
+                break
+              fi
+              if [ "${SECONDS}" -ge "${deadline}" ]; then
+                echo "::error::the continuous run for ${target_sha} did not conclude within 75 minutes; no beta is cut from an unproven tip"
+                exit 1
+              fi
+              echo "waiting for the continuous run of ${target_sha} (${status})..."
+              sleep 60
+            done
+            # The build-jobs check on the resolved run: a superseded push's
+            # run skips its builds - the newer push's cut owns the channel.
             jobs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs" 2>/dev/null || echo '{"jobs":[]}')"
             read -r built total < <(printf '%s\n' "${jobs_json}" | jq -r \
               '[.jobs[] | select(.name | startswith("build-"))]
                | [(map(select(.conclusion == "success")) | length), length] | @tsv')
-            if [ "${total}" -ge 1 ] && [ "${built}" = "${total}" ]; then
-              target_sha="${candidate_sha}"
-              echo "nightly parent: ${target_sha} (continuous run ${run_id}: all ${total} build jobs green)"
-              break
+            if [ "${total}" -lt 1 ] || [ "${built}" != "${total}" ]; then
+              echo "::notice::the continuous run for ${target_sha} did not run its builds to green (${built}/${total}: a superseded push); the newer push's cut takes the channel"
+              # THE GREEN NO-OP: mark the run skipped for every LATER
+              # step (a step-level exit 0 lets the job continue, and the
+              # compute/tag steps would fail reading the missing state
+              # files — the guard env is the job-wide stop signal).
+              echo "CUT_SKIP=true" >> "${GITHUB_ENV}"
+              exit 0
             fi
-            echo "continuous run ${run_id} (${candidate_sha}) concluded success but its builds did not run to green (${built}/${total}); looking further back"
-          done < "${out}/candidate-runs"
-          if [ -z "${target_sha}" ]; then
-            echo "::error::no continuous run on rust with a green 4-target build in the last 100 runs; refusing to cut a nightly off an unbuilt tip"
-            exit 1
+            echo "rolling beta parent: ${target_sha} (continuous run ${run_id}: all ${total} build jobs green)"
+          else
+            # The dispatch walk: the newest continuous run on rust whose
+            # BUILD actually ran green, walking the successful runs newest
+            # first and accepting the first whose build-* jobs all
+            # completed green.
+            if ! gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/continuous.yml/runs?branch=rust&per_page=100" \
+                 | jq -e -r '[.workflow_runs[]
+                             | select(.status == "completed" and .conclusion == "success")]
+                            | sort_by(.run_number) | reverse | .[]
+                            | [.id, .head_sha] | @tsv' \
+                 > "${out}/candidate-runs" 2>/dev/null || [ ! -s "${out}/candidate-runs" ]; then
+              echo "::error::no successful continuous run on rust in the last 100 runs; refusing to cut a beta off an unproven tip"
+              exit 1
+            fi
+            while IFS="$(printf '\t')" read -r run_id candidate_sha; do
+              [ -n "${run_id}" ] && [ -n "${candidate_sha}" ] || continue
+              jobs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs" 2>/dev/null || echo '{"jobs":[]}')"
+              read -r built total < <(printf '%s\n' "${jobs_json}" | jq -r \
+                '[.jobs[] | select(.name | startswith("build-"))]
+                 | [(map(select(.conclusion == "success")) | length), length] | @tsv')
+              if [ "${total}" -ge 1 ] && [ "${built}" = "${total}" ]; then
+                target_sha="${candidate_sha}"
+                echo "rolling beta parent (the dispatch walk): ${target_sha} (continuous run ${run_id}: all ${total} build jobs green)"
+                break
+              fi
+              echo "continuous run ${run_id} (${candidate_sha}) concluded success but its builds did not run to green (${built}/${total}); looking further back"
+            done < "${out}/candidate-runs"
+            if [ -z "${target_sha}" ]; then
+              echo "::error::no continuous run on rust with a green 4-target build in the last 100 runs; refusing to cut a beta off an unbuilt tip"
+              exit 1
+            fi
           fi
           # The handoff contract: the compute step reads the resolved parent
           # from this file (the steps exchange state through
           # ${RUNNER_TEMP}/nightly, never shell memory) - the selection above
           # validates it, this write persists it.
           printf '%s\n' "${target_sha}" > "${out}/target-sha"
-          # The rolling nightly release's beta.json: the published counter.
+          # THE TAG LEDGER is the counter's truth, NOT beta.json: a
+          # superseded cut publishes its versioned artifacts but leaves
+          # the channel pointers alone, so a channel-derived counter would
+          # recompute the SAME next tag forever (the exists-guard would
+          # skip every subsequent cut — the beta channel would deadlock).
+          # The -beta* tags themselves are the append-only ledger: every
+          # cut's tag exists whether or not its channel publish ran, so
+          # the counter derived from the newest matching tag always
+          # advances. beta.json is still recorded (the compute step reads
+          # its shape when present, for the counter-restart check only).
+          ledger_version="$(gh api "repos/${GITHUB_REPOSITORY}/tags?per_page=100" \
+            | jq -r '.[].name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+-beta\\.[0-9]+$"))' \
+            | sort -V | tail -1 || true)"
+          if [ -n "${ledger_version}" ]; then
+            printf '%s\n' "${ledger_version}" > "${out}/beta-ledger-version"
+            echo "beta tag ledger: newest ${ledger_version}"
+          else
+            echo "no -beta* tags yet: the first cut starts the counter at 1"
+          fi
+          # The rolling nightly release's beta.json (informational: the
+          # published channel state; the counter comes from the ledger).
           if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/nightly" \
                | jq -e '[.assets[] | select(.name == "beta.json")][0].browser_download_url // empty' \
                > "${out}/beta-url" 2>/dev/null && [ -s "${out}/beta-url" ]; then
@@ -160,7 +241,7 @@ jobs:
               "$(tr -d '"' < "${out}/beta-url")" -o "${out}/beta.json"
             echo "rolling nightly beta.json: $(jq -c . "${out}/beta.json")"
           else
-            echo "no rolling nightly release yet: the first cut starts the counter at 1"
+            echo "no rolling nightly release yet: the channel starts empty"
           fi
           # The latest stable release (may predate the rust line - the TS
           # product's releases share this repo; the version math below takes
@@ -177,7 +258,7 @@ jobs:
           gh api "repos/${GITHUB_REPOSITORY}/contents/Cargo.lock?ref=${target_sha}" --jq .content | base64 -d > "${out}/Cargo.lock"
           gh api "repos/${GITHUB_REPOSITORY}/git/commits/${target_sha}" --jq .tree.sha > "${out}/base-tree-sha"
       - name: Compute the nightly version + rewrite the version rows
-        if: env.HAS_RELEASE_BOT == 'true'
+        if: env.HAS_RELEASE_BOT == 'true' && env.CUT_SKIP != 'true'
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -211,15 +292,25 @@ jobs:
                   x, y, z = parse_semver(tag)
                   stable_key = (x, y, z + 1)
 
+          # THE TAG LEDGER (the counter's truth): the newest -beta* tag,
+          # NOT beta.json — a superseded cut leaves the channel pointers
+          # alone, so a channel-derived counter would recompute the same
+          # next tag forever and the exists-guard would deadlock the
+          # channel. Every cut's tag exists whether or not its publish
+          # ran, so the ledger always advances.
           beta_key = None
           cb_n = 0
-          beta_file = out / "beta.json"
-          if beta_file.is_file():
-              doc = json.loads(beta_file.read_text())
-              beta_key, cb_n = parse_beta(doc["version"])
+          ledger_file = out / "beta-ledger-version"
+          if ledger_file.is_file():
+              beta_key, cb_n = parse_beta(ledger_file.read_text().strip())
+          else:
+              beta_file = out / "beta.json"
+              if beta_file.is_file():
+                  doc = json.loads(beta_file.read_text())
+                  beta_key, cb_n = parse_beta(doc["version"])
 
           # base = max(workspace version, latest stable + one patch, the
-          # published nightly's base). The floor matters: `releases/latest`
+          # ledger's newest beta base). The floor matters: `releases/latest`
           # serves the newest non-prerelease by created_at, not the highest
           # semver, and a workspace-version revert could otherwise derive a
           # base BELOW the published nightly - the rolling refresh's
@@ -298,8 +389,8 @@ jobs:
           }))
           print(f"tag-only commit prepared: {tag} from parent {target_sha}")
           PY
-      - name: Idempotency guard (the published counter is the truth)
-        if: env.HAS_RELEASE_BOT == 'true'
+      - name: Idempotency guard (the tag ledger is the truth)
+        if: env.HAS_RELEASE_BOT == 'true' && env.CUT_SKIP != 'true'
         id: guard
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -314,7 +405,7 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
       - name: Create the tag-only commit + annotated tag (GitHub API, the release bot)
-        if: env.HAS_RELEASE_BOT == 'true' && steps.guard.outputs.skip == 'false'
+        if: env.HAS_RELEASE_BOT == 'true' && env.CUT_SKIP != 'true' && steps.guard.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
