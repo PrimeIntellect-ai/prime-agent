@@ -446,6 +446,16 @@ impl PhaseTelemetry {
         if self.emitted.contains(&status.state) {
             return;
         }
+        // Only states with a v1 phase event OR a v2 stage mapping own a
+        // duration window; unmapped states (`Planning`, `Acquire`,
+        // `Join`, `Stopped`) never consume the window - a `Stopped`
+        // observation between mapped stages would otherwise shorten the
+        // next stage's duration instead of being skipped.
+        let v2_stage = installation_stage(status.state);
+        let v1_event = phase_event_name(status.state);
+        if v2_stage.is_none() && v1_event.is_none() {
+            return;
+        }
         self.emitted.push(status.state);
         let now = std::time::Instant::now();
         let duration_ms = self
@@ -455,8 +465,8 @@ impl PhaseTelemetry {
         // The v2 installation stage fires for EVERY mapped transition -
         // including the ones without their own v1 phase event (`Skipped`:
         // the already-current path still reports `completed`/`skipped`).
-        self.installation_stage(status, duration_ms);
-        let Some(event) = phase_event_name(status.state) else {
+        self.installation_stage(status, duration_ms, v2_stage);
+        let Some(event) = v1_event else {
             return;
         };
         let mut properties = pa_telemetry::base_properties("cli");
@@ -484,9 +494,14 @@ impl PhaseTelemetry {
     /// per transition, carrying the attempt id, the version pair, and
     /// the terminal restore counts. Primitives only: no paths, no
     /// messages, no ids beyond the attempt id.
-    fn installation_stage(&self, status: &UpdateStatus, duration_ms: u64) {
+    fn installation_stage(
+        &self,
+        status: &UpdateStatus,
+        duration_ms: u64,
+        mapping: Option<(&'static str, &'static str, Option<&'static str>)>,
+    ) {
         let Some(client) = &self.client else { return };
-        let Some((stage, outcome, reason)) = installation_stage(status.state) else {
+        let Some((stage, outcome, reason)) = mapping else {
             return;
         };
         let mut event = pa_telemetry::AgentInstallationStage {
