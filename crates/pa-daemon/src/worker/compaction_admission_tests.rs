@@ -182,7 +182,7 @@ async fn steer_mid_compaction_defers_and_delivers_after_the_window() {
     let joined = tokio::time::timeout(std::time::Duration::from_secs(10), compact).await;
     let compact = match joined {
         Ok(joined) => joined.expect("the compact task panicked"),
-        Err(_) => panic!("the compact never settled"),
+        Err(error) => panic!("the compact never settled: {error}"),
     };
     assert!(compact.success, "scripted compact failed: {compact:?}");
     assert!(

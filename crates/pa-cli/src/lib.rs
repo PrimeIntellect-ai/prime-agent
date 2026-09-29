@@ -1,3 +1,22 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
+// by design on hot paths (boxing 130 fns is allocation-churn with zero
+// correctness gain); the fn-length threshold is a style gate, not
+// correctness (the harness fns are intentionally linear); 64-bit targets -
+// the narrowing sits at OS/protocol boundaries where the values are
+// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
+// guarded parses), and checked conversions would add panic paths where
+// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
+// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
+// dossier for the conductor).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! pa-cli: the `prime-agent` binary. The argument surface, command routing,
 //! help output, and validation are faithful ports of the TypeScript product's
 //! `packages/coding-agent/src/main.ts` and `src/cli/*.ts`. Runtime execution
@@ -61,7 +80,7 @@ pub use interactive_mode::{
 
 /// Entry point shared by the binary and the integration tests. Returns the
 /// process exit code.
-pub fn main_with_runtime(args: Vec<String>, runtime: &dyn mode::Runtime) -> i32 {
+pub fn main_with_runtime(args: &[String], runtime: &dyn mode::Runtime) -> i32 {
     match main_impl(args, runtime) {
         Ok(code) => code,
         Err(error) => {
@@ -71,7 +90,7 @@ pub fn main_with_runtime(args: Vec<String>, runtime: &dyn mode::Runtime) -> i32 
     }
 }
 
-fn main_impl(args: Vec<String>, runtime: &dyn mode::Runtime) -> Result<i32, String> {
+fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String> {
     use std::io::IsTerminal;
 
     let offline_mode = args.iter().any(|arg| arg == "--offline")
@@ -91,7 +110,7 @@ fn main_impl(args: Vec<String>, runtime: &dyn mode::Runtime) -> Result<i32, Stri
 
     // Public command routing: help requests, removed commands, management
     // commands, and the model/session rewrites.
-    let public_command = public_command::handle_public_command(&args);
+    let public_command = public_command::handle_public_command(args);
     if public_command.handled {
         return Ok(public_command.exit_code.unwrap_or(0));
     }

@@ -449,7 +449,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = faux_engine_with_settings(
-            serde_json::json!({ "responses": [{"text": "warm ok"}, {"text": "working"}] }),
+            &serde_json::json!({ "responses": [{"text": "warm ok"}, {"text": "working"}] }),
             u64::MAX,
         );
         let engine = Arc::new(engine);
@@ -508,7 +508,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = faux_engine_with_settings(
-            serde_json::json!({ "responses": [{"text": "warm ok"}, {"text": "working"}] }),
+            &serde_json::json!({ "responses": [{"text": "warm ok"}, {"text": "working"}] }),
             u64::MAX,
         );
         let engine = Arc::new(engine);

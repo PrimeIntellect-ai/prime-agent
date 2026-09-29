@@ -170,11 +170,6 @@ pub(crate) struct SessionUi {
     /// The `terminal.fullscreenMouse` setting: whether the interactive
     /// surface enables mouse tracking; carried into `/new` runs.
     fullscreen_mouse: bool,
-    /// The runtime fullscreen flag (`/fullscreen`, TS `fullscreenEnabled`):
-    /// this surface always renders on the alternate screen, so the flag
-    /// starts on and the command persists the preference (TS
-    /// `settingsManager.setFullscreen`) and reports the TS status.
-    fullscreen_enabled: bool,
     /// The `/speed` display flag (TS `speedDisplayEnabled`): per-client
     /// runtime state, never persisted; turning it off clears the stats and
     /// the row.
@@ -496,6 +491,13 @@ pub(crate) struct SessionUi {
     /// by the next transcript rebuild — a same-session resync runs the
     /// `renderResyncedSession` bashFinished edge off it.
     resync_bash: Option<ResyncBash>,
+    /// The LAST HUMAN PROMPT's wall-clock time (unix ms), from the
+    /// attach snapshot's newest user message: the rebuilt loader
+    /// anchors its elapsed clock here (the operator's 2026-09-28
+    /// rule — the waiting/executing timer never resets on a view
+    /// transition; it counts since the prompt that started the live
+    /// turn). `None` keeps the re-attach-instant anchor.
+    loader_anchor_ms: Option<u64>,
     /// An in-flight side-conversation bash run (TS `sideQuestionBash`):
     /// its pane-mounted identity plus whether the run seeds follow-up
     /// side questions (the `!`, not the `!!`, variant).
@@ -663,10 +665,6 @@ impl SessionUi {
             last_status_index: None,
             show_images: options.show_images,
             fullscreen_mouse: options.fullscreen_mouse,
-            fullscreen_enabled: options
-                .client_settings
-                .as_ref()
-                .is_none_or(|settings| settings.fullscreen()),
             service_tier: None,
             speed_display_enabled: false,
             speed_stats: None,
@@ -766,6 +764,7 @@ impl SessionUi {
             user_bash_started_at: None,
             user_bash_counter: 0,
             resync_bash: None,
+            loader_anchor_ms: None,
             side_bash: None,
             side_bash_discarded: None,
             side_bash_counter: 0,
@@ -1099,6 +1098,7 @@ impl SessionUi {
             });
         self.pending_queue = Some(reconstructed.queued);
         self.pending_snapshot = Some(reconstructed.chat);
+        self.loader_anchor_ms = reconstructed.last_user_prompt_ms;
         self.goal_view.seed(reconstructed.goal.unwrap_or_default());
         // The resynced state owns the loader (TS `renderResyncedSession`
         // rebuilds from the snapshot): a turn that is still live behind the
@@ -1179,6 +1179,26 @@ impl SessionUi {
         self.subagents_focused = true;
         self.update_subagent_summary(view);
         true
+    }
+
+    /// The instant a rebuilt loader anchors at, from the LAST HUMAN
+    /// PROMPT's wall-clock time (unix ms). The operator's 2026-09-28
+    /// rule: the waiting/executing timer never resets on a view
+    /// transition — it counts since the prompt that started the live
+    /// turn, however long ago that was. TS
+    /// `restoreTurnStartFromMessages` anchors at the run-start
+    /// message's timestamp the same way, with no plausibility cap: a
+    /// placeholder-era timestamp anchors at its own wall time and the
+    /// elapsed reads the wire's garbage (TS clamps only the negative
+    /// display at `formatWorkingElapsed`). Only a FUTURE timestamp
+    /// keeps the re-attach-instant anchor.
+    fn loader_anchor_instant(prompt_ms: u64) -> Option<std::time::Instant> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_millis() as u64)
+            .unwrap_or_default();
+        let age = now_ms.checked_sub(prompt_ms)?;
+        std::time::Instant::now().checked_sub(std::time::Duration::from_millis(age))
     }
 
     /// Fold the pending snapshot into the view (fresh transcript, footer
@@ -1321,8 +1341,20 @@ impl SessionUi {
         // The rebuilt chat follows the session's live state: an attached
         // turn that survived the re-attach keeps its loader (TS
         // `renderResyncedSession`), and no stale loader survives a rebuild.
+        // The re-mounted loader anchors at the LAST HUMAN PROMPT (the
+        // operator's 2026-09-28 rule: the waiting/executing timer never
+        // resets on a view transition — an agents-view round trip
+        // re-attaches mid-turn and the clock keeps counting from the
+        // prompt that started the turn), so the elapsed readout picks up
+        // where it left off instead of restarting at the re-attach
+        // instant. The live paths (a submit's ack, a turn's engine
+        // start) keep their own anchors; only the rebuild re-derives one.
         if self.turn_active {
-            self.start_loader(view);
+            let anchor = self
+                .loader_anchor_ms
+                .and_then(Self::loader_anchor_instant)
+                .unwrap_or_else(std::time::Instant::now);
+            self.start_loader_at(view, anchor);
         } else {
             view.working = None;
         }
@@ -2608,25 +2640,6 @@ impl SessionUi {
                 self.handle_rlm_max_depth_command(view, &resolved.args)
                     .await;
             }
-            // `/fullscreen [on|off]` (TS `setFullscreenMode`): persist the
-            // preference and report the TS status row. This surface always
-            // renders on the alternate screen (the Rust TUI has no inline
-            // rendering mode yet), so the toggle changes the persisted
-            // preference and the reported state, not the surface.
-            "fullscreen" => {
-                self.track_command_used("fullscreen");
-                let arg = resolved.args.trim().to_lowercase();
-                if !arg.is_empty() && arg != "on" && arg != "off" {
-                    self.error_row("Usage: /fullscreen [on|off]", view);
-                    return Ok(());
-                }
-                let enable = match arg.as_str() {
-                    "on" => true,
-                    "off" => false,
-                    _ => !self.fullscreen_enabled,
-                };
-                self.set_fullscreen_mode(enable, view);
-            }
             // `/speed [on|off]` (TS `setSpeedDisplay`): toggle the footer
             // tok/sec readout for this session — the dim dock row with the
             // latest response's rate and the session average.
@@ -2848,5 +2861,51 @@ impl SessionUi {
     /// The `tui exit` reason recorded at the point the loop stopped.
     pub(crate) fn exit_reason(&self) -> &'static str {
         self.exit_reason
+    }
+}
+
+#[cfg(test)]
+mod loader_anchor_tests {
+    use super::SessionUi;
+
+    /// The anchor clock (Macroscope 2026-09-28: a prompt's age must
+    /// not be capped — the old 24-hour cutoff reset REAL old prompts
+    /// to a zero loader): any past prompt anchors at its own instant,
+    /// however long ago; only a future timestamp falls back to the
+    /// re-attach anchor. A placeholder-era timestamp anchors at its
+    /// own wall time too — TS `restoreTurnStartFromMessages` trusts
+    /// the wire's timestamp the same way.
+    #[test]
+    fn prompts_anchor_at_their_wall_time_and_future_ones_fall_back() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_millis() as u64)
+            .unwrap_or_default();
+        // A prompt two seconds old: the anchor sits ~2s in the past.
+        let recent = SessionUi::loader_anchor_instant(now_ms - 2_000).expect("recent prompt");
+        let rewound = std::time::Instant::now().duration_since(recent).as_millis();
+        assert!(
+            (1_500..).contains(&rewound),
+            "the anchor rewinds to the prompt: {rewound}ms"
+        );
+        // A prompt older than the retired 24h cutoff anchors too.
+        let old = SessionUi::loader_anchor_instant(now_ms - 90_000_000).expect("25-hour prompt");
+        let rewound = std::time::Instant::now().duration_since(old).as_millis();
+        assert!(
+            (89_000_000..).contains(&rewound),
+            "a 25h-old prompt keeps its anchor: {rewound}ms"
+        );
+        // A future timestamp cannot anchor anything.
+        assert!(SessionUi::loader_anchor_instant(now_ms + 10_000).is_none());
+        // A placeholder-era timestamp anchors at its own wall time
+        // (the elapsed reads the wire's garbage, as in TS).
+        let placeholder = SessionUi::loader_anchor_instant(1).expect("placeholder anchors");
+        let rewound = std::time::Instant::now()
+            .duration_since(placeholder)
+            .as_millis();
+        assert!(
+            rewound > u128::from(now_ms - 10_000),
+            "the placeholder anchors at its wall time, not the re-attach instant: {rewound}ms"
+        );
     }
 }

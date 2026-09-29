@@ -15,6 +15,31 @@
 //! follows the live-kernel verifiers' ambient-state contract: it honors
 //! `PA_E2E_KERNEL_PYTHON` and skips (with a note) on machines without a
 //! kernel install. Test B is the scripted engine (no kernel).
+// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
+// the full rationale).
+// Stack-resident futures by design on the daemon's hot paths; boxing the
+// call sites for a lint tick is a perf regression with zero correctness gain.
+#![allow(clippy::large_futures)]
+// 64-bit-only targets; the narrowing casts sit at OS boundaries
+// (pid/fd/time/size) where the values are bounded by the kernel - the
+// dead-guard expect()s would add panic paths where silent wrap was
+// deliberate.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// The fn-length threshold is a style gate, not correctness; the structure
+// campaign owns the god-fn splits as a follow-up.
+#![allow(clippy::too_many_lines)]
+// API-shape opinions, not defects; the surfaces are deliberate.
+#![allow(
+    clippy::unnecessary_wraps,
+    clippy::zero_sized_map_values,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names
+)]
 #![cfg(unix)]
 
 use std::fmt::Write as _;
@@ -129,7 +154,7 @@ fn spawn_mock(next: &'static AtomicUsize) -> PathBuf {
     PathBuf::from(url)
 }
 
-fn chunk(delta: Value, finish_reason: Option<&str>) -> String {
+fn chunk(delta: &Value, finish_reason: Option<&str>) -> String {
     json!({
         "id": "chatcmpl-wake",
         "object": "chat.completion.chunk",
@@ -169,7 +194,7 @@ fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
     let data = match request {
         0 => [
             chunk(
-                json!({
+                &json!({
                     "role": "assistant",
                     "content": "",
                     "tool_calls": [{
@@ -184,21 +209,21 @@ fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
                 }),
                 None,
             ),
-            chunk(json!({}), Some("tool_calls")),
+            chunk(&json!({}), Some("tool_calls")),
         ],
         1 => [
             chunk(
-                json!({"role": "assistant", "content": "watcher started"}),
+                &json!({"role": "assistant", "content": "watcher started"}),
                 None,
             ),
-            chunk(json!({}), Some("stop")),
+            chunk(&json!({}), Some("stop")),
         ],
         _ => [
             chunk(
-                json!({"role": "assistant", "content": "woken by the bash-done notice"}),
+                &json!({"role": "assistant", "content": "woken by the bash-done notice"}),
                 None,
             ),
-            chunk(json!({}), Some("stop")),
+            chunk(&json!({}), Some("stop")),
         ],
     };
     for data in data {
@@ -254,7 +279,7 @@ impl Client {
         }
     }
 
-    fn request(&mut self, id: &str, command: Value) -> Value {
+    fn request(&mut self, id: &str, command: &Value) -> Value {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -277,7 +302,7 @@ impl Client {
     }
 
     fn listed_sessions(&mut self) -> Vec<(String, String)> {
-        let response = self.request("list", json!({ "type": "list" }));
+        let response = self.request("list", &json!({ "type": "list" }));
         assert_eq!(response["success"], true, "list failed: {response}");
         response["data"]["sessions"]
             .as_array()
@@ -299,7 +324,7 @@ impl Client {
     fn messages(&mut self, active_session_id: &str) -> String {
         let response = self.request(
             "gm",
-            json!({ "type": "get_messages", "activeSessionId": active_session_id }),
+            &json!({ "type": "get_messages", "activeSessionId": active_session_id }),
         );
         assert_eq!(response["success"], true, "get_messages failed: {response}");
         serde_json::to_string(&response["data"]).expect("messages json")
@@ -323,7 +348,7 @@ fn create_session(client: &mut Client, id: &str, dir: &Path, agent_dir: &Path) -
     std::fs::create_dir_all(&sessions).expect("sessions dir");
     let created = client.request(
         id,
-        json!({
+        &json!({
             "type": "create",
             "name": "wake-lane",
             "config": {
@@ -390,7 +415,7 @@ fn a_detached_bash_completion_wakes_the_idle_session_across_a_supervisor_restart
     let (active_id, session_id) = create_session(&mut client, "c1", &dir, &agent_dir);
     let started = client.request(
         "p1",
-        json!({
+        &json!({
             "type": "prompt_and_wait",
             "activeSessionId": active_id,
             "message": "start the watcher and stop",
@@ -448,7 +473,7 @@ fn a_detached_bash_completion_wakes_the_idle_session_across_a_supervisor_restart
     // worker (and its kernel + watcher) do not leak past the test.
     client.request(
         "k1",
-        json!({ "type": "kill", "activeSessionId": active_id }),
+        &json!({ "type": "kill", "activeSessionId": active_id }),
     );
 }
 
@@ -485,7 +510,7 @@ fn a_heartbeat_keeps_firing_across_a_supervisor_restart() {
     std::fs::create_dir_all(&sessions).expect("sessions dir");
     let created = client.request(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "name": "hb-lane",
             "config": {
@@ -510,7 +535,7 @@ fn a_heartbeat_keeps_firing_across_a_supervisor_restart() {
         .join(format!("{session_id}.jsonl"));
     let heartbeat = client.request(
         "hb",
-        json!({
+        &json!({
             "type": "heartbeat_set",
             "activeSessionId": active_id,
             "schedule": "every 10s",
@@ -523,7 +548,7 @@ fn a_heartbeat_keeps_firing_across_a_supervisor_restart() {
     );
     let first_turn = client.request(
         "p1",
-        json!({
+        &json!({
             "type": "prompt_and_wait",
             "activeSessionId": active_id,
             "message": "warm the lane",
@@ -568,7 +593,7 @@ fn a_heartbeat_keeps_firing_across_a_supervisor_restart() {
 
     client.request(
         "k1",
-        json!({ "type": "kill", "activeSessionId": active_id }),
+        &json!({ "type": "kill", "activeSessionId": active_id }),
     );
 }
 
@@ -612,7 +637,7 @@ fn a_boot_fires_the_adopted_worker_due_job_and_never_resurrects_the_killed_sibli
     for name in ["wake-lane", "dead-lane"] {
         let created = client.request(
             name,
-            json!({
+            &json!({
                 "type": "create",
                 "name": name,
                 "config": {
@@ -645,7 +670,7 @@ fn a_boot_fires_the_adopted_worker_due_job_and_never_resurrects_the_killed_sibli
     // killed (its jobs cancel and its file archives — the stop gates).
     let heartbeat = client.request(
         "hb",
-        json!({
+        &json!({
             "type": "heartbeat_set",
             "activeSessionId": wake_active,
             "schedule": "every 10s",
@@ -658,7 +683,7 @@ fn a_boot_fires_the_adopted_worker_due_job_and_never_resurrects_the_killed_sibli
     );
     let killed = client.request(
         "kill",
-        json!({ "type": "kill", "activeSessionId": dead_active }),
+        &json!({ "type": "kill", "activeSessionId": dead_active }),
     );
     assert_eq!(killed["success"], true, "kill failed: {killed}");
 
@@ -707,7 +732,7 @@ fn a_boot_fires_the_adopted_worker_due_job_and_never_resurrects_the_killed_sibli
 
     client.request(
         "k1",
-        json!({ "type": "kill", "activeSessionId": wake_active }),
+        &json!({ "type": "kill", "activeSessionId": wake_active }),
     );
 }
 

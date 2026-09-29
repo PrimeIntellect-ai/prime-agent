@@ -47,6 +47,7 @@ fn current_uid() -> Option<String> {
 /// Default supervisor endpoint: `daemon.sock` in the socket dir (Unix) or
 /// the fixed daemon pipe name (Windows).
 #[cfg(unix)]
+#[must_use]
 pub fn default_daemon_socket_path() -> PathBuf {
     socket_dir().join("daemon.sock")
 }
@@ -59,6 +60,7 @@ pub fn default_daemon_socket_path() -> PathBuf {
 /// Worker endpoint next to the supervisor's: hashed supervisor key plus the
 /// worker id prefix (TS `workerSocketPath`).
 #[cfg(unix)]
+#[must_use]
 pub fn worker_socket_path(supervisor_socket_path: &Path, worker_id: &str) -> PathBuf {
     let key = hash_key(&supervisor_socket_path.to_string_lossy(), 12);
     socket_dir().join(format!(

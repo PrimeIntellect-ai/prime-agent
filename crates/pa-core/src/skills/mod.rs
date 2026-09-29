@@ -364,6 +364,44 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_frontmatter_block_is_a_warned_skip_not_a_panic() {
+        // TS no-frontmatter semantics: the whole document is the body, the
+        // description is missing, the skill is NOT loaded (warning).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let skill_dir = dir.path().join("bare");
+        std::fs::create_dir_all(&skill_dir).expect("mkdir");
+        std::fs::write(skill_dir.join("SKILL.md"), "---\n---\nUse it well.").expect("write");
+        let result = crate::skills::load_skills_from_dir(dir.path(), "user");
+        assert!(result.skills.is_empty());
+        assert!(result.diagnostics.iter().any(
+            |d| matches!(d, crate::skills::ResourceDiagnostic::Warning { message, .. }
+                if message == "description is required")
+        ));
+    }
+
+    #[test]
+    fn an_empty_frontmatter_name_falls_back_to_the_parent_directory() {
+        // TS `frontmatter.name || parentDirName`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let skill_dir = dir.path().join("named-dir");
+        std::fs::create_dir_all(&skill_dir).expect("mkdir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: \"\"\ndescription: The named dir skill\n---\nbody",
+        )
+        .expect("write");
+        let result = crate::skills::load_skills_from_dir(dir.path(), "user");
+        assert_eq!(
+            result
+                .skills
+                .iter()
+                .map(|skill| skill.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["named-dir"]
+        );
+    }
+
+    #[test]
     fn non_skill_and_unknown_inputs_pass_through() {
         let dir = tempfile::tempdir().expect("tempdir");
         let skills = [temp_skill("web-search", dir.path())];
