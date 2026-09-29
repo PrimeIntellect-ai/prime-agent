@@ -203,30 +203,56 @@ impl TransportStream for tokio::net::windows::named_pipe::NamedPipeClient {
     }
 }
 
-/// The pipe name handed to `CreateNamedPipe`/`CreateFile`: the `\\.\pipe\`
-/// names from `pa-daemon::platform` pass through unchanged (they must be
-/// UTF-8 for the Windows APIs). Any other explicit path - a unix-style
-/// socket file path from `--daemon-socket` or `PRIME_AGENT_DAEMON_SOCKET`
-/// - is derived into the pipe namespace deterministically: bind and
-/// connect run the same derivation, so the explicit path names the same
+/// The pipe name handed to `CreateNamedPipe`/`CreateFile`: an existing
+/// pipe path passes through unchanged (it must be UTF-8 for the Windows
+/// APIs) - the local `\\.\pipe\`/`\\?\pipe\` forms and the remote
+/// `\\server\pipe\` form, matched case-insensitively because the pipe
+/// namespace itself is case-insensitive. Any other explicit path - a
+/// unix-style socket file path from `--daemon-socket` or
+/// `PRIME_AGENT_DAEMON_SOCKET` - is derived into the pipe namespace
+/// deterministically: a relative path resolves against the current
+/// directory first, and the resolved absolute spelling is lowercased
+/// (Windows paths are case-preserving but case-insensitive), so bind and
+/// connect run the same derivation and the explicit path names the same
 /// endpoint on every platform the way a socket file does on Unix.
-/// Without the derivation the listener dies at `CreateNamedPipe` (a file
-/// path is not a valid pipe name) and the client waits out its startup
-/// timeout - the windows-latest ACP fixture failure, where the CLI fell
-/// back to the in-process engine and the pickers answered with the
-/// bundled catalog instead of the scripted fixture family.
 #[cfg(windows)]
 fn pipe_name(path: &Path) -> Result<String> {
     let raw = path
         .to_str()
         .with_context(|| format!("pipe name is not UTF-8: {}", path.display()))?;
-    if raw.starts_with(r"\\.\pipe\") || raw.starts_with(r"\\?\pipe\") {
+    if is_pipe_path(&raw.to_ascii_lowercase()) {
         return Ok(raw.to_string());
     }
+    let absolute = if path.is_relative() {
+        std::env::current_dir()
+            .with_context(|| format!("resolve the relative socket path {}", path.display()))?
+            .join(path)
+    } else {
+        path.to_path_buf()
+    };
+    let normalized = absolute
+        .to_str()
+        .with_context(|| format!("pipe name is not UTF-8: {}", absolute.display()))?
+        .to_ascii_lowercase();
     Ok(format!(
         r"\\.\pipe\prime-agent-explicit-{:016x}",
-        fnv1a64(raw)
+        fnv1a64(&normalized)
     ))
+}
+
+/// Whether `raw` (already lowercased) is a pipe path the Windows APIs
+/// accept as-is: the local `\\.\pipe\`/`\\?\pipe\` forms or the remote
+/// `\\server\pipe\` form (any non-empty server name).
+#[cfg(windows)]
+fn is_pipe_path(raw: &str) -> bool {
+    if raw.starts_with(r"\\.\pipe\") || raw.starts_with(r"\\?\pipe\") {
+        return true;
+    }
+    raw.strip_prefix(r"\\")
+        .and_then(|rest| rest.split_once(['\\', '/']))
+        .is_some_and(|(server, tail)| {
+            !server.is_empty() && tail.split(['\\', '/']).next() == Some("pipe")
+        })
 }
 
 /// FNV-1a over the raw path bytes: the derivation key for [`pipe_name`]
@@ -458,5 +484,63 @@ mod pipe_name_tests {
     fn fnv1a64_is_stable() {
         // FNV-1a("a") with the 64-bit offset basis and prime, for the record.
         assert_eq!(fnv1a64("a"), 0xaf63_dc4c_8601_ec8c);
+    }
+
+    #[test]
+    fn pipe_paths_match_case_insensitively_and_remote_forms_pass_through() {
+        let upper = Path::new(r"\\.\PIPE\prime-agent-daemon");
+        assert_eq!(pipe_name(upper).unwrap(), r"\\.\PIPE\prime-agent-daemon");
+        let remote = Path::new(r"\\fileserver\pipe\prime-agent");
+        assert_eq!(pipe_name(remote).unwrap(), r"\\fileserver\pipe\prime-agent");
+    }
+
+    #[test]
+    fn equivalent_path_spellings_derive_the_same_pipe() {
+        let a = pipe_name(Path::new(r"C:\Temp\daemon.sock")).expect("derives");
+        let b = pipe_name(Path::new(r"c:\temp\DAEMON.SOCK")).expect("derives");
+        assert_eq!(a, b, "case is normalized before hashing");
+    }
+
+    #[test]
+    fn relative_paths_derive_per_working_directory() {
+        // The current directory is process-global: hold the module's lock
+        // and restore the previous directory afterwards.
+        use std::sync::Mutex;
+        static CWD_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = CWD_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = std::env::current_dir().expect("current dir");
+        let first = tempfile_dir();
+        std::env::set_current_dir(&first).expect("chdir first");
+        let here = pipe_name(Path::new("daemon.sock")).expect("derives");
+        let second = tempfile_dir();
+        std::env::set_current_dir(&second).expect("chdir second");
+        let elsewhere = pipe_name(Path::new("daemon.sock")).expect("derives");
+        std::env::set_current_dir(&previous).expect("restore cwd");
+        assert_ne!(
+            here, elsewhere,
+            "the same relative name derives per working directory"
+        );
+        assert!(
+            here.starts_with(r"\\.\pipe\prime-agent-explicit-"),
+            "{here}"
+        );
+    }
+
+    /// A fresh directory to chdir into for the relative-path pin.
+    fn tempfile_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("pa-pipe-name-cwd-{}", uuid_like()));
+        std::fs::create_dir_all(&dir).expect("create the cwd pin dir");
+        dir
+    }
+
+    /// A per-call unique suffix without a uuid dependency: the process id
+    /// plus a monotonic counter.
+    fn uuid_like() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let next = COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+        (u64::from(std::process::id()) << 32) | next
     }
 }
