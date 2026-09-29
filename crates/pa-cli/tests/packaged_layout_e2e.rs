@@ -635,9 +635,16 @@ fn packaging_dry_run_produces_artifact() {
     .unwrap();
     std::fs::write(tree.path().join("README.md"), "# readme\n").unwrap();
     std::fs::write(tree.path().join("LICENSE"), "Apache-2.0\n").unwrap();
+    // The fixture repo's version must be the workspace version: the packer
+    // derives the decoder name and runs the two-sided version pin against
+    // the fixture tree, while the staged decoder answers with the compiled-in
+    // version - a hardcoded version here breaks on every workspace bump.
     std::fs::write(
         tree.path().join("Cargo.toml"),
-        "[workspace.package]\nversion = \"0.1.0\"\n",
+        format!(
+            "[workspace.package]\nversion = \"{ver}\"\n",
+            ver = env!("CARGO_PKG_VERSION")
+        ),
     )
     .unwrap();
 

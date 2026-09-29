@@ -1,0 +1,306 @@
+# The nightly: a scheduled beta-tag cut, the codex tag-only-commit trick,
+# nightlies only (RELEASE-FLOW-PROPOSAL.md §5). No release PR for nightlies
+# - reviewer load would be absurd at a per-merge cadence - and the branch is
+# NEVER touched: the nightly is a tag-only commit whose tree differs from its
+# parent only by the workspace version rows, and no branch head ever
+# references it.
+#
+# Cadence: daily 00:00Z. Schedule events fire ONLY from the default branch
+# (verified on this repo: the rust-only windows-runtime-triage.yml dispatch
+# 404s), so the operator mirrors this file to `main` as one config act; this
+# job resolves the rust line explicitly (the continuous runs on branch rust)
+# and never reads the ref it ran on.
+#
+# The cut, in order:
+#   1. Resolve the newest SUCCESSFUL `continuous` run on rust and take its
+#      head commit: the nightly is built from a parent that already built
+#      green, never from a tip whose continuous run is still in flight.
+#   2. Read the version inputs: the workspace version at that commit (the
+#      staged next stable), the rolling `nightly` release's beta.json (the
+#      published nightly counter), and the latest stable release.
+#   3. Compute vNEXT-beta.N: base = max(workspace version, latest stable + one
+#      patch) - before the first stable the nightlies prerelease the staged
+#      version (v0.10.0-beta.N); once a stable ships, the base moves a patch
+#      ahead so nightlies always outrank the last stable on the channel
+#      reader; when the tip is staged a release ahead (release-prepare bumped
+#      to 0.11.0), the nightlies prerelease THAT version. The counter N
+#      advances from beta.json; it restarts at 1 when the base moves (semver
+#      orders by base first, so a restart cannot regress the train).
+#   4. Create the tag-only commit via the git data API: Cargo.toml + the
+#      Cargo.lock member rows at the beta version (the rewrite is
+#      byte-identical to `cargo update --workspace`, validated 2026-09-29 on
+#      this repo), parent = the resolved continuous commit, base_tree = its
+#      tree. No branch moves.
+#   5. Create the annotated tag object + the refs/tags/vNEXT-beta.N ref via
+#      the API, using the release-bot GitHub App - never a user PAT, and
+#      load-bearing: a GITHUB_TOKEN-created tag fires NO downstream push
+#      event, so release.yml would never run. The App's ref creation is the
+#      push event that triggers release.yml's -beta* channel: build ->
+#      promote (beta.json, a PRERELEASE - never takes GitHub's Latest
+#      pointer; the release environment approval is the publish gate) ->
+#      nightly-refresh rolls the rolling `nightly` release.
+#
+# Idempotency/counter safety: if the computed tag already exists, the cut
+# skips loudly. That covers both "nothing new to ship" and "the previous
+# beta's promote is still pending or failed - its release run must be
+# resolved (re-run release.yml for that tag) before the nightly advances":
+# the counter comes from beta.json, the PUBLISHED state, not from a local
+# guess.
+#
+# Not built (deliberate, per the proposal): a prune job for accumulated
+# -beta* releases (deferred until asset count matters), and any content
+# change to the branch (the tag-only commit never lands on rust).
+
+name: nightly
+
+on:
+  schedule:
+    # 00:00 UTC daily (the proposal's cadence).
+    - cron: "0 0 * * *"
+  # For the operator's supervised first cut; behaves exactly like the cron.
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  # Serialize cuts: the exists-guard is checked once per run, so a cron/dispatch
+  # race must not interleave.
+  group: nightly-tag-cut
+  cancel-in-progress: false
+
+env:
+  # The guard step reads this: an unconfigured release bot makes the nightly a
+  # green no-op with a notice (the flow is opt-in by wiring the App), while a
+  # configured-but-broken App fails the run loudly below.
+  HAS_RELEASE_BOT: ${{ secrets.RELEASE_BOT_CLIENT_ID != '' && secrets.RELEASE_BOT_PRIVATE_KEY != '' }}
+
+jobs:
+  cut:
+    name: "cut the nightly beta tag (tag-only commit, never a branch change)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions: {}
+    steps:
+      - name: Guard (the release bot App gates the whole nightly flow)
+        if: env.HAS_RELEASE_BOT != 'true'
+        run: |
+          echo "::notice::the release-bot GitHub App is not configured (secrets RELEASE_BOT_CLIENT_ID / RELEASE_BOT_PRIVATE_KEY): the nightly cron is a no-op until the operator wires it - see the release-flow PR body's config checklist. No tag is ever cut while it is absent."
+      - name: The release bot token (a GitHub App installation, never a user PAT)
+        if: env.HAS_RELEASE_BOT == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          permission-contents: write
+      - name: Resolve the inputs (continuous SHA, beta.json, latest stable)
+        if: env.HAS_RELEASE_BOT == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/nightly"
+          mkdir -p "${out}"
+          # The newest SUCCESSFUL continuous run on the rust branch: its head
+          # commit is the nightly's parent (proof-by-construction that the
+          # parent built green; a red or in-flight tip is never shipped).
+          if ! gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/continuous.yml/runs?branch=rust&per_page=100" \
+               | jq -e '[.workflow_runs[]
+                        | select(.status == "completed" and .conclusion == "success")][0].head_sha // empty' \
+               > "${out}/target-sha" 2>/dev/null || [ ! -s "${out}/target-sha" ]; then
+            echo "::error::no successful continuous run on rust in the last 100 runs; refusing to cut a nightly off an unproven tip"
+            exit 1
+          fi
+          target_sha="$(tr -d '"' < "${out}/target-sha")"
+          echo "nightly parent: ${target_sha} (the newest successful continuous build on rust)"
+          # The rolling nightly release's beta.json: the published counter.
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/nightly" \
+               | jq -e '[.assets[] | select(.name == "beta.json")][0].browser_download_url // empty' \
+               > "${out}/beta-url" 2>/dev/null && [ -s "${out}/beta-url" ]; then
+            curl -fsSL "$(tr -d '"' < "${out}/beta-url")" -o "${out}/beta.json"
+            echo "rolling nightly beta.json: $(jq -c . "${out}/beta.json")"
+          else
+            echo "no rolling nightly release yet: the first cut starts the counter at 1"
+          fi
+          # The latest stable release (may predate the rust line - the TS
+          # product's releases share this repo; the version math below takes
+          # the max against the workspace version, so a TS-stable cannot drag
+          # the nightly base below the rust lineage).
+          if ! gh api "repos/${GITHUB_REPOSITORY}/releases/latest" \
+               | jq -e '.tag_name // empty' > "${out}/latest-stable" 2>/dev/null \
+               || [ ! -s "${out}/latest-stable" ]; then
+            echo "no stable release at all: the nightly base is the workspace version"
+          fi
+          # The tree the tag-only commit is built from: the resolved
+          # commit's Cargo.toml + Cargo.lock, plus its tree SHA (base_tree).
+          gh api "repos/${GITHUB_REPOSITORY}/contents/Cargo.toml?ref=${target_sha}" --jq .content | base64 -d > "${out}/Cargo.toml"
+          gh api "repos/${GITHUB_REPOSITORY}/contents/Cargo.lock?ref=${target_sha}" --jq .content | base64 -d > "${out}/Cargo.lock"
+          gh api "repos/${GITHUB_REPOSITORY}/git/commits/${target_sha}" --jq .tree.sha > "${out}/base-tree-sha"
+      - name: Compute the nightly version + rewrite the version rows
+        if: env.HAS_RELEASE_BOT == 'true'
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re, sys
+          from pathlib import Path
+
+          out = Path(os.environ["RUNNER_TEMP"]) / "nightly"
+
+          def parse_semver(v):
+              m = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", v.strip())
+              if not m:
+                  sys.exit(f"::error::cannot parse version {v!r}")
+              return tuple(int(p) for p in m.groups())
+
+          def parse_beta(v):
+              # "v0.10.0-beta.5" -> ((0, 10, 0), 5)
+              m = re.fullmatch(r"v?(\d+\.\d+\.\d+)-beta\.(\d+)$", v.strip())
+              if not m:
+                  sys.exit(f"::error::unexpected beta.json version {v!r}")
+              return parse_semver(m.group(1)), int(m.group(2))
+
+          cargo_toml = (out / "Cargo.toml").read_text()
+          workspace_ver = re.search(r'^version = "([^"]+)"', cargo_toml, re.M).group(1)
+          ws_key = parse_semver(workspace_ver)
+
+          stable_key = None
+          stable_file = out / "latest-stable"
+          if stable_file.is_file() and stable_file.read_text().strip().strip('"'):
+              tag = stable_file.read_text().strip().strip('"')
+              if re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+                  x, y, z = parse_semver(tag)
+                  stable_key = (x, y, z + 1)
+
+          # base = max(workspace version, latest stable + one patch)
+          base_key = max(k for k in (ws_key, stable_key) if k is not None)
+          base = ".".join(str(p) for p in base_key)
+
+          counter = 1
+          beta_file = out / "beta.json"
+          if beta_file.is_file():
+              doc = json.loads(beta_file.read_text())
+              cb_key, cb_n = parse_beta(doc["version"])
+              counter = cb_n + 1 if cb_key == base_key else 1
+
+          version = f"{base}-beta.{counter}"
+          tag = f"v{version}"
+          print(f"nightly: workspace {workspace_ver} staged, base {base}, counter {counter} -> {tag}")
+
+          # The version rows, rewritten exactly as `cargo update --workspace`
+          # would (validated byte-identical on this repo, 2026-09-29): the
+          # workspace row in Cargo.toml, and in Cargo.lock ONLY the member
+          # packages' rows (a registry dep at the same version is never
+          # touched; the lock header's `version = 4` line has no package
+          # block above it and is never rewritten).
+          members = re.search(r"members = \[([\s\S]*?)\]", cargo_toml).group(1)
+          names = {m.replace("crates/", "").strip(' ",')
+                   for m in re.findall(r'"([^"]+)"', members)}
+
+          new_toml = re.sub(r'^version = "[^"]+"', f'version = "{version}"',
+                            cargo_toml, count=1, flags=re.M)
+          if new_toml == cargo_toml:
+              sys.exit("::error::the workspace version row was not rewritten")
+
+          lock_lines = (out / "Cargo.lock").read_text().splitlines(keepends=True)
+          new_lock_lines, current = [], None
+          for line in lock_lines:
+              if line.startswith("name = "):
+                  current = line.split('"')[1]
+              elif line.startswith("version = ") and current in names:
+                  line = f'version = "{version}"' + line[line.rindex('"') + 1:]
+              new_lock_lines.append(line)
+          new_lock = "".join(new_lock_lines)
+
+          # The four API bodies, ready to POST (--input); the dependent SHAs
+          # are filled in between calls by the create step.
+          target_sha = (out / "target-sha").read_text().strip().strip('"')
+          (out / "tree.json").write_text(json.dumps({
+              "base_tree": (out / "base-tree-sha").read_text().strip().strip('"'),
+              "tree": [
+                  {"path": "Cargo.toml", "mode": "100644", "type": "blob", "content": new_toml},
+                  {"path": "Cargo.lock", "mode": "100644", "type": "blob", "content": new_lock},
+              ],
+          }))
+          (out / "commit.json").write_text(json.dumps({
+              "message": f"nightly: {tag} (tag-only: the branch is never touched)\n\n"
+                         f"The parent {target_sha} is the newest successful continuous build "
+                         f"on rust; this tree differs from it only by the workspace version "
+                         f"rows (Cargo.toml + Cargo.lock). Cut by the nightly workflow; no "
+                         f"branch head references this commit.",
+              "tree": "",
+              "parents": [target_sha],
+          }))
+          (out / "tag.json").write_text(json.dumps({
+              "tag": tag,
+              "message": f"Nightly build {tag}\n\n"
+                         f"Built from the continuous train at parent {target_sha} "
+                         f"(the newest successful continuous build on rust) via the nightly "
+                         f"workflow's tag-only commit. The -beta* tag publishes the nightly "
+                         f"channel (beta.json) through the release.yml promote gate.",
+              "object": "",
+              "type": "commit",
+          }))
+          (out / "ref.json").write_text(json.dumps({
+              "ref": f"refs/tags/{tag}",
+              "sha": "",
+          }))
+          (out / "meta.json").write_text(json.dumps({
+              "tag": tag, "version": version, "base": base, "counter": counter,
+              "parent": target_sha, "workspace_version": workspace_ver,
+          }))
+          print(f"tag-only commit prepared: {tag} from parent {target_sha}")
+          PY
+      - name: Idempotency guard (the published counter is the truth)
+        if: env.HAS_RELEASE_BOT == 'true'
+        id: guard
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/nightly"
+          tag="$(jq -r .tag "${out}/meta.json")"
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::tag ${tag} already exists: nothing new to ship, or the previous beta's release run is still pending or failed. The counter comes from the published beta.json; resolve (re-run) the release run for that tag before the nightly can advance."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Create the tag-only commit + annotated tag (GitHub API, the release bot)
+        if: env.HAS_RELEASE_BOT == 'true' && steps.guard.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/nightly"
+          repo="repos/${GITHUB_REPOSITORY}"
+          tree_sha="$(gh api -X POST "${repo}/git/trees" --input "${out}/tree.json" --jq .sha)"
+          python3 - "${out}" "${tree_sha}" <<'PY'
+          import json, sys
+          from pathlib import Path
+          out, tree_sha = Path(sys.argv[1]), sys.argv[2]
+          doc = json.loads((out / "commit.json").read_text())
+          doc["tree"] = tree_sha
+          (out / "commit.json").write_text(json.dumps(doc))
+          PY
+          commit_sha="$(gh api -X POST "${repo}/git/commits" --input "${out}/commit.json" --jq .sha)"
+          python3 - "${out}" "${commit_sha}" <<'PY'
+          import json, sys
+          from pathlib import Path
+          out, commit_sha = Path(sys.argv[1]), sys.argv[2]
+          doc = json.loads((out / "tag.json").read_text())
+          doc["object"] = commit_sha
+          (out / "tag.json").write_text(json.dumps(doc))
+          PY
+          tag_sha="$(gh api -X POST "${repo}/git/tags" --input "${out}/tag.json" --jq .sha)"
+          python3 - "${out}" "${tag_sha}" <<'PY'
+          import json, sys
+          from pathlib import Path
+          out, tag_sha = Path(sys.argv[1]), sys.argv[2]
+          doc = json.loads((out / "ref.json").read_text())
+          doc["sha"] = tag_sha
+          (out / "ref.json").write_text(json.dumps(doc))
+          PY
+          tag="$(jq -r .tag "${out}/meta.json")"
+          gh api -X POST "${repo}/git/refs" --input "${out}/ref.json"
+          echo "annotated tag ${tag} cut at the tag-only commit ${commit_sha} (parent $(jq -r .parent "${out}/meta.json"))"
+          echo "release.yml (tag-triggered, -beta* channel) takes over: build -> promote (beta.json + prerelease; the release environment approval is the publish gate) -> nightly-refresh rolls the nightly release"
