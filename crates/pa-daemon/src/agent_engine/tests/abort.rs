@@ -293,7 +293,7 @@ fn retried_run_restarts_with_its_own_agent_frames() {
     std::fs::create_dir_all(dir.path().join("agent")).unwrap();
     std::fs::write(
         dir.path().join("agent").join("settings.json"),
-        &serde_json::json!({
+        serde_json::json!({
             "compaction": { "enabled": true, "reserveTokens": 1, "keepRecentTokens": 10 },
             "retry": { "enabled": true, "maxRetries": 1, "baseDelayMs": 10 }
         })
