@@ -197,9 +197,6 @@ impl Worker {
                     tokio::task::spawn_blocking(move || {
                         let lease = crate::lease::acquire_runtime_session_lease(&path, &agent_dir)?;
                         let mut store = SessionFile::open_windowed(&path)?;
-                        // Prime the usage fold outside the core lock, so
-                        // summaries under the lock fold only the appended tail.
-                        let _ = crate::session_store::read_session_info(&path);
                         store.lease = Some(Arc::new(lease));
                         Ok(store)
                     })
@@ -272,6 +269,15 @@ impl Worker {
                         if let Err(error) = persisted {
                             return response_failure(None, "create", &error.to_string(), None);
                         }
+                        // Prime the usage fold on the file's final identity
+                        // (the full-reader fallback's rewrite replaces the
+                        // inode), off the runtime and before the core lock:
+                        // summaries under the lock fold only the appended tail.
+                        let primed = path.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            crate::session_store::read_session_info(&primed)
+                        })
+                        .await;
                         opened
                     }
                     Err(error) => return crate::hold_refusal::create_failure_response(&error),
