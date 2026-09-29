@@ -1362,11 +1362,11 @@ mod tests {
         );
     }
 
-    /// Legacy goals persisted before the creation-based contract have no
+    /// Goals persisted before the creation-based contract have no
     /// `created_at`: the load backfills it from `updated_at`, so the row
     /// reads its age sanely instead of compounding nothing.
     #[test]
-    fn legacy_goal_without_created_at_backfills_from_updated_at() {
+    fn rows_without_created_at_backfill_from_updated_at() {
         let mut session = persisted_session();
         let legacy = GoalState {
             active: true,
