@@ -1,5 +1,8 @@
 //! Geometry uses the same wrapping traversal as painted Markdown rows.
-use super::{parse_blocks, render_inline, wrapped_span_count, Block, BlockKind, MarkdownStyle};
+use super::{
+    block_cache_key, parse_blocks, render_inline, wrapped_span_count, Block, BlockKind,
+    MarkdownBlockCache, MarkdownStyle,
+};
 use crate::{Line, Span};
 use ratatui::style::Style;
 
@@ -64,7 +67,17 @@ pub(super) fn blank_after(next: Option<&Block>, exclude_lists: bool) -> bool {
 }
 
 /// Count rows without painting output buffers or syntax highlighting.
-pub(crate) fn markdown_row_count(text: &str, width: usize, style: &MarkdownStyle) -> usize {
+/// A non-empty `cache` replays the block's painted rows: the count==paint
+/// invariant holds by construction (the cached rows ARE what the render
+/// emits for the same key). The cache is only read — a cold cache costs
+/// what [`markdown_row_count`] costs.
+pub(crate) fn markdown_row_count_tagged(
+    text: &str,
+    width: usize,
+    style: &MarkdownStyle,
+    style_tag: &str,
+    cache: &MarkdownBlockCache,
+) -> usize {
     if text.trim().is_empty() {
         return 0;
     }
@@ -75,6 +88,16 @@ pub(crate) fn markdown_row_count(text: &str, width: usize, style: &MarkdownStyle
     for (index, block) in blocks.iter().enumerate() {
         let next = blocks.get(index + 1);
         total += usize::from(block.sep_blank);
+        // The key build clones the block's lines, so an empty cache skips
+        // it: the count-only callers pay what they pay today.
+        let cached = (!cache.0.is_empty())
+            .then(|| block_cache_key(style_tag, &blocks, index, width))
+            .flatten()
+            .and_then(|key| cache.0.get(&key));
+        if let Some(rows) = cached {
+            total += rows.len();
+            continue;
+        }
         let count = match &block.kind {
             BlockKind::Heading => 1 + usize::from(blank_after(next, false)),
             BlockKind::Hr => 1,
@@ -121,6 +144,11 @@ pub(crate) fn markdown_row_count(text: &str, width: usize, style: &MarkdownStyle
     total
 }
 
+/// The count-only callers' path: no cache, no replays.
+pub(crate) fn markdown_row_count(text: &str, width: usize, style: &MarkdownStyle) -> usize {
+    markdown_row_count_tagged(text, width, style, "", &MarkdownBlockCache::default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,6 +179,16 @@ mod tests {
                     super::super::markdown_row_count(text, width, &style),
                     super::super::render_markdown(text, width, &style).len(),
                     "{text:?} width {width}"
+                );
+                // Warm: the same document's painted rows through the
+                // block cache, so every hit branch counts by construction.
+                let mut cache = MarkdownBlockCache::default();
+                let painted =
+                    super::super::render_markdown_tagged(text, width, &style, "", &mut cache);
+                assert_eq!(
+                    super::super::markdown_row_count_tagged(text, width, &style, "", &cache),
+                    painted.len(),
+                    "{text:?} width {width} (warm cache)"
                 );
             }
         }

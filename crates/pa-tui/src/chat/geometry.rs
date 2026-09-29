@@ -1,6 +1,8 @@
 //! Shared chat framing decisions and count-only geometry.
 use super::{AssistantMessage, Detail, MessageBlock};
-use crate::markdown::{markdown_row_count, MarkdownStyle};
+use crate::markdown::{
+    markdown_row_count, markdown_row_count_tagged, MarkdownBlockCache, MarkdownStyle,
+};
 use crate::theme::{Theme, ThemeColor};
 
 pub(super) fn user_mask(text: &str) -> crate::prompt_highlight::PromptTokenMask {
@@ -27,6 +29,11 @@ pub(super) fn trailing_space(
 ) -> bool {
     message.has_tool_calls && (has_visible_content || message.aborted || !preceded_by_tool_activity)
 }
+
+/// The cache tag the dim thinking block renders and counts under: one
+/// definition for `chat.rs`'s render call and the count below, so the
+/// rows the paint caches are exactly the rows the count replays.
+pub(super) const THINKING_CACHE_TAG: &str = "dim";
 
 pub(super) fn thinking_style(md: &MarkdownStyle, theme: &Theme) -> MarkdownStyle {
     let mut md = md.clone();
@@ -67,6 +74,7 @@ pub(crate) fn assistant_row_count(
     code_block_indent: &str,
     width: usize,
     preceded_by_tool_activity: bool,
+    cache: &MarkdownBlockCache,
 ) -> usize {
     let blocks = visible_blocks(message, detail);
     let mut count = usize::from(!blocks.is_empty());
@@ -76,11 +84,16 @@ pub(crate) fn assistant_row_count(
     for (index, block) in blocks.iter().enumerate() {
         match block {
             MessageBlock::Text(text) => {
-                count += markdown_row_count(text.trim(), content_width, &md);
+                count += markdown_row_count_tagged(text.trim(), content_width, &md, "", cache);
             }
             MessageBlock::Thinking(text) => {
-                count +=
-                    markdown_row_count(text.trim(), content_width, &thinking_style(&md, theme));
+                count += markdown_row_count_tagged(
+                    text.trim(),
+                    content_width,
+                    &thinking_style(&md, theme),
+                    THINKING_CACHE_TAG,
+                    cache,
+                );
                 count += usize::from(index + 1 < blocks.len());
             }
         }
@@ -148,9 +161,39 @@ mod tests {
                                             .to_owned(),
                                     ),
                                 ] {
-                                    let message = AssistantMessage { blocks: blocks.clone(), has_tool_calls, streaming: false, aborted, error };
-                                    let mut cache = crate::markdown::MarkdownBlockCache::default();
-                                    assert_eq!(super::super::assistant_row_count(&message, detail, &theme, "  ", width, preceded), super::super::render_assistant(&message, detail, &theme, "  ", width, preceded, &mut cache).len());
+                                    let message = AssistantMessage {
+                                        blocks: blocks.clone(),
+                                        has_tool_calls,
+                                        streaming: false,
+                                        aborted,
+                                        error,
+                                    };
+                                    // The render fills the cache first, so
+                                    // the count exercises its warm replay
+                                    // (the "" and dim tags' hits).
+                                    let mut cache =
+                                        crate::markdown::MarkdownBlockCache::default();
+                                    let rendered = super::super::render_assistant(
+                                        &message,
+                                        detail,
+                                        &theme,
+                                        "  ",
+                                        width,
+                                        preceded,
+                                        &mut cache,
+                                    );
+                                    assert_eq!(
+                                        super::super::assistant_row_count(
+                                            &message,
+                                            detail,
+                                            &theme,
+                                            "  ",
+                                            width,
+                                            preceded,
+                                            &cache,
+                                        ),
+                                        rendered.len()
+                                    );
                                 }
                             }
                         }

@@ -411,33 +411,48 @@ fn quiet_style_renders_python_fences_uniform() {
     assert_eq!(lines[0][1].style, style.code_block);
 }
 
-/// The block cache must not serve one lang's token colors to another:
-/// TS's key carries `token.raw` (the fence info string included), so
-/// frame 2's ```json block (same content as frame 1's cached ```python
-/// block) re-renders uniform instead of replaying python colors.
+/// The TS-parity cacheability rule: a streaming frame caches the
+/// SETTLED blocks (every block but the final one) and never the
+/// changing final block. On the pre-fix inversion (only the final
+/// block keyed) the map instead grows one entry per frame (`be`,
+/// then `beta`) while `alpha` renders fresh every time.
 #[test]
-fn block_cache_does_not_carry_token_colors_across_langs() {
+fn streaming_frames_cache_only_settled_blocks() {
+    let style = MarkdownStyle::default();
+    let mut cache = MarkdownBlockCache::default();
+    render_markdown_tagged("alpha\n\nbe", 40, &style, "", &mut cache);
+    let frame = render_markdown_tagged("alpha\n\nbeta", 40, &style, "", &mut cache);
+    assert_eq!(frame, render_markdown("alpha\n\nbeta", 40, &style));
+    let cached: Vec<_> = cache.0.into_values().collect();
+    assert_eq!(cached, vec![render_markdown("alpha", 40, &style)]);
+}
+
+/// The key must cover every `render_block` input: list `ordered`/
+/// `start` (the markers are stripped from `block.lines`), the code
+/// fence lang, and the following block's trailing-blank decision —
+/// a hole would replay one doc's rows under another. One shared
+/// cache across all docs, so a collision can actually serve, and
+/// each cached render compared against the uncached one.
+#[test]
+fn block_cache_key_covers_every_render_input() {
     let theme = crate::theme::Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
     let style = MarkdownStyle::from_theme(&theme);
-    let number = theme.fg_style(crate::theme::ThemeColor::SyntaxNumber);
     let mut cache = MarkdownBlockCache::default();
-    let first =
-        render_markdown_tagged("intro\n\n```python\nx = 1\n```", 40, &style, "", &mut cache);
-    assert_eq!(first.last().unwrap()[2].style, number);
-    let second = render_markdown_tagged(
-        "intro\n\n```python\nx = 1\n```\n\nbetween\n\n```json\nx = 1\n```",
-        40,
-        &style,
-        "",
-        &mut cache,
-    );
-    // The final ```json block: one uniform code_block span, not the
-    // cached python token spans.
-    let json_row = second.last().unwrap();
-    assert_eq!(json_row.len(), 2);
-    assert_eq!(json_row[0].content, "  ");
-    assert_eq!(json_row[1].content, "x = 1");
-    assert_eq!(json_row[1].style, style.code_block);
+    for doc in [
+        "- a\n- b\n\nend",
+        "1. a\n2. b\n\nend",
+        "3. a\n4. b\n\nend",
+        "```python\nx = 1\n```\n\nend",
+        "```json\nx = 1\n```\n\nend",
+        "a\n# h",
+        "a\n- h",
+    ] {
+        assert_eq!(
+            render_markdown_tagged(doc, 40, &style, "", &mut cache),
+            render_markdown(doc, 40, &style),
+            "{doc:?}"
+        );
+    }
 }
 
 #[test]
