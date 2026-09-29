@@ -287,6 +287,7 @@ impl SessionManager {
     /// — the interrupted terminal settle's stale-active marker. A
     /// rehydrating driver adopts the failure as the goal's terminal
     /// state instead of resurrecting the active row.
+    #[must_use]
     pub fn stale_active_goal_failure(&self) -> Option<String> {
         let branch: Vec<FileEntry> = self.active_branch_entries().into_iter().cloned().collect();
         crate::goals::stale_active_goal_failure(&branch)

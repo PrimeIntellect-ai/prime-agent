@@ -10,6 +10,31 @@
 //! the worker-side idle clock and park-arm gates are covered by the unit
 //! battery (`idle_passivation_window_*`), and the timed path against the
 //! real binary by the VM census (the settings-driven 1-minute threshold).
+// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
+// the full rationale).
+// Stack-resident futures by design on the daemon's hot paths; boxing the
+// call sites for a lint tick is a perf regression with zero correctness gain.
+#![allow(clippy::large_futures)]
+// 64-bit-only targets; the narrowing casts sit at OS boundaries
+// (pid/fd/time/size) where the values are bounded by the kernel - the
+// dead-guard expect()s would add panic paths where silent wrap was
+// deliberate.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// The fn-length threshold is a style gate, not correctness; the structure
+// campaign owns the god-fn splits as a follow-up.
+#![allow(clippy::too_many_lines)]
+// API-shape opinions, not defects; the surfaces are deliberate.
+#![allow(
+    clippy::unnecessary_wraps,
+    clippy::zero_sized_map_values,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names
+)]
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -84,7 +109,7 @@ impl Client {
         (client, hello)
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -150,7 +175,7 @@ fn worker_token(agent_dir: &Path, active_session_id: &str) -> Option<String> {
     None
 }
 
-fn write_faux_script(dir: &Path, name: &str, responses: Value) -> PathBuf {
+fn write_faux_script(dir: &Path, name: &str, responses: &Value) -> PathBuf {
     let path = dir.join(format!("{name}.json"));
     std::fs::write(
         &path,
@@ -187,7 +212,7 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_prompt() {
     let parent_script = write_faux_script(
         dir.path(),
         "parent",
-        json!([
+        &json!([
             { "text": "parent turn done" },
             { "text": "parent turn done" },
         ]),
@@ -195,7 +220,7 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_prompt() {
     let child_script = write_faux_script(
         dir.path(),
         "child",
-        json!([{ "text": "child done" }, { "text": "revived: the child answered again" }]),
+        &json!([{ "text": "child done" }, { "text": "revived: the child answered again" }]),
     );
 
     let _daemon = spawn_supervisor(&socket, &agent_dir, &kernel_python);
@@ -205,7 +230,7 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_prompt() {
 
     client.send_command(
         "create-parent",
-        json!({
+        &json!({
             "type": "create",
             "name": "parent",
             "config": {
@@ -321,7 +346,7 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_prompt() {
     // supervisor's handler, the graceful stop, and the roster passive).
     client.send_command(
         "passivate",
-        json!({
+        &json!({
             "type": "worker_idle_passivation",
             "workerToken": child_token,
             "idleMinutes": 1,
@@ -422,7 +447,7 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_prompt() {
     .map_or(0, |content| content.lines().count());
     client.send_command(
         "revive",
-        json!({
+        &json!({
             "type": "prompt_and_wait",
             "activeSessionId": child_session_id,
             "message": "revive: answer again",
