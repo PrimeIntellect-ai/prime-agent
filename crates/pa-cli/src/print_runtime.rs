@@ -149,16 +149,50 @@ async fn try_daemon_attached_acp(options: &RunOptions) -> Option<i32> {
             .await
             .map_err(|error| format!("{error:#}"))?;
         let config = &options.config;
-        // The daemon worker resolves model auth from its own agent dir;
-        // the composition only carries the selection flags.
+        // The session flags the in-process engine honors, under the TS
+        // `runtimeConfigFromArgs` names. `--api-key` stays off: the
+        // in-process path ignores it too, and the create config is persisted.
+        let mut create_config = serde_json::json!({ "cwd": config.cwd.display().to_string() });
+        if let Some(provider) = &config.provider {
+            create_config["provider"] = serde_json::json!(provider);
+        }
+        if let Some(model) = &config.model {
+            create_config["model"] = serde_json::json!(model);
+        }
+        if let Some(thinking) = config.thinking {
+            create_config["thinking"] = serde_json::json!(thinking.wire_name());
+        }
+        if let Some(system_prompt) = &config.system_prompt {
+            create_config["systemPrompt"] = serde_json::json!(system_prompt);
+        }
+        if !config.append_system_prompt.is_empty() {
+            create_config["appendSystemPrompt"] = serde_json::json!(config.append_system_prompt);
+        }
+        for (key, paths) in [
+            ("skills", &config.skills),
+            ("promptTemplates", &config.prompt_templates),
+            ("extensions", &config.extensions),
+        ] {
+            if !paths.is_empty() {
+                create_config[key] = paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .into();
+            }
+        }
+        if let Some(tools) = &config.tools {
+            create_config["tools"] = serde_json::json!(tools);
+        }
+        if let Some(autonomous) = &config.autonomous {
+            create_config["autonomous"] = serde_json::json!(autonomous_runtime_config(autonomous));
+        }
         pa_daemon::acp::daemon::run_daemon_attached_acp_mode(
             pa_daemon::acp::daemon::DaemonAcpOptions {
                 socket_path,
                 actual_cwd: config.cwd.clone(),
                 product_version: crate::config::version().to_string(),
-                provider: config.provider.clone(),
-                model: config.model.clone(),
-                api_key: None,
+                create_config,
             },
         )
         .await

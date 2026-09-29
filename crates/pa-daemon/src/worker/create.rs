@@ -6,8 +6,10 @@ use super::{
     RlmSessionIdentity, SessionEngine, SessionFile, VecDeque, Worker,
 };
 
+use serde::Deserialize as _;
 use serde_json::Value;
 
+use crate::agent_engine::CreateSessionResources;
 use crate::protocol::DaemonResponse;
 
 impl Worker {
@@ -100,6 +102,29 @@ impl Worker {
                 .map(str::to_string),
             thinking: requested_thinking,
         });
+        // Folded before the background build spawn at the create's tail,
+        // so the first build sees them.
+        let resources = match CreateSessionResources::deserialize(payload) {
+            Ok(resources) => resources,
+            Err(error) => {
+                return response_failure(
+                    None,
+                    "create",
+                    &format!("Invalid create config: {error}"),
+                    None,
+                );
+            }
+        };
+        if let Some(agent_engine) = &self.agent_engine {
+            if let Some(autonomous) = &resources.autonomous {
+                *agent_engine.autonomous.lock().await =
+                    pa_core::autonomous::create_autonomous_runtime_state(Some(autonomous), None);
+            }
+            *agent_engine
+                .create_resources
+                .write()
+                .expect("create resources lock") = resources;
+        }
         let cwd = payload
             .get("cwd")
             .and_then(Value::as_str)
