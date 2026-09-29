@@ -409,6 +409,7 @@ mod tests {
             &records,
             None,
             &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
             &rollups,
             None,
         );
