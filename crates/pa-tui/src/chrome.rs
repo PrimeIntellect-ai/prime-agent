@@ -508,6 +508,7 @@ pub fn render_tray(state: &ChromeState, theme: &Theme, width: usize) -> Line {
 /// the hinted action — the left arrow's agents-back handoff, operator
 /// directive 2026-09-29). `None` when the left label is the override
 /// or the hint is hidden: the tray keeps no region then.
+#[must_use]
 pub fn render_tray_with_hint(
     state: &ChromeState,
     theme: &Theme,
@@ -739,6 +740,7 @@ pub struct ActivityDockSegment {
 /// [`render_activity_dock`] for the row itself): the segments cover
 /// exactly the cells each group renders — separators between groups
 /// stay inert — clamped to the row the truncation actually kept.
+#[must_use]
 pub fn render_activity_dock_segments(
     dock: &ActivityDock,
     theme: &Theme,

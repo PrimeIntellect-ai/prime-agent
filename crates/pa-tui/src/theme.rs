@@ -721,6 +721,7 @@ impl Theme {
     /// it clears the visibility bar over the surfaces it renders on
     /// and follows the theme in both color modes, so one style serves
     /// every surface instead of a per-surface copy.
+    #[must_use]
     pub fn hover_row_style(&self) -> Style {
         self.soft_selection_style()
     }

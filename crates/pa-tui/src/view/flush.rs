@@ -62,7 +62,7 @@ impl AgentView {
             let rows =
                 self.render_entry(index, entry, width, index == 0, preceded_by_tool_activity);
             sink.feed(out, &rows)?;
-            preceded_by_tool_activity = self.is_compact_neighbor(entry);
+            preceded_by_tool_activity = Self::is_compact_neighbor(entry);
         }
         sink.feed(out, &layout.tail)?;
         let dock = self.render_dock(width);

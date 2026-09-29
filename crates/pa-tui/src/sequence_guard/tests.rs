@@ -63,7 +63,7 @@ fn reports(outputs: &[GuardOutput]) -> Vec<Report> {
         .iter()
         .filter_map(|out| match out {
             GuardOutput::Mouse(report) => Some(*report),
-            GuardOutput::Event(Event::Mouse(mouse)) => mouse::from_crossterm(mouse),
+            GuardOutput::Event(Event::Mouse(mouse)) => mouse::from_crossterm(*mouse),
             GuardOutput::Event(_) => None,
         })
         .collect()
@@ -586,7 +586,7 @@ fn esc_then_a_mouse_report_flushes_the_esc_and_passes_the_report() {
     assert_eq!(
         reports(&outputs),
         vec![mouse::from_crossterm(match &wheel {
-            Event::Mouse(mouse) => mouse,
+            Event::Mouse(mouse) => *mouse,
             _ => unreachable!("the fixture is a mouse event"),
         })
         .expect("wheel decodes")]

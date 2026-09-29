@@ -504,7 +504,7 @@ pub fn context_tree_rows(tree: &Value, width: usize, scope: ContextTreeScope) ->
         ]);
         lines.push(vec![]);
     }
-    let mut header = format!("  {}", pad_end("agent", label_width),);
+    let mut header = format!("  {}", pad_end("agent", label_width));
     if show_models {
         let _ = write!(header, "  {}", pad_end("model", model_width));
     }

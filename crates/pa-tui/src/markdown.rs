@@ -56,6 +56,7 @@ impl Default for MarkdownStyle {
 }
 
 impl MarkdownStyle {
+    #[must_use]
     pub fn from_theme(theme: &crate::theme::Theme) -> Self {
         use crate::theme::ThemeColor as C;
         Self {
@@ -92,6 +93,7 @@ impl MarkdownStyle {
 }
 
 /// Rendered markdown document as styled lines.
+#[must_use]
 pub fn render_markdown(text: &str, width: usize, style: &MarkdownStyle) -> Vec<Line> {
     render_markdown_tagged(text, width, style, "", &mut MarkdownBlockCache::default())
 }
@@ -768,6 +770,7 @@ fn wrap_quote(spans: &[Span], width: usize, style: &MarkdownStyle, out: &mut Vec
 /// OSC 8 hyperlink sequences are stripped: ratatui has no escape-sequence
 /// support and would count their bytes as visible cells (the paint path
 /// re-emits them: zone markers per row, links via `HyperlinkWriter`).
+#[must_use]
 pub fn to_ratatui_line(line: &Line) -> rt::Line<'static> {
     let mut stripped = line.clone();
     crate::osc133::strip(&mut stripped);

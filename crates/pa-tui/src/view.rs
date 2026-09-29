@@ -37,6 +37,7 @@ pub struct ShareLoader {
 }
 
 impl ShareLoader {
+    #[must_use]
     pub fn new() -> Self {
         ShareLoader {
             message: "Creating gist...".to_string(),
@@ -297,7 +298,7 @@ impl AgentView {
     /// ipython cells included), bash executions, and shell completions
     /// render flush against each other — the set both the leading-space
     /// scan and `precededByToolActivity` compact decisions use.
-    pub(super) fn is_compact_neighbor(&self, entry: &ChatEntry) -> bool {
+    pub(super) fn is_compact_neighbor(entry: &ChatEntry) -> bool {
         matches!(
             entry,
             ChatEntry::Tool(_)
@@ -307,6 +308,7 @@ impl AgentView {
         )
     }
 
+    #[must_use]
     pub fn new(theme: Theme) -> Self {
         Self {
             theme,

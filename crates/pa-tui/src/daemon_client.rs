@@ -487,10 +487,12 @@ impl DaemonClient {
     /// hiccup the UI loop's reconnect driver observes (the event channel
     /// itself stays open: the retained sender keeps it alive for direct
     /// reader pumps). Poll it with `watch::Receiver::changed`.
+    #[must_use]
     pub fn reader_dead(&self) -> tokio::sync::watch::Receiver<bool> {
         self.reader_dead_rx.clone()
     }
 
+    #[must_use]
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
@@ -527,6 +529,7 @@ impl DaemonClient {
     }
 
     /// Protocol identity negotiated in the hello handshake.
+    #[must_use]
     pub fn protocol(&self) -> &DaemonProtocolInfo {
         &self.protocol
     }
@@ -546,6 +549,7 @@ impl DaemonClient {
             })
     }
 
+    #[must_use]
     pub fn hello(&self) -> &Value {
         &self.hello
     }
@@ -826,6 +830,7 @@ impl DaemonClient {
     }
 
     /// The active direct link's session, when this client upgraded.
+    #[must_use]
     pub fn direct_session_id(&self) -> Option<String> {
         self.direct.session_id()
     }
