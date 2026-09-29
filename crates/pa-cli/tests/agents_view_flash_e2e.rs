@@ -1,3 +1,22 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
+// by design on hot paths (boxing 130 fns is allocation-churn with zero
+// correctness gain); the fn-length threshold is a style gate, not
+// correctness (the harness fns are intentionally linear); 64-bit targets -
+// the narrowing sits at OS/protocol boundaries where the values are
+// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
+// guarded parses), and checked conversions would add panic paths where
+// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
+// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
+// dossier for the conductor).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! End-to-end verifier for the agents-view flash: a store seeded with
 //! hundreds of dead subagent sessions under one parent whose worker
 //! registers and then departs (the operator's fleet box: a departed
@@ -211,7 +230,7 @@ impl Client {
         }
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -405,7 +424,7 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
 
     // Before the family's worker ever registers, the roster snapshot is
     // clean of the dead family (nothing anchors it).
-    client.send_command("r0", json!({ "type": "roster_subscribe" }));
+    client.send_command("r0", &json!({ "type": "roster_subscribe" }));
     let before = client.request("r0");
     assert_eq!(before["success"], true, "roster_subscribe: {before}");
     assert_eq!(
@@ -420,7 +439,7 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
     // root is resident.
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "sessionPath": parent_file.to_string_lossy(),
             "config": {
@@ -440,7 +459,7 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
         .expect("the active session id")
         .to_string();
     client.drain_roster_pushes(Duration::from_millis(500));
-    client.send_command("r1", json!({ "type": "roster_subscribe" }));
+    client.send_command("r1", &json!({ "type": "roster_subscribe" }));
     let resident = client.request("r1");
     assert_eq!(
         family_rows(&roster_of(&resident), &parent_file, "sub-"),
@@ -457,12 +476,12 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
     // never vanishes).
     client.send_command(
         "k1",
-        json!({ "type": "kill", "activeSessionId": active_id }),
+        &json!({ "type": "kill", "activeSessionId": active_id }),
     );
     let killed = client.request("k1");
     assert_eq!(killed["success"], true, "kill failed: {killed}");
     client.drain_roster_pushes(Duration::from_millis(500));
-    client.send_command("r2", json!({ "type": "roster_subscribe" }));
+    client.send_command("r2", &json!({ "type": "roster_subscribe" }));
     let departed = client.request("r2");
     let departed_roster = roster_of(&departed);
     let seeded_children = departed_roster
@@ -494,7 +513,7 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
     // ledger walk): the parent plus its hundreds of children.
     client.send_command(
         "s1",
-        json!({ "type": "list_saved_sessions", "cwd": dir.path().to_string_lossy() }),
+        &json!({ "type": "list_saved_sessions", "cwd": dir.path().to_string_lossy() }),
     );
     let saved = client.request("s1");
     assert_eq!(saved["success"], true, "list_saved_sessions: {saved}");
@@ -607,7 +626,7 @@ async fn a_stopped_session_stays_visible_in_the_view() {
     // remove it.
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "sessionPath": stopped_file.to_string_lossy(),
             "config": {
@@ -629,14 +648,14 @@ async fn a_stopped_session_stays_visible_in_the_view() {
     client.drain_roster_pushes(Duration::from_millis(500));
     client.send_command(
         "k1",
-        json!({ "type": "kill", "activeSessionId": active_id }),
+        &json!({ "type": "kill", "activeSessionId": active_id }),
     );
     let killed = client.request("k1");
     assert_eq!(killed["success"], true, "kill failed: {killed}");
     client.drain_roster_pushes(Duration::from_millis(500));
 
     // The snapshot serves the passivated row (the view's roster half).
-    client.send_command("r1", json!({ "type": "roster_subscribe" }));
+    client.send_command("r1", &json!({ "type": "roster_subscribe" }));
     let roster = client.request("r1");
     assert_eq!(roster["success"], true, "roster_subscribe: {roster}");
     let entries = roster["data"]["roster"]

@@ -88,6 +88,7 @@ impl Supervisor {
     /// already published never flips the shutdown gate, so it cannot
     /// convert the descriptor-preserving update exit into a terminal
     /// stop pass.
+    #[cfg(unix)]
     pub(crate) fn begin_signal_drain(self: &Arc<Self>) -> bool {
         if self.update_prepare.active_state() == Some(PrepareState::Stopping)
             || self.accept_exit.load(Ordering::SeqCst)

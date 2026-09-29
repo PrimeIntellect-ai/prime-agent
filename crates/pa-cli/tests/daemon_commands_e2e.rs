@@ -1,3 +1,22 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
+// by design on hot paths (boxing 130 fns is allocation-churn with zero
+// correctness gain); the fn-length threshold is a style gate, not
+// correctness (the harness fns are intentionally linear); 64-bit targets -
+// the narrowing sits at OS/protocol boundaries where the values are
+// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
+// guarded parses), and checked conversions would add panic paths where
+// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
+// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
+// dossier for the conductor).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! End-to-end daemon-command tests: spawn the real `pa-daemon` supervisor on a
 //! temp socket, drive `prime-agent` list/stop/rename against it, and diff the
 //! output against goldens captured from the installed TS `prime-agent` binary
@@ -172,7 +191,7 @@ impl Wire {
         (wire, hello)
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -204,7 +223,7 @@ impl Wire {
         }
     }
 
-    fn request(&mut self, id: &str, command: Value) -> Value {
+    fn request(&mut self, id: &str, command: &Value) -> Value {
         self.send_command(id, command);
         loop {
             let line = self.read_line();
@@ -234,7 +253,7 @@ fn create_session(
     }
     let response = wire.request(
         id,
-        json!({ "type": "create", "name": name, "config": config }),
+        &json!({ "type": "create", "name": name, "config": config }),
     );
     assert_eq!(response["success"], true, "create failed: {response}");
     response["data"]["activeSessionId"]
@@ -1021,9 +1040,9 @@ fn ts_daemon_differential_cli_output() {
     );
     // TS stops the primary session, the Rust CLI stops the secondary one:
     // both must print the same golden output.
-    let stop_ts: Vec<&str> = vec!["stop", primary.as_str()];
-    let stop_rs: Vec<&str> = vec!["stop", tertiary.as_str()];
-    compare(&mut failures, &stop_ts, &stop_rs, "stop");
+    let ts_stop_args: Vec<&str> = vec!["stop", primary.as_str()];
+    let rust_stop_args: Vec<&str> = vec!["stop", tertiary.as_str()];
+    compare(&mut failures, &ts_stop_args, &rust_stop_args, "stop");
 
     // Saved-session wake on the TS daemon (ground truth): each CLI sends to
     // a session stopped earlier by its own name; both must wake it and
