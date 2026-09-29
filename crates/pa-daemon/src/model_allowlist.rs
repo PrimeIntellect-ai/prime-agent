@@ -107,6 +107,7 @@ pub struct ModelRefusalTelemetry {
 }
 
 impl ModelRefusalTelemetry {
+    #[must_use]
     pub fn new(agent_dir: std::path::PathBuf, telemetry_disabled: bool) -> Self {
         Self {
             agent_dir,

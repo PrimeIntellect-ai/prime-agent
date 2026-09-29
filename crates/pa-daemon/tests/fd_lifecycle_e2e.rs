@@ -3,6 +3,31 @@
 //! `/proc/<pid>/fd` per cycle so any monotonically growing fd class in the
 //! supervisor (worker transports, journals, logs, event channels) is
 //! caught as a regression.
+// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
+// the full rationale).
+// Stack-resident futures by design on the daemon's hot paths; boxing the
+// call sites for a lint tick is a perf regression with zero correctness gain.
+#![allow(clippy::large_futures)]
+// 64-bit-only targets; the narrowing casts sit at OS boundaries
+// (pid/fd/time/size) where the values are bounded by the kernel - the
+// dead-guard expect()s would add panic paths where silent wrap was
+// deliberate.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// The fn-length threshold is a style gate, not correctness; the structure
+// campaign owns the god-fn splits as a follow-up.
+#![allow(clippy::too_many_lines)]
+// API-shape opinions, not defects; the surfaces are deliberate.
+#![allow(
+    clippy::unnecessary_wraps,
+    clippy::zero_sized_map_values,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names
+)]
 #![cfg(unix)]
 
 use std::collections::HashMap;
@@ -126,7 +151,7 @@ impl Client {
         (client, hello)
     }
 
-    fn send_command(&mut self, id: &str, command: serde_json::Value) {
+    fn send_command(&mut self, id: &str, command: &serde_json::Value) {
         let envelope = serde_json::json!({
             "type": "command",
             "id": id,
@@ -240,7 +265,7 @@ fn supervisor_fd_count_stable_across_session_cycles() {
         let create_id = format!("c{cycle}");
         client.send_command(
             &create_id,
-            serde_json::json!({
+            &serde_json::json!({
                 "type": "create",
                 "config": {
                     "cwd": dir.path().to_string_lossy(),
@@ -261,7 +286,7 @@ fn supervisor_fd_count_stable_across_session_cycles() {
 
         client.send_command(
             &format!("a{cycle}"),
-            serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
+            &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
         );
         assert_eq!(
             client.read_response(&format!("a{cycle}"))["success"],
@@ -270,7 +295,7 @@ fn supervisor_fd_count_stable_across_session_cycles() {
         );
         client.send_command(
             &format!("p{cycle}"),
-            serde_json::json!({
+            &serde_json::json!({
                 "type": "prompt_and_wait",
                 "activeSessionId": session_id,
                 "message": "cycle",
@@ -292,7 +317,7 @@ fn supervisor_fd_count_stable_across_session_cycles() {
 
         client.send_command(
             &format!("k{cycle}"),
-            serde_json::json!({ "type": "kill", "activeSessionId": session_id }),
+            &serde_json::json!({ "type": "kill", "activeSessionId": session_id }),
         );
         let killed = client.read_response(&format!("k{cycle}"));
         assert_eq!(killed["success"], true, "kill failed: {killed}");
@@ -304,7 +329,7 @@ fn supervisor_fd_count_stable_across_session_cycles() {
             fd_snapshot(pid).is_empty() || worker_pid(&agent_dir, &socket, &session_id).is_none()
         });
         wait_until(Duration::from_secs(10), || {
-            client.send_command("l", serde_json::json!({ "type": "list" }));
+            client.send_command("l", &serde_json::json!({ "type": "list" }));
             let list = client.read_response("l");
             list["data"]["sessions"]
                 .as_array()
@@ -375,7 +400,7 @@ fn worker_fd_count_stable_across_prompts() {
 
     client.send_command(
         "c0",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -394,7 +419,7 @@ fn worker_fd_count_stable_across_prompts() {
     let pid = worker_pid(&agent_dir, &socket, &session_id).expect("worker pid");
     client.send_command(
         "a0",
-        serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
     );
     assert_eq!(client.read_response("a0")["success"], true, "attach failed");
 
@@ -403,7 +428,7 @@ fn worker_fd_count_stable_across_prompts() {
         let id = format!("p{turn}");
         client.send_command(
             &id,
-            serde_json::json!({
+            &serde_json::json!({
                 "type": "prompt_and_wait",
                 "activeSessionId": session_id,
                 "message": format!("turn {turn}"),
@@ -455,10 +480,10 @@ fn child_pids_of(ppid: u32) -> Vec<u32> {
     let mut pids = Vec::new();
     let entries = std::fs::read_dir("/proc").expect("read /proc");
     for entry in entries.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+        let Ok(entry_pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
             continue;
         };
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{entry_pid}/stat")) else {
             continue;
         };
         let Some((_, rest)) = stat.rsplit_once(')') else {
@@ -470,7 +495,7 @@ fn child_pids_of(ppid: u32) -> Vec<u32> {
             continue;
         };
         if parent == ppid {
-            pids.push(pid);
+            pids.push(entry_pid);
         }
     }
     pids
@@ -547,7 +572,7 @@ fn worker_fd_table_stable_across_client_connection_churn() {
     .expect("write script");
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -602,7 +627,7 @@ fn worker_fd_table_stable_across_client_connection_churn() {
     // The worker still serves after the churn: a routed command round-trips.
     client.send_command(
         "g1",
-        serde_json::json!({ "type": "get_last_assistant_text", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "get_last_assistant_text", "activeSessionId": session_id }),
     );
     let last = client.read_response("g1");
     assert_eq!(last["success"], true, "routed command failed: {last}");
@@ -618,7 +643,7 @@ fn worker_fd_table_stable_across_client_connection_churn() {
 
     client.send_command(
         "k1",
-        serde_json::json!({ "type": "kill", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "kill", "activeSessionId": session_id }),
     );
     let killed = client.read_response("k1");
     assert_eq!(killed["success"], true, "kill failed: {killed}");
@@ -660,7 +685,7 @@ fn supervisor_restart_loop_leaves_no_orphan_workers() {
     .expect("write script");
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -695,7 +720,7 @@ fn supervisor_restart_loop_leaves_no_orphan_workers() {
 
     // The restart loop runs to its failure budget and removes the session.
     wait_until(Duration::from_mins(1), || {
-        client.send_command("l", serde_json::json!({ "type": "list" }));
+        client.send_command("l", &serde_json::json!({ "type": "list" }));
         let list = client.read_response("l");
         list["data"]["sessions"]
             .as_array()

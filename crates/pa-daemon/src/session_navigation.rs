@@ -132,7 +132,7 @@ impl SessionNavigation {
     /// never touches the live session, so a prepare failure leaves it
     /// untouched - the TS `releaseUncommittedLease` fallthrough.
     #[allow(clippy::result_large_err)]
-    pub(crate) async fn prepare_new_session(
+    pub(crate) fn prepare_new_session(
         &self,
         payload: &Value,
     ) -> Result<PreparedReplacement, DaemonResponse> {
@@ -188,7 +188,7 @@ impl SessionNavigation {
     /// and any in-flight work, exactly like the TS throw out of
     /// `switchSession` before `teardownForReplacement`.
     #[allow(clippy::result_large_err)]
-    pub(crate) async fn prepare_switch_session(
+    pub(crate) fn prepare_switch_session(
         &self,
         payload: &Value,
     ) -> Result<PreparedReplacement, DaemonResponse> {
@@ -201,7 +201,6 @@ impl SessionNavigation {
             .and_then(Value::as_str)
             .map(str::to_string);
         self.open_replacement(session_path, cwd_override, "switch_session", None)
-            .await
     }
 
     /// `import_jsonl`'s prepare phase (TS `importFromJsonl` before the
@@ -209,7 +208,7 @@ impl SessionNavigation {
     /// open the copy. A missing input file answers the TS import error
     /// without touching the live session.
     #[allow(clippy::result_large_err)]
-    pub(crate) async fn prepare_import_jsonl(
+    pub(crate) fn prepare_import_jsonl(
         &self,
         payload: &Value,
     ) -> Result<PreparedReplacement, DaemonResponse> {
@@ -277,7 +276,6 @@ impl SessionNavigation {
             "import_jsonl",
             lease,
         )
-        .await
     }
 
     /// Open one replacement session file and check its stored cwd exists
@@ -288,7 +286,7 @@ impl SessionNavigation {
     /// — the last term is the worker's live cwd, so the empty fallthrough
     /// keeps it).
     #[allow(clippy::result_large_err)]
-    async fn open_replacement(
+    fn open_replacement(
         &self,
         path: &str,
         cwd_override: Option<String>,
@@ -408,7 +406,7 @@ impl Worker {
         if let Err(response) = self.require_created("new_session") {
             return response;
         }
-        let prepared = self.navigation.prepare_new_session(payload).await;
+        let prepared = self.navigation.prepare_new_session(payload);
         self.run_session_replacement("new_session", prepared).await
     }
 
@@ -417,7 +415,7 @@ impl Worker {
         if let Err(response) = self.require_created("switch_session") {
             return response;
         }
-        let prepared = self.navigation.prepare_switch_session(payload).await;
+        let prepared = self.navigation.prepare_switch_session(payload);
         self.run_session_replacement("switch_session", prepared)
             .await
     }
@@ -427,7 +425,7 @@ impl Worker {
         if let Err(response) = self.require_created("import_jsonl") {
             return response;
         }
-        let prepared = self.navigation.prepare_import_jsonl(payload).await;
+        let prepared = self.navigation.prepare_import_jsonl(payload);
         self.run_session_replacement("import_jsonl", prepared).await
     }
 }
@@ -776,8 +774,8 @@ mod tests {
         let entry_id = {
             let mut core = worker.core.lock().unwrap();
             let store = core.store.as_mut().expect("created store");
-            let entry_id =
-                store.append_message(json!({ "role": "user", "content": "hi", "timestamp": 1u64 }));
+            let entry_id = store
+                .append_message(&json!({ "role": "user", "content": "hi", "timestamp": 1u64 }));
             let _ = store.rewrite();
             entry_id
         };

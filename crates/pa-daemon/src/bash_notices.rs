@@ -129,7 +129,7 @@ fn validate_consumed(data: &Value) -> anyhow::Result<BashConsumedNotice> {
     let pid = data
         .get("pid")
         .and_then(Value::as_u64)
-        .filter(|pid| *pid > 0 && *pid <= u32::MAX as u64)
+        .filter(|pid| *pid > 0 && u32::try_from(*pid).is_ok())
         .ok_or_else(|| anyhow::anyhow!("bash.completed pid must be a positive integer"))?
         as u32;
     let command = data

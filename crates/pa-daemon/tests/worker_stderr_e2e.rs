@@ -99,7 +99,7 @@ impl Client {
         client
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let mut line = serde_json::to_string(&json!({
             "type": "command",
             "id": id,
@@ -152,7 +152,7 @@ impl Client {
 /// The active session id a create response answered (the summary's `id`,
 /// the same id that names the worker's stderr log).
 fn create_session(client: &mut Client, request_id: &str, config: &Value) -> String {
-    client.send_command(request_id, json!({ "type": "create", "config": config }));
+    client.send_command(request_id, &json!({ "type": "create", "config": config }));
     let created = client.read_response(request_id);
     assert_eq!(created["success"], true, "create failed: {created}");
     created["data"]["id"]
@@ -197,7 +197,7 @@ fn worker_stderr_lands_in_the_per_worker_log_and_prunes_retention() {
             .join("logs")
             .join(format!("worker-old{index:03}.stderr.log"));
         std::fs::write(&path, "leftover from an earlier daemon run\n").expect("leftover log");
-        let mtime = filetime::FileTime::from_unix_time(index as i64, 0);
+        let mtime = filetime::FileTime::from_unix_time(i64::from(index), 0);
         filetime::set_file_mtime(&path, mtime).expect("set mtime");
     }
     // PA_DAEMON_DEBUG makes the real worker narrate its boot on stderr
@@ -274,7 +274,7 @@ fn never_ready_worker_failure_carries_the_captured_stderr_tail() {
         "script": script_path.to_string_lossy(),
     });
     let mut client = Client::connect(&socket);
-    client.send_command("c1", json!({ "type": "create", "config": create_config }));
+    client.send_command("c1", &json!({ "type": "create", "config": create_config }));
     let failed = client.read_response("c1");
     assert_eq!(failed["success"], false, "create must fail: {failed}");
     let message = failed["error"].as_str().expect("error message");
