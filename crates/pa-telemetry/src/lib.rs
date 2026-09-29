@@ -10,6 +10,19 @@
 //! or tool content is ever emitted. Telemetry is best-effort and must never
 //! block or fail the agent.
 
+// Pedantic-gate exceptions (every other pedantic warning in this crate is
+// fixed in place; each exception carries its one-line justification):
+// - the casts: wire-format and duration arithmetic narrows validated or
+//   structurally bounded values (millisecond durations, clamped property
+//   bounds, non-negative-guarded JSON numbers); guarded conversions would
+//   add panic paths the bounds guarantee away.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 mod catalog;
 mod client;
 mod env;

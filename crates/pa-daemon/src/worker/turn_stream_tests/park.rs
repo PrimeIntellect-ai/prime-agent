@@ -292,7 +292,7 @@ async fn compacting_window_parks_a_cleared_suspension_until_it_ends() {
 
 /// A settings fixture: the agent dir's `settings.json` carries the
 /// `idleEvictionMinutes` value under test.
-fn passivation_settings(dir: &std::path::Path, value: serde_json::Value) {
+fn passivation_settings(dir: &std::path::Path, value: &serde_json::Value) {
     std::fs::create_dir_all(dir).unwrap();
     let settings = serde_json::json!({ "idleEvictionMinutes": value });
     std::fs::write(
@@ -306,7 +306,7 @@ fn passivation_settings(dir: &std::path::Path, value: serde_json::Value) {
 async fn idle_passivation_window_arms_only_for_idle_parent_owned_children() {
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
-    passivation_settings(&agent_dir, serde_json::json!(1));
+    passivation_settings(&agent_dir, &serde_json::json!(1));
     let engine = Arc::new(ScriptedEngine::default());
     let mut runner = burst_runner(Arc::clone(&engine) as Arc<dyn SessionEngine>);
     // The shared PassivationContext with a live settings dir.
@@ -348,7 +348,7 @@ async fn idle_passivation_window_arms_only_for_idle_parent_owned_children() {
     );
 
     // `"off"` disables the whole arm.
-    passivation_settings(&agent_dir, serde_json::json!("off"));
+    passivation_settings(&agent_dir, &serde_json::json!("off"));
     assert!(runner.idle_passivation_window().is_none());
 }
 
@@ -360,7 +360,7 @@ async fn idle_passivation_refuses_while_the_lanes_hold_undelivered_input() {
     // fresh-snapshot fence may pass while the lanes hold it.
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
-    passivation_settings(&agent_dir, serde_json::json!(1));
+    passivation_settings(&agent_dir, &serde_json::json!(1));
     let engine = Arc::new(ScriptedEngine::default());
     let mut runner = burst_runner(Arc::clone(&engine) as Arc<dyn SessionEngine>);
     runner.passivation.agent_dir = agent_dir;
@@ -436,7 +436,7 @@ async fn idle_passivation_fire_rechecks_the_fresh_state_and_reports_the_threshol
     // the fire NEVER stops the worker locally and never panics.
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
-    passivation_settings(&agent_dir, serde_json::json!(1));
+    passivation_settings(&agent_dir, &serde_json::json!(1));
     let engine = Arc::new(ScriptedEngine::default());
     let mut runner = burst_runner(Arc::clone(&engine) as Arc<dyn SessionEngine>);
     runner.passivation.agent_dir = agent_dir;

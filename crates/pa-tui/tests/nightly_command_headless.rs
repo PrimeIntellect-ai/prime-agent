@@ -332,6 +332,7 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
 
 fn options(socket: PathBuf) -> InteractiveOptions {
     InteractiveOptions {
+        models: None,
         socket_path: socket,
         cwd: PathBuf::from("/tmp"),
         session_dir: None,

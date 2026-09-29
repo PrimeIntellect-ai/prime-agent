@@ -109,7 +109,6 @@ pub fn session_stats(store: &SessionFile, context_window: Option<u64>) -> Value 
         }
     }
     let total_messages = durable_messages.len() as u64 + older_total_messages;
-    let costs = session_cost_split(store);
     let mut stats = json!({
         "sessionFile": store.path.display().to_string(),
         "sessionId": store.session_id(),
@@ -126,85 +125,11 @@ pub fn session_stats(store: &SessionFile, context_window: Option<u64>) -> Value 
             "total": input + output + cache_read + cache_write,
         },
         "cost": cost,
-        "totalCost": costs.total,
-        // The split behind the title's own + subagent aggregate pair:
-        // the two halves sum to `totalCost`.
-        "ownCost": costs.own,
-        "subagentsCost": costs.subagents,
     });
     if let Some(usage) = context_usage(&branch, &messages, context_window) {
         stats["contextUsage"] = usage;
     }
     stats
-}
-
-/// The whole-session spend split into the session's own bill and its
-/// descendant subagents' aggregate (the top bar's ask: the title shows
-/// `"$own + $subagents (subagents)"`, both labeled — the agents view's
-/// collapsed-row aggregate is the same rule over its forest records).
-/// `total` is the pre-split `totalCost` fold: the `/context` root
-/// `totalUsage`'s fold over the gap-bridged branch — cumulative across
-/// compactions, priced per record (model switches and cache classes
-/// correct by construction) — plus a windowed store's discarded-prefix
-/// cost, so the two halves sum to what the title showed before the
-/// split. Attributed child spend rides the parent's assistant rows (the
-/// child-usage attribution fold lands descendant costs there, including
-/// a deleted child's spend attributed before its deletion), so the walk
-/// already carries every subagent's bill; `subagents` is the attributed
-/// half — the retained region's own/total attribution gap plus the
-/// discarded prefix's captured child batches.
-struct SessionCostSplit {
-    own: f64,
-    subagents: f64,
-    total: f64,
-}
-
-fn session_cost_split(store: &SessionFile) -> SessionCostSplit {
-    let branch = store.branch_bridged();
-    let all_entries = store.entries();
-    let (own_usage, total_usage) =
-        crate::state_getters::compute_own_and_total_usage(&branch, all_entries);
-    let usage_cost = |usage: &Value| {
-        usage
-            .get("cost")
-            .and_then(|cost| cost.get("total"))
-            .and_then(Value::as_f64)
-            .unwrap_or_default()
-    };
-    let retained_own = usage_cost(&own_usage);
-    let retained_total = usage_cost(&total_usage);
-    // The retained region's subagent spend is the attribution gap (the
-    // own fold clamps at zero, so the difference is never negative).
-    let retained_subagents = retained_total - retained_own;
-    // The discarded prefix: its folded assistant rows plus the
-    // `compaction` / `branch_summary` spend — the in-window walk bills
-    // the retained region's summarizer rows, and the prefix's must
-    // land here or the full-session total undercounts (the
-    // summarizer's usage rides the entry, never a message — the
-    // window stats' message fold alone misses them). The prefix's
-    // captured child batches are the subagent half of the same folded
-    // rows.
-    let (prefix, prefix_subagents) = match store.window.as_ref() {
-        Some(window) => {
-            let stats = &window.older_path_stats;
-            (
-                stats.cost + stats.summarization_cost,
-                stats.attributed_child_cost,
-            )
-        }
-        None => (0.0, 0.0),
-    };
-    // The prefix's own half clamps at zero: attribution drift (or a
-    // malformed batch) can push the child sums past the rows the walk
-    // counted, and the full reader's own fold clamps per field the
-    // same way — `ownCost` never goes negative, the aggregate never
-    // exceeds the counted bill, and the pair still sums to `totalCost`.
-    let prefix_subagents = prefix_subagents.min(prefix);
-    SessionCostSplit {
-        own: retained_own + (prefix - prefix_subagents),
-        subagents: retained_subagents + prefix_subagents,
-        total: retained_total + prefix,
-    }
 }
 
 /// The messages TS `state.messages` holds after the latest compaction:

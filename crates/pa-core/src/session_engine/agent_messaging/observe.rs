@@ -1,7 +1,7 @@
 //! The agent-observe half (TS `agent-observe.ts`): the family status and
 //! activity enums, the observe summary and preview types, the controller
 //! trait, the limit clamps, and the host-handler registration.
-use super::*;
+use super::{host_handler, json, AgentFamilyRelationship, Future, HostRequestHandlers, Value};
 
 /// the agent has work in flight, `idle` for a resident-but-quiet session,
 /// `inactive` for a family member with no live session in this daemon.

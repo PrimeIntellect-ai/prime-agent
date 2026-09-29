@@ -890,11 +890,6 @@ mod tests {
         assert_eq!(stats["tokens"]["output"], json!(5863));
         assert_eq!(stats["tokens"]["cacheRead"], json!(18560));
         assert_eq!(stats["cost"].as_f64(), Some(0.008_995_7));
-        // The title's full-session total: the same folded aggregate —
-        // the six attributed children's spend rides the assistant rows
-        // (the fixture has no compaction, so the active region and the
-        // whole session coincide here).
-        assert_eq!(stats["totalCost"].as_f64(), Some(0.008_995_7));
     }
 
     /// The operator's cost question, proven over the real file path: a

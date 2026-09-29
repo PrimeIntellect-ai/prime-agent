@@ -51,6 +51,12 @@ name = "golden_system_prompt"
 path = "tests/golden/system_prompt.rs"
 
 [lints.clippy]
+# pa-core keeps its OWN lints table (not `workspace = true`): the
+# workspace's `rust.unsafe_code = "forbid"` would outlaw the platform
+# bindings' legitimate unsafe blocks (process/termios/lock-dir). The
+# clippy rows mirror the workspace table, and the pedantic class rides
+# here so CI's -D warnings bar enforces it on this crate too.
+pedantic = "warn"
 redundant_clone = "warn"
 clone_on_copy = "warn"
 assigning_clones = "warn"

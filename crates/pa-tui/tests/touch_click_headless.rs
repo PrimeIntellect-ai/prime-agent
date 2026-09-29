@@ -368,6 +368,7 @@ fn model(id: &str, name: &str) -> Model {
 
 fn options(socket: PathBuf, catalog: Vec<Model>) -> InteractiveOptions {
     InteractiveOptions {
+        models: None,
         socket_path: socket,
         cwd: PathBuf::from("/tmp"),
         session_dir: None,

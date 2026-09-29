@@ -623,6 +623,12 @@ fn pad_start(value: &str, width: usize) -> String {
 /// Compute the compact column layout for the rows at `width`.
 #[must_use]
 pub fn build_layout(rows: &[crate::agents_view_forest::AgentsViewRow], width: usize) -> RowLayout {
+    // TS `buildCompactAgentsViewLayout` (:3078) excludes the program's
+    // code rows: they contribute no columns and read no detail cell.
+    let rows: Vec<_> = rows
+        .iter()
+        .filter(|row| row.kind != crate::agents_view_forest::RowKind::Code)
+        .collect();
     let cost_width = rows
         .iter()
         .map(|row| str_width(&format!("${:.2}", row.cost)))
@@ -855,6 +861,7 @@ mod tests {
             &records,
             None,
             &std::collections::HashSet::default(),
+            &std::collections::HashSet::default(),
             &std::collections::HashMap::default(),
             None,
         );
@@ -1052,6 +1059,7 @@ mod tests {
             &records,
             None,
             &std::collections::HashSet::default(),
+            &std::collections::HashSet::default(),
             &std::collections::HashMap::default(),
             None,
         );
@@ -1100,6 +1108,7 @@ mod tests {
         let rows = crate::agents_view_forest::build_rows::<std::collections::hash_map::RandomState>(
             &records,
             None,
+            &std::collections::HashSet::default(),
             &std::collections::HashSet::default(),
             &std::collections::HashMap::default(),
             None,

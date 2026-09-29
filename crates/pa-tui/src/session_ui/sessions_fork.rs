@@ -338,6 +338,7 @@ impl SessionUi {
             session_dir: self.session_dir.clone(),
             script_path: self.script_path.clone(),
             model_selection: self.model_selection.clone(),
+            models: self.models.clone(),
             model_catalog: self.model_catalog.clone(),
             model_configured_providers: self.model_configured_providers.clone(),
             model_recent_models: self.model_recent_models.clone(),
@@ -453,8 +454,9 @@ impl SessionUi {
         self.stash_draft_for_switch(view);
         match self.attach_session(&id, DockFold::FirstFrame).await {
             Ok(()) => {
-                // Session-scoped stats again: the rebuilt title must show
-                // the switched-to session's pair, not the one being left.
+                // Session-scoped stats again: the rebuilt tray must show
+                // the switched-to session's context usage, not the one
+                // being left.
                 self.refresh_stats().await;
                 self.rebuild_view(view, &RebuildKind::Rebind);
                 self.note(&format!("switched to session {id}"), view);

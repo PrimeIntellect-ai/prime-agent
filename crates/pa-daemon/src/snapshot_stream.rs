@@ -363,9 +363,9 @@ mod tests {
         let table: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut out = String::new();
         for chunk in bytes.chunks(3) {
-            let b0 = chunk[0] as u32;
-            let b1 = *chunk.get(1).unwrap_or(&0) as u32;
-            let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+            let b0 = u32::from(chunk[0]);
+            let b1 = u32::from(*chunk.get(1).unwrap_or(&0));
+            let b2 = u32::from(*chunk.get(2).unwrap_or(&0));
             let triple = (b0 << 16) | (b1 << 8) | b2;
             out.push(table[(triple >> 18) as usize & 63] as char);
             out.push(table[(triple >> 12) as usize & 63] as char);

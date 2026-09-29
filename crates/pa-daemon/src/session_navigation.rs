@@ -83,6 +83,14 @@ impl SessionNavigation {
     async fn replace_session(&self, file: SessionFile) -> Result<(), String> {
         let branch_entries = file.branch_file_entries();
         let new_path = file.path.clone();
+        // Prime the new store's usage fold before it enters the core: the
+        // summaries the swap's roster pushes read resume from this cache
+        // and fold only the appended tail (off the runtime, like the
+        // create prime; an empty path fails fast).
+        let primed = new_path.clone();
+        let _ =
+            tokio::task::spawn_blocking(move || crate::session_store::read_session_info(&primed))
+                .await;
         {
             let mut core = self.core.lock().unwrap();
             core.store = Some(file);
@@ -399,6 +407,12 @@ impl Worker {
                 self.reseed_service_tier_for_replacement();
                 self.bind_scheduled_jobs().await;
                 self.prewarm_replacement_session();
+                // The replacement never pushed a roster delta, so the
+                // subscribed surfaces kept the PREVIOUS session's
+                // numbers until the next turn: the fresh session's
+                // summary row ships now (the title's cost folds it in
+                // `update_subagent_summary` on arrival).
+                self.push_roster_delta();
                 response_success(None, command, Some(json!({ "cancelled": false })))
             }
             Err(error) => response_failure(None, command, &error, None),

@@ -9,6 +9,12 @@
 //! re-entry attaches the unchanged session, adopts the held handoff on
 //! the matching attach cursor, and its frames carry the identical
 //! transcript content.
+// Pedantic-gate dispositions for THIS test root (each tied to its own
+// sites): the two round-trip flows are intentionally linear harness
+// scripts (the fn-length gate is style, not correctness), and their
+// async test futures are stack-resident by shape - boxing a test
+// future for a lint tick is churn with no correctness gain.
+#![allow(clippy::large_futures, clippy::too_many_lines)]
 #![cfg(unix)]
 
 use std::fmt::Write as _;
@@ -153,6 +159,7 @@ fn write_faux_script(dir: &Path, replies: &[&str]) -> PathBuf {
 
 fn chat_options(socket: PathBuf, cwd: PathBuf) -> InteractiveOptions {
     InteractiveOptions {
+        models: None,
         socket_path: socket,
         cwd,
         session_dir: None,

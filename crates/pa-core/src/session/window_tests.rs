@@ -74,21 +74,14 @@ fn older_path_stats_fold_child_usage_attributions() {
         (150, 15, 5, 0)
     );
     assert!((stats.cost - 0.165).abs() < 1e-9);
-    // The own/subagents split of the prefix's cost: the child batch
-    // ($0.055) is the subagent half, the raw row's own bill ($0.11) the
-    // own half — the aggregate folds the sum, so the two add up to the
-    // folded cost exactly.
-    assert!((stats.attributed_child_cost - 0.055).abs() < 1e-9);
-    assert!((stats.cost - stats.attributed_child_cost - 0.11).abs() < 1e-9);
 }
 
-/// Every attribution batch of one older-path target sums into the
-/// subagent half: the walk keeps only the target's LAST cumulative
-/// aggregate for the fold, but the child batches are additive — their
-/// sum must stay the folded row's attributed portion, or the split
-/// would bill later batches to the session's own cost.
+/// The walk keeps a target's LAST cumulative aggregate for the fold
+/// even when more attributions follow it in file order: the walk runs
+/// newest-first, so the FIRST aggregate seen per target is the last
+/// one written — the cumulative aggregate the TS fold ends with.
 #[test]
-fn older_path_stats_sum_every_child_batch_of_a_target() {
+fn older_path_stats_keep_a_targets_last_aggregate() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("older-attribution-batches.jsonl");
     let mut rows = vec![
@@ -121,21 +114,16 @@ fn older_path_stats_sum_every_child_batch_of_a_target() {
     let store = WindowedSessionStore::open(&path).unwrap().unwrap();
     let stats = store.older_path_stats();
     // The LAST aggregate (the walk keeps the newest-first first-seen)
-    // folds the row; both batches sum into the subagent half.
+    // folds the row.
     assert!((stats.cost - 0.198).abs() < 1e-9);
-    assert!((stats.attributed_child_cost - 0.088).abs() < 1e-9);
-    assert!((stats.cost - stats.attributed_child_cost - 0.11).abs() < 1e-9);
 }
 
-/// A well-formed child batch with a MALFORMED aggregate still counts as
-/// the prefix's subagent spend: the retained walk's own fold subtracts
-/// every well-formed `childUsage` block regardless of its row's
-/// aggregate, so the windowed capture must gate on the same validity —
-/// nesting it inside the aggregate gate would bill the batch to the
-/// session's own cost on the windowed open while the full open
-/// subtracts it.
+/// A MALFORMED aggregate (null, a scalar) must not replace a valid row
+/// usage with zeros: the capture gate accepts objects only, so the raw
+/// row stays the counted bill — the same skip the session-store fold
+/// applies to a non-object aggregate.
 #[test]
-fn older_path_stats_count_child_batches_with_malformed_aggregates() {
+fn older_path_stats_skip_malformed_aggregates() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("older-attribution-malformed.jsonl");
     let mut rows = vec![
@@ -161,13 +149,9 @@ fn older_path_stats_count_child_batches_with_malformed_aggregates() {
     std::fs::write(&path, &body).unwrap();
     let store = WindowedSessionStore::open(&path).unwrap().unwrap();
     let stats = store.older_path_stats();
-    // The malformed aggregate never folds (the raw row's $0.125 stays the
-    // counted bill), but the child batch still splits out as the
-    // subagent half — exactly what the full reader's own fold
-    // subtracts.
+    // The malformed aggregate never folds (the raw row's $0.125 stays
+    // the counted bill).
     assert!((stats.cost - 0.125).abs() < 1e-9);
-    assert!((stats.attributed_child_cost - 0.0625).abs() < 1e-9);
-    assert!((stats.cost - stats.attributed_child_cost - 0.0625).abs() < 1e-9);
 }
 
 /// The boundary model the per-model usage fold seeds its timeline with:
@@ -329,75 +313,6 @@ fn unleased_append_invalidates_without_certification() {
     let reopened = WindowedSessionStore::open(&path).unwrap().unwrap();
     assert!(!reopened.read_stats().cache_hit);
     assert_eq!(reopened.leaf_id(), "info");
-}
-
-#[test]
-fn pre_summarization_cost_sidecar_must_not_serve() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("stale-format.jsonl");
-    std::fs::write(&path, fixture()).unwrap();
-    let cold = WindowedSessionStore::open(&path).unwrap().unwrap();
-    assert!(!cold.read_stats().cache_hit);
-    // Degrade the sidecar to the v4 shape: the version that predates
-    // `summarization_cost`. Such a snapshot deserializes the missing
-    // field as zero, so serving it would undercount the discarded
-    // prefix's summarizer bill until the file's generation changed; the
-    // version bump retires it and the store rebuilds from the file.
-    let sidecar = path.with_extension("window-cache.json");
-    let mut snapshot: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
-    snapshot["version"] = json!(4);
-    snapshot["stats"]
-        .as_object_mut()
-        .unwrap()
-        .remove("summarization_cost");
-    std::fs::write(&sidecar, serde_json::to_vec(&snapshot).unwrap()).unwrap();
-    super::super::window_cache::evict_live_snapshot(&path);
-    let stale = WindowedSessionStore::open(&path).unwrap().unwrap();
-    assert!(
-        !stale.read_stats().cache_hit,
-        "a v4 snapshot must not serve"
-    );
-    // The rebuilt store carries the same accounting as the cold walk.
-    assert_eq!(
-        serde_json::to_value(stale.context().messages).unwrap(),
-        serde_json::to_value(cold.context().messages).unwrap()
-    );
-}
-
-#[test]
-fn pre_attributed_child_cost_sidecar_must_not_serve() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("stale-split.jsonl");
-    std::fs::write(&path, fixture()).unwrap();
-    let cold = WindowedSessionStore::open(&path).unwrap().unwrap();
-    assert!(!cold.read_stats().cache_hit);
-    // Degrade the sidecar to the v6 shape: the version that predates
-    // `attributed_child_cost`. Such a snapshot deserializes the missing
-    // field as zero, so serving it would bill the discarded prefix's
-    // subagent spend to the session's own cost until the file's
-    // generation changed; the version bump retires it and the store
-    // rebuilds from the file.
-    let sidecar = path.with_extension("window-cache.json");
-    let mut snapshot: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
-    snapshot["version"] = json!(6);
-    snapshot["stats"]
-        .as_object_mut()
-        .unwrap()
-        .remove("attributed_child_cost");
-    std::fs::write(&sidecar, serde_json::to_vec(&snapshot).unwrap()).unwrap();
-    super::super::window_cache::evict_live_snapshot(&path);
-    let stale = WindowedSessionStore::open(&path).unwrap().unwrap();
-    assert!(
-        !stale.read_stats().cache_hit,
-        "a v6 snapshot must not serve"
-    );
-    // The rebuilt store carries the same accounting as the cold walk.
-    assert_eq!(
-        serde_json::to_value(stale.context().messages).unwrap(),
-        serde_json::to_value(cold.context().messages).unwrap()
-    );
 }
 
 #[test]

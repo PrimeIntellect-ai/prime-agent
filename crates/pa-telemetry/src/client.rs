@@ -115,6 +115,9 @@ impl TelemetryClientConfig {
     }
 }
 
+// The sink handles and retry policy are opaque services without a
+// Debug surface; the config rows above are the debug surface.
+#[allow(clippy::missing_fields_in_debug)]
 impl std::fmt::Debug for TelemetryClientConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TelemetryClientConfig")
@@ -285,7 +288,7 @@ impl Worker {
                     };
                     match cmd {
                         Cmd::Track(event) => {
-                            self.enqueue(event);
+                            self.enqueue(&event);
                             if self.channels.iter().any(|channel| {
                                 channel.queue.len() >= self.config.batch_size
                                     && channel.ready_for_send(tokio::time::Instant::now())
@@ -338,7 +341,7 @@ impl Worker {
         now + delay
     }
 
-    fn enqueue(&mut self, event: TelemetryEvent) {
+    fn enqueue(&mut self, event: &TelemetryEvent) {
         for channel in &mut self.channels {
             if channel.queue.len() >= self.config.queue_capacity {
                 channel.queue.pop_front();

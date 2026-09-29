@@ -69,6 +69,46 @@ fn the_summary_line_renders_the_aggregate_in_the_cost_column() {
     );
 }
 
+/// A query that matches only the parent still bills the parent's row
+/// the whole family's spend: only the rows are filtered, never the
+/// rollup input.
+#[test]
+fn a_search_keeps_the_rows_totals() {
+    let mut parent = parent_summary("p");
+    parent["usage"] = serde_json::json!({ "cost": 0.25 });
+    let mut child = child_summary("c1", "p", "worker one");
+    child["usage"] = serde_json::json!({ "cost": 1.25 });
+    let mut mode = mode_with_parent_and_child();
+    mode.roster = vec![
+        roster_entry("p", "idle", &parent),
+        roster_entry("c1", "running", &child),
+    ];
+    mode.query = "p name".to_string();
+    mode.rebuild_rows();
+    let parent_row = mode
+        .rows
+        .iter()
+        .find(|row| {
+            row.summary
+                .get("sessionId")
+                .and_then(serde_json::Value::as_str)
+                == Some("p")
+        })
+        .expect("the matched parent row renders");
+    assert!(
+        (parent_row.cost - 1.50).abs() < 1e-9,
+        "the parent's total keeps the child the query filtered out"
+    );
+    assert!(
+        !mode.rows.iter().any(|row| row
+            .summary
+            .get("sessionId")
+            .and_then(serde_json::Value::as_str)
+            == Some("c1")),
+        "the child's row stays filtered"
+    );
+}
+
 /// A tree that spends nothing still prints its `$0.00` aggregate —
 /// the cost cell rides the row, it is never a value-dependent
 /// extra.

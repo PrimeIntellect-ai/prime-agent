@@ -512,6 +512,28 @@ impl KeybindingsManager {
         self.resolved.get(keybinding).cloned().unwrap_or_default()
     }
 
+    /// Whether `data` is the macOS option-composed form of one of the id's
+    /// bound keys (TS `matches(keyData, id, { optionComposed: true })`:
+    /// Option+S types `ß` on layouts without option-as-meta, and the
+    /// composed character must toggle like Alt+S; only an alt-only
+    /// binding composes).
+    #[must_use]
+    pub fn matches_option_composed(&self, data: &str, keybinding: &str) -> bool {
+        self.resolved.get(keybinding).is_some_and(|keys| {
+            keys.iter().any(|key| {
+                let composed = parse_key_id(key).and_then(|parsed| {
+                    (parsed.alt
+                        && !parsed.ctrl
+                        && !parsed.shift
+                        && !parsed.super_key
+                        && parsed.key == "s")
+                        .then_some("\u{df}")
+                });
+                composed.is_some_and(|composed| composed == data)
+            })
+        })
+    }
+
     #[must_use]
     pub fn first_key(&self, keybinding: &str) -> Option<String> {
         self.get_keys(keybinding).into_iter().next()

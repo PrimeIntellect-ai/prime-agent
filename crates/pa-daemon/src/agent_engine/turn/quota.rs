@@ -1,7 +1,9 @@
 //! The quota-park machinery (moved with its concern): the park
 //! policies, the resume-job lifecycle, the wake recovery, and the
 //! durable park/resume entries.
-use super::*;
+use super::{
+    AgentSessionEngine, QuotaParkState, QUOTA_WAKE_MAX_RETRIES, QUOTA_WAKE_RETRY_DELAY_MS,
+};
 
 impl AgentSessionEngine {
     /// The quota-park policy from settings

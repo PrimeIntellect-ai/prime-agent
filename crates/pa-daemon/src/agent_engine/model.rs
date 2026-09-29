@@ -17,11 +17,26 @@ impl AgentSessionEngine {
         let all: Vec<Model> = registry.get_all().to_vec();
         let settings =
             pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir);
+        // The create-time `--models` scope (TS main.ts:548-568): the
+        // daemon resolved it once per create against its registry; a
+        // fresh session starts on the saved default when it is in scope,
+        // else the first scoped model, and a continuing session ignores
+        // the scope for the initial model (cycling keeps the list, the
+        // worker's `cycle_model`).
+        let (scoped_models, is_continuing) = match self
+            .startup_scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            Some(scope) => (scope.scoped_models, scope.is_continuing),
+            None => (Vec::new(), false),
+        };
         pa_core::models::find_initial_model(&pa_core::models::InitialModelOptions {
             cli_provider: None,
             cli_model: None,
-            scoped_models: &[],
-            is_continuing: false,
+            scoped_models: &scoped_models,
+            is_continuing,
             default_provider: settings.get_default_provider(),
             default_model_id: settings.get_default_model(),
             all_models: &all,
@@ -357,9 +372,41 @@ impl AgentSessionEngine {
         {
             return level;
         }
-        let requested = self
-            .current_selection()
+        let model = self.resolve_model();
+        let selection = self.current_selection();
+        let requested = selection
             .thinking
+            .or_else(|| {
+                // TS main.ts:556-566: an unflagged fresh session that
+                // starts on a scoped entry takes that entry's `:thinking`
+                // (the resolved model IS the picked entry; the explicit
+                // `--thinking` above still wins).
+                if selection.model.is_some() {
+                    return None;
+                }
+                let scope = self
+                    .startup_scope
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                scope
+                    .filter(|scope| !scope.is_continuing)?
+                    .scoped_models
+                    .iter()
+                    .find(|scoped| {
+                        model.as_ref().is_ok_and(|model| {
+                            scoped.model.provider == model.provider && scoped.model.id == model.id
+                        })
+                    })?
+                    .thinking_level
+                    .and_then(|level| {
+                        // The entry's level serializes as the same wire
+                        // name the cycler parses back.
+                        let wire = serde_json::to_value(level).ok()?;
+                        wire.as_str()
+                            .and_then(pa_ai::models::thinking_level_from_str)
+                    })
+            })
             .or_else(|| {
                 let settings =
                     pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir);
@@ -369,7 +416,7 @@ impl AgentSessionEngine {
             })
             // TS `DEFAULT_THINKING_LEVEL`.
             .unwrap_or(pa_types::ai::ModelThinkingLevel::Medium);
-        let resolved = match self.resolve_model() {
+        let resolved = match model {
             Ok(model) => pa_ai::models::clamp_thinking_level(&model, requested),
             Err(_) => pa_types::ai::ModelThinkingLevel::Off,
         };

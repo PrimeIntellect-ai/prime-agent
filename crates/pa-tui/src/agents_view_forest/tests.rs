@@ -45,7 +45,14 @@ fn rows_for(
     let records = reconcile_unified_sessions(roster, &[]);
     let rollups = compute_rollups(&records);
     let expanded: HashSet<String> = expanded.iter().map(ToString::to_string).collect();
-    build_rows(&records, scope, &expanded, &rollups, None)
+    build_rows(
+        &records,
+        scope,
+        &expanded,
+        &HashSet::default(),
+        &rollups,
+        None,
+    )
 }
 
 /// An opened child session nests under its parent: the live
@@ -598,6 +605,7 @@ fn saved_child_nests_under_its_saved_parent() {
         &records,
         None,
         &std::collections::HashSet::default(),
+        &HashSet::default(),
         &rollups,
         None,
     );
@@ -606,7 +614,14 @@ fn saved_child_nests_under_its_saved_parent() {
     assert_eq!(rows[0].title, "root agent");
     assert_eq!(rows[1].title, "1 subagents (0 running)");
     let expanded: HashSet<String> = [rows[0].identity.clone()].into_iter().collect();
-    let rows = build_rows(&records, None, &expanded, &rollups, None);
+    let rows = build_rows(
+        &records,
+        None,
+        &expanded,
+        &HashSet::default(),
+        &rollups,
+        None,
+    );
     assert_eq!(rows[2].title, "saved child");
     assert_eq!(rows[2].kind, RowKind::Subagent);
 }
@@ -797,6 +812,7 @@ fn rollups_sum_costs_over_descendants_only() {
         &records,
         None,
         &std::collections::HashSet::default(),
+        &HashSet::default(),
         &empty,
         None,
     );
@@ -864,7 +880,14 @@ fn an_active_query_ranks_hits_globally_ancestors_sink_last() {
     // Expansion state must not reintroduce nesting under a query.
     let mut expanded = HashSet::new();
     expanded.insert("file:/x/orch.jsonl".to_string());
-    let rows = build_rows(&filtered, None, &expanded, &rollups, None);
+    let rows = build_rows(
+        &filtered,
+        None,
+        &expanded,
+        &HashSet::default(),
+        &rollups,
+        None,
+    );
     let titles: Vec<&str> = rows.iter().map(|row| row.title.as_str()).collect();
     assert_eq!(
         titles,
@@ -937,6 +960,7 @@ fn equal_scores_break_ties_by_recency_not_section() {
         &filtered,
         None,
         &std::collections::HashSet::default(),
+        &HashSet::default(),
         &rollups,
         None,
     );
@@ -1022,7 +1046,14 @@ fn the_summary_line_bills_the_deleted_descendant_bucket() {
             < f64::EPSILON,
         "live child 0.25 + deleted bucket 0.50"
     );
-    let rows = build_rows(&records, None, &HashSet::new(), &rollups, None);
+    let rows = build_rows(
+        &records,
+        None,
+        &HashSet::new(),
+        &HashSet::new(),
+        &rollups,
+        None,
+    );
     let summary = rows
         .iter()
         .find(|row| row.identity == "subagents:file:/x/p.jsonl")

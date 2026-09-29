@@ -243,6 +243,7 @@ fn chat_options(
     session: pa_tui::interactive::SessionSelection,
 ) -> pa_tui::interactive::InteractiveOptions {
     pa_tui::interactive::InteractiveOptions {
+        models: None,
         socket_path: socket.to_path_buf(),
         cwd: dir.to_path_buf(),
         session_dir: Some(session_dir.to_path_buf()),

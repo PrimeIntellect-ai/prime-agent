@@ -28,7 +28,7 @@ mod summary;
 pub use lineage::{
     compute_rollups, has_session_children, scope_ancestors, scope_depth, scope_to_subtree,
 };
-pub use rows::build_rows;
+pub(crate) use rows::build_rows;
 pub use selection::{ancestor_session_ids, resolve_selection};
 pub(crate) use summary::{is_subagent_summary, session_model};
 pub use summary::{selection_key, session_title, summary_identity};
@@ -68,10 +68,13 @@ pub struct AgentsViewRow {
     pub running_subagent_count: usize,
     /// The summary row's list is expanded (TS `expanded`).
     pub expanded: bool,
+    /// The row's children carry a spawn program (TS `hasSpawnCode`):
+    /// true only on the summary row whose children carry code, computed
+    /// where the children are known.
+    pub has_spawn_code: bool,
 }
 
-/// The three list row shapes (TS `AgentsViewRowKind`; the read-only
-/// spawn-code rows belong to the program surface, not this one).
+/// The four list row shapes (TS `AgentsViewRowKind`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowKind {
     /// A top-level agent row.
@@ -81,6 +84,8 @@ pub enum RowKind {
     SubagentSummary,
     /// A nested child row inside an expanded list (TS `subagent`).
     Subagent,
+    /// A read-only spawn-program line (TS `subagent-code`).
+    Code,
 }
 
 /// The summary line's identity prefix (TS `subagent-summary` keeps the
@@ -95,10 +100,14 @@ pub(crate) fn is_summary_row_identity(identity: &str) -> bool {
 }
 
 impl AgentsViewRow {
-    /// Rows the selection may land on (TS `selectable`: every row here).
+    /// Rows the selection may land on (TS `selectable`): the program's
+    /// code rows are read-only context, every session row selects.
     #[must_use]
     pub fn selectable(&self) -> bool {
-        true
+        match self.kind {
+            RowKind::Code => false,
+            RowKind::Agent | RowKind::SubagentSummary | RowKind::Subagent => true,
+        }
     }
 }
 

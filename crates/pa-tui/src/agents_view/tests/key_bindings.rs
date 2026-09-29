@@ -3,6 +3,8 @@
 
 use super::*;
 
+use super::super::rename::RenameTarget;
+
 #[test]
 fn open_key_override_fires_and_the_default_is_inert() {
     let mut mode = mode_with_user_bindings(&[("app.agents.open", "ctrl+g")]);
@@ -65,6 +67,140 @@ fn expand_and_new_key_overrides_fire_and_defaults_are_inert() {
     mode.handle_key("ctrl+n");
     assert!(mode.running, "the default new key is inert");
     assert!(!mode.new_session);
+}
+
+/// TS `cycleProgramForSelected` (the `app.agents.program` key, default
+/// ctrl+o): the parent with a code-carrying child expands its list with
+/// the program's rows above the child — the code block capped and
+/// padded — and a second press hides them while the list stays open;
+/// the code rows never take the selection; a parent whose children
+/// carry no code reports instead.
+#[test]
+fn program_key_shows_and_hides_the_spawn_program() {
+    let mut mode = mode_with_parent_and_child();
+    // The child spawned from a 12-line cell: the program block caps at
+    // 10 lines and counts the remainder (the trailing newline strips).
+    mode.roster[1]["summary"]["spawnCode"] = serde_json::json!(
+        "line0\nline1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\n"
+    );
+    mode.rebuild_rows();
+    mode.handle_key("ctrl+o");
+    // Parent, summary line, pad-top + 10 code lines + the remainder row
+    // + pad-bottom, then the child (the whole-vec equality below pins
+    // the row set).
+    let after_summary: Vec<(RowKind, String)> = mode.rows[2..]
+        .iter()
+        .map(|row| (row.kind, row.title.clone()))
+        .collect();
+    let mut expected = vec![(RowKind::Code, String::new())];
+    for index in 0..10 {
+        expected.push((RowKind::Code, format!("line{index}")));
+    }
+    expected.push((RowKind::Code, "\u{2026} +2 more lines".to_string()));
+    expected.push((RowKind::Code, String::new()));
+    expected.push((RowKind::Subagent, "worker one".to_string()));
+    assert_eq!(
+        after_summary, expected,
+        "the program rows precede the child"
+    );
+    // The selection walks over the program: down from the parent is the
+    // summary line, the next down skips every code row.
+    mode.handle_key("down");
+    assert_eq!(mode.rows[mode.selected].kind, RowKind::SubagentSummary);
+    mode.handle_key("down");
+    assert_eq!(
+        mode.rows[mode.selected].title, "worker one",
+        "the code rows are not selectable"
+    );
+    // A second ctrl+o hides the program, the list stays expanded.
+    mode.handle_key("ctrl+o");
+    assert_eq!(mode.rows.len(), 3);
+    assert!(mode.rows[1].expanded);
+    assert!(mode.rows.iter().all(|row| row.kind != RowKind::Code));
+    // A parent whose children carry no code reports TS's status.
+    let mut mode = mode_with_parent_and_child();
+    mode.selected = 0;
+    mode.handle_key("ctrl+o");
+    assert_eq!(
+        mode.status.as_deref(),
+        Some("No program recorded for these subagents")
+    );
+}
+
+/// TS `enterRenameMode`/`confirmRename` (the `app.agents.rename` key,
+/// default ctrl+r): the composer owns the prompt and the key routing —
+/// the header and the save/cancel hint render, the prefill is the
+/// session's name, the editing grammar matches the search field, Enter
+/// submits the trimmed name with the live target, Esc exits with the
+/// query untouched, and a child row never enters.
+#[test]
+fn rename_key_composes_edits_and_dispatches() {
+    let mut mode = mode_with_parent_and_child();
+    mode.handle_key("ctrl+r");
+    let Composer::Rename(rename) = &mode.composer else {
+        panic!("the composer entered rename mode");
+    };
+    assert_eq!(rename.name, "p name", "the prefill is the session name");
+    // The rendered frame: the header; the hint: save/cancel.
+    let (frame, _) = mode.render_frame(120, 20);
+    let rendered: Vec<String> = frame.iter().map(flat).collect();
+    assert!(
+        rendered
+            .iter()
+            .any(|row| row.starts_with("  Rename agent session")),
+        "the rename header rendered with TS's two-space indent:
+{}",
+        rendered.join("\n")
+    );
+    assert_eq!(
+        flat(&mode.render_hints(120, None)),
+        "Enter save   Esc/Ctrl+C cancel"
+    );
+    // The editing grammar (the search field's): ctrl+u clears, the typed
+    // characters land, Enter submits the trimmed name with the live
+    // target.
+    mode.handle_key("ctrl+u");
+    mode.handle_key("n");
+    mode.handle_key("e");
+    mode.handle_key("w");
+    mode.handle_key("enter");
+    let rename = mode.pending_rename.take();
+    assert_eq!(
+        rename.as_ref(),
+        Some(&Rename {
+            target: RenameTarget::Live {
+                active_session_id: "p-live".to_string()
+            },
+            name: "new".to_string(),
+        }),
+        "the confirmed rename dispatches"
+    );
+    assert_eq!(mode.status.as_deref(), Some("Renaming agent..."));
+    // The landed outcome reports TS's row (the dispatched request itself).
+    mode.rename_result(rename.expect("the dispatched rename"), Ok(()));
+    assert_eq!(mode.status.as_deref(), Some("Renamed to new"));
+    // Esc exits back to search; the query stays untouched. Ctrl+C
+    // cancels too (TS :1120 — the default cancel binding includes it;
+    // the force-quit guard's handled note rides the routing).
+    mode.handle_key("ctrl+r");
+    mode.handle_key("escape");
+    assert_eq!(mode.composer, Composer::Search);
+    mode.handle_key("ctrl+r");
+    mode.handle_key("ctrl+c");
+    assert_eq!(
+        mode.composer,
+        Composer::Search,
+        "ctrl+c cancels rename mode (TS :1120)"
+    );
+    // A subagent row never enters rename mode (TS :1871: only
+    // top-level agents rename). Expand the list so the child row is
+    // the selection's landing.
+    mode.handle_key("down");
+    mode.handle_key("enter");
+    mode.handle_key("down");
+    assert_eq!(mode.rows[mode.selected].kind, RowKind::Subagent);
+    mode.handle_key("ctrl+r");
+    assert_eq!(mode.composer, Composer::Search);
 }
 
 #[test]

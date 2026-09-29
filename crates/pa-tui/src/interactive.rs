@@ -57,7 +57,10 @@ mod render;
 pub use headless::{HeadlessPlan, HeadlessStep, UiMode};
 pub use onboarding::{ModelReadiness, OnboardingSink, OnboardingTask};
 pub(crate) use render::write_flush_rows;
-use render::{apply_startup_chrome, check_tmux_keyboard_setup, Renderer, TerminalHandoff};
+use render::{
+    apply_startup_chrome, check_tmux_keyboard_setup, spawn_session_reader, Renderer,
+    TerminalHandoff,
+};
 
 // The reconnect machinery (the update-restart resume window, the
 // unexpected-loss hiccup loop, and the announced shutdown's bounded
@@ -102,6 +105,13 @@ pub enum SessionSelection {
     /// Create with `sessionPath`: reopen a saved session file (`--resume`).
     Resume(PathBuf),
 }
+
+/// Cap on the exit-path telemetry flush (the `tui exit` event's bound):
+/// the `PostHog` sink alone allows up to 1.5s, so an exit-path event is
+/// dropped rather than awaited past the exit-within-1s contract. The
+/// interactive loop and the composition root's exit paths share this one
+/// bound.
+pub const TELEMETRY_EXIT_TIMEOUT_MS: u64 = 500;
 
 /// Explicit model selection carried into every `create` config: the CLI
 /// `--provider`/`--model`/`--api-key`/`--thinking` flags. Explicit flags are
@@ -189,7 +199,7 @@ pub trait InteractionTelemetry: Send + Sync {
     /// command — `context`, `session`, `system-prompt`, `logs`,
     /// `changelog`, `hotkeys`, `traces`, `list`), `source` how it opened
     /// (`command` — the bare slash submission, `tab` — a typed partial +
-    /// Tab).
+    /// Tab, `shortcut` — a keybinding action).
     fn menu_opened(
         &self,
         menu: &'static str,
@@ -255,6 +265,33 @@ pub trait InteractionTelemetry: Send + Sync {
         action: &'static str,
         had_images: bool,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    /// The external editor ran (`tui external editor used`): `outcome` is
+    /// `applied` (the saved text replaced the draft), `unchanged` (the
+    /// editor exited non-zero, the draft kept), `failed` (an IO/spawn
+    /// failure, the error row surfaced), or `no_editor` (neither `$VISUAL`
+    /// nor `$EDITOR` is set; the warning row rendered).
+    fn external_editor_used(
+        &self,
+        outcome: &'static str,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    /// A scoped-models interaction (`tui scoped models used`): `action` is
+    /// `cycle_forward` / `cycle_backward` (the cycle keys) or
+    /// `toggle_scope` (the picker's scope key); `scoped` reports whether
+    /// the cycle ran within the session's scoped list (the response's
+    /// `isScoped`) / the toggle landed on the scoped side.
+    fn scoped_models_used(
+        &self,
+        action: &'static str,
+        scoped: bool,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    /// An agents-view action ran (`tui agents action`): `action` is
+    /// `program_shown` (the ctrl+o toggle turned a spawn program on) or
+    /// `renamed` (a rename landed) — primitives only, no prompt,
+    /// session, or file content.
+    fn agents_view_action(
+        &self,
+        action: &'static str,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
 }
 
 /// Options for one interactive run. `Debug` skips the telemetry handle (the
@@ -283,6 +320,12 @@ pub struct InteractiveOptions {
     pub script_path: Option<PathBuf>,
     /// Model flags to carry into the create config.
     pub model_selection: ModelSelection,
+    /// The `--models` scope patterns (TS `parsed.models`): raw strings —
+    /// `provider/id`, globs, `:thinking` suffixes — that ride the create
+    /// config's `models` field; the daemon resolves them against its
+    /// registry into the session's scoped list (Alt+M cycling, the
+    /// picker's scoped view). `None` leaves the scope unset.
+    pub models: Option<Vec<String>>,
     /// Create without a session file (`--no-session`).
     pub no_session: bool,
     pub session: SessionSelection,
@@ -376,6 +419,7 @@ impl std::fmt::Debug for InteractiveOptions {
             .field("session_dir", &self.session_dir)
             .field("script_path", &self.script_path)
             .field("model_selection", &self.model_selection)
+            .field("models", &self.models)
             .field("model_catalog", &self.model_catalog)
             .field("no_session", &self.no_session)
             .field("session", &self.session)
@@ -413,6 +457,11 @@ impl InteractiveOptions {
         }
         if let Some(thinking) = self.model_selection.thinking {
             config["thinking"] = json!(thinking.wire_name());
+        }
+        // TS `runtimeConfigFromArgs` carries the raw `--models` patterns:
+        // the daemon resolves them once per create (main.ts:838-851).
+        if let Some(models) = &self.models {
+            config["models"] = json!(models);
         }
         config
     }

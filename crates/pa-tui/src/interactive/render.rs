@@ -91,6 +91,11 @@ pub(super) enum Renderer {
         /// The `terminal.fullscreenMouse` setting: mouse tracking
         /// re-enables on resume after a suspended client command.
         mouse: bool,
+        /// The reader's channel and force-quit guard: the external-editor
+        /// cycle stops and respawns the session reader around the child
+        /// run, and the terminal renderer owns the seeds for the respawn.
+        ui_tx: mpsc::UnboundedSender<UiInput>,
+        exit_guard: ExitGuard,
     },
     Headless {
         width: u16,
@@ -116,6 +121,58 @@ impl crate::suspend::SuspendTerminal for TerminalHandoff<'_> {
     fn resume(&mut self) -> Result<()> {
         self.renderer.resume()
     }
+}
+
+/// Start the session surface's terminal input reader (the setup mount and
+/// the external-editor cycle's respawn both call it). One reader thread
+/// feeds the loop; crossterm events are process-global, so the reader
+/// registry joins the previous surface's reader before this one starts
+/// polling. The reader also observes Ctrl+C pairs for the exit guard:
+/// this thread stays alive when the UI loop is wedged, so the force-quit
+/// contract holds regardless of loop state. The paste-aware variant
+/// coalesces a marker-less multi-line keystroke burst (tmux 3.2 and older
+/// forward pastes without bracketed markers) into one editor paste — TS
+/// `StdinBuffer`'s `isRawMultilinePaste`.
+pub(super) fn spawn_session_reader(ui_tx: mpsc::UnboundedSender<UiInput>, exit_guard: ExitGuard) {
+    crate::input::spawn_paste_aware_reader(move |input| match input {
+        crate::input::ReaderInput::BurstPaste(text) => ui_tx.send(UiInput::Paste(text)).is_ok(),
+        // A report the guard reassembled from a sequence crossterm's
+        // reader split at a committed-`ESC` read boundary: same contract
+        // as the terminal's own mouse events below — consumed unless
+        // tracking is active.
+        crate::input::ReaderInput::Mouse(report) => {
+            if crate::mouse_tracking::active() {
+                ui_tx.send(UiInput::Mouse(report)).is_ok()
+            } else {
+                true
+            }
+        }
+        crate::input::ReaderInput::Event(event) => match event {
+            crossterm::event::Event::Key(key) => {
+                exit_guard.observe_key(&key);
+                ui_tx.send(UiInput::Key(key)).is_ok()
+            }
+            crossterm::event::Event::Paste(text) => ui_tx.send(UiInput::Paste(text)).is_ok(),
+            // TS forces a full re-render on resize (tui.ts
+            // widthChanged/heightChanged); the loop repaints on the dirty
+            // flag this sets.
+            crossterm::event::Event::Resize(..) => ui_tx.send(UiInput::Resize).is_ok(),
+            // Mouse reports are always consumed (nothing downstream
+            // understands them): wheel turns reach the loop only while
+            // tracking is active (TS consumes reports even when tracking
+            // is disabled).
+            crossterm::event::Event::Mouse(mouse) => {
+                if !crate::mouse_tracking::active() {
+                    true
+                } else if let Some(event) = crate::mouse::from_crossterm(mouse) {
+                    ui_tx.send(UiInput::Mouse(event)).is_ok()
+                } else {
+                    true
+                }
+            }
+            _ => true,
+        },
+    });
 }
 
 impl Renderer {
@@ -163,59 +220,7 @@ impl Renderer {
                 // see `enhanced_keys`) runs before the reader thread
                 // starts polling.
                 crate::enhanced_keys::enable(&mut std::io::stdout())?;
-                // One reader thread feeds the loop; crossterm events are
-                // process-global, so the reader registry joins the previous
-                // surface's reader before this one starts polling. The
-                // reader also observes Ctrl+C pairs for the exit guard:
-                // this thread stays alive when the UI loop is wedged, so
-                // the force-quit contract holds regardless of loop state.
-                // The paste-aware variant coalesces a marker-less
-                // multi-line keystroke burst (tmux 3.2 and older forward
-                // pastes without bracketed markers) into one editor paste
-                // — TS StdinBuffer's `isRawMultilinePaste`.
-                crate::input::spawn_paste_aware_reader(move |input| match input {
-                    crate::input::ReaderInput::BurstPaste(text) => {
-                        ui_tx.send(UiInput::Paste(text)).is_ok()
-                    }
-                    // A report the guard reassembled from a sequence
-                    // crossterm's reader split at a committed-`ESC` read
-                    // boundary: same contract as the terminal's own mouse
-                    // events below — consumed unless tracking is active.
-                    crate::input::ReaderInput::Mouse(report) => {
-                        if crate::mouse_tracking::active() {
-                            ui_tx.send(UiInput::Mouse(report)).is_ok()
-                        } else {
-                            true
-                        }
-                    }
-                    crate::input::ReaderInput::Event(event) => match event {
-                        crossterm::event::Event::Key(key) => {
-                            exit_guard.observe_key(&key);
-                            ui_tx.send(UiInput::Key(key)).is_ok()
-                        }
-                        crossterm::event::Event::Paste(text) => {
-                            ui_tx.send(UiInput::Paste(text)).is_ok()
-                        }
-                        // TS forces a full re-render on resize (tui.ts
-                        // widthChanged/heightChanged); the loop repaints on
-                        // the dirty flag this sets.
-                        crossterm::event::Event::Resize(..) => ui_tx.send(UiInput::Resize).is_ok(),
-                        // Mouse reports are always consumed (nothing
-                        // downstream understands them): wheel turns reach the
-                        // loop only while tracking is active (TS consumes
-                        // reports even when tracking is disabled).
-                        crossterm::event::Event::Mouse(mouse) => {
-                            if !crate::mouse_tracking::active() {
-                                true
-                            } else if let Some(event) = crate::mouse::from_crossterm(mouse) {
-                                ui_tx.send(UiInput::Mouse(event)).is_ok()
-                            } else {
-                                true
-                            }
-                        }
-                        _ => true,
-                    },
-                });
+                spawn_session_reader(ui_tx.clone(), exit_guard.clone());
                 let terminal = Terminal::new(crate::hyperlinks::stdout_backend())?;
                 // The adopted buffer still holds the previous view's frame;
                 // the first draw repaints the same buffer (a fresh alt
@@ -232,6 +237,8 @@ impl Renderer {
                 Ok(Renderer::Terminal {
                     term: terminal,
                     mouse,
+                    ui_tx,
+                    exit_guard,
                 })
             }
             UiMode::Headless(plan) => {
@@ -361,7 +368,7 @@ impl Renderer {
     /// Take the terminal back after a suspended client command.
     pub(super) fn resume(&mut self) -> Result<()> {
         match self {
-            Renderer::Terminal { term, mouse } => {
+            Renderer::Terminal { term, mouse, .. } => {
                 // The raw re-arm's `cfmakeraw` write clears IXON - the
                 // kernel's one trigger for lifting a pending Ctrl+S stop -
                 // so a stop armed at the shell while the process sat

@@ -20,6 +20,12 @@ regex = "1"
 tempfile = "3"
 
 [lints.clippy]
+# pa-types keeps its OWN lints table (not `workspace = true`): the
+# workspace's `rust.unsafe_code = "forbid"` would outlaw the platform
+# bindings' legitimate unsafe blocks. The clippy rows mirror the
+# workspace table, and the pedantic class rides here so CI's
+# -D warnings bar enforces it on this crate too.
+pedantic = "warn"
 redundant_clone = "warn"
 clone_on_copy = "warn"
 assigning_clones = "warn"

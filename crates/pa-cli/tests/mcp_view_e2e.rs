@@ -247,6 +247,7 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
 /// login/logout argument arms answer through the same client path).
 fn headless_options(socket: &Path, dir: &Path) -> pa_tui::interactive::InteractiveOptions {
     pa_tui::interactive::InteractiveOptions {
+        models: None,
         socket_path: socket.to_path_buf(),
         cwd: dir.to_path_buf(),
         session_dir: Some(dir.join("agent").join("sessions")),

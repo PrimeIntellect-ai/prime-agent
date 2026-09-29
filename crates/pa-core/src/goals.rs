@@ -81,6 +81,7 @@ pub struct GoalContextDetails {
 /// "unchanged state" comparison — an unchanged goal would otherwise
 /// re-emit `goal_update` every time a second boundary passes between two
 /// reads. Emit the real state; dedupe on this projection.
+#[must_use]
 pub fn goal_update_dedupe_projection(state: &GoalState) -> GoalState {
     let mut projected = state.clone();
     projected.time_used_seconds = 0;
