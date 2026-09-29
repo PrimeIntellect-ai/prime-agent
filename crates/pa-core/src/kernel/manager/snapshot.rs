@@ -155,20 +155,22 @@ impl Inner {
         {
             return None;
         }
-        // The invalidation epoch: a namespace-code/restore settle or a
-        // kernel start invalidated the memo since the arm — never replay.
-        if lock(&self.guarded).freshness_epoch != memo.epoch {
-            return None;
-        }
-        // The settle-race guard: the count was sampled before the stat
-        // await, and a user cell can settle while it runs. The decision
-        // must describe the namespace at decision time, so re-read the
-        // count under the same lock the settle bumps — a cell that settled
-        // in between defeats the skip here (a cell settling after this
-        // read is the settles-after-the-capture class a real dump misses
-        // too).
-        if lock(&self.guarded).user_executions != memo.user_executions {
-            return None;
+        // The invalidation epoch and the settle-race guard, read together
+        // under ONE lock acquisition: a namespace-code/restore settle or a
+        // kernel start invalidated the memo since the arm — never replay;
+        // and the count was sampled before the stat await, so a user cell
+        // can settle while it runs — the decision must describe the
+        // namespace at decision time. Reading both under the same
+        // acquisition the settle bumps closes the split-lock window where
+        // an internal request could invalidate the memo between the two
+        // checks while leaving the count unchanged (a cell settling after
+        // this read is the settles-after-the-capture class a real dump
+        // misses too).
+        {
+            let g = lock(&self.guarded);
+            if g.freshness_epoch != memo.epoch || g.user_executions != memo.user_executions {
+                return None;
+            }
         }
         let mut result = memo.result;
         // The pruned names left the live namespace with the commit that
@@ -192,13 +194,15 @@ impl Inner {
         // The stat pair is the witness artifact: the payload stat is the
         // load-bearing one (it fingerprints what a later restore reads),
         // the manifest stat catches the paired bookkeeping being replaced.
-        // The memo arms ONLY with both stats present: a stalled or missing
-        // filesystem read never memoizes (and clears any previous memo, so
-        // an unstatable filesystem degrades to re-dumping, never to
-        // replaying). The epoch re-check after the await closes the
-        // invalidation-revive ordering: a namespace-code/restore settle or
-        // a kernel start that landed while this capture's own request ran
-        // must not be re-described by this arm.
+        // The memo arms ONLY with both stats present and the epoch
+        // unmoved: a stalled, contended, or missing filesystem read never
+        // memoizes, and any previous memo is left untouched (its stat pair
+        // described the files as of its own commit, which this capture
+        // just rewrote — the stale pair can no longer match a later
+        // consult, so it is inert). The epoch re-check after the await
+        // closes the invalidation-revive ordering: a namespace-code or
+        // restore settle or a kernel start that landed while this
+        // capture's own request ran must not be re-described by this arm.
         let (payload_stat, manifest_stat) =
             stats_after_commit(&self.freshness_stat_probe, cfg).await;
         let live_over_cap = result.skipped.iter().any(|skip| {
@@ -218,11 +222,15 @@ impl Inner {
                 result: result.clone(),
                 live_over_cap,
             });
-        } else {
-            // A failed stat read or an epoch move never arms: clear any
-            // previous memo rather than leaving a stale description.
-            g.capture_freshness = None;
         }
+        // A missing stat pair (a contended probe) or an epoch move never
+        // arms — and leaves any previous memo untouched: that memo's stat
+        // pair described the files as of ITS commit, and this capture just
+        // rewrote both, so the stale pair can no longer match a later
+        // consult (the count and epoch checks cover the changed-namespace
+        // corners). An inert memo is strictly safer to leave than to wipe:
+        // wiping would cost the next capture a redundant re-dump of an
+        // unchanged namespace.
     }
 
     /// Revive a previously snapshotted namespace into the kernel.
@@ -503,6 +511,16 @@ impl Inner {
 }
 
 /// File-stat identity of a snapshot manifest; `None` when it cannot be stated.
+/// Releases the probe claim on any exit path, including a dropped future
+/// (see [`stats_after_commit`]).
+struct ProbeClaimGuard<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for ProbeClaimGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 /// Stat the committed payload + manifest pair, off the executor, bounded,
 /// and SERIALIZED: a stalled (network/FUSE) artifacts filesystem must not
 /// wedge the capture path, and a stalled `fs::metadata` cannot be
@@ -521,15 +539,19 @@ async fn stats_after_commit(
     if claim.swap(true, std::sync::atomic::Ordering::AcqRel) {
         return (None, None);
     }
+    // A drop guard, not a trailing store: the capture future can be
+    // dropped at ANY await (the debounce timer's abort, a teardown) — a
+    // cancelled probe must release the claim or every later call would
+    // read as in-flight and the skip would stay off for the manager's
+    // lifetime.
+    let _guard = ProbeClaimGuard(claim);
     let probe = tokio::task::spawn_blocking(move || {
         (manifest_stat_of(&payload), manifest_stat_of(&manifest))
     });
-    let pair = match tokio::time::timeout(STAT_TIMEOUT, probe).await {
+    match tokio::time::timeout(STAT_TIMEOUT, probe).await {
         Ok(Ok(pair)) => pair,
         _ => (None, None),
-    };
-    claim.store(false, std::sync::atomic::Ordering::Release);
-    pair
+    }
 }
 fn manifest_stat_of(path: &std::path::Path) -> Option<ManifestStat> {
     std::fs::metadata(path).ok().map(|m| ManifestStat {
