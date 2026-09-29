@@ -635,44 +635,6 @@ fn top_bar_centers_name_with_cost() {
     assert_eq!(start, 55);
 }
 
-/// The title's own + subagent aggregate pair (the operator's ask):
-/// both values render in the details-view cost format with the
-/// labeled `(subagents)` suffix on the aggregate.
-#[test]
-fn top_bar_trails_the_subagent_aggregate_beside_the_own_cost() {
-    let state = ChromeState {
-        chat_name: "orchestrator".to_string(),
-        cost_usd: Some(58.1),
-        subagents_cost_usd: Some(94.36),
-        ..Default::default()
-    };
-    let line = render_top_bar(&state, &theme(), 120);
-    let text = line.iter().map(|s| s.content.as_str()).collect::<String>();
-    assert!(
-        text.contains("orchestrator  $58.10 + $94.36 (subagents)"),
-        "the pair renders: {text}"
-    );
-}
-
-/// A zero aggregate (no subagents, or subagents with no spend)
-/// omits the suffix cleanly: the title shows the own cost alone,
-/// exactly like a session that never spawned.
-#[test]
-fn top_bar_omits_the_subagent_suffix_at_zero() {
-    for subagents in [None, Some(0.0)] {
-        let state = ChromeState {
-            chat_name: "solo".to_string(),
-            cost_usd: Some(1.0),
-            subagents_cost_usd: subagents,
-            ..Default::default()
-        };
-        let line = render_top_bar(&state, &theme(), 120);
-        let text = line.iter().map(|s| s.content.as_str()).collect::<String>();
-        assert!(text.contains("solo  $1.00"), "the own cost: {text}");
-        assert!(!text.contains("subagents"), "no suffix at zero: {text}");
-    }
-}
-
 #[test]
 fn tray_left_and_right_labels() {
     let state = ChromeState {

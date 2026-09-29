@@ -99,6 +99,19 @@ pub(crate) struct CreateSessionResources {
     pub(crate) autonomous: Option<pa_core::autonomous::AgentAutonomousConfig>,
 }
 
+/// The create command's `--models` scope inputs (TS main.ts:548-568 +
+/// :838-851): the daemon resolves the scope once per create against its
+/// registry and threads the resolved list plus the continuing flag in —
+/// the startup chain picks the first scoped model (or the saved default
+/// when it is in scope) for a fresh session; a continuing session keeps
+/// its own model. The worker's `cycle_model` keeps its own copy of the
+/// list.
+#[derive(Clone)]
+pub(super) struct StartupScope {
+    pub(super) scoped_models: Vec<pa_core::models::ScopedModel>,
+    pub(super) is_continuing: bool,
+}
+
 /// The daemon-side adapter onto the engine's attribution producer: the
 /// children registry's observation sites deliver per-origin batches
 /// through this sink (pa-core owns the target row and the durable

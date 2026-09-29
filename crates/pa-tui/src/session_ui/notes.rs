@@ -60,11 +60,9 @@ impl SessionUi {
         }
     }
 
-    /// Re-apply the refreshed context usage and cost to the chrome state.
+    /// Re-apply the refreshed context usage to the chrome state.
     pub(crate) fn rebuild_tray(&mut self, view: &mut AgentView) {
         view.chrome.context = self.context;
-        view.chrome.cost_usd = self.cost_usd;
-        view.chrome.subagents_cost_usd = self.subagents_cost_usd;
         view.chrome.chat_name = self.session_display();
         self.dirty = true;
     }

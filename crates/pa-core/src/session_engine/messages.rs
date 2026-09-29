@@ -110,10 +110,18 @@ pub fn provider_retry_recovered_text(attempts: u32, last_error: &str) -> String 
 
 /// The terminal-line text of a retry episode that gave up: the same text
 /// the TS `auto_retry_end` live row carries, so the durable row and the
-/// live one read identically.
+/// live one read identically. A zero-attempt failure (the
+/// failure-scoped disclosure of a permanent classification on the first
+/// attempt) never retried, so it reads as the plain provider failure it
+/// is — TS never emits this shape (that omission is the silent empty
+/// message the disclosure now covers).
 #[must_use]
 pub fn provider_retry_exhausted_text(attempts: u32, final_error: &str) -> String {
-    format!("\u{26a0} Error: Retry failed after {attempts} attempts: {final_error}")
+    if attempts == 0 {
+        format!("\u{26a0} Error: {final_error}")
+    } else {
+        format!("\u{26a0} Error: Retry failed after {attempts} attempts: {final_error}")
+    }
 }
 
 /// The durable disclosure row of one provider-retry episode (see

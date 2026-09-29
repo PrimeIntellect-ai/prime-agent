@@ -49,14 +49,13 @@ impl Generation {
             && *self == Self::of(&std::fs::metadata(path)?))
     }
 }
-/// The snapshot format version. 7: `WindowStats` gained
-/// `attributed_child_cost` (v6 sidecars deserialize it as zero and
-/// would bill the discarded prefix's subagent spend to the session's
-/// own cost — they must not serve). 5: `WindowStats` gained
-/// `summarization_cost` (v4 sidecars deserialize it as zero and
-/// undercount the discarded prefix's summarizer bill — they must not
-/// serve). 4: the older-path stats fold child usage attributions (v3
-/// sidecars carry pre-fold totals and must not serve).
+/// The snapshot format version: a sidecar serves only at exactly this
+/// version (any other version is rebuilt by the full walk). A served
+/// snapshot's older-path `WindowStats` already folds the child usage
+/// attributions — each targeted assistant row counts its cumulative
+/// aggregate — so the window's prefix totals match a full read. The
+/// sidecar is plain serde JSON without `deny_unknown_fields`: keys this
+/// format does not read are ignored on load.
 pub(super) const SNAPSHOT_VERSION: u32 = 7;
 // `retained_whole_file` (added after v7) is `#[serde(default)]` false:
 // older sidecars deserialize it as false and simply skip the

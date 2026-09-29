@@ -463,6 +463,14 @@ impl TreeNavigation {
     pub(crate) async fn replace_with_fork(&self, forked: SessionFile) -> Result<(), String> {
         let branch_entries = forked.branch_file_entries();
         let new_path = forked.path.clone();
+        // Prime the fork store's usage fold before it enters the core: the
+        // summaries the swap's roster pushes read resume from this cache
+        // and fold only the appended tail (off the runtime, like the
+        // create prime; an empty path fails fast).
+        let primed = new_path.clone();
+        let _ =
+            tokio::task::spawn_blocking(move || crate::session_store::read_session_info(&primed))
+                .await;
         {
             let mut core = self.core.lock().unwrap();
             core.store = Some(forked);
@@ -609,6 +617,12 @@ impl Worker {
                 self.reseed_service_tier_for_replacement();
                 self.bind_scheduled_jobs().await;
                 self.prewarm_replacement_session();
+                // The fork swap is a whole-session replacement too: the
+                // fresh session's summary row ships to the subscribed
+                // surfaces (the title's cost folds it in
+                // `update_subagent_summary` on arrival), never waiting
+                // for the next turn.
+                self.push_roster_delta();
                 let mut data = json!({ "cancelled": false });
                 if let Some(selected_text) = selected_text {
                     data["selectedText"] = json!(selected_text);

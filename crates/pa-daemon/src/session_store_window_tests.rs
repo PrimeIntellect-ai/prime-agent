@@ -254,70 +254,26 @@ fn captured_window_matches_full_transcript_and_stats() {
 }
 
 /// The summary scalars the old full-clone fold computed: the reverse
-/// `find_map` timestamp, the assistant usage sums, and the message count.
-/// This is the exact extraction `summaryForActiveSession` ran over
-/// `messages()` before the scan existed — the reference the scan must
-/// reproduce for every window shape.
-fn fold_reference_scalars(store: &SessionFile) -> (Option<u64>, u64, u64, f64, usize) {
+/// `find_map` timestamp and the message count. This is the exact
+/// extraction `summaryForActiveSession` ran over `messages()` before
+/// the scan existed — the reference the scan must reproduce for every
+/// window shape.
+fn fold_reference_scalars(store: &SessionFile) -> (Option<u64>, usize) {
     let messages = store.messages();
     let last_timestamp = messages
         .iter()
         .rev()
         .find_map(crate::types::message_timestamp_ms);
-    let mut input_tokens = 0u64;
-    let mut output_tokens = 0u64;
-    let mut cost = 0.0f64;
-    for message in &messages {
-        if crate::types::message_role(message) != Some("assistant") {
-            continue;
-        }
-        let Some(usage) = message.get("usage") else {
-            continue;
-        };
-        input_tokens += usage
-            .get("input")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
-        input_tokens += usage
-            .get("cacheRead")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
-        input_tokens += usage
-            .get("cacheWrite")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
-        output_tokens += usage
-            .get("output")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
-        cost += usage
-            .get("cost")
-            .and_then(|cost| cost.get("total"))
-            .and_then(Value::as_f64)
-            .unwrap_or_default();
-    }
-    (
-        last_timestamp,
-        input_tokens,
-        output_tokens,
-        cost,
-        messages.len(),
-    )
+    (last_timestamp, messages.len())
 }
 
 fn assert_scan_matches_fold(label: &str, store: &SessionFile) {
-    let (last_timestamp, input_tokens, output_tokens, cost, count) = fold_reference_scalars(store);
+    let (last_timestamp, count) = fold_reference_scalars(store);
     let scalars = store.scan_message_scalars();
     assert_eq!(
         scalars.last_timestamp_ms, last_timestamp,
         "{label}: newest timestamp"
     );
-    assert_eq!(scalars.input_tokens, input_tokens, "{label}: input tokens");
-    assert_eq!(
-        scalars.output_tokens, output_tokens,
-        "{label}: output tokens"
-    );
-    assert!((scalars.cost - cost).abs() < 1e-9, "{label}: cost");
     assert_eq!(scalars.message_count, count, "{label}: message count");
 }
 
@@ -348,9 +304,9 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
     let dir = tempfile::tempdir().unwrap();
 
     // Plain conversation: non-monotonic timestamps (the reverse find_map
-    // takes the LAST positioned timestamp, not the maximum), assistant
-    // usage with cache lanes, a custom row carrying a `usage` field (role
-    // `custom` never counts), and a toolResult without a timestamp.
+    // takes the LAST positioned timestamp, not the maximum), an
+    // assistant carrying usage, a custom row, and a toolResult without a
+    // timestamp.
     {
         let path = dir.path().join("plain.jsonl");
         let mut store = SessionFile::create("/tmp", None, 0);
@@ -402,7 +358,6 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
         assert_scan_matches_fold("compaction kept on message row", &store);
         let scalars = store.scan_message_scalars();
         assert_eq!(scalars.last_timestamp_ms, Some(70));
-        assert_eq!(scalars.input_tokens, 4 + 6 + 8 + 1);
         assert_eq!(scalars.message_count, 4); // summary + kept + two assistants
     }
 
@@ -422,7 +377,6 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
         store.append_message(&assistant(&usage_of(2, 2, 0, 0.25), 20));
         assert_scan_matches_fold("kept id on non-bearing row", &store);
         let scalars = store.scan_message_scalars();
-        assert_eq!(scalars.input_tokens, 2);
         assert_eq!(scalars.message_count, 2); // summary + post-compaction assistant
     }
 

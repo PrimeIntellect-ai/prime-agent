@@ -13,10 +13,11 @@
 //! passivation" (`agent-session.ts`).
 //!
 //! Consumers: the saved-session listing scan (`session_store` feeds one
-//! [`UsageScan`] while parsing each line) and the worker's live own-usage
-//! summary ([`read_own_usage_summary`]). The live side layers only what
-//! never reaches the file — child spend attributed in memory ahead of the
-//! durable entry, and memoization — on top of this fold.
+//! [`UsageScan`] while parsing each line) and, through it, the worker's
+//! live summary row — [`crate::session_store::read_session_info`] serves
+//! the same fold for a session's file and
+//! [`own_usage_summary_of`] serves it over a pathless store's in-memory
+//! entries, so the live row and the saved row publish one number.
 
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -251,7 +252,7 @@ impl UsageScan {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ScanEntry {
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default)]
     type_: String,
     #[serde(default)]
     id: String,
@@ -324,9 +325,12 @@ fn scan_file(path: &Path) -> Option<UsageScan> {
     Some(scan)
 }
 
-/// Whole-file own usage (the saved-row summary): the worker's live
-/// own-usage summary reads this, so live rows and saved rows never
-/// disagree.
+/// Whole-file own usage (the saved-row summary) for the one-off readers
+/// outside the resumable scan: the spawn ledger's tombstone fallback
+/// (`rlm_ledger`) and the saved-delete capture
+/// (`saved_session_commands`). The listing surfaces (and the worker's
+/// live row) read the resumable `session_store::read_session_info`
+/// instead.
 #[must_use]
 pub fn read_own_usage_summary(path: &Path) -> Option<SessionUsageSummary> {
     scan_file(path).and_then(|scan| scan.summary())
@@ -338,6 +342,31 @@ pub fn read_own_usage_summary(path: &Path) -> Option<SessionUsageSummary> {
 #[must_use]
 pub fn read_session_usage(path: &Path) -> Option<SessionUsageTotals> {
     scan_file(path).map(|scan| scan.totals())
+}
+
+/// The same own-usage fold (`ScanEntry::fold_into` / `UsageScan`) over
+/// a store's in-memory entries (TS `getOwnUsageSummary` over
+/// `sessionManager.getEntries()`): the pathless `--no-session` worker
+/// has no file to scan, but its live entries carry the rows a flush
+/// would write, so the live row's usage is the one fold over the
+/// second input. An entry that does not parse contributes nothing,
+/// exactly like `scan_file` skipping an invalid line.
+pub(crate) fn own_usage_summary_of(
+    entries: &[crate::session_store::SessionEntry],
+) -> Option<SessionUsageSummary> {
+    let mut scan = UsageScan::default();
+    for entry in entries {
+        // `type`/`id` live on the envelope (`#[serde(flatten)] fields`
+        // keeps only the rest); the usage-bearing fields deserialize
+        // borrowed.
+        let Ok(mut parsed) = ScanEntry::deserialize(&entry.fields) else {
+            continue;
+        };
+        parsed.type_.clone_from(&entry.type_);
+        parsed.id.clone_from(&entry.id);
+        parsed.fold_into(&mut scan);
+    }
+    scan.summary()
 }
 
 #[cfg(test)]

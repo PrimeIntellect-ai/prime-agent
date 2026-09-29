@@ -318,3 +318,93 @@ async fn continue_recent_view_preselects_the_candidate_and_renders_the_notice() 
     );
     drop(supervisor);
 }
+
+/// The ctrl+r rename through the real daemon (the
+/// `rename_saved_session` wire path — the supervisor's name reservation
+/// ladder and the offline catalog rename, which a unit test cannot
+/// exercise): the saved fixture row renames, the status reports TS's
+/// row, the final frame lists the new name, and the file on disk gains
+/// the `session_info` name entry.
+#[tokio::test]
+async fn rename_saved_session_renames_the_row_and_the_file() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+    let path = write_fixture(
+        &session_dir,
+        "ren-01",
+        "gateway worker",
+        &[("rename me", "renamed by the daemon")],
+    );
+
+    let options = AgentsViewOptions {
+        socket_path: supervisor.socket.clone(),
+        cwd: dir.path().to_path_buf(),
+        session_dir: Some(session_dir.clone()),
+        theme: "prime".to_string(),
+        version: "0.0.0".to_string(),
+        anchor_session_id: Some("ren-01".to_string()),
+        scope: None,
+        query: None,
+        expanded_ancestors: Vec::new(),
+        selected_row_identity: None,
+        selected_key: None,
+        status_message: None,
+        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
+        show_hardware_cursor: false,
+        incident_notice_state: None,
+    };
+    let plan = AgentsHeadlessPlan {
+        steps: vec![
+            // The saved catalog lands right after open; settle so the
+            // fixture's row is selectable before the rename key.
+            AgentsStep::WaitSettle { timeout_ms: 1000 },
+            AgentsStep::Key("ctrl+r".to_string()),
+            AgentsStep::Key("ctrl+u".to_string()),
+            AgentsStep::Type("renamed agent".to_string()),
+            AgentsStep::Key("enter".to_string()),
+            AgentsStep::WaitRender {
+                needle: "Renamed to renamed agent".to_string(),
+                timeout_ms: 10_000,
+            },
+        ],
+        width: 120,
+        height: 36,
+    };
+    let outcome =
+        pa_tui::agents_view::run_agents_view(options, AgentsViewUiMode::Headless(plan), None)
+            .await
+            .expect("agents view run")
+            .outcome;
+    let rendered = outcome.frames.join("\n");
+    assert!(
+        rendered.contains("Renamed to renamed agent"),
+        "the rename's TS status row rendered:\n{rendered}"
+    );
+    assert!(
+        outcome
+            .frames
+            .last()
+            .is_some_and(|frame| frame.contains("renamed agent")),
+        "the final frame lists the new name:\n{rendered}"
+    );
+    // The old name left the row: the catalog loads once and is never
+    // refetched, so this pins the in-place saved-row patch in
+    // `rename_result` (the status alone never proves it).
+    assert!(
+        outcome
+            .frames
+            .last()
+            .is_some_and(|frame| !frame.contains("gateway worker")),
+        "the final frame dropped the old name:\n{rendered}"
+    );
+    let content = std::fs::read_to_string(&path).expect("read fixture");
+    assert!(
+        content.contains("\"name\":\"renamed agent\""),
+        "the fixture gained the session_info name entry:\n{content}"
+    );
+    drop(supervisor);
+}

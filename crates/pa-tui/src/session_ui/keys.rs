@@ -1,8 +1,9 @@
 //! The keys concern: the terminal input grammar — key dispatch, mouse
 //! reports, paste, selection/auto-scroll, and the input-state seams.
 use super::{
-    key_event_to_id, AgentView, DaemonCommand, DockFocusSource, Duration, EffortPickerAction,
-    Instant, KeyEvent, Map, QueueBrowseDirection, QueueLane, Result, SessionUi, SubmitBehavior,
+    key_event_to_id, AgentView, ChatEntry, DaemonCommand, DockFocusSource, Duration,
+    EffortPickerAction, Instant, KeyEvent, Map, QueueBrowseDirection, QueueLane, Result, SessionUi,
+    StatusKind, SubmitBehavior,
 };
 
 /// How long the Ctrl+C exit hint arms the second-press exit (TS
@@ -675,7 +676,10 @@ impl SessionUi {
             *running = false;
             return Ok(());
         }
-        if view.editor.keybindings().matches(&id, "app.clear") {
+        // TS routes `app.interrupt` through the `app.clear` handlers; only the
+        // second-press exit is ctrl+c's alone.
+        let interrupt = view.editor.keybindings().matches(&id, "app.interrupt");
+        if interrupt || view.editor.keybindings().matches(&id, "app.clear") {
             // One handled Ctrl+C press: the force-quit guard disarms once
             // every observed press of the pair was handled without an exit
             // (abort / autocomplete cancel, TS `handleCtrlC`); an exit keeps
@@ -691,8 +695,10 @@ impl SessionUi {
             // TS `handleCtrlC`: the first press interrupts (aborting an
             // active turn, showing the exit hint); a second press inside
             // the hint window shuts down unconditionally — no turn wait,
-            // no abort wait — so the client always exits promptly.
-            if self.ctrl_c_hint_visible() {
+            // no abort wait — so the client always exits promptly. The
+            // interrupt action shows the same hint but never exits on the
+            // second press (TS `handleInterruptKey` has no exit branch).
+            if self.ctrl_c_hint_visible() && !interrupt {
                 self.exit_reason = "ctrl_c_twice";
                 *running = false;
                 return Ok(());
@@ -740,6 +746,48 @@ impl SessionUi {
             }
             return Ok(());
         }
+        // TS `app.model.select` (default ctrl+l, `showModelSelector`):
+        // the same surface `/model` opens (TS registers it between the
+        // suspend and the detail actions). No command was submitted, so
+        // the menu telemetry reports the `shortcut` source.
+        if view.editor.keybindings().matches(&id, "app.model.select") {
+            // The picker takes the frame: a completion request parked by
+            // this same press must not materialize a dropdown over the
+            // picker on the next idle tick (the Tab path's cancel; TS's
+            // selector mounts without the editor's dropdown).
+            view.editor.cancel_autocomplete();
+            self.open_model_picker(view, "").await?;
+            // The key opens the picker over the user's own text (a draft
+            // or a browsed queued message), so the picker's apply must
+            // keep it — the Tab path's flag truth, not a typed-command
+            // partial (TS's selector never touches the editor).
+            self.picker_restored_draft = true;
+            self.track_menu_opened("model", "shortcut");
+            self.dirty = true;
+            return Ok(());
+        }
+        // TS `app.model.cycleForward`/`app.model.cycleBackward` (defaults
+        // alt+m / shift+alt+m, registered right after the selector): cycle
+        // within the session's scoped list when one is set, else the
+        // available catalog.
+        if view
+            .editor
+            .keybindings()
+            .matches(&id, "app.model.cycleForward")
+        {
+            self.cycle_model(pa_types::daemon::CycleDirection::Forward, view)
+                .await;
+            return Ok(());
+        }
+        if view
+            .editor
+            .keybindings()
+            .matches(&id, "app.model.cycleBackward")
+        {
+            self.cycle_model(pa_types::daemon::CycleDirection::Backward, view)
+                .await;
+            return Ok(());
+        }
         if view.editor.keybindings().matches(&id, "app.tools.expand") {
             // TS `app.tools.expand` (default ctrl+o) cycles conversation
             // detail: overview -> details -> all -> overview.
@@ -754,6 +802,36 @@ impl SessionUi {
             .matches(&id, "app.subagents.focus")
         {
             self.focus_subagents_summary(&DockFocusSource::Shortcut, view);
+            self.dirty = true;
+            return Ok(());
+        }
+        // TS `app.editor.external` (default ctrl+g,
+        // `openExternalEditor`): a configured editor hands off through the
+        // loop (the terminal belongs to the renderer); without one, TS
+        // shows the warning row (an appended row, not a status rewrite).
+        if view
+            .editor
+            .keybindings()
+            .matches(&id, "app.editor.external")
+        {
+            match crate::external_editor::editor_command() {
+                None => {
+                    view.push_entry(ChatEntry::Status {
+                        text: "\u{26a0} No editor configured. Set $VISUAL or $EDITOR environment variable."
+                            .to_string(),
+                        kind: StatusKind::Warning,
+                    });
+                    self.last_status_index = None;
+                    if let Some(telemetry) = self.telemetry.clone() {
+                        tokio::spawn(async move {
+                            telemetry.external_editor_used("no_editor").await;
+                        });
+                    }
+                }
+                Some(command) => {
+                    self.external_editor_request = Some(command);
+                }
+            }
             self.dirty = true;
             return Ok(());
         }
@@ -784,6 +862,14 @@ impl SessionUi {
             }
             self.sync_queue_selection(view);
             self.handle_prompt_stash(view);
+            return Ok(());
+        }
+        // TS `app.session.new` (no default key; user-bindable,
+        // `handleClearCommand`): the `/new` flow — TS registers it
+        // without an editor-text gate, so it fires with a draft too.
+        if view.editor.keybindings().matches(&id, "app.session.new") {
+            self.start_new_session(view).await?;
+            self.dirty = true;
             return Ok(());
         }
         // TS `app.session.resume` (no default key; user-bindable): open the

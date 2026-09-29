@@ -384,6 +384,7 @@ impl pa_tui::client_settings::ClientSettings for RecordingSettings {
 
 fn options(socket: PathBuf, settings: Arc<RecordingSettings>) -> InteractiveOptions {
     InteractiveOptions {
+        models: None,
         socket_path: socket,
         cwd: PathBuf::from("/tmp"),
         session_dir: None,

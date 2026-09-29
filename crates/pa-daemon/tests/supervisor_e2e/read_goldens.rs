@@ -130,16 +130,6 @@ fn session_stats_and_header_match_live_daemon_goldens() {
     assert_eq!(data["tokens"]["cacheRead"], 0);
     assert_eq!(data["tokens"]["cacheWrite"], 0);
     assert_eq!(data["tokens"]["total"], 128);
-    // The deliberate TS delta: the full-session total the top bar shows
-    // (the whole gap-bridged branch's cumulative spend, subagents
-    // included). The scripted turn's spend is the whole session here, so
-    // it equals the active `cost`.
-    assert_eq!(data["totalCost"], 0.0);
-    // The title's own/subagent split: no attributed child spend in this
-    // scripted turn, so the own half carries the whole bill and the
-    // subagent aggregate is zero.
-    assert_eq!(data["ownCost"], 0.0);
-    assert_eq!(data["subagentsCost"], 0.0);
     let stats_keys: Vec<&str> = data
         .as_object()
         .expect("stats object")
@@ -148,9 +138,7 @@ fn session_stats_and_header_match_live_daemon_goldens() {
         .collect();
     // TS `SessionStats` key order (sessionFile, sessionId, userMessages,
     // assistantMessages, toolCalls, toolResults, totalMessages, tokens,
-    // cost) with this port's `totalCost` plus the title split
-    // (`ownCost`, `subagentsCost`) appended after `cost`: the JSON map
-    // preserves insertion order.
+    // cost): the JSON map preserves insertion order.
     assert_eq!(
         stats_keys,
         vec![
@@ -163,9 +151,6 @@ fn session_stats_and_header_match_live_daemon_goldens() {
             "totalMessages",
             "tokens",
             "cost",
-            "totalCost",
-            "ownCost",
-            "subagentsCost",
         ]
     );
 

@@ -258,6 +258,7 @@ fn openrouter_catalog() -> Vec<pa_types::ai::Model> {
 
 fn options(socket: PathBuf) -> InteractiveOptions {
     InteractiveOptions {
+        models: None,
         socket_path: socket,
         cwd: PathBuf::from("/tmp"),
         session_dir: None,

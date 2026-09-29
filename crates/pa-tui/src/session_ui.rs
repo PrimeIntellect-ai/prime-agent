@@ -49,7 +49,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
-use pa_types::daemon::DaemonCommand;
+use pa_types::daemon::{CycleDirection, DaemonCommand};
 use pa_types::slash_commands::{SlashCommandExecution, SlashCommandRegistry};
 use serde_json::{Map, Value};
 
@@ -155,6 +155,11 @@ pub(crate) struct SessionUi {
     session_dir: Option<PathBuf>,
     script_path: Option<PathBuf>,
     model_selection: ModelSelection,
+    /// The `--models` scope patterns carried into every `create` config
+    /// (TS `runtimeConfigFromArgs.models`): the daemon resolves them per
+    /// create into the session's scoped list, so a `/new` session keeps
+    /// the scope.
+    models: Option<Vec<String>>,
     /// The model catalog for the `/model` picker: a startup snapshot from
     /// the composition root (the bundled fallback), replaced by the
     /// daemon's `get_model_catalog` response once it lands.
@@ -281,13 +286,8 @@ pub(crate) struct SessionUi {
     /// The parked-message browse state (TS `QueueSelection`): which queued
     /// row alt+up/alt+down selected, and its stashed editor draft.
     queue_selection: crate::queued::QueueSelection,
-    /// Context usage + cost refreshed from `get_session_stats`.
+    /// Context usage refreshed from `get_session_stats`.
     context: Option<crate::chrome::ContextUsage>,
-    cost_usd: Option<f64>,
-    /// The aggregate descendant-subagent spend from the same stats (the
-    /// title's `+ $X (subagents)` suffix; `None` on daemons without the
-    /// split fields).
-    subagents_cost_usd: Option<f64>,
     /// Rows of the most recent `/list` (for `/switch <n>`).
     list_rows: Vec<Value>,
     pub(crate) turn_active: bool,
@@ -532,16 +532,21 @@ pub(crate) struct SessionUi {
     /// process-group suspend: the interactive loop performs the cycle
     /// right after dispatch, because the renderer is the loop's terminal.
     suspend_requested: bool,
+    /// `app.editor.external` (default ctrl+g, TS `openExternalEditor`)
+    /// parked the configured editor command: the interactive loop
+    /// performs the terminal handoff the editor child needs (stop the
+    /// reader, suspend the renderer, run the child, resume).
+    external_editor_request: Option<String>,
     /// The `/mcp` view's internal auth resolution (its Enter on a
     /// connection, or the pasteable service's paste flow): the auth args
     /// plus the inline auth panel's title; the loop mounts the panel and
     /// spawns the command through the auth seam, never through the
     /// typed-command path.
     pending_mcp_auth: Option<McpAuthIntent>,
-    /// The Tab-interception path restored the stashed browse draft into
-    /// the editor when it opened the picker, so the editor holds the
-    /// user's draft, not the command's typed partial: a picker apply
-    /// fulfills the command but must keep the draft.
+    /// The editor holds the user's own text — the Tab path's restored
+    /// browse draft, or the text ctrl+l opened the picker over — not a
+    /// typed command partial: a picker apply must keep it (TS's selector
+    /// never touches the editor).
     picker_restored_draft: bool,
     /// Whether this run already reported its first suspend cycle.
     suspend_adoption_emitted: bool,
@@ -897,6 +902,44 @@ impl SessionUi {
     /// its outcome row lands).
     pub(crate) fn reload_pending(&self) -> bool {
         self.reload.is_some()
+    }
+
+    /// The settled external-editor round trip (TS
+    /// `openExternalEditor`'s readback): a saved text replaces the editor
+    /// draft; a non-zero editor exit keeps it (TS is silent); an IO/spawn
+    /// failure surfaces the error row TS swallows (no swallowed errors).
+    /// `tui external editor used` reports the outcome.
+    pub(crate) fn apply_external_editor_outcome(
+        &mut self,
+        outcome: anyhow::Result<Option<String>>,
+        view: &mut AgentView,
+    ) {
+        let settled = match outcome {
+            Ok(Some(text)) => {
+                view.editor.set_text(&text);
+                // The editor child received the expanded text, so the
+                // registry describes markers the saved draft no longer
+                // carries — a literal `[paste #N]` in it would expand to
+                // stale content. Clear it the same way submit does (TS
+                // keeps the stale registry: the same latent bug); undo
+                // still restores the markers, snapshots carry the
+                // registry.
+                view.editor
+                    .restore_paste_snapshot(crate::editor::EditorPasteSnapshot::default());
+                "applied"
+            }
+            Ok(None) => "unchanged",
+            Err(error) => {
+                self.error_row(&format!("{error:#}"), view);
+                "failed"
+            }
+        };
+        if let Some(telemetry) = self.telemetry.clone() {
+            tokio::spawn(async move {
+                telemetry.external_editor_used(settled).await;
+            });
+        }
+        self.dirty = true;
     }
 
     /// Whether the `/mcp` view parked an auth request for the loop to
