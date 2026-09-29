@@ -1,13 +1,16 @@
 //! The installer-takeover update funnel: `prime-agent update` and the TUI's
-//! `/update` download the `rust` branch's `install-rust.sh` and run it.
-//! The script is the single source of truth for the whole move — it
-//! resolves and downloads the latest `continuous` build, uninstalls the
-//! TypeScript version, publishes the payload, and never touches
-//! `~/.prime/agent` (the sessions and configuration the products share).
-//! This module only fetches and execs the script, then reports what
-//! landed; every install/uninstall decision stays in the script the
-//! installer-takeover lane owns, so the two surfaces can never drift from
-//! it.
+//! `/update` download the installer from the OFFICIAL DOMAIN endpoint and
+//! run it — never a GitHub raw or workflow URL. The script is the single
+//! source of truth for the whole move — it resolves and downloads the
+//! latest build, uninstalls the TypeScript version, publishes the payload,
+//! and never touches `~/.prime/agent` (the sessions and configuration the
+//! products share). The domain serves the TypeScript product's official
+//! installer today and will serve the Rust installer when the operator
+//! ships it there; the command's contract is "fetch from the official
+//! source, run it". This module only fetches and execs the script, then
+//! reports what landed; every install/uninstall decision stays in the
+//! script the installer-takeover lane owns, so the two surfaces can never
+//! drift from it.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -30,15 +33,21 @@ pub const ENV_INSTALLER_URL: &str = "PRIME_AGENT_RUST_INSTALLER_URL";
 /// the anonymous rate limit).
 pub const ENV_GITHUB_TOKEN: &str = "GITHUB_TOKEN";
 
-/// The repo the installer and the run report resolve from.
+/// The official domain's install endpoint — the one source the funnel
+/// fetches the installer from (the TypeScript product's official install
+/// endpoint today; the operator ships the Rust installer through this
+/// domain itself, so the command never points at a GitHub raw or workflow
+/// URL).
+pub const OFFICIAL_INSTALLER_URL: &str = "https://app.primeintellect.ai/prime-agent/install.sh";
+/// The repo the run report resolves from (the run-list query's owner; the
+/// installer fetch itself never derives from it).
 pub const DEFAULT_REPO: &str = "PrimeIntellect-ai/prime-agent";
 /// The workflow whose artifacts the installer downloads (the same name
 /// the script's run-list query uses).
 pub const WORKFLOW: &str = "continuous";
-/// The branch the installer script and the continuous runs resolve from.
+/// The branch the continuous runs resolve from (the run-list query's
+/// branch).
 pub const BRANCH: &str = "rust";
-/// The installer script's file name on the branch.
-pub const SCRIPT_NAME: &str = "install-rust.sh";
 
 /// The small-file budget for the script download (the script is a few KB;
 /// a hung fetch must not hang the update).
@@ -59,8 +68,9 @@ pub fn repo() -> String {
         .unwrap_or_else(|| DEFAULT_REPO.to_string())
 }
 
-/// The installer script URL: the branch's raw file by default
-/// (`PRIME_AGENT_RUST_INSTALLER_URL` overrides it).
+/// The installer script URL: the official domain's install endpoint by
+/// default (`PRIME_AGENT_RUST_INSTALLER_URL` overrides it — tests serve
+/// their own script, a pinned install can point elsewhere).
 #[must_use]
 pub fn installer_script_url() -> String {
     if let Ok(url) = std::env::var(ENV_INSTALLER_URL) {
@@ -68,10 +78,7 @@ pub fn installer_script_url() -> String {
             return url;
         }
     }
-    format!(
-        "https://raw.githubusercontent.com/{}/{BRANCH}/{SCRIPT_NAME}",
-        repo()
-    )
+    OFFICIAL_INSTALLER_URL.to_string()
 }
 
 /// The install prefix the launcher probe reads (`PRIME_AGENT_RUST_PREFIX`,
@@ -460,7 +467,7 @@ mod tests {
                 let _ = stream.flush();
             }
         });
-        format!("http://{address}/{SCRIPT_NAME}")
+        format!("http://{address}/install.sh")
     }
 
     /// The sandboxed preserve fixture: a session file under a home the
@@ -538,6 +545,24 @@ echo "installed: 9.9.8-continuous.fedcba9876543210"
         let prefix = root.path().join("prefix/.local");
         std::fs::create_dir_all(&prefix).expect("prefix");
         (root, preserve, prefix)
+    }
+
+    /// The default funnel URL is the official domain's install endpoint —
+    /// never a GitHub raw or workflow URL (the operator ships the Rust
+    /// installer through the domain itself; the override stays for tests
+    /// and pinned installs).
+    #[test]
+    fn the_default_installer_url_is_the_official_domain_endpoint() {
+        std::env::remove_var(ENV_INSTALLER_URL);
+        assert_eq!(installer_script_url(), OFFICIAL_INSTALLER_URL);
+        assert_eq!(
+            OFFICIAL_INSTALLER_URL,
+            "https://app.primeintellect.ai/prime-agent/install.sh"
+        );
+        assert!(
+            !OFFICIAL_INSTALLER_URL.contains("github"),
+            "the official endpoint never points at GitHub"
+        );
     }
 
     #[test]
