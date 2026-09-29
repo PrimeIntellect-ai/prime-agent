@@ -239,6 +239,9 @@ impl Supervisor {
             "rlmMaxDepth",
             "parentSessionPath",
             "models",
+            // The scripted-parent verification seam: a dropped key leaves
+            // spawned children scriptless.
+            "childScript",
             "systemPrompt",
             "appendSystemPrompt",
             "skills",
