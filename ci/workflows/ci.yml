@@ -22,8 +22,8 @@
 # PR and push builds are strictly read-only: `contents: read` and
 # persist-credentials: false. No secrets, no publish capability.
 # Third-party action SHAs below were resolved from the tags via the GitHub API
-# (or taken from ~/codex's own verified pins, its AGENTS.md being the template
-# for this repo's governance).
+# (or taken from the upstream Codex repo's own verified pins, its AGENTS.md being
+# the template for this repo's governance).
 
 name: ci
 

@@ -1046,7 +1046,7 @@ impl Supervisor {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::supervisor::SupervisorOptions;
@@ -1059,7 +1059,6 @@ mod tests {
     /// (finding 4a): the loss becomes a durable daemon-log line naming the
     /// client and the dropped count. Drives a real connection loop
     /// (`handle_client`) over a real socket pair with a flooded ring.
-    #[cfg(unix)]
     #[tokio::test]
     async fn a_lagged_client_event_stream_is_logged() {
         use tokio::io::AsyncReadExt as _;

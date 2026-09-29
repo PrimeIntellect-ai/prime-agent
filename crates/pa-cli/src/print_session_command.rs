@@ -124,7 +124,7 @@ pub(crate) async fn execute_prompt_session_command(
         if let Some(instructions) = &custom_instructions {
             event["customInstructions"] = json!(instructions);
         }
-        goal.emit_stream_event(event);
+        goal.emit_stream_event(&event);
     }
     // The refinement rows the executor's refine run appends (streamed in
     // TS emission order ahead of the `refine_complete` event).
@@ -165,7 +165,7 @@ pub(crate) async fn execute_prompt_session_command(
                 custom_instructions.as_deref(),
             )
         };
-        goal.emit_stream_event(end);
+        goal.emit_stream_event(&end);
     }
     // `/refine`: the durable refinement rows stream as message pairs, then
     // `refine_complete` (or `refine_failed`), before the result row.
@@ -176,9 +176,9 @@ pub(crate) async fn execute_prompt_session_command(
             goal.emit_row_pair(&row);
         }
         if let Some(error) = &execution.refinement_failed {
-            goal.emit_stream_event(json!({ "type": "refine_failed", "error": error }));
+            goal.emit_stream_event(&json!({ "type": "refine_failed", "error": error }));
         } else if let Some(result) = &execution.refinement {
-            goal.emit_stream_event(json!({
+            goal.emit_stream_event(&json!({
                 "type": "refine_complete",
                 "result": serde_json::to_value(result).unwrap_or(Value::Null),
             }));
@@ -464,7 +464,7 @@ mod tests {
         None
     }
 
-    fn script(responses: Value) -> Value {
+    fn script(responses: &Value) -> Value {
         json!({
             "engine": "faux",
             "modelId": "faux-1",
@@ -478,7 +478,7 @@ mod tests {
     #[tokio::test]
     async fn goal_status_stream_matches_ts() {
         let _guard = FAUX_TEST_LOCK.lock().await;
-        let test = bed(script(json!([]))).await;
+        let test = bed(script(&json!([]))).await;
         assert_eq!(run_command(&test, "/goal status").await, None);
         assert_eq!(
             trace(&test.frames),
@@ -523,7 +523,7 @@ mod tests {
     #[tokio::test]
     async fn goal_start_admits_the_continuation() {
         let _guard = FAUX_TEST_LOCK.lock().await;
-        let test = bed(script(json!([{"text": "goal turn reply"}]))).await;
+        let test = bed(script(&json!([{"text": "goal turn reply"}]))).await;
         assert_eq!(run_command(&test, "/goal ship it").await, None);
         // The queued continuation ran to the faux queue's exhaustion and
         // the terminal error failed the goal.
@@ -569,7 +569,7 @@ mod tests {
         // the next mint hits the exhausted faux queue, and the goal fails
         // — a goal record (objective held) is exactly what a clear
         // removes.
-        let test = bed(script(json!([{"text": "goal turn reply"}]))).await;
+        let test = bed(script(&json!([{"text": "goal turn reply"}]))).await;
         assert_eq!(run_command(&test, "/goal ship it").await, None);
         let rows = custom_rows(&test.engine).await;
         assert_eq!(rows[1].1, "Goal active: ship it");
@@ -614,7 +614,7 @@ mod tests {
     #[tokio::test]
     async fn compact_skip_warns_without_a_row() {
         let _guard = FAUX_TEST_LOCK.lock().await;
-        let test = bed(script(json!([]))).await;
+        let test = bed(script(&json!([]))).await;
         assert_eq!(run_command(&test, "/compact").await, None);
         // A skip records nothing beyond the echo (TS CompactionSkippedError
         // catch arm) and the end event carries the warning.
@@ -645,7 +645,7 @@ mod tests {
             "compaction": {"enabled": true, "reserveTokens": 1, "keepRecentTokens": 10}
         });
         let test =
-            bed_with_settings(script(json!([{"text": "r1"}, {"text": "r2"}])), settings).await;
+            bed_with_settings(script(&json!([{"text": "r1"}, {"text": "r2"}])), settings).await;
         let long_seed = "seed turn one ".to_string() + &"x".repeat(15000);
         test.engine
             .session

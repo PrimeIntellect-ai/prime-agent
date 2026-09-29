@@ -239,12 +239,10 @@ fn a_settled_row_re_arms_instead_of_executing_the_stale_word() {
     let armed = mode.delete_arm_target().expect("an armed target");
     assert!(armed.stop);
     // The settled child: the section reads idle while the arm
-    // rides the same row. The running expansion keeps running rows
-    // only, so the settled child lives under the parent's inactive
-    // line now: open it before the rebuild so the armed row stays
-    // visible (the arm only rides a row the list still carries).
-    mode.expanded_inactive_parents
-        .insert(parent_row.identity.clone());
+    // rides the same row. The parent's ONE merged group already
+    // carries the settled child (the merged line renders every
+    // child, running or not), so the armed row stays visible through
+    // the rebuild (the arm only rides a row the list still carries).
     mode.roster[1]["status"] = serde_json::json!("idle");
     mode.rebuild_rows();
     mode.selected = mode
@@ -299,12 +297,9 @@ fn the_confirm_hint_rides_the_current_live_work() {
         "the running row's confirm reads stop: {hint}"
     );
     // The settled child keeps the arm on its identity and session
-    // key; the hint reads the settled row's word. The settled child
-    // renders under the parent's inactive line now (the running
-    // expansion keeps running rows only), so open it before the
-    // rebuild so the armed row stays visible for the hint to ride.
-    mode.expanded_inactive_parents
-        .insert(parent_row.identity.clone());
+    // key; the hint reads the settled row's word. The parent's ONE
+    // merged group keeps the settled child visible through the
+    // rebuild, so the armed row stays rendered for the hint to ride.
     mode.roster[1]["status"] = serde_json::json!("idle");
     mode.rebuild_rows();
     let hint = mode

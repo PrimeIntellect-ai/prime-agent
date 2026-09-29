@@ -5,14 +5,13 @@ use serde_json::Value;
 use super::lineage::{depth_consistent_parent, is_subagent_descendant};
 use super::{
     is_subagent_summary, session_model, session_title, AgentsViewRow, AgentsViewScope, Rollup,
-    RowKind, INACTIVE_SUMMARY_ROW_PREFIX, SUMMARY_ROW_PREFIX,
+    RowKind, SUMMARY_ROW_PREFIX,
 };
 use crate::agents_view_state::{
     now_ms, relative_age, section_rank, summary_for_record, Section, UnifiedRecord,
 };
 use crate::subagents::{summary_identity_keys, summary_parent_keys};
 
-/// One base row while the forest is being assembled.
 struct BaseRow {
     kind: RowKind,
     section: Section,
@@ -28,27 +27,22 @@ struct BaseRow {
     descendant_cost: f64,
     descendant_count: usize,
     running_subagent_count: usize,
-    /// Direct children currently roster-running: the `direct` number of
-    /// the running line's `"{direct}, {nested} running"` title (the
-    /// nested number is the recursive running count minus this).
-    direct_running: usize,
     record: usize,
     search_score: Option<f64>,
 }
 
 /// Build the session-list rows (TS `buildAgentsViewRows`, plus the
-/// operator's two-line subagent summary): top-level agents, each with its
-/// running line (`d, n running`, expands to the running rows only) and,
-/// when non-running children exist, its inactive line (`N inactive
-/// subagents`, expands to them). `expanded_running` and
-/// `expanded_inactive` hold the parent row identities whose lines are
-/// open; `rollups` carries the unfiltered hierarchy totals; a scope
-/// excludes its root and lifts its direct children to top-level rows.
+/// operator's one-line subagent summary): top-level agents, each with
+/// its ONE subagents line (`N subagents (M running)` — N = the full
+/// roster, M = the running subset — expanding to the whole roster in
+/// one group, running rows first). `expanded` holds the parent row
+/// identities whose lines are open; `rollups` carries the unfiltered
+/// hierarchy totals; a scope excludes its root and lifts its direct
+/// children to top-level rows.
 pub fn build_rows(
     records: &[UnifiedRecord],
     scope: Option<&AgentsViewScope>,
-    expanded_running: &HashSet<String>,
-    expanded_inactive: &HashSet<String>,
+    expanded: &HashSet<String>,
     rollups: &HashMap<String, Rollup>,
     anchor: Option<&str>,
 ) -> Vec<AgentsViewRow> {
@@ -124,7 +118,6 @@ pub fn build_rows(
             descendant_cost: rollup.descendants,
             descendant_count: rollup.descendant_count,
             running_subagent_count: 0,
-            direct_running: 0,
             summary,
             record: position,
         });
@@ -192,20 +185,15 @@ pub fn build_rows(
     }
     for index in tally_order.iter().rev() {
         let mut running = 0;
-        let mut direct_running = 0;
         let mut descendants = 0;
         let mut descendants_cost = 0.0;
         for child in children_by_parent.get(index).into_iter().flatten() {
-            if base[*child].section == Section::Running {
-                direct_running += 1;
-            }
             running += (base[*child].section == Section::Running) as usize
                 + base[*child].running_subagent_count;
             descendants += 1 + base[*child].descendant_count;
             descendants_cost += base[*child].recursive_cost;
         }
         base[*index].running_subagent_count = running;
-        base[*index].direct_running = direct_running;
         // Rollups follow the unfiltered hierarchy; the per-pass walk is the
         // fallback when the caller passed none (TS `rollup ?? descendants`).
         if !rollups.contains_key(&base[*index].identity) {
@@ -247,27 +235,15 @@ pub fn build_rows(
         .filter(|index| Some(base[*index].record) != scope_root.as_ref().map(|(root, _)| *root))
         .collect();
     visible_roots.sort_by(|a, b| compare_base(&base[*a], &base[*b], anchor));
-    let (exposed_running, exposed_inactive) = scan_flatten_exposed(
-        &base,
-        &children_by_parent,
-        expanded_running,
-        expanded_inactive,
-    );
     let forest = RowForest {
         base: &base,
         children_by_parent: &children_by_parent,
-        expanded_running,
-        expanded_inactive,
+        expanded,
         anchor,
     };
     let mut rows: Vec<AgentsViewRow> = Vec::new();
-    let walk = EmitWalk {
-        exposed_running: &exposed_running,
-        exposed_inactive: &exposed_inactive,
-        on_running_path: false,
-    };
     for root in visible_roots {
-        forest.emit(root, 0, None, &walk, &mut rows);
+        forest.emit(root, 0, None, &mut rows);
     }
     rows
 }
@@ -276,60 +252,22 @@ pub fn build_rows(
 struct RowForest<'a> {
     base: &'a [BaseRow],
     children_by_parent: &'a HashMap<usize, Vec<usize>>,
-    expanded_running: &'a HashSet<String>,
-    expanded_inactive: &'a HashSet<String>,
+    expanded: &'a HashSet<String>,
     anchor: Option<&'a str>,
 }
 
-/// The per-pass state the emit walk threads: the flatten-exposure sets
-/// (which ancestor's flatten already renders a line's content) and the
-/// running-path flag (a row reached through a running line's expansion
-/// keeps its inactive line collapsed — see `emit`). Bundling the walk
-/// state keeps the walk's helpers under the too-many-arguments lint.
-struct EmitWalk<'a> {
-    exposed_running: &'a HashSet<String>,
-    exposed_inactive: &'a HashSet<String>,
-    on_running_path: bool,
-}
-
-impl EmitWalk<'_> {
-    /// The variant rows under a running line's expansion walk with: the
-    /// same exposure sets, flagged as on the running path.
-    fn running_path(&self) -> EmitWalk<'_> {
-        EmitWalk {
-            exposed_running: self.exposed_running,
-            exposed_inactive: self.exposed_inactive,
-            on_running_path: true,
-        }
-    }
-}
-
 impl RowForest<'_> {
-    /// Emit one row, then its summary lines, then their expanded children
-    /// (TS `emit`, plus the operator's running/inactive split): depth and
-    /// parent identity come from the walk. Each line expands to its own
-    /// status only — the running line to the running rows (flattened
-    /// through non-running children so nested workers stay reachable),
-    /// the inactive line to the not-running rows (flattened the mirror
-    /// way through running children) — and a line whose content an
-    /// ancestor's flatten already exposes does not render, so every
-    /// agent keeps exactly one visible row however many lines are open.
-    /// The walk's `on_running_path` flag marks rows reached through a
-    /// running line's expansion: their inactive line keeps rendering its
-    /// collapsed row but never EXPANDS there — the operator's rule that
-    /// the running expansion carries running rows only holds even when a
-    /// child's inactive line is open elsewhere (the inactive rows stay
-    /// reachable through the parent's own inactive line). The inactive
-    /// expansion keeps the mirror reachability on purpose: a child's
-    /// running line opened from within the parent's inactive view
-    /// reveals its live worker (the nested toggle is the one visible
-    /// path while the parent's running line is collapsed).
+    /// Emit one row, then its ONE summary line, then its expanded
+    /// children (TS `emit`): depth and parent identity come from the
+    /// walk. The line expands to the FULL roster in one group — the
+    /// running children first (each carrying its own running state and
+    /// its own nested line), the not-running children after — so every
+    /// descendant is reachable through the nesting alone.
     fn emit(
         &self,
         index: usize,
         depth: usize,
         parent_identity: Option<&str>,
-        walk: &EmitWalk,
         rows: &mut Vec<AgentsViewRow>,
     ) {
         let row = &self.base[index];
@@ -340,290 +278,25 @@ impl RowForest<'_> {
         if children.is_empty() {
             return;
         }
+        let is_expanded = self.expanded.contains(&row.identity);
+        rows.push(merged_summary_row(row, depth + 1, is_expanded));
+        if !is_expanded {
+            return;
+        }
         let mut sorted = children.clone();
         sorted.sort_by(|a, b| compare_base(&self.base[*a], &self.base[*b], self.anchor));
+        // One group, one order (the operator's contract): the running
+        // rows first — `compare_base`'s section rank already sinks the
+        // not-running rows below them — so the partition is explicit
+        // rather than left to the comparator's section ordering.
         let (running_kids, other_kids): (Vec<usize>, Vec<usize>) = sorted
             .iter()
             .copied()
             .partition(|child| self.base[*child].section == Section::Running);
-        if row.running_subagent_count > 0 && !walk.exposed_running.contains(&row.identity) {
-            let is_expanded = self.expanded_running.contains(&row.identity);
-            rows.push(running_summary_row(row, depth + 1, is_expanded));
-            if is_expanded {
-                let inner = walk.running_path();
-                for child in &running_kids {
-                    self.emit(*child, depth + 1, Some(&row.identity), &inner, rows);
-                }
-                for child in &other_kids {
-                    if self.base[*child].running_subagent_count > 0 {
-                        self.emit_running_descendants(
-                            *child,
-                            depth + 1,
-                            Some(&row.identity),
-                            &inner,
-                            rows,
-                        );
-                    }
-                }
-            }
-        }
-        let inactive = row
-            .descendant_count
-            .saturating_sub(row.running_subagent_count);
-        if inactive > 0 && !walk.exposed_inactive.contains(&row.identity) {
-            let is_expanded =
-                !walk.on_running_path && self.expanded_inactive.contains(&row.identity);
-            rows.push(inactive_summary_row(row, depth + 1, is_expanded));
-            if is_expanded {
-                for child in &other_kids {
-                    self.emit(*child, depth + 1, Some(&row.identity), walk, rows);
-                }
-                for child in &running_kids {
-                    let child_inactive = self.base[*child]
-                        .descendant_count
-                        .saturating_sub(self.base[*child].running_subagent_count);
-                    if child_inactive > 0 {
-                        self.emit_inactive_descendants(
-                            *child,
-                            depth + 1,
-                            Some(&row.identity),
-                            walk,
-                            rows,
-                        );
-                    }
-                }
-            }
+        for child in running_kids.into_iter().chain(other_kids) {
+            self.emit(child, depth + 1, Some(&row.identity), rows);
         }
     }
-
-    /// Emit the running descendants of a non-running ancestor the
-    /// running path flattens through (the `0, N running` case): the
-    /// ancestor itself stays hidden, its running children render at
-    /// their true depth, and deeper non-running ancestors continue the
-    /// same way. The ancestor is already in the pass's exposed set (the
-    /// `scan_flatten_exposed` pre-pass recorded it). An explicit work
-    /// stack drives the walk — one entry per flattened ancestor, never
-    /// one call frame — so a deep subagent chain cannot overflow the
-    /// TUI thread's stack (the LIFO pops keep the recursive pre-order:
-    /// a child's own descendants render before its later siblings).
-    fn emit_running_descendants(
-        &self,
-        index: usize,
-        depth: usize,
-        visible_parent: Option<&str>,
-        walk: &EmitWalk,
-        rows: &mut Vec<AgentsViewRow>,
-    ) {
-        // (ancestor, depth, is_running_child): a running child emits its
-        // whole subtree in place when its task pops; a non-running
-        // ancestor task walks the next level.
-        let mut stack: Vec<(usize, usize, bool)> = vec![(index, depth, false)];
-        while let Some((node, at_depth, is_running_child)) = stack.pop() {
-            if is_running_child {
-                self.emit(node, at_depth, visible_parent, walk, rows);
-                continue;
-            }
-            let mut sorted = self
-                .children_by_parent
-                .get(&node)
-                .cloned()
-                .unwrap_or_default();
-            sorted.sort_by(|a, b| compare_base(&self.base[*a], &self.base[*b], self.anchor));
-            for child in sorted.into_iter().rev() {
-                if self.base[child].section == Section::Running {
-                    stack.push((child, at_depth + 1, true));
-                } else if self.base[child].running_subagent_count > 0 {
-                    stack.push((child, at_depth + 1, false));
-                }
-            }
-        }
-    }
-
-    /// Emit the not-running descendants of a running ancestor the
-    /// inactive path flattens through (the inactive line's mirror of
-    /// `emit_running_descendants`): the ancestor stays hidden, its
-    /// not-running children render at their true depth, and deeper
-    /// running ancestors continue the same way. The ancestor is already
-    /// in the pass's exposed set (the `scan_flatten_exposed`
-    /// pre-pass recorded it). An explicit work stack drives the walk
-    /// (the running mirror's stack rule: no call frame per flattened
-    /// ancestor, LIFO pops keep the recursive pre-order).
-    fn emit_inactive_descendants(
-        &self,
-        index: usize,
-        depth: usize,
-        visible_parent: Option<&str>,
-        walk: &EmitWalk,
-        rows: &mut Vec<AgentsViewRow>,
-    ) {
-        // (ancestor, depth, is_inactive_child): a not-running child emits
-        // its whole subtree in place when its task pops; a running
-        // ancestor task walks the next level.
-        let mut stack: Vec<(usize, usize, bool)> = vec![(index, depth, false)];
-        while let Some((node, at_depth, is_inactive_child)) = stack.pop() {
-            if is_inactive_child {
-                self.emit(node, at_depth, visible_parent, walk, rows);
-                continue;
-            }
-            let mut sorted = self
-                .children_by_parent
-                .get(&node)
-                .cloned()
-                .unwrap_or_default();
-            sorted.sort_by(|a, b| compare_base(&self.base[*a], &self.base[*b], self.anchor));
-            for child in sorted.into_iter().rev() {
-                let child_inactive = self.base[child]
-                    .descendant_count
-                    .saturating_sub(self.base[child].running_subagent_count);
-                if self.base[child].section != Section::Running {
-                    stack.push((child, at_depth + 1, true));
-                } else if child_inactive > 0 {
-                    stack.push((child, at_depth + 1, false));
-                }
-            }
-        }
-    }
-}
-
-/// Pre-compute the flatten-exposed ancestors for one pass, so the emit
-/// walk's order never decides a line's visibility: an expanded running
-/// line flattens through its non-running children (transitively), an
-/// expanded inactive line through its running children, and the walk
-/// below records every skipped ancestor. The emit's own flatten walks
-/// mirror this scan exactly, so a skipped ancestor's opposite-status
-/// line stays suppressed wherever it renders — one visible row per
-/// agent when both lines are open.
-fn scan_flatten_exposed(
-    base: &[BaseRow],
-    children_by_parent: &HashMap<usize, Vec<usize>>,
-    expanded_running: &HashSet<String>,
-    expanded_inactive: &HashSet<String>,
-) -> (HashSet<String>, HashSet<String>) {
-    /// The running-path scan: record the skipped non-running ancestor,
-    /// then walk through its non-running children that own running
-    /// descendants (running children render in full — their own lines
-    /// ride the suppression sets). An explicit work stack drives the
-    /// walk: the set's membership is order-free, and a deep chain never
-    /// rides the call stack.
-    fn scan_running(
-        base: &[BaseRow],
-        children_by_parent: &HashMap<usize, Vec<usize>>,
-        index: usize,
-        exposed_running: &mut HashSet<String>,
-    ) {
-        let mut stack = vec![index];
-        while let Some(index) = stack.pop() {
-            exposed_running.insert(base[index].identity.clone());
-            for child in children_by_parent.get(&index).into_iter().flatten() {
-                if base[*child].section != Section::Running
-                    && base[*child].running_subagent_count > 0
-                {
-                    stack.push(*child);
-                }
-            }
-        }
-    }
-    /// The inactive-path scan: the running-ancestor mirror (the same
-    /// explicit work stack).
-    fn scan_inactive(
-        base: &[BaseRow],
-        children_by_parent: &HashMap<usize, Vec<usize>>,
-        index: usize,
-        exposed_inactive: &mut HashSet<String>,
-    ) {
-        let mut stack = vec![index];
-        while let Some(index) = stack.pop() {
-            exposed_inactive.insert(base[index].identity.clone());
-            for child in children_by_parent.get(&index).into_iter().flatten() {
-                let child_inactive = base[*child]
-                    .descendant_count
-                    .saturating_sub(base[*child].running_subagent_count);
-                if base[*child].section == Section::Running && child_inactive > 0 {
-                    stack.push(*child);
-                }
-            }
-        }
-    }
-    // Emit's path rule mirrors here: a row reached through a running
-    // line's expansion never expands its own inactive line (see
-    // `emit`), so a stale `expanded_inactive` entry for such a row is
-    // inert — processing it would mark lines whose content never
-    // renders, stranding the subtree. The inactive scan skips those
-    // rows entirely.
-    let on_running_path = scan_running_path_rows(base, children_by_parent, expanded_running);
-    let mut exposed_running: HashSet<String> = HashSet::new();
-    let mut exposed_inactive: HashSet<String> = HashSet::new();
-    for index in 0..base.len() {
-        if expanded_running.contains(&base[index].identity) {
-            for child in children_by_parent.get(&index).into_iter().flatten() {
-                if base[*child].section != Section::Running
-                    && base[*child].running_subagent_count > 0
-                {
-                    scan_running(base, children_by_parent, *child, &mut exposed_running);
-                }
-            }
-        }
-        if expanded_inactive.contains(&base[index].identity)
-            && !on_running_path.contains(&base[index].identity)
-        {
-            for child in children_by_parent.get(&index).into_iter().flatten() {
-                let child_inactive = base[*child]
-                    .descendant_count
-                    .saturating_sub(base[*child].running_subagent_count);
-                if base[*child].section == Section::Running && child_inactive > 0 {
-                    scan_inactive(base, children_by_parent, *child, &mut exposed_inactive);
-                }
-            }
-        }
-    }
-    (exposed_running, exposed_inactive)
-}
-
-/// The rows the emit walk reaches through a running line's expansion:
-/// every expanded running line's running children — direct and through
-/// the running flatten — recursively (a running-path row's own running
-/// line still expands). `emit` never expands such a row's inactive
-/// line, so the exposure scan ignores their `expanded_inactive`
-/// entries. An explicit work stack drives the walk — the flatten legs
-/// and the expansion recursion both ride it, never the call stack.
-fn scan_running_path_rows(
-    base: &[BaseRow],
-    children_by_parent: &HashMap<usize, Vec<usize>>,
-    expanded_running: &HashSet<String>,
-) -> HashSet<String> {
-    let mut on_running_path: HashSet<String> = HashSet::new();
-    let mut frontier: Vec<usize> = (0..base.len())
-        .filter(|index| expanded_running.contains(&base[*index].identity))
-        .collect();
-    while let Some(index) = frontier.pop() {
-        for child in children_by_parent.get(&index).into_iter().flatten() {
-            if base[*child].section == Section::Running {
-                if on_running_path.insert(base[*child].identity.clone())
-                    && expanded_running.contains(&base[*child].identity)
-                {
-                    frontier.push(*child);
-                }
-            } else if base[*child].running_subagent_count > 0 {
-                // The running flatten: the hidden ancestor's running
-                // descendants render on the running path too.
-                let mut stack = vec![*child];
-                while let Some(ancestor) = stack.pop() {
-                    for descendant in children_by_parent.get(&ancestor).into_iter().flatten() {
-                        if base[*descendant].section == Section::Running {
-                            if on_running_path.insert(base[*descendant].identity.clone())
-                                && expanded_running.contains(&base[*descendant].identity)
-                            {
-                                frontier.push(*descendant);
-                            }
-                        } else if base[*descendant].running_subagent_count > 0 {
-                            stack.push(*descendant);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    on_running_path
 }
 
 /// One session row's rendered fields (the display-side slice the layout
@@ -646,93 +319,39 @@ fn agents_row(row: &BaseRow, depth: usize, parent_identity: Option<&str>) -> Age
     }
 }
 
-/// The running line under one agent (the operator's 2026-09-25
-/// directive, a deliberate TS divergence: TS `createSubagentSummaryRow`
-/// titles one `"{n} subagents running"` line that expands to every
-/// child). The title reads `"{direct}, {nested} running"` — `direct` =
-/// immediately running children, `nested` = further running descendants
-/// below them — and the expansion renders only running rows, flattened
-/// through non-running ancestors. The title stays count-only (the
-/// operator's 2026-09-26 follow-up: the model mix left this line, the
-/// expanded children render their own Model column).
-fn running_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsViewRow {
-    let direct = parent.direct_running;
-    let nested = parent.running_subagent_count.saturating_sub(direct);
-    let title = format!("{direct}, {nested} running");
-    summary_row(
-        parent,
-        depth,
-        expanded,
-        title,
-        SUMMARY_ROW_PREFIX,
-        parent.descendant_cost,
-        parent.running_subagent_count,
-    )
-}
-
-/// The inactive line under one agent (the operator's 2026-09-25
-/// directive): the explicit home for every not-running descendant — the
-/// historical agents stay discoverable here without contaminating the
-/// running line's expansion. The count aggregates the whole descendant
-/// tree's not-running rows (the summary count's deliberate divergence)
-/// and the expansion lists the not-running children. The title stays
-/// count-only (the operator's 2026-09-26 follow-up: the model mix left
-/// this line too), and the line bills the same descendant-tree aggregate
-/// the running line does — the aggregate must survive the state where
-/// every descendant is done and the running line no longer renders.
-fn inactive_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsViewRow {
-    let inactive = parent
-        .descendant_count
-        .saturating_sub(parent.running_subagent_count);
-    let title = format!(
-        "{inactive} inactive {}",
-        if inactive == 1 {
-            "subagent"
-        } else {
-            "subagents"
-        }
-    );
-    summary_row(
-        parent,
-        depth,
-        expanded,
-        title,
-        INACTIVE_SUMMARY_ROW_PREFIX,
-        parent.descendant_cost,
-        0,
-    )
-}
-
-/// One summary line's row: both lines reuse their parent's summary so
-/// the open action and selection keys resolve the parent. The `cost`
-/// cell is the line's aggregate — BOTH lines bill the whole descendant
-/// tree (the operator's 2026-09-26 ask; the running line first, then
-/// the follow-up: an all-done tree renders no running line, so the
-/// inactive line bills the same total — TS `createSubagentSummaryRow`
-/// pins `recursiveCost: 0` there, a deliberate divergence), and neither
-/// line carries an age.
-fn summary_row(
-    parent: &BaseRow,
-    depth: usize,
-    expanded: bool,
-    title: String,
-    identity_prefix: &str,
-    cost: f64,
-    running_subagent_count: usize,
-) -> AgentsViewRow {
+/// The subagents line under one agent (the operator's 2026-09-28
+/// one-dropdown directive): `"{total} subagents ({running} running)"` —
+/// `total` = the FULL descendant roster (running + inactive), `running`
+/// = the running subset — expanding to the whole roster in one group,
+/// the running rows first. TS parity: TS `createSubagentSummaryRow`
+/// titles one `"{n} subagents running"` / `"{n} subagents"` line that
+/// expands to every child — this is the same one-line shape with the
+/// operator's both-counts label, a sanctioned divergence. The title
+/// stays count-only (the expanded children render their own Model
+/// column).
+///
+/// The line reuses its parent's summary so the open action and selection
+/// keys resolve the parent. The `cost` cell is the whole descendant
+/// tree's spend — the line always renders while any descendant exists,
+/// so the aggregate never loses its row (TS `createSubagentSummaryRow`
+/// pins `recursiveCost: 0` there, a deliberate divergence) — and the
+/// line carries no age.
+fn merged_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsViewRow {
+    let total = parent.descendant_count;
+    let running = parent.running_subagent_count;
     AgentsViewRow {
         kind: RowKind::SubagentSummary,
         section: parent.section,
-        identity: format!("{identity_prefix}{}", parent.identity),
+        identity: format!("{SUMMARY_ROW_PREFIX}{}", parent.identity),
         parent_identity: Some(parent.identity.clone()),
         summary: parent.summary.clone(),
-        title,
+        title: format!("{total} subagents ({running} running)"),
         model: String::new(),
-        cost,
+        cost: parent.descendant_cost,
         age: String::new(),
         depth,
         descendant_count: 0,
-        running_subagent_count,
+        running_subagent_count: running,
         expanded,
     }
 }
