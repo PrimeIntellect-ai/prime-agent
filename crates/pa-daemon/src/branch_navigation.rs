@@ -617,6 +617,12 @@ impl Worker {
                 self.reseed_service_tier_for_replacement();
                 self.bind_scheduled_jobs().await;
                 self.prewarm_replacement_session();
+                // The fork swap is a whole-session replacement too: the
+                // fresh session's summary row ships to the subscribed
+                // surfaces (the title's cost folds it in
+                // `update_subagent_summary` on arrival), never waiting
+                // for the next turn.
+                self.push_roster_delta();
                 let mut data = json!({ "cancelled": false });
                 if let Some(selected_text) = selected_text {
                     data["selectedText"] = json!(selected_text);

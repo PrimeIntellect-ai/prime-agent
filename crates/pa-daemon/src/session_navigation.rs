@@ -407,6 +407,12 @@ impl Worker {
                 self.reseed_service_tier_for_replacement();
                 self.bind_scheduled_jobs().await;
                 self.prewarm_replacement_session();
+                // The replacement never pushed a roster delta, so the
+                // subscribed surfaces kept the PREVIOUS session's
+                // numbers until the next turn: the fresh session's
+                // summary row ships now (the title's cost folds it in
+                // `update_subagent_summary` on arrival).
+                self.push_roster_delta();
                 response_success(None, command, Some(json!({ "cancelled": false })))
             }
             Err(error) => response_failure(None, command, &error, None),
