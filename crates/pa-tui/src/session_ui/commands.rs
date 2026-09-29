@@ -721,6 +721,12 @@ impl SessionUi {
                 }
                 self.handle_fast_command(view).await;
             }
+            // `/tier [tier]` (TS `handleTierCommand`): show or set the
+            // session service tier.
+            "tier" => {
+                self.track_command_used("tier");
+                self.handle_tier_command(view, &resolved.args).await;
+            }
             // `/rlm-max-depth` (TS `handleRlmMaxDepthCommand`): view or set
             // the per-chat recursive depth limit.
             "rlm-max-depth" => {

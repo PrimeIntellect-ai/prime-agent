@@ -163,6 +163,7 @@ impl SessionUi {
             user_bash_started_at: None,
             user_bash_counter: 0,
             resync_bash: None,
+            loader_anchor_ms: None,
             side_bash: None,
             side_bash_discarded: None,
             side_bash_counter: 0,
@@ -496,6 +497,7 @@ impl SessionUi {
             });
         self.pending_queue = Some(reconstructed.queued);
         self.pending_snapshot = Some(reconstructed.chat);
+        self.loader_anchor_ms = reconstructed.last_user_prompt_ms;
         self.goal_view.seed(reconstructed.goal.unwrap_or_default());
         // The resynced state owns the loader (TS `renderResyncedSession`
         // rebuilds from the snapshot): a turn that is still live behind the
@@ -546,6 +548,26 @@ impl SessionUi {
         // instead of riding the arenas for the process lifetime.
         self.trim_after_frame = true;
         Ok(())
+    }
+
+    /// The instant a rebuilt loader anchors at, from the LAST HUMAN
+    /// PROMPT's wall-clock time (unix ms). The operator's 2026-09-28
+    /// rule: the waiting/executing timer never resets on a view
+    /// transition — it counts since the prompt that started the live
+    /// turn, however long ago that was. TS
+    /// `restoreTurnStartFromMessages` anchors at the run-start
+    /// message's timestamp the same way, with no plausibility cap: a
+    /// placeholder-era timestamp anchors at its own wall time and the
+    /// elapsed reads the wire's garbage (TS clamps only the negative
+    /// display at `formatWorkingElapsed`). Only a FUTURE timestamp
+    /// keeps the re-attach-instant anchor.
+    fn loader_anchor_instant(prompt_ms: u64) -> Option<std::time::Instant> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_millis() as u64)
+            .unwrap_or_default();
+        let age = now_ms.checked_sub(prompt_ms)?;
+        std::time::Instant::now().checked_sub(std::time::Duration::from_millis(age))
     }
 
     /// Fold the pending snapshot into the view (fresh transcript, footer
@@ -606,6 +628,11 @@ impl SessionUi {
             view.chrome.model_id = Some(model);
             view.chrome.model_provider = self.pending_model_provider.take();
         }
+        // The tray badge mirrors the session-scoped tier on every rebuild:
+        // an attach that reports no tier clears the previous session's
+        // badge instead of leaving it stranded (the rebuild is where the
+        // chrome fields re-sync from the reconstructed session).
+        view.chrome.service_tier.clone_from(&self.service_tier);
         // The tray's effort suffix moves with the same snapshot: an
         // attach's state either carries the session's level or reports a
         // model without reasoning, and the bare name wins in both cases.
@@ -683,18 +710,28 @@ impl SessionUi {
         // The rebuilt chat follows the session's live state: an attached
         // turn that survived the re-attach keeps its loader (TS
         // `renderResyncedSession`), and no stale loader survives a rebuild.
+        // The re-mounted loader anchors at the LAST HUMAN PROMPT (the
+        // operator's 2026-09-28 rule: the waiting/executing timer never
+        // resets on a view transition — an agents-view round trip
+        // re-attaches mid-turn and the clock keeps counting from the
+        // prompt that started the turn), so the elapsed readout picks up
+        // where it left off instead of restarting at the re-attach
+        // instant. The live paths (a submit's ack, a turn's engine
+        // start) keep their own anchors; only the rebuild re-derives one.
         if self.turn_active {
-            self.start_loader(view);
+            let anchor = self
+                .loader_anchor_ms
+                .and_then(Self::loader_anchor_instant)
+                .unwrap_or_else(std::time::Instant::now);
+            self.start_loader_at(view, anchor);
         } else {
             view.working = None;
         }
         view.follow();
-        self.update_fast_filter(view);
         // An open `/heartbeats` picker follows the rebuilt session's
-        // catalog (the channel fold's `apply_catalog` path, which the
-        // attach-time inline fold replaced): without this, a rebind
-        // leaves the picker showing the previous session's rows, and
-        // its Manage actions would target the stale active session.
+        // catalog (the channel fold's `apply_catalog` path): without this
+        // a rebind leaves the picker showing the previous session's rows
+        // and its Manage actions target stale jobs.
         if let Some(picker) = view.heartbeats_picker.as_mut() {
             picker.apply_catalog(self.heartbeat_catalog.clone(), None);
         }

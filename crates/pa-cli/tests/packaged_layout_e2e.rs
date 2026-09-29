@@ -1,10 +1,29 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
+// by design on hot paths (boxing 130 fns is allocation-churn with zero
+// correctness gain); the fn-length threshold is a style gate, not
+// correctness (the harness fns are intentionally linear); 64-bit targets -
+// the narrowing sits at OS/protocol boundaries where the values are
+// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
+// guarded parses), and checked conversions would add panic paths where
+// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
+// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
+// dossier for the conductor).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! Kernel-packaging e2e: the packaged (exe-adjacent) release layout boots a
 //! session with NO `PI_PACKAGE_DIR`, and the packaging script produces the
 //! release artifact.
 //!
 //! The staged layout is the TS native packaging contract (install.sh +
 //! copy-binary-assets.mjs): the binary plus `package.json` (the version
-//! manifest), the `prime-agent-runtime/` sidecar, `skills/`, and `docs/`
+//! manifest), the `prime-agent-runtime/` sidecar, and `skills/`
 //! beside it, all resolved at runtime from the executable's directory.
 
 use std::fmt::Write as _;
@@ -50,7 +69,7 @@ fn stage_packaged_layout(dir: &Path, with_runtime: bool) {
         ),
     )
     .expect("version manifest");
-    for asset in ["skills", "docs", "README.md"] {
+    for asset in ["skills", "README.md"] {
         let source = repo_root().join(asset);
         let target = dir.join(asset);
         if source.is_dir() {
@@ -614,13 +633,6 @@ fn packaging_dry_run_produces_artifact() {
         "---\nname: greet\ndescription: hi\n---\nHi.",
     )
     .unwrap();
-    let docs = tree.path().join("docs");
-    std::fs::create_dir_all(&docs).expect("docs tree");
-    // Every user-facing doc is REQUIRED payload content (SHIPPED_DOC_ENTRIES
-    // / package_release.py REQUIRED_FILES): the synthetic tree stages all three.
-    for doc in ["MODEL-SURFACE.md", "RUST_QUICKSTART.md", "keybindings.md"] {
-        std::fs::write(docs.join(doc), "# doc\n").unwrap();
-    }
     std::fs::write(tree.path().join("README.md"), "# readme\n").unwrap();
     std::fs::write(tree.path().join("LICENSE"), "Apache-2.0\n").unwrap();
     std::fs::write(
@@ -794,6 +806,7 @@ fn sha256_file(path: &Path) -> String {
 }
 
 /// SHA-256 (FIPS 180-4), pure std so the e2e needs no extra dev-dependency.
+#[allow(clippy::many_single_char_names)] // the RFC 6234 SHA-256 reference names (h, w, a..g)
 fn sha256(data: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
         0x428a_2f98,
@@ -861,7 +874,7 @@ fn sha256(data: &[u8]) -> [u8; 32] {
         0xbef9_a3f7,
         0xc671_78f2,
     ];
-    let mut h: [u32; 8] = [
+    let mut hash_words: [u32; 8] = [
         0x6a09_e667,
         0xbb67_ae85,
         0x3c6e_f372,
@@ -895,8 +908,16 @@ fn sha256(data: &[u8]) -> [u8; 32] {
                 .wrapping_add(w[index - 7])
                 .wrapping_add(s1);
         }
-        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
-            (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) = (
+            hash_words[0],
+            hash_words[1],
+            hash_words[2],
+            hash_words[3],
+            hash_words[4],
+            hash_words[5],
+            hash_words[6],
+            hash_words[7],
+        );
         for index in 0..64 {
             let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
             let ch = (e & f) ^ ((!e) & g);
@@ -917,17 +938,17 @@ fn sha256(data: &[u8]) -> [u8; 32] {
             b = a;
             a = temp1.wrapping_add(temp2);
         }
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g);
-        h[7] = h[7].wrapping_add(hh);
+        hash_words[0] = hash_words[0].wrapping_add(a);
+        hash_words[1] = hash_words[1].wrapping_add(b);
+        hash_words[2] = hash_words[2].wrapping_add(c);
+        hash_words[3] = hash_words[3].wrapping_add(d);
+        hash_words[4] = hash_words[4].wrapping_add(e);
+        hash_words[5] = hash_words[5].wrapping_add(f);
+        hash_words[6] = hash_words[6].wrapping_add(g);
+        hash_words[7] = hash_words[7].wrapping_add(hh);
     }
     let mut digest = [0u8; 32];
-    for (index, word) in h.iter().enumerate() {
+    for (index, word) in hash_words.iter().enumerate() {
         digest[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
     }
     digest

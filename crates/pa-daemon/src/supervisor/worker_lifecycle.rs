@@ -1,11 +1,19 @@
 //! Worker lifecycle: the launch/probe/connect plumbing for new workers
 //! and the stop, kill, retire, and tombstone passes for resident ones.
 
+#[cfg(unix)]
+use super::launch_budget::WORKER_CONNECT_BACKOFF_MS;
 use super::launch_budget::{
-    DEFAULT_WORKER_CONNECT_TIMEOUT_MS, WORKER_CONNECT_BACKOFF_MS, WORKER_CONNECT_PROBE_MS,
-    WORKER_CONNECT_TIMEOUT_ENV,
+    DEFAULT_WORKER_CONNECT_TIMEOUT_MS, WORKER_CONNECT_PROBE_MS, WORKER_CONNECT_TIMEOUT_ENV,
 };
-use super::*;
+#[cfg(not(unix))]
+use super::launch_budget::{WORKER_PROBE_BACKOFF_MAX_MS, WORKER_PROBE_BACKOFF_MIN_MS};
+use super::{
+    anyhow, create_command_payload, json, persist_worker, socket, util, Arc, Context,
+    DaemonCommand, DaemonWorkerDescriptor, DaemonWorkerLifecycle, DurableDaemonCreateCommand,
+    Duration, EngineModelSelection, Map, Ordering, Path, ResidentWorker, Result, RouteAdmission,
+    Supervisor, TypedCreateRejection, Value, LONG_ROUTE_TIMEOUT_MS, ROUTE_TIMEOUT_MS,
+};
 use crate::lease::is_process_alive;
 
 impl Supervisor {
@@ -449,7 +457,7 @@ impl Supervisor {
         // route gates on this, so nothing overtakes the session's create).
         resident.note_session_ready();
         let pid = child.id().unwrap_or(0);
-        self.spawn_monitor(Arc::clone(&resident), Some(child), pid as u64);
+        self.spawn_monitor(Arc::clone(&resident), Some(child), u64::from(pid));
         Ok((resident, create_summary))
     }
 
@@ -715,6 +723,11 @@ pub(super) async fn probe_worker_socket(
     socket_path: &Path,
     connect_deadline: tokio::time::Instant,
 ) -> Result<()> {
+    // TS `WORKER_PROBE_BACKOFF_MIN_MS` doubles per retry up to
+    // `WORKER_PROBE_BACKOFF_MAX_MS`; unix keeps the port's flat pause
+    // (see `launch_budget`).
+    #[cfg(not(unix))]
+    let mut backoff_ms = WORKER_PROBE_BACKOFF_MIN_MS;
     loop {
         if socket::can_connect(socket_path, Duration::from_millis(WORKER_CONNECT_PROBE_MS)).await {
             return Ok(());
@@ -724,7 +737,15 @@ pub(super) async fn probe_worker_socket(
                 "session worker {worker_id} did not come up in time"
             ));
         }
+        #[cfg(unix)]
         tokio::time::sleep(Duration::from_millis(WORKER_CONNECT_BACKOFF_MS)).await;
+        #[cfg(not(unix))]
+        {
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            backoff_ms = backoff_ms
+                .saturating_mul(2)
+                .min(WORKER_PROBE_BACKOFF_MAX_MS);
+        }
     }
 }
 

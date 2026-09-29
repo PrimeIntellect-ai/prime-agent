@@ -344,7 +344,7 @@ impl Supervisor {
     /// The name-reservation input (TS `savedSessionNameReservationInput`):
     /// the live roster row for the path, else the saved session info;
     /// a miss answers `Session not found`.
-    async fn saved_session_name_scope(
+    fn saved_session_name_scope(
         &self,
         session_path: &str,
         name: String,
@@ -420,10 +420,7 @@ impl Supervisor {
                 false,
             );
         };
-        let scope = match self
-            .saved_session_name_scope(session_path, name.trim().to_string())
-            .await
-        {
+        let scope = match self.saved_session_name_scope(session_path, name.trim().to_string()) {
             Ok(scope) => scope,
             Err(error) => {
                 return (
@@ -828,7 +825,7 @@ impl Worker {
     /// `rename_saved_session` (TS daemon-mode case): a live target renames
     /// through the session's own rename path (answering with no data, the
     /// TS shape); an offline file gets the catalog append.
-    pub(crate) async fn handle_rename_saved_session(&self, payload: &Value) -> DaemonResponse {
+    pub(crate) fn handle_rename_saved_session(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("rename_saved_session") {
             return response;
         }
@@ -971,7 +968,7 @@ mod tombstone_usage_tests {
         let mut session = SessionFile::create("/work", None, 0);
         let path = dir.join(format!("{}.jsonl", session.session_id()));
         session.set_path(path.clone());
-        session.append_message(json!({"role": "user", "content": "hi", "timestamp": 1u64}));
+        session.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
         session.rewrite().unwrap();
         let usage_row = json!({
             "type": "message", "id": "m1",
@@ -1011,7 +1008,7 @@ mod tombstone_usage_tests {
         std::fs::write(&parent, "{}").unwrap();
         let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
         ledger
-            .append_spawn(crate::rlm_ledger::RlmSpawnInput {
+            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
                 child_id: "sub-1".to_string(),
                 parent: parent.to_string_lossy().to_string(),
                 child: child.to_string_lossy().to_string(),
@@ -1089,7 +1086,7 @@ mod tombstone_usage_tests {
         };
         let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
         ledger
-            .append_spawn(crate::rlm_ledger::RlmSpawnInput {
+            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
                 child_id: "sub-9".into(),
                 parent: parent.to_string_lossy().into(),
                 child: child.to_string_lossy().into(),
@@ -1140,7 +1137,7 @@ mod tombstone_usage_tests {
         std::os::unix::net::UnixListener::bind(&fifo).unwrap();
         let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
         ledger
-            .append_spawn(crate::rlm_ledger::RlmSpawnInput {
+            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
                 child_id: "sub-9".into(),
                 parent: parent.to_string_lossy().into(),
                 child: fifo.to_string_lossy().into(),

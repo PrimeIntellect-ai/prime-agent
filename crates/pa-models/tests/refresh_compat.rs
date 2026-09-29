@@ -76,10 +76,13 @@ async fn fresh_fetch_writes_a_validated_0600_snapshot_and_serves_it() {
     assert!(models.iter().any(|m| m.id == "model-a"));
 
     let path = dir.path().join("provider-model-catalog.v1.json");
-    let metadata = std::fs::metadata(&path).expect("snapshot written");
+    // The mode check is unix-only (Windows inherits ACLs instead, the
+    // documented TS-parity decision), so the metadata read lives inside
+    // the gate: the binding would be unused on the other side.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let metadata = std::fs::metadata(&path).expect("snapshot written");
         assert_eq!(
             metadata.permissions().mode() & 0o777,
             0o600,

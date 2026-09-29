@@ -179,7 +179,7 @@ impl Client {
         }
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -211,7 +211,7 @@ impl Client {
         }
     }
 
-    fn send(&mut self, id: &str, command: Value) -> Value {
+    fn send(&mut self, id: &str, command: &Value) -> Value {
         self.send_command(id, command);
         self.request(id)
     }
@@ -268,7 +268,7 @@ fn abort_during_a_kernel_cell_settles_the_daemon_turn_immediately() {
     let mut client = Client::connect(&socket);
     let created = client.send(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": cwd.to_string_lossy(),
@@ -285,14 +285,14 @@ fn abort_during_a_kernel_cell_settles_the_daemon_turn_immediately() {
         .to_string();
     let attached = client.send(
         "a1",
-        json!({ "type": "attach", "activeSessionId": session_id }),
+        &json!({ "type": "attach", "activeSessionId": session_id }),
     );
     assert_eq!(attached["success"], true, "attach failed: {attached}");
 
     // The turn starts; the cell's start marker lands once the kernel boots.
     let started = client.send(
         "p1",
-        json!({ "type": "prompt", "activeSessionId": session_id, "message": "run the wedge cell" }),
+        &json!({ "type": "prompt", "activeSessionId": session_id, "message": "run the wedge cell" }),
     );
     assert_eq!(started["success"], true, "prompt failed: {started}");
     let marker = cwd.join("wedge-started");
@@ -312,7 +312,7 @@ fn abort_during_a_kernel_cell_settles_the_daemon_turn_immediately() {
     // Abort strictly mid-cell.
     let aborted = client.send(
         "x1",
-        json!({ "type": "abort", "activeSessionId": session_id }),
+        &json!({ "type": "abort", "activeSessionId": session_id }),
     );
     assert_eq!(aborted["success"], true, "abort failed: {aborted}");
 

@@ -46,6 +46,7 @@ pub enum RlmLedgerDeleteReason {
 
 impl RlmLedgerDeleteReason {
     /// The wire names (`user`, `parent-teardown`, `revoked`, `gc`).
+    #[must_use]
     pub fn from_wire(value: &str) -> Option<Self> {
         match value {
             "user" => Some(Self::User),
@@ -174,7 +175,7 @@ fn parse_ledger_line(line: &str, index: usize) -> Result<Option<LedgerRecord>> {
             let Some(depth) = record.get("depth").and_then(Value::as_u64) else {
                 bail!("malformed RLM ledger line {line_no}: invalid spawn record");
             };
-            if depth < 1 || depth > u32::MAX as u64 {
+            if depth < 1 || depth > u64::from(u32::MAX) {
                 bail!("malformed RLM ledger line {line_no}: invalid spawn record");
             }
             Ok(Some(LedgerRecord::Spawn {
@@ -395,6 +396,7 @@ fn canonicalize_dir(dir: &Path) -> PathBuf {
 
 /// Ledger path for one sessions dir (TS `rlmLedgerPath`): a 16-hex sha256 of
 /// the canonical sessions dir under `<agent-dir>/rlm-ledger/`.
+#[must_use]
 pub fn rlm_ledger_path(agent_dir: &Path, sessions_dir: &Path) -> PathBuf {
     let canonical = canonicalize_dir(sessions_dir);
     let hash = crate::paths::hash_key(&canonical.to_string_lossy(), 16);
@@ -440,7 +442,7 @@ impl RlmSpawnLedger {
     /// live edge already claims the child session path, when the ledger
     /// replay fails (an oversized or malformed ledger), or when the
     /// record cannot be appended.
-    pub fn append_spawn(&self, input: RlmSpawnInput) -> Result<()> {
+    pub fn append_spawn(&self, input: &RlmSpawnInput) -> Result<()> {
         if input.child_id.is_empty()
             || input.parent.is_empty()
             || input.child.is_empty()
@@ -469,7 +471,7 @@ impl RlmSpawnLedger {
                 );
             }
         }
-        self.append_record(json!({
+        self.append_record(&json!({
             "v": 1,
             "op": "spawn",
             "at": now_iso(),
@@ -489,7 +491,7 @@ impl RlmSpawnLedger {
     /// ledger directory, open, serialization, write, or sync fails).
     pub fn append_rename(&self, child_id: &str, child: &str, name: &str) -> Result<()> {
         let child_path = canonical_session_path(Path::new(child));
-        self.append_record(json!({
+        self.append_record(&json!({
             "v": 1,
             "op": "rename",
             "at": now_iso(),
@@ -511,7 +513,7 @@ impl RlmSpawnLedger {
         let state = self.replay_cached()?;
         for edge in &state.edges {
             if edge.deleted.is_none() && canonical_session_path(Path::new(&edge.child)) == target {
-                self.append_record(json!({
+                self.append_record(&json!({
                     "v": 1,
                     "op": "rename",
                     "at": now_iso(),
@@ -538,7 +540,7 @@ impl RlmSpawnLedger {
         reason: RlmLedgerDeleteReason,
     ) -> Result<()> {
         let child_path = canonical_session_path(Path::new(child));
-        self.append_record(json!({
+        self.append_record(&json!({
             "v": 1,
             "op": "delete",
             "at": now_iso(),
@@ -584,7 +586,7 @@ impl RlmSpawnLedger {
         }
         let usage = serde_json::to_value(usage)
             .with_context(|| "serialize the deleted child usage snapshot")?;
-        self.append_record(json!({
+        self.append_record(&json!({
             "v": 1,
             "op": "delete",
             "at": now_iso(),
@@ -1011,7 +1013,7 @@ impl RlmSpawnLedger {
 
     /// One durable append; the first record in a fresh file is the meta
     /// header (the same line `seed` publishes).
-    fn append_record(&self, record: Value) -> Result<()> {
+    fn append_record(&self, record: &Value) -> Result<()> {
         self.seed_once()?;
         if let Some(parent) = self.path.parent() {
             crate::paths::ensure_dir(parent)?;
@@ -1253,6 +1255,7 @@ pub struct RlmSubagentDisplayEntry {
 
 /// Read one child's display entry; `None` when absent, unreadable, or not
 /// describing the requested child (a stale file from a re-used session dir).
+#[must_use]
 pub fn read_rlm_subagent_display(child_session_dir: &Path) -> Option<RlmSubagentDisplayEntry> {
     let content = fs::read_to_string(child_session_dir.join("rlm-subagent.json")).ok()?;
     let entry: RlmSubagentDisplayEntry = serde_json::from_str(&content).ok()?;
@@ -1463,7 +1466,7 @@ mod tests {
         fs::write(&parent, "{\"type\":\"session\",\"id\":\"p\"}").unwrap();
         fs::write(&child, "{\"type\":\"session\",\"id\":\"c\"}").unwrap();
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "sub-1".into(),
                 parent: parent.to_string_lossy().into(),
                 child: child.to_string_lossy().into(),
@@ -1504,7 +1507,7 @@ mod tests {
         fs::write(&child, "{}").unwrap();
         let child_path = child.to_string_lossy().into_owned();
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "sub-1".into(),
                 parent: parent.to_string_lossy().into_owned(),
                 child: child_path.clone(),
@@ -1531,7 +1534,7 @@ mod tests {
         fs::write(&other_child, "{}").unwrap();
         let other_path = other_child.to_string_lossy().into_owned();
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "sub-1".into(),
                 parent: parent.to_string_lossy().into_owned(),
                 child: other_path,
@@ -1563,7 +1566,7 @@ mod tests {
         fs::write(&parent, "{}").unwrap();
         fs::write(&child, "{}").unwrap();
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "sub-1".into(),
                 parent: parent.to_string_lossy().into(),
                 child: child.to_string_lossy().into(),
@@ -1603,7 +1606,7 @@ mod tests {
         fs::write(&live_parent, "{}").unwrap();
         fs::write(&live_child, "{}").unwrap();
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "sub-1".into(),
                 parent: recorded_parent.into(),
                 child: recorded_child.into(),
@@ -1651,7 +1654,7 @@ mod tests {
         fs::write(&parent, "{}").unwrap();
         fs::write(&child, "{}").unwrap();
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "sub-1".into(),
                 parent: parent.to_string_lossy().into(),
                 child: child.to_string_lossy().into(),
@@ -1659,7 +1662,7 @@ mod tests {
                 name: "w".into(),
             })
             .unwrap();
-        let duplicate = ledger.append_spawn(RlmSpawnInput {
+        let duplicate = ledger.append_spawn(&RlmSpawnInput {
             child_id: "sub-2".into(),
             parent: parent.to_string_lossy().into(),
             child: child.to_string_lossy().into(),
@@ -1667,7 +1670,7 @@ mod tests {
             name: "w".into(),
         });
         assert!(duplicate.is_err());
-        let depth_zero = ledger.append_spawn(RlmSpawnInput {
+        let depth_zero = ledger.append_spawn(&RlmSpawnInput {
             child_id: "sub-3".into(),
             parent: parent.to_string_lossy().into(),
             child: child.to_string_lossy().into(),
@@ -1850,7 +1853,7 @@ mod tests {
         fs::write(&parent, "{}").unwrap();
         fs::write(&child, "{}").unwrap();
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "sub-1".into(),
                 parent: parent.to_string_lossy().into(),
                 child: child.to_string_lossy().into(),
@@ -1924,7 +1927,7 @@ mod tests {
         fs::write(&parent, "{}").unwrap();
         fs::write(&child, "{}").unwrap();
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "neg".into(),
                 parent: parent.to_string_lossy().into(),
                 child: child.to_string_lossy().into(),
@@ -1974,7 +1977,7 @@ mod tests {
         fs::write(&child, "{}").unwrap();
         for child_id in ["sub-1", "sub-2"] {
             ledger
-                .append_spawn(RlmSpawnInput {
+                .append_spawn(&RlmSpawnInput {
                     child_id: child_id.into(),
                     parent: parent.to_string_lossy().into(),
                     child: child.to_string_lossy().into(),
@@ -2032,7 +2035,7 @@ mod tests {
         }
         let spawn = |child_id: &str, parent: &Path, child: &Path, depth: u32| {
             ledger
-                .append_spawn(RlmSpawnInput {
+                .append_spawn(&RlmSpawnInput {
                     child_id: child_id.into(),
                     parent: parent.to_string_lossy().into(),
                     child: child.to_string_lossy().into(),
@@ -2129,7 +2132,7 @@ mod tests {
         fs::write(&parent, "{}").unwrap();
         fs::write(&child, assistant_usage_row("m1", 0.25)).unwrap();
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "sub-1".into(),
                 parent: parent.to_string_lossy().into(),
                 child: child.to_string_lossy().into(),
@@ -2254,7 +2257,7 @@ mod tests {
         fs::write(&parent, "{}").unwrap();
         fs::write(&child, "{}").unwrap();
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "old".into(),
                 parent: parent.to_string_lossy().into(),
                 child: child.to_string_lossy().into(),
@@ -2272,7 +2275,7 @@ mod tests {
             .unwrap();
         // A fresh child spawns at the same path: the path is live again.
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "new".into(),
                 parent: parent.to_string_lossy().into(),
                 child: child.to_string_lossy().into(),

@@ -190,6 +190,9 @@ pub(crate) struct SessionUi {
     /// seeded from the attach state and kept live by `service_tier_changed`
     /// events; the `/fast` toggle reads it.
     service_tier: Option<String>,
+    /// The current model's provider (TS `getCurrentModel()` keeps the full
+    /// model): the eligibility lookups over the TUI-side catalog disambiguate
+    /// same-id entries across providers with it.
     /// The client-process settings seam (`/settings`, `/fullscreen`);
     /// the composition root supplies it.
     client_settings: Option<std::sync::Arc<dyn crate::client_settings::ClientSettings>>,
@@ -496,6 +499,13 @@ pub(crate) struct SessionUi {
     /// by the next transcript rebuild — a same-session resync runs the
     /// `renderResyncedSession` bashFinished edge off it.
     resync_bash: Option<ResyncBash>,
+    /// The LAST HUMAN PROMPT's wall-clock time (unix ms), from the
+    /// attach snapshot's newest user message: the rebuilt loader
+    /// anchors its elapsed clock here (the operator's 2026-09-28
+    /// rule — the waiting/executing timer never resets on a view
+    /// transition; it counts since the prompt that started the live
+    /// turn). `None` keeps the re-attach-instant anchor.
+    loader_anchor_ms: Option<u64>,
     /// An in-flight side-conversation bash run (TS `sideQuestionBash`):
     /// its pane-mounted identity plus whether the run seeds follow-up
     /// side questions (the `!`, not the `!!`, variant).
@@ -701,19 +711,154 @@ impl SessionUi {
             })?
     }
 
+    /// Recompute the model-eligibility autocomplete state (TS
+    /// `getAvailableCommands` drops `/fast` when the current model is not
+    /// fast-mode-eligible; TS `getArgumentCompletions` for `/tier` lists
+    /// the tiers the current model supports with the current one marked):
+    /// call after every point the model id or the session tier can move.
+    fn update_model_eligibility_filters(&self, view: &mut AgentView) {
+        let eligible = self
+            .current_model_entry(view)
+            .is_some_and(pa_types::ai::supports_fast_mode);
+        let mut hidden = std::collections::HashSet::new();
+        if !eligible {
+            hidden.insert("fast".to_string());
+        }
+        view.editor.set_autocomplete_hidden_commands(hidden);
+        view.editor
+            .set_autocomplete_argument_completions("tier", self.tier_completion_items(view));
+    }
+
+    /// TS `getAvailableServiceTiers` (the `/tier` choices; `scale` is not
+    /// a user-facing choice): `default` plus the tiers the current model
+    /// supports, in the TS order.
+    fn available_service_tiers(&self, view: &AgentView) -> Vec<&'static str> {
+        let Some(model) = self.current_model_entry(view) else {
+            return vec!["default"];
+        };
+        let mut tiers = vec!["default"];
+        for tier in [
+            pa_types::ai::ServiceTier::Flex,
+            pa_types::ai::ServiceTier::Priority,
+            pa_types::ai::ServiceTier::Auto,
+        ] {
+            if pa_types::ai::supports_service_tier(model, tier) {
+                tiers.push(match tier {
+                    pa_types::ai::ServiceTier::Flex => "flex",
+                    pa_types::ai::ServiceTier::Priority => "priority",
+                    pa_types::ai::ServiceTier::Auto => "auto",
+                    _ => unreachable!("the loop names every choice"),
+                });
+            }
+        }
+        tiers
+    }
+
+    /// TS `getServiceTierCompletions`: the `/tier` argument items — the
+    /// available tiers with their descriptions, the current one marked.
+    fn tier_completion_items(&self, view: &AgentView) -> Vec<crate::autocomplete::CompletionItem> {
+        let current = self.service_tier.as_deref().unwrap_or("default");
+        self.available_service_tiers(view)
+            .into_iter()
+            .map(|tier| {
+                // The one descriptions owner: the settings row's submenu
+                // exports the TS `SERVICE_TIER_OPTIONS` table.
+                let description = crate::settings_menu::service_tier_description(tier);
+                let description = if tier == current {
+                    format!("{description} (current)")
+                } else {
+                    description.to_string()
+                };
+                crate::autocomplete::CompletionItem {
+                    value: tier.to_string(),
+                    label: tier.to_string(),
+                    description: Some(description),
+                    argument_hint: None,
+                    source_tag: None,
+                }
+            })
+            .collect()
+    }
+
+    /// `/tier [tier]` (TS `handleTierCommand`): without an argument report
+    /// the current tier and the available ones; a tier the model does not
+    /// support errors with the available list; a supported one applies
+    /// through the same daemon tier switch as `/fast` (TS
+    /// `enqueueServiceTierChange`) and reports the applied tier.
+    async fn handle_tier_command(&mut self, view: &mut AgentView, args: &str) {
+        let tiers = self.available_service_tiers(view);
+        let requested = args.trim().to_lowercase();
+        if requested.is_empty() {
+            let current = self.service_tier.as_deref().unwrap_or("default");
+            self.note(
+                &format!("Service tier: {current} (available: {})", tiers.join(", ")),
+                view,
+            );
+            return;
+        }
+        if !tiers.contains(&requested.as_str()) {
+            self.error_row(
+                &format!(
+                    "Service tier '{requested}' is not available for the current model. Available: {}",
+                    tiers.join(", ")
+                ),
+                view,
+            );
+            return;
+        }
+        let Ok(tier) =
+            serde_json::from_value::<pa_types::ai::ServiceTier>(Value::String(requested.clone()))
+        else {
+            self.error_row(&format!("Unknown service tier: {requested}"), view);
+            return;
+        };
+        let switched = self
+            .bounded_request(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                DaemonCommand::SetServiceTier {
+                    id: None,
+                    active_session_id: self.active_session_id.clone(),
+                    service_tier: Some(tier),
+                    rest: Map::default(),
+                },
+            )
+            .await;
+        if let Err(error) = switched {
+            self.error_row(&format!("{error:#}"), view);
+            return;
+        }
+        // The status row reports what the session actually applied (TS
+        // `formatStatus(state.serviceTier)`); a state read that fails or
+        // omits the tier shows no success row — the stale local tier must
+        // not report an apply that did not confirm.
+        let Some(state) = self.connection_state(view).await else {
+            return;
+        };
+        let Some(applied) = state
+            .get("serviceTier")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            return;
+        };
+        self.service_tier = Some(applied.clone());
+        view.chrome.service_tier = Some(applied.clone());
+        self.update_model_eligibility_filters(view);
+        self.note(&format!("Service tier: {applied}"), view);
+    }
+
     /// Send a prompt to the session and start the working loader. Session
     /// commands travel the same path — the session engine parses and
     /// executes them instead of admitting a model turn. `behavior` is the
     /// TS streaming behavior: Enter parks mid-turn input on the steering
     /// lane, the follow-up key on the follow-up lane; an idle session runs
     /// either immediately. The images whose markers are present in
-    /// `text`, or `None` when there are none (TS `collectImagesFor`).
-    /// Resolved against the current model: when it has no image input the
-    /// attachments are dropped here, matching the paste-time hint.
-    fn collect_images_for(&self, text: &str, view: &AgentView) -> Option<serde_json::Value> {
-        if !self.model_supports_images(view) {
-            return None;
-        }
+    /// `text`, or `None` when there are none (TS `collectImagesFor`):
+    /// attachments always reach the session - a text-only session model is
+    /// either routed to `settings.imageModel` at dispatch or the turn
+    /// fails there with the actionable setup error, so nothing is
+    /// silently downgraded downstream.
+    fn collect_images_for(&self, text: &str, _view: &AgentView) -> Option<serde_json::Value> {
         let images: Vec<&LoadedImage> = collect_marked_images(&self.pasted_images, text)
             .into_iter()
             .map(|(_, image)| image)
@@ -759,5 +904,51 @@ impl SessionUi {
     /// The `tui exit` reason recorded at the point the loop stopped.
     pub(crate) fn exit_reason(&self) -> &'static str {
         self.exit_reason
+    }
+}
+
+#[cfg(test)]
+mod loader_anchor_tests {
+    use super::SessionUi;
+
+    /// The anchor clock (Macroscope 2026-09-28: a prompt's age must
+    /// not be capped — the old 24-hour cutoff reset REAL old prompts
+    /// to a zero loader): any past prompt anchors at its own instant,
+    /// however long ago; only a future timestamp falls back to the
+    /// re-attach anchor. A placeholder-era timestamp anchors at its
+    /// own wall time too — TS `restoreTurnStartFromMessages` trusts
+    /// the wire's timestamp the same way.
+    #[test]
+    fn prompts_anchor_at_their_wall_time_and_future_ones_fall_back() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_millis() as u64)
+            .unwrap_or_default();
+        // A prompt two seconds old: the anchor sits ~2s in the past.
+        let recent = SessionUi::loader_anchor_instant(now_ms - 2_000).expect("recent prompt");
+        let rewound = std::time::Instant::now().duration_since(recent).as_millis();
+        assert!(
+            (1_500..).contains(&rewound),
+            "the anchor rewinds to the prompt: {rewound}ms"
+        );
+        // A prompt older than the retired 24h cutoff anchors too.
+        let old = SessionUi::loader_anchor_instant(now_ms - 90_000_000).expect("25-hour prompt");
+        let rewound = std::time::Instant::now().duration_since(old).as_millis();
+        assert!(
+            (89_000_000..).contains(&rewound),
+            "a 25h-old prompt keeps its anchor: {rewound}ms"
+        );
+        // A future timestamp cannot anchor anything.
+        assert!(SessionUi::loader_anchor_instant(now_ms + 10_000).is_none());
+        // A placeholder-era timestamp anchors at its own wall time
+        // (the elapsed reads the wire's garbage, as in TS).
+        let placeholder = SessionUi::loader_anchor_instant(1).expect("placeholder anchors");
+        let rewound = std::time::Instant::now()
+            .duration_since(placeholder)
+            .as_millis();
+        assert!(
+            rewound > u128::from(now_ms - 10_000),
+            "the placeholder anchors at its wall time, not the re-attach instant: {rewound}ms"
+        );
     }
 }

@@ -99,7 +99,6 @@ use crate::protocol::{
 use crate::registration::RegistrationHandle;
 use crate::session_store::{session_file_name, SessionFile};
 
-use crate::setting_switches::{effective_service_tier, supports_fast_mode};
 use crate::types::{AgentConnectionState, SessionActionSnapshot};
 
 pub struct Worker {
@@ -312,6 +311,7 @@ impl Worker {
             parent_session_id: None,
             child_script: None,
             service_tier: None,
+            active_service_tier: None,
             steering_mode: "all".to_string(),
             follow_up_mode: "one-at-a-time".to_string(),
             forced_all_steering: false,
@@ -422,9 +422,9 @@ impl Worker {
                         Err(_) => std::sync::Arc::new(ScriptedEngine::default()),
                     }
                 }
-                Some(script) => std::sync::Arc::new(
-                    ScriptedEngine::from_value(script.clone()).unwrap_or_default(),
-                ),
+                Some(script) => {
+                    std::sync::Arc::new(ScriptedEngine::from_value(script).unwrap_or_default())
+                }
                 None => {
                     let cwd =
                         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -623,7 +623,7 @@ impl Worker {
                         &notice_recovery,
                         &notice_core,
                         &notice_notify,
-                        notice,
+                        &notice,
                         // Revalidated inside the admission's own lock
                         // section: the close paths mark the session
                         // BEFORE clearing the lanes, so a notice that
@@ -635,7 +635,7 @@ impl Worker {
                 let withdraw_core = Arc::clone(&core);
                 let withdraw_recovery = Arc::clone(&recovery);
                 let consumed: crate::engine::BashConsumedSink = Arc::new(move |notice| {
-                    withdraw_bash_completion_notice(&withdraw_recovery, &withdraw_core, notice);
+                    withdraw_bash_completion_notice(&withdraw_recovery, &withdraw_core, &notice);
                 });
                 concrete.set_bash_notice_sinks(completion, consumed);
             }
@@ -657,10 +657,7 @@ impl Worker {
                     roster_delta_sequence: std::sync::Arc::clone(&roster_delta_sequence),
                     roster_push_order: std::sync::Arc::clone(&roster_push_order),
                 });
-            crate::roster_activity::spawn_roster_activity_watch(
-                events.clone(),
-                roster_pushes.clone(),
-            );
+            crate::roster_activity::spawn_roster_activity_watch(&events, roster_pushes.clone());
             let runner = TurnRunner {
                 recovery: Arc::clone(&recovery),
                 core: Arc::clone(&core),
@@ -814,7 +811,7 @@ fn emit_refinement_row(
     core: &Arc<Mutex<SessionCore>>,
     events: &Arc<EventPump>,
     review_session_id: &str,
-    message: Value,
+    message: &Value,
 ) -> bool {
     {
         let mut core = core.lock().unwrap();
@@ -914,6 +911,23 @@ fn is_rlm_child_status_item(item: &QueuedItem) -> bool {
     crate::child_status_notices::is_reserved_child_status_custom_type(row)
 }
 
+/// One parked item's engine-minted internal-prompt provenance (the
+/// injected continuations TS's `visibleSessionActionProjection` filters
+/// out of the queue projection entirely): the turn policy marks the
+/// admission class and `queue_visible` the invisible shape — the goal
+/// continuations and budget-limit steers (`admit_goal_follow_up`, the
+/// post-compaction continuation) and the threshold-compaction
+/// autonomous continuation (`admit_autonomous_follow_up`) all park
+/// exactly this way, preview-less, so their raw message text is the
+/// only thing a string could read. The queue projection marks them by
+/// index instead (the `injectedPrompts` rider, the `rlmChildStatus`
+/// precedent): a user-typed prompt that merely looks like a
+/// continuation stays the human row it is. Child status notices never
+/// ride this rider — they carry their own.
+fn is_injected_prompt_item(item: &QueuedItem) -> bool {
+    item.policy == TurnPolicy::Injected && !item.queue_visible && !is_rlm_child_status_item(item)
+}
+
 #[cfg(test)]
 #[path = "worker_resume_settings_tests.rs"]
 mod worker_resume_settings_tests;
@@ -924,6 +938,8 @@ mod agent_message_tests;
 #[cfg(test)]
 mod prompt_image_tests;
 
+#[cfg(test)]
+mod compaction_admission_tests;
 #[cfg(test)]
 mod recovery_verdict_tests;
 #[cfg(test)]

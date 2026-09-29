@@ -283,7 +283,7 @@ impl AcpSession {
 
     /// Reset the overflow recovery state (the turn loop calls it at
     /// every settled non-error turn and every admitted prompt).
-    pub(super) async fn reset_overflow_recovery(&self) {
+    pub(super) fn reset_overflow_recovery(&self) {
         self.arms.reset();
     }
 
@@ -742,6 +742,7 @@ mod tests {
             create_session(SessionEngineConfig {
                 cron_store: None,
                 queued_steering_probe: None,
+                image_model_router: None,
                 steering_mode: None,
                 follow_up_mode: None,
                 telemetry: None,

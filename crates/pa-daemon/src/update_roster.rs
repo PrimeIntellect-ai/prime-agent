@@ -51,7 +51,7 @@ pub(crate) struct WorkerSnapshot {
 pub(crate) fn supervisor_identity(generation: String) -> UpdateSupervisorIdentity {
     let pid = std::process::id();
     UpdateSupervisorIdentity {
-        pid: pid as u64,
+        pid: u64::from(pid),
         process_start_id: crate::protocol::process_start_id(pid),
         generation,
     }
@@ -339,7 +339,7 @@ pub(crate) struct UpdateRosterInputs<'a> {
 /// snapshots, the RLM ledger, and the scheduled-jobs scan.
 pub(crate) fn build_update_roster(
     inputs: UpdateRosterInputs<'_>,
-    workers: Vec<WorkerSnapshot>,
+    workers: &[WorkerSnapshot],
 ) -> Result<UpdateRoster> {
     let UpdateRosterInputs {
         update_id,
@@ -369,7 +369,7 @@ pub(crate) fn build_update_roster(
         .collect();
     let mut sessions = Vec::new();
     let mut rows = Vec::new();
-    for snapshot in &workers {
+    for snapshot in workers {
         let row = session_row(snapshot, &child_parents)?;
         rows.push(worker_row(
             agent_dir,
@@ -511,7 +511,7 @@ mod tests {
         }
         let ledger = RlmSpawnLedger::new(agent_dir, &sessions_dir, |_| {});
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 parent: sessions_file(&sessions_dir, "p1"),
                 child: sessions_file(&sessions_dir, "c1"),
                 child_id: "child-c1".into(),
@@ -522,7 +522,7 @@ mod tests {
         (ledger, sessions_dir)
     }
 
-    fn write_scheduled_jobs(agent_dir: &Path, session_id: &str, jobs: Value) {
+    fn write_scheduled_jobs(agent_dir: &Path, session_id: &str, jobs: &Value) {
         let dir = agent_dir.join("session-artifacts").join(session_id);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("scheduled-jobs.json"), jobs.to_string()).unwrap();
@@ -560,7 +560,7 @@ mod tests {
         write_scheduled_jobs(
             agent_dir,
             "p1",
-            json!({"jobs": [
+            &json!({"jobs": [
                 {"id": "j1", "status": "active", "sessionId": "p1", "activeSessionId": "active-p1",
                  "sessionFile": "/tmp/sessions/p1.jsonl", "cwd": "/w", "prompt": "check",
                  "label": "watch", "deliveryMode": "follow_up",
@@ -588,7 +588,7 @@ mod tests {
                 created_at_ms: 1_000,
                 ledger: &ledger,
             },
-            workers,
+            &workers,
         )
         .unwrap();
 
@@ -681,7 +681,7 @@ mod tests {
                 created_at_ms: 1,
                 ledger: &ledger,
             },
-            vec![snapshot],
+            &[snapshot],
         )
         .unwrap_err();
         assert!(error.to_string().contains("no session id"));
