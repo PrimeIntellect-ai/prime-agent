@@ -227,7 +227,7 @@ mod tests {
                     accept_error(ErrorKind::ConnectionAborted, "aborted"),
                     accept_error(ErrorKind::ConnectionReset, "reset"),
                     accept_error(ErrorKind::Interrupted, "interrupted"),
-                    Ok(accepted_stream()),
+                    Ok(accepted_stream().await),
                 ]
                 .into(),
             ),
@@ -261,7 +261,7 @@ mod tests {
         for _ in 0..(2 * GIVE_UP_AFTER) {
             results.push_back(accept_error(ErrorKind::ConnectionAborted, "storm"));
         }
-        results.push_back(Ok(accepted_stream()));
+        results.push_back(Ok(accepted_stream().await));
         let scripted = ScriptedAccepts {
             results: Mutex::new(results),
             supervisor: Arc::clone(&supervisor),
@@ -297,7 +297,7 @@ mod tests {
             results: Mutex::new(
                 vec![
                     accept_error(ErrorKind::Other, "too many open files"),
-                    Ok(accepted_stream()),
+                    Ok(accepted_stream().await),
                 ]
                 .into(),
             ),
@@ -335,7 +335,7 @@ mod tests {
         for _ in 0..burst {
             results.push_back(accept_error(ErrorKind::Other, "transient"));
         }
-        results.push_back(Ok(accepted_stream()));
+        results.push_back(Ok(accepted_stream().await));
         for _ in 0..burst {
             results.push_back(accept_error(ErrorKind::Other, "transient"));
         }
