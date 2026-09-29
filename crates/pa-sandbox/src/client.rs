@@ -58,11 +58,12 @@ pub struct ClientOptions {
 /// [`PrimeSandboxClient::with_transport`].
 #[derive(Debug)]
 pub struct PrimeSandboxClient<T: SandboxTransport = ReqwestSandboxTransport> {
-    transport: T,
-    api_key: String,
-    base_url: String,
+    pub(crate) transport: T,
+    pub(crate) api_key: String,
+    pub(crate) base_url: String,
     team_id: Option<String>,
-    request_timeout: Duration,
+    pub(crate) request_timeout: Duration,
+    pub(crate) allow_insecure_localhost: bool,
 }
 
 impl PrimeSandboxClient<ReqwestSandboxTransport> {
@@ -109,6 +110,7 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
             base_url,
             team_id: options.team_id.filter(|team_id| !team_id.is_empty()),
             request_timeout,
+            allow_insecure_localhost: options.allow_insecure_localhost,
         })
     }
 
@@ -139,7 +141,10 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
                 .request_json(
                     Method::Post,
                     url.clone(),
-                    Some(body.to_string()),
+                    self.platform_headers(),
+                    Some(body.to_string().into_bytes()),
+                    self.request_timeout,
+                    self.platform_secrets(),
                     "Sandbox create",
                     parse_sandbox,
                 )
@@ -170,7 +175,10 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
         self.request_json(
             Method::Get,
             format!("{}/api/v1/sandbox/{sandbox_id}", self.base_url),
+            self.platform_headers(),
             None,
+            self.request_timeout,
+            self.platform_secrets(),
             "Sandbox fetch",
             parse_sandbox,
         )
@@ -190,9 +198,12 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
             .request_json(
                 Method::Delete,
                 format!("{}/api/v1/sandbox/{sandbox_id}", self.base_url),
+                self.platform_headers(),
                 None,
+                self.request_timeout,
+                self.platform_secrets(),
                 "Sandbox delete",
-                require_delete_response,
+                |value| require_delete_response(&value),
             )
             .await;
         match outcome {
@@ -267,7 +278,7 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
         }
     }
 
-    fn platform_headers(&self) -> Vec<(String, String)> {
+    pub(crate) fn platform_headers(&self) -> Vec<(String, String)> {
         vec![
             (
                 "Authorization".to_string(),
@@ -277,18 +288,24 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
         ]
     }
 
-    fn platform_secrets(&self) -> Vec<&str> {
+    pub(crate) fn platform_secrets(&self) -> Vec<&str> {
         vec![self.api_key.as_str()]
     }
 
     /// The shared JSON request pipeline: typed transport errors, status
     /// mapping with a bounded redacted `details` preview, and strict
     /// response parsing.
-    async fn request_json<R, Parse>(
+    /// The TS module passes one options object; the argument count is the
+    /// port's own seam, not over-decomposition material.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn request_json<R, Parse>(
         &self,
         method: Method,
         url: String,
-        body: Option<String>,
+        headers: Vec<(String, String)>,
+        body: Option<Vec<u8>>,
+        timeout: Duration,
+        secrets: Vec<&str>,
         context: &str,
         parse: Parse,
     ) -> Result<R, SandboxError>
@@ -297,10 +314,11 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
     {
         let request = TransportRequest {
             method,
-            headers: self.platform_headers(),
+            headers,
             url: url.clone(),
             body,
-            timeout: self.request_timeout,
+            max_response_bytes: None,
+            timeout: Some(timeout),
         };
         // Transport errors already carry the method and url.
         let response = self.transport.execute(request).await?;
@@ -310,7 +328,10 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
                 &url,
                 response.status,
                 &response.body,
-                &self.platform_secrets(),
+                // The redaction set is per call: platform calls redact the
+                // API key, gateway calls additionally redact the sandbox
+                // bearer token (TS passes [apiKey, token] for both).
+                &secrets,
                 context,
             ));
         }
@@ -327,7 +348,7 @@ impl<T: SandboxTransport> PrimeSandboxClient<T> {
 
 /// The delete response contract: any JSON object (TS checks
 /// `isRecord(value)`).
-fn require_delete_response(value: serde_json::Value) -> Result<(), SandboxError> {
+fn require_delete_response(value: &serde_json::Value) -> Result<(), SandboxError> {
     if value.is_object() {
         Ok(())
     } else {
@@ -344,7 +365,7 @@ fn require_delete_response(value: serde_json::Value) -> Result<(), SandboxError>
 /// with `{ "error": "sandbox_not_found" }` a `sandbox_not_found`; anything
 /// else is a generic `http` error. `details` carries a bounded,
 /// secret-scrubbed preview of the response body.
-fn http_error(
+pub(crate) fn http_error(
     method: Method,
     url: &str,
     status: u16,

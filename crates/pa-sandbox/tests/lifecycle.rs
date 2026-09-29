@@ -4,12 +4,23 @@
 //! tolerance, wait semantics, and retry discipline. The transport trait
 //! is the injection seam; the real reqwest transport has its own suite
 //! (`tests/transport_loopback.rs`).
+//
+// Test-only allows: scripted replies return without awaiting (the trait
+// seam), and resource fields compare exactly (the repo's
+// `cfg_attr(test, ...)` float posture).
+#![allow(
+    clippy::unused_async_trait_impl,
+    clippy::float_cmp,
+    clippy::needless_pass_by_value
+)]
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use pa_sandbox::transport::{SandboxTransport, TransportRequest, TransportResponse};
+use pa_sandbox::transport::{
+    ResponseChunks, SandboxTransport, StreamedResponse, TransportRequest, TransportResponse,
+};
 use pa_sandbox::{
     ClientOptions, PrimeSandboxClient, Sandbox, SandboxErrorCode, SandboxStatus, VmCreateRequest,
     WaitOptions,
@@ -45,7 +56,21 @@ impl ScriptedTransport {
     }
 }
 
+// The scripted transport satisfies the RPITIT seam without awaiting.
+#[allow(clippy::unused_async_trait_impl)]
 impl SandboxTransport for &ScriptedTransport {
+    async fn execute_streaming(
+        &self,
+        request: TransportRequest,
+    ) -> Result<StreamedResponse, pa_sandbox::SandboxError> {
+        let response = SandboxTransport::execute(self, request).await?;
+        Ok(StreamedResponse {
+            status: response.status,
+            headers: Vec::new(),
+            body: ResponseChunks::Queued(std::iter::once(response.body).collect()),
+        })
+    }
+
     async fn execute(
         &self,
         request: TransportRequest,
@@ -189,7 +214,7 @@ async fn create_sends_the_vm_wire_contract() {
         ]
     );
     let mut body: serde_json::Value =
-        serde_json::from_str(request.body.as_deref().unwrap()).unwrap();
+        serde_json::from_slice(request.body.as_deref().unwrap()).unwrap();
     assert_eq!(body["idempotency_key"].as_str().unwrap().len(), 32);
     body["idempotency_key"] = json!("the-key");
     // The TS field order, snake_case, `vm` forced true, key present.
@@ -216,7 +241,7 @@ async fn create_reuses_the_idempotency_key_across_transient_retries() {
         .iter()
         .map(|request| {
             let body: serde_json::Value =
-                serde_json::from_str(request.body.as_deref().unwrap()).unwrap();
+                serde_json::from_slice(request.body.as_deref().unwrap()).unwrap();
             body["idempotency_key"].as_str().unwrap().to_string()
         })
         .collect();
@@ -236,7 +261,7 @@ async fn create_honors_a_caller_idempotency_key() {
     };
     client.create_vm_sandbox(request).await.unwrap();
     let body: serde_json::Value =
-        serde_json::from_str(transport.recorded()[0].body.as_deref().unwrap()).unwrap();
+        serde_json::from_slice(transport.recorded()[0].body.as_deref().unwrap()).unwrap();
     assert_eq!(body["idempotency_key"], "caller-key-1");
 }
 
@@ -295,7 +320,7 @@ async fn create_appends_the_team_id_when_set() {
     let request = &transport.recorded()[0];
     // A trailing /api/v1 in the base URL normalizes away.
     assert_eq!(request.url, "https://api.test/api/v1/sandbox");
-    let body: serde_json::Value = serde_json::from_str(request.body.as_deref().unwrap()).unwrap();
+    let body: serde_json::Value = serde_json::from_slice(request.body.as_deref().unwrap()).unwrap();
     assert_eq!(body["team_id"], "team-77");
 }
 

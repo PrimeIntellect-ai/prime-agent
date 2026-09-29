@@ -3,7 +3,7 @@ name = "pa-sandbox"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Prime Sandboxes lifecycle client: idempotent create, wait, delete."
+description = "Prime Sandboxes client: lifecycle, authenticated gateway data path, and the ConnectRPC command_session stream."
 
 [dependencies]
 serde = { workspace = true }
