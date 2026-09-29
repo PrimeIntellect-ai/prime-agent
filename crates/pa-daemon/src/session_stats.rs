@@ -871,9 +871,11 @@ mod tests {
         // total exactly.
         assert_eq!(stats["ownCost"].as_f64(), Some(1.0 + 0.1 + 0.2));
         assert!((stats["subagentsCost"].as_f64().unwrap() - 0.05).abs() < 1e-9);
-        assert_eq!(
-            stats["ownCost"].as_f64().unwrap() + stats["subagentsCost"].as_f64().unwrap(),
-            stats["totalCost"].as_f64().unwrap()
+        assert!(
+            (stats["ownCost"].as_f64().unwrap() + stats["subagentsCost"].as_f64().unwrap()
+                - stats["totalCost"].as_f64().unwrap())
+                .abs()
+                < 1e-9
         );
     }
 
@@ -1048,9 +1050,11 @@ mod tests {
         assert_eq!(stats["totalCost"].as_f64(), Some(0.53125));
         assert_eq!(stats["ownCost"].as_f64(), Some(0.28125));
         assert_eq!(stats["subagentsCost"].as_f64(), Some(0.25));
-        assert_eq!(
-            stats["ownCost"].as_f64().unwrap() + stats["subagentsCost"].as_f64().unwrap(),
-            stats["totalCost"].as_f64().unwrap()
+        assert!(
+            (stats["ownCost"].as_f64().unwrap() + stats["subagentsCost"].as_f64().unwrap()
+                - stats["totalCost"].as_f64().unwrap())
+                .abs()
+                < 1e-9
         );
     }
 

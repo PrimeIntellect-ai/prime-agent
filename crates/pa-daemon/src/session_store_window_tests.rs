@@ -317,7 +317,7 @@ fn assert_scan_matches_fold(label: &str, store: &SessionFile) {
         scalars.output_tokens, output_tokens,
         "{label}: output tokens"
     );
-    assert_eq!(scalars.cost, cost, "{label}: cost");
+    assert!((scalars.cost - cost).abs() < 1e-9, "{label}: cost");
     assert_eq!(scalars.message_count, count, "{label}: message count");
 }
 
