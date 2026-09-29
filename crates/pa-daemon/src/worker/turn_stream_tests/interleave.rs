@@ -78,10 +78,11 @@
 //! family's predicate-set test. The timer leg (the park loop's sleep to
 //! the threshold) is wall-clock-bound by design and stays pinned at rest
 //! by the park family's window battery plus the product's real-time
-//! coverage. The base's UserBash open corners (the single-slot overlap,
+//! coverage. The base's `UserBash` open corners (the single-slot overlap,
 //! the forked-grandchild survival) are TS-anchored follow-ups on the
 //! base's bash surface — out of this lane's scope (the round-9 rebuttal
 //! carries them).
+use super::park::passivation_settings;
 use super::*;
 
 // ---------------------------------------------------------------------------
@@ -116,7 +117,7 @@ impl StopAskProbe {
                 };
                 let asks = Arc::clone(&sink);
                 tokio::spawn(async move {
-                    use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+                    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
                     let (read_half, mut write_half) = stream.into_split();
                     // The link's handshake: the probe is the supervisor
                     // side, so the hello goes first (the link only checks
@@ -161,8 +162,7 @@ impl StopAskProbe {
                         let response = crate::protocol::response_line(
                             &crate::protocol::response_success(Some(&id), &kind, None),
                         );
-                        let mut answer =
-                            serde_json::to_string(&response).unwrap_or_default();
+                        let mut answer = serde_json::to_string(&response).unwrap_or_default();
                         answer.push('\n');
                         if write_half.write_all(answer.as_bytes()).await.is_err() {
                             return;
@@ -352,12 +352,15 @@ struct FiredSeam {
 
 /// Release the held fire and settle on its own completion: the post-await
 /// revalidation and the ask run to their end before any assertion reads
-/// the transcript — the join barrier, never a timing window.
-async fn release_the_gate_and_settle(gate: &GateHoldEngine, seam: &FiredSeam) {
+/// the transcript — the join barrier, never a timing window. The settle
+/// TAKES the fire handle (the caller's last use of the seam's settle
+/// arm; the survivors stay readable through the seam's own handles).
+async fn release_the_gate_and_settle(
+    gate: &GateHoldEngine,
+    fired: tokio::task::JoinHandle<()>,
+) {
     gate.release.notify_waiters();
-    seam.fired
-        .await
-        .expect("the fire settles at its own completion");
+    fired.await.expect("the fire settles at its own completion");
 }
 
 // ---------------------------------------------------------------------------
@@ -377,7 +380,7 @@ async fn the_unraced_fire_passes_the_gate_and_asks_the_supervisor_to_stop() {
     let gate = Arc::new(GateHoldEngine::new());
     let (runner, dir) = interleave_runner(&gate, &probe);
     let seam = drive_the_fire_to_the_gate(runner, dir, &gate).await;
-    release_the_gate_and_settle(&gate, &seam).await;
+    release_the_gate_and_settle(&gate, seam.fired).await;
     let asks = probe.asks();
     assert_eq!(
         asks.len(),
@@ -392,10 +395,7 @@ async fn the_unraced_fire_passes_the_gate_and_asks_the_supervisor_to_stop() {
         asks[0].get("workerToken").and_then(Value::as_str),
         Some("interleave-child-token")
     );
-    assert_eq!(
-        asks[0].get("idleMinutes").and_then(Value::as_u64),
-        Some(1)
-    );
+    assert_eq!(asks[0].get("idleMinutes").and_then(Value::as_u64), Some(1));
 }
 
 /// A client attaching while the fire holds at the engine gate (the round-7
@@ -412,7 +412,7 @@ async fn a_client_attaching_at_the_gate_cancels_the_stop() {
         .unwrap()
         .attached_client_ids
         .push("late-client".to_string());
-    release_the_gate_and_settle(&gate, &seam).await;
+    release_the_gate_and_settle(&gate, seam.fired).await;
     assert!(
         probe.asks().is_empty(),
         "a client attaching at the gate must cancel the stop: {:?}",
@@ -459,7 +459,7 @@ async fn lane_work_parking_at_the_gate_cancels_the_stop() {
         core.pending_next_turn
             .push(json!({ "type": "user", "text": "the replayed prefix row" }));
     }
-    release_the_gate_and_settle(&gate, &seam).await;
+    release_the_gate_and_settle(&gate, seam.fired).await;
     assert!(
         probe.asks().is_empty(),
         "lane work parking at the gate must cancel the stop: {:?}",
@@ -488,7 +488,7 @@ async fn a_manual_compaction_starting_at_the_gate_cancels_the_stop() {
     let (runner, dir) = interleave_runner(&gate, &probe);
     let seam = drive_the_fire_to_the_gate(runner, dir, &gate).await;
     seam.core.lock().unwrap().compacting = true;
-    release_the_gate_and_settle(&gate, &seam).await;
+    release_the_gate_and_settle(&gate, seam.fired).await;
     assert!(
         probe.asks().is_empty(),
         "a compaction starting at the gate must cancel the stop: {:?}",
@@ -508,7 +508,7 @@ async fn an_input_suspension_engaging_at_the_gate_cancels_the_stop() {
     let (runner, dir) = interleave_runner(&gate, &probe);
     let seam = drive_the_fire_to_the_gate(runner, dir, &gate).await;
     seam.core.lock().unwrap().queued_input_suspended = true;
-    release_the_gate_and_settle(&gate, &seam).await;
+    release_the_gate_and_settle(&gate, seam.fired).await;
     assert!(
         probe.asks().is_empty(),
         "a suspension engaging at the gate must cancel the stop: {:?}",
@@ -533,7 +533,7 @@ async fn a_user_bash_admitted_at_the_gate_cancels_the_stop() {
         seam.user_bash.is_running(),
         "the probe: the bash hold is live at the seam"
     );
-    release_the_gate_and_settle(&gate, &seam).await;
+    release_the_gate_and_settle(&gate, seam.fired).await;
     assert!(
         probe.asks().is_empty(),
         "a bash admitted at the gate must cancel the stop: {:?}",
@@ -554,7 +554,7 @@ async fn a_shutdown_starting_at_the_gate_cancels_the_stop() {
     let (runner, dir) = interleave_runner(&gate, &probe);
     let seam = drive_the_fire_to_the_gate(runner, dir, &gate).await;
     seam.core.lock().unwrap().shutdown_requested = true;
-    release_the_gate_and_settle(&gate, &seam).await;
+    release_the_gate_and_settle(&gate, seam.fired).await;
     assert!(
         probe.asks().is_empty(),
         "a shutdown starting at the gate must cancel the stop ask: {:?}",
@@ -594,7 +594,7 @@ async fn the_departure_release_re_arms_the_window_and_the_stop_leaves() {
     );
     // THE FIRE from the departed state: the gate, the fence, and the ask.
     let seam = drive_the_fire_to_the_gate(runner, dir, &gate).await;
-    release_the_gate_and_settle(&gate, &seam).await;
+    release_the_gate_and_settle(&gate, seam.fired).await;
     let asks = probe.asks();
     assert_eq!(
         asks.len(),
@@ -654,13 +654,11 @@ async fn wait_for_event(
 ) -> Value {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
-        let frame = tokio::time::timeout_at(
-            tokio::time::Instant::from_std(deadline),
-            events.recv(),
-        )
-        .await
-        .expect("the event never arrived")
-        .expect("the event stream stays live");
+        let frame =
+            tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), events.recv())
+                .await
+                .expect("the event never arrived")
+                .expect("the event stream stays live");
         if frame.outbound_type != "session_event" {
             continue;
         }
@@ -821,10 +819,7 @@ async fn the_close_beats_the_late_attach_registration() {
 async fn a_routed_attach_without_a_token_keeps_the_core_retain() {
     let (worker, _dir) = interleave_worker().await;
     let response = worker.handle_attach(&json!({ "clientId": "supervisor-routed" }));
-    assert!(
-        response.success,
-        "the routed attach answers: {response:?}"
-    );
+    assert!(response.success, "the routed attach answers: {response:?}");
     assert!(
         worker
             .core
@@ -847,10 +842,7 @@ async fn the_registration_beats_the_close_and_the_release_frees_the_hold() {
         "clientId": "client-1",
         "connectionToken": "conn-1",
     }));
-    assert!(
-        response.success,
-        "the live attach answers: {response:?}"
-    );
+    assert!(response.success, "the live attach answers: {response:?}");
     assert!(
         worker
             .core
