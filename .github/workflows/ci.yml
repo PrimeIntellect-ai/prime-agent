@@ -1,10 +1,8 @@
 # CI gates for the prime-agent Rust port: the tip-compiles-tests guarantee
 # plus PR gating, in one workflow (the shape of the TS product's ci.yml).
-#
-# Promoted from the former staged copy at ci/workflows/ (2026-09-23); the
-# staged-copy era ended 2026-09-28 when the operator authorized the
-# workflow-scope push: the staged windows-cross/windows/deny jobs are folded
-# in below and ci/workflows/ is gone — `.github/workflows/` is the one home.
+# `.github/workflows/` is the one home for workflow files; the
+# windows-cross/windows/deny jobs run live in this file alongside the unix
+# gates.
 # Two triggers, one
 # gate set mirroring `make check` exactly (fmt --all --check, clippy --workspace
 # --all-targets -- -D warnings, cargo test --workspace) on the pinned
@@ -219,9 +217,7 @@ jobs:
       - name: Audit the shards and merge their failure reports
         run: python3 scripts/ci_test_shard_summary.py --total 4 --dir manifests
 
-  # The Windows job set + the supply-chain deny gate, promoted from the
-  # former staged copy at ci/workflows/ci.yml (2026-09-28, the
-  # operator-authorized workflow-scope push):
+  # The Windows job set + the supply-chain deny gate:
   #
   #   windows-cross — the cfg-hygiene cross-target gate, the CI mirror of
   #   `make windows-cross`. The Sep-23..25

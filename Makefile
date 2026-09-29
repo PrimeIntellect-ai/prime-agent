@@ -23,8 +23,8 @@ windows-cross:
 	cargo check --workspace --target x86_64-pc-windows-gnu --all-targets
 	cargo clippy --workspace --target x86_64-pc-windows-gnu --all-targets -- -D warnings
 
-# Lints every workflow file (.github/workflows/ is the one home since the
-# 2026-09-28 unification removed the staged ci/workflows/ copies).
+# Lints every workflow file (.github/workflows/ is the one home for
+# workflow files).
 actionlint:
 	@command -v actionlint >/dev/null 2>&1 || { echo "actionlint not installed (see rhysd/actionlint releases)"; exit 1; }
 	actionlint .github/workflows/ci.yml .github/workflows/codebase-health.yml .github/workflows/contribution-gate.yml .github/workflows/continuous.yml .github/workflows/release.yml
@@ -51,10 +51,9 @@ glibc-gate:
 		fi \
 		;; esac
 
-# Perf wave + regression gate (local only; the former staged
-# ci/workflows/benchmark.yml copy was removed with the 2026-09-28 CI
-# unification — it needed self-hosted `prime-sandbox` runner labels no
-# runner carries): runs the
+# Perf wave + regression gate (local only — a hosted run would need
+# self-hosted `prime-sandbox` runner labels no registered runner
+# carries): runs the
 # TS binary and a fresh release build side by side in a fresh Prime sandbox
 # (both sides on one quiet machine, the methodology BENCHMARKS.md requires)
 # and gates the rust medians against scripts/battery/perf-baseline.json.
