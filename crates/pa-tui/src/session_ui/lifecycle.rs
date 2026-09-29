@@ -561,7 +561,7 @@ impl SessionUi {
     /// elapsed reads the wire's garbage (TS clamps only the negative
     /// display at `formatWorkingElapsed`). Only a FUTURE timestamp
     /// keeps the re-attach-instant anchor.
-    fn loader_anchor_instant(prompt_ms: u64) -> Option<std::time::Instant> {
+    pub(super) fn loader_anchor_instant(prompt_ms: u64) -> Option<std::time::Instant> {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|since| since.as_millis() as u64)
