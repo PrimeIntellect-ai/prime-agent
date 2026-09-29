@@ -676,6 +676,21 @@ pub trait SessionEngine: Send + Sync {
     /// Engines without a model (the scripted harness) ignore it.
     fn configure_create_model(&self, _selection: EngineModelSelection) {}
 
+    /// The create command's `--models` scope, resolved once per create by
+    /// the daemon against its registry (TS main.ts:838-851:
+    /// `config.models ?? settings.enabledModels` → `resolveModelScope`),
+    /// plus whether the session continues an existing file (TS
+    /// `hasExistingSession`): the startup chain starts a fresh session on
+    /// the first scoped model or the saved default when it is in scope
+    /// (main.ts:548-568); a continuing session keeps its own model. The
+    /// default is a no-op (scripted engines run no startup chain).
+    fn configure_startup_scope(
+        &self,
+        _scoped_models: Vec<pa_core::models::ScopedModel>,
+        _is_continuing: bool,
+    ) {
+    }
+
     /// Set the session's resolved service-tier preference before the next request.
     fn configure_service_tier(&self, _tier: Option<pa_types::ai::ServiceTier>) {}
 

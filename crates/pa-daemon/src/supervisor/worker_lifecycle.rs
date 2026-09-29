@@ -231,11 +231,14 @@ impl Supervisor {
         // create command so a respawned worker rebuilds the same session.
         // `thinking` is covered above: the validated wire name goes into the
         // durable command, never the raw config value, so an invalid level
-        // cannot outlive the create check.
+        // cannot outlive the create check. `models` rides it too: the
+        // create-time scope replays on a respawn (TS replays the whole
+        // create config).
         for key in [
             "rlmDepth",
             "rlmMaxDepth",
             "parentSessionPath",
+            "models",
             "systemPrompt",
             "appendSystemPrompt",
             "skills",

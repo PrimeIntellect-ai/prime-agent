@@ -324,6 +324,7 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
     // carries the subagent session's `depth N` label (TS
     // `getTrayLocationLabel`).
     let child_options = pa_tui::interactive::InteractiveOptions {
+        models: None,
         socket_path: supervisor.socket.clone(),
         cwd: PathBuf::from("/tmp"),
         model_catalog: Vec::new(),

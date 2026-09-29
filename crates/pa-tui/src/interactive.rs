@@ -267,6 +267,16 @@ pub trait InteractionTelemetry: Send + Sync {
         &self,
         outcome: &'static str,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    /// A scoped-models interaction (`tui scoped models used`): `action` is
+    /// `cycle_forward` / `cycle_backward` (the cycle keys) or
+    /// `toggle_scope` (the picker's scope key); `scoped` reports whether
+    /// the cycle ran within the session's scoped list (the response's
+    /// `isScoped`) / the toggle landed on the scoped side.
+    fn scoped_models_used(
+        &self,
+        action: &'static str,
+        scoped: bool,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
 }
 
 /// Options for one interactive run. `Debug` skips the telemetry handle (the
@@ -295,6 +305,12 @@ pub struct InteractiveOptions {
     pub script_path: Option<PathBuf>,
     /// Model flags to carry into the create config.
     pub model_selection: ModelSelection,
+    /// The `--models` scope patterns (TS `parsed.models`): raw strings —
+    /// `provider/id`, globs, `:thinking` suffixes — that ride the create
+    /// config's `models` field; the daemon resolves them against its
+    /// registry into the session's scoped list (Alt+M cycling, the
+    /// picker's scoped view). `None` leaves the scope unset.
+    pub models: Option<Vec<String>>,
     /// Create without a session file (`--no-session`).
     pub no_session: bool,
     pub session: SessionSelection,
@@ -388,6 +404,7 @@ impl std::fmt::Debug for InteractiveOptions {
             .field("session_dir", &self.session_dir)
             .field("script_path", &self.script_path)
             .field("model_selection", &self.model_selection)
+            .field("models", &self.models)
             .field("model_catalog", &self.model_catalog)
             .field("no_session", &self.no_session)
             .field("session", &self.session)
@@ -425,6 +442,11 @@ impl InteractiveOptions {
         }
         if let Some(thinking) = self.model_selection.thinking {
             config["thinking"] = json!(thinking.wire_name());
+        }
+        // TS `runtimeConfigFromArgs` carries the raw `--models` patterns:
+        // the daemon resolves them once per create (main.ts:838-851).
+        if let Some(models) = &self.models {
+            config["models"] = json!(models);
         }
         config
     }

@@ -2,9 +2,9 @@
 //! and landed-catalog fold, the picker's open/key handling, and the
 //! model/thinking-level application paths.
 use super::{
-    key_event_to_id, streaming_tray_hint, AgentView, ChatEntry, CurrentModel, DaemonCommand,
-    Duration, KeyEvent, Map, ModelPicker, ModelPickerAction, ModelPickerOptions, Result, SessionUi,
-    SetModelOutcome, StatusKind, UI_REQUEST_TIMEOUT_MS,
+    key_event_to_id, streaming_tray_hint, AgentView, ChatEntry, CurrentModel, CycleDirection,
+    DaemonCommand, Duration, KeyEvent, Map, ModelPicker, ModelPickerAction, ModelPickerOptions,
+    Result, SessionUi, SetModelOutcome, StatusKind, UI_REQUEST_TIMEOUT_MS,
 };
 use serde_json::Value;
 
@@ -44,15 +44,37 @@ impl SessionUi {
         search: &str,
     ) -> Result<()> {
         let current = self.current_model(view);
-        let thinking_level = self
-            .picker_initial_thinking_level(current.as_ref(), view)
-            .await;
+        // TS `showConfigurationMenu("models")` reads the connection state
+        // once: the thinking seed and the scoped-model list both come from
+        // it.
+        let state = self.connection_state(view).await;
+        let thinking_level = self.picker_initial_thinking_level(current.as_ref(), state.as_ref());
+        // TS `getScopedModelState`: the session's scoped list as `provider/id` keys;
+        // the picker resolves them against its loaded catalog.
+        let scoped_models: Vec<String> = state
+            .as_ref()
+            .and_then(|state| state.get("scopedModels"))
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| {
+                        let model = entry.get("model")?;
+                        Some(ModelPicker::model_key_provider(
+                            model.get("provider")?.as_str()?,
+                            model.get("id")?.as_str()?,
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let options = ModelPickerOptions {
             models: self.model_catalog.clone(),
             current,
             configured_providers: self.model_configured_providers.clone(),
             recent_models: self.model_recent_models.clone(),
             thinking_level,
+            scoped_models,
             viewport_rows: picker_viewport_rows(view.terminal_rows()),
         };
         // TS `handleModelCommand` always opens the menu (an empty catalog
@@ -112,6 +134,15 @@ impl SessionUi {
             .map(|picker| picker.handle_key(&id, view.editor.keybindings()));
         match action {
             Some(ModelPickerAction::None) | None => {}
+            Some(ModelPickerAction::ScopeToggled { scoped }) => {
+                // The picker stays mounted (TS consumes the key inside the
+                // selector); only the adoption event rides out.
+                if let Some(telemetry) = self.telemetry.clone() {
+                    tokio::spawn(async move {
+                        telemetry.scoped_models_used("toggle_scope", scoped).await;
+                    });
+                }
+            }
             Some(ModelPickerAction::Cancel) => {
                 view.model_picker = None;
                 self.picker_restored_draft = false;
@@ -254,11 +285,13 @@ impl SessionUi {
 
     /// The picker's effort seed (TS `showConfigurationMenu`'s `thinkingLevel`
     /// option): the session's live level for a reasoning current model,
-    /// else the settings default (`"medium"` when unset).
-    async fn picker_initial_thinking_level(
-        &mut self,
+    /// else the settings default (`"medium"` when unset). The state is the
+    /// caller's single connection-state read (the same one that feeds the
+    /// scoped list).
+    fn picker_initial_thinking_level(
+        &self,
         current: Option<&CurrentModel>,
-        view: &mut AgentView,
+        state: Option<&Value>,
     ) -> Option<pa_types::ai::ModelThinkingLevel> {
         let reasoning = current.and_then(|current| {
             self.model_catalog
@@ -267,14 +300,10 @@ impl SessionUi {
                 .map(|model| model.reasoning)
         });
         if reasoning == Some(true) {
-            let level = self
-                .connection_state(view)
-                .await
-                .as_ref()
+            return state
                 .and_then(|state| state.get("thinkingLevel"))
                 .and_then(Value::as_str)
                 .and_then(pa_types::ai::thinking_level_from_str);
-            return level;
         }
         self.default_thinking_level
             .as_deref()
@@ -358,6 +387,75 @@ impl SessionUi {
                 );
             }
         }
+    }
+
+    /// TS `handleModelCycle` (the `app.model.cycleForward`/`cycleBackward`
+    /// actions, defaults alt+m / shift+alt+m): cycle within the session's
+    /// scoped list when one is set, else the available catalog. A `null`
+    /// answer is TS's "no other model"; the switch status names the
+    /// provider (`Model: provider/id`, unlike the picker's `Model: <id>`),
+    /// and the create-config runtime selection follows the cycled model so
+    /// a `/new` session starts on it.
+    pub(super) async fn cycle_model(&mut self, direction: CycleDirection, view: &mut AgentView) {
+        let cycled = self
+            .bounded_request(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                DaemonCommand::CycleModel {
+                    id: None,
+                    active_session_id: self.active_session_id.clone(),
+                    direction: Some(direction),
+                    rest: Map::default(),
+                },
+            )
+            .await;
+        match cycled {
+            Ok(data) => {
+                if data == Value::Null {
+                    self.note("No other models available to cycle", view);
+                    return;
+                }
+                let model = data.get("model");
+                let provider = model
+                    .and_then(|model| model.get("provider"))
+                    .and_then(Value::as_str);
+                let model_id = model
+                    .and_then(|model| model.get("id"))
+                    .and_then(Value::as_str);
+                let Some((provider, model_id)) = provider.zip(model_id) else {
+                    self.error_row("the cycle answer carried no model", view);
+                    return;
+                };
+                let (provider, model_id) = (provider.to_string(), model_id.to_string());
+                // The create path's runtime config carries the cycled model,
+                // so `/new` starts on it (the same bookkeeping
+                // `try_set_model` keeps).
+                self.model_selection.provider = Some(provider.clone());
+                self.model_selection.model = Some(model_id.clone());
+                self.refresh_model_label(&provider, &model_id, view).await;
+                self.note(&format!("Model: {provider}/{model_id}"), view);
+                if let Some(telemetry) = self.telemetry.clone() {
+                    // TS has no scoped-models telemetry: the Rust adoption
+                    // event reports the cycle's lane (the response's
+                    // `isScoped`).
+                    let action = match direction {
+                        CycleDirection::Forward => "cycle_forward",
+                        CycleDirection::Backward => "cycle_backward",
+                    };
+                    let scoped = data
+                        .get("isScoped")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    tokio::spawn(async move {
+                        telemetry.scoped_models_used(action, scoped).await;
+                    });
+                }
+            }
+            Err(error) => {
+                // TS `showError`: the ⚠ Error row with the error tone.
+                self.error_row(&format!("{error:#}"), view);
+            }
+        }
+        self.dirty = true;
     }
 
     /// Apply a thinking level (TS `applyThinkingLevel`): the daemon

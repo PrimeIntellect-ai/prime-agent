@@ -140,6 +140,23 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
         })
     }
 
+    fn scoped_models_used(
+        &self,
+        action: &'static str,
+        scoped: bool,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let Some(client) = self.client() else {
+                return;
+            };
+            let mut properties = pa_telemetry::base_properties("interactive");
+            properties.set("action", serde_json::Value::from(action));
+            properties.set("scoped", serde_json::Value::from(scoped));
+            client.track("tui scoped models used", properties);
+            let _ = client.shutdown().await;
+        })
+    }
+
     fn scroll_used(
         &self,
         action: &'static str,

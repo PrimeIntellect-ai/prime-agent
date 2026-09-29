@@ -90,7 +90,7 @@ pub use config::AgentEngineConfig;
 pub(crate) use config::AutonomousAdmission;
 pub(crate) use config::CreateSessionResources;
 pub use config::SupervisorLinkConfig;
-use config::{GoalRuntimeHandles, ProducerUsageSink, RestoredSessionModel};
+use config::{GoalRuntimeHandles, ProducerUsageSink, RestoredSessionModel, StartupScope};
 
 // The `SessionEngine` trait impl moved to the child module whole -
 // one impl block per trait+type is a rustc constraint (E0119).
@@ -265,6 +265,11 @@ pub struct AgentSessionEngine {
     /// re-restores at every session boot), and an explicit create flag
     /// wins end-to-end (the decision is never consulted).
     restored_model: std::sync::Mutex<Option<RestoredSessionModel>>,
+    /// The create-time `--models` scope (see [`config::StartupScope`]):
+    /// resolved once per create by the worker and consulted by the
+    /// startup chain (TS main.ts:548-568); `None` keeps the unscoped
+    /// chain.
+    startup_scope: std::sync::Mutex<Option<StartupScope>>,
     /// The session runtime config the reset returns to at every session
     /// restore — TS `mergeAgentSessionRuntimeConfig(defaultSessionConfig,
     /// command.config)`: the spawn-time fallback (create config or worker

@@ -49,7 +49,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
-use pa_types::daemon::DaemonCommand;
+use pa_types::daemon::{CycleDirection, DaemonCommand};
 use pa_types::slash_commands::{SlashCommandExecution, SlashCommandRegistry};
 use serde_json::{Map, Value};
 
@@ -155,6 +155,11 @@ pub(crate) struct SessionUi {
     session_dir: Option<PathBuf>,
     script_path: Option<PathBuf>,
     model_selection: ModelSelection,
+    /// The `--models` scope patterns carried into every `create` config
+    /// (TS `runtimeConfigFromArgs.models`): the daemon resolves them per
+    /// create into the session's scoped list, so a `/new` session keeps
+    /// the scope.
+    models: Option<Vec<String>>,
     /// The model catalog for the `/model` picker: a startup snapshot from
     /// the composition root (the bundled fallback), replaced by the
     /// daemon's `get_model_catalog` response once it lands.

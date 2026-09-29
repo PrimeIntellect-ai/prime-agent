@@ -386,6 +386,54 @@ impl Worker {
             }
         };
 
+        // TS main.ts:838-851: the `models` patterns (else settings
+        // `enabledModels`) resolve once into the session's scoped list,
+        // which `cycle_model` reads. The resolution sits AFTER the store
+        // open — the continuing path's bounded catalog-readiness wait (the
+        // saved-model restore just awaited it) is the one wait the create
+        // already owns, so a cold boot's in-flight catalog fetch has had
+        // its window before the scope resolves: resolving before it could
+        // store an empty scope.
+        let model_patterns = match payload.get("models").and_then(Value::as_array) {
+            Some(patterns) => patterns
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<String>>(),
+            None => pa_core::settings::SettingsManager::create(&cwd, &self.config.agent_dir)
+                .get_enabled_models()
+                .unwrap_or_default(),
+        };
+        let scoped_models = if model_patterns.is_empty() {
+            Vec::new()
+        } else {
+            let registry = crate::state_getters::worker_model_registry(&self.config.agent_dir);
+            let available: Vec<pa_types::ai::Model> =
+                registry.get_available().into_iter().cloned().collect();
+            pa_core::models::resolve_model_scope_from_models(&model_patterns, &available)
+        };
+        let is_continuing = match (&session_path, no_session) {
+            (Some(path), false) => path.exists(),
+            _ => false,
+        };
+        self.engine
+            .configure_startup_scope(scoped_models.clone(), is_continuing);
+        // The wire shape `set_scoped_models` stores (the connection state
+        // surface and the cycler's input): `{ model, thinkingLevel? }`.
+        let scoped_entries: Vec<Value> = scoped_models
+            .iter()
+            .map(|scoped| {
+                let mut entry = json!({ "model": scoped.model });
+                // The pattern's `:thinking` suffix (TS `ScopedModel`
+                // `thinkingLevel`); the wire name is the serde-lowercase
+                // level the cycler and the state readers parse back.
+                if let Some(level) = scoped.thinking_level {
+                    entry["thinkingLevel"] = json!(level);
+                }
+                entry
+            })
+            .collect();
+
         if !name_persisted_by_fresh_arm {
             if let Some(name) = name.filter(|n| !n.trim().is_empty()) {
                 if let Err(error) =
@@ -512,7 +560,7 @@ impl Worker {
             core.steering_mode.clone_from(&steering_mode);
             core.follow_up_mode.clone_from(&follow_up_mode);
             core.forced_all_steering = false;
-            core.scoped_models = Vec::new();
+            core.scoped_models.clone_from(&scoped_entries);
             core.retry_abort_requested = false;
             // The session's depth falls back to the opened file's header (TS
             // `config.rlmDepth ?? header.rlmDepth`): a resumed saved subagent

@@ -235,6 +235,7 @@ fn attach_data(id: &str) -> Value {
 
 fn options(socket: PathBuf, fullscreen_mouse: bool) -> InteractiveOptions {
     InteractiveOptions {
+        models: None,
         socket_path: socket,
         cwd: PathBuf::from("/tmp"),
         session_dir: None,

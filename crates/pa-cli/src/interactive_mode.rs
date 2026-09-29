@@ -517,6 +517,9 @@ fn build_tui_options(
             // the worker clamps it to the model's supported levels.
             thinking: config.thinking,
         },
+        // The raw `--models` patterns ride the create config (TS
+        // `runtimeConfigFromArgs`); the daemon owns the resolution.
+        models: config.models.clone(),
         no_session: options.session.no_session,
         session,
         initial_message: options.initial_message.clone(),

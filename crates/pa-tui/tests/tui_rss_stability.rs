@@ -352,6 +352,7 @@ fn interactive_session_rss_plateaus_over_long_stream() {
         steps.push(HeadlessStep::WaitIdle { timeout_ms: 30_000 });
     }
     let options = InteractiveOptions {
+        models: None,
         socket_path: socket,
         cwd: PathBuf::from("/tmp"),
         session_dir: None,

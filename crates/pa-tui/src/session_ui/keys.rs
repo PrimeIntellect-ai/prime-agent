@@ -676,12 +676,8 @@ impl SessionUi {
             *running = false;
             return Ok(());
         }
-        // TS registers `app.interrupt` (no default key) through the same
-        // handlers as `app.clear` (`handleInterruptKey` / `handleCtrlC`):
-        // the autocomplete cancel, the side-question abort, the
-        // `interruptOrClearInput` ladder, and the exit hint are shared —
-        // only the second-press exit belongs to ctrl+c alone (custom-
-        // editor.ts:236-238 cancels autocomplete for both).
+        // TS routes `app.interrupt` through the `app.clear` handlers; only the
+        // second-press exit is ctrl+c's alone.
         let interrupt = view.editor.keybindings().matches(&id, "app.interrupt");
         if interrupt || view.editor.keybindings().matches(&id, "app.clear") {
             // One handled Ctrl+C press: the force-quit guard disarms once
@@ -768,6 +764,28 @@ impl SessionUi {
             self.picker_restored_draft = true;
             self.track_menu_opened("model", "shortcut");
             self.dirty = true;
+            return Ok(());
+        }
+        // TS `app.model.cycleForward`/`app.model.cycleBackward` (defaults
+        // alt+m / shift+alt+m, registered right after the selector): cycle
+        // within the session's scoped list when one is set, else the
+        // available catalog.
+        if view
+            .editor
+            .keybindings()
+            .matches(&id, "app.model.cycleForward")
+        {
+            self.cycle_model(pa_types::daemon::CycleDirection::Forward, view)
+                .await;
+            return Ok(());
+        }
+        if view
+            .editor
+            .keybindings()
+            .matches(&id, "app.model.cycleBackward")
+        {
+            self.cycle_model(pa_types::daemon::CycleDirection::Backward, view)
+                .await;
             return Ok(());
         }
         if view.editor.keybindings().matches(&id, "app.tools.expand") {
