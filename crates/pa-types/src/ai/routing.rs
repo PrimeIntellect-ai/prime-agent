@@ -1,6 +1,6 @@
 //! The provider routing family: the `OpenRouter` routing preferences with
 //! their sort/max-price/threshold types, and the Vercel gateway routing.
-use super::*;
+use super::{Deserialize, JsNumber, Serialize};
 
 /// `OpenRouter` provider routing preferences (`provider` request field).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
