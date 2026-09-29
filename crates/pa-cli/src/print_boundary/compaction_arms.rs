@@ -87,7 +87,7 @@ impl TurnBoundary {
                 // Adoption telemetry (TS `compaction_end` handling counts
                 // every completed compaction into the active run).
                 if let Some(telemetry) = engine.telemetry.as_ref() {
-                    telemetry.note_compaction();
+                    telemetry.note_compaction(Some(run.duration_ms));
                 }
                 // TS `_scheduleAutoRefineAfterCompaction`: every successful
                 // compaction schedules the compact-trigger auto-refine for
@@ -148,7 +148,7 @@ impl TurnBoundary {
                             // handling counts every completed compaction
                             // into the active run).
                             if let Some(telemetry) = engine.telemetry.as_ref() {
-                                telemetry.note_compaction();
+                                telemetry.note_compaction(Some(run.duration_ms));
                             }
                             // TS `_scheduleAutoRefineAfterCompaction`: every
                             // successful compaction schedules the
@@ -297,7 +297,7 @@ impl TurnBoundary {
                 // Adoption telemetry (TS `compaction_end` handling counts
                 // every completed compaction into the active run).
                 if let Some(telemetry) = engine.telemetry.as_ref() {
-                    telemetry.note_compaction();
+                    telemetry.note_compaction(Some(run.duration_ms));
                 }
                 // The wire result is the TS `CompactionResult` shape; the
                 // end event carries `willRetry: true` (the turn re-issues).

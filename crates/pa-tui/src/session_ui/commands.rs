@@ -112,6 +112,7 @@ impl SessionUi {
                 self.refresh_stats().await;
                 self.rebuild_view(view, RebuildKind::Rebind);
                 self.note(&format!("started session {id}"), view);
+                self.track_feature_outcome("new", "completed", None);
             }
             // TS `/quit` shuts the client down; this build's exit detaches
             // and exits (the session keeps running in the daemon).
@@ -155,6 +156,7 @@ impl SessionUi {
                 }
                 self.open_model_picker(view, "").await?;
                 self.track_menu_opened("model", "command");
+                self.track_feature_outcome("model", "initiated", None);
             }
             // `/effort [level]` (TS `handleEffortCommand`): the
             // session's thinking levels drive the outcome — a model
@@ -190,6 +192,7 @@ impl SessionUi {
                 match effort_picker::effort_command(&levels, current.as_deref(), &resolved.args) {
                     effort_picker::EffortCommandOutcome::Open(picker) => {
                         view.effort_picker = Some(picker);
+                        self.track_feature_outcome("effort", "initiated", None);
                     }
                     effort_picker::EffortCommandOutcome::Unsupported => {
                         self.note("Current model does not support thinking", view);
@@ -214,6 +217,7 @@ impl SessionUi {
             "tree" => {
                 if resolved.args.is_empty() {
                     self.track_command_used("tree");
+                    self.track_feature_outcome("tree", "initiated", None);
                     self.open_tree_selector(view, None).await?;
                 } else {
                     self.note("Usage: /tree", view);
@@ -224,6 +228,7 @@ impl SessionUi {
             "fork" => {
                 if resolved.args.is_empty() {
                     self.track_command_used("fork");
+                    self.track_feature_outcome("fork", "initiated", None);
                     self.open_fork_selector(view).await?;
                 } else {
                     self.note("Usage: /fork", view);
@@ -234,6 +239,7 @@ impl SessionUi {
             "clone" => {
                 if resolved.args.is_empty() {
                     self.track_command_used("clone");
+                    self.track_feature_outcome("clone", "initiated", None);
                     self.handle_clone_command(view).await?;
                 } else {
                     self.note("Usage: /clone", view);
@@ -262,6 +268,7 @@ impl SessionUi {
                     self.track_command_used("login");
                     self.open_provider_auth(AuthSelectorKind::Login, view)
                         .await?;
+                    self.track_feature_outcome("login", "initiated", None);
                 } else {
                     view.editor
                         .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
@@ -275,6 +282,7 @@ impl SessionUi {
                     self.track_command_used("logout");
                     self.open_provider_auth(AuthSelectorKind::Logout, view)
                         .await?;
+                    self.track_feature_outcome("logout", "initiated", None);
                 } else {
                     view.editor
                         .set_text(&format!("/{} {}", resolved.original_name, resolved.args));

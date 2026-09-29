@@ -34,6 +34,12 @@ impl TelemetryEvent {
         EpochMs(self.timestamp_ms).iso8601()
     }
 
+    /// The serialized size of the sink-facing object form; batches cap
+    /// at a byte budget.
+    pub(crate) fn wire_size_estimate(&self) -> usize {
+        serde_json::to_string(&self.to_value()).map_or(0, |text| text.len())
+    }
+
     /// The sink-facing object form: `{"name", "timestamp" (ISO-8601),
     /// "properties"}`. Sinks lift fields from this shape into their wire
     /// format (`PostHog` `event`/`timestamp`, JSONL mirror adds `distinct_id`).

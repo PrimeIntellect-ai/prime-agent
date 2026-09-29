@@ -258,7 +258,7 @@ fn onboarding_gate_follows_settings_and_auth() {
     let mut settings = pa_core::settings::SettingsManager::create(dir.path(), &agent);
     settings.set_onboarding_shown(true).expect("set flag");
     let options = run_options(dir.path());
-    assert!(onboarding_task(&options, None).is_none());
+    assert!(onboarding_task(&options, None).0.is_none());
     // Back to a first run for the readiness checks below.
     settings.set_onboarding_shown(false).expect("reset flag");
 
@@ -291,7 +291,9 @@ fn onboarding_gate_follows_settings_and_auth() {
         .set_default_model_and_provider("onboard-test", "m1")
         .expect("saved default");
     let options = run_options(dir.path());
-    let task = onboarding_task(&options, None).expect("the ready home mounts the flow");
+    let task = onboarding_task(&options, None)
+        .0
+        .expect("the ready home mounts the flow");
     assert!(
         (task.model_ready)(),
         "the configured default model is ready (the question flow)"
@@ -307,7 +309,9 @@ fn onboarding_gate_follows_settings_and_auth() {
     let mut options = run_options(dir.path());
     options.config.provider = Some("onboard-naked".into());
     options.config.model = Some("m2".into());
-    let task = onboarding_task(&options, None).expect("the flag alone mounts the flow");
+    let task = onboarding_task(&options, None)
+        .0
+        .expect("the flag alone mounts the flow");
     assert!(
         !(task.model_ready)(),
         "the naked provider leaves the model not ready (the full flow)"
@@ -345,6 +349,8 @@ fn settings_sink_completes_a_provisioned_home_without_touching_the_choice() {
         cwd: dir.path().to_path_buf(),
         agent_dir: agent_dir.clone(),
         created_at: std::time::Instant::now(),
+        onboarding_id: uuid::Uuid::new_v4().to_string(),
+        ready_emitted: std::sync::atomic::AtomicBool::new(false),
         probe: StartupModelProbe {
             cwd: dir.path().to_path_buf(),
             agent_dir: agent_dir.clone(),
@@ -393,6 +399,8 @@ fn settings_sink_persists_the_fresh_home_answer_with_the_flag() {
         cwd: dir.path().to_path_buf(),
         agent_dir: agent_dir.clone(),
         created_at: std::time::Instant::now(),
+        onboarding_id: uuid::Uuid::new_v4().to_string(),
+        ready_emitted: std::sync::atomic::AtomicBool::new(false),
         probe: StartupModelProbe {
             cwd: dir.path().to_path_buf(),
             agent_dir: agent_dir.clone(),
@@ -462,7 +470,7 @@ fn build_tui_options_reads_code_block_indent_settings() {
         r#"{ "markdown": { "codeBlockIndent": "    " } }"#,
     )
     .expect("settings.json");
-    let options = build_tui_options(
+    let (options, _) = build_tui_options(
         &run_options(dir.path()),
         dir.path().join("d.sock"),
         std::sync::Arc::default(),
@@ -473,7 +481,7 @@ fn build_tui_options_reads_code_block_indent_settings() {
     // No markdown settings: the TS default.
     let bare = tempfile::TempDir::new().expect("temp dir");
     std::fs::create_dir_all(bare.path().join("agent")).expect("agent dir");
-    let options = build_tui_options(
+    let (options, _) = build_tui_options(
         &run_options(bare.path()),
         bare.path().join("d.sock"),
         std::sync::Arc::default(),
@@ -789,7 +797,7 @@ fn build_tui_options_opens_a_fork_as_the_startup_session() {
     options.config.agent_dir = dir.path().join("agent");
     options.session.fork = Some(id);
     options.session.session_dir = Some(session_dir.clone());
-    let tui = build_tui_options(
+    let (tui, _) = build_tui_options(
         &options,
         dir.path().join("d.sock"),
         std::sync::Arc::default(),
