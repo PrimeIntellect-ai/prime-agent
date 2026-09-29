@@ -20,9 +20,10 @@ use pa_agent::types::{AssistantMessage, StopReason};
 
 use super::provider_park::{is_quota_block_failure, ParkDecisionCallback};
 use super::provider_retry::{
-    is_agent_lifecycle_failure, is_context_overflow_failure, is_faux_provider_queue_exhausted,
-    is_permanent_provider_failure_kind, is_unsupported_tool_failure, jittered_delay_ms,
-    provider_retry_delay, provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
+    has_provider_stream_failure, is_agent_lifecycle_failure, is_context_overflow_failure,
+    is_faux_provider_queue_exhausted, is_permanent_provider_failure_kind,
+    is_unsupported_tool_failure, jittered_delay_ms, provider_retry_delay,
+    provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
     provider_stream_failure_status, retry_jitter_rand01, ProviderRetryDelay, ProviderRetryPolicy,
 };
 
@@ -116,8 +117,7 @@ where
         if signal.is_some_and(AbortSignal::is_aborted) {
             return Ok(with_stop_reason_aborted(message));
         }
-        // Non-retryable failures never enter the TS retry bookkeeping: with
-        // no retry performed they surface with no events at all, and a
+        // Non-retryable failures never enter the TS retry bookkeeping: a
         // permanent failure that follows earlier transient retries only
         // closes the active retry (`_finishActiveRetryWithFailure`).
         let non_retryable = is_agent_lifecycle_failure(&message)
@@ -132,7 +132,20 @@ where
                 provider_stream_failure_status(&message),
             );
         if !policy.enabled || non_retryable {
-            if retries_performed > 0 {
+            // SANCTIONED DIVERGENCE (the 402 diagnosis, operator ruling):
+            // the outcome row is FAILURE-scoped, not episode-scoped. TS
+            // only emits retry events once a retry was attempted, so a
+            // permanent classification on the FIRST attempt settled with
+            // no events at all — the disclosure row the machinery exists
+            // for never fired (the operator's silent empty message). A
+            // provider failure with a recorded stream failure discloses
+            // at attempt 0; the self-managed arms stay silent (the
+            // overflow's compact-and-retry recovery owns its disclosure,
+            // lifecycle and faux failures are not provider failures).
+            if retries_performed > 0
+                || (has_provider_stream_failure(&message)
+                    && !is_context_overflow_failure(&message, context_window))
+            {
                 emit(AutoRetryEvent::End {
                     success: false,
                     attempt: retries_performed,
@@ -589,8 +602,12 @@ mod tests {
         assert_eq!(events.len(), 4); // three starts + one end
     }
 
+    /// SANCTIONED DIVERGENCE (the 402 diagnosis): a permanent provider
+    /// failure on the first attempt still emits the failure-scoped
+    /// `auto_retry_end` (attempt 0) — the disclosure row must fire for
+    /// every provider failure, not only retry episodes.
     #[tokio::test]
-    async fn permanent_failures_never_retry_and_emit_no_events() {
+    async fn permanent_failures_never_retry_but_disclose() {
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let events = Arc::new(Mutex::new(Vec::new()));
         let events_for_emit = Arc::clone(&events);
@@ -619,17 +636,71 @@ mod tests {
         .unwrap();
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(message.stop_reason, StopReason::Error);
-        // No retry happened, so no events: the caller renders the failed
-        // assistant message itself (TS only emits retry events once a retry
-        // was actually attempted).
-        assert!(events.lock().unwrap().is_empty());
+        // No retry happened, but the failure still discloses at attempt 0:
+        // the outcome row is failure-scoped, not episode-scoped.
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            &[AutoRetryEvent::End {
+                success: false,
+                attempt: 0,
+                final_error: Some("provider down".to_string()),
+                restored_model: None,
+            }]
+        );
+    }
+
+    /// THE 402 REGRESSION (the diagnosis's variant B): a wallet-drain 402
+    /// (the `payment_required` kind, classified by status regardless of
+    /// the body's `error.type` text) is permanent on the FIRST attempt —
+    /// no retry ladder burns 13-15s on a dead wallet — and the
+    /// failure-scoped disclosure still fires, so the turn never settles
+    /// as a silent empty message.
+    #[tokio::test]
+    async fn payment_failures_settle_once_with_the_disclosure() {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_for_emit = Arc::clone(&events);
+        let message = run_turn_with_auto_retry(
+            &fast_policy(),
+            0,
+            None,
+            || {
+                let attempts = Arc::clone(&attempts);
+                async move {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(error_message(Some("payment_required"), Some(402), None))
+                }
+            },
+            move |event| {
+                let events = Arc::clone(&events_for_emit);
+                async move {
+                    events.lock().unwrap().push(event);
+                    Ok(())
+                }
+            },
+            |_| async { true },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(message.stop_reason, StopReason::Error);
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            &[AutoRetryEvent::End {
+                success: false,
+                attempt: 0,
+                final_error: Some("provider down".to_string()),
+                restored_model: None,
+            }]
+        );
     }
 
     /// TS #2472: a safety-filter failure (e.g. a `content_filter`
     /// rejection) is a deterministic rejection — one attempt, no retry
-    /// loop, no retry events.
+    /// loop — with the failure-scoped disclosure (attempt 0).
     #[tokio::test]
-    async fn safety_failures_are_permanent_and_never_retry() {
+    async fn safety_failures_are_permanent_never_retry_but_disclose() {
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let events = Arc::new(Mutex::new(Vec::new()));
         let events_for_emit = Arc::clone(&events);
@@ -662,7 +733,16 @@ mod tests {
             "a safety rejection must not retry"
         );
         assert_eq!(message.stop_reason, StopReason::Error);
-        assert!(events.lock().unwrap().is_empty());
+        // The failure-scoped disclosure still fires at attempt 0.
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            &[AutoRetryEvent::End {
+                success: false,
+                attempt: 0,
+                final_error: Some("provider down".to_string()),
+                restored_model: None,
+            }]
+        );
     }
 
     /// A context overflow can never succeed unchanged (TS
@@ -809,8 +889,10 @@ mod tests {
         );
     }
 
+    /// A disabled retry policy never retries, but a provider failure
+    /// still settles with the failure-scoped disclosure (attempt 0).
     #[tokio::test]
-    async fn disabled_policy_never_retries_or_emits() {
+    async fn disabled_policy_never_retries_but_discloses() {
         let policy = ProviderRetryPolicy {
             enabled: false,
             ..fast_policy()
@@ -843,7 +925,15 @@ mod tests {
         .unwrap();
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(message.stop_reason, StopReason::Error);
-        assert!(events.lock().unwrap().is_empty());
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            &[AutoRetryEvent::End {
+                success: false,
+                attempt: 0,
+                final_error: Some("provider down".to_string()),
+                restored_model: None,
+            }]
+        );
     }
 
     #[tokio::test]
@@ -863,10 +953,11 @@ mod tests {
     }
 
     /// The router's tool-use 404 ("No endpoints found that support tool
-    /// use") is a permanent capability mismatch: the turn surfaces with
-    /// no retry events, exactly like the other non-retryable kinds.
+    /// use") is a permanent capability mismatch: the turn surfaces after
+    /// one attempt with the failure-scoped disclosure (attempt 0), like
+    /// the other non-retryable provider failures.
     #[tokio::test]
-    async fn unsupported_tool_failures_surface_without_retry_events() {
+    async fn unsupported_tool_failures_surface_with_the_disclosure() {
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let events = Arc::new(Mutex::new(Vec::new()));
         let events_for_emit = Arc::clone(&events);
@@ -898,6 +989,16 @@ mod tests {
         .unwrap();
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(message.stop_reason, StopReason::Error);
-        assert!(events.lock().unwrap().is_empty());
+        // A provider rejection with a recorded stream failure discloses
+        // even though no retry ran.
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            &[AutoRetryEvent::End {
+                success: false,
+                attempt: 0,
+                final_error: Some("404 No endpoints found that support tool use.".to_string()),
+                restored_model: None,
+            }]
+        );
     }
 }

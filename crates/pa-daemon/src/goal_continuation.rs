@@ -180,13 +180,39 @@ impl AgentSessionEngine {
         if self.session_input_queued() {
             return;
         }
+        // The progress check's input (the 402 diagnosis's (a)) + the
+        // failed pair's drop ((c)), read before the driver lock like the
+        // natural-boundary mint.
+        let last_turn = self.last_loop_assistant_message_async().await;
+        if last_turn
+            .as_ref()
+            .is_some_and(|turn: &pa_agent::types::AssistantMessage| {
+                turn.stop_reason == pa_agent::types::StopReason::Error
+                    || pa_core::session_engine::goal_driver::turn_produced_no_output(turn)
+            })
+        {
+            self.drop_failed_goal_continuation_pair().await;
+        }
         let mut driver = handles.driver.lock().await;
         let mut session = handles.session.lock().await;
-        let message = match driver.take_owed_continuation(&mut session) {
+        let message = match driver.take_owed_continuation(&mut session, last_turn.as_ref()) {
             Ok(Some(message)) => message,
             Ok(None) => {
                 // An inactive goal drops the deferral without minting (TS:
-                // "drops the deferral for inactive goals").
+                // "drops the deferral for inactive goals"). A live goal in
+                // the no-progress backoff keeps the deferral (the take
+                // restored it) and arms the one-shot wake so the
+                // advertised retry actually runs. The refusal still changed
+                // the durable goal state (an Error finish or a backoff
+                // strike): publish it — this settle task runs OUTSIDE a
+                // turn's tracking wrapper, so nothing else would.
+                let state = driver.state_with_creation_elapsed();
+                let wake_at = driver.backoff_wake_at();
+                drop(driver);
+                self.publish_goal_state(&state);
+                if let Some(wake_at) = wake_at {
+                    self.schedule_goal_backoff_wake(wake_at).await;
+                }
                 return;
             }
             Err(error) => {
@@ -196,6 +222,9 @@ impl AgentSessionEngine {
                 return;
             }
         };
+        // The mint succeeded: the progress turn reset any armed streak —
+        // retire the pending wake instead of firing one more marker turn.
+        self.cancel_goal_backoff_wake();
         // This mint's own guard handle, captured under the driver lock:
         // every later release of the mint (the admission sink, the drop
         // paths, this task's own close-race branch) clears exactly this
@@ -303,6 +332,16 @@ impl AgentSessionEngine {
         let Some(handles) = self.goal_runtime.lock().expect("goal runtime lock").clone() else {
             return GoalBoundary::Proceed;
         };
+        // The progress check's input (the 402 diagnosis's (a)): the
+        // just-settled turn of the live loop context, read BEFORE the
+        // driver lock (the engine-session mutex never nests under the
+        // driver lock). The trailing failed continuation pair's DROP
+        // ((c)) happens inside, only once the consult is actually about
+        // to examine the corpse — never before the deferral gates (an
+        // early drop would hide the no-progress turn from the later owed
+        // or post-compaction consult, which would then read the previous
+        // progress row and reset the streak).
+        let last_turn = self.last_loop_assistant_message();
         self.runtime.block_on(async {
             let mut driver = handles.driver.lock().await;
             if !driver.owns_continuation_wakeup() {
@@ -310,7 +349,7 @@ impl AgentSessionEngine {
                 // drops a stale deferral for inactive goals).
                 let mut session = handles.session.lock().await;
                 if driver.owes_continuation() {
-                    let _ = driver.take_owed_continuation(&mut session);
+                    let _ = driver.take_owed_continuation(&mut session, None);
                 }
                 return GoalBoundary::Proceed;
             }
@@ -328,12 +367,27 @@ impl AgentSessionEngine {
                 driver.mark_continuation_owed();
                 return GoalBoundary::End;
             }
+            // The consult is about to examine the just-settled turn: now
+            // the trailing failed continuation pair can leave the live
+            // loop (the captured `last_turn` still carries the corpse's
+            // verdict for the check below).
+            if last_turn
+                .as_ref()
+                .is_some_and(|turn: &pa_agent::types::AssistantMessage| {
+                    turn.stop_reason == pa_agent::types::StopReason::Error
+                        || pa_core::session_engine::goal_driver::turn_produced_no_output(turn)
+                })
+            {
+                drop(driver);
+                self.drop_failed_goal_continuation_pair().await;
+                driver = handles.driver.lock().await;
+            }
             let was_owed = driver.owes_continuation();
             let mut session = handles.session.lock().await;
             let message = if was_owed {
-                driver.take_owed_continuation(&mut session)
+                driver.take_owed_continuation(&mut session, last_turn.as_ref())
             } else {
-                driver.next_continuation_message(&mut session)
+                driver.next_continuation_message(&mut session, last_turn.as_ref())
             };
             let message = match message {
                 Ok(message) => message,
@@ -346,8 +400,28 @@ impl AgentSessionEngine {
                 }
             };
             if message.is_none() {
+                // The no-progress backoff's wake: a refused mint with the
+                // window still armed schedules the one-shot retry (the
+                // advertised 10s/20s/40s backoff actually runs — without
+                // a wake the refusal would stall the goal until an
+                // unrelated boundary event). The refusal also changed the
+                // durable goal state (an Error finish or a backoff
+                // strike): publish it here too — the run's tracking
+                // wrapper re-checks at the trailing Done, but the direct
+                // publish keeps every refusal site consistent and lets
+                // an attach mid-boundary see the transition.
+                let state = driver.state_with_creation_elapsed();
+                let wake_at = driver.backoff_wake_at();
+                drop(driver);
+                self.publish_goal_state(&state);
+                if let Some(wake_at) = wake_at {
+                    self.schedule_goal_backoff_wake(wake_at).await;
+                }
                 return GoalBoundary::End;
             }
+            // The mint succeeded: the streak reset retires any stale
+            // wake instead of firing one more marker turn.
+            self.cancel_goal_backoff_wake();
             // This mint's own guard handle, captured under the driver
             // lock: the admission sink and the drop paths release exactly
             // this mint's guard, never the mutable mirror (a rebuild may

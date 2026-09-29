@@ -1,12 +1,13 @@
 //! The `prime-agent update` body: the TS->Rust migration path. One step —
-//! the update downloads the latest `install-rust.sh` from the `rust`
-//! branch and runs it; the script uninstalls the TypeScript version,
-//! installs the latest Rust build, and never touches `~/.prime/agent`
-//! (the sessions and configuration). The TUI's `/update` runs the same
-//! core out-of-band (`client_update.rs`), so the two surfaces cannot
-//! diverge. This command exists only in the Rust binary: the TypeScript
-//! version does not have it — the move happens when the user runs the
-//! installer's curl|sh URL (the README's Install section) or
+//! the update fetches the installer from the OFFICIAL DOMAIN endpoint
+//! (`https://app.primeintellect.ai/prime-agent/install.sh`, never a
+//! GitHub raw or workflow URL) and runs it; the script uninstalls the
+//! TypeScript version, installs the latest Rust build, and never touches
+//! `~/.prime/agent` (the sessions and configuration). The TUI's `/update`
+//! runs the same core out-of-band (`client_update.rs`), so the two
+//! surfaces cannot diverge. This command exists only in the Rust binary:
+//! the TypeScript version does not have it — the move happens when the
+//! user runs the installer's curl|sh URL (the README's Install section) or
 //! `prime-agent update` (after the Rust install exists).
 
 use pa_core::update::installer::{self, InstallerOutput};
@@ -32,10 +33,13 @@ pub fn run(options: &UpdateOptions) -> i32 {
     if options.check {
         return runtime.block_on(run_check());
     }
+    // The RESOLVED URL, not the const: a PRIME_AGENT_RUST_INSTALLER_URL
+    // pin (a test or a pinned install) changes where the funnel actually
+    // fetches from, and the banner must not claim a source the run will
+    // not use.
     println!(
-        "Updating to the latest Rust build ({} @ {})…",
-        installer::repo(),
-        installer::BRANCH
+        "Updating to the latest Rust build — fetching the installer from {}:",
+        installer::installer_script_url()
     );
     match runtime.block_on(installer::run_installer(InstallerOutput::Inherit)) {
         Ok(installed) => {
@@ -72,6 +76,13 @@ async fn run_check() -> i32 {
     };
     println!("Platform: {target}");
     println!("Running:  {running}");
+    // The resolved source (the official endpoint unless the override
+    // pins one): --check must verify the script the funnel will execute,
+    // so its Source line can never disagree with the actual fetch.
+    println!(
+        "Source:  {} (the endpoint `prime-agent update` fetches the installer from)",
+        installer::installer_script_url()
+    );
     match installer::latest_continuous_run().await {
         Ok(latest) => {
             println!(

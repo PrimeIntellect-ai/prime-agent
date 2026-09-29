@@ -60,9 +60,12 @@ use pa_tui::interactive::{
 };
 
 /// The SGR tracking sequences the seam writes (the exact byte order of
-/// `mouse_tracking`: enable is `?1002h` + `?1003h` + `?1006h` — the
-/// hover affordance's any-event pair rides with the button-event mode —
-/// disable the reverse).
+/// `mouse_tracking`: enable is `?1002h`, `?1003h` (the #2918 hover
+/// affordance's any-event tracking), then `?1006h`; disable the reverse).
+/// The needles were stale from #2918 through 2026-09-29 — the `?1003`
+/// halves sat between the old pairs — and the e2e's runner-session gate
+/// skips in gate/CI shapes, so the mismatch surfaced only when the
+/// verdict-time lane's raced-suspend oracle exercised the same bytes.
 const MOUSE_ENABLE: &str = "\x1b[?1002h\x1b[?1003h\x1b[?1006h";
 const MOUSE_DISABLE: &str = "\x1b[?1006l\x1b[?1003l\x1b[?1002l";
 

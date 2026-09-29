@@ -116,6 +116,16 @@ impl SessionEngine for AgentSessionEngine {
             .lock()
             .expect("goal runtime lock")
             .clone()?;
+        // The progress check's input (the 402 diagnosis's (a)) + the
+        // failed pair's drop ((c)), read before the driver lock.
+        // The progress check's input, read before the driver lock. The
+        // trailing failed continuation pair's DROP happens INSIDE, only
+        // after the quiescence gate — the same ordering discipline as the
+        // natural boundary (an early drop, when the deferral then returns
+        // without taking, hides the no-progress corpse from the later owed
+        // consult, which would read the previous progress row, reset the
+        // streak, and remint — the drop-resets-the-cap hole).
+        let last_turn = self.last_loop_assistant_message();
         let continuation = self.runtime.block_on(async {
             let mut driver = handles.driver.lock().await;
             // TS `resumeQueuedWork()`'s quiescence arm: unsettled RLM
@@ -125,6 +135,21 @@ impl SessionEngine for AgentSessionEngine {
             if self.has_unsettled_rlm_work().await || self.has_live_background_bash_handles() {
                 driver.mark_continuation_owed();
                 return None;
+            }
+            // The consult is about to examine the just-settled turn: now
+            // the trailing failed continuation pair can leave the live
+            // loop (the captured `last_turn` still carries the corpse's
+            // verdict for the check the take runs).
+            if last_turn
+                .as_ref()
+                .is_some_and(|turn: &pa_agent::types::AssistantMessage| {
+                    turn.stop_reason == pa_agent::types::StopReason::Error
+                        || pa_core::session_engine::goal_driver::turn_produced_no_output(turn)
+                })
+            {
+                drop(driver);
+                self.drop_failed_goal_continuation_pair().await;
+                driver = handles.driver.lock().await;
             }
             let mut session = handles.session.lock().await;
             // TS `compact()`'s didCompact branch is the OWED delivery, not
@@ -140,20 +165,44 @@ impl SessionEngine for AgentSessionEngine {
             // or objective-less goal drops the deferral without minting. A
             // failed persist ends the boundary without a continuation (TS
             // `_maybeResumeGoalContinuationAfterRlmWork`'s catch: the hook
-            // must not reject; the unchanged count retries).
+            // must not reject; the unchanged count retries). The taken
+            // continuation still passes the just-settled turn through the
+            // 402 diagnosis's progress check.
             driver.mark_continuation_owed();
-            let message = match driver.take_owed_continuation(&mut session) {
+            let message = match driver.take_owed_continuation(&mut session, last_turn.as_ref()) {
                 Ok(message) => message,
                 Err(error) => {
                     eprintln!("pa-daemon: goal continuation mint persist failed: {error:#}");
                     None
                 }
-            }?;
+            };
+            if message.is_none() {
+                // A refused mint (the progress check's terminal finish or
+                // the backoff window) still changed the durable goal
+                // state: publish it so connected clients see the error or
+                // the backoff transition instead of a stale active read —
+                // and arm the no-progress backoff's one-shot wake (the
+                // advertised 10s/20s/40s retry must run from this mint
+                // site too, not only the natural boundary).
+                let state = driver.state_with_creation_elapsed();
+                let wake_at = driver.backoff_wake_at();
+                drop(driver);
+                self.publish_goal_state(&state);
+                if let Some(wake_at) = wake_at {
+                    self.schedule_goal_backoff_wake(wake_at).await;
+                }
+                return None;
+            }
+            let message = message?;
             // This mint's own guard handle, captured under the driver
             // lock: the worker's admission sink releases exactly this
             // mint's guard, never the mutable mirror.
             let pending_handle = Some(driver.pending_continuation_handle());
             let goal_update = self.publish_goal_state(&driver.state_with_creation_elapsed());
+            // The mint succeeded: the progress turn reset any armed
+            // streak — retire the pending wake.
+            drop(driver);
+            self.cancel_goal_backoff_wake();
             Some((
                 crate::engine::PromptRequest {
                     batch: Vec::new(),

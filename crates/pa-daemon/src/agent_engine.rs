@@ -184,6 +184,17 @@ pub struct AgentSessionEngine {
     /// `_clearQueuedGoalContexts`): invoked by the pause/clear/start
     /// session commands and the kernel `goal.complete` host request.
     pub(crate) goal_queue_purge: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    /// The armed no-progress backoff wake's cron job id (the goal-side
+    /// analogue of the quota park's wake): `Some` while a one-shot
+    /// `goal-backoff-wake` job is pending, so the successful mint and the
+    /// goal's terminal transitions cancel it.
+    pub(crate) goal_backoff_wake_job_id: std::sync::Mutex<Option<String>>,
+    /// The stale-row guard's DURABLE terminal row, deferred until after the
+    /// context adoption (a write before `rebuild_branch_context`/
+    /// `restore_windowed_context` would be replaced with the adopted
+    /// entries and discarded — the active row would survive the rebuild).
+    /// `Some` between the goal seed and the post-adoption flush.
+    pub(crate) stale_goal_terminal_pending: std::sync::Mutex<Option<pa_core::goals::GoalState>>,
     /// The worker's bash-completion queue seams (TS
     /// `_promptInjectedMessage`/`_withdrawAsyncBashCompletionNotice`):
     /// the `bash.completed` notice admits through the steering lane
