@@ -276,6 +276,16 @@ async fn abort_and_send_idle_race_rate_harness() {
                         "RATE_HARNESS LOST_ABORT rep {rep} of {reps}: the held turn served \"held reply\" as its own reply (users_before={users_before}) - the abort never reached the run: {}",
                         dump_hang_state(&worker)
                     );
+                    // Wait out the busy session (the batch and the
+                    // follow-up lanes still hold work) so the next rep
+                    // starts on an idle queue, exactly like the leak
+                    // branch - the lost abort's worker otherwise keeps
+                    // delivering behind the harness's back.
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_millis(delay_ms + 10_000),
+                        worker.dispatch("wait_for_idle", &json!({})),
+                    )
+                    .await;
                 } else {
                     honored = true;
                     if !idle_ok {
@@ -291,9 +301,15 @@ async fn abort_and_send_idle_race_rate_harness() {
                             worker.dispatch("wait_for_idle", &json!({})),
                         )
                         .await;
+                        let settle_ok = matches!(&settle, Ok(response) if response.success);
+                        if !settle_ok {
+                            // The inherited hold outlived its whole
+                            // window: the session never settled - count
+                            // it, never exit green on a busy session.
+                            lost_aborts += 1;
+                        }
                         eprintln!(
-                            "RATE_HARNESS FIXTURE_LEAK rep {rep}: post-leak settle ok={}",
-                            matches!(&settle, Ok(response) if response.success)
+                            "RATE_HARNESS FIXTURE_LEAK rep {rep}: post-leak settle ok={settle_ok}"
                         );
                     }
                 }

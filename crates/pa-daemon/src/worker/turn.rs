@@ -512,6 +512,15 @@ impl TurnRunner {
         // run).
         let engine_agent_end = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let engine_agent_end_seen = Arc::clone(&engine_agent_end);
+        // Whether the abort gate ever observed the delivery's cancel flag
+        // DURING this turn (the per-event read below): the fallback
+        // `agent_end` keys its silence on THIS association — an abort
+        // landing after the turn's last emitted event (a late abort
+        // racing the settle) never armed the gate and must not suppress
+        // the completed run's fallback (the macroscope finding: the
+        // post-join flag read raced `handle_abort`).
+        let abort_gate_armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let abort_gate_armed_seen = Arc::clone(&abort_gate_armed);
         let turn = tokio::task::spawn_blocking(move || {
             // Whether the engine already emitted its own terminal
             // `turn_end` frame this run (the loop emits one per turn —
@@ -610,10 +619,11 @@ impl TurnRunner {
                         | EngineEvent::DoneAborted
                 );
                 let mut core = core.lock().unwrap();
-                if core.abort_requested
-                    && (core.suppress_aborted_row || !(abort_settle || aborted_row))
-                {
-                    return false;
+                if core.abort_requested {
+                    abort_gate_armed_seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                    if core.suppress_aborted_row || !(abort_settle || aborted_row) {
+                        return false;
+                    }
                 }
                 // The engine cuts its in-memory entries; its
                 // `firstKeptEntryId` never matches this store's file ids,
@@ -1148,14 +1158,21 @@ impl TurnRunner {
         // included — the TS `agent_end` `messages` payload) are the real
         // frames, and a run whose `agent_end` the abort gate swallowed
         // stays silent exactly like TS (the compact path's detached run).
-        // An ABORTED settle keeps the same silence: the abort flag is
-        // still armed from the abort (the runner clears it only at the
-        // next pickup), and the admission consult's pre-run abort ends
-        // the turn with NO engine `agent_end` at all (no run registered —
-        // the compact-interrupt probe's suppressed-run wire shape, which
-        // the fallback would otherwise break with a synthesized frame).
-        let abort_settled = self.core.lock().unwrap().abort_requested;
-        if !engine_agent_end.load(std::sync::atomic::Ordering::SeqCst) && !abort_settled {
+        // An ABORTED settle keeps the same silence: the admission
+        // consult's pre-run abort ends the turn with NO engine
+        // `agent_end` at all (no run registered — the
+        // compact-interrupt probe's suppressed-run wire shape, which the
+        // fallback would otherwise break with a synthesized frame). The
+        // association is the abort GATE's own observation during the
+        // turn (the per-event flag read), never a post-join re-read of
+        // the flag: an abort landing after the turn's last emitted event
+        // cancels nothing of this run and must not suppress its fallback
+        // (the flag stays armed until the next pickup — a settle-time
+        // re-read would race `handle_abort` and silence a completed
+        // session-command or pre-model-failure run).
+        if !engine_agent_end.load(std::sync::atomic::Ordering::SeqCst)
+            && !abort_gate_armed.load(std::sync::atomic::Ordering::SeqCst)
+        {
             self.emit_turn_event(json!({ "type": "agent_end" }));
         }
         let snapshot = {
