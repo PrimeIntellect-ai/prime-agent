@@ -756,6 +756,79 @@ describe("AuthStorage", () => {
 		});
 	});
 
+	describe("external credential changes", () => {
+		// Synthetic provider: no environment variables or OAuth provider can
+		// supply an unrelated candidate for it.
+		const provider = "external-reload-test-provider";
+
+		test("stale-marked stored key recovers when another process rewrites auth.json", async () => {
+			writeAuthJson({ [provider]: { type: "api_key", key: "rejected-old-key" } });
+			authStorage = AuthStorage.create(authJsonPath);
+
+			await expect(authStorage.getApiKey(provider)).resolves.toBe("rejected-old-key");
+			authStorage.markAuthStale(provider);
+			await expect(authStorage.getApiKey(provider)).resolves.toBeUndefined();
+
+			// Another process (a /login in a different session) refreshes the key.
+			writeAuthJson({ [provider]: { type: "api_key", key: "fresh-new-key" } });
+			await expect(authStorage.getApiKey(provider)).resolves.toBe("fresh-new-key");
+		});
+
+		test("credential written by another process becomes visible without a restart", async () => {
+			writeAuthJson({ [provider]: { type: "api_key", key: "old-key" } });
+			authStorage = AuthStorage.create(authJsonPath);
+
+			writeAuthJson({ [provider]: { type: "api_key", key: "replacement-key" } });
+			expect(authStorage.getAuthStatus(provider)).toEqual({ configured: true, source: "stored" });
+			await expect(authStorage.getApiKey(provider)).resolves.toBe("replacement-key");
+			expect(authStorage.hasAuth(provider)).toBe(true);
+		});
+
+		test("external change notifies listeners once; repeated lookups do not re-notify", async () => {
+			writeAuthJson({ [provider]: { type: "api_key", key: "old-key" } });
+			authStorage = AuthStorage.create(authJsonPath);
+
+			const changes = vi.fn();
+			authStorage.onChange(changes);
+
+			writeAuthJson({ [provider]: { type: "api_key", key: "replacement-key" } });
+			await authStorage.getApiKey(provider);
+			await authStorage.getApiKey(provider);
+			authStorage.getAuthStatus(provider);
+
+			expect(changes).toHaveBeenCalledTimes(1);
+		});
+
+		test("own writes are not treated as external changes", async () => {
+			writeAuthJson({ [provider]: { type: "api_key", key: "old-key" } });
+			authStorage = AuthStorage.create(authJsonPath);
+
+			const changes = vi.fn();
+			authStorage.onChange(changes);
+
+			authStorage.set(provider, { type: "api_key", key: "new-own-key" });
+			await expect(authStorage.getApiKey(provider)).resolves.toBe("new-own-key");
+			expect(changes).toHaveBeenCalledTimes(1); // only the set() notification
+		});
+
+		test("a re-login with the very same key clears the stale marking", async () => {
+			writeAuthJson({ [provider]: { type: "api_key", key: "stable-key" } });
+			authStorage = AuthStorage.create(authJsonPath);
+
+			await expect(authStorage.getApiKey(provider)).resolves.toBe("stable-key");
+			authStorage.markAuthStale(provider);
+			await expect(authStorage.getApiKey(provider)).resolves.toBeUndefined();
+
+			// Same credential, rewritten by another process. The file also holds
+			// an unrelated provider so the rewrite always changes its size.
+			writeAuthJson({
+				[provider]: { type: "api_key", key: "stable-key" },
+				"another-provider": { type: "api_key", key: "unrelated" },
+			});
+			await expect(authStorage.getApiKey(provider)).resolves.toBe("stable-key");
+		});
+	});
+
 	describe("runtime overrides", () => {
 		test("runtime override takes priority over auth.json until it is removed", async () => {
 			writeAuthJson({ anthropic: { type: "api_key", key: "!echo stored-key" } });

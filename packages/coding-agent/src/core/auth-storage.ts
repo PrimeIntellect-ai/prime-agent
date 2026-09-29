@@ -15,7 +15,7 @@ import {
 	type OAuthProviderId,
 } from "@earendil-works/pi-ai";
 import { getOAuthApiKey, getOAuthProvider, getOAuthProviders } from "@earendil-works/pi-ai/oauth";
-import { closeSync, existsSync, fchmodSync, mkdirSync, openSync, readFileSync, writeSync } from "fs";
+import { closeSync, existsSync, fchmodSync, mkdirSync, openSync, readFileSync, statSync, writeSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { getAgentDir } from "../config.js";
@@ -117,10 +117,50 @@ type AuthApiKeyResult = {
 export interface AuthStorageBackend {
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T;
 	withLockAsync<T>(fn: (current: string | undefined) => Promise<LockResult<T>>): Promise<T>;
+	/**
+	 * True when the backing store was rewritten by another process since this
+	 * backend last read or wrote it. Absent on non-file backends.
+	 */
+	changedExternally?(): boolean;
 }
 
+type FileState = { dev: number; ino: number; mtimeMs: number; size: number };
+
 export class FileAuthStorageBackend implements AuthStorageBackend {
+	/**
+	 * State of the file as this backend last read or wrote it. Used to detect
+	 * rewrites by other processes without re-reading the file on every lookup.
+	 */
+	private lastKnownFileState: FileState | undefined;
+
 	constructor(private authPath: string = join(getAgentDir(), "auth.json")) {}
+
+	private statFileState(): FileState | undefined {
+		try {
+			const stats = statSync(this.authPath);
+			return { dev: stats.dev, ino: stats.ino, mtimeMs: stats.mtimeMs, size: stats.size };
+		} catch {
+			return undefined;
+		}
+	}
+
+	changedExternally(): boolean {
+		const last = this.lastKnownFileState;
+		if (!last) {
+			return false;
+		}
+		const current = this.statFileState();
+		if (!current) {
+			// The file was removed since we last saw it.
+			return true;
+		}
+		return (
+			current.dev !== last.dev ||
+			current.ino !== last.ino ||
+			current.mtimeMs !== last.mtimeMs ||
+			current.size !== last.size
+		);
+	}
 
 	private ensureParentDir(): void {
 		const dir = dirname(this.authPath);
@@ -200,10 +240,14 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 		let release: (() => void) | undefined;
 		try {
 			release = this.acquireLockSyncWithRetry(this.authPath);
+			const stateBeforeRead = this.statFileState();
 			const current = existsSync(this.authPath) ? readFileSync(this.authPath, "utf-8") : undefined;
 			const { result, next } = fn(current);
 			if (next !== undefined) {
 				writeFileAtomicSync(realpathIfPresentSync(this.authPath), next, { mode: 0o600 });
+				this.lastKnownFileState = this.statFileState();
+			} else {
+				this.lastKnownFileState = stateBeforeRead;
 			}
 			return result;
 		} finally {
@@ -243,11 +287,15 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			});
 
 			throwIfCompromised();
+			const stateBeforeRead = this.statFileState();
 			const current = existsSync(this.authPath) ? readFileSync(this.authPath, "utf-8") : undefined;
 			const { result, next } = await fn(current);
 			throwIfCompromised();
 			if (next !== undefined) {
 				writeFileAtomicSync(realpathIfPresentSync(this.authPath), next, { mode: 0o600 });
+				this.lastKnownFileState = this.statFileState();
+			} else {
+				this.lastKnownFileState = stateBeforeRead;
 			}
 			throwIfCompromised();
 			return result;
@@ -354,6 +402,39 @@ export class AuthStorage {
 	private recordError(error: unknown): void {
 		const normalizedError = error instanceof Error ? error : new Error(String(error));
 		this.errors.push(normalizedError);
+	}
+
+	/**
+	 * auth.json is shared by every process on the machine: a /login in one
+	 * session (for example the TUI, while a daemon worker keeps serving another
+	 * session) must become visible to long-lived workers. Check before
+	 * resolving credentials so a rejected key does not wedge the worker until a
+	 * restart. An external write is an explicit credential change, so stored
+	 * stale markings are dropped exactly like an in-process set()/remove()
+	 * drops them; a re-login with the same key also recovers.
+	 */
+	private refreshFromExternalChanges(): void {
+		if (!this.storage.changedExternally?.()) {
+			return;
+		}
+		this.reload();
+		if (this.loadError) {
+			// A corrupt file selects nothing: keep the stale identity until a
+			// readable credential file replaces it.
+			return;
+		}
+		for (const [provider, tokens] of this.staleAuthSources) {
+			const next = tokens.filter((token) => token.source !== "stored");
+			if (next.length === tokens.length) {
+				continue;
+			}
+			if (next.length === 0) {
+				this.staleAuthSources.delete(provider);
+			} else {
+				this.staleAuthSources.set(provider, next);
+			}
+		}
+		this.notifyChanged();
 	}
 
 	private fingerprintAuthSource(source: ActiveAuthStatusSource, material: string): string {
@@ -950,6 +1031,7 @@ export class AuthStorage {
 	 * Unlike getApiKey(), this doesn't refresh OAuth tokens.
 	 */
 	hasAuth(provider: string): boolean {
+		this.refreshFromExternalChanges();
 		return this.getAvailableAuthCandidate(provider).candidate !== undefined;
 	}
 
@@ -957,6 +1039,7 @@ export class AuthStorage {
 	 * Return auth status without exposing credential values or refreshing tokens.
 	 */
 	getAuthStatus(provider: string): AuthStatus {
+		this.refreshFromExternalChanges();
 		return this.getAuthStatusFromCandidates(provider);
 	}
 
@@ -1059,6 +1142,7 @@ export class AuthStorage {
 		providerId: string,
 		options?: { includeFallback?: boolean },
 	): Promise<AuthApiKeyResult> {
+		this.refreshFromExternalChanges();
 		// Runtime overrides take precedence over stored credentials and environment keys.
 		const runtimeCandidate = this.getRuntimeAuthCandidate(providerId);
 		const runtimeKey = this.runtimeOverrides.get(providerId);

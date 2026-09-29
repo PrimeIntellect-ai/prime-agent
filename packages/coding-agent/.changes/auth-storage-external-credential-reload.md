@@ -1,0 +1,1 @@
+- Fixed daemon session workers staying wedged on a rejected credential after `/login` refreshed it in another session: auth.json is now re-read when another process rewrote it, stored stale-auth markings are cleared on readable external writes (mirroring an in-process login), and change notifications let long-lived workers pick up the new key without a restart.
