@@ -227,9 +227,10 @@ fn wait_until<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T 
 /// daemon bootstraps a dedicated kernel venv from the checkout's
 /// prime-agent-runtime (the identity cache makes repeat runs cheap).
 fn kernel_venv() -> PathBuf {
-    let base = std::env::var_os("CARGO_TARGET_TMPDIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("autobg-e2e"));
+    let base = std::env::var_os("CARGO_TARGET_TMPDIR").map_or_else(
+        || std::env::temp_dir().join("autobg-e2e"),
+        PathBuf::from,
+    );
     base.join("autobg-kernel-venv")
 }
 
