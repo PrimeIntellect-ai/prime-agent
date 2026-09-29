@@ -11,6 +11,7 @@ import type {
 	ChatCompletionToolMessageParam,
 } from "openai/resources/chat/completions.js";
 import { getAnthropicCacheWriteCost, hasStandardAnthropicCachePricing } from "../cache-pricing.js";
+import { resolveCacheRetention } from "../cache-retention.js";
 import { getEnvApiKey } from "../env-api-keys.js";
 import { calculateCost, clampThinkingLevel } from "../models.js";
 import type {
@@ -128,16 +129,6 @@ type ChatCompletionTextPartWithCacheControl = ChatCompletionContentPartText & {
 type ChatCompletionToolWithCacheControl = OpenAI.Chat.Completions.ChatCompletionTool & {
 	cache_control?: OpenAICompatCacheControl;
 };
-
-function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention {
-	if (cacheRetention) {
-		return cacheRetention;
-	}
-	if (typeof process !== "undefined" && process.env.PI_CACHE_RETENTION === "long") {
-		return "long";
-	}
-	return "short";
-}
 
 export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenAICompletionsOptions> = (
 	model: Model<"openai-completions">,

@@ -1,0 +1,1 @@
+- Moved the shared cache retention default (including the legacy `PI_CACHE_RETENTION` fallback) into one module, replacing four identical copies in the Anthropic, Bedrock, OpenAI Completions, and OpenAI Responses providers.
