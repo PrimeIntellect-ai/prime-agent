@@ -311,6 +311,20 @@ pub trait SessionEngine: Send + Sync {
         Box::pin(std::future::ready(()))
     }
 
+    /// Whether the settled-child passivation gates pass (TS #2483's
+    /// `canPassivateSettledSession` minus the release itself): no
+    /// unsettled RLM descendants and no registered active-or-paused
+    /// scheduled job. The whole-worker idle passivation (the
+    /// `idleEvictionMinutes` consumer) re-checks these engine-side gates
+    /// before asking the supervisor for the graceful stop. The default
+    /// `false` keeps scripted harness engines and kernel-less embeddings
+    /// resident — the same conservative arm as the release default.
+    fn can_passivate_settled_session(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+        Box::pin(std::future::ready(false))
+    }
+
     /// Mint the owed post-compaction goal continuation (TS `compact()`'s
     /// `didCompact` + active-goal branch: `resumeQueuedWork()`'s
     /// `_maybeResumeGoalContinuationAfterRlmWork` — `continuationsUsed`

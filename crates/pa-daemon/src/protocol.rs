@@ -902,6 +902,7 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::ListAgentPeers { .. }
         | DaemonCommand::GetWorkerPeerTransport { .. }
         | DaemonCommand::RosterSubscribe { .. }
+        | DaemonCommand::WorkerIdlePassivation { .. }
         | DaemonCommand::WorkerRosterDelta { .. }
         | DaemonCommand::RosterUnsubscribe { .. }
         | DaemonCommand::Create { .. }
@@ -923,6 +924,7 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::GetDirectWorkerTransport { .. } => "get_direct_worker_transport",
         DaemonCommand::GetWorkerPeerTransport { .. } => "get_worker_peer_transport",
         DaemonCommand::RosterSubscribe { .. } => "roster_subscribe",
+        DaemonCommand::WorkerIdlePassivation { .. } => "worker_idle_passivation",
         DaemonCommand::WorkerRosterDelta { .. } => "worker_roster_delta",
         DaemonCommand::RosterUnsubscribe { .. } => "roster_unsubscribe",
         DaemonCommand::Create { .. } => "create",

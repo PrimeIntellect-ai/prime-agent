@@ -189,7 +189,7 @@ impl Supervisor {
     /// `Unknown` keeps the caller's unknown-session error; `Failed` carries
     /// the wake's own error (a catalog ambiguity outranks the miss, like
     /// the TS `Ambiguous session selector` propagation).
-    async fn wake_saved_target(
+    pub(crate) async fn wake_saved_target(
         self: &Arc<Self>,
         resolve_error: &anyhow::Error,
         selector: &str,
@@ -415,7 +415,7 @@ fn sender_endpoint_from_summary(summary: &Value, client_id: &str) -> Value {
 }
 
 /// The wake outcome for an unknown `send_message` target.
-enum WakeOutcome {
+pub(crate) enum WakeOutcome {
     /// The saved session was woken (or reused); the resident serves it.
     Woken(Arc<ResidentWorker>),
     /// No saved session matched: the caller answers with the TS

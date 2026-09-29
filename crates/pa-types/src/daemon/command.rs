@@ -164,6 +164,23 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// Worker -> supervisor idle-passivation request (TS's whole-worker
+    /// idle eviction, worker-driven): a parent-owned child worker whose
+    /// park arm proved the idle state and whose idle clock crossed the
+    /// `idleEvictionMinutes` threshold asks the supervisor to run the
+    /// graceful stop (`stop_worker`: tombstone, routed shutdown, registry
+    /// retirement, roster passivation). The supervisor verifies the worker
+    /// token and the parent-owned descriptor before stopping. Clients
+    /// never send this command; it rides the worker's supervisor link.
+    WorkerIdlePassivation {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        worker_token: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        idle_minutes: Option<u64>,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     /// Worker -> supervisor roster delta (the Rust-native form of the TS
     /// `roster_delta` worker frame): the worker pushes its slim session
     /// summary so the supervisor's roster tracks live status without

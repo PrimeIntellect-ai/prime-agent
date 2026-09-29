@@ -49,6 +49,14 @@ pub(crate) struct SessionCore {
     pub(crate) last_action_snapshot: Option<SessionActionSnapshot>,
     /// This session's RLM recursion depth (children run at depth + 1).
     pub(crate) rlm_depth: u32,
+    /// The wall-clock ms of this session's last activity (TS
+    /// `lastActivityAt`): stamped every time the runner parks after work,
+    /// so the idle-eviction clock (the `idleEvictionMinutes` consumer)
+    /// measures from the true end of the last activity, not the process
+    /// start. Zero means "no activity yet" (a fresh worker parks before
+    /// its first turn: the stamp also lands there, so the clock starts at
+    /// the park).
+    pub(crate) last_activity_ms: u64,
     /// `top-level` | `subagent` (summary `runtimeKind`).
     pub(crate) runtime_kind: String,
     /// The subagent runtime identity (create `runtimeMetadata`): the child
@@ -148,6 +156,7 @@ impl SessionCore {
             abort_requested: false,
             suppress_aborted_row: false,
             shutdown_requested: false,
+            last_activity_ms: 0,
             compacting: false,
             running_tool_calls: std::collections::HashSet::new(),
             auto_compaction_enabled: true,

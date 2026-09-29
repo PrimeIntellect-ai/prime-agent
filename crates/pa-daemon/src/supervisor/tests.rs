@@ -767,3 +767,177 @@ async fn a_signal_during_an_in_flight_shutdown_forces() {
         "the committed update stop must not become a terminal stop pass"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The worker-driven idle passivation handler (TS `idleEvictionMinutes`).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn idle_passivation_requires_the_worker_token() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: agent_dir.clone(),
+        })
+        .expect("supervisor"),
+    );
+    // An unknown token answers the authentication failure.
+    let response = supervisor
+        .handle_worker_idle_passivation("c1", "worker_idle_passivation", "no-such-token", Some(1))
+        .await;
+    assert!(!response.success);
+    assert!(
+        response
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("authentication failed"),
+        "the unauthenticated ask is refused: {response:?}"
+    );
+}
+
+#[tokio::test]
+async fn idle_passivation_refuses_a_root_worker() {
+    // The parent-owned gate: only a child worker (rlmDepth > 0 in the
+    // create command) may ask; a root worker's lease is client-owned
+    // policy and the ask is refused.
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: agent_dir.clone(),
+        })
+        .expect("supervisor"),
+    );
+    let descriptor = pa_types::daemon::DaemonWorkerDescriptor {
+        version: 1,
+        worker_id: "w-root".to_string(),
+        pid: 4242,
+        process_start_id: None,
+        socket_path: "/tmp/none.sock".to_string(),
+        recovery_journal_path: "/tmp/none.jsonl".to_string(),
+        orphan_process_journal_path: None,
+        supervisor_socket_path: "/tmp/none.sock".to_string(),
+        authentication_token: "root-token".to_string(),
+        worker_instance_id: None,
+        root_active_session_id: "w-root".to_string(),
+        owner_client_id: None,
+        root_session_id: Some("root-1".to_string()),
+        session_file: None,
+        session_dir: None,
+        telemetry_disabled: None,
+        created_at: "t".to_string(),
+        updated_at: "t".to_string(),
+        lifecycle: DaemonWorkerLifecycle::Ready,
+        create_command: pa_types::daemon::DurableDaemonCreateCommand {
+            session_path: None,
+            no_session: None,
+            rest: Map::default(),
+        },
+        consecutive_failures: 0,
+        stop_requested_at: None,
+        archive_on_stop: None,
+        last_failure_at: None,
+        last_error: None,
+        rest: Map::default(),
+    };
+    let resident = ResidentWorker::new("w-root".to_string(), descriptor, dir.path().join("w.d"));
+    supervisor.registry.insert(resident).await;
+    let response = supervisor
+        .handle_worker_idle_passivation("c1", "worker_idle_passivation", "root-token", Some(1))
+        .await;
+    assert!(!response.success);
+    assert!(
+        response
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("child-worker policy"),
+        "the root worker's ask is refused: {response:?}"
+    );
+}
+
+/// The passivation-aware delete: a Kill carrying the `rlmLedgerDelete`
+/// marker aimed at a STOPPED child (no resident worker) resolves the
+/// ledger edge and tombstones it — the deletion boundary without a
+/// worker (TS `recordRlmSubagentDeletion` after a whole-worker
+/// eviction).
+#[tokio::test]
+async fn a_ledger_delete_of_a_stopped_child_tombstones_without_a_worker() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let sessions_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: agent_dir.clone(),
+        })
+        .expect("supervisor"),
+    );
+    // A live ledger edge for a stopped child (the passivation's leftover:
+    // the session file survives, the worker is gone).
+    let child_file = sessions_dir.join("child-gone.jsonl");
+    std::fs::write(
+        &child_file,
+        "{\"type\":\"session\",\"version\":3,\"id\":\"child-gone\",\"timestamp\":\"t\",\"cwd\":\"/c\"}\n",
+    )
+    .unwrap();
+    let parent_file = sessions_dir.join("parent.jsonl");
+    std::fs::write(&parent_file, "{\"type\":\"session\",\"id\":\"p\"}\n").unwrap();
+    let ledger = supervisor
+        .rlm_spawn_ledger_for(None)
+        .await
+        .expect("the spawn ledger resolves");
+    ledger
+        .append_spawn(crate::rlm_ledger::RlmSpawnInput {
+            child_id: "sub-gone".to_string(),
+            parent: parent_file.to_string_lossy().into_owned(),
+            child: child_file.to_string_lossy().into_owned(),
+            depth: 1,
+            name: "parked-worker".to_string(),
+        })
+        .expect("the spawn edge appends");
+    assert_eq!(ledger.live_edges().expect("edges").len(), 1);
+
+    // The parent's delete rides the kill route with the marker; the
+    // route finds no resident and the passivation-aware arm must answer
+    // success WITH the tombstone applied.
+    let outcome = supervisor
+        .tombstone_saved_rlm_child(
+            "child-gone",
+            Some("sub-gone"),
+            crate::rlm_ledger::RlmLedgerDeleteReason::User,
+        )
+        .await;
+    assert!(
+        outcome.is_ok(),
+        "the stopped child's delete must tombstone: {outcome:?}"
+    );
+    let edges = ledger.live_edges().expect("edges after");
+    assert!(
+        edges.is_empty(),
+        "the tombstone retires the live edge: {edges:?}"
+    );
+    let tombstones = ledger.edges(true).expect("tombstones");
+    assert_eq!(
+        tombstones[0].deleted,
+        Some(crate::rlm_ledger::RlmLedgerDeleteReason::User)
+    );
+
+    // An unknown selector with no ledger edge is a clean failure (the
+    // caller answers the delete error, never a silent success).
+    let miss = supervisor
+        .tombstone_saved_rlm_child(
+            "no-such-child",
+            None,
+            crate::rlm_ledger::RlmLedgerDeleteReason::User,
+        )
+        .await;
+    assert!(miss.is_err(), "a selector with no edge must not delete");
+}

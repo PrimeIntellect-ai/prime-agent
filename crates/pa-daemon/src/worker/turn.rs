@@ -22,6 +22,20 @@ pub(super) struct TurnRunner {
     /// the queue's consumer composes and ships the summary (the
     /// event-driven arm lives in [`crate::roster_activity`]).
     pub(super) roster_pushes: crate::roster_activity::RosterPushQueue,
+    /// The user-bash handle: the idle passivation's live-bash gate.
+    pub(super) user_bash: std::sync::Arc<crate::user_bash::UserBash>,
+    /// The worker config slice the idle passivation needs (agent dir,
+    /// supervisor link coordinates).
+    pub(super) passivation: PassivationContext,
+}
+
+/// The idle-passivation context on the turn runner: the settings source
+/// (the agent dir), the supervisor link, and the worker token for the
+/// graceful-stop request.
+pub(super) struct PassivationContext {
+    pub(super) agent_dir: std::path::PathBuf,
+    pub(super) link: std::sync::Arc<crate::supervisor_link::SupervisorLink>,
+    pub(super) worker_token: String,
 }
 
 impl TurnRunner {
@@ -146,6 +160,13 @@ impl TurnRunner {
                 self.run_turn(engine, items).await;
             } else {
                 self.idle_notify.notify_waiters();
+                // The idle clock (TS `lastActivityAt`): every park after
+                // work re-stamps the activity end, so the idle-eviction
+                // window below measures from the TRUE last activity.
+                {
+                    let mut core = self.core.lock().unwrap();
+                    core.last_activity_ms = crate::util::now_ms();
+                }
                 // TS #2483's settled-child kernel release (the inline arm): a
                 // parent-owned child that parks with no lane work releases its
                 // kernel with a snapshot flush; the next kernel use revives it
@@ -153,7 +174,25 @@ impl TurnRunner {
                 // the kernel resident, and the roster/collect surfaces stay
                 // untouched by design.
                 self.maybe_release_settled_child_kernel().await;
-                self.work_notify.notified().await;
+                // The whole-worker idle passivation (TS's
+                // `idleEvictionMinutes` tier, worker-driven): the same park
+                // state the kernel release proved, plus the idle clock. The
+                // window arms only for parent-owned children under a live
+                // threshold; the select's notified arm is the wake path — a
+                // queued delivery wins the race and the next park re-arms.
+                match self.idle_passivation_window() {
+                    Some(remaining) => {
+                        tokio::select! {
+                            () = self.work_notify.notified() => {}
+                            () = tokio::time::sleep(remaining) => {
+                                self.maybe_request_idle_passivation().await;
+                            }
+                        }
+                    }
+                    None => {
+                        self.work_notify.notified().await;
+                    }
+                }
             }
         }
     }
@@ -179,6 +218,112 @@ impl TurnRunner {
         if release {
             self.engine.release_settled_child_kernel().await;
         }
+    }
+
+    /// The idle-eviction window for a parent-owned child (TS's
+    /// `idleEvictionMinutes` consumer, worker-side): `Some(remaining)`
+    /// when the park state holds (parent-owned, unattached, not
+    /// compacting, not shutting down, no live background bash) and the
+    /// setting is a live threshold; `None` otherwise (roots, attached
+    /// children, `"off"`, and any state the engine gates would reject
+    /// stay parked without a timer). The engine-side passivation gates
+    /// (unsettled descendants, registered active-or-paused scheduled
+    /// jobs) are re-checked at the fire inside
+    /// [`Self::maybe_request_idle_passivation`] — the fresh-snapshot
+    /// fence — so this window only decides whether to arm.
+    pub(super) fn idle_passivation_window(&self) -> Option<std::time::Duration> {
+        let (rlm_depth, attached, compacting, shutdown, last_activity, cwd) = {
+            let core = self.core.lock().unwrap();
+            (
+                core.rlm_depth,
+                core.attached_client_ids.is_empty(),
+                core.compacting,
+                core.shutdown_requested,
+                core.last_activity_ms,
+                core.cwd.clone(),
+            )
+        };
+        if rlm_depth == 0 || !attached || compacting || shutdown {
+            return None;
+        }
+        // A live background bash handle keeps the worker resident (the
+        // kernel snapshot cannot resurrect a live process; TS never
+        // passivates a bash-running session).
+        if self.user_bash.is_running() {
+            return None;
+        }
+        let settings =
+            pa_core::settings::SettingsManager::create(&cwd, &self.passivation.agent_dir);
+        let minutes = match settings.get_idle_eviction() {
+            pa_core::settings::IdleEviction::Off => return None,
+            pa_core::settings::IdleEviction::Minutes(minutes) => minutes,
+        };
+        let now = crate::util::now_ms();
+        let idle_ms = now.saturating_sub(last_activity);
+        let threshold_ms = minutes.saturating_mul(60_000);
+        Some(std::time::Duration::from_millis(
+            threshold_ms.saturating_sub(idle_ms),
+        ))
+    }
+
+    /// The fire: re-check the full gate set on a fresh snapshot (the
+    /// TS `passivateSession` fresh-snapshot fence), then ask the
+    /// supervisor for the graceful stop over the worker's supervisor
+    /// link. The request carries the worker token; the supervisor
+    /// verifies it against the resident worker before stopping. A
+    /// rejected or failed request leaves the worker resident — the
+    /// next park re-arms, exactly like the kernel release's best-effort
+    /// arm.
+    pub(super) async fn maybe_request_idle_passivation(&self) {
+        let (rlm_depth, attached, compacting, shutdown, last_activity, cwd) = {
+            let core = self.core.lock().unwrap();
+            (
+                core.rlm_depth,
+                core.attached_client_ids.is_empty(),
+                core.compacting,
+                core.shutdown_requested,
+                core.last_activity_ms,
+                core.cwd.clone(),
+            )
+        };
+        // The fresh-snapshot fence: the wake that raced the timer must
+        // find the worker resident, so any state change since the window
+        // armed cancels the passivation.
+        if rlm_depth == 0 || !attached || compacting || shutdown {
+            return;
+        }
+        if self.user_bash.is_running() {
+            return;
+        }
+        let settings =
+            pa_core::settings::SettingsManager::create(&cwd, &self.passivation.agent_dir);
+        let minutes = match settings.get_idle_eviction() {
+            pa_core::settings::IdleEviction::Off => return,
+            pa_core::settings::IdleEviction::Minutes(minutes) => minutes,
+        };
+        // The idle threshold still holds on the fresh clock.
+        if crate::util::now_ms().saturating_sub(last_activity) < minutes.saturating_mul(60_000) {
+            return;
+        }
+        // The engine-side gates (no unsettled descendants, no registered
+        // active-or-paused scheduled job): a parked child with either
+        // stays resident.
+        if !self.engine.can_passivate_settled_session().await {
+            return;
+        }
+        let command = serde_json::json!({
+            "type": "worker_idle_passivation",
+            "workerToken": self.passivation.worker_token,
+            "idleMinutes": minutes,
+        });
+        // The bounded ask: the supervisor's stop path runs the routed
+        // shutdown back into this worker (the graceful flush), so the
+        // timeout only bounds the ask, not the stop.
+        let _ = self
+            .passivation
+            .link
+            .request(command, std::time::Duration::from_secs(30))
+            .await;
     }
 
     /// Push one roster delta to the supervisor (the Rust-native form of

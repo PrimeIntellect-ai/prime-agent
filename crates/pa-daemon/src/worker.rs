@@ -298,6 +298,7 @@ impl Worker {
             abort_requested: false,
             suppress_aborted_row: false,
             shutdown_requested: false,
+            last_activity_ms: 0,
             compacting: false,
             auto_compaction_enabled: true,
             // TS seeds `_lastSessionActionSnapshot` with the empty
@@ -652,7 +653,7 @@ impl Worker {
                     engine: std::sync::Arc::clone(&engine),
                     user_bash: std::sync::Arc::clone(&user_bash),
                     roster_link: Arc::clone(&roster_link),
-                    worker_token,
+                    worker_token: worker_token.clone(),
                     worker_instance_id: config.worker_instance_id.clone(),
                     roster_delta_sequence: std::sync::Arc::clone(&roster_delta_sequence),
                     roster_push_order: std::sync::Arc::clone(&roster_push_order),
@@ -672,6 +673,12 @@ impl Worker {
                 engine: std::sync::Arc::clone(&engine),
                 active_session_id,
                 roster_pushes: roster_pushes.clone(),
+                user_bash: std::sync::Arc::clone(&user_bash),
+                passivation: crate::worker::turn::PassivationContext {
+                    agent_dir: config.agent_dir.clone(),
+                    link: Arc::clone(&roster_link),
+                    worker_token,
+                },
             };
             tokio::spawn(async move {
                 runner.run().await;
