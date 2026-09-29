@@ -1,9 +1,11 @@
 //! Shutdown and signal handling: the drain arms, the shutdown entry, and the
 //! daemon-closing shutdown event.
 use super::{
-    json, Arc, ClientRouting, Ordering, PrepareState, RouteAdmission, Supervisor, Value,
-    ROUTE_TIMEOUT_MS,
+    json, Arc, ClientRouting, Ordering, RouteAdmission, Supervisor, Value, ROUTE_TIMEOUT_MS,
 };
+// The only use sits behind the unix update-drain arm below.
+#[cfg(unix)]
+use super::PrepareState;
 
 /// The non-update `daemon_closing` frame (the shutdown command's and the
 /// OS-signal drain's shared spelling): every connected client learns the
