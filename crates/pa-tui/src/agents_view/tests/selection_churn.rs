@@ -2,6 +2,7 @@
 //! re-pushes, and the list window that keeps the selection visible.
 
 use super::*;
+use ratatui::style::Modifier;
 
 /// A multi-session roster for the selection-persistence probes: six
 /// idle top-level sessions with distinct activity stamps (newest
@@ -185,15 +186,26 @@ fn list_window_follows_the_selection_below_the_fold() {
     );
     assert!(!texts.iter().any(|t| t.contains("session 7")));
     assert_ne!(texts.last().map(|t| t.trim()), Some("..."));
-    // The selected row carries the selection background (its line
-    // paints over the full width; the unselected rows do not).
+    // The selected row carries the ONE shared selection style (the
+    // operator's 2026-09-28 consistency rule: the agents view's
+    // selected rows paint the same purple band and bold the dock's
+    // groups, the heartbeats picker, and the shell view carry —
+    // `Theme::selection_row_style`, one constant).
     let selected_line = mode.render_list(120, 8, 0);
+    let band = mode.theme.selection_row_style();
     let painted = selected_line
         .iter()
-        .any(|line| line.iter().any(|span| span.style.bg.is_some()));
+        .find(|line| line.iter().any(|span| span.style.bg.is_some()))
+        .expect("the selected row renders with the selection background");
     assert!(
-        painted,
-        "the selected row renders with the selection background"
+        painted.iter().all(|span| span.style.bg == band.bg),
+        "every span of the selected row carries the shared purple band: {painted:?}"
+    );
+    assert!(
+        painted
+            .iter()
+            .all(|span| span.style.add_modifier.contains(Modifier::BOLD)),
+        "every span of the selected row carries the bold modifier: {painted:?}"
     );
     // Arrow back to the top: the leading ellipsis goes away and the
     // first rows render behind the legend again.

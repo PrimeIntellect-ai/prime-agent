@@ -1,3 +1,22 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
+// by design on hot paths (boxing 130 fns is allocation-churn with zero
+// correctness gain); the fn-length threshold is a style gate, not
+// correctness (the harness fns are intentionally linear); 64-bit targets -
+// the narrowing sits at OS/protocol boundaries where the values are
+// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
+// guarded parses), and checked conversions would add panic paths where
+// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
+// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
+// dossier for the conductor).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! End-to-end RPC-mode verification: the real binary serves the TS
 //! `modes/rpc` JSONL command surface over stdio, driven by the scripted
 //! faux provider. Covers the protocol contract (response shapes, parse
@@ -89,7 +108,7 @@ impl RpcChild {
         }
     }
 
-    fn send(&mut self, frame: Value) {
+    fn send(&mut self, frame: &Value) {
         let mut line = serde_json::to_string(&frame).unwrap();
         line.push('\n');
         let stdin = self.stdin.as_mut().expect("stdin piped");
@@ -102,7 +121,7 @@ impl RpcChild {
         let id = format!("t-{}", self.next_id);
         let mut frame = command.clone();
         frame["id"] = json!(id);
-        self.send(frame);
+        self.send(&frame);
         id
     }
 
@@ -234,7 +253,7 @@ impl Drop for RpcChild {
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 
-fn turn_script(steps: Value) -> Value {
+fn turn_script(steps: &Value) -> Value {
     json!({ "responses": steps })
 }
 
@@ -244,7 +263,7 @@ fn turn_script(steps: Value) -> Value {
 fn rpc_get_state_answers_the_fresh_session() {
     let mut client = RpcChild::spawn(
         &["--mode", "rpc", "--no-session"],
-        &turn_script(json!(["unused"])),
+        &turn_script(&json!(["unused"])),
     );
     let response = client.request(&json!({ "type": "get_state" }));
     assert_eq!(response["success"], true, "the response: {response}");
@@ -276,7 +295,7 @@ fn rpc_get_state_answers_the_fresh_session() {
 fn rpc_prompt_streams_events_after_the_response() {
     let mut client = RpcChild::spawn(
         &["--mode", "rpc", "--no-session"],
-        &turn_script(json!(["first reply"])),
+        &turn_script(&json!(["first reply"])),
     );
     let id = client.command(&json!({ "type": "prompt", "message": "hi" }));
     let (response, before) = client.wait_response(&id, TIMEOUT);
@@ -318,11 +337,11 @@ fn rpc_prompt_streams_events_after_the_response() {
 fn rpc_parse_and_unknown_command_errors() {
     let mut client = RpcChild::spawn(
         &["--mode", "rpc", "--no-session"],
-        &turn_script(json!(["unused"])),
+        &turn_script(&json!(["unused"])),
     );
     // A non-object line answers the parse error (no id to match on, so
     // match the command name).
-    client.send(json!("not an object"));
+    client.send(&json!("not an object"));
     let deadline = Instant::now() + TIMEOUT;
     let parse_error = loop {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -339,7 +358,7 @@ fn rpc_parse_and_unknown_command_errors() {
         parse_error["error"],
         "Invalid command: expected an object with a string type"
     );
-    client.send(json!({ "type": "definitely_not_a_command" }));
+    client.send(&json!({ "type": "definitely_not_a_command" }));
     let deadline = Instant::now() + TIMEOUT;
     let unknown = loop {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -526,7 +545,7 @@ fn rpc_thinking_level_set_and_cycle() {
 fn rpc_compact_answers_the_ts_skip_error() {
     let mut client = RpcChild::spawn(
         &["--mode", "rpc", "--no-session"],
-        &turn_script(json!(["unused"])),
+        &turn_script(&json!(["unused"])),
     );
     let id = client.command(&json!({ "type": "compact" }));
     let (response, events) = client.wait_response(&id, TIMEOUT);
@@ -558,7 +577,7 @@ fn rpc_compact_answers_the_ts_skip_error() {
 fn rpc_daemon_mode_families_answer_the_ts_inprocess_semantics() {
     let mut client = RpcChild::spawn(
         &["--mode", "rpc", "--no-session"],
-        &turn_script(json!(["unused"])),
+        &turn_script(&json!(["unused"])),
     );
     let bash = client.request(&json!({ "type": "bash", "command": "echo hi" }));
     assert_eq!(bash["success"], false);
@@ -596,7 +615,7 @@ fn rpc_daemon_mode_families_answer_the_ts_inprocess_semantics() {
 fn rpc_set_session_name_round_trip() {
     let mut client = RpcChild::spawn(
         &["--mode", "rpc", "--no-session"],
-        &turn_script(json!(["unused"])),
+        &turn_script(&json!(["unused"])),
     );
     // The changed event lands BEFORE the response: assert it among the
     // pre-response frames (a later wait would never see a copy).
@@ -622,7 +641,7 @@ fn rpc_set_session_name_round_trip() {
 /// (the persisted session-file path).
 #[test]
 fn rpc_fork_messages_and_fork_swap() {
-    let script = turn_script(json!(["one", "two"]));
+    let script = turn_script(&json!(["one", "two"]));
     let mut client = RpcChild::spawn(&["--mode", "rpc"], &script);
     for message in ["first turn", "second turn"] {
         let response = client.request(&json!({ "type": "prompt", "message": message }));
@@ -662,7 +681,7 @@ fn rpc_fork_messages_and_fork_swap() {
 /// `new_session` replaces the runtime with a fresh session.
 #[test]
 fn rpc_new_session_swaps_the_engine() {
-    let script = turn_script(json!(["one", "unused"]));
+    let script = turn_script(&json!(["one", "unused"]));
     let mut client = RpcChild::spawn(&["--mode", "rpc"], &script);
     let response = client.request(&json!({ "type": "prompt", "message": "hi" }));
     assert_eq!(response["success"], true);
@@ -689,7 +708,7 @@ fn rpc_get_available_models_lists_the_catalog() {
     // the same shape).
     let mut client = RpcChild::spawn_seeded(
         &["--mode", "rpc", "--no-session"],
-        &turn_script(json!(["unused"])),
+        &turn_script(&json!(["unused"])),
         Some(json!({
             "providers": {
                 "faux": {
@@ -731,13 +750,13 @@ fn rpc_eof_settles_and_exits_zero() {
     client.wait_event("message_start", TIMEOUT);
     // Close stdin mid-turn: the child settles the turn and exits 0.
     drop(client.stdin.take());
-    let status = client
+    let wait_status = client
         .child
         .wait()
         .expect("the child exits when stdin closes");
     assert!(
-        status.success(),
-        "stdin close settles the turn and exits 0 (status {status})"
+        wait_status.success(),
+        "stdin close settles the turn and exits 0 (status {wait_status})"
     );
     client.spawn_stderr = None;
 }
@@ -746,7 +765,7 @@ fn rpc_eof_settles_and_exits_zero() {
 /// messages.
 #[test]
 fn rpc_get_session_stats_answers_the_ts_shape() {
-    let script = turn_script(json!(["one"]));
+    let script = turn_script(&json!(["one"]));
     let mut client = RpcChild::spawn(&["--mode", "rpc"], &script);
     let response = client.request(&json!({ "type": "prompt", "message": "hi" }));
     assert_eq!(response["success"], true);
@@ -773,15 +792,18 @@ fn rpc_get_session_stats_answers_the_ts_shape() {
 fn rpc_mode_never_prints_the_missing_subsystem_stub() {
     let mut client = RpcChild::spawn(
         &["--mode", "rpc", "--no-session"],
-        &turn_script(json!(["unused"])),
+        &turn_script(&json!(["unused"])),
     );
     // Any answered command proves the transport is live; the stub would
     // exit 1 immediately with the misleading error on stderr/stdout.
     let response = client.request(&json!({ "type": "get_state" }));
     assert_eq!(response["success"], true);
     drop(client.stdin.take());
-    let status = client.child.wait().expect("exit");
-    assert!(status.success(), "the mode serves the protocol: {status}");
+    let wait_status = client.child.wait().expect("exit");
+    assert!(
+        wait_status.success(),
+        "the mode serves the protocol: {wait_status}"
+    );
     client.spawn_stderr = None;
 }
 
@@ -791,7 +813,7 @@ fn rpc_mode_never_prints_the_missing_subsystem_stub() {
 /// unleased): the owner record exists while the engine is live.
 #[test]
 fn rpc_fresh_sessions_lease_their_files() {
-    let mut client = RpcChild::spawn(&["--mode", "rpc"], &turn_script(json!(["one"])));
+    let mut client = RpcChild::spawn(&["--mode", "rpc"], &turn_script(&json!(["one"])));
     let response = client.request(&json!({ "type": "prompt", "message": "hi" }));
     assert_eq!(response["success"], true);
     client.wait_event("agent_end", TIMEOUT);
@@ -806,8 +828,11 @@ fn rpc_fresh_sessions_lease_their_files() {
         "the fresh session's file is runtime-leased while the engine is live (leased: {leased:?})"
     );
     drop(client.stdin.take());
-    let status = client.child.wait().expect("exit");
-    assert!(status.success(), "eof settles the leased session: {status}");
+    let wait_status = client.child.wait().expect("exit");
+    assert!(
+        wait_status.success(),
+        "eof settles the leased session: {wait_status}"
+    );
     client.spawn_stderr = None;
 }
 
@@ -816,7 +841,7 @@ fn rpc_fresh_sessions_lease_their_files() {
 /// second writer while this engine appends (the source is only read).
 #[test]
 fn rpc_fork_leases_the_materialized_file() {
-    let mut source = RpcChild::spawn(&["--mode", "rpc"], &turn_script(json!(["one"])));
+    let mut source = RpcChild::spawn(&["--mode", "rpc"], &turn_script(&json!(["one"])));
     let response = source.request(&json!({ "type": "prompt", "message": "hi" }));
     assert_eq!(response["success"], true);
     source.wait_event("agent_end", TIMEOUT);
@@ -826,13 +851,16 @@ fn rpc_fork_leases_the_materialized_file() {
         .expect("the source session reports its file")
         .to_string();
     drop(source.stdin.take());
-    let status = source.child.wait().expect("the source exits cleanly");
-    assert!(status.success(), "the source session settles: {status}");
+    let wait_status = source.child.wait().expect("the source exits cleanly");
+    assert!(
+        wait_status.success(),
+        "the source session settles: {wait_status}"
+    );
     source.spawn_stderr = None;
 
     let mut forked = RpcChild::spawn(
         &["--mode", "rpc", "--fork", &source_file],
-        &turn_script(json!(["hi there"])),
+        &turn_script(&json!(["hi there"])),
     );
     let response = forked.request(&json!({ "type": "prompt", "message": "again" }));
     assert_eq!(response["success"], true);
@@ -849,8 +877,11 @@ fn rpc_fork_leases_the_materialized_file() {
         "the fork's materialized file is runtime-leased (leased: {leased:?})"
     );
     drop(forked.stdin.take());
-    let status = forked.child.wait().expect("exit");
-    assert!(status.success(), "eof settles the forked session: {status}");
+    let wait_status = forked.child.wait().expect("exit");
+    assert!(
+        wait_status.success(),
+        "eof settles the forked session: {wait_status}"
+    );
     forked.spawn_stderr = None;
 }
 
@@ -964,13 +995,13 @@ fn rpc_sigterm_during_replacement_exits_promptly() {
     client.wait_event("message_start", TIMEOUT);
     // The replacement queues behind the running turn's settle; SIGTERM
     // must cut through both.
-    client.send(json!({ "type": "new_session", "id": "t-replace" }));
-    let status = std::process::Command::new("kill")
+    client.send(&json!({ "type": "new_session", "id": "t-replace" }));
+    let wait_status = std::process::Command::new("kill")
         .arg("-TERM")
         .arg(client.child.id().to_string())
         .status()
         .expect("send SIGTERM");
-    assert!(status.success(), "the SIGTERM dispatch succeeded");
+    assert!(wait_status.success(), "the SIGTERM dispatch succeeded");
     // Event-gated wait: the stdout pipe closes exactly when the child
     // exits — well inside the faux turn's 30s hold.
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -986,8 +1017,8 @@ fn rpc_sigterm_during_replacement_exits_promptly() {
             }
         }
     }
-    let status = client.child.wait().expect("the signal exits the child");
-    assert_eq!(status.code(), Some(143), "SIGTERM exits 143");
+    let wait_status = client.child.wait().expect("the signal exits the child");
+    assert_eq!(wait_status.code(), Some(143), "SIGTERM exits 143");
     client.spawn_stderr = None;
 }
 
@@ -1239,7 +1270,7 @@ impl TimedRpcChild {
             use std::io::Read;
             let mut stdout = stdout;
             let mut buf: Vec<u8> = Vec::new();
-            let mut chunk = [0u8; 65536];
+            let mut chunk = vec![0u8; 65536].into_boxed_slice();
             loop {
                 match stdout.read(&mut chunk) {
                     Ok(0) | Err(_) => break,
@@ -1265,8 +1296,8 @@ impl TimedRpcChild {
         self.frames = Some(frames);
     }
 
-    fn send(&mut self, frame: Value) {
-        let mut line = serde_json::to_string(&frame).unwrap();
+    fn send(&mut self, frame: &Value) {
+        let mut line = serde_json::to_string(frame).unwrap();
         line.push('\n');
         self.stdin.write_all(line.as_bytes()).unwrap();
         self.stdin.flush().unwrap();
@@ -1278,7 +1309,7 @@ impl TimedRpcChild {
         let mut frame = command.clone();
         frame["id"] = json!(id);
         let sent = Instant::now();
-        self.send(frame);
+        self.send(&frame);
         (id, sent)
     }
 
@@ -1370,15 +1401,15 @@ fn rpc_compact_flushes_the_start_frame_before_the_pipeline() {
             _ => {}
         }
     }
-    let (cs_at, cs_event) = cs.expect("the compaction_start event");
-    let (ce_at, _) = ce.expect("the compaction_end event");
+    let (start_at, cs_event) = cs.expect("the compaction_start event");
+    let (end_at, _) = ce.expect("the compaction_end event");
     assert_eq!(cs_event["reason"], "requested");
     assert!(
         cs_event.get("result").is_none(),
         "compaction_start carries no result (TS shape)"
     );
-    let cs_ms = cs_at.duration_since(sent).as_secs_f64() * 1000.0;
-    let start_to_end_ms = ce_at.duration_since(cs_at).as_secs_f64() * 1000.0;
+    let cs_ms = start_at.duration_since(sent).as_secs_f64() * 1000.0;
+    let start_to_end_ms = end_at.duration_since(start_at).as_secs_f64() * 1000.0;
     // The flush: the start frame is visible to the client immediately
     // (a pipe write, microseconds) — well before the pre-summarizer span
     // (tens of milliseconds at this session size) could strand it.
@@ -1519,13 +1550,13 @@ fn rpc_prompt_admitted_compact_frames_flush_after_the_response() {
                     frame.get("type").and_then(Value::as_str) == Some("response")
                         && frame.get("id").and_then(Value::as_str) == Some(&id)
                 });
-                let has_cs = seen.iter().any(|frame: &Value| {
+                let has_start = seen.iter().any(|frame: &Value| {
                     frame.get("type").and_then(Value::as_str) == Some("compaction_start")
                 });
-                let has_ce = seen.iter().any(|frame: &Value| {
+                let has_end = seen.iter().any(|frame: &Value| {
                     frame.get("type").and_then(Value::as_str) == Some("compaction_end")
                 });
-                if seen_response && has_cs && has_ce {
+                if seen_response && has_start && has_end {
                     break;
                 }
             }
@@ -1553,18 +1584,18 @@ fn rpc_prompt_admitted_compact_frames_flush_after_the_response() {
         .expect("the prompt response");
     let response = &seen[response_at];
     assert_eq!(response["success"], true, "the response: {response}");
-    let cs_at = position("compaction_start")
+    let start_at = position("compaction_start")
         .expect("the buffered compaction_start flushed with the response window");
-    let ce_at = position("compaction_end")
+    let end_at = position("compaction_end")
         .expect("the buffered compaction_end flushed with the response window");
     assert!(
-        response_at < cs_at,
+        response_at < start_at,
         "the TS promptResponsePending contract: the prompt response (at {response_at}) \
-         must precede the buffered compaction_start (at {cs_at})"
+         must precede the buffered compaction_start (at {start_at})"
     );
     assert!(
-        cs_at < ce_at,
-        "compaction_end (at {ce_at}) must follow compaction_start (at {cs_at})"
+        start_at < end_at,
+        "compaction_end (at {end_at}) must follow compaction_start (at {start_at})"
     );
-    assert_eq!(seen[cs_at]["reason"], "requested");
+    assert_eq!(seen[start_at]["reason"], "requested");
 }

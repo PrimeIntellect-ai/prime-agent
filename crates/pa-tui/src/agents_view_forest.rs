@@ -1,22 +1,20 @@
 //! The agents-view subagent forest: how unified records nest into the
 //! session list's rows. One pass computes the record hierarchy (parent
 //! linkage, rollups), then row building emits top-level agents with their
-//! subagent summary lines and, when a line is expanded, its nested
+//! subagent summary line and, when the line is expanded, its nested
 //! children. Selection resolution and ancestry walks over that row tree
 //! live here too. Pure functions on the wire forms (roster summaries and
 //! saved-catalog rows); the view module owns input and painting.
 //!
-//! Operator directive (2026-09-25, deliberate TS divergence): a parent
-//! with running descendants carries TWO summary lines. The running line
-//! titles `"{direct}, {nested} running"` (direct = immediately running
-//! children, nested = further running descendants below them) and expands
-//! to ONLY running rows — flattened through non-running ancestors so a
-//! `0, N running` line still reveals its nested workers. The inactive
-//! line titles `"{n} inactive subagent(s)"` and expands to the
-//! not-running children, so historical agents stay discoverable without
-//! contaminating the running expansion. TS `createSubagentSummaryRow`
-//! instead titles one `"{n} subagents running"` / `"{n} subagents"` line
-//! that expands to every child.
+//! Operator directive (2026-09-28): a parent with descendants carries ONE
+//! summary line — `"{total} subagents ({running} running)"` — that
+//! expands to the FULL roster in one group, the running rows first (with
+//! their running state), the inactive after, every child rendering in
+//! place with its own nested line. TS parity: TS
+//! `createSubagentSummaryRow` titles one `"{n} subagents running"` /
+//! `"{n} subagents"` line that expands to every child — the same
+//! one-line shape, with the operator's both-counts label as a
+//! sanctioned divergence.
 
 use serde_json::Value;
 
@@ -78,27 +76,22 @@ pub struct AgentsViewRow {
 pub enum RowKind {
     /// A top-level agent row.
     Agent,
-    /// The running/inactive summary lines under an agent (TS
-    /// `subagent-summary`, split by the operator's 2026-09-25
-    /// directive).
+    /// The subagents summary line under an agent (TS
+    /// `subagent-summary`; the operator's 2026-09-28 one-line merge).
     SubagentSummary,
     /// A nested child row inside an expanded list (TS `subagent`).
     Subagent,
 }
 
-/// The running line's identity prefix (TS `subagent-summary` keeps the
+/// The summary line's identity prefix (TS `subagent-summary` keeps the
 /// `subagents:` prefix, so a carried selection restores onto it).
 pub(crate) const SUMMARY_ROW_PREFIX: &str = "subagents:";
-/// The inactive line's identity prefix (the operator's historical
-/// agents' separate line).
-pub(crate) const INACTIVE_SUMMARY_ROW_PREFIX: &str = "subagents-inactive:";
 
-/// Whether a row identity is one of a parent's summary lines (the
-/// running or the inactive line): such identities pin selection
-/// fallbacks to summary rows, which reuse their parent's session key,
-/// and the inactive prefix drives the toggle's expansion-set dispatch.
+/// Whether a row identity is one of a parent's summary lines: such
+/// identities pin selection fallbacks to summary rows, which reuse
+/// their parent's session key.
 pub(crate) fn is_summary_row_identity(identity: &str) -> bool {
-    identity.starts_with(SUMMARY_ROW_PREFIX) || identity.starts_with(INACTIVE_SUMMARY_ROW_PREFIX)
+    identity.starts_with(SUMMARY_ROW_PREFIX)
 }
 
 impl AgentsViewRow {

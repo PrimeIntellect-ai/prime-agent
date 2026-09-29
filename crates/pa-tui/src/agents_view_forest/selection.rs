@@ -38,8 +38,8 @@ pub fn ancestor_session_ids(rows: &[AgentsViewRow], parent_identity: Option<&str
 /// `resolveAgentsViewSelectionState`): the row identity wins, then the
 /// active session id, then the session id; an unresolvable anchor keeps
 /// the bounded current index, else the first selectable row. A summary
-/// line identity (running or inactive) pins the fallbacks to summary
-/// rows, which reuse their parent's session key.
+/// line identity pins the fallbacks to summary rows, which reuse their
+/// parent's session key.
 pub fn resolve_selection(
     rows: &[AgentsViewRow],
     current: usize,

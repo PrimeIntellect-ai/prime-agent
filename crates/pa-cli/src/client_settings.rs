@@ -22,25 +22,19 @@ impl CliClientSettings {
         Arc::new(Self { cwd, agent_dir })
     }
 
-    fn manager(&self) -> Result<pa_core::settings::SettingsManager> {
-        Ok(pa_core::settings::SettingsManager::create(
-            &self.cwd,
-            &self.agent_dir,
-        ))
+    fn manager(&self) -> pa_core::settings::SettingsManager {
+        pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir)
     }
 }
 
 macro_rules! setting {
     ($get:ident, $set:ident, $getter:ident, $setter:ident, $ty:ty) => {
         fn $get(&self) -> $ty {
-            match self.manager() {
-                Ok(manager) => manager.$getter(),
-                Err(_) => Default::default(),
-            }
+            self.manager().$getter()
         }
 
         fn $set(&self, value: $ty) -> Result<()> {
-            self.manager()?.$setter(value)
+            self.manager().$setter(value)
         }
     };
 }
@@ -48,37 +42,30 @@ macro_rules! setting {
 macro_rules! str_setting {
     ($get:ident, $set:ident, $getter:ident, $setter:ident) => {
         fn $get(&self) -> String {
-            match self.manager() {
-                Ok(manager) => manager.$getter().to_string(),
-                Err(_) => String::new(),
-            }
+            self.manager().$getter().to_string()
         }
 
         fn $set(&self, value: &str) -> Result<()> {
-            self.manager()?.$setter(value)
+            self.manager().$setter(value)
         }
     };
 }
 
 impl ClientSettings for CliClientSettings {
     fn theme(&self) -> Option<String> {
-        self.manager().ok()?.get_theme().map(str::to_string)
+        self.manager().get_theme().map(str::to_string)
     }
 
     fn set_theme(&self, theme: &str) -> Result<()> {
-        self.manager()?.set_theme(theme.to_string())
+        self.manager().set_theme(theme.to_string())
     }
 
     fn default_service_tier(&self) -> String {
         // The wire name of the persisted default tier (TS
         // `getDefaultServiceTier()`), "default" when unset or unreadable.
-        self.manager()
+        serde_json::to_value(self.manager().get_default_service_tier())
             .ok()
-            .and_then(|manager| {
-                serde_json::to_value(manager.get_default_service_tier())
-                    .ok()
-                    .and_then(|value| value.as_str().map(str::to_string))
-            })
+            .and_then(|value| value.as_str().map(str::to_string))
             .unwrap_or_else(|| "default".to_string())
     }
 
@@ -86,7 +73,7 @@ impl ClientSettings for CliClientSettings {
         let parsed: pa_types::ai::ServiceTier =
             serde_json::from_value(serde_json::Value::String(tier.to_string()))
                 .map_err(|error| anyhow::anyhow!("Invalid service tier \"{tier}\": {error}"))?;
-        self.manager()?.set_default_service_tier(parsed)
+        self.manager().set_default_service_tier(parsed)
     }
 
     setting!(
@@ -126,7 +113,7 @@ impl ClientSettings for CliClientSettings {
     );
 
     fn image_model(&self) -> Option<String> {
-        self.manager().ok()?.get_image_model()
+        self.manager().get_image_model()
     }
     setting!(
         enable_skill_commands,
@@ -205,7 +192,7 @@ impl ClientSettings for CliClientSettings {
     /// `updateChannel`: the settings enum's wire value; unset reads as
     /// `None` (TS's global-only `getUpdateChannel`).
     fn update_channel(&self) -> Option<String> {
-        let channel = self.manager().ok()?.get_update_channel()?;
+        let channel = self.manager().get_update_channel()?;
         Some(
             match channel {
                 pa_core::settings::UpdateChannel::Stable => "stable",
@@ -221,14 +208,13 @@ impl ClientSettings for CliClientSettings {
             "nightly" => pa_core::settings::UpdateChannel::Nightly,
             _ => anyhow::bail!("unknown update channel: {channel}"),
         };
-        self.manager()?.set_update_channel(channel)
+        self.manager().set_update_channel(channel)
     }
 
     fn effective_update_channel(&self, version: &str) -> String {
         let preferred = self
             .manager()
-            .ok()
-            .and_then(|manager| manager.get_update_channel())
+            .get_update_channel()
             .map(|channel| match channel {
                 pa_core::settings::UpdateChannel::Stable => {
                     pa_core::update::version::UpdateChannel::Stable

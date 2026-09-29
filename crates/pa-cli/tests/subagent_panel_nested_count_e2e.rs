@@ -1,3 +1,22 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
+// by design on hot paths (boxing 130 fns is allocation-churn with zero
+// correctness gain); the fn-length threshold is a style gate, not
+// correctness (the harness fns are intentionally linear); 64-bit targets -
+// the narrowing sits at OS/protocol boundaries where the values are
+// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
+// guarded parses), and checked conversions would add panic paths where
+// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
+// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
+// dossier for the conductor).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! End-to-end verifier for the subagent panel's nested counts: a
 //! two-level spawn through the real supervisor — a root session's child
 //! that itself spawns a grandchild — must surface BOTH descendants on
@@ -102,7 +121,7 @@ impl Client {
         client
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -151,7 +170,7 @@ impl Client {
 
     /// The full roster snapshot (`roster_subscribe`).
     fn roster(&mut self, id: &str) -> Vec<Value> {
-        self.send_command(id, json!({ "type": "roster_subscribe" }));
+        self.send_command(id, &json!({ "type": "roster_subscribe" }));
         let response = self.read_response(id);
         assert!(response["success"].as_bool().unwrap_or(false), "{response}");
         response["data"]["roster"]
