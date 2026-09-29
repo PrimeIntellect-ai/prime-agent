@@ -415,7 +415,7 @@ describe("Agent", () => {
 		expect(agent.state.isStreaming).toBe(false);
 	});
 
-	it("should preserve the original failure when the recovery agent_end listener throws", async () => {
+	it("preserves the original failure and the run's model when the recovery agent_end listener throws", async () => {
 		const agent = new Agent({
 			streamFn: () => {
 				const stream = new MockAssistantStream();
@@ -425,6 +425,7 @@ describe("Agent", () => {
 				return stream;
 			},
 		});
+		agent.modelOverride = { model: { ...agent.state.model, id: "routed" }, thinkingLevel: "off", serviceTier: null };
 		const events: string[] = [];
 		agent.subscribe((event) => {
 			events.push(event.type);
@@ -432,6 +433,7 @@ describe("Agent", () => {
 				throw new Error("agent_end listener failed");
 			}
 			if ((event.type === "message_start" || event.type === "message_end") && event.message.role === "assistant") {
+				agent.modelOverride = undefined;
 				throw new Error("original listener failure");
 			}
 		});
@@ -443,6 +445,7 @@ describe("Agent", () => {
 		const lastMessage = agent.state.messages.at(-1);
 		expect(lastMessage?.role).toBe("assistant");
 		if (lastMessage?.role === "assistant") {
+			expect(lastMessage.model).toBe("routed");
 			expect(lastMessage.stopReason).toBe("error");
 			expect(lastMessage.errorMessage).toBe("original listener failure");
 		}
