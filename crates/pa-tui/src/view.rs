@@ -164,10 +164,6 @@ pub struct AgentView {
     /// true): image blocks render their metadata rows when set, their
     /// `[Image: ...]` text placeholders otherwise.
     pub show_images: bool,
-    /// The runtime `terminal.fullscreen` preference (TS `fullscreenEnabled`):
-    /// the fullscreen compose pins the top bar; the inline surface (TS
-    /// `fullscreen rendering off`) renders without it.
-    pub fullscreen: bool,
     /// The `showHardwareCursor` setting (TS default false): the hardware
     /// cursor is positioned at the focused caret for IME on every frame
     /// either way, but only shown when this is set — TS keeps the
@@ -370,7 +366,6 @@ impl AgentView {
             settings_menu: None,
             info_panel: None,
             show_images: true,
-            fullscreen: true,
             show_hardware_cursor: false,
             splash_suppressed: false,
             scroll_top: 0,
@@ -1429,10 +1424,12 @@ impl AgentView {
         } else {
             picker_dock
         };
-        let top = self
-            .fullscreen
-            .then(|| render_top_bar(&self.chrome, &self.theme, width));
-        let top_rows = usize::from(top.is_some());
+        // The top bar always renders: the surface is fullscreen-only
+        // (the operator's 2026-09-28 retirement ruling — the
+        // non-fullscreen render path never existed, so the preference
+        // and its toggle are gone and the bar has no gate left).
+        let top = render_top_bar(&self.chrome, &self.theme, width);
+        let top_rows = 1;
         let dock = match selector_dock {
             // The replacement surfaces swap only the editor part of the
             // dock; the `/speed` footer stays the dock's last row under
@@ -1475,9 +1472,7 @@ impl AgentView {
         // touched re-style; the rest reuse the cached styled rows.
         let window_rows = self.selection_styled_window(window_rows, start);
         let mut frame: Vec<Line> = Vec::with_capacity(height);
-        if let Some(top) = top {
-            frame.push(pad_row(top, width));
-        }
+        frame.push(pad_row(top, width));
         for line in window_rows {
             frame.push(pad_row(line, width));
         }
