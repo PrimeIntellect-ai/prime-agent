@@ -414,6 +414,7 @@ impl AgentView {
             .resize_with(self.chat.len(), || [None, None, None]);
         self.entry_heights
             .resize(self.chat.len(), [None, None, None]);
+        self.seed_pending_handoff();
     }
 
     pub(super) fn render_transcript_tail(&self, width: usize) -> Vec<Line> {
@@ -576,5 +577,43 @@ impl AgentView {
             out.extend(source.range(from, to));
         }
         offset + source.len()
+    }
+    /// The cross-view layout handoff's seed (see `view::handoff`): a
+    /// held handoff whose render shape matches this preparation places
+    /// its visible-window packs into the (fresh or wiped) layout cache
+    /// so the first window build serves them instead of re-rendering —
+    /// the reuse is the byte-exact expansion of rows a fresh render of
+    /// the same entries would produce (pack storage is output-neutral,
+    /// the tui-scroll-retain2 contract). A shape mismatch (a resize, a
+    /// theme/settings change, an image-fallback flip since the handoff)
+    /// or a handoff whose entry indices fall outside this transcript
+    /// drops the affected packs — the window re-renders exactly as
+    /// before this cut.
+    fn seed_pending_handoff(&mut self) {
+        let Some(handoff) = self.pending_handoff.take() else {
+            return;
+        };
+        let (width, options) = match self.layout_options.as_ref() {
+            // The branch above leaves the view's layout state equal to
+            // this draw's shape (it either just set it or found it
+            // unchanged), so the held packs validate against the view's
+            // own current shape without re-deriving it.
+            Some(options) => (self.layout_width, options),
+            None => return,
+        };
+        if handoff.shape.0 != width || &handoff.shape.1 != options {
+            return;
+        }
+        for (index, slots) in handoff.packs {
+            let Some(target) = self.entry_layout.get_mut(index) else {
+                continue;
+            };
+            for (detail, slot) in slots.into_iter().enumerate() {
+                if slot.is_some() {
+                    target[detail] = slot;
+                    self.sparse_entries.insert(index);
+                }
+            }
+        }
     }
 }

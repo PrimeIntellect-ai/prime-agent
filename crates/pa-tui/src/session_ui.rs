@@ -122,6 +122,18 @@ pub(crate) struct SessionUi {
     pub(crate) client: DaemonClient,
     pub(crate) active_session_id: String,
     pub(crate) session_id: String,
+    /// The worker generation of this run's attach (the resume cursor's
+    /// generation): the cross-view layout handoff's key (`view::handoff`)
+    /// pairs it with the attach's event sequence so a restarted worker
+    /// can never serve a stale handoff.
+    pub(crate) attach_event_generation: String,
+    /// The event sequence of this run's attach — the same monotonic
+    /// counter the resume cursor rides. The layout handoff stores this
+    /// value at the run's handoff and adopts only on the next attach's
+    /// exact match: every transcript change rides an event, so a match
+    /// means the entries the handoff's packs were rendered from are
+    /// exactly the ones the re-entry rebuilt (`view::handoff`).
+    pub(crate) attach_event_sequence: u64,
     session_name: Option<String>,
     /// Config carried over from the run options; `/new` sessions reuse it.
     cwd: PathBuf,
@@ -644,6 +656,8 @@ impl SessionUi {
             client,
             active_session_id: String::new(),
             session_id: String::new(),
+            attach_event_generation: String::new(),
+            attach_event_sequence: 0,
             session_name: None,
             cwd: options.cwd.clone(),
             session_dir: options.session_dir.clone(),
@@ -1015,6 +1029,9 @@ impl SessionUi {
                 .await;
         }
         self.session_id = reconstructed.session_id;
+        self.attach_event_generation
+            .clone_from(&reconstructed.event_generation);
+        self.attach_event_sequence = reconstructed.last_event_sequence;
         // The closing notice is per-connection (TS #2458: it clears on
         // every attach): a later bare session stop must not route into a
         // stale shutdown recovery's reconnect hang.

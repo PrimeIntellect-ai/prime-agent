@@ -456,6 +456,20 @@ async fn run_interactive_surface(
     // composition-root snapshot keeps serving the picker.
     session.spawn_model_catalog_refresh();
     session.rebuild_view(&mut view, crate::session_ui::RebuildKind::Rebind);
+    // The cross-view layout handoff's adopt (view::handoff): a re-entry
+    // whose attach cursor exactly matches the previous run's held
+    // handoff — the same worker, the same event sequence, the same entry
+    // count, i.e. a transcript unchanged since the run just left —
+    // holds its visible-window packs for the first draw. The first
+    // layout preparation validates the render shape, and any chat
+    // mutation after this point retires the handoff (the notice folds
+    // below included — a startup notice changes the transcript, so the
+    // re-entry conservatively re-renders on boxes that show one).
+    view.adopt_layout_handoff(
+        &session.session_id,
+        &session.attach_event_generation,
+        session.attach_event_sequence,
+    );
     if let Some(notice) = check_tmux_keyboard_setup().await {
         view.push_entry(crate::chat::ChatEntry::Status {
             text: format!("\u{26a0} {notice}"),
@@ -1827,6 +1841,17 @@ async fn run_interactive_surface(
     // run's binding (a held draft stays in the store for the next view).
     if session.open_agents_view || session.pending_selection.is_some() {
         session.stash_draft_for_agents_view(&view);
+        // The cross-view layout handoff (view::handoff): hold the last
+        // frame's visible-window packs keyed by this run's attach cursor,
+        // so the unchanged-session re-entry's first draw reuses them
+        // instead of re-rendering the window (the process keeps running
+        // through the agents view; every changed attach misses and
+        // re-renders exactly as before).
+        view.stash_layout_handoff(
+            &session.session_id,
+            &session.attach_event_generation,
+            session.attach_event_sequence,
+        );
     }
     session.release_prompt_stash_session();
     // TS `shutdown` fetches the session stats while the connection is

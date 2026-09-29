@@ -58,6 +58,12 @@ pub struct Reconstructed {
     pub session_name: Option<String>,
     /// Session id of the persisted session file.
     pub session_id: String,
+    /// The worker generation of the attach's event cursor (the resume
+    /// protocol's generation): disambiguates event-sequence values
+    /// across worker restarts for the cross-view layout handoff's key
+    /// (`view::handoff`) — a restarted worker's sequence restarts, so the
+    /// generation must match too.
+    pub event_generation: String,
     /// The session's goal state (`state.goal`), when the snapshot reports
     /// one (TS `snapshot.ts: goal: session.goalState`).
     pub goal: Option<pa_types::goal::GoalState>,
@@ -353,6 +359,18 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         .and_then(Value::as_u64)
         .or(attach.last_event_sequence)
         .unwrap_or_default();
+    let event_generation = attach
+        .last_event_cursor
+        .as_ref()
+        .map(|cursor| cursor.generation.clone())
+        .or_else(|| {
+            snapshot
+                .get("lastEventCursor")
+                .and_then(|cursor| cursor.get("generation"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
     let goal = state
         .and_then(|state| state.get("goal"))
         .and_then(|goal| serde_json::from_value::<pa_types::goal::GoalState>(goal.clone()).ok());
@@ -388,6 +406,7 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         thinking_suffix,
         session_name,
         session_id,
+        event_generation,
         goal,
         last_event_sequence,
         queued,

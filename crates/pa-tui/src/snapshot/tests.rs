@@ -744,6 +744,10 @@ fn reconstructs_slim_attach() {
     assert_eq!(view.session_id, "0199-sess");
     assert_eq!(view.session_name.as_deref(), Some("my session"));
     assert_eq!(view.last_event_sequence, 9);
+    assert_eq!(
+        view.event_generation, "g",
+        "the cursor's generation reconstructs for the layout handoff's key"
+    );
 }
 
 /// TS `getModelContextLabel`: the attach snapshot's state carries the
