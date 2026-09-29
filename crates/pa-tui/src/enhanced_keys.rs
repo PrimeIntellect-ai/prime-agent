@@ -59,6 +59,8 @@
 use anyhow::Result;
 use std::io::{IsTerminal, Stdout, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
+// The probe's answer channel is unix-only (see `spawn_kitty_probe`).
+#[cfg(unix)]
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -92,6 +94,7 @@ const PRE_POP_KITTY_FLAGS: &[u8] = b"\x1b[<u";
 const MODIFY_OTHER_KEYS_RESET: &[u8] = b"\x1b[>4;0m";
 /// TS `keyboardProtocolFallbackTimer`: the window the kitty answer gets
 /// before the modifyOtherKeys fallback fires.
+#[cfg(unix)]
 const KITTY_QUERY_FALLBACK: Duration = Duration::from_millis(150);
 
 static BRACKETED_PASTE_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -501,6 +504,7 @@ fn write_all(out: &mut Stdout, sequence: &[u8]) -> Result<()> {
 /// arrives). Skipped when the surface that started the probe is already
 /// gone — a stray enable would leave the flags pushed over the next
 /// surface's own setup.
+#[cfg(unix)]
 fn enable_kitty(out: &mut Stdout) {
     // The capability is the durable truth: a later start re-applies the
     // flags from it even when this push stands down for the exit.
@@ -527,6 +531,9 @@ fn enable_kitty(out: &mut Stdout) {
 /// then settle. An answer within crossterm's patched 250ms query window
 /// enables kitty; no answer settles with no enhanced modes (this port
 /// never arms the modifyOtherKeys fallback — see the module docs).
+/// The kitty probe is unix-only: the vendored crossterm's raw-read
+/// support check exists only on unix (cfg(all(unix, feature = "events"))).
+#[cfg(unix)]
 fn spawn_kitty_probe() {
     let probe = std::thread::Builder::new()
         .name("tui-kitty-probe".to_string())
@@ -625,6 +632,15 @@ fn spawn_kitty_probe() {
         // Out of thread resources: no probe, no modes — plain key input.
         QUERY_IN_FLIGHT.store(false, Ordering::SeqCst);
     }
+}
+
+/// Windows has no kitty keyboard protocol probe: the capability settles
+/// as probed-but-unsupported (the same settle the no-answer probe path
+/// takes) and the query window closes.
+#[cfg(not(unix))]
+fn spawn_kitty_probe() {
+    KITTY_PROBED.store(true, Ordering::SeqCst);
+    QUERY_IN_FLIGHT.store(false, Ordering::SeqCst);
 }
 
 #[cfg(test)]
@@ -790,6 +806,9 @@ mod tests {
         assert!(!enhanced_keys_active());
     }
 
+    // The late-answer standdown is the unix probe's answer path (kitty
+    // protocol + raw modes do not exist on the non-unix targets).
+    #[cfg(unix)]
     #[test]
     fn release_for_exit_stands_a_late_probe_answer_down() {
         let _lock = lock_state();
