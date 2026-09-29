@@ -9,6 +9,31 @@
 //!
 //! Linux-only e2e (`AF_UNIX` sockets, `/proc`, pidfd signaling): compiles
 //! to nothing elsewhere, like the other pa-daemon e2e verifiers.
+// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
+// the full rationale).
+// Stack-resident futures by design on the daemon's hot paths; boxing the
+// call sites for a lint tick is a perf regression with zero correctness gain.
+#![allow(clippy::large_futures)]
+// 64-bit-only targets; the narrowing casts sit at OS boundaries
+// (pid/fd/time/size) where the values are bounded by the kernel - the
+// dead-guard expect()s would add panic paths where silent wrap was
+// deliberate.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// The fn-length threshold is a style gate, not correctness; the structure
+// campaign owns the god-fn splits as a follow-up.
+#![allow(clippy::too_many_lines)]
+// API-shape opinions, not defects; the surfaces are deliberate.
+#![allow(
+    clippy::unnecessary_wraps,
+    clippy::zero_sized_map_values,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names
+)]
 #![cfg(target_os = "linux")]
 
 use std::io::{BufRead, BufReader, Write};
@@ -118,7 +143,7 @@ impl Client {
         }
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let mut line = serde_json::to_string(&json!({
             "type": "command",
             "id": id,
@@ -131,7 +156,7 @@ impl Client {
         self.writer.flush().expect("flush");
     }
 
-    fn request(&mut self, id: &str, command: Value) -> Value {
+    fn request(&mut self, id: &str, command: &Value) -> Value {
         self.send_command(id, command);
         loop {
             let response = self.read_line();
@@ -155,7 +180,7 @@ fn create_session(client: &mut Client, id: &str, dir: &Path, agent_dir: &Path) -
     let script = write_script(dir);
     let created = client.request(
         id,
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.to_string_lossy(),
@@ -197,7 +222,7 @@ fn write_script(dir: &Path) -> PathBuf {
 fn session_file_of(client: &mut Client, active_id: &str) -> PathBuf {
     let stats = client.request(
         "stats",
-        json!({ "type": "get_session_stats", "activeSessionId": active_id }),
+        &json!({ "type": "get_session_stats", "activeSessionId": active_id }),
     );
     assert_eq!(stats["success"], true, "stats failed: {stats}");
     PathBuf::from(
@@ -290,7 +315,7 @@ fn a_hung_worker_is_killed_within_the_escalation_window_and_its_lease_frees() {
     let sent = Instant::now();
     let killed = client.request(
         "kill",
-        json!({ "type": "kill", "activeSessionId": session.active_id }),
+        &json!({ "type": "kill", "activeSessionId": session.active_id }),
     );
     let elapsed = sent.elapsed();
     assert_eq!(
@@ -338,7 +363,7 @@ fn a_hung_worker_is_killed_within_the_escalation_window_and_its_lease_frees() {
     // The session reopens (the end-user symptom of finding #5 is gone).
     let reopened = client.request(
         "reopen",
-        json!({
+        &json!({
             "type": "create",
             "sessionPath": session_file.to_string_lossy(),
             "config": {
@@ -362,7 +387,7 @@ fn a_hung_worker_is_killed_within_the_escalation_window_and_its_lease_frees() {
         .expect("reopened session id");
     let cleaned = client.request(
         "cleanup",
-        json!({ "type": "kill", "activeSessionId": reopened_id }),
+        &json!({ "type": "kill", "activeSessionId": reopened_id }),
     );
     assert_eq!(cleaned["success"], true, "cleanup kill failed: {cleaned}");
 
@@ -392,7 +417,7 @@ fn a_well_behaved_worker_keeps_the_clean_stop() {
     let sent = Instant::now();
     let killed = client.request(
         "kill",
-        json!({ "type": "kill", "activeSessionId": session.active_id }),
+        &json!({ "type": "kill", "activeSessionId": session.active_id }),
     );
     let elapsed = sent.elapsed();
     assert_eq!(killed["success"], true, "kill failed: {killed}");
@@ -428,7 +453,7 @@ fn a_well_behaved_worker_keeps_the_clean_stop() {
     drop(lease);
     let reopened = client.request(
         "reopen",
-        json!({
+        &json!({
             "type": "create",
             "sessionPath": session_file.to_string_lossy(),
             "config": {
@@ -452,7 +477,7 @@ fn a_well_behaved_worker_keeps_the_clean_stop() {
         .expect("reopened session id");
     let cleaned = client.request(
         "cleanup",
-        json!({ "type": "kill", "activeSessionId": reopened_id }),
+        &json!({ "type": "kill", "activeSessionId": reopened_id }),
     );
     assert_eq!(cleaned["success"], true, "cleanup kill failed: {cleaned}");
 

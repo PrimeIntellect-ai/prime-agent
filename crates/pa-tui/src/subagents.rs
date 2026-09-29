@@ -212,7 +212,8 @@ pub fn entry_status(entry: &Value) -> AgentRosterStatus {
 /// `countRosterSubagentStatuses`: rows of any lifecycle count on the live
 /// roster; callers that mix saved catalog rows filter their input). The
 /// running split rides the descendant depths: depth 1 counts direct,
-/// deeper counts nested (the operator's `direct, nested` pair).
+/// deeper counts nested — the two addends the dock's single running
+/// total sums (the operator's 2026-09-28 one-number readout).
 pub fn count_descendants(roster: &[Value], parent: &SessionIdentity) -> SubagentCounts {
     let mut counts = SubagentCounts::default();
     for (entry, depth) in descendant_entries_with_depth(roster, parent) {

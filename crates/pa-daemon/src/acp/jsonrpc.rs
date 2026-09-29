@@ -37,12 +37,12 @@ pub enum Incoming {
 /// malformed input, with `id: null` when the id is unknowable).
 pub fn parse_line(line: &str) -> Result<Incoming, Value> {
     let trimmed = line.trim();
-    let bad_request = || error_response(Value::Null, INVALID_REQUEST, "Invalid Request", None);
+    let bad_request = || error_response(&Value::Null, INVALID_REQUEST, "Invalid Request", None);
     let value: Value = match serde_json::from_str(trimmed) {
         Ok(value) => value,
         Err(_) => {
             return Err(error_response(
-                Value::Null,
+                &Value::Null,
                 PARSE_ERROR,
                 "Parse error",
                 None,
@@ -75,12 +75,12 @@ pub fn parse_line(line: &str) -> Result<Incoming, Value> {
 }
 
 /// A successful response frame.
-pub fn response(id: Value, result: Value) -> Value {
+pub fn response(id: &Value, result: &Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
 
 /// An error response frame. `data` rides under the error object.
-pub fn error_response(id: Value, code: i64, message: &str, data: Option<Value>) -> Value {
+pub fn error_response(id: &Value, code: i64, message: &str, data: Option<&Value>) -> Value {
     let error = match data {
         Some(data) => json!({ "code": code, "message": message, "data": data }),
         None => json!({ "code": code, "message": message }),
@@ -89,7 +89,7 @@ pub fn error_response(id: Value, code: i64, message: &str, data: Option<Value>) 
 }
 
 /// A notification frame (no id, no response expected).
-pub fn notification(method: &str, params: Value) -> Value {
+pub fn notification(method: &str, params: &Value) -> Value {
     json!({ "jsonrpc": "2.0", "method": method, "params": params })
 }
 
@@ -129,20 +129,20 @@ mod tests {
     #[test]
     fn response_shapes() {
         assert_eq!(
-            response(json!(1), json!({"stopReason": "end_turn"})),
+            response(&json!(1), &json!({"stopReason": "end_turn"})),
             json!({"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}})
         );
         assert_eq!(
             error_response(
-                json!(2),
+                &json!(2),
                 INVALID_PARAMS,
                 "Invalid params",
-                Some(json!({"details": "x"}))
+                Some(&json!({"details": "x"}))
             ),
             json!({"jsonrpc":"2.0","id":2,"error":{"code":-32602,"message":"Invalid params","data":{"details":"x"}}})
         );
         assert_eq!(
-            notification("session/update", json!({"sessionId": "s"})),
+            notification("session/update", &json!({"sessionId": "s"})),
             json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s"}})
         );
     }

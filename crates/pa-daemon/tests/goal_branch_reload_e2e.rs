@@ -111,7 +111,7 @@ impl Client {
         }
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -201,7 +201,7 @@ fn setup(name: &str) -> Harness {
     let mut client = Client::connect(&socket);
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -220,7 +220,7 @@ fn setup(name: &str) -> Harness {
         .to_string();
     client.send_command(
         "a1",
-        json!({ "type": "attach", "activeSessionId": session_id }),
+        &json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let attached = client.request("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached:?}");
@@ -246,7 +246,7 @@ impl Harness {
     fn prompt(&mut self, id: &str, message: &str) {
         self.client.send_command(
             id,
-            json!({
+            &json!({
                 "type": "prompt_and_wait",
                 "activeSessionId": self.session_id,
                 "message": message,
@@ -262,7 +262,7 @@ impl Harness {
     fn prompt_racing_the_loop(&mut self, id: &str, message: &str) {
         self.client.send_command(
             id,
-            json!({
+            &json!({
                 "type": "prompt_and_wait",
                 "activeSessionId": self.session_id,
                 "message": message,
@@ -326,7 +326,7 @@ impl Harness {
     fn flat_entries(&mut self, id: &str) -> Vec<Value> {
         self.client.send_command(
             id,
-            json!({ "type": "get_session_tree", "activeSessionId": self.session_id }),
+            &json!({ "type": "get_session_tree", "activeSessionId": self.session_id }),
         );
         let tree = self.client.request(id);
         assert_eq!(tree["success"], true, "get_session_tree failed: {tree:?}");
@@ -339,7 +339,7 @@ impl Harness {
     fn navigate(&mut self, id: &str, target_id: &str, summarize: bool) -> Value {
         self.client.send_command(
             id,
-            json!({
+            &json!({
                 "type": "navigate_tree",
                 "activeSessionId": self.session_id,
                 "targetId": target_id,

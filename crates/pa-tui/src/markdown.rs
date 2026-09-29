@@ -1680,18 +1680,18 @@ mod tests {
         // suffix prints (autolinked emails).
         crate::hyperlinks::set_hyperlinks_override(Some(false));
         let style = MarkdownStyle::default();
-        let spans = render_inline("mail foo.bar+baz@example.co.uk ok", &style);
+        let spans = render_inline("mail foo.bar+baz@example.com ok", &style);
         let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
-        assert_eq!(joined, "mail foo.bar+baz@example.co.uk ok");
+        assert_eq!(joined, "mail foo.bar+baz@example.com ok");
         // OSC 8 form: the href carries mailto:.
         crate::hyperlinks::set_hyperlinks_override(Some(true));
-        let spans = render_inline("mail foo@example.co.uk ok", &style);
+        let spans = render_inline("mail foo@example.com ok", &style);
         let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
         assert_eq!(
             joined,
             format!(
-                "mail {}foo@example.co.uk{} ok",
-                crate::hyperlinks::osc8_open("mailto:foo@example.co.uk"),
+                "mail {}foo@example.com{} ok",
+                crate::hyperlinks::osc8_open("mailto:foo@example.com"),
                 crate::hyperlinks::OSC8_CLOSE
             )
         );

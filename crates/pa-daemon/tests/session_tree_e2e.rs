@@ -4,6 +4,31 @@
 //! leaf no-op, branch summary, unknown target), and `fork`. The wire shapes
 //! are the TS daemon-protocol contract; the leaf moves are asserted through
 //! the store's `get_messages` read of the moved branch.
+// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
+// the full rationale).
+// Stack-resident futures by design on the daemon's hot paths; boxing the
+// call sites for a lint tick is a perf regression with zero correctness gain.
+#![allow(clippy::large_futures)]
+// 64-bit-only targets; the narrowing casts sit at OS boundaries
+// (pid/fd/time/size) where the values are bounded by the kernel - the
+// dead-guard expect()s would add panic paths where silent wrap was
+// deliberate.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// The fn-length threshold is a style gate, not correctness; the structure
+// campaign owns the god-fn splits as a follow-up.
+#![allow(clippy::too_many_lines)]
+// API-shape opinions, not defects; the surfaces are deliberate.
+#![allow(
+    clippy::unnecessary_wraps,
+    clippy::zero_sized_map_values,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names
+)]
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -85,7 +110,7 @@ impl Client {
         self.writer.flush().expect("flush");
     }
 
-    fn send_command(&mut self, id: &str, command: serde_json::Value) {
+    fn send_command(&mut self, id: &str, command: &serde_json::Value) {
         self.send(&serde_json::json!({
             "type": "command",
             "id": id,
@@ -141,7 +166,7 @@ fn message_texts(response: &serde_json::Value) -> Vec<String> {
 fn scripted_turn(client: &mut Client, session_id: &str, message: &str, id: &str) {
     client.send_command(
         id,
-        serde_json::json!({
+        &serde_json::json!({
             "type": "prompt_and_wait",
             "activeSessionId": session_id,
             "message": message,
@@ -181,7 +206,7 @@ fn session_tree_commands_over_the_supervisor_wire() {
     .expect("write script");
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -204,7 +229,7 @@ fn session_tree_commands_over_the_supervisor_wire() {
     // The tree: every entry in file order plus the leaf id.
     client.send_command(
         "t1",
-        serde_json::json!({ "type": "get_session_tree", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "get_session_tree", "activeSessionId": session_id }),
     );
     let tree = client.read_response("t1");
     assert_eq!(tree["success"], true, "get_session_tree failed: {tree}");
@@ -243,7 +268,7 @@ fn session_tree_commands_over_the_supervisor_wire() {
     // Labels persist and surface in the flat tree.
     client.send_command(
         "l1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "set_session_entry_label",
             "activeSessionId": session_id,
             "entryId": first_user_id,
@@ -254,7 +279,7 @@ fn session_tree_commands_over_the_supervisor_wire() {
     assert_eq!(labeled["success"], true, "label failed: {labeled}");
     client.send_command(
         "t2",
-        serde_json::json!({ "type": "get_session_tree", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "get_session_tree", "activeSessionId": session_id }),
     );
     let tree = client.read_response("t2");
     let labeled_node = tree["data"]["flatNodes"]
@@ -268,7 +293,7 @@ fn session_tree_commands_over_the_supervisor_wire() {
     // Fork points: the two user messages with their text.
     client.send_command(
         "f0",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "get_user_messages_for_forking",
             "activeSessionId": session_id,
         }),
@@ -286,7 +311,7 @@ fn session_tree_commands_over_the_supervisor_wire() {
     // Unknown target errors like the TS session manager.
     client.send_command(
         "n0",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "navigate_tree",
             "activeSessionId": session_id,
             "targetId": "no-such-entry",
@@ -299,7 +324,7 @@ fn session_tree_commands_over_the_supervisor_wire() {
     // Navigating to the current leaf is a no-op.
     client.send_command(
         "n1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "navigate_tree",
             "activeSessionId": session_id,
             "targetId": leaf_id,
@@ -314,7 +339,7 @@ fn session_tree_commands_over_the_supervisor_wire() {
     // second turn's entries are abandoned on their branch).
     client.send_command(
         "n2",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "navigate_tree",
             "activeSessionId": session_id,
             "targetId": first_assistant_id,
@@ -325,7 +350,7 @@ fn session_tree_commands_over_the_supervisor_wire() {
     assert!(navigated["data"].get("editorText").is_none());
     client.send_command(
         "m1",
-        serde_json::json!({ "type": "get_messages", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "get_messages", "activeSessionId": session_id }),
     );
     let messages = client.read_response("m1");
     let texts: Vec<String> = message_texts(&messages);
@@ -340,7 +365,7 @@ fn session_tree_commands_over_the_supervisor_wire() {
     // on the new branch, and the user text returns to the editor.
     client.send_command(
         "n3",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "navigate_tree",
             "activeSessionId": session_id,
             "targetId": first_user_id,
@@ -382,7 +407,7 @@ fn session_tree_commands_over_the_supervisor_wire() {
     // up to that point, and the message text back as selectedText.
     client.send_command(
         "f1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "fork",
             "activeSessionId": session_id,
             "entryId": second_user_id,
@@ -398,7 +423,7 @@ fn session_tree_commands_over_the_supervisor_wire() {
     // messages are the pre-fork path.
     client.send_command(
         "m2",
-        serde_json::json!({ "type": "get_messages", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "get_messages", "activeSessionId": session_id }),
     );
     let messages = client.read_response("m2");
     let texts: Vec<String> = message_texts(&messages);
@@ -532,7 +557,7 @@ fn session_tree_commands_over_the_direct_worker_link() {
     .expect("write script");
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -554,7 +579,7 @@ fn session_tree_commands_over_the_direct_worker_link() {
     // The supervisor-issued direct-transport ticket + worker peer auth.
     client.send_command(
         "tk1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "get_direct_worker_transport",
             "activeSessionId": session_id,
         }),
