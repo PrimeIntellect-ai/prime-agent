@@ -258,14 +258,13 @@ mod tests {
     }
 
     #[test]
+    // Golden equality is the contract: cacheWrite must round-trip the fixture's exact 1.25.
+    #[allow(clippy::float_cmp)]
     fn parses_a_valid_entry() {
         let parsed = parse_model_catalog(&catalog(vec![entry(&json!({}))]), InvalidEntries::Reject)
             .expect("valid");
         assert_eq!(parsed.models.len(), 1);
         assert_eq!(parsed.models[0].id, "model-a");
-        // Golden equality is the contract: cacheWrite must round-trip the
-        // fixture's exact 1.25.
-        #[allow(clippy::float_cmp)]
         assert_eq!(parsed.models[0].cost.cache_write.as_f64(), 1.25);
     }
 

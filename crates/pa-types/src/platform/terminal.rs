@@ -126,7 +126,7 @@ pub fn restart_output() {
     let fd = tty.as_raw_fd();
     let mut attrs: libc::termios = unsafe { std::mem::zeroed() };
     // SAFETY: `tcgetattr` only reads the line discipline into `attrs`.
-    if unsafe { libc::tcgetattr(fd, &mut attrs) } != 0 {
+    if unsafe { libc::tcgetattr(fd, &raw mut attrs) } != 0 {
         return;
     }
     let restored = attrs;
@@ -134,8 +134,8 @@ pub fn restart_output() {
     // SAFETY: the two `tcsetattr` writes run the kernel's one stop-lift
     // (the IXON transition) and then restore the exact captured state.
     unsafe {
-        if libc::tcsetattr(fd, libc::TCSANOW, &attrs) == 0 {
-            let _ = libc::tcsetattr(fd, libc::TCSANOW, &restored);
+        if libc::tcsetattr(fd, libc::TCSANOW, &raw const attrs) == 0 {
+            let _ = libc::tcsetattr(fd, libc::TCSANOW, &raw const restored);
         }
     }
 }

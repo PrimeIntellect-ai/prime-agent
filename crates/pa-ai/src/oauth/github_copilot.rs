@@ -391,6 +391,8 @@ async fn start_device_flow(http: &dyn ProviderHttp, domain: &str) -> Result<Devi
 /// TS backoff (the 1.2x initial multiplier, the 1.4x `slow_down`
 /// multiplier, and the `slow_down` interval bump) and the cooperative
 /// cancel between the wait steps.
+// Long by design (a 1:1 port of the TS poll loop); refactoring is out of scope for the zero-behavior pedantic sweep.
+#[allow(clippy::too_many_lines)]
 async fn poll_for_github_access_token(
     http: &dyn ProviderHttp,
     domain: &str,

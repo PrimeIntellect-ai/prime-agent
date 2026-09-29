@@ -1030,6 +1030,7 @@ pub struct Model {
 /// Model-typed [`supports_service_tier`] delegates here so the surfaces
 /// that only hold the connection-state model metadata (provider, api, id)
 /// share one predicate.
+#[must_use]
 pub fn supports_service_tier_fields(
     provider: &str,
     api: &str,
@@ -1074,6 +1075,7 @@ pub fn supports_service_tier_fields(
 /// honors) a requested service tier. The single eligibility predicate
 /// behind the `/tier` command, the settings row, and the `/fast` toggle
 /// (the TS product keeps the same function in the shared AI package).
+#[must_use]
 pub fn supports_service_tier(model: &Model, tier: ServiceTier) -> bool {
     supports_service_tier_fields(&model.provider, &model.api, &model.id, tier)
 }
@@ -1082,6 +1084,7 @@ pub fn supports_service_tier(model: &Model, tier: ServiceTier) -> bool {
 /// model does not support it. An absent model (a session with no resolved
 /// model) clamps every non-default tier, exactly like the TS
 /// `model == null` arm; an unset (`null`) preference passes through.
+#[must_use]
 pub fn clamp_service_tier(model: Option<&Model>, tier: Option<ServiceTier>) -> Option<ServiceTier> {
     match tier {
         None | Some(ServiceTier::Default) => tier,

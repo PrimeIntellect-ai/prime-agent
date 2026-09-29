@@ -46,6 +46,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Unix timestamp in milliseconds, mirroring `Date.now()` in the TS reference.
+///
+/// # Panics
+///
+/// Panics if the epoch timestamp exceeds i64 milliseconds — beyond year
+/// 292 million, so unreachable for any real clock.
 #[must_use]
 pub fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| {

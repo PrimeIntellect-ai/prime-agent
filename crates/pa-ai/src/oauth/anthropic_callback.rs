@@ -104,7 +104,7 @@ impl AnthropicCallbackServer {
     /// # Errors
     ///
     /// Returns an error when the listener cannot be bound.
-    pub async fn start(state: &str) -> Result<Self, String> {
+    pub fn start(state: &str) -> Result<Self, String> {
         let host = std::env::var(CALLBACK_HOST_ENV).unwrap_or_else(|_| "127.0.0.1".to_string());
         Self::bind(&host, CALLBACK_PORT, state)
     }
@@ -413,7 +413,7 @@ mod tests {
     use std::time::Duration;
 
     /// One live server on a free loopback port, with its port.
-    async fn live(state: &str) -> (AnthropicCallbackServer, u16) {
+    fn live(state: &str) -> (AnthropicCallbackServer, u16) {
         let server = AnthropicCallbackServer::bind("127.0.0.1", 0, state)
             .expect("a free loopback port binds");
         let port = server.port();
@@ -447,7 +447,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_matching_redirect_settles_the_code_and_state() {
-        let (server, port) = live("the-state").await;
+        let (server, port) = live("the-state");
         let response = request(port, "/callback?code=the-code&state=the-state").await;
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("Anthropic authentication completed"));
@@ -462,7 +462,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_error_response_answers_its_page_and_keeps_waiting() {
-        let (server, port) = live("the-state").await;
+        let (server, port) = live("the-state");
         let response = request(port, "/callback?error=access_denied").await;
         assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
         assert!(response.contains("Anthropic authentication did not complete"));
@@ -475,7 +475,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_parameters_and_state_mismatch_never_settle() {
-        let (server, port) = live("the-state").await;
+        let (server, port) = live("the-state");
         let missing = request(port, "/callback?code=the-code").await;
         assert!(missing.starts_with("HTTP/1.1 400 Bad Request"));
         assert!(missing.contains("Missing code or state parameter."));
@@ -499,9 +499,7 @@ mod tests {
         let Ok(blocker) = std::net::TcpListener::bind(("127.0.0.1", CALLBACK_PORT)) else {
             return; // the registered port is busy: this run cannot stage it.
         };
-        let error = AnthropicCallbackServer::start("the-state")
-            .await
-            .unwrap_err();
+        let error = AnthropicCallbackServer::start("the-state").unwrap_err();
         assert!(error.contains("port 53692"), "{error}");
         assert!(error.contains("Address already in use"), "{error}");
         drop(blocker);

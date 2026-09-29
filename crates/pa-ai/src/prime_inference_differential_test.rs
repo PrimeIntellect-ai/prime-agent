@@ -57,6 +57,8 @@ fn glm_53_flash(base_url: &str) -> Model {
     }
 }
 
+// `context` and `content`: the local mirrors the `content` JSON field it builds; a rename would churn the differential harness.
+#[allow(clippy::similar_names)]
 async fn normalized_result(model: &Model) -> Value {
     let context = crate::types::Context {
         system_prompt: Some("You are a helpful assistant. Be concise.".into()),
@@ -76,8 +78,6 @@ async fn normalized_result(model: &Model) -> Value {
     });
     let stream = stream_openai_completions(model, &context, Some(&options));
     let result = stream.result().await;
-    // The local mirrors the `content` JSON field it builds; a rename would churn the differential harness.
-    #[allow(clippy::similar_names)]
     let content: Vec<Value> = result
         .content
         .iter()

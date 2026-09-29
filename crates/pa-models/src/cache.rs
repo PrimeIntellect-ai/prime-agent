@@ -98,6 +98,7 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         // Epoch millis fit u64 for any real clock; overflow degrades to the
         // same default as an unreadable clock rather than truncating.
+        .ok()
         .and_then(|since| u64::try_from(since.as_millis()).ok())
         .unwrap_or_default()
 }

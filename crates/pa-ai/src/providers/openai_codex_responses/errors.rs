@@ -295,7 +295,11 @@ fn codex_usage_limit_message(
         })
         .map(|ms| ms.max(0) as u64);
     // The minutes wait is f64 rounding math; u64 ms is the message's integral form.
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     let when = retry_after_ms
         .map(|ms| {
             format!(

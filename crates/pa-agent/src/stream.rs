@@ -186,6 +186,7 @@ impl std::fmt::Debug for StreamRequestOptions {
             .field("max_tokens", &self.max_tokens)
             .field("reasoning", &self.reasoning)
             .field("session_id", &self.session_id)
+            .field("service_tier", &self.service_tier)
             .field("api_key", &self.api_key.as_ref().map(|_| "<set>"))
             .field("signal", &self.signal)
             .field("on_payload", &self.on_payload.is_some())

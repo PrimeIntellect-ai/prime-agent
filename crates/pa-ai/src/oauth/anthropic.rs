@@ -91,7 +91,7 @@ pub async fn login_anthropic(
         return Err(LOGIN_CANCELLED.to_string());
     }
     let (verifier, challenge) = generate_pkce();
-    let server = AnthropicCallbackServer::start(&verifier).await?;
+    let server = AnthropicCallbackServer::start(&verifier)?;
     ui.on_auth(
         &authorization_url(&challenge, &verifier),
         Some(AUTH_INSTRUCTIONS),

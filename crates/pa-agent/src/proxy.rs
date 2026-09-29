@@ -1124,6 +1124,8 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept proxy request");
+            // 64 KiB read buffer on a dedicated stub thread is fine for a test.
+            #[allow(clippy::large_stack_arrays)]
             let mut buffer = [0u8; 64 * 1024];
             let mut request = String::new();
             loop {
