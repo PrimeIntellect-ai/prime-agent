@@ -141,15 +141,31 @@ impl AgentSessionEngine {
     /// The handle form of [`release_goal_work_continuation`] for sinks that
     /// hand the work item away before releasing (the admission takes
     /// ownership): clone the item's handle first, then release through
-    /// this.
+    /// this. An item that armed no guard releases NOTHING — no fallback
+    /// mirror clear (an unrelated in-flight mint's armed guard must never
+    /// be dropped by an admission that holds no handle).
     pub(crate) fn release_goal_continuation_handle(
         &self,
         handle: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) {
-        match handle {
-            Some(pending) => pending.store(false, std::sync::atomic::Ordering::SeqCst),
-            None => self.clear_pending_goal_continuation(),
+        if let Some(pending) = handle {
+            pending.store(false, std::sync::atomic::Ordering::SeqCst);
         }
+    }
+
+    /// The mirror's current handle, READ without clearing: the
+    /// post-compaction mint task's spawn-time capture — the core the mint
+    /// will use at that moment. The join-failure path releases exactly
+    /// this handle, never the mirror at clear time (a core rebuild may
+    /// have re-swapped the mirror onto a replacement session's guard
+    /// meanwhile).
+    pub(crate) fn goal_pending_handle(
+        &self,
+    ) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        self.pending_goal_continuation
+            .lock()
+            .expect("pending goal continuation lock")
+            .clone()
     }
 
     /// Emit the `goal_update` engine event when the session's goal state

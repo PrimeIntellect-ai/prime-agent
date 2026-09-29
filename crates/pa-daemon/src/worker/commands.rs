@@ -425,13 +425,15 @@ impl Worker {
             cancel(&mut core.steering, &mut dropped_goal_context);
             cancel(&mut core.follow_up, &mut dropped_goal_context);
         }
-        // A withdrawn minted goal continuation never reaches a turn: the
-        // driver's pending guard releases with it (TS
-        // `_cancelSessionActions` drops the queued continuation; the
-        // goal keeps its consumed slot and resumes at the next boundary).
-        if dropped_goal_context {
-            self.engine.clear_pending_goal_continuation();
-        }
+        // A withdrawn minted goal continuation never reaches a turn (TS
+        // `_cancelSessionActions` drops the queued continuation; the goal
+        // keeps its consumed slot and resumes at the next boundary). Its
+        // pending guard already released at ITS admission (the worker
+        // sink), so the withdraw clears nothing: a mirror clear here could
+        // drop an unrelated in-flight mint's armed guard (a second
+        // continuation for the same boundary) or — after a core rebuild —
+        // a replacement session's guard. A withdrawn item holds no guard
+        // to release.
         // TS `requestAbort()` also aborts the compaction in flight (manual
         // and automatic): the interrupt key cancels a compacting session.
         self.compaction.abort();
