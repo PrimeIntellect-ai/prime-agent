@@ -186,6 +186,28 @@ impl AcpChild {
             }
         }
     }
+
+    /// Read frames until one `sessionUpdate` of `kind` arrives — the
+    /// observed-event readiness signal, never a timer. The frames
+    /// before it are dropped.
+    fn wait_update(&mut self, kind: &str, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let timeout_left = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !timeout_left.is_zero(),
+                "the stream never published a {kind} update"
+            );
+            let line = self
+                .lines
+                .recv_timeout(timeout_left)
+                .expect("the ACP stream stayed open");
+            let frame: Value = serde_json::from_str(&line).expect("valid JSON line");
+            if frame["params"]["update"]["sessionUpdate"] == kind {
+                return;
+            }
+        }
+    }
 }
 
 impl Drop for AcpChild {
@@ -835,22 +857,7 @@ fn acp_daemon_attached_prompt_after_cancel_runs() {
         &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "a slow question" }] }),
     );
     // Readiness is the turn's own first streamed chunk, not a timer.
-    let deadline = Instant::now() + TIMEOUT;
-    loop {
-        let timeout_left = deadline.saturating_duration_since(Instant::now());
-        assert!(
-            !timeout_left.is_zero(),
-            "the paced turn never streamed a chunk"
-        );
-        let line = client
-            .lines
-            .recv_timeout(timeout_left)
-            .expect("the ACP stream stayed open");
-        let frame: Value = serde_json::from_str(&line).expect("valid JSON line");
-        if frame["params"]["update"]["sessionUpdate"] == "agent_message_chunk" {
-            break;
-        }
-    }
+    client.wait_update("agent_message_chunk", TIMEOUT);
     client.notify("session/cancel", &json!({ "sessionId": session_id }));
     let (first_response, _) = client.wait_response(first, TIMEOUT);
     assert_eq!(
@@ -873,6 +880,66 @@ fn acp_daemon_attached_prompt_after_cancel_runs() {
     assert_eq!(
         chunk["params"]["update"]["content"],
         json!({ "type": "text", "text": "SECOND-OK" })
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn acp_daemon_attached_supervisor_loss_fails_the_prompt() {
+    // The supervisor dies while a prompt is in flight: the pending
+    // request must fail fast with an error response, never hang, because
+    // the link close is the turn's liveness bound (turn-long requests
+    // carry no timer).
+    let (mut client, socket) = AcpChild::spawn_daemon_attached(
+        &["--mode", "acp", "--no-session"],
+        &json!({ "engine": "faux", "tokensPerSecond": 2, "responses": [
+            { "text": "a paced answer that streams slowly enough to outlive the supervisor" },
+        ] }),
+    );
+    let init = client.request("initialize", &initialize_params());
+    let _ = client.wait_response(init, TIMEOUT);
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
+    let (new_response, _) = client.wait_response(new, TIMEOUT);
+    let session_id = new_response["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let prompt = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "a slow question" }] }),
+    );
+    // Readiness is the turn's own first streamed chunk: the prompt is
+    // provably in flight before the supervisor goes away.
+    client.wait_update("agent_message_chunk", TIMEOUT);
+    // Crash the supervisor (no graceful drain, so the in-flight response
+    // can never arrive). Its pid comes from the hello frame every new
+    // connection receives.
+    let probe = pa_types::platform::transport::connect_blocking(&socket).expect("daemon socket");
+    let reader = probe.try_clone_box().expect("daemon socket clone");
+    let _ = reader.set_read_timeout(Duration::from_mins(2));
+    let hello = BufReader::new(reader)
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(&line.expect("daemon line")).expect("daemon JSON")
+        })
+        .find(|frame| frame["type"] == json!("daemon_hello"))
+        .expect("the daemon closed without a hello");
+    let pid = hello["supervisorPid"].as_u64().expect("supervisor pid");
+    drop(probe);
+    let killed = std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .status()
+        .expect("kill the supervisor");
+    assert!(killed.success(), "the supervisor crash did not run");
+    let (prompt_response, _) = client.wait_response(prompt, TIMEOUT);
+    assert_eq!(
+        prompt_response["error"],
+        json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": { "details": "the daemon connection closed mid-request" }
+        }),
+        "the in-flight prompt fails fast on supervisor loss: {prompt_response}"
     );
 }
 

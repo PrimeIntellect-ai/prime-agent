@@ -40,10 +40,8 @@ use super::wire_config::{
 };
 use super::wire_events::{self, WireMappingState};
 
-/// Response timeout for turn-long commands (the turn itself bounds them).
-pub(crate) const TURN_TIMEOUT_MS: u64 = 600_000;
 /// Response timeout for session-scoped commands.
-pub(crate) const REQUEST_TIMEOUT_MS: u64 = 30_000;
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// One inbound supervisor frame, classified by the reader.
 enum LinkFrame {
@@ -56,6 +54,10 @@ enum LinkFrame {
 pub(crate) struct DaemonLink {
     writer: mpsc::UnboundedSender<String>,
     pending: Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<DaemonResponse>>>>,
+    /// Set once the frame channel ends (the socket closed and every
+    /// frame the reader read is delivered): every new request fails
+    /// fast instead of waiting for a response no one will send.
+    closed: Arc<std::sync::atomic::AtomicBool>,
     frames: Mutex<mpsc::UnboundedReceiver<LinkFrame>>,
     protocol_version: u64,
     next_request_id: std::sync::atomic::AtomicU64,
@@ -76,6 +78,8 @@ impl DaemonLink {
         let (hello_tx, hello_rx) = oneshot::channel::<Value>();
         let pending: Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<DaemonResponse>>>> =
             Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let closed: Arc<std::sync::atomic::AtomicBool> =
+            Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         tokio::spawn(async move {
             let mut writer = writer_half;
@@ -146,17 +150,33 @@ impl DaemonLink {
         Ok(DaemonLink {
             writer: line_tx,
             pending,
+            closed,
             frames: Mutex::new(frame_rx),
             protocol_version: version,
             next_request_id: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
-    /// Send one command envelope and wait for the matching response.
-    pub(crate) async fn request(
+    /// Send one command envelope and wait for the matching response
+    /// under the session-scoped response timeout.
+    pub(crate) async fn request(&self, command: DaemonCommand) -> anyhow::Result<DaemonResponse> {
+        self.exchange(command, Some(REQUEST_TIMEOUT)).await
+    }
+
+    /// Send one command envelope with no fixed cap: the response or the
+    /// link close ends the wait (turn-long commands — declared
+    /// divergence, TS caps them at 24 h; the link-close signal is the
+    /// liveness bound here, not a timer).
+    async fn request_until_close(&self, command: DaemonCommand) -> anyhow::Result<DaemonResponse> {
+        self.exchange(command, None).await
+    }
+
+    /// One exchange: register the response slot, send the envelope, and
+    /// wait for the answer.
+    async fn exchange(
         &self,
         command: DaemonCommand,
-        timeout_ms: u64,
+        timeout: Option<std::time::Duration>,
     ) -> anyhow::Result<DaemonResponse> {
         use std::sync::atomic::Ordering;
         let id = format!(
@@ -176,6 +196,14 @@ impl DaemonLink {
         let line = serde_json::to_string(&envelope)?;
         let (tx, rx) = oneshot::channel::<DaemonResponse>();
         self.pending.lock().unwrap().insert(id.clone(), tx);
+        // A request that races the close loses either way: the flag
+        // fails it here, or the pending clear already dropped its
+        // sender. The flag is stored before the clear, so no request
+        // parks unnoticed.
+        if self.closed.load(Ordering::SeqCst) {
+            self.pending.lock().unwrap().remove(&id);
+            anyhow::bail!("the daemon connection is closed");
+        }
         if self.writer.send(line).is_err() {
             // A closed writer leaves the pending slot behind otherwise; a
             // link that never answers again would grow one entry per
@@ -183,13 +211,14 @@ impl DaemonLink {
             self.pending.lock().unwrap().remove(&id);
             anyhow::bail!("the daemon connection is closed");
         }
-        tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx)
-            .await
-            .map_err(|_| {
+        match timeout {
+            Some(timeout) => tokio::time::timeout(timeout, rx).await.map_err(|_| {
                 self.pending.lock().unwrap().remove(&id);
                 anyhow::anyhow!("timed out waiting for the daemon response")
-            })?
-            .map_err(|_| anyhow::anyhow!("the daemon connection closed mid-request"))
+            })?,
+            None => rx.await,
+        }
+        .map_err(|_| anyhow::anyhow!("the daemon connection closed mid-request"))
     }
 }
 
@@ -370,6 +399,13 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
                     }
                 }
             }
+            // The reader hit the socket close and every frame it read
+            // has been delivered: fail the still-pending requests
+            // (dropping a sender answers with the mid-request error)
+            // and fail every later request fast. The flag goes up
+            // before the clear; `request` covers the race.
+            link.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+            link.pending.lock().unwrap().clear();
         });
     }
 
@@ -558,7 +594,7 @@ async fn handle_session_new(
         launch_env: None,
         rest: Map::default(),
     };
-    let create_response = match link.request(create, REQUEST_TIMEOUT_MS).await {
+    let create_response = match link.request(create).await {
         Ok(response) => response,
         Err(error) => {
             *state.lock().await = DaemonAcpState::default();
@@ -593,20 +629,17 @@ async fn handle_session_new(
         launch_env: None,
         rest: Map::default(),
     };
-    if let Ok(response) = link.request(attach, REQUEST_TIMEOUT_MS).await {
+    if let Ok(response) = link.request(attach).await {
         if !response.success {
             let failure = response
                 .error
                 .unwrap_or_else(|| "unknown error".to_string());
             let _ = link
-                .request(
-                    DaemonCommand::Kill {
-                        id: None,
-                        active_session_id: daemon_active_session_id.clone(),
-                        rest: Map::default(),
-                    },
-                    REQUEST_TIMEOUT_MS,
-                )
+                .request(DaemonCommand::Kill {
+                    id: None,
+                    active_session_id: daemon_active_session_id.clone(),
+                    rest: Map::default(),
+                })
                 .await;
             *state.lock().await = DaemonAcpState::default();
             let _ = tx.send(super::internal_error(&id, &failure));
@@ -649,14 +682,11 @@ async fn handle_session_new(
     if let Err(error) = replace_session_servers(link, &hosted, &resolved).await {
         let failure = error.to_string();
         let _ = link
-            .request(
-                DaemonCommand::Kill {
-                    id: None,
-                    active_session_id: hosted.daemon_active_session_id.clone(),
-                    rest: Map::default(),
-                },
-                REQUEST_TIMEOUT_MS,
-            )
+            .request(DaemonCommand::Kill {
+                id: None,
+                active_session_id: hosted.daemon_active_session_id.clone(),
+                rest: Map::default(),
+            })
             .await;
         *state.lock().await = DaemonAcpState::default();
         let _ = tx.send(super::internal_error(&id, &failure));
@@ -710,16 +740,13 @@ async fn replace_session_servers(
     resolved: &[pa_core::mcp::AcpMcpServerConfig],
 ) -> anyhow::Result<()> {
     let response = link
-        .request(
-            DaemonCommand::ReplaceAcpMcpServers {
-                id: None,
-                active_session_id: hosted.daemon_active_session_id.clone(),
-                owner_id: hosted.mcp_owner_id.clone(),
-                servers: serde_json::to_value(resolved)?,
-                rest: Map::default(),
-            },
-            REQUEST_TIMEOUT_MS,
-        )
+        .request(DaemonCommand::ReplaceAcpMcpServers {
+            id: None,
+            active_session_id: hosted.daemon_active_session_id.clone(),
+            owner_id: hosted.mcp_owner_id.clone(),
+            servers: serde_json::to_value(resolved)?,
+            rest: Map::default(),
+        })
         .await?;
     if !response.success {
         anyhow::bail!(response
@@ -814,7 +841,7 @@ async fn handle_session_prompt(
         },
         rest: Map::default(),
     };
-    let response = match link.request(prompt, TURN_TIMEOUT_MS).await {
+    let response = match link.request_until_close(prompt).await {
         Ok(response) => response,
         Err(error) => {
             producer.finish_prompt(turn_id).await;
@@ -979,15 +1006,12 @@ async fn fetch_autonomous_status(
     active_session_id: &str,
 ) -> Option<pa_core::autonomous::AgentAutonomousStatus> {
     let response = link
-        .request(
-            DaemonCommand::WaitForHeadlessCompletion {
-                id: None,
-                active_session_id: active_session_id.to_string(),
-                wait_for_rlm_quiescence: None,
-                rest: Map::default(),
-            },
-            TURN_TIMEOUT_MS,
-        )
+        .request_until_close(DaemonCommand::WaitForHeadlessCompletion {
+            id: None,
+            active_session_id: active_session_id.to_string(),
+            wait_for_rlm_quiescence: None,
+            rest: Map::default(),
+        })
         .await
         .ok()?;
     if !response.success {
@@ -1022,7 +1046,7 @@ async fn session_cancel(
         rest: Map::default(),
     };
     drop(guard);
-    let _ = link.request(abort, REQUEST_TIMEOUT_MS).await;
+    let _ = link.request(abort).await;
     Ok(())
 }
 
@@ -1058,32 +1082,26 @@ async fn handle_session_close(
         return;
     };
     let _ = link
-        .request(
-            DaemonCommand::Abort {
-                id: None,
-                active_session_id: hosted.daemon_active_session_id.clone(),
-                rest: Map::default(),
-            },
-            REQUEST_TIMEOUT_MS,
-        )
+        .request(DaemonCommand::Abort {
+            id: None,
+            active_session_id: hosted.daemon_active_session_id.clone(),
+            rest: Map::default(),
+        })
         .await;
     if !hosted.mcp_server_names.is_empty() {
         let _ = replace_session_servers(link, &hosted, &[]).await;
     }
     // The worker dies before the config queue drains: a stalled
     // `set_model`/`set_thinking_level` (holding the queue on a wire
-    // request) fails fast once the worker is gone instead of parking the
-    // close for the turn timeout. Then the serialized config work settles
-    // before the producer fences (TS `await configTask`).
+    // request) fails fast once the worker is gone instead of parking
+    // the close on the request timeout. Then the serialized config work
+    // settles before the producer fences (TS `await configTask`).
     let _ = link
-        .request(
-            DaemonCommand::Kill {
-                id: None,
-                active_session_id: hosted.daemon_active_session_id.clone(),
-                rest: Map::default(),
-            },
-            REQUEST_TIMEOUT_MS,
-        )
+        .request(DaemonCommand::Kill {
+            id: None,
+            active_session_id: hosted.daemon_active_session_id.clone(),
+            rest: Map::default(),
+        })
         .await;
     let _ = hosted.config.queue.lock().await;
     hosted.producer.close().await;
@@ -1102,24 +1120,18 @@ async fn teardown(link: &Arc<DaemonLink>, state: &Arc<Mutex<DaemonAcpState>>) {
     // operation holding the queue releases once the wire peer is gone),
     // then the serialized config work settles before the producer fences.
     let _ = link
-        .request(
-            DaemonCommand::Abort {
-                id: None,
-                active_session_id: hosted.daemon_active_session_id.clone(),
-                rest: Map::default(),
-            },
-            REQUEST_TIMEOUT_MS,
-        )
+        .request(DaemonCommand::Abort {
+            id: None,
+            active_session_id: hosted.daemon_active_session_id.clone(),
+            rest: Map::default(),
+        })
         .await;
     let _ = link
-        .request(
-            DaemonCommand::Kill {
-                id: None,
-                active_session_id: hosted.daemon_active_session_id.clone(),
-                rest: Map::default(),
-            },
-            REQUEST_TIMEOUT_MS,
-        )
+        .request(DaemonCommand::Kill {
+            id: None,
+            active_session_id: hosted.daemon_active_session_id.clone(),
+            rest: Map::default(),
+        })
         .await;
     let _ = hosted.config.queue.lock().await;
     hosted.producer.close().await;
