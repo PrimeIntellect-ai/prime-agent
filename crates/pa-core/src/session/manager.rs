@@ -95,7 +95,7 @@ pub use git::capture_git_context;
 // (session::manager::repair); the re-export keeps the pub API path stable
 // (zero external callers - the find_most_recent_session_for_cwd
 // precedent) and the bindings keep the bare-path callers in scope (the
-// write arms until their own cut + the test child).
+// persist/append write arms + the test child).
 mod repair;
 pub use repair::load_entries_from_file;
 #[cfg(test)]
