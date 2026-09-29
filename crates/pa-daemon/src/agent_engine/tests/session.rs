@@ -1,5 +1,6 @@
 //! The session-surface tests (skills enumeration, replacement teardown, the branch rebuild).
 use super::*;
+use crate::engine::PromptBatchRow;
 
 /// `get_commands` enumerates the session's skills as `skill:<name>`
 /// commands (TS `createAgentConnectionCommands`) — including before the
@@ -336,7 +337,7 @@ fn core_session_user_texts(engine: &AgentSessionEngine) -> Vec<String> {
                 .iter()
                 .filter_map(|entry| match entry {
                     pa_types::session::FileEntry::Message {
-                        message: pa_types::session::SessionAgentMessage::User(user),
+                        message: pa_types::session::AgentMessage::User(user),
                         ..
                     } => Some(user.content.text()),
                     _ => None,
