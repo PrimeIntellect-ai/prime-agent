@@ -1,9 +1,9 @@
 //! The dispatch surface: command routing, the command handlers,
 //! and the abort family.
 use super::{
-    is_goal_context_item, json, response_failure, response_success, KillCloseReason, Lane,
-    QueueCheckpoint, QueuedItem, Result, SessionFile, TurnSettle, VecDeque, Worker,
-    PROMPT_ABORTED_BEFORE_DELIVERY, SIDE_QUESTION_SETTLE_TIMEOUT,
+    json, response_failure, response_success, KillCloseReason, Lane, QueueCheckpoint, QueuedItem,
+    Result, SessionFile, TurnSettle, VecDeque, Worker, PROMPT_ABORTED_BEFORE_DELIVERY,
+    SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 use serde_json::Value;
@@ -398,18 +398,14 @@ impl Worker {
         // (steer/follow-up, agent-message deliveries, prompt-behind-work,
         // heartbeat fires) survive parked - the suspension defers the
         // pump, it never drops the queue (the abort-ownership probe).
-        let mut dropped_goal_context = false;
         {
             let mut core = self.core.lock().unwrap();
-            let cancel = |lane: &mut VecDeque<QueuedItem>, dropped_goal_context: &mut bool| {
+            let cancel = |lane: &mut VecDeque<QueuedItem>| {
                 let mut kept = VecDeque::new();
                 while let Some(item) = lane.pop_front() {
                     if item.queue_visible {
                         kept.push_back(item);
                     } else {
-                        if is_goal_context_item(&item) {
-                            *dropped_goal_context = true;
-                        }
                         if let Some(id) = &item.admission_id {
                             let _ = self.prompt_admissions.cancel(id);
                         }
@@ -422,8 +418,8 @@ impl Worker {
                 }
                 *lane = kept;
             };
-            cancel(&mut core.steering, &mut dropped_goal_context);
-            cancel(&mut core.follow_up, &mut dropped_goal_context);
+            cancel(&mut core.steering);
+            cancel(&mut core.follow_up);
         }
         // A withdrawn minted goal continuation never reaches a turn (TS
         // `_cancelSessionActions` drops the queued continuation; the goal
