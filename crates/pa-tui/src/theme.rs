@@ -712,58 +712,58 @@ impl Theme {
     /// Paint one hover band over the given column span of a composed
     /// row (the hover affordance's row painter): a span straddling the
     /// span's edge splits, so the band covers exactly the hovered
-    /// region — a dock group's own segment, the hint's own text — and
+    /// region - a dock group's own segment, the hint's own text - and
     /// cells that already carry a background keep it (a cell inside
     /// the purple selection band keeps the focused state's band: both
     /// styles apply where the two states overlap, and the hover never
     /// demotes the selection).
+    ///
+    /// The split walks GRAPHEME CLUSTERS, never scalar values: a
+    /// combining mark stays with its base (`e` + U+0301 is one cell)
+    /// and a wide glyph stays whole, so a title the band crosses
+    /// renders byte-identical on both sides of the edge - the band's
+    /// edges snap to the cluster that starts them, the same integrity
+    /// rule the composition's own truncation keeps.
     pub fn paint_hover_band(&self, line: &mut crate::Line, cols: std::ops::Range<usize>) {
+        use unicode_segmentation::UnicodeSegmentation;
         let band = self.hover_row_style();
         let mut painted: crate::Line = Vec::with_capacity(line.len() + 2);
         let mut col = 0usize;
         for span in std::mem::take(line) {
-            let width = crate::width::str_width(&span.content);
-            let start = col;
-            let end = col + width;
-            col = end;
-            // The span's cells outside the hovered range paint as they
-            // are; the covered cells gain the band, unless they already
-            // carry a background (the selection's purple).
-            let before = cols.start.saturating_sub(start).min(width);
-            let after = end
-                .saturating_sub(cols.end)
-                .min(width.saturating_sub(before));
-            let hit = width - before - after;
-            if before > 0 {
-                painted.push(split_span(&span, 0, before));
-            }
-            if hit > 0 {
-                let mut covered = split_span(&span, before, before + hit);
-                if covered.style.bg.is_none() {
-                    covered.style = covered.style.patch(band);
+            let mut before = String::new();
+            let mut covered = String::new();
+            let mut after = String::new();
+            for cluster in span.content.graphemes(true) {
+                if col < cols.start {
+                    before.push_str(cluster);
+                } else if col < cols.end {
+                    covered.push_str(cluster);
+                } else {
+                    after.push_str(cluster);
                 }
-                painted.push(covered);
+                col += crate::width::grapheme_width(cluster);
             }
-            if after > 0 {
-                painted.push(split_span(&span, before + hit, width));
+            let piece = |text: String| {
+                let mut piece = span.clone();
+                piece.content = text;
+                piece
+            };
+            if !before.is_empty() {
+                painted.push(piece(before));
+            }
+            if !covered.is_empty() {
+                let mut hit = piece(covered);
+                if hit.style.bg.is_none() {
+                    hit.style = hit.style.patch(band);
+                }
+                painted.push(hit);
+            }
+            if !after.is_empty() {
+                painted.push(piece(after));
             }
         }
         *line = painted;
     }
-}
-
-/// One slice of a span's cells (grapheme-safe for the widths the
-/// composition pads and truncates at char boundaries): `from`/`to`
-/// index the span's chars, so a split piece keeps the original style.
-fn split_span(span: &crate::Span, from: usize, to: usize) -> crate::Span {
-    let mut piece = span.clone();
-    piece.content = span
-        .content
-        .chars()
-        .skip(from)
-        .take(to - from)
-        .collect::<String>();
-    piece
 }
 
 fn span_with(span: crate::Span, modifier: Modifier) -> crate::Span {
@@ -1117,6 +1117,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The band's edges snap to GRAPHEME CLUSTERS (Macroscope: the
+    /// scalar-slice dropped a combining mark and cut wide glyphs): a
+    /// cluster the band crosses stays whole — the content renders
+    /// byte-identical on both sides of the edge, and a combining mark
+    /// keeps its base, a wide glyph its two cells.
+    #[test]
+    fn the_hover_band_splits_on_grapheme_clusters() {
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let combining = "e\u{301}x";
+        let wide = "\u{4e2d}y";
+        let mut line = vec![crate::Span::raw(combining), crate::Span::raw(wide)];
+        // The band starts inside the first span (the combining cluster
+        // rides its base) and ends inside the second (the wide glyph
+        // spans the edge's last cell).
+        theme.paint_hover_band(&mut line, 1..3);
+        assert_eq!(flat(&line), format!("{combining}{wide}"));
+        assert_eq!(
+            line[0].content, "e\u{301}",
+            "the combining mark keeps its base"
+        );
+        assert_eq!(line[1].content, "x");
+        assert_eq!(line[2].content, "\u{4e2d}", "the wide glyph stays whole");
+        assert_eq!(line[3].content, "y");
+        assert_eq!(
+            line[0].style.bg, None,
+            "the cluster before the band stays bare"
+        );
+        assert_eq!(
+            line[1].style.bg,
+            theme.hover_row_style().bg,
+            "the covered plain cell bands"
+        );
+        assert_eq!(
+            line[2].style.bg,
+            theme.hover_row_style().bg,
+            "the wide glyph at the band's end bands with it"
+        );
+        assert_eq!(line[3].style.bg, None, "the tail stays bare");
     }
 
     /// The hover band paints only its own column span: a span

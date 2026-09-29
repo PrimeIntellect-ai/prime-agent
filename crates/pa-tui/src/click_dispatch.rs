@@ -91,8 +91,17 @@ impl SessionUi {
                 self.open_dock_group_from_click(group, view);
             }
             ClickAction::OpenAgentsView => {
-                self.track_click("hint");
-                self.open_agents_view_from_hint(view);
+                // The hint advertises the LEFT ARROW's action, and the
+                // key only hands the pane off while the editor is empty
+                // (`app.agents.back`'s gate — with a draft the arrow is
+                // the editor's caret motion): the click keeps the same
+                // contract, so a draft never rides a stray click out of
+                // the session (Macroscope: the unconditional dispatch
+                // stashed a draft the key would have left in place).
+                if view.editor.get_text().trim().is_empty() {
+                    self.track_click("hint");
+                    self.open_agents_view_from_hint(view);
+                }
             }
         }
     }

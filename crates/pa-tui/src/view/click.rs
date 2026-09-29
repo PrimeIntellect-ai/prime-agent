@@ -56,6 +56,8 @@ pub(crate) enum ClickAction {
     /// left arrow's agents-back handoff, which hands the pane to the
     /// agents view (operator directive 2026-09-29). The target spans
     /// the hint's own cells; the depth label beside it is metadata.
+    /// The dispatch gates on the empty editor like `app.agents.back`,
+    /// the key the hint names.
     OpenAgentsView,
 }
 
@@ -306,14 +308,18 @@ impl AgentView {
     /// 2026-09-26 + 2026-09-29: the hovered clickable row re-styles so
     /// clickability is discoverable). Only a hover-affordance target
     /// holds the hover — a clickable card row, a dock group segment, or
-    /// the tray's `← manage` hint — anything else clears it — and the
-    /// state changes only when the hover crosses onto or off of that
-    /// row (the affordance is row-level; the tracked cell rides along
-    /// for the render-side revalidation), so a motion burst across one
-    /// row never schedules a render per report.
+    /// the tray's `← manage` hint — anything else clears it. The state
+    /// changes when the hover crosses onto or off of a target row, and
+    /// when it lands on a DIFFERENT target on the same row — the dock's
+    /// groups share one row, and the band must follow the mouse across
+    /// the segments, so the highlighted group and the group a click
+    /// opens can never disagree. Within one target the affordance is
+    /// row-level: a motion burst across a card row schedules one
+    /// render per crossing, not one per report.
     pub(crate) fn note_hover(&mut self, row: usize, col: usize) -> bool {
+        let target = self.click_target_at(row, col);
         let hover = matches!(
-            self.click_target_at(row, col),
+            target,
             Some(
                 ClickAction::ToggleCardExpansion
                     | ClickAction::OpenDockGroup(_)
@@ -322,7 +328,9 @@ impl AgentView {
         )
         .then_some((row, col));
         let changed = match (self.hover_pos, hover) {
-            (Some((hover_row, _)), Some((row, _))) => hover_row != row,
+            (Some((hover_row, hover_col)), Some((row, _))) => {
+                hover_row != row || self.click_target_at(hover_row, hover_col) != target
+            }
             (Some(_), None) | (None, Some(_)) => true,
             (None, None) => false,
         };
@@ -702,6 +710,60 @@ mod tests {
             col += width;
         }
         assert!(kept, "the hovered focused group keeps its purple band");
+    }
+
+    /// The dock's groups share one row: a hover that moves from one
+    /// segment onto another ON THE SAME ROW is a change (the band
+    /// follows the mouse — the highlighted group and the group a
+    /// click opens can never disagree), while a motion within one
+    /// segment still batches to a single render per crossing.
+    #[test]
+    fn the_hover_follows_the_mouse_across_the_dock_row() {
+        let mut view = dock_frame(crate::chrome::ActivityGroup::Heartbeats);
+        let (group_row, subagents) = region_span(
+            &view,
+            &ClickAction::OpenDockGroup(crate::chrome::ActivityGroup::Subagents),
+        );
+        let shells = region_span(
+            &view,
+            &ClickAction::OpenDockGroup(crate::chrome::ActivityGroup::Bash),
+        )
+        .1;
+        // Crossing onto the subagents segment changes the state.
+        assert!(view.note_hover(group_row, subagents.start));
+        let first = view.render_frame(80, 24);
+        // Moving WITHIN the segment changes nothing.
+        assert!(!view.note_hover(group_row, subagents.end - 1));
+        // Crossing onto the shells segment on the SAME row changes the
+        // state, and the repaint moves the band with it.
+        assert!(
+            view.note_hover(group_row, shells.start),
+            "the same-row group switch is a hover change"
+        );
+        let light = view.theme.hover_row_style().bg;
+        let band = |frame: &Vec<crate::Line>, cols: &std::ops::Range<usize>| {
+            let mut col = 0usize;
+            let mut banded = false;
+            for span in &frame[group_row] {
+                let width = crate::width::str_width(&span.content);
+                let covered = col.max(cols.start) < (col + width).min(cols.end);
+                if covered && span.style.bg == light {
+                    banded = true;
+                }
+                col += width;
+            }
+            banded
+        };
+        assert!(band(&first, &subagents), "the first hover banded subagents");
+        let second = view.render_frame(80, 24);
+        assert!(
+            !band(&second, &subagents),
+            "the band left the subagents segment"
+        );
+        assert!(
+            band(&second, &shells),
+            "the band followed the mouse onto the shells segment"
+        );
     }
 
     #[test]

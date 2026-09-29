@@ -245,8 +245,9 @@ impl SessionUi {
     /// (operator directive 2026-09-29): the left arrow's agents-back
     /// handoff — the pane goes to the agents view (a `--no-session`
     /// run has no daemon fleet to browse, so the click reports that
-    /// exactly like the key). A draft in the editor rides the exit
-    /// path's stash, like every agents-back key.
+    /// exactly like the key). The dispatch gates on the empty editor
+    /// exactly like `app.agents.back`, so the click never does more
+    /// than the hint promises.
     pub(crate) fn open_agents_view_from_hint(&mut self, view: &mut AgentView) {
         if self.return_to_agents_view {
             self.open_agents_view = true;

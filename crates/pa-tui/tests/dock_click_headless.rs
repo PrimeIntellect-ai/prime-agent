@@ -528,6 +528,44 @@ fn a_click_on_the_goal_group_opens_the_goal_panel() {
     );
 }
 
+/// The hint's click keeps the key's gate: with a draft in the editor
+/// the left arrow is the caret motion, not the agents-back handoff, so
+/// the click on the hint opens nothing either — the draft stays in the
+/// editor (Macroscope: the unconditional dispatch stashed a draft the
+/// key would have left in place).
+#[test]
+fn a_click_on_the_manage_hint_with_a_draft_opens_nothing() {
+    let frames = settled_frames("manage");
+    let (row, col) = locate(&frames, "manage").expect("the tray's manage hint renders");
+    let outcome = run_plan(vec![
+        HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+        HeadlessStep::WaitRender {
+            needle: "manage".to_string(),
+            timeout_ms: 10_000,
+        },
+        HeadlessStep::Type("draft stays".to_string()),
+        HeadlessStep::WaitRender {
+            needle: "draft stays".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::Mouse(press(col + 2, row + 1)),
+        HeadlessStep::Mouse(release(col + 2, row + 1)),
+        HeadlessStep::WaitRender {
+            needle: "draft stays".to_string(),
+            timeout_ms: 3_000,
+        },
+    ]);
+    let last = outcome.frames.last().expect("a frame after the click");
+    assert!(
+        last.contains("draft stays"),
+        "the draft stays in the editor: {last}"
+    );
+    assert!(
+        !outcome.return_to_agents_view,
+        "the hint click with a draft hands nothing off"
+    );
+}
+
 /// A click on the separator between two dock groups opens nothing: the
 /// gap between the segments is inert, exactly the cells the click
 /// surface never recorded.
