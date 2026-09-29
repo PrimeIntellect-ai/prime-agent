@@ -15,7 +15,7 @@ fn session_flags_map_to_selections() {
     let session_dir = dir.path().join("sessions");
     std::fs::create_dir_all(&session_dir).expect("sessions dir");
     assert_eq!(
-        session_selection(&session, &Some(session_dir.clone())).unwrap(),
+        session_selection(&session, Some(session_dir.as_path())),
         SessionSelection::New
     );
     // `--continue` never maps to a resume: the continue-recent launch
@@ -23,14 +23,14 @@ fn session_flags_map_to_selections() {
     // `continue_recent_view`) or falls through to a fresh session.
     session.continue_recent = true;
     assert_eq!(
-        session_selection(&session, &Some(session_dir.clone())).unwrap(),
+        session_selection(&session, Some(session_dir.as_path())),
         SessionSelection::New
     );
     session.continue_recent = false;
     session.resume = Some("a1b2c3".to_string());
     // A bare selector that is not a file attaches a live session id.
     assert_eq!(
-        session_selection(&session, &Some(session_dir.clone())).unwrap(),
+        session_selection(&session, Some(session_dir.as_path())),
         SessionSelection::Attach("a1b2c3".to_string())
     );
     // An id with a saved file under the sessions dir reopens the file.
@@ -38,7 +38,7 @@ fn session_flags_map_to_selections() {
     std::fs::write(&saved, "{}\n").expect("write file");
     session.resume = Some("deadbeefcafe".to_string());
     assert_eq!(
-        session_selection(&session, &Some(session_dir.clone())).unwrap(),
+        session_selection(&session, Some(session_dir.as_path())),
         SessionSelection::Resume(saved)
     );
     // An explicit file path reopens that session file.
@@ -46,7 +46,7 @@ fn session_flags_map_to_selections() {
     std::fs::write(&file, "{}\n").expect("write file");
     session.resume = Some(file.to_string_lossy().to_string());
     assert_eq!(
-        session_selection(&session, &Some(session_dir)).unwrap(),
+        session_selection(&session, Some(session_dir.as_path())),
         SessionSelection::Resume(file)
     );
 }

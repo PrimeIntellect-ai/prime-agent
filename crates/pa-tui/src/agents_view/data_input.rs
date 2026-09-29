@@ -71,7 +71,6 @@ impl AgentsViewMode {
             &filtered,
             self.options.scope.as_ref(),
             &self.expanded_parents,
-            &self.expanded_inactive_parents,
             &rollups,
             self.options.anchor_session_id.as_deref(),
         );
@@ -108,14 +107,10 @@ impl AgentsViewMode {
                     }
                     let session_id = row.summary.get("sessionId").and_then(Value::as_str);
                     if session_id.is_some_and(|id| wanted.iter().any(|w| w == id)) {
-                        // The drilled row sits under either line (running
-                        // or inactive), so the reveal opens both: the
-                        // flatten path may also need the running line to
-                        // expose a nested worker.
-                        let opened_running = self.expanded_parents.insert(row.identity.clone());
-                        let opened_inactive =
-                            self.expanded_inactive_parents.insert(row.identity.clone());
-                        if opened_running || opened_inactive {
+                        // The drilled row sits under the ONE merged
+                        // line (running and inactive rows alike), so
+                        // the reveal opens it.
+                        if self.expanded_parents.insert(row.identity.clone()) {
                             added = true;
                         }
                     }
@@ -125,7 +120,6 @@ impl AgentsViewMode {
                         &filtered,
                         self.options.scope.as_ref(),
                         &self.expanded_parents,
-                        &self.expanded_inactive_parents,
                         &rollups,
                         self.options.anchor_session_id.as_deref(),
                     );

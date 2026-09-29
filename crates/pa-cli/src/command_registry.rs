@@ -216,8 +216,9 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
          version and installs the latest Rust build; your sessions and configuration \
          (~/.prime/agent) are never touched. Restart prime-agent after the update to run the \
          new build. This command exists only in the Rust binary — the TypeScript version does \
-         not have it; the move happens when you run the curl|sh URL from \
-         docs/RUST_QUICKSTART.md or `prime-agent update` (after the Rust install exists). The \
+         not have it; the move happens when you run the installer's \
+         curl|sh URL (the README's Install section) or `prime-agent update` \
+         (after the Rust install exists). The \
          fetch source flips to the official domain install endpoint \
          (https://app.primeintellect.ai/prime-agent/install.sh) at the rust-to-main merge; \
          `PRIME_AGENT_RUST_INSTALLER_URL` overrides the source for testing.",

@@ -23,6 +23,7 @@ pub mod goal_driver;
 pub mod harness_digest;
 pub mod headless;
 pub mod host_requests;
+pub mod image_model_routing;
 pub mod ipython_state;
 pub mod messages;
 pub mod provider_adapter;
@@ -181,6 +182,10 @@ pub struct AgentSession {
     /// The telemetry handle for the `skill used` adoption event the
     /// prompt path owns (`None` in sessions without telemetry).
     skill_telemetry: Option<std::sync::Arc<telemetry::SessionTelemetry>>,
+    /// The image-model routing host seam (`None` keeps the session model on
+    /// image turns: verification harnesses, and the daemon worker whose
+    /// turn dispatch owns routing itself).
+    image_model_router: Option<image_model_routing::ImageModelRouter>,
     /// The live compaction summary-delta sink
     /// ([`compaction_exec::SummaryDeltaSink`]): every summarizer text
     /// delta the session's compactions stream reaches it, in arrival
@@ -256,10 +261,87 @@ impl AgentSession {
             pending_next_turn_rows: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             skills: Vec::new(),
             skill_telemetry: None,
+            image_model_router: None,
             compaction_summary_sink: std::sync::Mutex::new(None),
         };
         this.ensure_harness_digest_context().await?;
         Ok(this)
+    }
+
+    /// Install the image-model routing host seam (the headless surfaces'
+    /// settings + registry + pinned stream target); `None` keeps image
+    /// turns on the session model.
+    pub fn set_image_model_router(
+        &mut self,
+        router: Option<image_model_routing::ImageModelRouter>,
+    ) {
+        self.image_model_router = router;
+    }
+
+    /// The dispatch-time routing decision for one admitted batch (TS
+    /// `_imageModelOverrideForTurns` at commit): when the batch attaches
+    /// image blocks the session model cannot serve, the host's route
+    /// takes the stream target and the agent's per-run override, so the
+    /// run serves on the configured image model while the session model
+    /// keeps identifying the session. The fresh decision of EVERY admitted
+    /// batch (image-free included) re-evaluates the route, so retries and
+    /// post-compaction continuations of a routed turn keep serving it and
+    /// the next image-free batch returns to the session model. `Err` fails
+    /// the turn with the actionable refusal.
+    async fn apply_image_model_routing(
+        &self,
+        images: &[pa_agent::types::ImageContent],
+        batch: &[PromptBatchRow],
+    ) -> anyhow::Result<()> {
+        let Some(router) = self.image_model_router.as_ref() else {
+            return Ok(());
+        };
+        // The prior episode never outlives this admission (TS
+        // `_clearModelOverrideWhenIdle`: an explicit selection wins over
+        // routing lingering from the last dispatched turn, and the next
+        // dispatch re-evaluates against the new selection). The settle
+        // runs only while no run streams — the winner of an admission
+        // race keeps its own live serving target — and its still-routed
+        // guard leaves a mid-idle model switch alone, so the capture this
+        // batch's decision reads is always the live session model, never
+        // one from before a switch.
+        if !self.agent.state().await.is_streaming {
+            (router.swap_target)(None);
+            self.agent.set_model_override(None);
+        }
+        let carries_images = !images.is_empty() || batch.iter().any(|row| !row.images.is_empty());
+        // The live thinking level (the agent state's, matching
+        // `request_output_budget`'s read) rides the decision: a mid-run
+        // `/effort` or model switch must not route with the build-time
+        // level.
+        let live_level =
+            provider_adapter::model_thinking_level(self.agent.state().await.thinking_level);
+        let route = (router.decide)(carries_images, live_level).map_err(anyhow::Error::msg)?;
+        let Some(resolved) = route.as_ref() else {
+            (router.swap_target)(None);
+            self.agent.set_model_override(None);
+            return Ok(());
+        };
+        (router.swap_target)(Some(resolved));
+        // The conversion failure happens AFTER the swap armed the routed
+        // target: unwind the route so the failed turn does not leave it
+        // serving the next batch (the same unwind the admission race and
+        // the refusal paths perform).
+        let Some(agent_model) =
+            crate::session_engine::provider_adapter::json_round_trip(&resolved.model)
+        else {
+            (router.swap_target)(None);
+            self.agent.set_model_override(None);
+            return Err(anyhow::anyhow!("model conversion failed"));
+        };
+        self.agent
+            .set_model_override(Some(pa_agent::agent::AgentModelOverride {
+                model: agent_model,
+                thinking_level: crate::session_engine::provider_adapter::map_thinking_level(
+                    resolved.thinking_level,
+                ),
+            }));
+        Ok(())
     }
 
     /// Override the compaction settings from the session's resolved
@@ -534,13 +616,7 @@ impl AgentSession {
             let session = self.session.lock().await;
             crate::session_engine::compact_session::rebuilt_context_after_compaction(&session)
         };
-        let loop_messages: Vec<AgentMessage> = rebuilt
-            .into_iter()
-            .filter_map(|message| {
-                let value = serde_json::to_value(&message).ok()?;
-                serde_json::from_value::<AgentMessage>(value).ok()
-            })
-            .collect();
+        let loop_messages: Vec<AgentMessage> = rebuilt_loop_messages(rebuilt);
         let rebuilt_message_count = loop_messages.len();
         self.agent.set_messages(loop_messages).await;
         compaction_trace::trace(
@@ -645,14 +721,9 @@ impl AgentSession {
             session.adopt_entries(branch_entries);
             crate::session_engine::compact_session::rebuilt_context_after_compaction(&session)
         };
-        let loop_messages: Vec<AgentMessage> = rebuilt
-            .into_iter()
-            .filter_map(|message| {
-                let value = serde_json::to_value(&message).ok()?;
-                serde_json::from_value::<AgentMessage>(value).ok()
-            })
-            .collect();
-        self.agent.set_messages(loop_messages).await;
+        self.agent
+            .set_messages(rebuilt_loop_messages(rebuilt))
+            .await;
         Ok(())
     }
 
@@ -672,43 +743,73 @@ impl AgentSession {
         api_key: Option<String>,
         global_harness_dir: std::path::PathBuf,
     ) -> anyhow::Result<crate::refinement::RefinementResult> {
-        let snapshot = self.session.lock().await.history_snapshot();
-        let entries = snapshot.await?;
-        let messages: Vec<SessionAgentMessage> = entries
-            .iter()
-            .filter_map(|entry| match entry {
-                FileEntry::Message { message, .. } => Some(message.clone()),
-                _ => None,
-            })
-            .collect();
-        let result = {
+        self.refine_with_refiner(
+            options,
+            source,
+            model,
+            refine::default_refiner_call(api_key),
+            global_harness_dir,
+        )
+        .await
+    }
+
+    /// [`Self::refine`] with an injected refiner call: the seam the parity
+    /// tests use to drive the refinement without a provider.
+    pub(crate) async fn refine_with_refiner(
+        &self,
+        options: &refine::RefineOptions,
+        source: refine::RefinementSource,
+        model: &pa_types::ai::Model,
+        refine_call: crate::refinement::executor::RefinerFn,
+        global_harness_dir: std::path::PathBuf,
+    ) -> anyhow::Result<crate::refinement::RefinementResult> {
+        // The transcript's consumed artifacts (the message rows plus the
+        // in-session refinement history) are extracted under this first
+        // lock straight from the retained rows: no owned copy of the full
+        // entry set, no second clone of the message rows (#3013).
+        let parts = self.session.lock().await.refine_transcript_parts();
+        let crate::session::manager::RefineTranscriptParts {
+            messages,
+            refinement_history,
+        } = parts.await?;
+        let (result, context_row_ids) = {
             let mut session = self.session.lock().await;
-            refine::execute_refinement(
+            refine::execute_refinement_with_rows(
                 &mut session,
                 refine::RefinementTranscript {
                     messages: &messages,
-                    historical_entries: &entries,
+                    refinement_history: &refinement_history,
                 },
                 &global_harness_dir,
                 model,
                 options,
                 source,
-                refine::default_refiner_call(api_key),
+                refine_call,
             )
             .await?
         };
-        // The notice entry must also enter the live loop context.
-        let session = self.session.lock().await;
-        let loop_messages: Vec<AgentMessage> =
-            crate::session_engine::compact_session::rebuilt_context_after_compaction(&session)
-                .into_iter()
-                .filter_map(|message| {
-                    let value = serde_json::to_value(&message).ok()?;
-                    serde_json::from_value::<AgentMessage>(value).ok()
-                })
-                .collect();
-        drop(session);
-        self.agent.set_messages(loop_messages).await;
+        // TS `_appendDurableRefineMessage` pushes the outcome row (and the
+        // notice row when any edit applied) onto `agent.state.messages`
+        // after the durable append; TS never rebuilds the whole context
+        // after a refine — the rebuild is the compact/navigate arm, and a
+        // rebuild here would also resurrect a retried turn's dropped
+        // trailing assistant, which TS deliberately keeps out of the live
+        // context. The pushed rows are THIS run's, selected by the ids the
+        // run appended (so interleaved runs can never select each other's
+        // rows), and materialize from the appended durable entries, so they
+        // are byte-identical to a context rebuild's rows for them, while the
+        // live-context update stays O(refine rows) instead of O(session
+        // file) and lands under ONE agent-state lock (TS's synchronous
+        // `agent.state.messages.push`).
+        let rows = {
+            let session = self.session.lock().await;
+            refine::context_rows_by_ids(session.retained_entries(), &context_row_ids)
+        };
+        let loop_rows: Vec<AgentMessage> =
+            rows.iter().filter_map(session_message_to_loop).collect();
+        if !loop_rows.is_empty() {
+            self.agent.append_messages(loop_rows).await;
+        }
         Ok(result)
     }
 
@@ -778,6 +879,11 @@ impl AgentSession {
         prompt_messages.extend(self.take_next_turn_rows().await);
         let custom_row = session_message_to_loop(&SessionAgentMessage::Custom(message.clone()))
             .ok_or_else(|| anyhow::anyhow!("injected custom message conversion failed"))?;
+        // The dispatch-time routing decision fires for every dispatched
+        // turn (TS `_startPreparedTurnActions` runs it per prepared turn
+        // action): an injected row never carries images, so it clears a
+        // route left behind by the previous dispatched turn.
+        self.apply_image_model_routing(&[], &[]).await?;
         prompt_messages.push(custom_row);
         self.agent
             .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
@@ -874,6 +980,13 @@ impl AgentSession {
                 None => unreachable!("busy without a streaming behavior errors above"),
             }
         } else {
+            // The dispatch-time image-model routing decision (TS
+            // `_imageModelOverrideForTurns` at commit): an image-attaching
+            // batch routes to the host's configured image model or fails
+            // with the actionable refusal, never silently downgrading the
+            // images to placeholders.
+            self.apply_image_model_routing(&images, &options.batch)
+                .await?;
             // The turn's prompt messages (TS preparedMessages): the deferred
             // first-turn harness digest rides first when one is due, so the
             // loop streams its message pair ahead of the user prompt and
@@ -901,16 +1014,47 @@ impl AgentSession {
             }
             if options.return_after_accepted {
                 // TS `returnAfterAccepted: true` — the connection's prompt
-                // returns once the admitted turn delivers.
-                self.agent
+                // returns once the admitted turn delivers. The failure
+                // path unwinds the route exactly like the plain prompt
+                // branch below: this prompt never started, so its route
+                // must not survive (while no winner streams).
+                if let Err(error) = self
+                    .agent
                     .prompt_until_accepted(pa_agent::agent::AgentPromptInput::Messages(
                         prompt_messages,
                     ))
-                    .await?;
-            } else {
-                self.agent
-                    .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
-                    .await?;
+                    .await
+                {
+                    if !self.agent.state().await.is_streaming {
+                        if let Some(router) = self.image_model_router.as_ref() {
+                            (router.swap_target)(None);
+                            self.agent.set_model_override(None);
+                        }
+                    }
+                    return Err(error);
+                }
+            } else if let Err(error) = self
+                .agent
+                .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
+                .await
+            {
+                // A concurrent admission won the agent's run slot: this
+                // prompt never started, so its route must not survive. The
+                // unwind only happens while NO run streams - the winner's
+                // live run keeps its own serving target (an idle slot means
+                // our route never served a request; a streaming one belongs
+                // to the winner). TS decides per prepared action inside the
+                // same commit fence, so its single-threaded commit cannot
+                // observe this race at all; the headless surfaces serialize
+                // prompt admissions (one ACP prompt turn per session, the
+                // print loop's sequential awaits) besides.
+                if !self.agent.state().await.is_streaming {
+                    if let Some(router) = self.image_model_router.as_ref() {
+                        (router.swap_target)(None);
+                        self.agent.set_model_override(None);
+                    }
+                }
+                return Err(error);
             }
         }
         Ok(PromptOutcome::Prompt)
@@ -1129,6 +1273,17 @@ fn user_prompt_message(text: &str, images: &[pa_agent::types::ImageContent]) -> 
 /// out of the provider request).
 pub(crate) fn session_message_to_loop(message: &SessionAgentMessage) -> Option<AgentMessage> {
     serde_json::from_value(serde_json::to_value(message).ok()?).ok()
+}
+
+/// The live-context rebuild's conversion half: the rebuilt session
+/// messages converted to the loop's shape row by row through the shared
+/// wire shape (rows that fail the shared-shape conversion drop, exactly
+/// like the inline closures this replaced).
+pub(crate) fn rebuilt_loop_messages(rebuilt: Vec<SessionAgentMessage>) -> Vec<AgentMessage> {
+    rebuilt
+        .into_iter()
+        .filter_map(|message| session_message_to_loop(&message))
+        .collect()
 }
 
 fn now_millis() -> u64 {
@@ -2450,6 +2605,338 @@ mod compaction_outcome_tests {
                 .unwrap()
                 .contains("retained after the failed write"),
             "a context rebuild keeps the retained row"
+        );
+    }
+
+    // ---- refine: the live-context push (TS `_appendDurableRefineMessage`) ----
+
+    fn session_ai_model() -> pa_types::ai::Model {
+        serde_json::from_value(serde_json::json!({
+            "id": "m", "name": "m", "api": "openai-completions", "provider": "test",
+            "baseUrl": "http://localhost", "reasoning": false, "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 100_000, "maxTokens": 8000
+        }))
+        .unwrap()
+    }
+
+    fn refine_assistant_row(error: bool) -> SessionAgentMessage {
+        SessionAgentMessage::Assistant(pa_types::ai::AssistantMessage {
+            content: vec![pa_types::ai::AssistantContentBlock::Text(
+                pa_types::ai::TextContent {
+                    text: if error {
+                        "provider failed".to_string()
+                    } else {
+                        "did the thing".to_string()
+                    },
+                    text_signature: None,
+                    rest: serde_json::Map::default(),
+                },
+            )],
+            api: "openai-completions".to_string(),
+            provider: "test".to_string(),
+            model: "m".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: pa_types::ai::Usage::default(),
+            stop_reason: if error {
+                pa_types::ai::StopReason::Error
+            } else {
+                pa_types::ai::StopReason::Stop
+            },
+            stop_reason_raw: None,
+            error_message: if error {
+                Some("provider failed".to_string())
+            } else {
+                None
+            },
+            timestamp: 0,
+            rest: serde_json::Map::default(),
+        })
+    }
+
+    fn refine_plan_call(plan: &'static str) -> crate::refinement::executor::RefinerFn {
+        Box::new(move |_model, _system, _prompt| {
+            Box::pin(async move {
+                Ok(pa_types::ai::AssistantMessage {
+                    content: vec![pa_types::ai::AssistantContentBlock::Text(
+                        pa_types::ai::TextContent {
+                            text: plan.to_string(),
+                            text_signature: None,
+                            rest: serde_json::Map::default(),
+                        },
+                    )],
+                    api: "openai-completions".to_string(),
+                    provider: "test".to_string(),
+                    model: "m".to_string(),
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
+                    usage: pa_types::ai::Usage::default(),
+                    stop_reason: pa_types::ai::StopReason::Stop,
+                    stop_reason_raw: None,
+                    error_message: None,
+                    timestamp: 0,
+                    rest: serde_json::Map::default(),
+                })
+            })
+        })
+    }
+
+    const APPLIED_PLAN: &str = r#"{"summary":"note it","rationale":"repeated","expectedOutcome":"recall","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#;
+    const EMPTY_PLAN: &str = r#"{"summary":"bench","edits":[]}"#;
+
+    /// A persisted session over two seeded rows, with the live loop context
+    /// built the way the resume path builds it (one rebuild:
+    /// `restore_windowed_context`'s construction).
+    async fn refine_test_session() -> (AgentSession, tempfile::TempDir) {
+        let provider = Arc::new(ScriptedProvider::new(test_model()));
+        let options = AgentOptions {
+            initial_state: AgentInitialState {
+                model: Some(test_model()),
+                ..Default::default()
+            },
+            stream_fn: Some(provider.stream_fn()),
+            ..Default::default()
+        };
+        let agent = Agent::new(options);
+        let tmp = tempfile::tempdir().unwrap();
+        let session_dir = tmp.path().join("session");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let mut manager = SessionManager::in_memory(tmp.path());
+        manager.materialize_session_file(Some(session_dir));
+        manager
+            .append_message(SessionAgentMessage::User(pa_types::ai::UserMessage {
+                content: pa_types::ai::UserContent::Text("do a thing twice".to_string()),
+                timestamp: 0,
+                rest: serde_json::Map::default(),
+            }))
+            .unwrap();
+        manager.append_message(refine_assistant_row(false)).unwrap();
+        let session = AgentSession::new(Arc::new(agent), manager, vec![])
+            .await
+            .unwrap();
+        let live = {
+            let persistence = session.shared_persistence();
+            let manager = persistence.lock().await;
+            rebuilt_loop_messages(
+                crate::session_engine::compact_session::rebuilt_context_after_compaction(&manager),
+            )
+        };
+        session.agent().set_messages(live).await;
+        (session, tmp)
+    }
+
+    /// The pre-change mechanism, verbatim: the full active-context rebuild
+    /// plus the shared-shape conversion (the oracle's reference).
+    async fn full_rebuild_reference(session: &AgentSession) -> Vec<AgentMessage> {
+        let persistence = session.shared_persistence();
+        let manager = persistence.lock().await;
+        rebuilt_loop_messages(
+            crate::session_engine::compact_session::rebuilt_context_after_compaction(&manager),
+        )
+    }
+
+    fn is_error_assistant(message: &AgentMessage) -> bool {
+        matches!(
+            message,
+            AgentMessage::Standard(pa_agent::types::Message::Assistant(assistant))
+                if assistant.stop_reason == pa_agent::types::StopReason::Error
+        )
+    }
+
+    fn custom_types(messages: &[AgentMessage]) -> Vec<String> {
+        messages
+            .iter()
+            .filter_map(|message| match message {
+                AgentMessage::Custom(custom) => custom
+                    .payload
+                    .get("customType")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                AgentMessage::Standard(_) => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn refine_pushed_live_context_matches_a_full_rebuild_byte_for_byte() {
+        let (session, tmp) = refine_test_session().await;
+        let global_dir = tmp.path().join("harness");
+        let result = session
+            .refine_with_refiner(
+                &refine::RefineOptions::default(),
+                refine::RefinementSource::User,
+                &session_ai_model(),
+                refine_plan_call(APPLIED_PLAN),
+                global_dir,
+            )
+            .await
+            .unwrap();
+        assert!(result.applied_edits.iter().any(|edit| edit.applied));
+        // Candidate: the pushed live loop context.
+        let candidate = session.agent().state().await.messages;
+        // Reference: the pre-change full-rebuild mechanism, run verbatim.
+        let reference = full_rebuild_reference(&session).await;
+        assert_eq!(
+            serde_json::to_value(&candidate).unwrap(),
+            serde_json::to_value(&reference).unwrap(),
+            "the pushed live context is byte-identical to the full rebuild"
+        );
+        // The pushed rows land exactly once, in durable order (outcome,
+        // then notice); the audit entry never enters the context.
+        assert_eq!(candidate.len(), 4);
+        assert_eq!(
+            custom_types(&candidate[candidate.len() - 2..]),
+            vec!["refinement_outcome", "refinement_notice"]
+        );
+        assert!(custom_types(&candidate)
+            .iter()
+            .all(|custom_type| custom_type != "prime-agent.refinement"));
+    }
+
+    #[tokio::test]
+    async fn refine_with_an_empty_plan_pushes_only_the_outcome_row() {
+        let (session, tmp) = refine_test_session().await;
+        let global_dir = tmp.path().join("harness");
+        let result = session
+            .refine_with_refiner(
+                &refine::RefineOptions::default(),
+                refine::RefinementSource::User,
+                &session_ai_model(),
+                refine_plan_call(EMPTY_PLAN),
+                global_dir,
+            )
+            .await
+            .unwrap();
+        assert!(result.applied_edits.iter().all(|edit| !edit.applied));
+        let candidate = session.agent().state().await.messages;
+        let reference = full_rebuild_reference(&session).await;
+        assert_eq!(
+            serde_json::to_value(&candidate).unwrap(),
+            serde_json::to_value(&reference).unwrap(),
+            "the pushed live context is byte-identical to the full rebuild"
+        );
+        assert_eq!(candidate.len(), 3, "only the outcome row is pushed");
+        assert_eq!(
+            custom_types(&candidate[candidate.len() - 1..]),
+            vec!["refinement_outcome"],
+            "no notice row without an applied edit"
+        );
+    }
+
+    #[tokio::test]
+    async fn sequential_refines_push_exactly_their_own_rows() {
+        // Two runs back-to-back: the second must select exactly its own
+        // rows (by id), never the first run's — the pushed live context
+        // stays byte-identical to a full rebuild, which holds exactly one
+        // copy of each appended row.
+        let (session, tmp) = refine_test_session().await;
+        let global_dir = tmp.path().join("harness");
+        let first = r#"{"summary":"one","edits":[{"action":"create","kind":"memory","id":"m1","title":"A","content":"a"}]}"#;
+        let second = r#"{"summary":"two","edits":[{"action":"create","kind":"memory","id":"m2","title":"B","content":"b"}]}"#;
+        session
+            .refine_with_refiner(
+                &refine::RefineOptions::default(),
+                refine::RefinementSource::User,
+                &session_ai_model(),
+                refine_plan_call(first),
+                global_dir.clone(),
+            )
+            .await
+            .unwrap();
+        session
+            .refine_with_refiner(
+                &refine::RefineOptions::default(),
+                refine::RefinementSource::User,
+                &session_ai_model(),
+                refine_plan_call(second),
+                global_dir,
+            )
+            .await
+            .unwrap();
+        let candidate = session.agent().state().await.messages;
+        let reference = full_rebuild_reference(&session).await;
+        assert_eq!(
+            serde_json::to_value(&candidate).unwrap(),
+            serde_json::to_value(&reference).unwrap(),
+            "two sequential refines hold exactly one copy of each appended row"
+        );
+        // Base rows + two outcomes + two notices, in durable order.
+        assert_eq!(candidate.len(), 6);
+        assert_eq!(
+            custom_types(&candidate[candidate.len() - 4..]),
+            vec![
+                "refinement_outcome",
+                "refinement_notice",
+                "refinement_outcome",
+                "refinement_notice"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn refine_keeps_the_retry_drop_instead_of_resurrecting_the_error_row() {
+        let (session, tmp) = refine_test_session().await;
+        // The retry arm's sanctioned live/durable divergence: the failed
+        // turn's error assistant row is durable, then dropped from the live
+        // context (`drop_trailing_assistant`, TS's retry `slice(0, -1)`).
+        {
+            let persistence = session.shared_persistence();
+            let mut manager = persistence.lock().await;
+            manager.append_message(refine_assistant_row(true)).unwrap();
+        }
+        let rebuilt = {
+            let persistence = session.shared_persistence();
+            let manager = persistence.lock().await;
+            crate::session_engine::compact_session::rebuilt_context_after_compaction(&manager)
+        };
+        session
+            .agent()
+            .set_messages(rebuilt_loop_messages(rebuilt))
+            .await;
+        session
+            .drop_trailing_assistant(TrailingAssistantFilter::ErrorOnly)
+            .await;
+        let pre_live = session.agent().state().await.messages;
+        assert_eq!(
+            pre_live.len(),
+            2,
+            "the error row is dropped from the live context"
+        );
+        let global_dir = tmp.path().join("harness");
+        session
+            .refine_with_refiner(
+                &refine::RefineOptions::default(),
+                refine::RefinementSource::User,
+                &session_ai_model(),
+                refine_plan_call(APPLIED_PLAN),
+                global_dir,
+            )
+            .await
+            .unwrap();
+        // The served-path gate: the push preserves the live list (the
+        // pre-change rebuild would have replaced it). TS `_applyRefine`
+        // pushes onto `agent.state.messages`; the dropped error row stays
+        // out of the live context exactly like TS.
+        let live = session.agent().state().await.messages;
+        assert_eq!(live.len(), 4);
+        assert!(
+            !live.iter().any(is_error_assistant),
+            "the retry-dropped error row is not resurrected"
+        );
+        assert_eq!(
+            custom_types(&live[live.len() - 2..]),
+            vec!["refinement_outcome", "refinement_notice"]
+        );
+        // The deliberate, TS-anchored divergence: the full rebuild WOULD
+        // resurrect the row (the pre-change mechanism's behavior).
+        let reference = full_rebuild_reference(&session).await;
+        assert_eq!(reference.len(), 5);
+        assert!(
+            reference.iter().any(is_error_assistant),
+            "the reference rebuild resurrects the dropped row; the push does not"
         );
     }
 }

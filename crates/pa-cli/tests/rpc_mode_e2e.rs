@@ -1,3 +1,22 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
+// by design on hot paths (boxing 130 fns is allocation-churn with zero
+// correctness gain); the fn-length threshold is a style gate, not
+// correctness (the harness fns are intentionally linear); 64-bit targets -
+// the narrowing sits at OS/protocol boundaries where the values are
+// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
+// guarded parses), and checked conversions would add panic paths where
+// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
+// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
+// dossier for the conductor).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! End-to-end RPC-mode verification: the real binary serves the TS
 //! `modes/rpc` JSONL command surface over stdio, driven by the scripted
 //! faux provider. Covers the protocol contract (response shapes, parse
@@ -89,7 +108,7 @@ impl RpcChild {
         }
     }
 
-    fn send(&mut self, frame: Value) {
+    fn send(&mut self, frame: &Value) {
         let mut line = serde_json::to_string(&frame).unwrap();
         line.push('\n');
         let stdin = self.stdin.as_mut().expect("stdin piped");
@@ -102,7 +121,7 @@ impl RpcChild {
         let id = format!("t-{}", self.next_id);
         let mut frame = command.clone();
         frame["id"] = json!(id);
-        self.send(frame);
+        self.send(&frame);
         id
     }
 
@@ -234,7 +253,7 @@ impl Drop for RpcChild {
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 
-fn turn_script(steps: Value) -> Value {
+fn turn_script(steps: &Value) -> Value {
     json!({ "responses": steps })
 }
 
@@ -244,7 +263,7 @@ fn turn_script(steps: Value) -> Value {
 fn rpc_get_state_answers_the_fresh_session() {
     let mut client = RpcChild::spawn(
         &["--mode", "rpc", "--no-session"],
-        &turn_script(json!(["unused"])),
+        &turn_script(&json!(["unused"])),
     );
     let response = client.request(&json!({ "type": "get_state" }));
     assert_eq!(response["success"], true, "the response: {response}");
@@ -276,7 +295,7 @@ fn rpc_get_state_answers_the_fresh_session() {
 fn rpc_prompt_streams_events_after_the_response() {
     let mut client = RpcChild::spawn(
         &["--mode", "rpc", "--no-session"],
-        &turn_script(json!(["first reply"])),
+        &turn_script(&json!(["first reply"])),
     );
     let id = client.command(&json!({ "type": "prompt", "message": "hi" }));
     let (response, before) = client.wait_response(&id, TIMEOUT);
@@ -318,11 +337,11 @@ fn rpc_prompt_streams_events_after_the_response() {
 fn rpc_parse_and_unknown_command_errors() {
     let mut client = RpcChild::spawn(
         &["--mode", "rpc", "--no-session"],
-        &turn_script(json!(["unused"])),
+        &turn_script(&json!(["unused"])),
     );
     // A non-object line answers the parse error (no id to match on, so
     // match the command name).
-    client.send(json!("not an object"));
+    client.send(&json!("not an object"));
     let deadline = Instant::now() + TIMEOUT;
     let parse_error = loop {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -339,7 +358,7 @@ fn rpc_parse_and_unknown_command_errors() {
         parse_error["error"],
         "Invalid command: expected an object with a string type"
     );
-    client.send(json!({ "type": "definitely_not_a_command" }));
+    client.send(&json!({ "type": "definitely_not_a_command" }));
     let deadline = Instant::now() + TIMEOUT;
     let unknown = loop {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -526,7 +545,7 @@ fn rpc_thinking_level_set_and_cycle() {
 fn rpc_compact_answers_the_ts_skip_error() {
     let mut client = RpcChild::spawn(
         &["--mode", "rpc", "--no-session"],
-        &turn_script(json!(["unused"])),
+        &turn_script(&json!(["unused"])),
     );
     let id = client.command(&json!({ "type": "compact" }));
     let (response, events) = client.wait_response(&id, TIMEOUT);
@@ -558,7 +577,7 @@ fn rpc_compact_answers_the_ts_skip_error() {
 fn rpc_daemon_mode_families_answer_the_ts_inprocess_semantics() {
     let mut client = RpcChild::spawn(
         &["--mode", "rpc", "--no-session"],
-        &turn_script(json!(["unused"])),
+        &turn_script(&json!(["unused"])),
     );
     let bash = client.request(&json!({ "type": "bash", "command": "echo hi" }));
     assert_eq!(bash["success"], false);
@@ -596,7 +615,7 @@ fn rpc_daemon_mode_families_answer_the_ts_inprocess_semantics() {
 fn rpc_set_session_name_round_trip() {
     let mut client = RpcChild::spawn(
         &["--mode", "rpc", "--no-session"],
-        &turn_script(json!(["unused"])),
+        &turn_script(&json!(["unused"])),
     );
     // The changed event lands BEFORE the response: assert it among the
     // pre-response frames (a later wait would never see a copy).
@@ -622,7 +641,7 @@ fn rpc_set_session_name_round_trip() {
 /// (the persisted session-file path).
 #[test]
 fn rpc_fork_messages_and_fork_swap() {
-    let script = turn_script(json!(["one", "two"]));
+    let script = turn_script(&json!(["one", "two"]));
     let mut client = RpcChild::spawn(&["--mode", "rpc"], &script);
     for message in ["first turn", "second turn"] {
         let response = client.request(&json!({ "type": "prompt", "message": message }));
@@ -662,7 +681,7 @@ fn rpc_fork_messages_and_fork_swap() {
 /// `new_session` replaces the runtime with a fresh session.
 #[test]
 fn rpc_new_session_swaps_the_engine() {
-    let script = turn_script(json!(["one", "unused"]));
+    let script = turn_script(&json!(["one", "unused"]));
     let mut client = RpcChild::spawn(&["--mode", "rpc"], &script);
     let response = client.request(&json!({ "type": "prompt", "message": "hi" }));
     assert_eq!(response["success"], true);
@@ -689,7 +708,7 @@ fn rpc_get_available_models_lists_the_catalog() {
     // the same shape).
     let mut client = RpcChild::spawn_seeded(
         &["--mode", "rpc", "--no-session"],
-        &turn_script(json!(["unused"])),
+        &turn_script(&json!(["unused"])),
         Some(json!({
             "providers": {
                 "faux": {
@@ -731,13 +750,13 @@ fn rpc_eof_settles_and_exits_zero() {
     client.wait_event("message_start", TIMEOUT);
     // Close stdin mid-turn: the child settles the turn and exits 0.
     drop(client.stdin.take());
-    let status = client
+    let wait_status = client
         .child
         .wait()
         .expect("the child exits when stdin closes");
     assert!(
-        status.success(),
-        "stdin close settles the turn and exits 0 (status {status})"
+        wait_status.success(),
+        "stdin close settles the turn and exits 0 (status {wait_status})"
     );
     client.spawn_stderr = None;
 }
@@ -746,7 +765,7 @@ fn rpc_eof_settles_and_exits_zero() {
 /// messages.
 #[test]
 fn rpc_get_session_stats_answers_the_ts_shape() {
-    let script = turn_script(json!(["one"]));
+    let script = turn_script(&json!(["one"]));
     let mut client = RpcChild::spawn(&["--mode", "rpc"], &script);
     let response = client.request(&json!({ "type": "prompt", "message": "hi" }));
     assert_eq!(response["success"], true);
@@ -773,15 +792,18 @@ fn rpc_get_session_stats_answers_the_ts_shape() {
 fn rpc_mode_never_prints_the_missing_subsystem_stub() {
     let mut client = RpcChild::spawn(
         &["--mode", "rpc", "--no-session"],
-        &turn_script(json!(["unused"])),
+        &turn_script(&json!(["unused"])),
     );
     // Any answered command proves the transport is live; the stub would
     // exit 1 immediately with the misleading error on stderr/stdout.
     let response = client.request(&json!({ "type": "get_state" }));
     assert_eq!(response["success"], true);
     drop(client.stdin.take());
-    let status = client.child.wait().expect("exit");
-    assert!(status.success(), "the mode serves the protocol: {status}");
+    let wait_status = client.child.wait().expect("exit");
+    assert!(
+        wait_status.success(),
+        "the mode serves the protocol: {wait_status}"
+    );
     client.spawn_stderr = None;
 }
 
@@ -791,7 +813,7 @@ fn rpc_mode_never_prints_the_missing_subsystem_stub() {
 /// unleased): the owner record exists while the engine is live.
 #[test]
 fn rpc_fresh_sessions_lease_their_files() {
-    let mut client = RpcChild::spawn(&["--mode", "rpc"], &turn_script(json!(["one"])));
+    let mut client = RpcChild::spawn(&["--mode", "rpc"], &turn_script(&json!(["one"])));
     let response = client.request(&json!({ "type": "prompt", "message": "hi" }));
     assert_eq!(response["success"], true);
     client.wait_event("agent_end", TIMEOUT);
@@ -806,8 +828,11 @@ fn rpc_fresh_sessions_lease_their_files() {
         "the fresh session's file is runtime-leased while the engine is live (leased: {leased:?})"
     );
     drop(client.stdin.take());
-    let status = client.child.wait().expect("exit");
-    assert!(status.success(), "eof settles the leased session: {status}");
+    let wait_status = client.child.wait().expect("exit");
+    assert!(
+        wait_status.success(),
+        "eof settles the leased session: {wait_status}"
+    );
     client.spawn_stderr = None;
 }
 
@@ -816,7 +841,7 @@ fn rpc_fresh_sessions_lease_their_files() {
 /// second writer while this engine appends (the source is only read).
 #[test]
 fn rpc_fork_leases_the_materialized_file() {
-    let mut source = RpcChild::spawn(&["--mode", "rpc"], &turn_script(json!(["one"])));
+    let mut source = RpcChild::spawn(&["--mode", "rpc"], &turn_script(&json!(["one"])));
     let response = source.request(&json!({ "type": "prompt", "message": "hi" }));
     assert_eq!(response["success"], true);
     source.wait_event("agent_end", TIMEOUT);
@@ -826,13 +851,16 @@ fn rpc_fork_leases_the_materialized_file() {
         .expect("the source session reports its file")
         .to_string();
     drop(source.stdin.take());
-    let status = source.child.wait().expect("the source exits cleanly");
-    assert!(status.success(), "the source session settles: {status}");
+    let wait_status = source.child.wait().expect("the source exits cleanly");
+    assert!(
+        wait_status.success(),
+        "the source session settles: {wait_status}"
+    );
     source.spawn_stderr = None;
 
     let mut forked = RpcChild::spawn(
         &["--mode", "rpc", "--fork", &source_file],
-        &turn_script(json!(["hi there"])),
+        &turn_script(&json!(["hi there"])),
     );
     let response = forked.request(&json!({ "type": "prompt", "message": "again" }));
     assert_eq!(response["success"], true);
@@ -849,8 +877,11 @@ fn rpc_fork_leases_the_materialized_file() {
         "the fork's materialized file is runtime-leased (leased: {leased:?})"
     );
     drop(forked.stdin.take());
-    let status = forked.child.wait().expect("exit");
-    assert!(status.success(), "eof settles the forked session: {status}");
+    let wait_status = forked.child.wait().expect("exit");
+    assert!(
+        wait_status.success(),
+        "eof settles the forked session: {wait_status}"
+    );
     forked.spawn_stderr = None;
 }
 
@@ -964,13 +995,13 @@ fn rpc_sigterm_during_replacement_exits_promptly() {
     client.wait_event("message_start", TIMEOUT);
     // The replacement queues behind the running turn's settle; SIGTERM
     // must cut through both.
-    client.send(json!({ "type": "new_session", "id": "t-replace" }));
-    let status = std::process::Command::new("kill")
+    client.send(&json!({ "type": "new_session", "id": "t-replace" }));
+    let wait_status = std::process::Command::new("kill")
         .arg("-TERM")
         .arg(client.child.id().to_string())
         .status()
         .expect("send SIGTERM");
-    assert!(status.success(), "the SIGTERM dispatch succeeded");
+    assert!(wait_status.success(), "the SIGTERM dispatch succeeded");
     // Event-gated wait: the stdout pipe closes exactly when the child
     // exits — well inside the faux turn's 30s hold.
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -986,7 +1017,585 @@ fn rpc_sigterm_during_replacement_exits_promptly() {
             }
         }
     }
-    let status = client.child.wait().expect("the signal exits the child");
-    assert_eq!(status.code(), Some(143), "SIGTERM exits 143");
+    let wait_status = client.child.wait().expect("the signal exits the child");
+    assert_eq!(wait_status.code(), Some(143), "SIGTERM exits 143");
     client.spawn_stderr = None;
+}
+
+/// A deterministic large session fixture in the corpus row schema (the
+/// bench generator's exact row shapes: the session header, the base
+/// harness-digest rows, then user -> assistant(tool call) -> toolResult
+/// turns with digest rows every 20 turns, and the final marker pair). A
+/// resumable session whose compaction's pre-summarizer CPU span is
+/// data-scaled — the same property the canonical 10MiB bench fixture
+/// has, sized for the compaction-visibility oracles.
+fn write_corpus_fixture(path: &std::path::Path, size_mib: usize) {
+    let home = path.parent().unwrap().parent().unwrap();
+    let mut rows: Vec<Value> = Vec::new();
+    rows.push(json!({
+        "type": "session", "id": "cvis-e2e-corpus", "version": 3,
+        "timestamp": "2026-09-16T18:40:16.600Z",
+        "cwd": home.display().to_string(), "rlmDepth": 0,
+    }));
+    let mut counter: u64 = 0;
+    let mut parent = String::new();
+    let entry = |counter: &mut u64, parent: &mut String, fields: Value| {
+        *counter += 1;
+        let id = format!("{:08x}", *counter);
+        let mut row = fields;
+        row["id"] = json!(id);
+        row["parentId"] = json!(parent);
+        row["timestamp"] = json!(format!(
+            "2026-09-16T18:{:02}:{:02}.{:03}Z",
+            (*counter / 60) % 60,
+            *counter % 60,
+            *counter % 1000
+        ));
+        *parent = id;
+        row
+    };
+    for base in 0..11 {
+        let row = entry(
+            &mut counter,
+            &mut parent,
+            json!({
+                "customType": "harness_digest",
+                "content": format!(
+                    "[harness-digest] base note {base}: persistent state summary for the corpus."
+                ),
+                "type": "custom_message",
+            }),
+        );
+        rows.push(row);
+    }
+    // ~40KB of assistant text per turn keeps the fixture at `size_mib`
+    // MiB over a few hundred turns (the bench corpus's per-turn scale).
+    let paragraph = "Latency tools daemon terminal kernel parity settle memory viewport \
+                     streaming cadence corpus sentinel transcript snapshot roster. "
+        .repeat(10);
+    let turn_text = paragraph.repeat(90);
+    let per_turn = turn_text.len() + 1024;
+    let turns = (size_mib * (1 << 20)) / per_turn;
+    for turn in 0..turns {
+        let row = entry(
+            &mut counter,
+            &mut parent,
+            json!({
+                "message": {
+                    "role": "user",
+                    "content": [{ "type": "text", "text": format!("please do task number {turn}") }],
+                    "timestamp": 1_789_584_016_603_i64 + turn as i64,
+                },
+                "type": "message",
+            }),
+        );
+        rows.push(row);
+        let call_id = format!("call_{turn:06}");
+        let row = entry(
+            &mut counter,
+            &mut parent,
+            json!({
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "thinking", "thinking": format!("task {turn}: run the corpus command") },
+                        { "type": "text", "text": turn_text },
+                    ],
+                    "toolCalls": [{
+                        "id": call_id,
+                        "name": "ipython",
+                        "arguments": { "code": format!("print('corpus {turn}')") },
+                    }],
+                    "api": "openai-completions",
+                    "provider": "prime-inference",
+                    "model": "mock-1",
+                    "usage": {
+                        "input": 100, "output": 20, "cacheRead": 10, "cacheWrite": 0,
+                        "totalTokens": 130,
+                        "cost": { "input": 0.1, "output": 0.02, "cacheRead": 0, "cacheWrite": 0, "total": 0.12 },
+                    },
+                    "stopReason": "tool_calls",
+                    "timestamp": 1_789_584_016_603_i64 + turn as i64,
+                },
+                "type": "message",
+            }),
+        );
+        rows.push(row);
+        let row = entry(
+            &mut counter,
+            &mut parent,
+            json!({
+                "message": {
+                    "role": "toolResult",
+                    "toolCallId": call_id,
+                    "content": [{ "type": "text", "text": format!("corpus {turn}\n[0, 1, 2]\n") }],
+                    "isError": false,
+                    "timestamp": 1_789_584_016_603_i64 + turn as i64,
+                },
+                "type": "message",
+            }),
+        );
+        rows.push(row);
+        if (turn + 1) % 20 == 0 {
+            let row = entry(
+                &mut counter,
+                &mut parent,
+                json!({
+                    "customType": "harness_digest",
+                    "content": format!(
+                        "[harness-digest] note {turn}: persistent state summary for the corpus."
+                    ),
+                    "type": "custom_message",
+                }),
+            );
+            rows.push(row);
+        }
+    }
+    let row = entry(
+        &mut counter,
+        &mut parent,
+        json!({
+            "message": {
+                "role": "user",
+                "content": [{ "type": "text", "text": "final marker request" }],
+                "timestamp": 1_789_584_016_603_i64,
+            },
+            "type": "message",
+        }),
+    );
+    rows.push(row);
+    let row = entry(
+        &mut counter,
+        &mut parent,
+        json!({
+            "message": {
+                "role": "assistant",
+                "content": [
+                    { "type": "thinking", "thinking": "final marker" },
+                    { "type": "text", "text": "CVIS-E2E-TAIL end of corpus." },
+                ],
+                "api": "openai-completions",
+                "provider": "prime-inference",
+                "model": "mock-1",
+                "usage": {
+                    "input": 100, "output": 20, "cacheRead": 10, "cacheWrite": 0,
+                    "totalTokens": 130,
+                    "cost": { "input": 0.1, "output": 0.02, "cacheRead": 0, "cacheWrite": 0, "total": 0.12 },
+                },
+                "stopReason": "stop",
+                "timestamp": 1_789_584_016_603_i64,
+            },
+            "type": "message",
+        }),
+    );
+    rows.push(row);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut text = String::new();
+    for row in rows {
+        text.push_str(&serde_json::to_string(&row).unwrap());
+        text.push('\n');
+    }
+    std::fs::write(path, text).unwrap();
+}
+
+/// One timestamped RPC child for the compaction-visibility oracles: the
+/// reader records each frame with the `Instant` its read chunk arrived,
+/// so a frame's client-visibility time is the pipe-arrival time, not a
+/// later poll (the same arrival-accurate rule the bench frame pump has).
+struct TimedRpcChild {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    frames: Option<std::sync::mpsc::Receiver<(std::time::Instant, Value)>>,
+    /// Held while the reader is deferred (the stalled-reader oracle).
+    pending_stdout: Option<std::process::ChildStdout>,
+    next_id: u64,
+    /// Held so the tempdir (the child's cwd) outlives the child process:
+    /// the Drop reaps the child before the field drops.
+    _home: tempfile::TempDir,
+}
+
+impl TimedRpcChild {
+    fn spawn(fixture: &std::path::Path, script: &Value) -> TimedRpcChild {
+        let mut child = Self::spawn_stalled(fixture, script);
+        child.begin_reading();
+        child
+    }
+
+    /// Spawn with the reader thread deferred: the stalled-reader oracle
+    /// holds the child's stdout pipe unread (a full pipe blocks the
+    /// writer task mid-write) until `begin_reading` starts the drain.
+    fn spawn_stalled(fixture: &std::path::Path, script: &Value) -> TimedRpcChild {
+        let home = tempfile::TempDir::new().unwrap();
+        let bin = env!("CARGO_BIN_EXE_prime-agent");
+        let mut child = Command::new(bin)
+            .args(["--mode", "rpc", "--resume", fixture.to_str().unwrap()])
+            .env("HOME", home.path())
+            .env("PRIME_AGENT_FAUX_SCRIPT", script.to_string())
+            .env("RUST_LOG", "error")
+            .current_dir(home.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("binary present");
+        let stdin = child.stdin.take().expect("stdin piped");
+        let stdout = child.stdout.take().expect("stdout piped");
+        let stderr = child.stderr.take().expect("stderr piped");
+        // The child's stderr must drain for the trial's lifetime: a
+        // piped-but-undrained stderr fills its 64KB pipe and the child
+        // blocks on its next log write, wedging the very path the test
+        // measures.
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut sink = [0u8; 8192];
+            let mut stderr = stderr;
+            while matches!(stderr.read(&mut sink), Ok(n) if n > 0) {}
+        });
+        TimedRpcChild {
+            child,
+            stdin,
+            frames: None,
+            pending_stdout: Some(stdout),
+            next_id: 0,
+            _home: home,
+        }
+    }
+
+    /// Start the deferred reader thread (the stalled-reader oracle holds
+    /// it back until the stall window closes).
+    fn begin_reading(&mut self) {
+        let (tx, frames) = std::sync::mpsc::channel();
+        let stdout = self.pending_stdout.take().expect("reader started once");
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut stdout = stdout;
+            let mut buf: Vec<u8> = Vec::new();
+            let mut chunk = vec![0u8; 65536].into_boxed_slice();
+            loop {
+                match stdout.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let arrived = Instant::now();
+                        buf.extend_from_slice(&chunk[..n]);
+                        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                            let line: Vec<u8> = buf.drain(..=pos).collect();
+                            let line = String::from_utf8_lossy(&line).trim().to_owned();
+                            if line.is_empty() {
+                                continue;
+                            }
+                            let frame: Value =
+                                serde_json::from_str(&line).expect("valid JSON line");
+                            if tx.send((arrived, frame)).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        self.frames = Some(frames);
+    }
+
+    fn send(&mut self, frame: &Value) {
+        let mut line = serde_json::to_string(frame).unwrap();
+        line.push('\n');
+        self.stdin.write_all(line.as_bytes()).unwrap();
+        self.stdin.flush().unwrap();
+    }
+
+    fn command(&mut self, command: &Value) -> (String, Instant) {
+        self.next_id += 1;
+        let id = format!("t-{}", self.next_id);
+        let mut frame = command.clone();
+        frame["id"] = json!(id);
+        let sent = Instant::now();
+        self.send(&frame);
+        (id, sent)
+    }
+
+    /// Read frames until `id`'s response, returning the events seen
+    /// before it, each with its arrival instant.
+    fn wait_response(&mut self, id: &str, timeout: Duration) -> (Value, Vec<(Instant, Value)>) {
+        let deadline = Instant::now() + timeout;
+        let mut events = Vec::new();
+        let frames = self.frames.as_ref().expect("reader started");
+        loop {
+            let timeout_left = deadline.saturating_duration_since(Instant::now());
+            assert!(!timeout_left.is_zero(), "timed out waiting for {id}");
+            match frames.recv_timeout(timeout_left) {
+                Ok((arrived, frame)) => {
+                    if frame.get("type").and_then(Value::as_str) == Some("response")
+                        && frame.get("id").and_then(Value::as_str) == Some(id)
+                    {
+                        return (frame, events);
+                    }
+                    events.push((arrived, frame));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("timed out waiting for response {id} (events: {events:?})")
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("rpc child closed before {id} answered (events: {events:?})")
+                }
+            }
+        }
+    }
+}
+
+impl Drop for TimedRpcChild {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The compaction's `compaction_start` frame reaches the client BEFORE
+/// the compaction pipeline runs (the served-path oracle): the handler
+/// flushes the queued frame before entering the pre-summarizer CPU span
+/// (digest capture, cut scan, token estimation, details extraction) —
+/// a span that runs to the summarizer's `await` without an executor
+/// yield, so without the flush the queued frame strands behind it and
+/// the client sees the compaction start only when the span ends. TS
+/// writes stdout frames synchronously at the emit, so the flush is the
+/// TS-parity shape, and the oracle bites from both sides: the start must
+/// arrive inside the flush budget, and the pipeline after it must be a
+/// span an unflushed frame would have straggled behind.
+#[test]
+fn rpc_compact_flushes_the_start_frame_before_the_pipeline() {
+    let home = tempfile::TempDir::new().unwrap();
+    let fixture = home.path().join("sess").join("fixture.jsonl");
+    write_corpus_fixture(&fixture, 10);
+    let script = json!({
+        // The faux harness's response budget is finite (repeat-last is a
+        // daemon-seam key the CLI harness ignores): the split-turn cut
+        // makes two concurrent summarizer calls, so the script queues
+        // one response each.
+        "responses": [
+            { "text": "corpus history summary: the scale corpus ran" },
+            { "text": "corpus turn-prefix summary: the final marker" },
+        ],
+    });
+    let mut client = TimedRpcChild::spawn(&fixture, &script);
+    let (ready, _) = client.command(&json!({ "type": "get_state" }));
+    let (_, _) = client.wait_response(&ready, TIMEOUT);
+    let (id, sent) = client.command(&json!({ "type": "compact" }));
+    let (response, events) = client.wait_response(&id, TIMEOUT);
+    assert_eq!(response["success"], true, "the response: {response}");
+    let result = &response["data"];
+    let summary = result["summary"].as_str().expect("the summary");
+    assert!(
+        summary.contains("corpus history summary: the scale corpus ran")
+            && summary.contains("corpus turn-prefix summary: the final marker"),
+        "the split-turn compaction composes both summarizer answers: {summary}"
+    );
+    assert!(
+        result["tokensBefore"].is_number(),
+        "the CompactionResult shape"
+    );
+    let mut cs: Option<(Instant, &Value)> = None;
+    let mut ce: Option<(Instant, &Value)> = None;
+    for (arrived, event) in &events {
+        match event.get("type").and_then(Value::as_str) {
+            Some("compaction_start") if cs.is_none() => cs = Some((*arrived, event)),
+            Some("compaction_end") if ce.is_none() => ce = Some((*arrived, event)),
+            _ => {}
+        }
+    }
+    let (start_at, cs_event) = cs.expect("the compaction_start event");
+    let (end_at, _) = ce.expect("the compaction_end event");
+    assert_eq!(cs_event["reason"], "requested");
+    assert!(
+        cs_event.get("result").is_none(),
+        "compaction_start carries no result (TS shape)"
+    );
+    let cs_ms = start_at.duration_since(sent).as_secs_f64() * 1000.0;
+    let start_to_end_ms = end_at.duration_since(start_at).as_secs_f64() * 1000.0;
+    // The flush: the start frame is visible to the client immediately
+    // (a pipe write, microseconds) — well before the pre-summarizer span
+    // (tens of milliseconds at this session size) could strand it.
+    assert!(
+        cs_ms < 20.0,
+        "compaction_start arrived {cs_ms:.1}ms after the command: \
+         the queued frame stranded behind the pre-summarizer span"
+    );
+    // Anti-vacuity: the span after the start frame is exactly the
+    // stranding window — a session too small to strand a frame would
+    // make the assert above vacuous.
+    assert!(
+        start_to_end_ms > 20.0,
+        "the compaction span after the start frame was only \
+         {start_to_end_ms:.1}ms: the fixture is too small to strand a frame"
+    );
+}
+
+/// The flush is bounded against a stalled reader: with the client's
+/// pipe full (an unread multi-MiB `get_state` response) the writer task
+/// blocks mid-write, and the compaction must still complete — the
+/// budget expires, the command proceeds, and every frame flows once the
+/// reader drains. An unbounded drain would wedge the compaction behind
+/// the reader forever (TS never blocks a command on the reader).
+#[test]
+fn rpc_compact_flush_is_bounded_against_a_stalled_reader() {
+    let home = tempfile::TempDir::new().unwrap();
+    let fixture = home.path().join("sess").join("fixture.jsonl");
+    write_corpus_fixture(&fixture, 10);
+    let script = json!({
+        // The faux harness's response budget is finite (repeat-last is a
+        // daemon-seam key the CLI harness ignores): the split-turn cut
+        // makes two concurrent summarizer calls, so the script queues
+        // one response each.
+        "responses": [
+            { "text": "corpus history summary: the scale corpus ran" },
+            { "text": "corpus turn-prefix summary: the final marker" },
+        ],
+    });
+    let mut client = TimedRpcChild::spawn_stalled(&fixture, &script);
+    // No reader thread touches stdout: the get_messages response (the
+    // session's whole serialized context, well over the pipe capacity)
+    // fills the pipe and the writer task blocks mid-write — `pending`
+    // stays nonzero through the compaction, so its start-frame flush can
+    // only retire by hitting the budget.
+    let (messages, _) = client.command(&json!({ "type": "get_messages" }));
+    let (id, _) = client.command(&json!({ "type": "compact" }));
+    // The compaction must run BEHIND the stalled pipe: the budget
+    // expired (50ms) instead of waiting the reader out, so the durable
+    // compaction row lands in the session file while no reader drains
+    // the child. The row's appearance IS the readiness signal (polled,
+    // never a fixed sleep): an unbounded drain would still be spinning
+    // in its wait loop — no row ever lands while the reader is
+    // stalled, and the poll deadline fails right here.
+    // The compaction runs BEHIND the stalled pipe: the budget expired
+    // (50ms) instead of waiting the reader out, so the durable
+    // compaction row lands in the session file while no reader drains
+    // the child. An unbounded drain would still be spinning in its wait
+    // loop — no row ever lands while the reader is stalled, and the
+    // poll deadline fails right here. (The row's landing time varies
+    // with the pipe-stall CPU contention, hence the poll instead of a
+    // fixed sleep.)
+    let row_deadline = Instant::now() + Duration::from_secs(4);
+    let mut compacted_behind_the_stall = false;
+    while Instant::now() < row_deadline {
+        let session = std::fs::read_to_string(&fixture).expect("session file");
+        if session
+            .lines()
+            .any(|line| line.contains("\"type\":\"compaction\""))
+        {
+            compacted_behind_the_stall = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        compacted_behind_the_stall,
+        "the compaction never ran behind the stalled reader: the flush \
+         wedged the command on the reader"
+    );
+    // The stall drains now: every held frame flows, the compact's
+    // response is among them, and the child never wedged.
+    let _ = messages;
+    client.begin_reading();
+    let (response, _) = client.wait_response(&id, TIMEOUT);
+    assert_eq!(response["success"], true, "the response: {response}");
+}
+
+/// The prompt-admitted `/compact`'s compaction frames ride the
+/// prompt-response buffer and publish AFTER the prompt's response (TS
+/// `promptResponsePending`: `outputConnectionEvent` buffers connection
+/// events while a prompt is pending; `handleInputLine`'s `finally`
+/// disarms and flushes them) — the port's buffered seam is the TS wire
+/// order, so NO early flush belongs on this path (the direct `compact`
+/// command's flush lives in its own handler, where no prompt buffer
+/// stands between the frame and the writer). The oracle pins the
+/// contract by ARRIVAL POSITION: the prompt response precedes
+/// `compaction_start`, which precedes `compaction_end` — an early
+/// publish (routing the frame past the buffer) or a late flush reorders
+/// the wire and fails the positions.
+#[test]
+fn rpc_prompt_admitted_compact_frames_flush_after_the_response() {
+    let home = tempfile::TempDir::new().unwrap();
+    let fixture = home.path().join("sess").join("fixture.jsonl");
+    write_corpus_fixture(&fixture, 10);
+    let script = json!({
+        // The faux harness's response budget is finite (repeat-last is a
+        // daemon-seam key the CLI harness ignores): the split-turn cut
+        // makes two concurrent summarizer calls, so the script queues
+        // one response each.
+        "responses": [
+            { "text": "corpus history summary: the scale corpus ran" },
+            { "text": "corpus turn-prefix summary: the final marker" },
+        ],
+    });
+    let mut client = TimedRpcChild::spawn(&fixture, &script);
+    let (id, _) = client.command(&json!({ "type": "prompt", "message": "/compact" }));
+    // Collect every frame until the prompt's response AND both
+    // compaction frames have arrived (the buffered frames flush at the
+    // handler's end, so they land right after the response).
+    let deadline = Instant::now() + TIMEOUT;
+    let mut seen: Vec<Value> = Vec::new();
+    loop {
+        let timeout_left = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !timeout_left.is_zero(),
+            "timed out waiting for the prompt-admitted compact's frames"
+        );
+        match client
+            .frames
+            .as_ref()
+            .expect("reader started")
+            .recv_timeout(timeout_left)
+        {
+            Ok((_, frame)) => {
+                seen.push(frame);
+                let seen_response = seen.iter().any(|frame: &Value| {
+                    frame.get("type").and_then(Value::as_str) == Some("response")
+                        && frame.get("id").and_then(Value::as_str) == Some(&id)
+                });
+                let has_start = seen.iter().any(|frame: &Value| {
+                    frame.get("type").and_then(Value::as_str) == Some("compaction_start")
+                });
+                let has_end = seen.iter().any(|frame: &Value| {
+                    frame.get("type").and_then(Value::as_str) == Some("compaction_end")
+                });
+                if seen_response && has_start && has_end {
+                    break;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!(
+                    "timed out mid-collection (seen: {:?})",
+                    seen.iter().map(|f| f.get("type")).collect::<Vec<_>>()
+                )
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("rpc child closed before the prompt-admitted compact's frames arrived")
+            }
+        }
+    }
+    let position = |kind: &str| {
+        seen.iter()
+            .position(|frame: &Value| frame.get("type").and_then(Value::as_str) == Some(kind))
+    };
+    let response_at = seen
+        .iter()
+        .position(|frame: &Value| {
+            frame.get("type").and_then(Value::as_str) == Some("response")
+                && frame.get("id").and_then(Value::as_str) == Some(&id)
+        })
+        .expect("the prompt response");
+    let response = &seen[response_at];
+    assert_eq!(response["success"], true, "the response: {response}");
+    let start_at = position("compaction_start")
+        .expect("the buffered compaction_start flushed with the response window");
+    let end_at = position("compaction_end")
+        .expect("the buffered compaction_end flushed with the response window");
+    assert!(
+        response_at < start_at,
+        "the TS promptResponsePending contract: the prompt response (at {response_at}) \
+         must precede the buffered compaction_start (at {start_at})"
+    );
+    assert!(
+        start_at < end_at,
+        "compaction_end (at {end_at}) must follow compaction_start (at {start_at})"
+    );
+    assert_eq!(seen[start_at]["reason"], "requested");
 }

@@ -732,6 +732,93 @@ fn a_leftover_settle_keeps_its_own_orphan_card() {
     );
 }
 
+/// The rebuild's loader anchor (the operator's 2026-09-28 rule: the
+/// waiting/executing timer counts since the LAST HUMAN PROMPT): the
+/// reconstruct reads the NEWEST user message's wall-clock timestamp —
+/// the numeric ms wire form, the f64 form, and the ISO-8601 string
+/// form — and skips non-user messages and unreadable times.
+#[test]
+fn reconstructs_the_last_user_prompt_timestamp() {
+    // The numeric ms form (the live engine's wire shape).
+    let mut attach = slim_attach();
+    let snapshot = attach.get_mut("snapshot").expect("snapshot");
+    let messages = snapshot
+        .get_mut("messages")
+        .expect("messages")
+        .as_array_mut()
+        .expect("messages array");
+    assert_eq!(messages[0].get("role"), Some(&json!("user")));
+    messages[0]["timestamp"] = json!(1_700_000_000_000u64);
+    let view = reconstruct(&attach_data_from_response(attach).unwrap());
+    assert_eq!(view.last_user_prompt_ms, Some(1_700_000_000_000));
+    // The f64 form reads as ms too.
+    let mut attach = slim_attach();
+    let messages = attach
+        .get_mut("snapshot")
+        .expect("snapshot")
+        .get_mut("messages")
+        .expect("messages")
+        .as_array_mut()
+        .expect("messages array");
+    messages[0]["timestamp"] = json!(1_700_000_000_050.0f64);
+    let view = reconstruct(&attach_data_from_response(attach).unwrap());
+    assert_eq!(view.last_user_prompt_ms, Some(1_700_000_000_050));
+    // The ISO-8601 string form parses through the same reader (older
+    // wire shapes carry the entry timestamp as a string).
+    let mut attach = slim_attach();
+    let messages = attach
+        .get_mut("snapshot")
+        .expect("snapshot")
+        .get_mut("messages")
+        .expect("messages")
+        .as_array_mut()
+        .expect("messages array");
+    messages[0]["timestamp"] = json!("2026-09-28T12:00:01.000Z");
+    let view = reconstruct(&attach_data_from_response(attach).unwrap());
+    assert_eq!(view.last_user_prompt_ms, Some(1_790_596_801_000));
+    // A newer user prompt with NO readable time does not strand the
+    // anchor (Macroscope 2026-09-28): the scan takes the newest user
+    // message that HAS a readable time, so unreadable-tail prompts
+    // leave the older prompt anchoring the loader.
+    let mut attach = slim_attach();
+    let messages = attach
+        .get_mut("snapshot")
+        .expect("snapshot")
+        .get_mut("messages")
+        .expect("messages")
+        .as_array_mut()
+        .expect("messages array");
+    messages[0]["timestamp"] = json!(1_700_000_000_000u64);
+    messages.push(json!({
+        "role": "user",
+        "content": "newer but the time is garbage",
+        "timestamp": "not-a-time",
+    }));
+    messages.push(json!({ "role": "user", "content": "newest, no time at all" }));
+    let view = reconstruct(&attach_data_from_response(attach).unwrap());
+    assert_eq!(
+        view.last_user_prompt_ms,
+        Some(1_700_000_000_000),
+        "the newest READABLE user time wins, not the newest user message"
+    );
+    // No readable user time anywhere: the anchor stays unset and the
+    // loader keeps its re-attach instant.
+    let mut attach = slim_attach();
+    let messages = attach
+        .get_mut("snapshot")
+        .expect("snapshot")
+        .get_mut("messages")
+        .expect("messages")
+        .as_array_mut()
+        .expect("messages array");
+    messages[0]
+        .as_object_mut()
+        .expect("the user message")
+        .remove("timestamp");
+    let view = reconstruct(&attach_data_from_response(attach).unwrap());
+    assert_eq!(view.last_user_prompt_ms, None);
+}
+
 #[test]
 fn reconstructs_slim_attach() {
     let data = attach_data_from_response(slim_attach()).unwrap();
@@ -823,7 +910,8 @@ fn reconstructs_the_queue_from_session_actions() {
             steering: vec!["turn right".to_string()],
             follow_ups: vec!["then summarize".to_string()],
             starting: None,
-            rlm_child_status: crate::queued::RlmChildStatusIndices::default(),
+            rlm_child_status: crate::queued::QueueLaneIndices::default(),
+            injected_prompts: crate::queued::QueueLaneIndices::default(),
         },
         "an attach re-syncs the queue strip from the snapshot"
     );
@@ -850,11 +938,39 @@ fn reconstructs_the_child_status_provenance_from_session_actions() {
     let view = reconstruct(&data);
     assert_eq!(
         view.queued.rlm_child_status,
-        crate::queued::RlmChildStatusIndices {
+        crate::queued::QueueLaneIndices {
             steering: Vec::new(),
             follow_up: vec![0, 2],
         },
         "the attach re-sync carries the typed provenance"
+    );
+}
+
+/// The injected-continuation provenance rides the attach snapshot too
+/// (replay parity with the live frames): a re-attach keeps the
+/// engine-minted continuations folded and inspectable read-only, while
+/// a projection without the rider (older daemons) still decodes.
+#[test]
+fn reconstructs_the_injected_provenance_from_session_actions() {
+    let mut attach = slim_attach();
+    attach["snapshot"]["state"]["sessionActions"] = json!({
+        "queuedCount": 2,
+        "steering": [],
+        "followUps": [
+            "[goal: continuation]\n\nKeep driving the goal.",
+            "then summarize",
+        ],
+        "injectedPrompts": { "steering": [], "followUp": [0] },
+    });
+    let data = attach_data_from_response(attach).unwrap();
+    let view = reconstruct(&data);
+    assert_eq!(
+        view.queued.injected_prompts,
+        crate::queued::QueueLaneIndices {
+            steering: Vec::new(),
+            follow_up: vec![0],
+        },
+        "the attach re-sync carries the injected provenance"
     );
 }
 
@@ -962,7 +1078,8 @@ fn decodes_session_action_update_as_the_queue_projection() {
             steering: vec![],
             follow_ups: vec!["queued follow-up".to_string()],
             starting: None,
-            rlm_child_status: crate::queued::RlmChildStatusIndices::default(),
+            rlm_child_status: crate::queued::QueueLaneIndices::default(),
+            injected_prompts: crate::queued::QueueLaneIndices::default(),
         }
     );
 }
@@ -989,9 +1106,47 @@ fn decodes_the_child_status_provenance_from_the_live_queue_update() {
             steering: vec!["[child-exited: no-reply child:lane]".to_string()],
             follow_ups: vec!["then summarize".to_string()],
             starting: None,
-            rlm_child_status: crate::queued::RlmChildStatusIndices {
+            rlm_child_status: crate::queued::QueueLaneIndices {
                 steering: vec![0],
                 follow_up: Vec::new(),
+            },
+            injected_prompts: crate::queued::QueueLaneIndices::default(),
+        }
+    );
+}
+
+/// The live queue update carries the injected-continuation provenance
+/// (the second Rust-native rider): the parked continuations fold into
+/// the strip on the live path exactly like the attach path, and a
+/// projection without the rider decodes with empty provenance.
+#[test]
+fn decodes_the_injected_provenance_from_the_live_queue_update() {
+    let update = event_to_update(&json!({
+        "type": "session_action_update",
+        "actions": {
+            "queuedCount": 2,
+            "steering": [],
+            "followUps": [
+                "[goal: continuation]\n\nKeep driving the goal.",
+                "then summarize",
+            ],
+            "injectedPrompts": { "steering": [], "followUp": [0] },
+        },
+    }))
+    .expect("a queue update");
+    assert_eq!(
+        update,
+        TurnUpdate::QueueUpdated {
+            steering: Vec::new(),
+            follow_ups: vec![
+                "[goal: continuation]\n\nKeep driving the goal.".to_string(),
+                "then summarize".to_string(),
+            ],
+            starting: None,
+            rlm_child_status: crate::queued::QueueLaneIndices::default(),
+            injected_prompts: crate::queued::QueueLaneIndices {
+                steering: Vec::new(),
+                follow_up: vec![0],
             },
         }
     );
@@ -1022,7 +1177,8 @@ fn decodes_the_preparing_turn_label_as_the_starting_row() {
             steering: vec![],
             follow_ups: vec![],
             starting: Some("queued before compaction".to_string()),
-            rlm_child_status: crate::queued::RlmChildStatusIndices::default(),
+            rlm_child_status: crate::queued::QueueLaneIndices::default(),
+            injected_prompts: crate::queued::QueueLaneIndices::default(),
         })
     );
     let committed = json!({
@@ -1044,7 +1200,8 @@ fn decodes_the_preparing_turn_label_as_the_starting_row() {
             steering: vec![],
             follow_ups: vec![],
             starting: None,
-            rlm_child_status: crate::queued::RlmChildStatusIndices::default(),
+            rlm_child_status: crate::queued::QueueLaneIndices::default(),
+            injected_prompts: crate::queued::QueueLaneIndices::default(),
         })
     );
     // An active action that is not a turn never projects a starting
@@ -1068,7 +1225,8 @@ fn decodes_the_preparing_turn_label_as_the_starting_row() {
             steering: vec![],
             follow_ups: vec![],
             starting: None,
-            rlm_child_status: crate::queued::RlmChildStatusIndices::default(),
+            rlm_child_status: crate::queued::QueueLaneIndices::default(),
+            injected_prompts: crate::queued::QueueLaneIndices::default(),
         })
     );
 }

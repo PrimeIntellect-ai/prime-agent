@@ -40,7 +40,25 @@ pub enum SettingsSubmenu {
     Theme { themes: Vec<String> },
     /// "Warnings" (the single warning toggle as its own settings list).
     Warnings,
+    /// "Default Service Tier" (TS `SERVICE_TIER_OPTIONS`: default/flex/
+    /// priority/auto with their descriptions).
+    ServiceTier,
 }
+
+/// The service-tier descriptions the TS settings submenu lists (TS
+/// `SERVICE_TIER_OPTIONS`).
+pub fn service_tier_description(tier: &str) -> &'static str {
+    match tier {
+        "default" => "Standard processing",
+        "flex" => "Cheaper, slower, may hit capacity limits",
+        "priority" => "Faster, more expensive (fast mode)",
+        "auto" => "Provider picks the tier",
+        _ => "",
+    }
+}
+
+/// The settings-row and autocomplete choice order (TS `SERVICE_TIER_CHOICES`).
+pub const SERVICE_TIER_CHOICES: [&str; 4] = ["default", "flex", "priority", "auto"];
 
 /// One settings row (TS `SettingItem`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +90,9 @@ pub enum SettingsMenuAction {
     PreviewTheme {
         name: String,
     },
+    /// Esc inside a submenu closed it (TS `onCancel` → `done()`); the menu
+    /// itself stays open (a top-level Esc is the menu [`Cancel`]).
+    SubmenuClosed,
     /// The theme submenu closed with Esc: restore the row's theme.
     RestoreTheme {
         name: String,
@@ -260,6 +281,14 @@ pub fn settings_menu_rows(current: &SettingsCurrentValues) -> Vec<SettingsMenuRo
             submenu: None,
         },
         SettingsMenuRow {
+            id: "default-service-tier",
+            label: "Default service tier",
+            description: "Service tier for new sessions; applies to the current session when the model supports it",
+            current: current.default_service_tier.clone(),
+            values: None,
+            submenu: Some(SettingsSubmenu::ServiceTier),
+        },
+        SettingsMenuRow {
             id: "mermaid-rendering",
             label: "Mermaid diagrams",
             description: "Render Mermaid code blocks as Unicode diagrams",
@@ -334,6 +363,7 @@ pub struct SettingsCurrentValues {
     pub steering_mode: String,
     pub follow_up_mode: String,
     pub transport: String,
+    pub default_service_tier: String,
     pub mermaid: String,
     pub quiet_startup: bool,
     pub tree_filter_mode: String,
@@ -374,11 +404,14 @@ impl SettingsMenu {
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> SettingsMenuAction {
         if let Some(mut sub) = self.sub.take() {
             let action = self.handle_submenu_key(&mut sub, key, kb);
-            // A value select or a theme restore closes the submenu (TS
-            // `done()`); a plain navigation or live preview keeps it open.
+            // A value select, a theme restore, or the submenu's Esc (TS
+            // `done()` and `onCancel` both close it) closes the submenu; a
+            // plain navigation or live preview keeps it open.
             let closed = matches!(
                 action,
-                SettingsMenuAction::Change { .. } | SettingsMenuAction::RestoreTheme { .. }
+                SettingsMenuAction::Change { .. }
+                    | SettingsMenuAction::RestoreTheme { .. }
+                    | SettingsMenuAction::SubmenuClosed
             );
             if !closed {
                 self.sub = Some(sub);
@@ -469,10 +502,19 @@ impl SettingsMenu {
         };
         let row = &mut self.rows[row_index];
         if let Some(kind) = row.submenu.clone() {
+            // TS `SelectSubmenu` preselects the current value (the tier
+            // submenu opens on the row's current tier).
+            let selected = match &kind {
+                SettingsSubmenu::ServiceTier => SERVICE_TIER_CHOICES
+                    .iter()
+                    .position(|tier| *tier == row.current)
+                    .unwrap_or(0),
+                _ => 0,
+            };
             self.sub = Some(SubmenuState {
                 row: row_index,
                 kind,
-                selected: 0,
+                selected,
             });
             return SettingsMenuAction::None;
         }
@@ -501,6 +543,7 @@ impl SettingsMenu {
             SettingsSubmenu::Thinking { levels } => levels.len(),
             SettingsSubmenu::Theme { themes } => themes.len(),
             SettingsSubmenu::Warnings => 1,
+            SettingsSubmenu::ServiceTier => SERVICE_TIER_CHOICES.len(),
         };
         if kb.matches(key, "tui.select.up") {
             if options > 0 {
@@ -549,6 +592,13 @@ impl SettingsMenu {
                         "false".into()
                     },
                 }),
+                SettingsSubmenu::ServiceTier => SERVICE_TIER_CHOICES
+                    .get(sub.selected)
+                    .copied()
+                    .map(|tier| SettingsMenuAction::Change {
+                        id: row_id,
+                        value: tier.to_string(),
+                    }),
             };
             // TS `done(value)` closes the submenu and updates the row's
             // displayed value; the caller keeps its selected index (the
@@ -589,7 +639,9 @@ impl SettingsMenu {
             SettingsSubmenu::Theme { .. } => SettingsMenuAction::RestoreTheme {
                 name: self.rows[sub.row].current.clone(),
             },
-            _ => SettingsMenuAction::None,
+            // Every other submenu just goes back (TS `onCancel` →
+            // `done()`); the menu itself stays open.
+            _ => SettingsMenuAction::SubmenuClosed,
         }
     }
 
@@ -754,6 +806,14 @@ impl SettingsMenu {
                     "Enable or disable individual warnings",
                     vec![(String::from("Anthropic extra usage"), None)],
                 ),
+                SettingsSubmenu::ServiceTier => (
+                    "Default Service Tier",
+                    "Service tier for new sessions; applies to the current session when the model supports it",
+                    SERVICE_TIER_CHOICES
+                        .iter()
+                        .map(|tier| (tier.to_string(), Some(service_tier_description(tier))))
+                        .collect(),
+                ),
             };
         let mut lines: Vec<crate::Line> = Vec::new();
         lines.push(vec![theme.fg_span(ThemeColor::Accent, title)]);
@@ -883,7 +943,10 @@ mod menu_tests {
                         "warnings"
                     ]
                 ),
-                ("Models", vec!["thinking", "transport"]),
+                (
+                    "Models",
+                    vec!["thinking", "transport", "default-service-tier"]
+                ),
                 (
                     "Display",
                     vec![
@@ -1006,6 +1069,59 @@ mod menu_tests {
         );
         let text = render_text(&menu);
         assert!(text.iter().any(|row| row.contains("Theme")));
+    }
+
+    #[test]
+    fn enter_opens_the_service_tier_submenu_preselected_and_selection_applies() {
+        let values = SettingsCurrentValues {
+            default_service_tier: "flex".to_string(),
+            ..Default::default()
+        };
+        let mut menu = SettingsMenu::new(settings_menu_rows(&values));
+        // 2 jumps to the Models tab; two downs reach the tier row
+        // (thinking, transport, default-service-tier).
+        menu.handle_key("2", &kb());
+        menu.handle_key("down", &kb());
+        menu.handle_key("down", &kb());
+        assert_eq!(menu.handle_key("enter", &kb()), SettingsMenuAction::None);
+        let text = render_text(&menu);
+        assert!(text.iter().any(|row| row.contains("Default Service Tier")));
+        assert!(text
+            .iter()
+            .any(|row| row.contains("Cheaper, slower, may hit capacity limits")));
+        // The submenu preselects the current value (flex is the second
+        // option): Enter applies it as the row's change.
+        assert_eq!(
+            menu.handle_key("enter", &kb()),
+            SettingsMenuAction::Change {
+                id: "default-service-tier",
+                value: "flex".to_string()
+            }
+        );
+        // A walk down to auto applies the same change shape.
+        assert_eq!(menu.handle_key("enter", &kb()), SettingsMenuAction::None);
+        menu.handle_key("down", &kb());
+        menu.handle_key("down", &kb());
+        assert_eq!(
+            menu.handle_key("enter", &kb()),
+            SettingsMenuAction::Change {
+                id: "default-service-tier",
+                value: "auto".to_string()
+            }
+        );
+        // Esc inside the submenu closes it (TS `onCancel` → `done()`)
+        // while the menu itself stays open.
+        assert_eq!(menu.handle_key("enter", &kb()), SettingsMenuAction::None);
+        assert_eq!(
+            menu.handle_key("esc", &kb()),
+            SettingsMenuAction::SubmenuClosed
+        );
+        let text = render_text(&menu);
+        // The menu hint returns with its full grammar (the tabs segment
+        // sits between the search and change segments).
+        assert!(text
+            .iter()
+            .any(|row| row.contains("Enter/Space change · Esc close")));
     }
 
     #[test]

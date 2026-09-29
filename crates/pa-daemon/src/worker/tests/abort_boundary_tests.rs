@@ -1,0 +1,539 @@
+//! Post-abort/post-compact queued-input suspension e2e tests (moved with their concerns).
+use super::*;
+
+/// `abort` (TS `requestAbort`) suspends queued-input admission: a plain
+/// prompt is rejected with the TS admission error until a resume site
+/// fires (a `steer` carries `resumeIfIdle: true`), after which a plain
+/// prompt is admitted again.
+#[tokio::test]
+async fn abort_suspends_plain_prompts_until_steer_resumes() {
+    let worker = created_dispatch_worker().await;
+    let aborted = worker.dispatch("abort", &json!({})).await;
+    assert!(aborted.success, "abort failed: {aborted:?}");
+    let rejected = worker
+        .dispatch(
+            "prompt_and_wait",
+            &json!({ "activeSessionId": "suspension-session", "message": "hi" }),
+        )
+        .await;
+    assert!(!rejected.success, "admitted while suspended: {rejected:?}");
+    assert_eq!(rejected.command, "prompt_and_wait");
+    assert_eq!(rejected.error.as_deref(), Some(QUEUED_INPUT_SUSPENDED));
+    let rejected_prompt = worker
+        .dispatch(
+            "prompt",
+            &json!({ "activeSessionId": "suspension-session", "message": "hi" }),
+        )
+        .await;
+    assert_eq!(
+        rejected_prompt.error.as_deref(),
+        Some(QUEUED_INPUT_SUSPENDED)
+    );
+    // A prompt carrying streamingBehavior is a resume site (TS
+    // `resumeIfIdle: command.streamingBehavior !== undefined`).
+    let admitted_with_behavior = worker
+        .dispatch(
+            "prompt_and_wait",
+            &json!({
+                "activeSessionId": "suspension-session",
+                "message": "steered",
+                "streamingBehavior": "steer"
+            }),
+        )
+        .await;
+    assert!(
+        admitted_with_behavior.success,
+        "steer not admitted: {admitted_with_behavior:?}"
+    );
+    let plain = worker
+        .dispatch(
+            "prompt_and_wait",
+            &json!({ "activeSessionId": "suspension-session", "message": "plain again" }),
+        )
+        .await;
+    assert!(plain.success, "still suspended after steer: {plain:?}");
+}
+
+/// A manual `compact` aborts first (TS `compact()`), so the
+/// suspension is set whatever the compaction outcome (the scripted
+/// engine always compacts; TS skips only "Session is too short" and
+/// the skip path leaves the suspension set too);
+/// `resume_queue` clears it before answering the empty queue (TS
+/// `resumeQueuedWork()` runs `_resumeSessionInputAdmission()`
+/// unconditionally).
+#[tokio::test]
+async fn compact_suspends_and_resume_queue_clears() {
+    let worker = created_dispatch_worker().await;
+    let compact = worker
+        .dispatch(
+            "compact",
+            &json!({ "activeSessionId": "suspension-session" }),
+        )
+        .await;
+    assert!(compact.success, "scripted compact failed: {compact:?}");
+    let rejected = worker
+        .dispatch(
+            "prompt_and_wait",
+            &json!({ "activeSessionId": "suspension-session", "message": "hi" }),
+        )
+        .await;
+    assert_eq!(rejected.error.as_deref(), Some(QUEUED_INPUT_SUSPENDED));
+    let resumed = worker.dispatch("resume_queue", &json!({})).await;
+    assert!(
+        !resumed.success,
+        "resume_queue on the empty queue must still answer the TS failure: {resumed:?}"
+    );
+    assert_eq!(resumed.error.as_deref(), Some("No queued work to resume"));
+    let plain = worker
+        .dispatch(
+            "prompt_and_wait",
+            &json!({ "activeSessionId": "suspension-session", "message": "after resume" }),
+        )
+        .await;
+    assert!(
+        plain.success,
+        "still suspended after resume_queue: {plain:?}"
+    );
+}
+
+/// `abort_and_send_queued` (TS `abortAndSendQueued`, schema 29): with
+/// visible steering parked at a running turn's boundary, the interrupt
+/// aborts the run AND delivers the parked queue right after the aborted
+/// turn settles (TS `requestAbort()` + `resumeQueuedWork()`); the
+/// follow-up lane drains too, once the session goes idle. The aborted
+/// turn's row surfaces with the aborted shape.
+#[tokio::test]
+// the faux registry is process-global: the guard must span the async flow
+#[allow(clippy::await_holding_lock)]
+async fn abort_and_send_queued_delivers_the_parked_queue_at_the_boundary() {
+    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = std::env::temp_dir().join(format!("pa-worker-abort-send-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = WorkerConfig {
+        socket_path: dir.join("worker.sock"),
+        supervisor_socket_path: PathBuf::new(),
+        token: "token".to_string(),
+        worker_instance_id: String::new(),
+        active_session_id: "abort-send-session".to_string(),
+        agent_dir: dir.join("agent"),
+        recovery_journal_path: dir.join("recovery.jsonl"),
+        telemetry_disabled: None,
+        script: Some(json!({
+            "engine": "faux",
+            "responses": [
+                { "text": "held reply", "delayMs": 60000 },
+                "steering one reply",
+                "steering two reply",
+                "follow-up reply",
+            ],
+        })),
+    };
+    let worker = std::sync::Arc::new(Worker::new(config, None));
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({ "noSession": true, "cwd": "/tmp", "name": "abort-send" }),
+        )
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+    let mut subscription = worker.events.subscribe();
+    // The held turn parks the queue behind it (60s fetch hold).
+    let prompt = worker
+        .dispatch(
+            "prompt",
+            &json!({
+                "activeSessionId": "abort-send-session",
+                "message": "held turn for the abort-and-send probe",
+            }),
+        )
+        .await;
+    assert!(prompt.success, "prompt failed: {prompt:?}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if worker.core.lock().unwrap().busy {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the held turn was never admitted"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // Parked steering and one follow-up behind the running turn.
+    for message in ["steering one", "steering two"] {
+        let steered = worker
+            .dispatch("steer", &json!({ "message": message }))
+            .await;
+        assert!(steered.success, "steer failed: {steered:?}");
+    }
+    let follow = worker
+        .dispatch("follow_up", &json!({ "message": "follow-up now" }))
+        .await;
+    assert!(follow.success, "follow_up failed: {follow:?}");
+    // The interrupt: abort the run and send the parked queue.
+    let aborted = worker.dispatch("abort_and_send_queued", &json!({})).await;
+    assert!(aborted.success, "abort_and_send_queued failed: {aborted:?}");
+    assert_eq!(aborted.command, "abort_and_send_queued");
+    let idle = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        worker.dispatch("wait_for_idle", &json!({})),
+    )
+    .await;
+    assert!(idle.is_ok(), "the session never went idle after the abort");
+    assert!(idle.unwrap().success, "wait_for_idle failed");
+    // The held turn aborted (its row carries the aborted shape) and
+    // the parked queue delivered: steering one, steering two, then the
+    // follow-up, each answered by its scripted reply.
+    let messages = worker.dispatch("get_messages", &json!({})).await;
+    assert!(messages.success, "get_messages failed: {messages:?}");
+    let wire_messages = messages
+        .data
+        .as_ref()
+        .and_then(|data| data.get("messages"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let texts: Vec<String> = wire_messages
+        .iter()
+        .filter(|message| crate::types::message_role(message) == Some("user"))
+        .map(crate::types::message_text)
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            "held turn for the abort-and-send probe",
+            "steering one",
+            "steering two",
+            "follow-up now",
+        ],
+        "the parked queue never delivered in order: {texts:?}"
+    );
+    // The one-batched-turn granularity (the steer-family lane's
+    // supersede of this test's original reply-granularity
+    // expectations): the two parked steers deliver as ONE co-delivered
+    // turn — a single `agent_start` for both rows and ONE assistant
+    // reply for the whole batch — exactly TS `abortAndSendQueued`'s
+    // armed batch (`_forcedAllSteeringActionIds` +
+    // `_startPreparedTurnActions`); the follow-up stays a turn of its
+    // own behind it.
+    let events = session_events_since(&mut subscription);
+    let agent_starts = events
+        .iter()
+        .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent_start"))
+        .count();
+    assert_eq!(
+        agent_starts, 3,
+        "the held turn, the steers' ONE batched turn, the follow-up's: {events:?}"
+    );
+    let replies: Vec<String> = events
+        .iter()
+        .filter(|event| {
+            event.get("type").and_then(Value::as_str) == Some("message_end")
+                && event["message"]["role"] == "assistant"
+                && event["message"].get("stopReason").and_then(Value::as_str) != Some("aborted")
+        })
+        .filter_map(|event| {
+            let message = event.get("message")?;
+            let content = message.get("content")?;
+            content
+                .as_array()
+                .and_then(|parts| parts.first())
+                .and_then(|part| part.get("text"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
+    // The batch's one reply is the next scripted response; the
+    // follow-up's turn takes the one after it - the steers never
+    // consume one reply each.
+    assert_eq!(
+        replies,
+        [
+            "steering one reply".to_string(),
+            "steering two reply".to_string()
+        ],
+        "ONE reply for the whole steers' batch, one for the follow-up: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| {
+            event.get("type").and_then(Value::as_str) == Some("message_end")
+                && event["message"]["role"] == "assistant"
+                && event["message"]["stopReason"] == "aborted"
+        }),
+        "the held turn never surfaced its aborted row: {events:?}"
+    );
+    // The queue drained and the suspension is gone (a plain prompt is
+    // admissible again, unlike the plain-abort path).
+    let queue = worker.dispatch("get_queue", &json!({})).await;
+    assert!(queue.success, "get_queue failed: {queue:?}");
+    let lanes = queue.data.as_ref().expect("the queue lanes");
+    assert_eq!(lanes["steering"], json!([]), "queue: {queue:?}");
+    assert_eq!(lanes["followUp"], json!([]), "queue: {queue:?}");
+    assert!(
+        !worker.core.lock().unwrap().queued_input_suspended,
+        "the abort-and-send suspension never cleared"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The abort-only arm: `abort_and_send_queued` with no visible steering
+/// parked is a plain abort (TS `queuedSteering.length === 0` ->
+/// `requestAbort()` + `return false`) - the queued-input suspension
+/// stays set, so a plain prompt is rejected until a resume site fires.
+#[tokio::test]
+async fn abort_and_send_queued_with_an_empty_queue_is_a_plain_abort() {
+    let worker = created_dispatch_worker().await;
+    let aborted = worker.dispatch("abort_and_send_queued", &json!({})).await;
+    assert!(aborted.success, "abort_and_send_queued failed: {aborted:?}");
+    assert_eq!(aborted.command, "abort_and_send_queued");
+    let rejected = worker
+        .dispatch(
+            "prompt_and_wait",
+            &json!({ "activeSessionId": "suspension-session", "message": "hi" }),
+        )
+        .await;
+    assert!(
+        !rejected.success,
+        "admitted after the abort-only abort: {rejected:?}"
+    );
+    assert_eq!(rejected.error.as_deref(), Some(QUEUED_INPUT_SUSPENDED));
+}
+
+/// A follow-up-only queue keeps flowing after the abort (the
+/// sanctioned divergence): the abort ends the running turn cleanly
+/// and the OLDEST queued follow-up starts the next turn right after
+/// the aborted turn settles; later follow-ups stay queued and drain
+/// one per completed turn, each row delivered exactly once, in
+/// enqueue order.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
+async fn abort_and_send_queued_with_only_follow_ups_starts_the_oldest() {
+    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = std::env::temp_dir().join(format!("pa-worker-abort-fu-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = WorkerConfig {
+        socket_path: dir.join("worker.sock"),
+        supervisor_socket_path: PathBuf::new(),
+        token: "token".to_string(),
+        worker_instance_id: String::new(),
+        active_session_id: "abort-fu-session".to_string(),
+        agent_dir: dir.join("agent"),
+        recovery_journal_path: dir.join("recovery.jsonl"),
+        telemetry_disabled: None,
+        script: Some(json!({
+            "engine": "faux",
+            "responses": [
+                { "text": "held reply", "delayMs": 60000 },
+                { "text": "follow-up one reply", "delayMs": 1500 },
+                "follow-up two reply",
+            ],
+        })),
+    };
+    let worker = std::sync::Arc::new(Worker::new(config, None));
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({ "noSession": true, "cwd": "/tmp", "name": "abort-fu" }),
+        )
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+    let mut subscription = worker.events.subscribe();
+    let prompt = worker
+        .dispatch(
+            "prompt",
+            &json!({
+                "activeSessionId": "abort-fu-session",
+                "message": "held turn for the follow-up abort probe",
+            }),
+        )
+        .await;
+    assert!(prompt.success, "prompt failed: {prompt:?}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if worker.core.lock().unwrap().busy {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the held turn was never admitted"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // Two follow-ups park behind the running turn and the steering
+    // lane stays empty — the interrupt keeps nothing armable, the
+    // exact shape of the follow-up-only abort.
+    for message in ["follow-up one", "follow-up two"] {
+        let follow = worker
+            .dispatch("follow_up", &json!({ "message": message }))
+            .await;
+        assert!(follow.success, "follow_up failed: {follow:?}");
+    }
+    // The interrupt: the abort ends the held turn and the queue
+    // keeps flowing — the follow-up lane never parks behind the
+    // abort's suspension.
+    let aborted = worker.dispatch("abort_and_send_queued", &json!({})).await;
+    assert!(aborted.success, "abort_and_send_queued failed: {aborted:?}");
+    assert_eq!(aborted.command, "abort_and_send_queued");
+    assert!(
+        !worker.core.lock().unwrap().queued_input_suspended,
+        "the abort must resume a follow-up-only queue"
+    );
+    // The OLDEST follow-up starts the next turn right after the
+    // aborted turn settles (its paced reply holds the turn open):
+    // while it runs, the second follow-up stays queued — the lane
+    // drains one turn per completed turn, never as one batch.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let (busy, queued) = {
+            let core = worker.core.lock().unwrap();
+            (core.busy, core.follow_up.len())
+        };
+        if busy && queued == 1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the oldest follow-up never started while the second stayed queued"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let queue = worker.dispatch("get_queue", &json!({})).await;
+    assert!(queue.success, "get_queue failed: {queue:?}");
+    assert_eq!(
+        queue.data.as_ref().expect("the queue lanes")["followUp"],
+        json!(["follow-up two"]),
+        "the second follow-up must stay queued behind the first: {queue:?}"
+    );
+    let idle = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        worker.dispatch("wait_for_idle", &json!({})),
+    )
+    .await;
+    assert!(
+        idle.is_ok(),
+        "the follow-up-only queue never drained after the abort"
+    );
+    assert!(idle.unwrap().success, "wait_for_idle failed");
+    // Both follow-ups delivered in enqueue order, each row exactly
+    // once, each in its own turn behind the aborted run.
+    let messages = worker.dispatch("get_messages", &json!({})).await;
+    assert!(messages.success, "get_messages failed: {messages:?}");
+    let wire_messages = messages
+        .data
+        .as_ref()
+        .and_then(|data| data.get("messages"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let texts: Vec<String> = wire_messages
+        .iter()
+        .filter(|message| crate::types::message_role(message) == Some("user"))
+        .map(crate::types::message_text)
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            "held turn for the follow-up abort probe",
+            "follow-up one",
+            "follow-up two",
+        ],
+        "the follow-ups never drained in enqueue order: {texts:?}"
+    );
+    let events = session_events_since(&mut subscription);
+    let agent_start_indexes: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event.get("type").and_then(Value::as_str) == Some("agent_start"))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(
+        agent_start_indexes.len(),
+        3,
+        "one turn per follow-up, never a merged batch: {events:?}"
+    );
+    let aborted_row = events
+        .iter()
+        .position(|event| {
+            event.get("type").and_then(Value::as_str) == Some("message_end")
+                && event["message"]["role"] == "assistant"
+                && event["message"].get("stopReason").and_then(Value::as_str) == Some("aborted")
+        })
+        .expect("the held turn never surfaced its aborted row");
+    assert!(
+        aborted_row < agent_start_indexes[1],
+        "the abort must end the held turn before the first follow-up's turn starts: {events:?}"
+    );
+    let replies: Vec<String> = events
+        .iter()
+        .filter(|event| {
+            event.get("type").and_then(Value::as_str) == Some("message_end")
+                && event["message"]["role"] == "assistant"
+                && event["message"].get("stopReason").and_then(Value::as_str) != Some("aborted")
+        })
+        .filter_map(|event| {
+            let message = event.get("message")?;
+            let content = message.get("content")?;
+            content
+                .as_array()
+                .and_then(|parts| parts.first())
+                .and_then(|part| part.get("text"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
+    assert_eq!(
+        replies,
+        [
+            "follow-up one reply".to_string(),
+            "follow-up two reply".to_string()
+        ],
+        "one reply per follow-up turn: {events:?}"
+    );
+    {
+        let core = worker.core.lock().unwrap();
+        assert!(
+            core.steering.is_empty() && core.follow_up.is_empty(),
+            "the queue must fully drain"
+        );
+        assert!(
+            !core.queued_input_suspended,
+            "the resume never cleared the suspension"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `abort_and_clear_queue` suspends like the bare `abort` (TS
+/// `requestAbort` in that arm): a plain prompt is rejected afterwards
+/// and a `follow_up` (a resume site) is admitted.
+#[tokio::test]
+async fn abort_and_clear_queue_suspends_plain_prompts() {
+    let worker = created_dispatch_worker().await;
+    let cleared = worker.dispatch("abort_and_clear_queue", &json!({})).await;
+    assert!(cleared.success, "abort_and_clear_queue failed: {cleared:?}");
+    let rejected = worker
+        .dispatch(
+            "prompt_and_wait",
+            &json!({ "activeSessionId": "suspension-session", "message": "hi" }),
+        )
+        .await;
+    assert_eq!(rejected.error.as_deref(), Some(QUEUED_INPUT_SUSPENDED));
+    let resumed = worker
+        .dispatch(
+            "follow_up",
+            &json!({
+                "activeSessionId": "suspension-session",
+                "message": "queued resume"
+            }),
+        )
+        .await;
+    assert!(resumed.success, "follow_up failed: {resumed:?}");
+    let idle = worker.dispatch("wait_for_idle", &json!({})).await;
+    assert!(idle.success, "never went idle: {idle:?}");
+}
