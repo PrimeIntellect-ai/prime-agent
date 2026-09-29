@@ -1,7 +1,7 @@
 //! The upload concern (moved with its concern): the one-session upload
 //! options, the outcome-logged upload entry point, the gated perform arm
 //! with its cursor/header/context resolution, and the retriable
-//! fetch_with_retry loop (TS uploadAgentTraceFile).
+//! `fetch_with_retry` loop (TS uploadAgentTraceFile).
 
 use super::*;
 

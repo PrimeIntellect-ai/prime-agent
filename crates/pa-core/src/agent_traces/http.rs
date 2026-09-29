@@ -1,5 +1,5 @@
 //! The HTTP transport concern (moved with its concern): the response and
-//! error records, the injectable TraceHttp trait + the reqwest transport,
+//! error records, the injectable `TraceHttp` trait + the reqwest transport,
 //! the URI-component encoding, the response message, the Retry-After
 //! parse, and the retry backoff (TS prime-http.ts's surface).
 

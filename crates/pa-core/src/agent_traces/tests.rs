@@ -1,4 +1,4 @@
-//! The agent_traces unit battery (moved with its concern): the header
+//! The `agent_traces` unit battery (moved with its concern): the header
 //! validation, the scripted upload's request + cursor + trace-log
 //! contract, the retry/rate gates, the parent-chain + git-context
 //! resolution, the preview, the find walk, and the outbox entry hash.
