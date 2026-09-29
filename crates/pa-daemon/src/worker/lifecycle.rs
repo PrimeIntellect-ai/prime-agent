@@ -1,6 +1,10 @@
 //! Session lifecycle on the worker: shutdown, replacement handoff,
 //! resume, compaction triggers, and the wait-for-settled arms.
-use super::*;
+use super::{
+    json, queue_lanes, response_failure, response_success, session_snapshot, DaemonResponse,
+    QueueCheckpoint, QueuePriority, QueuedItem, SessionFile, TurnPolicy, Value, Worker,
+    SIDE_QUESTION_SETTLE_TIMEOUT,
+};
 
 impl Worker {
     /// `update_snapshot` (supervisor plane, update flow spec §8): a
@@ -560,7 +564,7 @@ impl Worker {
                         if let Ok(value) = serde_json::to_value(
                             pa_types::session::AgentMessage::Custom(outcome_row),
                         ) {
-                            self.emit_custom_row(value);
+                            self.emit_custom_row(&value);
                         }
                         if result.applied_edits.iter().any(|edit| edit.applied) {
                             let notice =
@@ -571,7 +575,7 @@ impl Worker {
                             if let Ok(value) = serde_json::to_value(
                                 pa_types::session::AgentMessage::Custom(notice),
                             ) {
-                                self.emit_custom_row(value);
+                                self.emit_custom_row(&value);
                             }
                         }
                     }

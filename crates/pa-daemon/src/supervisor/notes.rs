@@ -1,6 +1,6 @@
 //! The supervisor's operator-note surface: the daemon-event and session-channel
 //! notes, the rotating log line, and the spawn-ledger assembly.
-use super::*;
+use super::{paths, util, Arc, Result, Supervisor, Value};
 
 impl Supervisor {
     /// Emit the `daemon event` adoption signal for a session-archive sweep
@@ -56,7 +56,7 @@ impl Supervisor {
     /// evaluates the attached set in the same pass that writes). A full
     /// queue drops the frame and the stall-cycle transition lands in the
     /// daemon log (finding 4a visibility).
-    pub(crate) fn publish_session_event(&self, active_session_id: &str, payload: Arc<Value>) {
+    pub(crate) fn publish_session_event(&self, active_session_id: &str, payload: &Arc<Value>) {
         let outcome = self.session_subscribers.publish(active_session_id, payload);
         if !outcome.lagged.is_empty() {
             self.log_line(&format!(

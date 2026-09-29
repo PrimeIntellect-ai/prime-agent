@@ -7,6 +7,31 @@
 //!
 //! Linux-only e2e (`AF_UNIX` sockets, `kill -9` semantics): compiles to
 //! nothing elsewhere, like the other pa-daemon e2e verifiers.
+// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
+// the full rationale).
+// Stack-resident futures by design on the daemon's hot paths; boxing the
+// call sites for a lint tick is a perf regression with zero correctness gain.
+#![allow(clippy::large_futures)]
+// 64-bit-only targets; the narrowing casts sit at OS boundaries
+// (pid/fd/time/size) where the values are bounded by the kernel - the
+// dead-guard expect()s would add panic paths where silent wrap was
+// deliberate.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// The fn-length threshold is a style gate, not correctness; the structure
+// campaign owns the god-fn splits as a follow-up.
+#![allow(clippy::too_many_lines)]
+// API-shape opinions, not defects; the surfaces are deliberate.
+#![allow(
+    clippy::unnecessary_wraps,
+    clippy::zero_sized_map_values,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names
+)]
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -92,7 +117,7 @@ impl Client {
         self.writer.flush().expect("flush");
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         self.send(&json!({
             "type": "command",
             "id": id,
@@ -259,7 +284,7 @@ fn load_worker_identity(agent_dir: &Path, socket: &Path, worker_id: &str) -> Wor
 fn get_ticket(client: &mut Client, session_id: &str) -> Value {
     client.send_command(
         "ticket",
-        json!({ "type": "get_direct_worker_transport", "activeSessionId": session_id }),
+        &json!({ "type": "get_direct_worker_transport", "activeSessionId": session_id }),
     );
     let response = client.read_response("ticket");
     assert_eq!(
@@ -320,7 +345,7 @@ fn direct_attach_ticket_streams_across_supervisor_kill9() {
     // Create the session through the supervisor (control plane).
     client.send_command(
         "create",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -461,7 +486,7 @@ fn direct_attach_ticket_streams_across_supervisor_kill9() {
     let (mut client2, _hello) = Client::connect(&socket);
     let deadline = Instant::now() + Duration::from_secs(15);
     let roster = loop {
-        client2.send_command("list", json!({ "type": "list" }));
+        client2.send_command("list", &json!({ "type": "list" }));
         let list = client2.read_response("list");
         assert!(Instant::now() < deadline, "roster never rebuilt: {list}");
         let sessions = list["data"]["sessions"]
@@ -532,7 +557,7 @@ fn direct_attach_ticket_streams_across_supervisor_kill9() {
     assert_eq!(answer, "turn-2", "second scripted turn completed");
 
     // Shutdown: the restarted supervisor takes the adopted worker down.
-    client2.send_command("sd", json!({ "type": "shutdown" }));
+    client2.send_command("sd", &json!({ "type": "shutdown" }));
     let shutdown = client2.read_response("sd");
     assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -563,7 +588,7 @@ fn unused_ticket_expires() {
     let (mut client, _hello) = Client::connect(&socket);
     client.send_command(
         "create",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -607,7 +632,7 @@ fn unused_ticket_expires() {
         "fresh grant works: {auth_fresh}"
     );
 
-    client.send_command("sd", json!({ "type": "shutdown" }));
+    client.send_command("sd", &json!({ "type": "shutdown" }));
     let shutdown = client.read_response("sd");
     assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");
 }

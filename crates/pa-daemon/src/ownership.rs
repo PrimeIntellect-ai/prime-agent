@@ -59,15 +59,15 @@ impl Supervisor {
             active_session_id, ..
         } = command
         else {
-            return self.owned_failure(command_id, type_name, "invalid command");
+            return Self::owned_failure(command_id, type_name, "invalid command");
         };
         let resident = match self.resolve_retry_target(active_session_id).await {
             Ok(resident) => resident,
-            Err(error) => return self.owned_failure(command_id, type_name, &error),
+            Err(error) => return Self::owned_failure(command_id, type_name, &error),
         };
         let owner = resident.descriptor.lock().await.owner_client_id.clone();
         if owner.as_deref() != Some(effective_client_id) {
-            return self.owned_failure(
+            return Self::owned_failure(
                 command_id,
                 type_name,
                 "Session is not owned by this client",
@@ -80,7 +80,7 @@ impl Supervisor {
         // persist failure fails the owned stop (TS throws) instead of
         // stopping an untombstoned worker.
         if let Err(error) = self.stop_worker(&resident).await {
-            return self.owned_failure(
+            return Self::owned_failure(
                 command_id,
                 type_name,
                 &format!("Failed to persist the session stop: {error:#}"),
@@ -110,11 +110,11 @@ impl Supervisor {
             active_session_id, ..
         } = command
         else {
-            return self.owned_failure(command_id, type_name, "invalid command");
+            return Self::owned_failure(command_id, type_name, "invalid command");
         };
         let resident = match self.resolve_retry_target(active_session_id).await {
             Ok(resident) => resident,
-            Err(error) => return self.owned_failure(command_id, type_name, &error),
+            Err(error) => return Self::owned_failure(command_id, type_name, &error),
         };
         let previous_owner = {
             let mut descriptor = resident.descriptor.lock().await;
@@ -127,7 +127,7 @@ impl Supervisor {
                         .rest
                         .insert("promotedOwnerClientId".to_string(), json!(owner));
                     if let Err(error) = persist_worker(&resident.descriptor_path, &descriptor) {
-                        return self.owned_failure(command_id, type_name, &error.to_string());
+                        return Self::owned_failure(command_id, type_name, &error.to_string());
                     }
                     true
                 }
@@ -144,7 +144,7 @@ impl Supervisor {
             }
         };
         if !previous_owner {
-            return self.owned_failure(
+            return Self::owned_failure(
                 command_id,
                 type_name,
                 "Session is not owned by this client",
@@ -177,11 +177,11 @@ impl Supervisor {
             active_session_id, ..
         } = command
         else {
-            return self.owned_failure(command_id, type_name, "invalid command");
+            return Self::owned_failure(command_id, type_name, "invalid command");
         };
         let resident = match self.resolve_retry_target(active_session_id).await {
             Ok(resident) => resident,
-            Err(error) => return self.owned_failure(command_id, type_name, &error),
+            Err(error) => return Self::owned_failure(command_id, type_name, &error),
         };
         // The client access gate (TS `assertWorkerAccessibleToClient`): a
         // worker another client owns is invisible through this selector.
@@ -189,7 +189,7 @@ impl Supervisor {
             let descriptor = resident.descriptor.lock().await;
             if let Some(owner) = descriptor.owner_client_id.as_deref() {
                 if owner != effective_client_id {
-                    return self.owned_failure(
+                    return Self::owned_failure(
                         command_id,
                         type_name,
                         &format!("Unknown active session: {active_session_id}"),
@@ -198,7 +198,7 @@ impl Supervisor {
             }
         }
         if self.is_stopping(&resident) {
-            return self.owned_failure(
+            return Self::owned_failure(
                 command_id,
                 type_name,
                 "Session worker is stopping; retry after it finishes",
@@ -231,7 +231,7 @@ impl Supervisor {
             descriptor.lifecycle = DaemonWorkerLifecycle::Ready;
             let _ = persist_worker(&resident.descriptor_path, &descriptor);
         } else if let Err(error) = self.relaunch_worker(&resident).await {
-            return self.owned_failure(
+            return Self::owned_failure(
                 command_id,
                 type_name,
                 &last_error.unwrap_or_else(|| error.to_string()),
@@ -239,7 +239,7 @@ impl Supervisor {
         }
         let lifecycle = resident.descriptor.lock().await.lifecycle;
         if lifecycle != DaemonWorkerLifecycle::Ready {
-            return self.owned_failure(
+            return Self::owned_failure(
                 command_id,
                 type_name,
                 &last_error.unwrap_or_else(|| "Session worker recovery failed".to_string()),
@@ -274,7 +274,7 @@ impl Supervisor {
         }
     }
 
-    fn owned_failure(&self, command_id: &str, type_name: &str, error: &str) -> (Vec<Value>, bool) {
+    fn owned_failure(command_id: &str, type_name: &str, error: &str) -> (Vec<Value>, bool) {
         (
             vec![response_line(&response_failure(
                 Some(command_id),

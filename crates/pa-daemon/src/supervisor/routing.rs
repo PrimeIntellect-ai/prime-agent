@@ -1,6 +1,11 @@
 //! Command routing between clients and workers: the route tables, the
 //! per-request deadlines, and the worker-not-connected refusal.
-use super::*;
+use super::{
+    anyhow, attach_client_capabilities, bail, client_command_payload, command_active_session_id,
+    json, mpsc, oneshot, response_failure, response_line, response_success, streamed_attach_lines,
+    wants_chunked, Arc, DaemonCommand, DaemonResponse, Duration, Outbound, ResidentWorker, Result,
+    RouteAdmission, SnapshotPurpose, Supervisor, Value, WorkerReply, WorkerRequest,
+};
 
 pub(crate) const ROUTE_TIMEOUT_MS: u64 = 30_000;
 /// The route failure for a worker whose command channel is gone (never
