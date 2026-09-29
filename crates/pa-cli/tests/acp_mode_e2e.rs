@@ -806,6 +806,76 @@ fn acp_daemon_attached_cancels_mid_turn() {
     drop(client);
 }
 
+#[test]
+fn acp_daemon_attached_prompt_after_cancel_runs() {
+    // A Stop -> resend flow: a mid-turn cancel leaves the worker's
+    // queued-input admission suspended (TS `requestAbort`), and the next
+    // ACP prompt resumes it through its streaming behavior (TS sends
+    // `followUp` + `queueIfBusy: true` on every prompt, acp-mode.ts).
+    // The first response streams at a fixed token rate, so the test
+    // cancels only after its first chunk: the turn is observably running,
+    // and the cancel cannot land before the worker admitted it.
+    let (mut client, _socket) = AcpChild::spawn_daemon_attached(
+        &["--mode", "acp", "--no-session"],
+        &json!({ "engine": "faux", "tokensPerSecond": 2, "responses": [
+            { "text": "a paced answer that streams slowly enough to cancel mid-turn" },
+            "SECOND-OK",
+        ] }),
+    );
+    let init = client.request("initialize", &initialize_params());
+    let _ = client.wait_response(init, TIMEOUT);
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
+    let (new_response, _) = client.wait_response(new, TIMEOUT);
+    let session_id = new_response["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let first = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "a slow question" }] }),
+    );
+    // Readiness is the turn's own first streamed chunk, not a timer.
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let timeout_left = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !timeout_left.is_zero(),
+            "the paced turn never streamed a chunk"
+        );
+        let line = client
+            .lines
+            .recv_timeout(timeout_left)
+            .expect("the ACP stream stayed open");
+        let frame: Value = serde_json::from_str(&line).expect("valid JSON line");
+        if frame["params"]["update"]["sessionUpdate"] == "agent_message_chunk" {
+            break;
+        }
+    }
+    client.notify("session/cancel", &json!({ "sessionId": session_id }));
+    let (first_response, _) = client.wait_response(first, TIMEOUT);
+    assert_eq!(
+        first_response["result"]["stopReason"], "cancelled",
+        "the mid-turn cancel settles the first prompt: {first_response}"
+    );
+    let second = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "the resend" }] }),
+    );
+    let (second_response, updates) = client.wait_response(second, TIMEOUT);
+    assert_eq!(
+        second_response["result"]["stopReason"], "end_turn",
+        "the prompt after a cancel runs: {second_response}"
+    );
+    let chunk = updates
+        .iter()
+        .find(|update| update["params"]["update"]["sessionUpdate"] == "agent_message_chunk")
+        .expect("the resumed turn streams its scripted answer");
+    assert_eq!(
+        chunk["params"]["update"]["content"],
+        json!({ "type": "text", "text": "SECOND-OK" })
+    );
+}
+
 /// Stop the sandboxed supervisor a test spawned (the shared-daemon
 /// product behavior leaves it running; a test owns its sandbox).
 fn shutdown_sandboxed_daemon(socket: &std::path::Path) {
