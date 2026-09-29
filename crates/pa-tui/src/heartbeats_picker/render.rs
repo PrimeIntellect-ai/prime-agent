@@ -213,7 +213,10 @@ impl Columns {
         row.push(Span::raw("  "));
         let (dot, _) = status_dot(&entry.job.status);
         row.push(theme.fg_span(status_color, format!("{dot} {}", entry.job.status)));
-        fill_row(theme, row, selected, width)
+        // The selected row paints the ONE shared selection style (the
+        // operator's 2026-09-28 consistency rule): the same purple band
+        // and bold the dock's groups and the agents view's rows carry.
+        fill_row(row, selected, width, theme.selection_row_style())
     }
 }
 
@@ -236,11 +239,11 @@ pub(super) fn action_row(
     }
     row.push(theme.fg_span(ThemeColor::Dim, format!("  {description}")));
     hug_row(
-        theme,
         row,
         str_width(label) + 2 + 2 + str_width(description),
         selected,
         width,
+        theme.selection_row_style(),
     )
 }
 

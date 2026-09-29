@@ -502,7 +502,7 @@ async fn build_headless_engine_with(
     // thinking level per batch (the engine passes its agent state's level,
     // so a mid-run `/effort` or model switch never routes at a stale level).
     let image_model_router = headless_image_model_router(
-        std::sync::Arc::clone(&provider_target),
+        &provider_target,
         std::sync::Arc::clone(&armed_target),
         config.cwd.clone(),
         config.agent_dir.clone(),
@@ -656,7 +656,7 @@ fn route_authoritative_stream_fn(
 /// actionable refusal that fails the turn — and the serving-target swap
 /// (`None` restores the session target).
 fn headless_image_model_router(
-    provider_target: std::sync::Arc<
+    provider_target: &std::sync::Arc<
         std::sync::RwLock<Option<pa_core::session_engine::provider_adapter::ProviderTarget>>,
     >,
     armed_target: std::sync::Arc<
@@ -678,7 +678,7 @@ fn headless_image_model_router(
     // still holds the route from one a mid-run `/model` switch rewrote.
     let armed_to = armed_target;
     let decide_agent_dir = agent_dir.clone();
-    let decide_provider_target = std::sync::Arc::clone(&provider_target);
+    let decide_provider_target = std::sync::Arc::clone(provider_target);
     let decide_armed_from = std::sync::Arc::clone(&armed_from);
     let decide = std::sync::Arc::new(
         move |carries_images: bool,
@@ -759,7 +759,7 @@ fn headless_image_model_router(
         },
     );
     let swap_target = {
-        let provider_target = std::sync::Arc::clone(&provider_target);
+        let provider_target = std::sync::Arc::clone(provider_target);
         let armed_to = std::sync::Arc::clone(&armed_to);
         std::sync::Arc::new(move |route: Option<&pa_core::models::ResolvedImageModel>| {
             if let Some(resolved) = route {
@@ -972,8 +972,8 @@ fn build_session_manager_with_lease(
         // selector's convention; the interactive fork arm matches).
         let expanded = crate::config::expand_tilde_path(selector);
         let selector = expanded.to_string_lossy();
-        let resolved =
-            resolve_session_path(&selector, &cwd, &session_dir).map_err(render_selector_error)?;
+        let resolved = resolve_session_path(&selector, &cwd, &session_dir)
+            .map_err(|error| render_selector_error(&error))?;
         let source = match resolved {
             ResolvedSession::Path(path)
             | ResolvedSession::Local(path)
@@ -990,8 +990,8 @@ fn build_session_manager_with_lease(
     // over the stored session cwd on resume.
     let explicit_cwd_override = options.session.cwd_from_flag.then_some(cwd.as_path());
     if let Some(selector) = &options.session.resume {
-        let resolved =
-            resolve_session_path(selector, &cwd, &session_dir).map_err(render_selector_error)?;
+        let resolved = resolve_session_path(selector, &cwd, &session_dir)
+            .map_err(|error| render_selector_error(&error))?;
         return match resolved {
             ResolvedSession::Path(path) | ResolvedSession::Local(path) => {
                 let lease = session_open_guard(options.daemon_socket.as_deref(), &path)?;
@@ -1213,7 +1213,7 @@ fn open_session_file(
 
 /// Render a selector failure with the main.ts formatting: the error message
 /// plus the browse hint.
-pub(crate) fn render_selector_error(error: SessionSelectorError) -> String {
+pub(crate) fn render_selector_error(error: &SessionSelectorError) -> String {
     format!(
         "{}.{}\nOpen prime-agent and press left-arrow to browse sessions.",
         error.message(),
@@ -1723,19 +1723,19 @@ mod tests {
             std::sync::Mutex<Option<pa_core::session_engine::provider_adapter::ProviderTarget>>,
         > = std::sync::Arc::new(std::sync::Mutex::new(None));
         let router = super::headless_image_model_router(
-            std::sync::Arc::clone(&provider_target),
+            &provider_target,
             std::sync::Arc::clone(&armed_target),
             home.path().to_path_buf(),
             agent_dir,
             session_model,
         );
-        let routed = pa_core::models::ResolvedImageModel {
+        let expected_route = pa_core::models::ResolvedImageModel {
             model: fixture_model("image-model"),
             thinking_level: pa_types::ai::ModelThinkingLevel::High,
             service_tier: None,
         };
         // Arm: the slot now serves the routed image model.
-        (router.swap_target)(Some(&routed));
+        (router.swap_target)(Some(&expected_route));
         assert_eq!(
             provider_target.read().unwrap().as_ref().unwrap().model.id,
             "image-model"
@@ -1755,7 +1755,7 @@ mod tests {
         // baseline is the post-switch session model: the plain arm ->
         // serve -> settle contract restores that baseline (the
         // capture-at-arm, restore-at-settle pair).
-        (router.swap_target)(Some(&routed));
+        (router.swap_target)(Some(&expected_route));
         (router.swap_target)(None);
         assert_eq!(
             provider_target.read().unwrap().as_ref().unwrap().model.id,

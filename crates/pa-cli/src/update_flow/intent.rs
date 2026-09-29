@@ -21,6 +21,7 @@ pub enum AcquireOutcome {
 }
 
 /// The per-socket update directory for one daemon socket path.
+#[must_use]
 pub fn socket_update_directory(agent_dir: &Path, socket_path: &str) -> PathBuf {
     let hash = pa_daemon::paths::hash_key(socket_path, 64);
     socket_update_dir(agent_dir, &hash)
@@ -56,7 +57,7 @@ pub fn acquire(
             });
         }
     }
-    let intent = intent_record(update_id, std::process::id() as u64, status_path);
+    let intent = intent_record(update_id, u64::from(std::process::id()), status_path);
     write_atomically(&intent_path, &intent)?;
     // Another coordinator may have stolen between the read and the write:
     // re-read and let the winner be whoever's record is on disk.
@@ -111,6 +112,7 @@ pub fn release(agent_dir: &Path, socket_path: &str) -> Result<()> {
 /// The status path this socket's coordinator writes (spec §7: one
 /// `status.json` per socket directory; the intent record carries it so a
 /// joining process can tail it).
+#[must_use]
 pub fn status_path_for(agent_dir: &Path, socket_path: &str) -> PathBuf {
     update_status_path(&socket_update_directory(agent_dir, socket_path))
 }

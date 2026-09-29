@@ -1,3 +1,22 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
+// by design on hot paths (boxing 130 fns is allocation-churn with zero
+// correctness gain); the fn-length threshold is a style gate, not
+// correctness (the harness fns are intentionally linear); 64-bit targets -
+// the narrowing sits at OS/protocol boundaries where the values are
+// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
+// guarded parses), and checked conversions would add panic paths where
+// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
+// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
+// dossier for the conductor).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! Differential parity for the live-session HTML export: the same fixture
 //! session (a custom-tool call that no renderer covers) resumed and
 //! exported through the TS daemon and the Rust daemon produces the same
@@ -61,18 +80,18 @@ impl Drop for Supervisor {
         let _ = self.child.kill();
         let _ = self.child.wait();
         for pid in workers {
-            kill_worker(&pid);
+            kill_worker(pid);
         }
         let _ = std::fs::remove_file(&self.socket);
     }
 }
 
-fn kill_worker(pid: &u32) {
+fn kill_worker(pid: u32) {
     unsafe {
-        libc::kill(*pid as i32, libc::SIGKILL);
+        libc::kill(pid as i32, libc::SIGKILL);
     }
     let deadline = Instant::now() + Duration::from_secs(5);
-    while process_alive(*pid) {
+    while process_alive(pid) {
         assert!(
             Instant::now() < deadline,
             "worker {pid} survived the teardown kill"
@@ -95,10 +114,10 @@ fn child_pids_of(ppid: u32) -> Vec<u32> {
     let mut pids = Vec::new();
     let entries = std::fs::read_dir("/proc").expect("read /proc");
     for entry in entries.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+        let Ok(entry_pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
             continue;
         };
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{entry_pid}/stat")) else {
             continue;
         };
         let Some((_, rest)) = stat.rsplit_once(')') else {
@@ -110,7 +129,7 @@ fn child_pids_of(ppid: u32) -> Vec<u32> {
             continue;
         };
         if parent == ppid {
-            pids.push(pid);
+            pids.push(entry_pid);
         }
     }
     pids
@@ -204,7 +223,7 @@ impl Wire {
         Wire { reader, writer }
     }
 
-    fn request(&mut self, command: Value) -> Value {
+    fn request(&mut self, command: &Value) -> Value {
         let id = command
             .get("id")
             .and_then(Value::as_str)
@@ -346,7 +365,7 @@ fn live_export(binary: &Path, base: &Path, ts_side: bool) -> Value {
             "script": script.to_string_lossy(),
         })
     };
-    let create = wire.request(json!({
+    let create = wire.request(&json!({
         "id": "c1", "type": "create",
         "sessionPath": fixture.to_string_lossy(),
         "name": "export-diff",
@@ -359,7 +378,7 @@ fn live_export(binary: &Path, base: &Path, ts_side: bool) -> Value {
         .expect("session id")
         .to_string();
     let out = base.join("out.html");
-    let export = wire.request(json!({
+    let export = wire.request(&json!({
         "id": "x1", "type": "export_html",
         "activeSessionId": session_id,
         "outputPath": out.to_string_lossy(),
