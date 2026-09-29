@@ -3,7 +3,7 @@
 //! manifest, so an incomplete or tampered staging area fails loudly
 //! before it is uploaded anywhere.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
@@ -19,6 +19,16 @@ const COMMIT_HEX_LEN: usize = 40;
 
 /// The length of a SHA-256 digest.
 const DIGEST_HEX_LEN: usize = 64;
+
+/// Whether a captured-entry list may record deletions: the worktree
+/// delta does (a tracked path may have been removed from the worktree),
+/// but a HEAD-tree baseline restates content the tree holds, so a
+/// deletion there is a contradictory instruction for the materializer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Deletions {
+    Allowed,
+    Forbidden,
+}
 
 /// Verify a staged snapshot: parse the manifest, re-hash every blob
 /// (delta and baseline alike), and reject unreferenced or missing blobs.
@@ -56,8 +66,12 @@ fn read_manifest(path: &Path) -> Result<SnapshotManifest, SnapshotError> {
 }
 
 /// Structural checks: safe and strictly path-sorted (hence
-/// duplicate-free) entry lists, well-formed digests, and in-root symlink
-/// targets - for the delta lists and for a HEAD-tree baseline alike.
+/// duplicate-free) entry lists, well-formed digests, in-root symlink
+/// targets, file-or-symlink baseline items, and globally disjoint path
+/// claims - for the delta lists and for a HEAD-tree baseline alike.
+/// Whether the baseline covers the head commit's whole tree cannot be
+/// proven offline from a commit string alone; that guarantee remains a
+/// creator invariant, not a verified manifest property.
 fn verify_structure(staging_dir: &Path, manifest: &SnapshotManifest) -> Result<(), SnapshotError> {
     let reject = |detail: String| SnapshotError::Verification {
         staging_dir: staging_dir.to_path_buf(),
@@ -68,11 +82,65 @@ fn verify_structure(staging_dir: &Path, manifest: &SnapshotManifest) -> Result<(
             return Err(reject(format!("malformed head commit {head:?}")));
         }
     }
-    verify_captured_list(staging_dir, &manifest.captured, "captured")?;
+    verify_captured_list(
+        staging_dir,
+        &manifest.captured,
+        "captured",
+        Deletions::Allowed,
+    )?;
     verify_excluded_list(staging_dir, &manifest.excluded, "excluded")?;
     if let Some(Baseline::HeadTree { entries, excluded }) = &manifest.baseline {
-        verify_captured_list(staging_dir, entries, "baseline")?;
+        verify_captured_list(staging_dir, entries, "baseline", Deletions::Forbidden)?;
         verify_excluded_list(staging_dir, excluded, "baseline excluded")?;
+    }
+    verify_disjoint_paths(staging_dir, manifest)?;
+    Ok(())
+}
+
+/// Cross-list path disjointness: every path is stated by at most one of
+/// the four lists (delta captured, delta excluded, baseline entries,
+/// baseline excluded). The creator sends each status or tree path to
+/// exactly one list, so a path claimed twice gives the materializer
+/// contradictory instructions - a staged blob alongside an exclusion for
+/// the same path, or the delta and the baseline disagreeing about who
+/// holds the newer state. Within-list duplicates are already rejected
+/// by the sorted-order checks.
+fn verify_disjoint_paths(
+    staging_dir: &Path,
+    manifest: &SnapshotManifest,
+) -> Result<(), SnapshotError> {
+    let reject = |detail: String| SnapshotError::Verification {
+        staging_dir: staging_dir.to_path_buf(),
+        detail,
+    };
+    // Gather every (path, list) claim, then reject the first path a
+    // second list also claims.
+    let mut claims: Vec<(&str, &str)> = manifest
+        .captured
+        .iter()
+        .map(|entry| (entry.path(), "captured"))
+        .chain(
+            manifest
+                .excluded
+                .iter()
+                .map(|entry| (entry.path.as_str(), "excluded")),
+        )
+        .collect();
+    if let Some(Baseline::HeadTree { entries, excluded }) = &manifest.baseline {
+        claims.extend(entries.iter().map(|entry| (entry.path(), "baseline")));
+        claims.extend(
+            excluded
+                .iter()
+                .map(|entry| (entry.path.as_str(), "baseline excluded")),
+        );
+    }
+    let mut claimed: HashMap<&str, &str> = HashMap::new();
+    for (path, list) in claims {
+        if let Some(prior) = claimed.insert(path, list) {
+            return Err(reject(format!(
+                "path {path:?} is claimed by both the {prior} and {list} lists"
+            )));
+        }
     }
     Ok(())
 }
@@ -81,6 +149,7 @@ fn verify_captured_list(
     staging_dir: &Path,
     entries: &[CapturedEntry],
     list: &str,
+    deletions: Deletions,
 ) -> Result<(), SnapshotError> {
     let reject = |detail: String| SnapshotError::Verification {
         staging_dir: staging_dir.to_path_buf(),
@@ -111,7 +180,13 @@ fn verify_captured_list(
                     )));
                 }
             }
-            CapturedEntry::Deleted { .. } => {}
+            CapturedEntry::Deleted { .. } => {
+                if deletions == Deletions::Forbidden {
+                    return Err(reject(format!(
+                        "deletion in {list} at {path:?}: baseline entries must be files or symlinks"
+                    )));
+                }
+            }
         }
     }
     Ok(())

@@ -6,7 +6,9 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
-use super::git::{parse_status, GitStatus, HeadTreeEntry, StatusEntry};
+use super::git::{
+    parse_status, read_head_tree, read_worktree_status, GitStatus, HeadTreeEntry, StatusEntry,
+};
 use super::manifest::{is_safe_relative_path, symlink_target_stays_inside};
 use super::{
     build_manifest, capture_leaf, create_workspace_snapshot, git_blob_oid, is_secret_path,
@@ -585,6 +587,41 @@ async fn head_tree_baseline_ships_head_content_and_full_coverage() {
         assert!(carried(path), "HEAD path {path} is not covered");
     }
     assert!(verify_workspace_snapshot(staging.path()).is_ok());
+}
+
+#[tokio::test]
+async fn head_tree_pins_to_the_status_reported_commit() {
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    init_repo(root);
+    write(root, "a.txt", "A\n");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "one"]);
+    let pinned = read_worktree_status(root, limits().git_timeout_ms)
+        .await
+        .unwrap()
+        .head_commit
+        .unwrap();
+    // Another process commits between the status run and the tree
+    // enumeration: the enumeration must describe the status-reported
+    // commit, not the moved HEAD, or the manifest would publish the
+    // old head commit with the new HEAD's tree.
+    write(root, "a.txt", "B\n");
+    write(root, "b.txt", "new\n");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "two"]);
+    let tree = read_head_tree(root, &pinned, limits().git_timeout_ms)
+        .await
+        .unwrap();
+    assert_eq!(
+        tree,
+        vec![HeadTreeEntry {
+            path: "a.txt".to_string(),
+            mode: "100644".to_string(),
+            gitlink: false,
+            oid: git_blob_oid(b"A\n"),
+        }]
+    );
 }
 
 #[test]
@@ -1258,6 +1295,94 @@ fn verification_rejects_baseline_tampering() {
     // The untampered pair verifies.
     let staging = stage(&manifest, &[(&digest(b"a\n"), b"a\n")]);
     assert_eq!(verify_workspace_snapshot(staging.path()).unwrap(), manifest);
+}
+
+#[test]
+fn verification_rejects_paths_claimed_by_two_lists() {
+    let head = "ee3a902349fa5446bf3edd1e1e8d8f7f48013081";
+    let error = |staging: &tempfile::TempDir| {
+        verify_workspace_snapshot(staging.path())
+            .err()
+            .unwrap()
+            .to_string()
+    };
+    // A delta path cannot be captured and excluded at once.
+    let overlap = bare_manifest(
+        vec![CapturedEntry::Deleted {
+            path: "a.txt".to_string(),
+            status: "D.".to_string(),
+        }],
+        vec![ExcludedEntry {
+            path: "a.txt".to_string(),
+            reason: ExcludeReason::NotRegularFile,
+        }],
+    );
+    let staging = stage(&overlap, &[]);
+    assert!(
+        error(&staging).contains("claimed by both the captured and excluded lists"),
+        "{}",
+        error(&staging)
+    );
+    // Nor can a baseline path be staged and excluded at once.
+    let overlap = SnapshotManifest {
+        version: 2,
+        head_commit: Some(head.to_string()),
+        baseline: Some(Baseline::HeadTree {
+            entries: vec![file_entry("a.txt", "100644", "a\n")],
+            excluded: vec![ExcludedEntry {
+                path: "a.txt".to_string(),
+                reason: ExcludeReason::Secret,
+            }],
+        }),
+        captured: vec![],
+        excluded: vec![],
+    };
+    let staging = stage(&overlap, &[(&digest(b"a\n"), b"a\n")]);
+    assert!(
+        error(&staging).contains("claimed by both the baseline and baseline excluded lists"),
+        "{}",
+        error(&staging)
+    );
+    // Nor can the delta and the baseline carry the same path - the
+    // delta holds the newer state, so the baseline must omit it.
+    let overlap = SnapshotManifest {
+        version: 2,
+        head_commit: Some(head.to_string()),
+        baseline: Some(head_tree(vec![file_entry("a.txt", "100644", "a\n")])),
+        captured: vec![file_entry("a.txt", ".M", "b\n")],
+        excluded: vec![],
+    };
+    let staging = stage(
+        &overlap,
+        &[(&digest(b"a\n"), b"a\n"), (&digest(b"b\n"), b"b\n")],
+    );
+    assert!(
+        error(&staging).contains("claimed by both the captured and baseline lists"),
+        "{}",
+        error(&staging)
+    );
+}
+
+#[test]
+fn verification_rejects_deletions_in_a_head_tree_baseline() {
+    // A deletion restates nothing HEAD's tree holds; it would tell the
+    // materializer to remove a path the baseline exists to provide.
+    let manifest = SnapshotManifest {
+        version: 2,
+        head_commit: Some("ee3a902349fa5446bf3edd1e1e8d8f7f48013081".to_string()),
+        baseline: Some(head_tree(vec![CapturedEntry::Deleted {
+            path: "a.txt".to_string(),
+            status: "100644".to_string(),
+        }])),
+        captured: vec![],
+        excluded: vec![],
+    };
+    let staging = stage(&manifest, &[]);
+    let error = verify_workspace_snapshot(staging.path())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("deletion in baseline"), "{error}");
 }
 
 #[test]

@@ -102,7 +102,12 @@ pub enum Baseline {
     /// newer state). No git history ships - no commits, no reverted
     /// content from any prior revision - and nothing here is a
     /// secret-safety guarantee: a credential under an innocuous name
-    /// still stages, in the baseline or the delta.
+    /// still stages, in the baseline or the delta. Entries are files and
+    /// symlinks only - a deletion is not baseline content - and
+    /// verification rejects any path claimed by more than one list, so
+    /// the materializer never receives contradictory instructions for
+    /// the same path (full HEAD-tree coverage itself stays a creator
+    /// invariant: it cannot be proven offline from a commit id alone).
     HeadTree {
         entries: Vec<CapturedEntry>,
         excluded: Vec<ExcludedEntry>,

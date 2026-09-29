@@ -205,14 +205,20 @@ pub(crate) struct HeadTreeEntry {
     pub(crate) oid: String,
 }
 
-/// Read every path in HEAD's tree. The baseline stages these contents
-/// from the (unmodified) worktree, so this is enumeration only - no
-/// history, no object payloads.
+/// Read every path in `commit`'s tree, where `commit` is the object id
+/// the preceding `git status` reported for HEAD. Enumerating that id
+/// (instead of re-resolving `HEAD`) pins the baseline to the commit the
+/// manifest will state: a concurrent commit between the two commands
+/// can no longer pair the old head commit with a newer HEAD's tree, and
+/// a vanished or rewritten object fails `ls-tree` loudly here. The
+/// baseline stages these contents from the (unmodified) worktree, so
+/// this is enumeration only - no history, no object payloads.
 pub(crate) async fn read_head_tree(
     root: &Path,
+    commit: &str,
     timeout_ms: u64,
 ) -> Result<Vec<HeadTreeEntry>, SnapshotError> {
-    let output = run_git(&["ls-tree", "-r", "-z", "HEAD"], root, timeout_ms).await?;
+    let output = run_git(&["ls-tree", "-r", "-z", commit], root, timeout_ms).await?;
     parse_head_tree(&output)
 }
 

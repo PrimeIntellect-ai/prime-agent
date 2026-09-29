@@ -189,8 +189,14 @@ pub async fn create_workspace_snapshot(
     // says so explicitly (head commit and baseline are both null).
     let head_tree = match (&status.head_commit, baseline_mode) {
         (None, _) | (Some(_), BaselineMode::External) => Vec::new(),
-        (Some(_), BaselineMode::HeadTree) => {
-            git::read_head_tree(&worktree_root, limits.git_timeout_ms).await?
+        // Enumerate the tree of the commit status just reported, never
+        // `HEAD` again: another process committing in between would
+        // otherwise pair the old `head_commit` with a newer HEAD's tree.
+        // With the enumeration pinned, the manifest's delta, baseline,
+        // and head commit all describe one revision, and any later
+        // worktree drift fails loudly per path instead.
+        (Some(commit), BaselineMode::HeadTree) => {
+            git::read_head_tree(&worktree_root, commit, limits.git_timeout_ms).await?
         }
     };
     let manifest = build_manifest(
