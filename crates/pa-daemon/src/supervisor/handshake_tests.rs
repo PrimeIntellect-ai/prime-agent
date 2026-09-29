@@ -304,10 +304,14 @@ async fn a_stale_epoch_never_overwrites_the_installed_channel() {
     let (stale_tx, _stale_rx) =
         mpsc::channel::<WorkerRequest>(crate::backpressure::WORKER_INFLIGHT_CAPACITY);
 
+    // The stale epoch is a real issued one: the superseded connect went
+    // live first, before the newer connection superseded it (an epoch-0
+    // oracle would also pass a guard that only rejects the never-issued
+    // epoch, leaving the live stale interleaving unexercised).
+    let stale_epoch = resident.note_connection_live();
     // The newer connection installs first; the stale connect's epoch is
     // now superseded.
     let newer_epoch = resident.note_connection_live();
-    let stale_epoch = newer_epoch - 1;
     resident
         .install_command_channel(newer_epoch, newer_tx)
         .await;
@@ -319,7 +323,9 @@ async fn a_stale_epoch_never_overwrites_the_installed_channel() {
     // The stale connect installs last (the TOCTOU window: its pre-lock
     // epoch check passed before the newer install) — under the lock the
     // recheck drops it, and the newer channel stays the routable one.
-    resident.install_command_channel(stale_epoch, stale_tx).await;
+    resident
+        .install_command_channel(stale_epoch, stale_tx)
+        .await;
     let routed = {
         let cmd_tx = resident.cmd_tx.lock().await;
         cmd_tx
