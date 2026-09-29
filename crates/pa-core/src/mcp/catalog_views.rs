@@ -55,6 +55,7 @@ pub struct McpPasteCredential {
     pub field_ids: Vec<String>,
 }
 
+#[must_use]
 pub fn mcp_paste_credential(service: &McpServiceDescriptor) -> Option<McpPasteCredential> {
     let fields = mcp_credential_fields(service);
     if fields.is_empty() {
@@ -104,6 +105,7 @@ const FIELD_LABEL_ACRONYMS: [&str; 6] = ["api", "aws", "ci", "sdk", "cli", "id"]
 /// and the service identity ("GitHub personal access token"). The
 /// derivation is display copy only — it never influences what is stored or
 /// sent.
+#[must_use]
 pub fn mcp_credential_field_prompt_label(
     service: &McpServiceDescriptor,
     field: &McpSetupField,

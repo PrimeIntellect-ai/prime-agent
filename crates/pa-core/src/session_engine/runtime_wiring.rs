@@ -80,7 +80,9 @@ impl std::fmt::Debug for KernelCronWiring {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KernelCronWiring")
             .field("binding", &self.binding)
-            .finish()
+            // The store + the hook are deliberately opaque (the type has no
+            // meaningful debug form): `..` documents the omission.
+            .finish_non_exhaustive()
     }
 }
 
@@ -101,6 +103,7 @@ pub struct SessionKernelWiring {
 /// and `rlm.*` host handlers the kernel reaches through its registry.
 /// `goal_complete_purge` is the embedding's queued-goal-context purge (TS
 /// `_completeGoalFromHost` -> `_clearQueuedGoalContexts`).
+#[must_use]
 pub fn wire_session_runtime(
     session: SessionManager,
     agent_dir: &std::path::Path,
@@ -195,6 +198,7 @@ pub fn wire_session_runtime(
 }
 
 /// Kernel-side Python skill modules, pre-imported at bootstrap.
+#[must_use]
 pub fn kernel_python_skills(skills: &[Skill]) -> Vec<KernelPythonSkill> {
     get_python_skill_runtime_info(skills)
         .into_iter()
@@ -222,6 +226,7 @@ pub fn kernel_python_skills(skills: &[Skill]) -> Vec<KernelPythonSkill> {
 /// session cwd differs from the process cwd (a daemon worker switched onto
 /// another session file) must spawn the kernel in the session's cwd.
 #[allow(clippy::too_many_arguments)] // one wiring funnel, same style as AgentSession::from_session_arc
+#[must_use]
 pub fn kernel_provisioner(
     session_id: String,
     handlers: HostRequestHandlers,
@@ -281,7 +286,7 @@ impl IpythonKernelProvisioner for KernelProvisioner {
     fn kill(&self) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         let this = self.clone();
         Box::pin(async move {
-            this.kill().await;
+            this.kill();
         })
     }
 }
@@ -363,6 +368,7 @@ fn convert_execute_result(
 }
 
 /// Build the ipython tool options for a wired kernel provisioner.
+#[must_use]
 pub fn ipython_tool_options(provisioner: Arc<KernelProvisioner>) -> IpythonToolOptions {
     IpythonToolOptions {
         provisioner,

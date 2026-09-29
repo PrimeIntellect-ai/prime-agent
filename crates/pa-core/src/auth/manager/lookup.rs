@@ -4,7 +4,11 @@
 //! staleness gate, the OAuth expiry refresh under the per-provider
 //! single-flight, and the passthrough `get_api_key` (TS getApiKey).
 
-use super::*;
+use super::{
+    now_epoch_ms, parse_storage_data, refresh_flight, resolve_config_value,
+    resolve_config_value_uncached, AuthApiKeyResult, AuthCredential, AuthStorage,
+    PRIME_INFERENCE_PROVIDER_ID,
+};
 
 impl AuthStorage {
     pub fn get_api_key_with_source_token(
@@ -18,7 +22,7 @@ impl AuthStorage {
                 if let Some(api_key) = self.runtime_overrides.get(provider_id).cloned() {
                     return AuthApiKeyResult {
                         api_key: Some(api_key),
-                        source_token: self.token_for(provider_id, &candidate),
+                        source_token: Self::token_for(provider_id, &candidate),
                         credential_type: Some("api_key"),
                     };
                 }
@@ -34,7 +38,7 @@ impl AuthStorage {
                 if !self.is_stale(provider_id, &candidate) {
                     return AuthApiKeyResult {
                         api_key: Some(api_key),
-                        source_token: self.token_for(provider_id, &candidate),
+                        source_token: Self::token_for(provider_id, &candidate),
                         credential_type: Some("api_key"),
                     };
                 }
@@ -56,7 +60,7 @@ impl AuthStorage {
                             };
                             return AuthApiKeyResult {
                                 api_key,
-                                source_token: self.token_for(provider_id, &candidate),
+                                source_token: Self::token_for(provider_id, &candidate),
                                 credential_type: Some("api_key"),
                             };
                         }
@@ -71,7 +75,7 @@ impl AuthStorage {
                                     return AuthApiKeyResult {
                                         api_key: self.oauth.api_key_for(provider_id, &refreshed),
                                         source_token: candidate
-                                            .and_then(|c| self.token_for(provider_id, &c)),
+                                            .and_then(|c| Self::token_for(provider_id, &c)),
                                         credential_type: Some("oauth"),
                                     };
                                 }
@@ -81,7 +85,7 @@ impl AuthStorage {
                             }
                             return AuthApiKeyResult {
                                 api_key: self.oauth.api_key_for(provider_id, &credential),
-                                source_token: self.token_for(provider_id, &candidate),
+                                source_token: Self::token_for(provider_id, &candidate),
                                 credential_type: Some("oauth"),
                             };
                         }
@@ -91,7 +95,7 @@ impl AuthStorage {
                         AuthCredential::McpStaticToken { bearer, .. } => {
                             return AuthApiKeyResult {
                                 api_key: Some(bearer.clone()),
-                                source_token: self.token_for(provider_id, &candidate),
+                                source_token: Self::token_for(provider_id, &candidate),
                                 credential_type: Some("mcp_static_token"),
                             };
                         }
@@ -106,7 +110,7 @@ impl AuthStorage {
                 if !self.is_stale(provider_id, &candidate) {
                     return AuthApiKeyResult {
                         api_key: Some(api_key),
-                        source_token: self.token_for(provider_id, &candidate),
+                        source_token: Self::token_for(provider_id, &candidate),
                         credential_type: None,
                     };
                 }
@@ -123,7 +127,7 @@ impl AuthStorage {
                         .and_then(|resolver| resolver(provider_id));
                     return AuthApiKeyResult {
                         api_key,
-                        source_token: self.token_for(provider_id, &candidate),
+                        source_token: Self::token_for(provider_id, &candidate),
                         credential_type: None,
                     };
                 }

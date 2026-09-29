@@ -106,6 +106,7 @@ fn truthy_env_flag(value: Option<&str>) -> bool {
 /// Request timing is on when either the settings flag or the env override
 /// is set (TS `isRequestTimingEnabled`). Both checks are cheap on the
 /// disabled path.
+#[must_use]
 pub fn is_request_timing_enabled(settings_flag: bool) -> bool {
     settings_flag || truthy_env_flag(std::env::var(REQUEST_TIMING_ENV).ok().as_deref())
 }
@@ -126,6 +127,7 @@ pub struct RequestTimingLog {
 
 impl RequestTimingLog {
     /// The log at `<agentDir>/logs/agent.jsonl` with the TS rotation cap.
+    #[must_use]
     pub fn new(agent_dir: &Path) -> Self {
         Self {
             path: agent_dir.join("logs").join("agent.jsonl"),
@@ -319,6 +321,7 @@ impl RequestTimingWiring {
 /// The pass-through context transform (the stand-in for TS's extension
 /// `emitContext` transform, which the Rust engine has not ported yet): it
 /// exists so the instrumented seam can mark the turn's dispatch moment.
+#[must_use]
 pub fn pass_through_transform() -> TransformContextFn {
     Arc::new(|messages, _signal| Box::pin(async move { Ok(messages) }))
 }
@@ -393,7 +396,7 @@ pub fn instrument_convert_to_llm(
 // ---------------------------------------------------------------------------
 
 /// The TS wire `stopReason` strings.
-fn stop_reason_string(reason: &StopReason) -> String {
+fn stop_reason_string(reason: StopReason) -> String {
     match reason {
         StopReason::Stop => "stop",
         StopReason::Length => "length",
@@ -528,7 +531,7 @@ impl ModelStream for TimingStream {
                 }
                 AssistantMessageEvent::Done { reason, message } => {
                     timing.mark_stream_done(
-                        stop_reason_string(reason),
+                        stop_reason_string(*reason),
                         message.error_message.clone(),
                     );
                     timing.mark_usage(&message.usage);
@@ -536,7 +539,7 @@ impl ModelStream for TimingStream {
                 }
                 AssistantMessageEvent::Error { reason, error } => {
                     timing
-                        .mark_stream_done(stop_reason_string(reason), error.error_message.clone());
+                        .mark_stream_done(stop_reason_string(*reason), error.error_message.clone());
                     timing.mark_usage(&error.usage);
                     // A terminal provider error is a failed (or aborted)
                     // request, not a completed one.

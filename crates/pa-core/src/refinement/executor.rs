@@ -39,6 +39,7 @@ pub fn generate_refinement_id() -> String {
 
 /// Harness overview section for the refine prompt (per-kind, 40-entry cap,
 /// 240-char content/ref/args snippets).
+#[must_use]
 pub fn overview_for_prompt(state: &HarnessState) -> String {
     let mut lines: Vec<String> = Vec::new();
     for kind in REFINEMENT_KINDS {
@@ -87,6 +88,7 @@ pub fn overview_for_prompt(state: &HarnessState) -> String {
 }
 
 /// Prior-refinement-history section for the refine prompt.
+#[must_use]
 pub fn history_for_prompt(history: &[RefinementResult]) -> String {
     if history.is_empty() {
         return "No prior refinement history.".to_string();
@@ -141,6 +143,7 @@ pub type RefinerFn = Box<
 >;
 
 /// Merge global and session histories into one prompt context.
+#[must_use]
 pub fn merge_refinement_result_history(
     global: &[RefinementResult],
     session: &[RefinementResult],

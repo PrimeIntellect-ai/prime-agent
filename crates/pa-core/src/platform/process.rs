@@ -74,6 +74,7 @@ pub fn set_no_window(_command: &mut Command) {}
 /// Signal a single pid. Returns true only when the signal was delivered,
 /// proving the pid was alive at signal time.
 #[cfg(unix)]
+#[must_use]
 pub fn kill_pid(pid: i32, signal: Signal) -> bool {
     if pid <= 0 {
         return false;
@@ -110,6 +111,7 @@ pub fn kill_pid(_pid: i32, _signal: Signal) -> bool {
 /// children run detached in a new group), then the bare pid as fallback.
 /// Returns true when either signal was delivered (TS `killProcessTree`).
 #[cfg(unix)]
+#[must_use]
 pub fn kill_process_group_or_pid(pid: i32) -> bool {
     if pid <= 0 {
         return false;
@@ -157,6 +159,7 @@ pub fn kill_process_group_or_pid(_pid: i32) -> bool {
 
 /// Cheap `kill(pid, 0)` existence probe; counts zombies as existing.
 #[cfg(unix)]
+#[must_use]
 pub fn pid_exists(pid: u32) -> bool {
     if pid == 0 {
         return false;
@@ -175,6 +178,7 @@ pub fn pid_exists(pid: u32) -> bool {
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
+#[must_use]
 pub fn open_pidfd(pid: u32) -> Option<i32> {
     // `SYS_pidfd_open`/`SYS_pidfd_send_signal` share their numbers across
     // x86_64 and aarch64 (the platforms this workspace ships) — Linux only:
@@ -208,6 +212,7 @@ pub fn open_pidfd(_pid: u32) -> Option<i32> {
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
+#[must_use]
 pub fn pidfd_signal(fd: i32, signal: Signal) -> bool {
     let signum = match signal {
         Signal::Term => libc::SIGTERM,
@@ -267,6 +272,7 @@ pub fn pid_exists(_pid: u32) -> bool {
 /// The signal number that terminated a child, when it was signaled
 /// (`ExitStatus::signal` on Unix; None elsewhere).
 #[cfg(unix)]
+#[must_use]
 pub fn termination_signal(status: &std::process::ExitStatus) -> Option<i32> {
     use std::os::unix::process::ExitStatusExt;
     status.signal()

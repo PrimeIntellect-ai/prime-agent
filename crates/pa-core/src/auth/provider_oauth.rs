@@ -47,6 +47,7 @@ impl Default for ProviderOAuth {
 
 impl ProviderOAuth {
     /// The production transports.
+    #[must_use]
     pub fn new() -> Self {
         ProviderOAuth {
             http: Arc::new(ReqwestCodexHttp::new()),
@@ -381,17 +382,17 @@ mod tests {
 
     fn storage_with_credential(
         provider_id: &str,
-        credential: AuthCredential,
+        credential: &AuthCredential,
     ) -> crate::auth::AuthStorage {
         let mut data = crate::auth::types::AuthStorageData::default();
-        data.insert(provider_id, &credential);
-        crate::auth::AuthStorage::in_memory_without_env(data, integrations())
+        data.insert(provider_id, credential);
+        crate::auth::AuthStorage::in_memory_without_env(&data, integrations())
     }
 
     #[test]
     fn an_expired_codex_credential_refreshes_and_resolves() {
         let mut auth =
-            storage_with_credential(OPENAI_CODEX_PROVIDER_ID, expired_codex_credential());
+            storage_with_credential(OPENAI_CODEX_PROVIDER_ID, &expired_codex_credential());
         let api_key = auth
             .get_api_key(OPENAI_CODEX_PROVIDER_ID)
             .expect("the refreshed access token resolves");
@@ -419,7 +420,7 @@ mod tests {
     fn an_expired_anthropic_credential_refreshes_and_resolves() {
         let mut auth = storage_with_credential(
             ANTHROPIC_PROVIDER_ID,
-            expired_credential(ANTHROPIC_PROVIDER_ID),
+            &expired_credential(ANTHROPIC_PROVIDER_ID),
         );
         let api_key = auth
             .get_api_key(ANTHROPIC_PROVIDER_ID)
@@ -440,7 +441,7 @@ mod tests {
     fn an_expired_copilot_credential_refreshes_through_the_enterprise_domain() {
         let mut auth = storage_with_credential(
             GITHUB_COPILOT_PROVIDER_ID,
-            expired_credential(GITHUB_COPILOT_PROVIDER_ID),
+            &expired_credential(GITHUB_COPILOT_PROVIDER_ID),
         );
         let api_key = auth
             .get_api_key(GITHUB_COPILOT_PROVIDER_ID)
@@ -469,7 +470,7 @@ mod tests {
     #[test]
     fn an_expired_xai_credential_refreshes_and_resolves() {
         let mut auth =
-            storage_with_credential(XAI_PROVIDER_ID, expired_credential(XAI_PROVIDER_ID));
+            storage_with_credential(XAI_PROVIDER_ID, &expired_credential(XAI_PROVIDER_ID));
         let api_key = auth
             .get_api_key(XAI_PROVIDER_ID)
             .expect("the refreshed access token resolves");
@@ -490,7 +491,7 @@ mod tests {
         // Nothing scripted: the refresh fails and resolution skips the
         // provider, keeping the stored credential for a later retry.
         let mut auth = crate::auth::AuthStorage::in_memory_without_env(
-            {
+            &{
                 let mut data = crate::auth::types::AuthStorageData::default();
                 data.insert(OPENAI_CODEX_PROVIDER_ID, &expired_codex_credential());
                 data
@@ -514,7 +515,7 @@ mod tests {
         // A stored OAuth credential for a provider outside the four
         // subscription ids never refreshes: resolution stays absent and
         // the credential stays.
-        let mut auth = storage_with_credential("other-oauth", expired_credential("other-oauth"));
+        let mut auth = storage_with_credential("other-oauth", &expired_credential("other-oauth"));
         assert_eq!(auth.get_api_key("other-oauth"), None);
         assert!(auth.get_all().credential("other-oauth").is_some());
     }
@@ -535,7 +536,7 @@ mod tests {
             resource: None,
             issuer: None,
         };
-        let mut auth = storage_with_credential(OPENAI_CODEX_PROVIDER_ID, unexpired);
+        let mut auth = storage_with_credential(OPENAI_CODEX_PROVIDER_ID, &unexpired);
         assert_eq!(
             auth.get_api_key(OPENAI_CODEX_PROVIDER_ID),
             Some("live-access".to_string())

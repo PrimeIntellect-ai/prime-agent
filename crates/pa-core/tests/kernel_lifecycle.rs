@@ -1,3 +1,15 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
+// crate root: the same bounded-boundary disposition as src/lib.rs
+// (large_futures/too_many_lines/the cast family; details there).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! Verifier integration tests: spawn a real `python -m rlm.repl` kernel
 //! (the same JSON-lines protocol v3 runtime the TS product ships) through
 //! `ReplKernelManager`, and check the persistence/revival semantics against
@@ -329,7 +341,8 @@ async fn kill9_then_restart_revives_snapshot_and_reports_unserializable() {
     let pid = manager.process_id().expect("kernel pid");
     assert!(pid > 0);
     // kill -9 the kernel process, like a host OOM/infra kill.
-    pa_core::platform::process::kill_pid(pid as i32, pa_core::platform::process::Signal::Kill);
+    let _ =
+        pa_core::platform::process::kill_pid(pid as i32, pa_core::platform::process::Signal::Kill);
     // The manager observes the death and goes defunct.
     for _ in 0..100 {
         if manager.is_defunct() {
@@ -462,7 +475,7 @@ async fn kernel_teardown_with_live_handles_settles_the_callback_once() {
     // TS #2053's teardown shape: kill() tears the handles down with the
     // kernel, and the settlement fires once for the whole track —
     // synchronously with the teardown, so the state is assertable here.
-    manager.kill().await;
+    manager.kill();
     assert!(!manager.has_background_work());
     assert_eq!(settled.load(std::sync::atomic::Ordering::SeqCst), 1);
 }

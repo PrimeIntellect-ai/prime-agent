@@ -13,16 +13,19 @@ pub struct AbortSignal {
 }
 
 impl AbortSignal {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Wrap a raw cancellation token.
+    #[must_use]
     pub fn from_token(token: tokio_util::sync::CancellationToken) -> Self {
         Self { token }
     }
 
     /// Signal wrapping an already aborted state.
+    #[must_use]
     pub fn aborted() -> Self {
         let signal = Self::new();
         signal.token.cancel();
@@ -35,6 +38,7 @@ impl AbortSignal {
     }
 
     /// True once aborted.
+    #[must_use]
     pub fn is_aborted(&self) -> bool {
         self.token.is_cancelled()
     }
@@ -45,11 +49,13 @@ impl AbortSignal {
     }
 
     /// Underlying token for composition helpers.
+    #[must_use]
     pub fn token(&self) -> &CancellationToken {
         &self.token
     }
 
     /// True when no signal was provided, or the provided one has not fired.
+    #[must_use]
     pub fn is_active(signal: Option<&AbortSignal>) -> bool {
         match signal {
             None => true,
@@ -58,6 +64,7 @@ impl AbortSignal {
     }
 
     /// Combine several signals: the merged signal fires when any source fires.
+    #[must_use]
     pub fn any(sources: Vec<Option<AbortSignal>>) -> Option<AbortSignal> {
         let live: Vec<CancellationToken> = sources.into_iter().flatten().map(|s| s.token).collect();
         if live.is_empty() {

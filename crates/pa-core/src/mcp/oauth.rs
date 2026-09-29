@@ -485,7 +485,7 @@ mod tests {
         }
     }
 
-    fn json_response(body: serde_json::Value) -> String {
+    fn json_response(body: &serde_json::Value) -> String {
         body.to_string()
     }
 
@@ -612,23 +612,23 @@ mod tests {
                 PLANE_PRM_URL,
                 200,
                 None,
-                &json_response(serde_json::json!({
+                &json_response(&serde_json::json!({
                     "resource": RESOURCE,
                     "authorization_servers": [PLANE_ISSUER],
                 })),
             ),
-            (PLANE_META_URL, 200, None, &json_response(plane_meta())),
+            (PLANE_META_URL, 200, None, &json_response(&plane_meta())),
             (
                 PLANE_REGISTER,
                 200,
                 None,
-                &json_response(serde_json::json!({ "client_id": "plane-client" })),
+                &json_response(&serde_json::json!({ "client_id": "plane-client" })),
             ),
             (
                 PLANE_TOKEN,
                 200,
                 None,
-                &json_response(serde_json::json!({
+                &json_response(&serde_json::json!({
                     "access_token": "access-1",
                     "refresh_token": "refresh-1",
                     "expires_in": 3600,
@@ -697,18 +697,18 @@ mod tests {
         let http = ScriptedHttp::new(vec![
             (ORIGIN_URL, 404, None, ""),
             (origin_prm, 404, None, ""),
-            (ORIGIN_META_URL, 200, None, &json_response(origin_meta())),
+            (ORIGIN_META_URL, 200, None, &json_response(&origin_meta())),
             (
                 ORIGIN_REGISTER,
                 200,
                 None,
-                &json_response(serde_json::json!({ "client_id": "origin-client" })),
+                &json_response(&serde_json::json!({ "client_id": "origin-client" })),
             ),
             (
                 ORIGIN_TOKEN,
                 200,
                 None,
-                &json_response(serde_json::json!({
+                &json_response(&serde_json::json!({
                     "access_token": "origin-access",
                     "refresh_token": "origin-refresh",
                     "expires_in": 3600,
@@ -767,23 +767,23 @@ mod tests {
                 pointer,
                 200,
                 None,
-                &json_response(serde_json::json!({
+                &json_response(&serde_json::json!({
                     "resource": RESOURCE,
                     "authorization_servers": [PLANE_ISSUER],
                 })),
             ),
-            (PLANE_META_URL, 200, None, &json_response(plane_meta())),
+            (PLANE_META_URL, 200, None, &json_response(&plane_meta())),
             (
                 PLANE_REGISTER,
                 200,
                 None,
-                &json_response(serde_json::json!({ "client_id": "pointer-client" })),
+                &json_response(&serde_json::json!({ "client_id": "pointer-client" })),
             ),
             (
                 PLANE_TOKEN,
                 200,
                 None,
-                &json_response(serde_json::json!({ "access_token": "pointer-access" })),
+                &json_response(&serde_json::json!({ "access_token": "pointer-access" })),
             ),
         ]);
         let ui = test_ui();
@@ -823,7 +823,7 @@ mod tests {
                 PLANE_PRM_URL,
                 200,
                 None,
-                &json_response(serde_json::json!({
+                &json_response(&serde_json::json!({
                     "resource": "https://attacker.example/mcp",
                     "authorization_servers": [PLANE_ISSUER],
                 })),
@@ -845,7 +845,7 @@ mod tests {
                 PLANE_PRM_URL,
                 200,
                 None,
-                &json_response(serde_json::json!({
+                &json_response(&serde_json::json!({
                     "resource": RESOURCE,
                     "authorization_servers": [PLANE_ISSUER],
                 })),
@@ -854,7 +854,7 @@ mod tests {
                 PLANE_META_URL,
                 200,
                 None,
-                &json_response(serde_json::json!({
+                &json_response(&serde_json::json!({
                     "issuer": "https://wrong.example",
                     "authorization_endpoint": PLANE_AUTHORIZE,
                     "token_endpoint": PLANE_TOKEN,
@@ -892,7 +892,7 @@ mod tests {
                 PLANE_PRM_URL,
                 200,
                 None,
-                &json_response(serde_json::json!({
+                &json_response(&serde_json::json!({
                     "resource": RESOURCE,
                     "authorization_servers": [issuer],
                 })),
@@ -903,18 +903,18 @@ mod tests {
                 None,
                 "<html>not metadata</html>",
             ),
-            (oidc_meta, 200, None, &json_response(oidc)),
+            (oidc_meta, 200, None, &json_response(&oidc)),
             (
                 "https://login.example/tenant/register",
                 200,
                 None,
-                &json_response(serde_json::json!({ "client_id": "c" })),
+                &json_response(&serde_json::json!({ "client_id": "c" })),
             ),
             (
                 "https://login.example/tenant/token",
                 200,
                 None,
-                &json_response(serde_json::json!({ "access_token": "a", "expires_in": 60 })),
+                &json_response(&serde_json::json!({ "access_token": "a", "expires_in": 60 })),
             ),
         ]);
         let credentials = mcp_login(&http, &config("plane", RESOURCE), &test_ui())
@@ -943,7 +943,7 @@ mod tests {
         let http = ScriptedHttp::new(vec![
             (ORIGIN_URL, 404, None, ""),
             (origin_prm, 404, None, ""),
-            (ORIGIN_META_URL, 200, None, &json_response(meta)),
+            (ORIGIN_META_URL, 200, None, &json_response(&meta)),
         ]);
         let error = mcp_login(&http, &config("slackish", ORIGIN_URL), &test_ui())
             .await
@@ -971,7 +971,7 @@ mod tests {
         let http = ScriptedHttp::new(vec![
             (ORIGIN_URL, 404, None, ""),
             (origin_prm, 404, None, ""),
-            (ORIGIN_META_URL, 200, None, &json_response(origin_meta())),
+            (ORIGIN_META_URL, 200, None, &json_response(&origin_meta())),
             (ORIGIN_TOKEN, 302, None, "redirect"),
         ]);
         let error = mcp_refresh_token(&http, &config("origin", ORIGIN_URL), &credentials)
@@ -1003,17 +1003,17 @@ mod tests {
                 PLANE_PRM_URL,
                 200,
                 None,
-                &json_response(serde_json::json!({
+                &json_response(&serde_json::json!({
                     "resource": RESOURCE,
                     "authorization_servers": [PLANE_ISSUER],
                 })),
             ),
-            (PLANE_META_URL, 200, None, &json_response(plane_meta())),
+            (PLANE_META_URL, 200, None, &json_response(&plane_meta())),
             (
                 PLANE_TOKEN,
                 200,
                 None,
-                &json_response(serde_json::json!({
+                &json_response(&serde_json::json!({
                     "access_token": "access-2",
                     "expires_in": 1800,
                 })),
@@ -1127,12 +1127,12 @@ mod tests {
                 PLANE_PRM_URL,
                 200,
                 None,
-                &json_response(serde_json::json!({
+                &json_response(&serde_json::json!({
                     "resource": RESOURCE,
                     "authorization_servers": [PLANE_ISSUER],
                 })),
             ),
-            (PLANE_META_URL, 200, None, &json_response(plane_meta())),
+            (PLANE_META_URL, 200, None, &json_response(&plane_meta())),
         ]);
         let error = mcp_refresh_token(&http, &config("plane", RESOURCE), &credentials)
             .await
@@ -1162,12 +1162,12 @@ mod tests {
                 None,
                 "",
             ),
-            (ORIGIN_META_URL, 200, None, &json_response(origin_meta())),
+            (ORIGIN_META_URL, 200, None, &json_response(&origin_meta())),
             (
                 ORIGIN_REGISTER,
                 200,
                 None,
-                &json_response(serde_json::json!({ "client_id": "c" })),
+                &json_response(&serde_json::json!({ "client_id": "c" })),
             ),
         ]);
         // The paste carries someone else's state.
@@ -1192,12 +1192,12 @@ mod tests {
                 None,
                 "",
             ),
-            (ORIGIN_META_URL, 200, None, &json_response(origin_meta())),
+            (ORIGIN_META_URL, 200, None, &json_response(&origin_meta())),
             (
                 ORIGIN_TOKEN,
                 200,
                 None,
-                &json_response(serde_json::json!({ "access_token": "root-access" })),
+                &json_response(&serde_json::json!({ "access_token": "root-access" })),
             ),
         ]);
         let ui = test_ui();

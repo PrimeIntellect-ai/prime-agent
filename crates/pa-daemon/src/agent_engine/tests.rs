@@ -84,16 +84,31 @@ pub(crate) fn faux_engine_with_settings(
 
 /// The goal-admission collector: installs the turn-end seam (a probe
 /// reporting no queued input plus a sink capturing minted work) on an
-/// engine built without a worker.
+/// engine built without a worker. The collector's push IS the admission
+/// for the harness: the driver's pending-continuation guard releases at
+/// the sink exactly like the worker's queue lane does.
 pub(crate) fn goal_admission_collector(
     engine: &std::sync::Arc<AgentSessionEngine>,
 ) -> std::sync::Arc<std::sync::Mutex<Vec<crate::engine::GoalTurnEndWork>>> {
     let collected: std::sync::Arc<std::sync::Mutex<Vec<crate::engine::GoalTurnEndWork>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink = std::sync::Arc::clone(&collected);
+    let sink_engine = std::sync::Arc::clone(engine);
     engine.set_goal_admission(
         std::sync::Arc::new(|| false),
-        std::sync::Arc::new(move |work| sink.lock().unwrap().push(work)),
+        std::sync::Arc::new(move |work| {
+            // The item's OWN handle (cloned before the push takes the
+            // work): the release names this mint's guard, never the
+            // mutable mirror.
+            let pending_handle = match &work {
+                crate::engine::GoalTurnEndWork::Continuation(item) => item.pending_handle.clone(),
+                crate::engine::GoalTurnEndWork::BudgetLimitSteer(item) => {
+                    item.pending_handle.clone()
+                }
+            };
+            sink.lock().unwrap().push(work);
+            sink_engine.release_goal_continuation_handle(&pending_handle);
+        }),
         std::sync::Arc::new(|| {}),
     );
     collected

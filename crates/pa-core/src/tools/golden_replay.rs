@@ -108,7 +108,7 @@ fn truncation_json(result: &crate::tools::truncate::TruncationResult) -> serde_j
     bash::truncation_to_json(result)
 }
 
-fn assert_json_eq(actual: serde_json::Value, expected: serde_json::Value, what: &str) {
+fn assert_json_eq(actual: &serde_json::Value, expected: &serde_json::Value, what: &str) {
     assert!(
         actual == expected,
         "{what} mismatch\nexpected: {expected}\n  actual: {actual}"
@@ -129,8 +129,8 @@ async fn golden_edit_group_matches_ts() {
             input = crate::tools::edit::prepare_edit_arguments(input);
             // The TS harness records the prepared input for such cases.
             assert_json_eq(
-                input.clone(),
-                case["preparedInput"].clone(),
+                &input.clone(),
+                &case["preparedInput"].clone(),
                 "edit/{name} preparedInput",
             );
         }
@@ -153,7 +153,7 @@ async fn golden_edit_group_matches_ts() {
                 if recorded_details.is_null() {
                     assert!(result.details.is_none(), "edit/{name} unexpected details");
                 } else {
-                    assert_json_eq(details, recorded_details, "edit/{name} details");
+                    assert_json_eq(&details, &recorded_details, "edit/{name} details");
                 }
             }
             Err(err) => {
@@ -271,7 +271,7 @@ async fn golden_bash_group_matches_ts() {
                 if recorded_details.is_null() {
                     assert!(result.details.is_none(), "bash/{name} unexpected details");
                 } else {
-                    assert_json_eq(details, recorded_details, "bash/{name} details");
+                    assert_json_eq(&details, &recorded_details, "bash/{name} details");
                 }
                 // Truncated runs must advertise a real, non-empty full-output file.
                 if let Some(record) = recorded.get("fullOutputFile") {
@@ -327,13 +327,13 @@ fn golden_truncate_group_matches_ts() {
         let head = truncate_head(content, options);
         let tail = truncate_tail(content, options);
         assert_json_eq(
-            truncation_json(&head),
-            case["head"].clone(),
+            &truncation_json(&head),
+            &case["head"].clone(),
             &format!("truncate/{name} head"),
         );
         assert_json_eq(
-            truncation_json(&tail),
-            case["tail"].clone(),
+            &truncation_json(&tail),
+            &case["tail"].clone(),
             &format!("truncate/{name} tail"),
         );
         checked += 1;
@@ -360,13 +360,13 @@ fn golden_preview_group_matches_ts() {
             "language": language(preview.language)["language"],
             "text": preview.text,
         });
-        assert_json_eq(actual, case["bash"].clone(), "preview bash");
+        assert_json_eq(&actual, &case["bash"].clone(), "preview bash");
         let preview = preview_ipython_code(input);
         let actual = serde_json::json!({
             "language": language(preview.language)["language"],
             "text": preview.text,
         });
-        assert_json_eq(actual, case["ipython"].clone(), "preview ipython");
+        assert_json_eq(&actual, &case["ipython"].clone(), "preview ipython");
         checked += 1;
     }
     assert_eq!(checked, corpus["caseCount"].as_u64().expect("caseCount"));
@@ -602,8 +602,8 @@ async fn golden_ipython_group_matches_ts() {
             "kill": provisioner.kill_calls.load(Ordering::SeqCst),
         });
         assert_json_eq(
-            calls,
-            case["provisionerCalls"].clone(),
+            &calls,
+            &case["provisionerCalls"].clone(),
             "ipython/{name} calls",
         );
         checked += 1;
@@ -652,7 +652,7 @@ fn golden_schema_group_matches_ts() {
             });
         }
         actual["parameters"] = definition.parameters.clone();
-        assert_json_eq(actual, case.clone(), "schema/{tool}");
+        assert_json_eq(&actual, &case.clone(), "schema/{tool}");
         checked += 1;
     }
     assert_eq!(checked, corpus["caseCount"].as_u64().expect("caseCount"));

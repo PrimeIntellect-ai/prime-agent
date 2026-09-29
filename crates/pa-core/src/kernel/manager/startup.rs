@@ -1,7 +1,13 @@
 //! Startup and child wiring: kernel process spawn, python resolution, stderr
 //! capture, and readiness handshake.
 
-use super::*;
+use super::{
+    anyhow, live_kernels, lock, oneshot, orphan_journal, parse_event, Arc, AsyncReadExt, BufReader,
+    ChildHandle, Duration, ExitInfo, HashMap, Inner, KernelShutdownOptions, KernelStartOptions,
+    KernelState, Mutex, Ordering, Signal, StderrLog, Write, KERNEL_STDERR_LOG_BUDGET_MARKER,
+    MAX_KERNEL_STDERR_CHARS, MAX_KERNEL_STDERR_LOG_BYTES, MAX_PROTOCOL_LINE_BYTES,
+    READY_TIMEOUT_MS, REPL_PROTOCOL_VERSION,
+};
 
 // ---------------------------------------------------------------------------
 // Startup and child wiring
@@ -306,7 +312,7 @@ impl Inner {
                 // (so a wedged child cannot block on backpressure) and discard.
                 let mut poisoned = false;
                 let mut buffered: Vec<u8> = Vec::new();
-                let mut chunk = [0u8; 64 * 1024];
+                let mut chunk = vec![0u8; 64 * 1024];
                 loop {
                     match reader.read(&mut chunk).await {
                         Ok(0) | Err(_) => break,
@@ -436,7 +442,7 @@ impl Inner {
                 Ok(status) => ExitInfo {
                     code: status.code(),
                     #[cfg(unix)]
-                    signal: unix_signal_of(&status),
+                    signal: unix_signal_of(status),
                     #[cfg(not(unix))]
                     signal: None,
                 },
@@ -540,13 +546,15 @@ impl Inner {
 }
 
 #[cfg(unix)]
-fn unix_signal_of(status: &std::process::ExitStatus) -> Option<i32> {
-    crate::platform::process::termination_signal(status)
+fn unix_signal_of(status: std::process::ExitStatus) -> Option<i32> {
+    crate::platform::process::termination_signal(&status)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::manager::ReplKernelManager;
+    use crate::kernel::shared::KernelManagerOptions;
 
     fn manager() -> ReplKernelManager {
         ReplKernelManager::new(KernelManagerOptions::default())

@@ -2,9 +2,10 @@
 //! first-line header read, the depth validation, and the root depth
 //! from the environment.
 
-use super::*;
+use super::{Path, SessionHeader};
 
 /// Read just the header of a session file (first line).
+#[must_use]
 pub fn read_session_header(file_path: &Path) -> Option<SessionHeader> {
     use std::io::BufRead;
     let file = std::fs::File::open(file_path).ok()?;

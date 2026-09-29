@@ -2,7 +2,10 @@
 //! the prior-compaction boundary and previous-summary anchors, the cut
 //! resolution, and the session-cut test seam.
 use super::recent_state_anchor::extract_recent_state_anchor;
-use super::*;
+use super::{
+    context_tokens, find_cut_point, message_from_entry, AgentMessage, CutPointResult, FileEntry,
+    SessionManager,
+};
 
 /// Why a compaction cannot prepare (TS `prepareCompaction` returning
 /// `undefined`). The two surfaces spell it differently: `/compact` raises
@@ -16,6 +19,7 @@ pub enum CompactSkip {
 
 impl CompactSkip {
     /// The `/compact` skip message (TS `CompactionSkippedError`).
+    #[must_use]
     pub fn user_message(self) -> &'static str {
         match self {
             CompactSkip::AlreadyCompacted => "Already compacted",
@@ -24,6 +28,7 @@ impl CompactSkip {
     }
 
     /// The `compact.run` host-request reason (TS `handleCompactHostRequest`).
+    #[must_use]
     pub fn request_reason(self) -> &'static str {
         match self {
             CompactSkip::AlreadyCompacted => "already compacted",
@@ -146,6 +151,7 @@ pub fn prepare_compaction(
 }
 
 /// The cut computed for a session (test seam for decision verification).
+#[must_use]
 pub fn compute_cut(session: &SessionManager, keep_recent_tokens: u64) -> (CutPointResult, u64) {
     let entries = session.retained_entries();
     let start = usize::from(matches!(entries.first(), Some(FileEntry::Header { .. })));

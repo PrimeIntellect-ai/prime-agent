@@ -1,7 +1,7 @@
 //! The venv dir-layout concern (moved with its concern): the override-aware
 //! kernel venv dir, the writable-dir fallback, and the interpreter path.
 
-use super::*;
+use super::{anyhow, Path, PathBuf};
 
 pub(crate) fn expand_home(path: &str) -> PathBuf {
     if path == "~" {
@@ -18,6 +18,7 @@ pub(super) fn home_dir() -> PathBuf {
 }
 
 /// Directory of the kernel venv, honoring `PRIME_AGENT_KERNEL_VENV`.
+#[must_use]
 pub fn kernel_venv_dir() -> PathBuf {
     if let Ok(override_dir) = std::env::var("PRIME_AGENT_KERNEL_VENV") {
         if !override_dir.is_empty() {
@@ -58,6 +59,7 @@ pub(crate) fn resolve_writable_kernel_venv_dir() -> anyhow::Result<PathBuf> {
 }
 
 /// Path of the venv's python interpreter.
+#[must_use]
 pub fn kernel_venv_python(venv: &Path) -> PathBuf {
     if cfg!(windows) {
         venv.join("Scripts").join("python.exe")

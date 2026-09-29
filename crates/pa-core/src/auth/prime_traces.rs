@@ -106,6 +106,7 @@ pub struct PrimeAgentTracesLoginOptions<'a> {
 impl<'a> PrimeAgentTracesLoginOptions<'a> {
     /// TS the default options object (`{}`): the prime-cli reuse is on,
     /// the path and the timing come from the caller's inputs.
+    #[must_use]
     pub fn new(prime_cli_config_path: Option<&'a Path>) -> Self {
         PrimeAgentTracesLoginOptions {
             prime_cli_config_path,

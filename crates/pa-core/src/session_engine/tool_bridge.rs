@@ -19,6 +19,7 @@ pub struct ToolDefinitionBridge {
 }
 
 impl ToolDefinitionBridge {
+    #[must_use]
     pub fn new(definition: ToolDefinition) -> Self {
         Self { definition }
     }
@@ -129,6 +130,7 @@ impl AgentTool for ToolDefinitionBridge {
 }
 
 /// Wrap a definition in the loop's tool trait.
+#[must_use]
 pub fn bridge_tool(definition: ToolDefinition) -> Arc<dyn AgentTool> {
     Arc::new(ToolDefinitionBridge::new(definition))
 }

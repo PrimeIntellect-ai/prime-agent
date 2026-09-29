@@ -1,7 +1,7 @@
 //! The outcome/provider/model/error classification family (moved with its
 //! concern): the TS `runOutcome`/`telemetryProviderCategory`/`modelCategory`/
 //! `errorCategory` ports and their string-matching helpers.
-use super::*;
+use super::{AssistantMessage, StopReason, Value};
 
 /// Run outcome per the TS `runOutcome`: aborted beats error beats success.
 pub(super) fn run_outcome(last_assistant: Option<&AssistantMessage>) -> &'static str {

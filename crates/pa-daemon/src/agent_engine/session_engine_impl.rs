@@ -127,20 +127,33 @@ impl SessionEngine for AgentSessionEngine {
                 return None;
             }
             let mut session = handles.session.lock().await;
-            // The mint persists the `thread_goal_state` entry (TS
-            // `_setGoalState`) and consumes one continuation slot; an
-            // inactive or objective-less goal mints nothing. A failed
-            // persist ends the boundary without a continuation (TS
-            // `_maybeResumeGoalContinuationAfterRlmWork`'s catch: the
-            // hook must not reject; the unchanged count retries).
-            let message = match driver.next_continuation_message(&mut session) {
+            // TS `compact()`'s didCompact branch is the OWED delivery, not
+            // a fresh mint:
+            //   `this._goalContinuationAwaitsRlmWork ||= !this.agent.hasQueuedMessages();
+            //    this.resumeQueuedWork();`
+            // Arming then taking keeps exactly one continuation per owed
+            // boundary — the pre-fix fresh mint left an already-armed flag
+            // behind (the mint consumed a slot TS never charges) and the
+            // settle/resume sites delivered a second continuation for the
+            // same boundary. The mint persists the `thread_goal_state`
+            // entry (TS `_setGoalState`) and consumes one slot; an inactive
+            // or objective-less goal drops the deferral without minting. A
+            // failed persist ends the boundary without a continuation (TS
+            // `_maybeResumeGoalContinuationAfterRlmWork`'s catch: the hook
+            // must not reject; the unchanged count retries).
+            driver.mark_continuation_owed();
+            let message = match driver.take_owed_continuation(&mut session) {
                 Ok(message) => message,
                 Err(error) => {
                     eprintln!("pa-daemon: goal continuation mint persist failed: {error:#}");
                     None
                 }
             }?;
-            let goal_update = self.publish_goal_state(driver.state());
+            // This mint's own guard handle, captured under the driver
+            // lock: the worker's admission sink releases exactly this
+            // mint's guard, never the mutable mirror.
+            let pending_handle = Some(driver.pending_continuation_handle());
+            let goal_update = self.publish_goal_state(&driver.state_with_creation_elapsed());
             Some((
                 crate::engine::PromptRequest {
                     batch: Vec::new(),
@@ -151,13 +164,30 @@ impl SessionEngine for AgentSessionEngine {
                     custom_message: Some(crate::session_commands::custom_message_value(&message)),
                 },
                 goal_update,
+                pending_handle,
             ))
         })?;
-        let (request, goal_update) = continuation;
+        let (request, goal_update, pending_handle) = continuation;
         Some(crate::engine::GoalContinuation {
             request,
             goal_update,
+            pending_handle,
         })
+    }
+
+    fn clear_pending_goal_continuation(&self) {
+        AgentSessionEngine::clear_pending_goal_continuation(self);
+    }
+
+    fn goal_pending_handle(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        AgentSessionEngine::goal_pending_handle(self)
+    }
+
+    fn release_goal_continuation_handle(
+        &self,
+        handle: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) {
+        AgentSessionEngine::release_goal_continuation_handle(self, handle);
     }
 
     fn autonomous_status(
@@ -806,7 +836,7 @@ impl SessionEngine for AgentSessionEngine {
             let session = engine.session.shared_persistence();
             let manager = session.lock().await;
             driver.reload_from_branch(&manager, goal_reload);
-            let announcement = self.publish_goal_state(driver.state());
+            let announcement = self.publish_goal_state(&driver.state_with_creation_elapsed());
             *self
                 .reloaded_goal_update
                 .lock()
