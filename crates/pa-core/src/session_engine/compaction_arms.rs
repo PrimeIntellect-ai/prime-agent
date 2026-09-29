@@ -1,5 +1,9 @@
 use super::compact_session::CompactOutcome;
-use super::{AgentSession, SessionAgentMessage, compaction, provider_adapter, TrailingAssistantFilter, standard_message, compaction_trace, AgentMessage, rebuilt_loop_messages, ipython_state, session_message_to_loop, FileEntry, refine};
+use super::{
+    compaction, compaction_trace, ipython_state, provider_adapter, rebuilt_loop_messages, refine,
+    session_message_to_loop, standard_message, AgentMessage, AgentSession, FileEntry,
+    SessionAgentMessage, TrailingAssistantFilter,
+};
 
 impl AgentSession {
     /// The latest compaction boundary in the live loop context, if any

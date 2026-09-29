@@ -1,5 +1,8 @@
 use super::slash_commands::parse_session_command;
-use super::{AgentSession, PromptOptions, PromptOutcome, session_message_to_loop, SessionAgentMessage, SessionSlashCommand, StreamingBehavior, user_prompt_message};
+use super::{
+    session_message_to_loop, user_prompt_message, AgentSession, PromptOptions, PromptOutcome,
+    SessionAgentMessage, SessionSlashCommand, StreamingBehavior,
+};
 
 impl AgentSession {
     /// Submit a prompt. Session commands (compact/refine/goal/autonomous)
@@ -274,7 +277,9 @@ impl AgentSession {
     /// Drain the queued next-turn rows (TS `_takePendingNextTurnMessages`):
     /// the admitting turn owns them; an empty take leaves nothing for later
     /// turns.
-    pub fn take_next_turn_rows(&self) -> impl std::future::Future<Output = Vec<pa_agent::types::AgentMessage>> {
+    pub fn take_next_turn_rows(
+        &self,
+    ) -> impl std::future::Future<Output = Vec<pa_agent::types::AgentMessage>> {
         std::future::ready(
             self.pending_next_turn_rows
                 .lock()

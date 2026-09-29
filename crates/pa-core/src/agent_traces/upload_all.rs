@@ -3,7 +3,13 @@
 //! and the concurrent sweep with its progress notes and cancel checks
 //! (TS uploadAllAgentTraces).
 
-use super::{TraceUploadCancel, TraceUploadDelaySink, TraceHttpError, now_ms, TraceUploadDelay, delay, TRACE_UPLOAD_ALL_MIN_REQUEST_INTERVAL_MS, Path, TraceHttp, TraceUploadAllProgress, PathBuf, read_trace_session_header, resolve_path, TraceUploadAllResult, TraceUploadResult, TRACE_UPLOAD_ALL_CONCURRENCY, Ordering, TraceUploadOptions, perform_agent_trace_upload, log_agent_trace_outcome};
+use super::{
+    delay, log_agent_trace_outcome, now_ms, perform_agent_trace_upload, read_trace_session_header,
+    resolve_path, Ordering, Path, PathBuf, TraceHttp, TraceHttpError, TraceUploadAllProgress,
+    TraceUploadAllResult, TraceUploadCancel, TraceUploadDelay, TraceUploadDelaySink,
+    TraceUploadOptions, TraceUploadResult, TRACE_UPLOAD_ALL_CONCURRENCY,
+    TRACE_UPLOAD_ALL_MIN_REQUEST_INTERVAL_MS,
+};
 use std::collections::HashSet;
 use std::sync::atomic::AtomicUsize;
 
