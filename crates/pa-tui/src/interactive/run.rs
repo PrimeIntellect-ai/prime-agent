@@ -1061,6 +1061,39 @@ async fn run_interactive_surface(
         {
             render_deadline = Some(Instant::now());
         }
+        // The frame-wake inventory: every pending-work state whose
+        // observation needs a loop iteration arms the frame deadline
+        // here, pre-select — the states the old unconditional tick
+        // used to observe implicitly. A dirty frame (the open's first
+        // paint; a keystroke's toast or hint) must not park behind a
+        // select that has no other wake: the frame gate that paints
+        // it runs at the iteration's tail. The headless barriers'
+        // deadlines re-check at the loop top, and the hint/toast
+        // expiry arms live HERE, not after the frame gate (a parked
+        // select would never reach a post-gate arm; a paint's
+        // deadline wipe only happens after the wake already fired,
+        // and the next iteration re-arms while the state persists).
+        if session.dirty && render_deadline.is_none() {
+            render_deadline = Some(Instant::now());
+        }
+        for deadline in [wait_idle_deadline, wait_render_deadline]
+            .into_iter()
+            .flatten()
+        {
+            if render_deadline.is_none_or(|armed| deadline < armed) {
+                render_deadline = Some(deadline);
+            }
+        }
+        if let Some(expiry) = session.ctrl_c_hint_expiry() {
+            if render_deadline.is_none_or(|armed| expiry < armed) {
+                render_deadline = Some(expiry);
+            }
+        }
+        if let Some(expiry) = view.toasts.next_expiry() {
+            if render_deadline.is_none_or(|armed| expiry < armed) {
+                render_deadline = Some(expiry);
+            }
+        }
         let was_active = session.turn_active;
         // The quiet tick's arming state, snapshotted before the select:
         // parked autocomplete requests and an armed selection auto-scroll
@@ -1863,24 +1896,6 @@ async fn run_interactive_surface(
             // (the spinner's next phase boundary) stays: the select needs
             // that wakeup even when nothing else is dirty.
             render_deadline = None;
-        }
-        // The armed exit hint's expiry wakeup (see the pre-gate check):
-        // armed after the gate so the paint above cannot wipe it — an
-        // otherwise idle loop must still wake once to clear the hint row.
-        if let Some(until) = session.ctrl_c_hint_expiry() {
-            if render_deadline.is_none_or(|deadline| deadline > until) {
-                render_deadline = Some(until);
-            }
-        }
-        // The visible toasts' TTL wakeup, the same way: prune_expired at
-        // the TTL marks the surface dirty, but only an iteration there
-        // repaints the overlay away — the quiet tick used to be that
-        // iteration on an idle surface, and a parked surface would leave
-        // the toast on screen until the next keypress.
-        if let Some(until) = view.toasts.next_expiry() {
-            if render_deadline.is_none_or(|deadline| deadline > until) {
-                render_deadline = Some(until);
-            }
         }
         if session.exit_requested {
             session.exit_reason = "session_request";
