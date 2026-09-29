@@ -72,7 +72,9 @@ mod tests;
 // pa_agent::types use row drops Usage (its only user moved - the child
 // binds its own).
 mod clock;
+mod payload;
 use clock::{Outcome, RequestTiming};
+pub(crate) use payload::RequestPayloadCapture;
 
 /// TS `REQUEST_TIMING_ENV`: the env override (inherited by daemon workers).
 const REQUEST_TIMING_ENV: &str = "PI_REQUEST_TIMING";
@@ -237,6 +239,9 @@ struct PromptBuildTiming {
 pub struct RequestTimingWiring {
     enabled: RequestTimingEnabled,
     log: RequestTimingLog,
+    /// The outbound body capture; `None` captures nothing (the timeline
+    /// stays at phases and byte counts).
+    payload_capture: Option<RequestPayloadCapture>,
     dispatch: Mutex<Option<Instant>>,
     prompt_build: Mutex<Option<PromptBuildTiming>>,
     request_seq: AtomicU64,
@@ -249,10 +254,20 @@ impl RequestTimingWiring {
         Self {
             enabled,
             log,
+            payload_capture: None,
             dispatch: Mutex::new(None),
             prompt_build: Mutex::new(None),
             request_seq: AtomicU64::new(0),
         }
+    }
+
+    /// Arm the outbound body capture: while the flag is on, the
+    /// instrumented payload hook hands each request's final body to the
+    /// capture's bounded writer.
+    #[must_use]
+    pub(crate) fn with_payload_capture(mut self, capture: RequestPayloadCapture) -> Self {
+        self.payload_capture = Some(capture);
+        self
     }
 
     /// The JSONL log the entries go to.
@@ -466,6 +481,8 @@ pub fn instrument_stream_fn(wiring: Arc<RequestTimingWiring>, stream_fn: StreamF
             // not to request-sent -> first-byte.
             let inner_payload: Option<OnPayloadHook> = options.on_payload.take();
             let timing_for_payload = Arc::clone(&timing);
+            let capture_for_payload = wiring.payload_capture.clone();
+            let session_id = options.session_id.clone();
             options.on_payload = Some(Arc::new(move |payload, model| {
                 let next = inner_payload
                     .as_ref()
@@ -473,6 +490,9 @@ pub fn instrument_stream_fn(wiring: Arc<RequestTimingWiring>, stream_fn: StreamF
                     .unwrap_or(payload);
                 timing_for_payload.record_request_bytes(measure_request_bytes(&next));
                 timing_for_payload.mark_request_sent();
+                if let Some(capture) = capture_for_payload.as_ref() {
+                    capture.record(&next, model, session_id.as_deref(), request_seq);
+                }
                 Some(next)
             }));
             // The response hook marks first-byte before delegating.

@@ -509,6 +509,15 @@ impl SessionEngine for AgentSessionEngine {
             let _ = self
                 .runtime
                 .block_on(core.session.set_model(&model, &provider, &model_id));
+            // TS `setModel` re-applies the thinking level after the
+            // model swap: the agent slot (the level the request carries)
+            // must equal the level `configure_model` re-clamped above.
+            // No durable `thinking_level_change` row: TS `setModel`
+            // records only the model row; `/thinking` owns the intent
+            // row.
+            let level = map_thinking_level(self.effective_thinking());
+            self.runtime
+                .block_on(core.session.agent().set_thinking_level(level));
         }
         // The children registry's inherited parent model follows the
         // switch (the build-time stamp alone would go stale): an inherited

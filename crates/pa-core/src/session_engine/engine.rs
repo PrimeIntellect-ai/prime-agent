@@ -669,13 +669,21 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // JSONL log, and the prompt-build correlation state. The wrappers pass
     // straight through while the flag is off — no timestamps, no payload
     // serialization, no entries.
-    let request_timing_wiring =
-        std::sync::Arc::new(super::request_timing::RequestTimingWiring::new(
+    let request_timing_wiring = std::sync::Arc::new(
+        super::request_timing::RequestTimingWiring::new(
             std::sync::Arc::new(move || {
                 super::request_timing::is_request_timing_enabled(request_timing_settings)
             }),
             super::request_timing::RequestTimingLog::new(&config.agent_dir),
-        ));
+        )
+        // The outbound body capture rides the same flag: while request
+        // timing is on, every session — the daemon workers' included,
+        // this is the one build path they all share — records each
+        // request's final outbound body.
+        .with_payload_capture(super::request_timing::RequestPayloadCapture::new(
+            &config.agent_dir,
+        )),
+    );
     let agent = Agent::new(AgentOptions {
         initial_state: AgentInitialState {
             system_prompt: Some(system_prompt.clone()),

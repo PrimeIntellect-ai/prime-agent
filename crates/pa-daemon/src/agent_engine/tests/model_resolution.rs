@@ -1263,3 +1263,90 @@ async fn a_pre_read_saved_context_restores_like_the_file_read() {
         "the pre-read path restores the saved level, not the default"
     );
 }
+
+/// The engine/agent thinking-level sync pin: the engine's
+/// `effective_thinking` (what `get_connection_state` reports) and the
+/// built session's agent slot (what the request carries) must stay
+/// equal across a model switch — TS `setModel` re-applies the level
+/// after the swap (`_getThinkingLevelForModelSwitch` +
+/// `setThinkingLevel`). The requested level survives the round trip
+/// (high -> clamped off on the plain model -> high again).
+#[test]
+fn a_model_switch_keeps_the_agent_slot_in_sync_with_the_reported_level() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_thinking_pair_models_json(&agent_dir, "http://127.0.0.1:9");
+    let engine = AgentSessionEngine::new(AgentEngineConfig {
+        cwd: dir.path().to_path_buf(),
+        agent_dir,
+        provider: Some("battery".to_string()),
+        model: Some("mock-reason".to_string()),
+        api_key: None,
+        thinking: Some(pa_types::ai::ModelThinkingLevel::High),
+        session_dir: None,
+        session_file: None,
+        faux_script: None,
+        supervisor_link: None,
+        telemetry_disabled: Some(true),
+        cron_store: None,
+        queued_steering_probe: None,
+    })
+    .unwrap();
+    // Build the session: the agent's slot is seeded from the engine's
+    // effective level (high on the reasoning model).
+    let model = engine.resolve_model().expect("resolves mock-reason");
+    engine
+        .ensure_core_session(&model)
+        .expect("the session builds");
+    let agent_wire_level = |engine: &AgentSessionEngine| {
+        let session = engine.session.blocking_lock();
+        let core = session.as_deref().expect("the built session");
+        let state = engine
+            .runtime
+            .block_on(async { core.session.agent().state().await });
+        pa_core::session_engine::provider_adapter::model_thinking_level(state.thinking_level)
+            .wire_name()
+            .to_string()
+    };
+    assert_eq!(engine.effective_thinking_level().as_deref(), Some("high"));
+    assert_eq!(agent_wire_level(&engine), "high");
+
+    // The switch onto the plain model clamps the effective level to off:
+    // the agent slot must follow (the request stops carrying a level the
+    // switched-to model cannot serve).
+    assert!(engine.switch_model(EngineModelSelection {
+        provider: Some("battery".to_string()),
+        model: Some("mock-plain".to_string()),
+        api_key: None,
+        thinking: None,
+    }));
+    assert_eq!(
+        engine.effective_thinking_level().as_deref(),
+        Some("off"),
+        "the plain model clamps the requested high to off"
+    );
+    assert_eq!(
+        agent_wire_level(&engine),
+        "off",
+        "the agent slot re-syncs to the re-clamped reported level"
+    );
+
+    // The requested level survives the round trip: switching back
+    // re-clamps the SAME request (high) onto the reasoning model.
+    assert!(engine.switch_model(EngineModelSelection {
+        provider: Some("battery".to_string()),
+        model: Some("mock-reason".to_string()),
+        api_key: None,
+        thinking: None,
+    }));
+    assert_eq!(
+        engine.effective_thinking_level().as_deref(),
+        Some("high"),
+        "the requested level survives the round trip"
+    );
+    assert_eq!(
+        agent_wire_level(&engine),
+        "high",
+        "the agent slot re-syncs to the restored level"
+    );
+}
