@@ -4487,6 +4487,200 @@ async fn tui_ctrl_s_stash_is_remappable_via_keybindings_json() {
     drop(supervisor);
 }
 
+/// Ctrl+s during a queue browse (Bugbot 79739005): the browse parks the
+/// real draft in `queue_selection` and shows the selected parked
+/// message's text in the editor, so the stash must leave the browse
+/// first — like every other editor-mutating exit — and stash the
+/// user's own draft, never the browsed parked text. The disarmed browse
+/// also keeps the next Enter from applying an empty edit that would
+/// DELETE the parked message.
+#[tokio::test]
+async fn tui_ctrl_s_during_queue_browse_stashes_the_draft_and_keeps_the_parked_message() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    // The first turn holds for 8s: the whole queue dance (park two
+    // prompts, draft, browse, stash, an empty Enter) runs inside the
+    // busy window, deterministically.
+    let supervisor = spawn_supervisor(dir.path());
+    let script = serde_json::json!({
+        "engine": "faux",
+        "responses": [
+            { "text": "the slow turn reply", "delayMs": 8000 },
+            { "text": "steered delivery" },
+            { "text": "followed up delivery" },
+            { "text": "browse draft reply", "delayMs": 10 },
+        ],
+    });
+    let script_path = dir.path().join("script.json");
+    let session = create_session_via_daemon(
+        &supervisor.socket,
+        &script_path,
+        &script,
+        dir.path(),
+        &session_dir,
+    )
+    .await;
+
+    let options = pa_tui::interactive::InteractiveOptions {
+        provider_auth: None,
+        traces: None,
+        update_commands: None,
+        socket_path: supervisor.socket.clone(),
+        cwd: dir.path().to_path_buf(),
+        session_dir: Some(session_dir.clone()),
+        script_path: Some(script_path.clone()),
+        model_selection: pa_tui::interactive::ModelSelection::default(),
+        model_catalog: Vec::new(),
+        model_configured_providers: std::collections::HashSet::default(),
+        model_recent_models: Vec::new(),
+        default_thinking_level: None,
+        no_session: false,
+        session: pa_tui::interactive::SessionSelection::Attach(session.clone()),
+        show_images: true,
+        fullscreen_mouse: true,
+        initial_message: None,
+        theme: "prime".to_string(),
+        code_block_indent: "  ".to_string(),
+        tree_filter_mode: String::new(),
+        branch_summary_skip_prompt: false,
+        version: "0.0.0".to_string(),
+        onboarding: None,
+        telemetry_disabled: None,
+        client_auth: None,
+        client_settings: None,
+        telemetry: None,
+        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
+        prompt_stash: std::sync::Arc::default(),
+        session_rlm_depth: None,
+        session_has_children: false,
+        restore_dock_focus: false,
+    };
+    let key = |code: KeyCode, modifiers: KeyModifiers| {
+        pa_tui::interactive::HeadlessStep::Key(KeyEvent::new(code, modifiers))
+    };
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            // The slow turn holds the run busy through the whole dance.
+            pa_tui::interactive::HeadlessStep::Submit("start the slow turn".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitMs(750),
+            // Two parked prompts: Enter while busy parks on the steering
+            // lane, alt+Enter parks on the follow-up lane.
+            pa_tui::interactive::HeadlessStep::Submit("steering prompt".to_string()),
+            pa_tui::interactive::HeadlessStep::Type("follow-up prompt".to_string()),
+            key(KeyCode::Enter, KeyModifiers::ALT),
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "Follow-up: follow-up prompt".to_string(),
+                timeout_ms: 5_000,
+            },
+            // A real draft, then the browse that parks it and loads the
+            // newest parked message's text into the editor.
+            pa_tui::interactive::HeadlessStep::Type("f24 browse draft".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "f24 browse draft".to_string(),
+                timeout_ms: 5_000,
+            },
+            key(KeyCode::Up, KeyModifiers::ALT),
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "enter steers".to_string(),
+                timeout_ms: 5_000,
+            },
+            // The stash: it leaves the browse (restoring the draft) and
+            // stashes the draft — never the browsed parked text.
+            key(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "Stashed prompt".to_string(),
+                timeout_ms: 5_000,
+            },
+            // The empty-editor Enter with the browse disarmed submits
+            // nothing: with the armed-browse bug this Enter would apply
+            // an empty edit and DELETE the parked follow-up.
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            // The run drains: the slow turn ends and both parked prompts
+            // deliver (the follow-up's delivery IS the survival proof).
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 60_000 },
+            // The stash held the pre-browse draft: the key restores it,
+            // Enter submits it.
+            key(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "Restored stashed prompt".to_string(),
+                timeout_ms: 5_000,
+            },
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+        ],
+        width: 100,
+        height: 30,
+    };
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
+    let frames = &outcome.frames;
+    let browse_index = frames
+        .iter()
+        .position(|frame| frame.contains("enter steers"))
+        .expect("the browse header rendered");
+    let stash_index = frames
+        .iter()
+        .position(|frame| frame.contains("Stashed prompt"))
+        .expect("the stash status rendered");
+    assert!(browse_index < stash_index);
+    // The browse ended with the stash: its header never renders again
+    // (the armed browse is what would route the next Enter into a
+    // queue edit).
+    for frame in &frames[stash_index..] {
+        assert!(
+            !frame.contains("enter steers"),
+            "the browse ended at the stash:\n{frame}"
+        );
+    }
+    // Both parked prompts delivered after the turn: the stash + the
+    // empty Enter deleted nothing, and nothing submitted early.
+    let rendered = frames.join("\n");
+    assert!(
+        rendered.contains("steered delivery"),
+        "the steering prompt delivered:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("followed up delivery"),
+        "the parked follow-up survived the stash and the empty Enter:\n{rendered}"
+    );
+    // The stash held the pre-browse draft, not the browsed parked
+    // text: the restore returns it.
+    let restore_index = frames
+        .iter()
+        .position(|frame| frame.contains("Restored stashed prompt"))
+        .expect("the restore status rendered");
+    assert!(restore_index > stash_index);
+    assert!(
+        frames[restore_index..]
+            .iter()
+            .any(|frame| frame.contains("f24 browse draft")),
+        "the restored draft is the pre-browse draft, not the parked text"
+    );
+    // Daemon-side: the restored draft's turn ran last.
+    let (client, _events) = pa_tui::daemon_client::DaemonClient::connect(&supervisor.socket)
+        .await
+        .expect("connect supervisor");
+    let last = client
+        .request_ok(DaemonCommand::GetLastAssistantText {
+            id: None,
+            active_session_id: session.clone(),
+            rest: serde_json::Map::default(),
+        })
+        .await
+        .expect("get_last_assistant_text");
+    assert_eq!(
+        last["text"], "browse draft reply",
+        "the restored draft submitted after the browse round-trip"
+    );
+    client.close();
+    drop(supervisor);
+}
+
 /// The empty `prompt`/`prompt_and_wait` input payload (no content, images, or
 /// admission): every optional field stays absent on the wire.
 fn empty_prompt_input() -> pa_types::daemon::PromptInput {

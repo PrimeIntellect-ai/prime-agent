@@ -758,6 +758,23 @@ impl SessionUi {
         // chat open or a switch landing (TS `restoreOnOpen`), so the
         // agents-view and `/switch` auto paths keep their own semantics.
         if view.editor.keybindings().matches(&id, "app.prompt.stash") {
+            // A queue browse parks the real draft in `queue_selection` and
+            // shows the selected queued message's text in the editor, so
+            // the stash must never take the browsed text: leaving the
+            // browse first restores the draft like every other
+            // editor-mutating exit (Esc, the menu opens) — the stash then
+            // acts on the user's own draft, the parked message keeps its
+            // text, and the disarmed browse cannot turn the next Enter
+            // into an empty-edit delete of the parked message.
+            if self.queue_selection.has_draft() {
+                let draft = self.queue_selection.reset();
+                view.editor.set_text(&draft);
+                self.dirty = true;
+            } else if self.queue_selection.is_browsing() {
+                self.queue_selection.reset();
+                self.dirty = true;
+            }
+            self.sync_queue_selection(view);
             self.handle_prompt_stash(view);
             return Ok(());
         }
