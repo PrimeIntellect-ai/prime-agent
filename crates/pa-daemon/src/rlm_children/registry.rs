@@ -2,7 +2,10 @@
 //! deletes with their tombstone receipts, the close walk, and the
 //! target lookup/resolution; the close-failure no-op marker is
 //! registry-only.
-use super::*;
+use super::{
+    bail, json, Arc, ChildCloseReason, ChildRecord, Context, DaemonCommand, DeletedChild, Map,
+    Mutex, Result, SupervisorChildSessionsInner, KILL_TIMEOUT_MS,
+};
 
 /// The already-gone marker inside a close failure (the supervisor's
 /// `Unknown active session` route failure): TS `closeSessionOnce` treats a

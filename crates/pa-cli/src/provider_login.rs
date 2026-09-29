@@ -8,7 +8,7 @@
 //! flows, the token exchanges, and the credential writes). The Prime
 //! browser logins (the RSA `auth_challenge` flow) are not ported yet.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use pa_core::auth::{AuthCredential, AuthSource, AuthStatus};
 use pa_core::models::ModelRegistry;
@@ -277,7 +277,7 @@ impl ProviderAuthCommands for ProviderAuth {
         Box::pin(async move {
             // The auth-store writes and the MCP manager locks stay off
             // the async workers.
-            tokio::task::spawn_blocking(move || login_blocking(provider_row, agent_dir, api_key))
+            tokio::task::spawn_blocking(move || login_blocking(&provider_row, &agent_dir, api_key))
                 .await
                 .expect("the login task ran")
         })
@@ -301,7 +301,7 @@ impl ProviderAuthCommands for ProviderAuth {
             // panel round-trips stay off the async workers (a prompt's
             // answer arrives from the TUI loop's thread).
             tokio::task::spawn_blocking(move || {
-                login_blocking_on_panel(provider_row, cwd, agent_dir, panel)
+                login_blocking_on_panel(&provider_row, cwd, agent_dir, panel)
             })
             .await
             .expect("the login task ran")
@@ -338,7 +338,7 @@ impl ProviderAuthCommands for ProviderAuth {
         let provider_row = provider.clone();
         let agent_dir = self.agent_dir.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || logout_blocking(provider_row, agent_dir))
+            tokio::task::spawn_blocking(move || logout_blocking(&provider_row, &agent_dir))
                 .await
                 .expect("the logout task ran")
         })
@@ -494,8 +494,8 @@ impl ProviderAuth {
 /// store, and an OAuth row reaching it answers the silent cancel (the
 /// session routes the panel rows to the panel body).
 fn login_blocking(
-    provider_row: ProviderRow,
-    agent_dir: PathBuf,
+    provider_row: &ProviderRow,
+    agent_dir: &Path,
     api_key: Option<String>,
 ) -> ProviderAuthOutcome {
     if provider_row.auth_type == AuthType::Oauth {
@@ -512,7 +512,7 @@ fn login_blocking(
             provider_row.name
         ));
     };
-    let mut auth = pa_core::auth::AuthStorage::create(&agent_dir);
+    let mut auth = pa_core::auth::AuthStorage::create(agent_dir);
     auth.set(
         &provider_row.id,
         AuthCredential::ApiKey {
@@ -537,7 +537,7 @@ fn login_blocking(
 /// answers arrive from the TUI loop's thread), and the inline auth panel
 /// carries every surface the plain terminal used to.
 fn login_blocking_on_panel(
-    provider_row: ProviderRow,
+    provider_row: &ProviderRow,
     cwd: PathBuf,
     agent_dir: PathBuf,
     panel: pa_tui::auth_panel::AuthPanelHandle,
@@ -717,8 +717,8 @@ fn login_blocking_on_panel(
 
 /// The logout body (blocking: the auth store lock stays off the async
 /// workers).
-fn logout_blocking(provider_row: ProviderRow, agent_dir: PathBuf) -> ProviderAuthOutcome {
-    let mut auth = pa_core::auth::AuthStorage::create(&agent_dir);
+fn logout_blocking(provider_row: &ProviderRow, agent_dir: &Path) -> ProviderAuthOutcome {
+    let mut auth = pa_core::auth::AuthStorage::create(agent_dir);
     if auth.get_all().get(&provider_row.id).is_none() {
         return ProviderAuthOutcome::Status(format!("{} is not configured.", provider_row.name));
     }

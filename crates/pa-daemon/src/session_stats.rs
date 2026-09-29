@@ -376,7 +376,7 @@ mod tests {
         assert_eq!(stats["cost"].as_f64(), Some(0.008_995_7));
     }
 
-    fn message(role: &str, fields: Value) -> Value {
+    fn message(role: &str, fields: &Value) -> Value {
         let mut value = json!({ "role": role });
         if let (Some(object), Some(fields)) = (value.as_object_mut(), fields.as_object()) {
             for (key, field) in fields {
@@ -434,7 +434,7 @@ mod tests {
         (
             "message",
             json!({
-                "message": message("assistant", json!({
+                "message": message("assistant", &json!({
                     "content": [
                         { "type": "text", "text": "hello" },
                         { "type": "toolCall", "name": "bash", "arguments": { "command": "ls" } },
@@ -500,12 +500,12 @@ mod tests {
         let store = store_with(&[
             (
                 "message",
-                json!({ "message": message("user", json!({ "content": "hi there" })) }),
+                json!({ "message": message("user", &json!({ "content": "hi there" })) }),
             ),
             entry_with_usage(128),
             (
                 "message",
-                json!({ "message": message("toolResult", json!({ "content": "out" })) }),
+                json!({ "message": message("toolResult", &json!({ "content": "out" })) }),
             ),
         ]);
         let stats = session_stats(&store, Some(1000));
@@ -535,7 +535,7 @@ mod tests {
         // No usage at all: everything is estimated.
         let store = store_with(&[(
             "message",
-            json!({ "message": message("user", json!({ "content": "12345678" })) }),
+            json!({ "message": message("user", &json!({ "content": "12345678" })) }),
         )]);
         let stats = session_stats(&store, Some(1000));
         assert_eq!(stats["contextUsage"]["tokens"], 2, "8 chars / 4");
@@ -547,13 +547,13 @@ mod tests {
         let store = store_with(&[
             (
                 "message",
-                json!({ "message": message("user", json!({ "content": "hi" })) }),
+                json!({ "message": message("user", &json!({ "content": "hi" })) }),
             ),
             entry_with_usage(50),
             ("compaction", json!({ "firstKeptEntryId": "e2" })),
             (
                 "message",
-                json!({ "message": message("user", json!({ "content": "again" })) }),
+                json!({ "message": message("user", &json!({ "content": "again" })) }),
             ),
         ]);
         let stats = session_stats(&store, Some(1000));
@@ -570,7 +570,7 @@ mod tests {
             entry_with_usage(300),
             (
                 "message",
-                json!({ "message": message("user", json!({ "content": "1234" })) }),
+                json!({ "message": message("user", &json!({ "content": "1234" })) }),
             ),
         ]);
         let stats = session_stats(&store, Some(1000));
@@ -592,7 +592,7 @@ mod tests {
         let store = store_with(&[
             (
                 "message",
-                json!({ "message": message("assistant", json!({
+                json!({ "message": message("assistant", &json!({
                     "content": [{ "type": "text", "text": "partial" }],
                     "stopReason": "aborted",
                     "usage": { "input": 1, "output": 1, "totalTokens": 500 },
@@ -646,7 +646,7 @@ mod tests {
             .to_string()
         };
         let user = |id: &str, parent: Option<&str>| {
-            row(id, parent, message("user", json!({ "content": "hi" })))
+            row(id, parent, message("user", &json!({ "content": "hi" })))
         };
         let assistant = |id: &str, parent: Option<&str>, spent: Value| {
             row(
@@ -654,7 +654,7 @@ mod tests {
                 parent,
                 message(
                     "assistant",
-                    json!({
+                    &json!({
                         "provider": "prime-inference", "model": "internal/glm-5.3-fast",
                         "content": [{ "type": "text", "text": "hi" }],
                         "stopReason": "stop",
@@ -871,9 +871,11 @@ mod tests {
         // total exactly.
         assert_eq!(stats["ownCost"].as_f64(), Some(1.0 + 0.1 + 0.2));
         assert!((stats["subagentsCost"].as_f64().unwrap() - 0.05).abs() < 1e-9);
-        assert_eq!(
-            stats["ownCost"].as_f64().unwrap() + stats["subagentsCost"].as_f64().unwrap(),
-            stats["totalCost"].as_f64().unwrap()
+        assert!(
+            (stats["ownCost"].as_f64().unwrap() + stats["subagentsCost"].as_f64().unwrap()
+                - stats["totalCost"].as_f64().unwrap())
+            .abs()
+                < 1e-9
         );
     }
 
@@ -1048,9 +1050,11 @@ mod tests {
         assert_eq!(stats["totalCost"].as_f64(), Some(0.53125));
         assert_eq!(stats["ownCost"].as_f64(), Some(0.28125));
         assert_eq!(stats["subagentsCost"].as_f64(), Some(0.25));
-        assert_eq!(
-            stats["ownCost"].as_f64().unwrap() + stats["subagentsCost"].as_f64().unwrap(),
-            stats["totalCost"].as_f64().unwrap()
+        assert!(
+            (stats["ownCost"].as_f64().unwrap() + stats["subagentsCost"].as_f64().unwrap()
+                - stats["totalCost"].as_f64().unwrap())
+            .abs()
+                < 1e-9
         );
     }
 

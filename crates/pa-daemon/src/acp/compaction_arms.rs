@@ -283,7 +283,7 @@ impl AcpSession {
 
     /// Reset the overflow recovery state (the turn loop calls it at
     /// every settled non-error turn and every admitted prompt).
-    pub(super) async fn reset_overflow_recovery(&self) {
+    pub(super) fn reset_overflow_recovery(&self) {
         self.arms.reset();
     }
 

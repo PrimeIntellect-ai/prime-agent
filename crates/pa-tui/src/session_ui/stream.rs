@@ -95,8 +95,20 @@ fn format_rate(tokens_per_second: f64) -> String {
 
 impl SessionUi {
     /// The working loader starts with a `Waiting` activity and a zero
-    /// token count (TS `agent_start` resets the tracker).
+    /// token count (TS `agent_start` resets the tracker), anchored at
+    /// this instant.
     pub(crate) fn start_loader(&mut self, view: &mut AgentView) {
+        self.start_loader_at(view, std::time::Instant::now());
+    }
+
+    /// [`Self::start_loader`] with an explicit anchor: the live paths
+    /// pass now (the submit, the engine start); the rebuild path
+    /// passes the LAST HUMAN PROMPT's instant (the operator's
+    /// 2026-09-28 rule: the timer never resets on a view
+    /// transition — an agents-view round trip re-attaches mid-turn
+    /// and the clock keeps counting from the prompt that started the
+    /// turn).
+    pub(crate) fn start_loader_at(&mut self, view: &mut AgentView, since: std::time::Instant) {
         view.working = Some(WorkingState {
             activity: "Waiting",
             message: None,
@@ -104,7 +116,7 @@ impl SessionUi {
             tokens: 0,
             elapsed_secs: 0,
         });
-        view.working_since = Some(std::time::Instant::now());
+        view.working_since = Some(since);
         self.working_tokens.reset();
     }
 

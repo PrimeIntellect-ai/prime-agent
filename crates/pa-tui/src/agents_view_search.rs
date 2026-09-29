@@ -317,7 +317,7 @@ mod tests {
             // One word: tier comparisons below stay single-token queries.
             name: "gatewayworker".to_string(),
             id: "01a0b6b3-2e8d-71ab-b1c2-2a7db1bf8077".to_string(),
-            cwd: "/Users/kevin/pi/prime-agent".to_string(),
+            cwd: "/home/dev/work/prime-agent".to_string(),
         }
     }
 
@@ -382,7 +382,7 @@ mod tests {
     #[test]
     fn the_cwd_targets_basename_first() {
         assert!(score("prime-agent").is_some(), "cwd basename matches");
-        assert!(score("kevin/pi").is_some(), "cwd path fragments match");
+        assert!(score("dev/work").is_some(), "cwd path fragments match");
     }
 
     #[test]

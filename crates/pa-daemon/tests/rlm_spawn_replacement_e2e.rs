@@ -23,6 +23,31 @@
 //! 3. No admission teardown of a healthy child: the replaced child is
 //!    relaunched with the same worker id, its session file is not archived,
 //!    and it settles with its answer.
+// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
+// the full rationale).
+// Stack-resident futures by design on the daemon's hot paths; boxing the
+// call sites for a lint tick is a perf regression with zero correctness gain.
+#![allow(clippy::large_futures)]
+// 64-bit-only targets; the narrowing casts sit at OS boundaries
+// (pid/fd/time/size) where the values are bounded by the kernel - the
+// dead-guard expect()s would add panic paths where silent wrap was
+// deliberate.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// The fn-length threshold is a style gate, not correctness; the structure
+// campaign owns the god-fn splits as a follow-up.
+#![allow(clippy::too_many_lines)]
+// API-shape opinions, not defects; the surfaces are deliberate.
+#![allow(
+    clippy::unnecessary_wraps,
+    clippy::zero_sized_map_values,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names
+)]
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -123,7 +148,7 @@ impl Client {
         (client, hello)
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -176,7 +201,7 @@ impl Client {
 
 /// The supervisor roster's session summaries (the `list` wire surface).
 fn roster_summaries(client: &mut Client, id: &str) -> Vec<Value> {
-    client.send_command(id, json!({ "type": "list" }));
+    client.send_command(id, &json!({ "type": "list" }));
     let list = client.read_response(id);
     assert_eq!(list["success"], true, "list failed: {list}");
     list["data"]["sessions"]
@@ -213,7 +238,7 @@ fn write_script(dir: &Path, answer: &str) -> PathBuf {
 
 /// Children registry bound to the running supervisor, with a parent identity
 /// rooted at `agent_dir`.
-async fn children(socket: &Path, agent_dir: &Path, script: &Path) -> SupervisorChildSessions {
+fn children(socket: &Path, agent_dir: &Path, script: &Path) -> SupervisorChildSessions {
     let sessions = SupervisorChildSessions::new(
         Arc::new(SupervisorLink::new(socket.to_path_buf())),
         agent_dir.to_path_buf(),
@@ -298,7 +323,7 @@ async fn concurrent_spawns_prompt_exactly_once_across_a_worker_replacement() {
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
     let script = write_script(dir.path(), "replacement kid answer");
-    let children = children(&socket, &agent_dir, &script).await;
+    let children = children(&socket, &agent_dir, &script);
 
     // Four concurrent spawns, each with a unique prompt marker.
     let (a, b, c, d) = tokio::join!(

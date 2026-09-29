@@ -289,10 +289,10 @@ pub(crate) fn parse_iso_ms(text: &str) -> Option<u64> {
     let (hour, minute, second, millis) = parse_time_parts(time)?;
     let days = days_from_civil(year, month, day);
     let ms = days * 86_400_000
-        + hour as i64 * 3_600_000
-        + minute as i64 * 60_000
-        + second as i64 * 1_000
-        + millis as i64
+        + i64::from(hour) * 3_600_000
+        + i64::from(minute) * 60_000
+        + i64::from(second) * 1_000
+        + i64::from(millis)
         - offset_ms;
     u64::try_from(ms).ok()
 }
@@ -361,11 +361,11 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let era = y.div_euclid(400);
     let yoe = y.rem_euclid(400);
     let mp = if month > 2 {
-        month as i64 - 3
+        i64::from(month) - 3
     } else {
-        month as i64 + 9
+        i64::from(month) + 9
     };
-    let doy = (153 * mp + 2) / 5 + day as i64 - 1;
+    let doy = (153 * mp + 2) / 5 + i64::from(day) - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146_097 + doe - 719_468
 }
