@@ -131,6 +131,10 @@ impl ClientSettings for CliClientSettings {
         set_block_images,
         bool
     );
+
+    fn image_model(&self) -> Option<String> {
+        self.manager().ok()?.get_image_model()
+    }
     setting!(
         enable_skill_commands,
         set_enable_skill_commands,

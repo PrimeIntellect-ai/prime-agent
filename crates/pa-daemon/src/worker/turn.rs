@@ -48,7 +48,21 @@ impl TurnRunner {
                 // which parks the pump after `requestAbort`/manual `compact`):
                 // already-queued items survive parked until a resume site
                 // clears the flag.
-                if self.input_pauses.paused() || core.queued_input_suspended {
+                // The compacting gate (TS `isCompacting` in
+                // `_isBusyForSessionInput("pump")`'s `externalBusy`): a
+                // manual compaction is a busy state the resume sites do NOT
+                // clear - `steer`/`follow_up` and a `streamingBehavior`
+                // prompt resume the suspension MID-WINDOW (TS
+                // `_admitSessionInput`'s `wake: "immediate"` resume), so
+                // the cleared suspension alone must not admit: without this
+                // term a racing turn starts while the compaction still
+                // holds the context and its user row lands on the live
+                // agent mid-window (rows TS's pump never admits - its
+                // deferral holds the queued item until `compact()`'s
+                // `finally` re-schedules the pump). The parked item
+                // survives in its lane; the compaction's tail wake
+                // delivers it after the window.
+                if self.input_pauses.paused() || core.queued_input_suspended || core.compacting {
                     core.busy = false;
                     None
                 } else if core.steering.front().is_some() {

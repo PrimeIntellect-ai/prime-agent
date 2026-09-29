@@ -430,6 +430,18 @@ pub struct SessionManager {
     persist_listeners: Vec<SessionPersistListener>,
 }
 
+/// The refine transcript's consumed artifacts: the conversation
+/// message rows (sequence order) and the in-session refinement
+/// history (the audit scan's output). Both are small next to the full
+/// entry set — the rows refine reads — so extracting them directly
+/// spares the owned copy of every entry a historical snapshot would
+/// materialize.
+#[derive(Debug, Default)]
+pub struct RefineTranscriptParts {
+    pub messages: Vec<AgentMessage>,
+    pub refinement_history: Vec<crate::refinement::RefinementResult>,
+}
+
 impl SessionManager {
     fn new_with(
         cwd: PathBuf,
@@ -679,13 +691,17 @@ impl SessionManager {
 
     /// Capture a historical read request while locked; await it after releasing
     /// the session mutex. Current unpersisted rows are merged into the snapshot.
+    /// A full-history window under the session's sole runtime lease serves
+    /// the retained rows directly instead of re-reading and re-parsing a
+    /// file whose rows the manager already holds.
     ///
     /// # Errors
     ///
     /// The returned future errors when reading the session file fails, or
     /// when the file read panics and the blocking task fails to join. When
-    /// the manager holds no windowed store, the retained entries are
-    /// returned without touching the disk.
+    /// the manager holds no windowed store — or holds the sole lease over
+    /// a full-history window — the retained entries are returned without
+    /// touching the disk.
     pub fn history_snapshot(
         &self,
     ) -> impl std::future::Future<Output = anyhow::Result<Vec<FileEntry>>> + Send + 'static {
@@ -694,7 +710,24 @@ impl SessionManager {
             .as_ref()
             .map(|window| window.source_path().to_owned());
         let retained = self.file_entries.clone();
+        // Full-history fast path (the shared-window pattern): when the
+        // window's walk retained every file row and this manager holds the
+        // session's sole runtime lease, the historical read would re-read
+        // and re-parse a file whose rows are all already resident — the
+        // file's rows are exactly `retained`'s persisted subset, and the
+        // retained copy also carries the current unpersisted tail the
+        // read would have to merge back in. Without the lease another
+        // writer may have appended out of band, so the gate stays closed
+        // and the historical read runs.
+        let fast_path = self
+            .window
+            .as_ref()
+            .is_some_and(super::window::WindowedSessionStore::retained_whole_file)
+            && self.append_ownership == super::window::AppendOwnership::SessionLeaseHeld;
         async move {
+            if fast_path {
+                return Ok(retained);
+            }
             let Some(path) = path else {
                 return Ok(retained);
             };
@@ -712,6 +745,80 @@ impl SessionManager {
                     .filter(|entry| entry.id().is_some_and(|id| !ids.contains(id))),
             );
             Ok(entries)
+        }
+    }
+
+    /// Extract the refine transcript's consumed artifacts (see
+    /// [`RefineTranscriptParts`]) without materializing an owned copy of
+    /// every entry: the message rows the refine prompt serializes, and
+    /// the in-session refinement history the audit scan reads. A
+    /// windowless manager — and a full-history window under the
+    /// session's sole runtime lease — serves both straight from the
+    /// retained rows; a boundary window keeps the historical read, since
+    /// its pre-window conversation and audit rows live only on disk, and
+    /// moves the messages out of the read's parse result instead of
+    /// re-cloning them.
+    ///
+    /// Capture while the session lock is held; await after releasing it,
+    /// like [`Self::history_snapshot`].
+    ///
+    /// # Errors
+    ///
+    /// The returned future errors when the historical read fails (see
+    /// [`Self::history_snapshot`]); the retained-serving arms cannot
+    /// fail.
+    ///
+    /// # Panics
+    ///
+    /// The read arm's `expect` cannot fire: it is reached only when the
+    /// retained-serving arms did not run, and the snapshot is captured in
+    /// exactly that case.
+    pub fn refine_transcript_parts(
+        &self,
+    ) -> impl std::future::Future<Output = anyhow::Result<RefineTranscriptParts>> + Send + 'static
+    {
+        let retained_serves = self.window.is_none()
+            || (self
+                .window
+                .as_ref()
+                .is_some_and(super::window::WindowedSessionStore::retained_whole_file)
+                && self.append_ownership == super::window::AppendOwnership::SessionLeaseHeld);
+        let parts = retained_serves.then(|| RefineTranscriptParts {
+            messages: self
+                .file_entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    FileEntry::Message { message, .. } => Some(message.clone()),
+                    _ => None,
+                })
+                .collect(),
+            refinement_history: crate::session_engine::refine::session_refinement_history(
+                &self.file_entries,
+            ),
+        });
+        // Only the read arm pays `history_snapshot`'s capture (its eager
+        // retained clone feeds the unpersisted-rows merge).
+        let snapshot = (!retained_serves).then(|| self.history_snapshot());
+        async move {
+            if let Some(parts) = parts {
+                return Ok(parts);
+            }
+            let entries = snapshot
+                .expect("the read arm always carries its snapshot")
+                .await?;
+            let refinement_history =
+                crate::session_engine::refine::session_refinement_history(&entries);
+            let messages = entries
+                .into_iter()
+                .filter_map(|entry| match entry {
+                    FileEntry::Message { message, .. } => Some(message),
+                    _ => None,
+                })
+                .collect();
+            Ok(RefineTranscriptParts {
+                messages,
+                refinement_history,
+            })
         }
     }
 
@@ -1832,8 +1939,19 @@ fn resolve_session_rlm_depth(header: &SessionHeader, _session_path: &Path) -> u6
 }
 
 /// Atomic session-file write: private temp + fsync + rename onto the
-/// destination (TS `writeFileAtomicSync`; the win32 destination-busy retry
-/// rides along in `rename_onto`).
+/// destination (the `writeFileAtomicSync` shape; the win32 destination-busy
+/// retry rides along in `rename_onto`).
+///
+/// The fsync is the port's deliberate session durability strengthening, not
+/// TS parity: the TS session rewrites and repairs pass no `fsync` option
+/// (session-manager.ts `_rewriteFile`/`_repairTornTail`), and the port
+/// instead promises that a row the append path made durable
+/// (`window::append_cached`'s per-row sync) is never regressed by the
+/// rewrite that replaces it — a non-synced rename onto the destination can
+/// zero the file on a hard crash, the window TS tolerates through
+/// repair-on-open. Disclosed in the atomic-write durability audit: the
+/// session family keeps its fsync; every other `atomic_write` family site
+/// is TS-default (no fsync).
 fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
     let temp = PathBuf::from(format!("{}.tmp{}", path.display(), std::process::id()));
     {
