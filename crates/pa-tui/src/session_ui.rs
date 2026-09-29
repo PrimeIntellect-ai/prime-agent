@@ -220,8 +220,13 @@ pub(crate) struct SessionUi {
     /// The client-process settings seam (`/settings`, `/fullscreen`);
     /// the composition root supplies it.
     client_settings: Option<std::sync::Arc<dyn crate::client_settings::ClientSettings>>,
-    /// The ban-risk warning's once-per-session gate (TS
-    /// `anthropicSubscriptionWarningShown`).
+    /// The ban-risk warning's view-local dedup (TS
+    /// `anthropicSubscriptionWarningShown`): this VIEW's own
+    /// once-per-instance gate. The once-per-SESSION-lifecycle gate (the
+    /// operator 2026-09-29 fix for the every-open re-warn) is the
+    /// daemon-side marker read through `get_state` — see
+    /// [`Self::anthropic_warning_already_shown`] and
+    /// [`Self::mark_anthropic_warning_shown`].
     anthropic_subscription_warning_shown: bool,
     /// The side-question run currently streaming (TS `activeSideQuestionId`):
     /// at most one run per client, exactly like the daemon enforces.

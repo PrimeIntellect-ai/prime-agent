@@ -257,6 +257,59 @@ fn the_depth_two_chain_reports_the_folded_aggregate() {
     assert_eq!(spawn.1.cost.total, pa_types::JsNumber(0.15));
 }
 
+/// The Anthropic subscription warning's once-per-session-lifecycle gate
+/// (operator directive 2026-09-29): [`SessionFile::mark_anthropic_warning_shown`]
+/// persists the marker row durably, the live flag flips, and BOTH reopen
+/// paths (the full [`SessionFile::open`] and the windowed
+/// [`SessionFile::open_windowed`]) hydrate the gate from the file — the
+/// reattach/resume contract: a session that warned once never warns again
+/// however it reopens. A fresh session serves the gate closed.
+#[test]
+fn marking_the_warning_persists_and_both_reopens_hydrate_it() {
+    let dir = temp_dir();
+    let mut session = SessionFile::create("/repo", None, 0);
+    session.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
+    let path = dir.join(session_file_name(session.session_id()));
+    session.set_path(path.clone());
+    session.rewrite().unwrap();
+    assert!(
+        !session.anthropic_warning_shown(),
+        "an unmarked session serves the gate closed"
+    );
+
+    session.mark_anthropic_warning_shown().unwrap();
+    assert!(
+        session.anthropic_warning_shown(),
+        "the live flag flipped with the mark"
+    );
+
+    // The durable row: the exact custom entry the lifecycle reads back.
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains("\"customType\":\"anthropic_subscription_warning_shown\""),
+        "the marker row reached the session file: {text}"
+    );
+
+    // The full reopen (a plain resume) and the windowed reopen (the
+    // create-over-file replay of a long session) both hydrate the gate.
+    let reopened = SessionFile::open(&path).unwrap();
+    assert!(reopened.anthropic_warning_shown());
+    let windowed = SessionFile::open_windowed(&path).unwrap();
+    assert!(windowed.anthropic_warning_shown());
+
+    // A session that never warned stays closed through both opens.
+    let mut fresh = SessionFile::create("/repo", None, 0);
+    let fresh_path = dir.join(session_file_name(fresh.session_id()));
+    fresh.set_path(fresh_path.clone());
+    fresh.rewrite().unwrap();
+    assert!(!SessionFile::open(&fresh_path)
+        .unwrap()
+        .anthropic_warning_shown());
+    assert!(!SessionFile::open_windowed(&fresh_path)
+        .unwrap()
+        .anthropic_warning_shown());
+}
+
 #[test]
 fn creates_and_loads_a_session() {
     let dir = temp_dir();

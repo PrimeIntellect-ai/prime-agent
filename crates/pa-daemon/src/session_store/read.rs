@@ -2,6 +2,7 @@
 //! streamed and windowed opens, the bounded header-only readers, the
 //! file-layout helpers, and the in-memory create.
 
+use super::view::is_warning_shown_row;
 use super::{
     anyhow, fold_child_usage_attributions, fs, message_text, BufRead, Context, HashMap, Map, Path,
     PathBuf, Read, Result, SessionEntry, SessionFile, SessionHeader, SessionWindow, Value,
@@ -168,6 +169,7 @@ impl SessionFile {
             leaf_id: None,
             window: None,
             lease: None,
+            anthropic_warning_shown: false,
         };
         for line in lines {
             let line = line.with_context(read_context)?;
@@ -181,6 +183,7 @@ impl SessionFile {
             }
         }
         fold_child_usage_attributions(&mut file.entries);
+        file.anthropic_warning_shown = file.entries.iter().any(is_warning_shown_row);
         Ok(file)
     }
 
@@ -203,6 +206,10 @@ impl SessionFile {
                 _ => None,
             })
             .ok_or_else(|| anyhow!("window has no session header"))?;
+        // The window's walk already hydrated the once-per-session-lifecycle
+        // warning gate from the whole active branch (the row may sit in the
+        // discarded prefix, far outside this store's retained rows).
+        let anthropic_warning_shown = window.anthropic_warning_shown();
         let mut file = Self {
             path: path.to_owned(),
             header,
@@ -211,6 +218,7 @@ impl SessionFile {
             leaf_id: None,
             window: None,
             lease: None,
+            anthropic_warning_shown,
         };
         // The raw rows are consumed in place: each line String drops as
         // soon as its parsed entry joins the store, instead of keeping the
@@ -304,6 +312,7 @@ impl SessionFile {
             leaf_id: None,
             window: None,
             lease: None,
+            anthropic_warning_shown: false,
         }
     }
 }
