@@ -557,6 +557,7 @@ pub fn register_agent_message_host_handlers<C: AgentMessageController + 'static>
 // agent_messaging:: path stable (the pa-daemon importers).
 mod observe;
 pub use observe::{
+    create_agent_observe_message_preview, normalize_observe_limit, normalize_observe_max_chars,
     register_agent_observe_host_handlers, AgentFamilyStatus, AgentObserveActivity,
     AgentObserveController, AgentObserveMessagePreview, AgentObserveSummary,
 };
