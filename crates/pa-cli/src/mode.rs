@@ -326,12 +326,18 @@ mod tests {
         for key in vars {
             std::env::remove_var(key);
         }
-        let _ = std::panic::catch_unwind(body);
+        // Restore the env FIRST, then resume the panic: a failed
+        // assertion must fail the test (never swallow), and the restore
+        // must survive it.
+        let outcome = std::panic::catch_unwind(body);
         for (key, value) in saved {
             match value {
                 Some(value) => std::env::set_var(key, value),
                 None => std::env::remove_var(key),
             }
+        }
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
         }
     }
 

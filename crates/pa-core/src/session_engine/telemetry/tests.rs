@@ -964,8 +964,10 @@ async fn bot_edges_the_give_up_never_double_counts_the_chain() {
         fixture.state.clone(),
         "interactive".to_string(),
     );
-    // The retry gives up: the failed call already counted its link; the
-    // give-up adds nothing.
+    // The retry gives up: the failed call already counted its link, and
+    // a FAILED retry emits no recovery update at all (the retried
+    // attempt's own failure is its own new occurrence when one happens -
+    // a mispaired update would claim the wrong recovery).
     telemetry.note_auto_retry_event(&AutoRetryEvent::End {
         success: false,
         attempt: 1,
@@ -973,10 +975,12 @@ async fn bot_edges_the_give_up_never_double_counts_the_chain() {
         restored_model: None,
     });
     let errors = event_properties(&fixture.mock, "agent error").await;
-    let occurrence = errors
-        .iter()
-        .find(|error| error["error_event_kind"] == serde_json::json!("occurrence"))
-        .expect("the occurrence");
+    assert_eq!(
+        errors.len(),
+        1,
+        "the give-up never created a recovery update"
+    );
+    let occurrence = &errors[0];
     assert_eq!(
         occurrence["consecutive_failure_count"],
         serde_json::json!(1),

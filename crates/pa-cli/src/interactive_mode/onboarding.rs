@@ -218,11 +218,14 @@ impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
 pub(super) fn onboarding_task(
     options: &RunOptions,
     provider_auth: Option<pa_tui::provider_auth::ProviderAuthCommandsHandle>,
-) -> Option<pa_tui::interactive::OnboardingTask> {
+) -> (
+    Option<pa_tui::interactive::OnboardingTask>,
+    Vec<pa_telemetry::OnboardingStage>,
+) {
     let config = &options.config;
     let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
     if settings.get_onboarding_shown() {
-        return None;
+        return (None, Vec::new());
     }
     let probe = StartupModelProbe {
         cwd: config.cwd.clone(),
@@ -244,10 +247,14 @@ pub(super) fn onboarding_task(
     // Rust onboarding is the first-run trace question, so `entry` fires
     // when the task mounts and `ready` once the startup model resolved
     // with configured auth (the flow's credential gate); no invented
-    // provider-selection or login steps.
-    if !crate::mode::telemetry_disabled(&settings) {
-        let client = pa_core::session_engine::telemetry::build_client(&settings, &config.agent_dir);
-        pa_telemetry::OnboardingStage {
+    // provider-selection or login steps. The records return to the caller
+    // because THIS call runs before the interactive runtime exists (a
+    // `TelemetryClient` spawned here is inert and the events would drop);
+    // `run_interactive_mode` emits them inside its runtime.
+    let pending_stages = if crate::mode::telemetry_disabled(&settings) {
+        Vec::new()
+    } else {
+        let mut stages = vec![pa_telemetry::OnboardingStage {
             onboarding_id: onboarding_id.clone(),
             stage: "entry",
             outcome: "initiated",
@@ -255,10 +262,9 @@ pub(super) fn onboarding_task(
             auth_category: Some("none"),
             entry_reason: Some("first_setup"),
             timing_scope: None,
-        }
-        .track(&client);
+        }];
         if model_ready_now {
-            pa_telemetry::OnboardingStage {
+            stages.push(pa_telemetry::OnboardingStage {
                 onboarding_id: onboarding_id.clone(),
                 stage: "ready",
                 outcome: "configured",
@@ -266,11 +272,11 @@ pub(super) fn onboarding_task(
                 auth_category: Some("none"),
                 entry_reason: Some("first_setup"),
                 timing_scope: Some("system_work"),
-            }
-            .track(&client);
+            });
         }
-    }
-    Some(pa_tui::interactive::OnboardingTask {
+        stages
+    };
+    let task = pa_tui::interactive::OnboardingTask {
         sink: std::sync::Arc::new(SettingsOnboardingSink {
             cwd: config.cwd.clone(),
             agent_dir: config.agent_dir.clone(),
@@ -281,5 +287,6 @@ pub(super) fn onboarding_task(
         model_ready: std::sync::Arc::new(move || readiness_probe.resolve().1),
         current_model,
         provider_auth,
-    })
+    };
+    (Some(task), pending_stages)
 }

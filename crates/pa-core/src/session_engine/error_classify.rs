@@ -253,12 +253,15 @@ pub fn classify_error_message(message: &str) -> ErrorClassification {
             retryable: subtype_retryable(subtype),
         };
     }
-    // 2. A recognized safe error code token names the subtype.
+    // 2. A recognized safe error code token names the subtype. The
+    // match runs case-insensitively in both directions (a lowercase
+    // message carries `econnreset`; the reported code keeps its canonical
+    // spelling).
     let lowered = message.to_ascii_lowercase();
-    if let Some((code, subtype)) = CODE_SUBTYPES
-        .iter()
-        .find(|(code, _)| lowered.contains(&**code) || message.contains(*code))
-    {
+    if let Some((code, subtype)) = CODE_SUBTYPES.iter().find(|(code, _)| {
+        let lowered_code = code.to_ascii_lowercase();
+        lowered.contains(&lowered_code) || message.contains(*code)
+    }) {
         return ErrorClassification {
             diagnostic: diagnostic(subtype),
             safe_message: None,
@@ -366,6 +369,16 @@ mod tests {
         assert_eq!(classification.code, Some("ECONNRESET"));
         assert_eq!(classification.category, "network");
         assert_eq!(classification.classification_source, "typed_error");
+    }
+
+    #[test]
+    fn errno_tokens_match_lowercase_messages() {
+        let classification = classify("request failed: econnreset during stream");
+        assert_eq!(
+            classification.subtype, "network_error",
+            "the lowercase errno still names the typed subtype"
+        );
+        assert_eq!(classification.code, Some("ECONNRESET"));
     }
 
     #[test]

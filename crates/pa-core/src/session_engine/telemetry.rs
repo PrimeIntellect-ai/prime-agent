@@ -391,27 +391,34 @@ impl SessionTelemetry {
             AutoRetryEvent::End {
                 success, attempt, ..
             } => {
-                if let Some(active) = state.active_error.take() {
-                    AgentError {
-                        error_id: active.error_id,
-                        kind: Some(ErrorEventKind::RecoveryUpdate),
-                        subtype: Some("unknown"),
-                        category: Some("other"),
-                        component: Some("provider"),
-                        operation: Some("retry"),
-                        stage: Some("model_request"),
-                        retry_attempt: Some(u64::from(*attempt)),
-                        recovery_action: Some("automatic_retry"),
-                        recovery_outcome: Some(if *success { "success" } else { "failed" }),
-                        ..Default::default()
-                    }
-                    .track(&self.client);
-                }
-                // The failed model call already counted its own chain
-                // link at its `MessageEnd`; the give-up never
-                // double-counts (the chain stays visible for the next
-                // occurrence's counter until a success resets it).
+                // A SUCCESSFUL retry resolves the error it was retrying
+                // (the active occurrence's id): one `recovery_update`,
+                // paired with that occurrence. A FAILED retry adds no
+                // recovery update at all - the retried attempt's own
+                // failure was recorded as its own new occurrence at its
+                // `MessageEnd` (the chain lives via that occurrence), and
+                // a mispaired update to the original id would claim the
+                // wrong recovery.
                 if *success {
+                    if let Some(active) = state.active_error.take() {
+                        AgentError {
+                            error_id: active.error_id,
+                            kind: Some(ErrorEventKind::RecoveryUpdate),
+                            subtype: Some("unknown"),
+                            category: Some("other"),
+                            component: Some("provider"),
+                            operation: Some("retry"),
+                            stage: Some("model_request"),
+                            retry_attempt: Some(u64::from(*attempt)),
+                            recovery_action: Some("automatic_retry"),
+                            recovery_outcome: Some("success"),
+                            ..Default::default()
+                        }
+                        .track(&self.client);
+                    }
+                    // The failed model call already counted its own chain
+                    // link at its `MessageEnd`; the success resets the
+                    // chain (the give-up never double-counts).
                     state.consecutive_failure_count = 0;
                 }
             }
