@@ -897,7 +897,7 @@ async fn a_ledger_delete_of_a_stopped_child_tombstones_without_a_worker() {
         .await
         .expect("the spawn ledger resolves");
     ledger
-        .append_spawn(crate::rlm_ledger::RlmSpawnInput {
+        .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
             child_id: "sub-gone".to_string(),
             parent: parent_file.to_string_lossy().into_owned(),
             child: child_file.to_string_lossy().into_owned(),
