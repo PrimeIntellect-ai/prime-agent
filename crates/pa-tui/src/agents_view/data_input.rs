@@ -39,7 +39,7 @@ impl AgentsViewMode {
                 } else {
                     self.scope_depth = None;
                     self.scope_dropped = true;
-                    self.status = Some(
+                    self.set_status(
                         "Scope is no longer available; returned to the global view".to_string(),
                     );
                     None
@@ -405,7 +405,7 @@ impl AgentsViewMode {
     /// catalog-failure message included — instead of a stale loading
     /// message.
     pub(super) fn clear_anchor_loading_hint(&mut self) {
-        if self.status.as_deref() == Some(ANCHOR_LOADING_HINT) {
+        if self.status_text() == Some(ANCHOR_LOADING_HINT) {
             self.status = None;
         }
     }
@@ -424,6 +424,9 @@ impl AgentsViewMode {
     /// `keybindings.json` override moves both the handler and the hint —
     /// the same contract as the session view (#184).
     pub(super) fn handle_key(&mut self, key: &str) {
+        // TS `handleInput`'s first call: a sticky line clears on any
+        // keypress (the transient lines ride their own expiry).
+        self.clear_sticky_status();
         let was_armed = self.exit_armed;
         // The notice panel: any key closes it (the refusal's ways out
         // stay copy-pasteable while it is up), except the exit key,

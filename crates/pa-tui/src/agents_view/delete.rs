@@ -2,7 +2,8 @@
 //! `pendingKillSubagent`), the wire dispatch the confirm executes, and
 //! the no-effect outcome summary (moved with its concern).
 use super::{
-    mpsc, AgentsViewMode, AgentsViewRow, DaemonClient, DaemonCommand, RowKind, UiInput, Value,
+    mpsc, AgentsViewMode, AgentsViewRow, DaemonClient, DaemonCommand, RowKind, StatusTone, UiInput,
+    Value,
 };
 
 /// The armed stop-or-delete row (TS `pendingDeleteAgent` /
@@ -167,23 +168,35 @@ pub(super) fn spawn_delete_dispatch(
                 }
             }
         };
-        let outcome = match client.request(request).await {
+        // The outcome's tone (TS `setStatusMessage`'s explicit tones):
+        // a success reads muted, a no-effect stop warning, a failure
+        // error — the status line never re-derives it from the text.
+        let (outcome, tone) = match client.request(request).await {
             Ok(response) if response.success && action.effect_happened(&response) => {
-                action.success_message()
+                (action.success_message(), StatusTone::Muted)
             }
             Ok(response) if response.success => {
                 // The wire ran but changed nothing: the status carries
                 // what the wire said, never the button's hope.
                 let summary = no_effect_summary(response.data.as_ref());
-                format!("{} did not change anything: {summary}", action.fail_word())
+                (
+                    format!("{} did not change anything: {summary}", action.fail_word()),
+                    StatusTone::Warning,
+                )
             }
             Ok(response) => {
                 let error = response
                     .error
                     .unwrap_or_else(|| "the command failed".into());
-                format!("{} failed: {error}", action.fail_word())
+                (
+                    format!("{} failed: {error}", action.fail_word()),
+                    StatusTone::Error,
+                )
             }
-            Err(error) => format!("{} failed: {error}", action.fail_word()),
+            Err(error) => (
+                format!("{} failed: {error}", action.fail_word()),
+                StatusTone::Error,
+            ),
         };
         let deleted_saved_path = match &action {
             DeleteAction::DeleteSavedSession { session_path, .. }
@@ -198,6 +211,7 @@ pub(super) fn spawn_delete_dispatch(
         };
         let _ = ui_tx.send(UiInput::DeleteResult {
             message: outcome,
+            tone,
             deleted_saved_path,
         });
     })
@@ -390,8 +404,13 @@ impl AgentsViewMode {
     /// One landed stop-or-delete outcome: the status line reports it,
     /// and a deleted saved row leaves the catalog immediately (the live
     /// roster push covers the other arms; saved rows have no push).
-    pub(super) fn delete_result(&mut self, message: String, deleted_saved_path: Option<String>) {
-        self.status = Some(message);
+    pub(super) fn delete_result(
+        &mut self,
+        message: String,
+        tone: StatusTone,
+        deleted_saved_path: Option<String>,
+    ) {
+        self.set_status_tone(message, tone);
         // A deleted saved row leaves the catalog by its own path (the
         // key the daemon deleted), never by the display name.
         if let Some(path) = deleted_saved_path {

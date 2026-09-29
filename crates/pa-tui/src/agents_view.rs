@@ -53,6 +53,9 @@ use delete::{spawn_delete_dispatch, DeleteAction, PendingDelete};
 mod rename;
 use rename::{spawn_rename_dispatch, Rename};
 
+mod status;
+use status::{Status, StatusTone};
+
 /// Options for one agents-view run.
 #[derive(Debug, Clone)]
 pub struct AgentsViewOptions {
@@ -272,9 +275,11 @@ enum UiInput {
         error: String,
     },
     /// One stop-or-delete dispatch landed (the ctrl+x flow): the status
-    /// line reports the outcome.
+    /// line reports the outcome in the tone the dispatch classified it
+    /// with (success muted, a no-effect stop warning, a failure error).
     DeleteResult {
         message: String,
+        tone: StatusTone,
         /// The deleted saved session's path (the catalog key for the
         /// immediate row removal); `None` for the other arms.
         deleted_saved_path: Option<String>,
@@ -352,7 +357,10 @@ struct AgentsViewMode {
     rows: Vec<AgentsViewRow>,
     selected: usize,
     query: String,
-    status: Option<String>,
+    /// The status line (TS `statusMessage` + `statusMessageTone` + the
+    /// 4.5s timer): rendered at the bottom hint row in its tone, expired
+    /// by the loop's deadline arm, sticky lines cleared by the next key.
+    status: Option<Status>,
     /// A multi-line notice from the previous run (a daemon refusal whose
     /// ways out span lines, like the cross-product lease hold): rendered
     /// as a dismissible panel above the hint line instead of the one-line
@@ -517,7 +525,10 @@ impl AgentsViewMode {
         // status.
         let (status, notice) = match options.status_message.clone() {
             Some(message) if message.contains('\n') => (None, Some(message)),
-            status => (status, None),
+            // TS seeds the run's status with the carried line through
+            // `setStatusMessage` (the default tone rule and the timer
+            // apply to it, exactly like any later line).
+            status => (status.map(Status::transient), None),
         };
         let pending_ancestors =
             (!options.expanded_ancestors.is_empty()).then(|| options.expanded_ancestors.clone());
@@ -939,8 +950,9 @@ async fn run_agents_view_surface(
                     // needle itself — the note renders into frames, and
                     // quoting the needle would satisfy the very
                     // condition that failed).
-                    mode.status =
-                        Some("timed out waiting for the headless render condition".to_string());
+                    mode.set_status(
+                        "timed out waiting for the headless render condition".to_string(),
+                    );
                     redraw = true;
                     continue;
                 }
@@ -1021,9 +1033,10 @@ async fn run_agents_view_surface(
                 UiInput::Resize | UiInput::Settled | UiInput::WaitRender { .. } => {}
                 UiInput::DeleteResult {
                     message,
+                    tone,
                     deleted_saved_path,
                 } => {
-                    mode.delete_result(message, deleted_saved_path);
+                    mode.delete_result(message, tone, deleted_saved_path);
                 }
                 UiInput::RenameResult { rename, outcome } => {
                     mode.rename_result(rename, outcome);
@@ -1048,8 +1061,7 @@ async fn run_agents_view_surface(
                     // must not keep reporting an unavailable catalog after
                     // it loaded).
                     if mode
-                        .status
-                        .as_deref()
+                        .status_text()
                         .is_some_and(|status| status.starts_with("Saved sessions unavailable"))
                     {
                         mode.status = None;
@@ -1081,7 +1093,10 @@ async fn run_agents_view_surface(
                     catalog_request = None;
                     mode.settle_anchor_wait_on_saved_failure();
                     mode.saved_fetch_failed = true;
-                    mode.status = Some(format!("Saved sessions unavailable: {error}"));
+                    mode.set_status_tone(
+                        format!("Saved sessions unavailable: {error}"),
+                        StatusTone::Error,
+                    );
                 }
                 // The headless plan ended: the run stops here (the
                 // interactive harness's `HeadlessDone` contract). A plan
@@ -1096,11 +1111,12 @@ async fn run_agents_view_surface(
             }
             redraw = true;
         } else {
-            // The batch window's deadline, copied out of the loop state:
-            // select evaluates EVERY branch expression whether or not its
-            // precondition passes, so the flush arm below must never
-            // unwrap the Option itself.
+            // The batch window's and the status line's deadlines, copied
+            // out of the loop state: select evaluates EVERY branch
+            // expression whether or not its precondition passes, so the
+            // arms below must never unwrap an Option themselves.
             let flush_at = saved_flush;
+            let status_at = mode.status_expiry(std::time::Instant::now());
             tokio::select! {
                 maybe_event = events.recv() => {
                     match maybe_event {
@@ -1130,7 +1146,10 @@ async fn run_agents_view_surface(
                         }
                         Some(_) => {}
                         None => {
-                            mode.status = Some("the daemon connection closed".to_string());
+                            mode.set_status_tone(
+                                "the daemon connection closed".to_string(),
+                                StatusTone::Error,
+                            );
                             mode.running = false;
                             redraw = true;
                         }
@@ -1176,8 +1195,22 @@ async fn run_agents_view_surface(
                         None => std::future::pending().await,
                     }
                 } => {}
+                // The status line's expiry wake (TS `setStatusMessage`'s
+                // timer): the line clears at its deadline even on a quiet
+                // view, and the expiry check below repaints it away.
+                () = async {
+                    match status_at.map(tokio::time::Instant::from_std) {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending().await,
+                    }
+                } => {}
             }
         }
+        // The status line's timer (TS's `setTimeout`): an expired line
+        // clears here after every arm — the wake's own and any input's —
+        // so a status that aged out mid-batch never survives the
+        // redraw that follows.
+        redraw |= mode.expire_status(std::time::Instant::now());
         // Coalesce a due animation pulse with the input or roster frame,
         // and a due incident poll behind a busy input stream (the TS
         // interval fires between turns regardless).
@@ -1243,9 +1276,10 @@ async fn run_agents_view_surface(
         match input {
             UiInput::DeleteResult {
                 message,
+                tone,
                 deleted_saved_path,
             } => {
-                mode.delete_result(message, deleted_saved_path);
+                mode.delete_result(message, tone, deleted_saved_path);
             }
             UiInput::RenameResult { rename, outcome } => {
                 mode.rename_result(rename, outcome);

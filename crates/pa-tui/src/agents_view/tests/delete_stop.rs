@@ -327,6 +327,7 @@ fn a_deleted_path_survives_a_late_catalog_apply() {
     mode.rebuild_rows();
     mode.delete_result(
         "Deleted session a deleted session".to_string(),
+        StatusTone::Muted,
         Some("/x/gone.jsonl".to_string()),
     );
     assert!(mode.saved.is_empty());
@@ -423,6 +424,7 @@ fn a_deleted_saved_row_leaves_the_catalog_by_path() {
     mode.rebuild_rows();
     mode.delete_result(
         "Deleted session a deleted session".to_string(),
+        StatusTone::Muted,
         Some("/x/gone.jsonl".to_string()),
     );
     assert!(
@@ -442,6 +444,7 @@ fn a_deleted_saved_row_leaves_the_catalog_by_path() {
     // display name still matches by its own key.
     mode.delete_result(
         "Deleted session Some Other Name".to_string(),
+        StatusTone::Muted,
         Some("/x/stays.jsonl".to_string()),
     );
     assert!(

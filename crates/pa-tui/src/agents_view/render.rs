@@ -634,11 +634,21 @@ impl AgentsViewMode {
             );
             return truncate_line(&vec![theme.fg(ThemeColor::Muted, hint)], width);
         }
-        if let Some(status) = status_override.or(self.status.as_deref()) {
-            return truncate_line(
-                &vec![theme.fg(ThemeColor::Error, status.to_string())],
-                width,
-            );
+        // TS `renderHints`: the status renders in its own tone (a
+        // failure reads error, a plain report muted). The truncation
+        // keeps the style: the row is one span, clipped to the width
+        // (`truncate_line` re-wraps plain text and would strip it — the
+        // tone is the row's whole point, the #3117 SF6 divergence).
+        if let Some(status) = self.status.as_ref() {
+            return vec![theme.fg(
+                status.tone().color(),
+                truncate_text(status.text(), width),
+            )];
+        }
+        // The notice fallback (the degenerate pane's first refusal
+        // line) is the error family it always was.
+        if let Some(status) = status_override {
+            return vec![theme.fg(ThemeColor::Error, truncate_text(status, width))];
         }
         // The rename composer's hint (TS :2942-2944): save/cancel over
         // the confirm/cancel bindings' every key (`keyText` — TS shows

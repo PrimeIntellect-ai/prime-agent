@@ -122,7 +122,7 @@ fn program_key_shows_and_hides_the_spawn_program() {
     mode.selected = 0;
     mode.handle_key("ctrl+o");
     assert_eq!(
-        mode.status.as_deref(),
+        mode.status_text(),
         Some("No program recorded for these subagents")
     );
 }
@@ -175,10 +175,10 @@ fn rename_key_composes_edits_and_dispatches() {
         }),
         "the confirmed rename dispatches"
     );
-    assert_eq!(mode.status.as_deref(), Some("Renaming agent..."));
+    assert_eq!(mode.status_text(), Some("Renaming agent..."));
     // The landed outcome reports TS's row (the dispatched request itself).
     mode.rename_result(rename.expect("the dispatched rename"), Ok(()));
-    assert_eq!(mode.status.as_deref(), Some("Renamed to new"));
+    assert_eq!(mode.status_text(), Some("Renamed to new"));
     // Esc exits back to search; the query stays untouched. Ctrl+C
     // cancels too (TS :1120 — the default cancel binding includes it;
     // the force-quit guard's handled note rides the routing).
