@@ -415,23 +415,37 @@ def _install_loop_schedule_compat() -> None:
     def call_later(delay: Any, callback: Any, *args: Any, context: Any = None) -> Any:
         if not _worker_in_cell():
             return orig_call_later(delay, callback, *args, context=context)
+        if context is None:
+            context = contextvars.copy_context()
         box: dict[str, Any] = {}
 
         def spawn() -> None:
-            box["handle"] = orig_call_later(delay, callback, *args, context=context)
+            try:
+                box["handle"] = orig_call_later(delay, callback, *args, context=context)
+            except BaseException as exc:  # noqa: BLE001 - surfaced to the caller below
+                box["exc"] = exc
 
         _bridge_to_loop(spawn)
+        if "exc" in box:
+            raise box["exc"]
         return box.get("handle")
 
     def call_at(when: Any, callback: Any, *args: Any, context: Any = None) -> Any:
         if not _worker_in_cell():
             return orig_call_at(when, callback, *args, context=context)
+        if context is None:
+            context = contextvars.copy_context()
         box: dict[str, Any] = {}
 
         def spawn() -> None:
-            box["handle"] = orig_call_at(when, callback, *args, context=context)
+            try:
+                box["handle"] = orig_call_at(when, callback, *args, context=context)
+            except BaseException as exc:  # noqa: BLE001 - surfaced to the caller below
+                box["exc"] = exc
 
         _bridge_to_loop(spawn)
+        if "exc" in box:
+            raise box["exc"]
         return box.get("handle")
 
     _loop.call_soon = call_soon  # type: ignore[method-assign]
@@ -1113,6 +1127,9 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
     runner: _SyncCellRunner | None = None
     # True once a degraded async task owns its own tail cleanup.
     tail_detached = False
+    # Bound before the try so the finally can read it on early failures
+    # (e.g. a compile error) - only _run_guarded ever sets "degraded".
+    status: str | None = None
     try:
         codes, has_trailing = _compile_cell(req["code"], filename)
         assert _loop is not None
@@ -1193,6 +1210,17 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
             _send(error)
         _send({"event": "done", "id": cell_id, "status": status})
     finally:
+        # status is still "degraded" only when the degrade bookkeeping never
+        # completed - a finishing-window KeyboardInterrupt unwound through it.
+        # The interrupt targeted this request, so its remaining work (the
+        # still-running execution) stops here, mirroring the handoff branch.
+        if status == "degraded":
+            if runner is not None:
+                runner.request_stop()
+            else:
+                task.cancel()
+            task.add_done_callback(_consume_task_exception)
+            _pop_tail(cell_id, tail)
         # A started sync cell's runner pops its own tail at thread completion;
         # a degraded async task's done-callback owns its tail. A runner whose
         # task was cancelled before its first step never starts, so its entry
