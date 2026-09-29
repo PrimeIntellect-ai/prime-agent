@@ -170,6 +170,7 @@ impl Default for Editor {
 }
 
 impl Editor {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             lines: vec![String::new()],
@@ -208,6 +209,7 @@ impl Editor {
         self.keybindings = kb;
     }
 
+    #[must_use]
     pub fn keybindings(&self) -> &KeybindingsManager {
         &self.keybindings
     }
@@ -225,6 +227,7 @@ impl Editor {
         self.autocomplete_provider = Some(provider);
     }
 
+    #[must_use]
     pub fn autocomplete_state(&self) -> Option<&crate::autocomplete::AutocompleteState> {
         self.autocomplete.as_ref()
     }
@@ -271,6 +274,7 @@ impl Editor {
         }
     }
 
+    #[must_use]
     pub fn is_showing_autocomplete(&self) -> bool {
         self.autocomplete.is_some()
     }
@@ -278,6 +282,7 @@ impl Editor {
     /// Whether a completion request is parked or a background `@`
     /// search is running: a menu may open, so the guards that close it
     /// (Esc) treat this like an open menu.
+    #[must_use]
     pub fn has_pending_autocomplete(&self) -> bool {
         self.pending_autocomplete.is_some() || self.autocomplete_search.is_some()
     }
@@ -303,10 +308,12 @@ impl Editor {
         segment_with_markers(text, &move |id| pastes.contains_key(&id))
     }
 
+    #[must_use]
     pub fn get_text(&self) -> String {
         self.lines.join("\n")
     }
 
+    #[must_use]
     pub fn get_expanded_text(&self) -> String {
         self.expand_paste_markers(&self.lines.join("\n"))
     }
@@ -341,10 +348,12 @@ impl Editor {
         result
     }
 
+    #[must_use]
     pub fn get_lines(&self) -> Vec<String> {
         self.lines.clone()
     }
 
+    #[must_use]
     pub fn get_cursor(&self) -> (usize, usize) {
         (self.cursor_line, self.cursor_col)
     }
@@ -361,6 +370,7 @@ impl Editor {
     /// The prompt prefix the first line renders in place of its leading
     /// `!`/`!!` (TS `CustomEditor.getPromptPrefix`): `! ` / `!! ` when the
     /// first line opens a bang command, `None` for the default `> `.
+    #[must_use]
     pub fn bash_prompt_prefix(&self) -> Option<&'static str> {
         self.lines
             .first()
@@ -372,6 +382,7 @@ impl Editor {
     /// `getHiddenTextPrefixLength`): the bang prefix the prompt renders
     /// in place of on line 0, zero everywhere else. The cursor cannot
     /// move into it and edits treat it as the line's start.
+    #[must_use]
     pub fn line_start_col(&self, line_index: usize) -> usize {
         if line_index != 0 {
             return 0;
@@ -386,11 +397,13 @@ impl Editor {
     /// `CustomEditor.isCursorAtEnd`): the position from which the
     /// move-below-prompt hook can hand the focus to the surface below the
     /// editor (the subagent summary line).
+    #[must_use]
     pub fn is_cursor_at_end(&self) -> bool {
         let last = self.lines.len() - 1;
         self.cursor_line == last && self.cursor_col == self.lines[last].chars().count()
     }
 
+    #[must_use]
     pub fn get_paste_snapshot(&self) -> EditorPasteSnapshot {
         let mut pastes: Vec<(usize, String)> =
             self.pastes.iter().map(|(k, v)| (*k, v.clone())).collect();
@@ -462,6 +475,7 @@ impl Editor {
         }
     }
 
+    #[must_use]
     pub fn get_history(&self) -> &[String] {
         &self.history
     }
@@ -499,6 +513,7 @@ impl Editor {
 
     /// History browsing holds the editor (TS `isHistoryNavigationActive`):
     /// the state that parks the move-below-prompt hand-off.
+    #[must_use]
     pub fn is_history_navigation_active(&self) -> bool {
         self.history_index > -1
     }

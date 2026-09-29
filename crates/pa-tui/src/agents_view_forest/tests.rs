@@ -1028,7 +1028,10 @@ fn the_summary_line_bills_the_deleted_descendant_bucket() {
         .find(|row| row.identity == "subagents:file:/x/p.jsonl")
         .expect("the ONE line");
     assert!((summary.cost - 0.75).abs() < f64::EPSILON);
-    assert!((rows[0].cost - 1.0).abs() < f64::EPSILON, "own 0.25 + aggregate 0.75");
+    assert!(
+        (rows[0].cost - 1.0).abs() < f64::EPSILON,
+        "own 0.25 + aggregate 0.75"
+    );
 }
 
 /// A tree that spends nothing bills its `$0.00` cell — the cost cell
@@ -1094,13 +1097,19 @@ fn a_nested_line_bills_its_own_subtree() {
         .find(|row| row.identity == format!("{SUMMARY_ROW_PREFIX}{child_identity}"))
         .expect("the child's own line");
     assert_eq!(nested.title, "1 subagents (1 running)");
-    assert!((nested.cost - 0.25).abs() < f64::EPSILON, "only the grandchild's spend");
+    assert!(
+        (nested.cost - 0.25).abs() < f64::EPSILON,
+        "only the grandchild's spend"
+    );
     let root = rows
         .iter()
         .find(|row| row.identity == "subagents:file:/x/p.jsonl")
         .expect("the root's line");
     assert_eq!(root.title, "3 subagents (2 running)");
-    assert!((root.cost - 4.0).abs() < f64::EPSILON, "runner subtree 1.50 + idle 2.50");
+    assert!(
+        (root.cost - 4.0).abs() < f64::EPSILON,
+        "runner subtree 1.50 + idle 2.50"
+    );
 }
 
 /// The operator's acceptance line: a fleet-scale roster — 331

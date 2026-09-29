@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::{json, Value};
 
 use crate::daemon_client::DaemonClient;

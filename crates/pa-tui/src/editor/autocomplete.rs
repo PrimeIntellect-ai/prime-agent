@@ -4,7 +4,7 @@
 use std::sync::mpsc::TryRecvError;
 
 use super::text_utils::{char_at, char_prefix, ends_with_symbol_token};
-use super::{Editor, EditorEvent, PendingAutocomplete};
+use super::{AutocompleteSearch, Editor, EditorEvent, PendingAutocomplete};
 
 impl Editor {
     // ---- autocomplete ------------------------------------------------------
