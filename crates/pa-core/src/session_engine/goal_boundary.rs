@@ -143,7 +143,8 @@ impl SessionEngine {
         if last_turn
             .as_ref()
             .is_some_and(|turn: &pa_agent::types::AssistantMessage| {
-                turn.stop_reason == pa_agent::types::StopReason::Error || turn.content.is_empty()
+                turn.stop_reason == pa_agent::types::StopReason::Error
+                    || super::goal_driver::turn_produced_no_output(turn)
             })
         {
             self.session.drop_failed_goal_continuation().await;

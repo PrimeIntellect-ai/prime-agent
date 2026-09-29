@@ -742,6 +742,29 @@ impl GoalDriver {
                 }
             }
         }
+        // The cap enforcement is UNCONDITIONAL: a restored goal already at
+        // the cap (a restart or a failed terminal persist between the
+        // streak row and the error row) finishes at the FIRST consult —
+        // the examined-turn gate must not shield a cap that already
+        // struck from the terminal transition.
+        if self.state.status == GoalStatus::Active
+            && self.no_progress_streak >= CONTINUATION_NO_PROGRESS_CAP
+        {
+            let reason =
+                "Goal continuation cap reached: consecutive turns made no progress".to_string();
+            self.set_state(
+                session,
+                GoalState {
+                    active: false,
+                    status: GoalStatus::Error,
+                    no_progress_streak: Some(self.no_progress_streak),
+                    last_reason: Some(reason.clone()),
+                    last_error: Some(reason),
+                    ..self.state.clone()
+                },
+            )?;
+            return Ok(None);
+        }
         // The backoff gate: a consult inside the window mints nothing;
         // the next boundary after the window re-mints (the goal stays
         // Active — this is a delay, not a death).
@@ -967,6 +990,24 @@ mod tests {
     use crate::session::manager::SessionManager;
     use pa_types::ai::UserContent;
     use std::fmt::Write as _;
+
+    /// The latest persisted goal state with the terminal row reverted:
+    /// the newest ACTIVE streak-3 row (the interrupted-transition shape).
+    fn session_rows_with_reverted_terminal(session: &mut SessionManager) -> GoalState {
+        let mut state = session.active_goal_state().unwrap_or_else(empty_goal_state);
+        if state.status == GoalStatus::Error {
+            // Roll the terminal row back to its pre-finish shape: the
+            // streak-3 Active row the persist left as the newest.
+            state = GoalState {
+                active: true,
+                status: GoalStatus::Active,
+                last_reason: None,
+                last_error: None,
+                ..state
+            };
+        }
+        state
+    }
 
     fn persisted_session() -> SessionManager {
         let dir = tempfile::TempDir::new().unwrap();
@@ -1596,6 +1637,44 @@ mod tests {
             .is_some());
         assert_eq!(driver.no_progress_streak(), 0);
         driver.continuation_consumed();
+    }
+
+    /// THE WAVE-3 REGRESSION: a restored goal already AT the cap (a
+    /// restart or a failed terminal persist between the streak row and
+    /// the error row leaves `Active` with `no_progress_streak == 3`)
+    /// finishes at the FIRST consult — the examined-turn gate must never
+    /// shield a cap that already struck.
+    #[test]
+    fn a_restored_goal_at_the_cap_finishes_at_the_first_consult() {
+        let mut session = persisted_session();
+        let mut driver = GoalDriver::new();
+        driver.start(&mut session, "work", None).unwrap();
+        let created_at = driver.state().created_at.unwrap();
+        for offset in 1..=3 {
+            let empty = test_empty_turn(created_at as i64 + offset);
+            driver
+                .next_continuation_message(&mut session, Some(&empty))
+                .unwrap();
+        }
+        assert_eq!(driver.state().status, GoalStatus::Error);
+        // Simulate the interrupted terminal transition: the durable rows
+        // keep the streak-3 Active row as the newest (the error row
+        // never landed). A rebuilt driver adopts Active-at-cap.
+        let rows = session_rows_with_reverted_terminal(&mut session);
+        let mut driver = GoalDriver::restore_persisted(rows);
+        assert_eq!(driver.state().status, GoalStatus::Active);
+        assert_eq!(driver.no_progress_streak(), 3);
+        // The FIRST consult — of ANY turn, examined or not — enforces
+        // the cap: the goal finishes.
+        assert!(driver
+            .next_continuation_message(&mut session, Some(&test_empty_turn(created_at as i64 + 3)))
+            .unwrap()
+            .is_none());
+        assert_eq!(driver.state().status, GoalStatus::Error);
+        assert_eq!(
+            driver.state().last_reason.as_deref(),
+            Some("Goal continuation cap reached: consecutive turns made no progress")
+        );
     }
 
     /// The restore-resurrection guard (the diagnosis's (d)): an active

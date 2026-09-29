@@ -99,8 +99,18 @@ impl AgentSession {
         // snapshot and the replace.
         self.agent
             .mutate_messages(|messages| {
+                // The failed assistant row: the LAST assistant, not the
+                // last row — a trailing `provider_retry_outcome`
+                // disclosure (a restored loop replays it after the
+                // corpse) must not hide the pair from the cleanup.
+                let Some(corpse_index) = messages
+                    .iter()
+                    .rposition(|message| standard_message(message).is_some())
+                else {
+                    return;
+                };
                 let Some(pa_agent::types::Message::Assistant(corpse)) =
-                    messages.last().and_then(standard_message)
+                    messages.get(corpse_index).and_then(standard_message)
                 else {
                     return;
                 };
@@ -111,11 +121,11 @@ impl AgentSession {
                 }
                 // The driving continuation row sits under the corpse,
                 // possibly behind trailing display rows (the
-                // `provider_retry_outcome` disclosure a restored loop
-                // replays): scan backward over Custom rows only — the
-                // first goal_context continuation row wins, and every
-                // display row it scanned past stays.
-                let goal_context_row_at = messages[..messages.len() - 1]
+                // `provider_retry_outcome` disclosure): scan backward
+                // over Custom rows only — the first goal_context
+                // continuation row wins, and every display row it
+                // scanned past stays.
+                let goal_context_row_at = messages[..corpse_index]
                     .iter()
                     .enumerate()
                     .rev()
@@ -142,7 +152,9 @@ impl AgentSession {
                 let Some(context_index) = goal_context_row_at else {
                     return;
                 };
-                let corpse_index = messages.len() - 1;
+                // Remove the later index first so the earlier one keeps
+                // its position (a trailing disclosure row keeps the
+                // corpse above the removal pair).
                 messages.remove(corpse_index);
                 messages.remove(context_index);
             })

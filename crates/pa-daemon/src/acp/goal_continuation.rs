@@ -73,7 +73,8 @@ pub(super) async fn mint_goal_continuation(
     if last_turn
         .as_ref()
         .is_some_and(|turn: &pa_agent::types::AssistantMessage| {
-            turn.stop_reason == pa_agent::types::StopReason::Error || turn.content.is_empty()
+            turn.stop_reason == pa_agent::types::StopReason::Error
+                || pa_core::session_engine::goal_driver::turn_produced_no_output(turn)
         })
     {
         mode.engine.session.drop_failed_goal_continuation().await;
