@@ -437,6 +437,8 @@ fn encode_model_id(model_id: &str) -> String {
     encoded
 }
 
+// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+#[allow(clippy::too_many_lines)]
 async fn run_stream(
     model: &Model,
     context: &Context,
@@ -671,7 +673,14 @@ async fn run_stream(
                 break;
             };
             for message in decoder.push(&chunk) {
-                match handle_event(&message, model, output, writer, &mut state, &request_id) {
+                match handle_event(
+                    &message,
+                    model,
+                    output,
+                    writer,
+                    &mut state,
+                    request_id.as_ref(),
+                ) {
                     Ok(()) => {}
                     Err(error) => {
                         stream_error = Some(error);

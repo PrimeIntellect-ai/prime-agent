@@ -28,6 +28,8 @@ pub struct CallbackCode {
 }
 
 /// Settled once per login; the first settle wins.
+// Two states: outer None = unsettled, inner None = settled-empty (cancelled).
+#[allow(clippy::option_option)]
 #[derive(Default)]
 struct CallbackShared {
     result: tokio::sync::Mutex<Option<Option<CallbackCode>>>,
@@ -115,6 +117,7 @@ impl CodexCallbackServer {
 
     /// The never-bound server: its wait settles empty (the login's
     /// manual paste is the remaining path).
+    #[must_use]
     pub fn dead() -> Self {
         CodexCallbackServer {
             shared: None,
@@ -124,6 +127,7 @@ impl CodexCallbackServer {
     }
 
     /// The bound port (`None` on the dead server).
+    #[must_use]
     pub fn port(&self) -> Option<u16> {
         self.port
     }

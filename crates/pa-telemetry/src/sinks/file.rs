@@ -29,6 +29,7 @@ pub struct FileSink {
 
 impl FileSink {
     /// Mirror at `<agentDir>/telemetry.jsonl` with the default 5 MiB cap.
+    #[must_use]
     pub fn new(agent_dir: &Path) -> Self {
         Self {
             path: agent_dir.join(FILE_NAME),
@@ -45,6 +46,7 @@ impl FileSink {
     }
 
     /// Current mirror file path.
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }

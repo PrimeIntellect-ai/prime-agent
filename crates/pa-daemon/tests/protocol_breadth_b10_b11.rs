@@ -3,6 +3,31 @@
 //! rides the real supervisor + worker over the socket and answers the
 //! exact TS wire shape (success and error paths), the same harness the
 //! supervisor e2e suite uses.
+// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
+// the full rationale).
+// Stack-resident futures by design on the daemon's hot paths; boxing the
+// call sites for a lint tick is a perf regression with zero correctness gain.
+#![allow(clippy::large_futures)]
+// 64-bit-only targets; the narrowing casts sit at OS boundaries
+// (pid/fd/time/size) where the values are bounded by the kernel - the
+// dead-guard expect()s would add panic paths where silent wrap was
+// deliberate.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// The fn-length threshold is a style gate, not correctness; the structure
+// campaign owns the god-fn splits as a follow-up.
+#![allow(clippy::too_many_lines)]
+// API-shape opinions, not defects; the surfaces are deliberate.
+#![allow(
+    clippy::unnecessary_wraps,
+    clippy::zero_sized_map_values,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names
+)]
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -97,7 +122,7 @@ impl Client {
         self.writer.flush().expect("flush");
     }
 
-    fn send_command(&mut self, id: &str, command: serde_json::Value) {
+    fn send_command(&mut self, id: &str, command: &serde_json::Value) {
         self.send(&serde_json::json!({
             "type": "command",
             "id": id,
@@ -232,7 +257,7 @@ fn scripted_session(
     .expect("write script");
     client.send_command(
         "create-1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.to_string_lossy(),
@@ -265,7 +290,7 @@ fn wave_b10_scheduling_wire_shapes() {
     // identity, the parsed one-shot schedule, a next run).
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "cron_add", "activeSessionId": session_id,
             "schedule": "in 10m", "prompt": "run me"
         }),
@@ -285,7 +310,7 @@ fn wave_b10_scheduling_wire_shapes() {
     // cron_list (selector form): the job.
     client.send_command(
         "c2",
-        json!({ "type": "cron_list", "activeSessionId": session_id }),
+        &json!({ "type": "cron_list", "activeSessionId": session_id }),
     );
     let response = client.read_response("c2");
     assert_eq!(response["success"], true, "{response}");
@@ -295,7 +320,7 @@ fn wave_b10_scheduling_wire_shapes() {
 
     // cron_list (selector-less): the supervisor merge over the live
     // worker plus the passive catalog.
-    client.send_command("c3", json!({ "type": "cron_list" }));
+    client.send_command("c3", &json!({ "type": "cron_list" }));
     let response = client.read_response("c3");
     assert_eq!(response["success"], true, "{response}");
     let jobs = response["data"]["jobs"].as_array().expect("jobs");
@@ -303,7 +328,7 @@ fn wave_b10_scheduling_wire_shapes() {
     assert_eq!(jobs[0]["id"], job_id.as_str());
 
     // heartbeats_list before any heartbeat: the empty catalog.
-    client.send_command("h0", json!({ "type": "heartbeats_list" }));
+    client.send_command("h0", &json!({ "type": "heartbeats_list" }));
     let response = client.read_response("h0");
     assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["data"]["heartbeats"], json!([]));
@@ -312,7 +337,7 @@ fn wave_b10_scheduling_wire_shapes() {
     // requested delivery mode).
     client.send_command(
         "h1",
-        json!({
+        &json!({
             "type": "heartbeat_set", "activeSessionId": session_id,
             "schedule": "every 10m", "prompt": "check in",
             "deliveryMode": "follow_up"
@@ -329,7 +354,7 @@ fn wave_b10_scheduling_wire_shapes() {
     // heartbeat_get: the session's heartbeat.
     client.send_command(
         "h2",
-        json!({ "type": "heartbeat_get", "activeSessionId": session_id }),
+        &json!({ "type": "heartbeat_get", "activeSessionId": session_id }),
     );
     let response = client.read_response("h2");
     assert_eq!(response["success"], true, "{response}");
@@ -337,7 +362,7 @@ fn wave_b10_scheduling_wire_shapes() {
 
     // heartbeats_list: the merged catalog row ({ job, sessionName?,
     // firstMessage? }).
-    client.send_command("h3", json!({ "type": "heartbeats_list" }));
+    client.send_command("h3", &json!({ "type": "heartbeats_list" }));
     let response = client.read_response("h3");
     assert_eq!(response["success"], true, "{response}");
     let heartbeats = response["data"]["heartbeats"].as_array().expect("rows");
@@ -347,7 +372,7 @@ fn wave_b10_scheduling_wire_shapes() {
     // heartbeat_update (pause): the paused heartbeat.
     client.send_command(
         "h4",
-        json!({
+        &json!({
             "type": "heartbeat_update", "activeSessionId": session_id,
             "action": "pause"
         }),
@@ -359,7 +384,7 @@ fn wave_b10_scheduling_wire_shapes() {
     // heartbeat_manage (resume): the active heartbeat again.
     client.send_command(
         "h5",
-        json!({
+        &json!({
             "type": "heartbeat_manage", "activeSessionId": session_id,
             "jobId": heartbeat_id, "action": "resume"
         }),
@@ -371,7 +396,7 @@ fn wave_b10_scheduling_wire_shapes() {
     // heartbeat_manage (stop): the cancelled heartbeat.
     client.send_command(
         "h6",
-        json!({
+        &json!({
             "type": "heartbeat_manage", "activeSessionId": session_id,
             "jobId": heartbeat_id, "action": "stop"
         }),
@@ -383,7 +408,7 @@ fn wave_b10_scheduling_wire_shapes() {
     // heartbeat_get with no live heartbeat: null (TS `?? null`).
     client.send_command(
         "h7",
-        json!({ "type": "heartbeat_get", "activeSessionId": session_id }),
+        &json!({ "type": "heartbeat_get", "activeSessionId": session_id }),
     );
     let response = client.read_response("h7");
     assert_eq!(response["success"], true, "{response}");
@@ -391,13 +416,16 @@ fn wave_b10_scheduling_wire_shapes() {
 
     // cron_cancel (selector-less): the supervisor finds the owning
     // worker and cancels through it.
-    client.send_command("c4", json!({ "type": "cron_cancel", "jobId": job_id }));
+    client.send_command("c4", &json!({ "type": "cron_cancel", "jobId": job_id }));
     let response = client.read_response("c4");
     assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["data"]["job"]["status"], "cancelled");
 
     // cron_cancel of an unknown job: the TS error.
-    client.send_command("c5", json!({ "type": "cron_cancel", "jobId": "ghost-job" }));
+    client.send_command(
+        "c5",
+        &json!({ "type": "cron_cancel", "jobId": "ghost-job" }),
+    );
     let response = client.read_response("c5");
     assert_eq!(response["success"], false, "{response}");
     assert_eq!(response["error"], "No cron job found: ghost-job");
@@ -405,7 +433,7 @@ fn wave_b10_scheduling_wire_shapes() {
     // heartbeat_manage of an unknown job: the TS error.
     client.send_command(
         "h8",
-        json!({
+        &json!({
             "type": "heartbeat_manage", "activeSessionId": session_id,
             "jobId": "ghost-beat", "action": "pause"
         }),
@@ -434,7 +462,7 @@ fn wave_b10_scheduled_prompt_fires() {
     );
     client.send_command(
         "f1",
-        json!({
+        &json!({
             "type": "cron_add", "activeSessionId": session_id,
             "schedule": at, "prompt": "fire me"
         }),
@@ -456,7 +484,7 @@ fn wave_b10_scheduled_prompt_fires() {
         );
         client.send_command(
             "f2",
-            json!({
+            &json!({
                 "type": "cron_list", "activeSessionId": session_id,
                 "includeInactive": true
             }),
@@ -489,24 +517,27 @@ fn wave_b10_fresh_supervisor_catalog() {
     let _daemon = spawn_daemon(&socket, &agent_dir);
     let (mut client, _hello) = Client::connect(&socket);
 
-    client.send_command("s1", json!({ "type": "cron_list" }));
+    client.send_command("s1", &json!({ "type": "cron_list" }));
     let response = client.read_response("s1");
     assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["data"], json!({ "jobs": [] }));
 
-    client.send_command("s2", json!({ "type": "heartbeats_list" }));
+    client.send_command("s2", &json!({ "type": "heartbeats_list" }));
     let response = client.read_response("s2");
     assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["data"], json!({ "heartbeats": [] }));
 
-    client.send_command("s3", json!({ "type": "cron_cancel", "jobId": "ghost-job" }));
+    client.send_command(
+        "s3",
+        &json!({ "type": "cron_cancel", "jobId": "ghost-job" }),
+    );
     let response = client.read_response("s3");
     assert_eq!(response["success"], false, "{response}");
     assert_eq!(response["error"], "No cron job found: ghost-job");
 
     client.send_command(
         "s4",
-        json!({
+        &json!({
             "type": "heartbeat_manage", "activeSessionId": "bogus-1",
             "jobId": "j", "action": "pause"
         }),
@@ -517,7 +548,7 @@ fn wave_b10_fresh_supervisor_catalog() {
 
     client.send_command(
         "s5",
-        json!({
+        &json!({
             "type": "cron_add", "activeSessionId": "bogus-1",
             "schedule": "every 10m", "prompt": "hi"
         }),
@@ -545,7 +576,7 @@ fn wave_b11_saved_sessions_wire_shapes() {
 
         client.send_command(
             "r0",
-            json!({
+            &json!({
                 "type": "rename_saved_session",
                 "sessionPath": "/tmp/does-not-exist-xyz.jsonl",
                 "name": "renamed"
@@ -560,7 +591,7 @@ fn wave_b11_saved_sessions_wire_shapes() {
 
         client.send_command(
             "d0",
-            json!({
+            &json!({
                 "type": "delete_saved_session",
                 "sessionPath": "/tmp/does-not-exist-xyz.jsonl"
             }),
@@ -571,7 +602,7 @@ fn wave_b11_saved_sessions_wire_shapes() {
         assert_eq!(response["success"], true, "{response}");
         assert_eq!(response["data"]["ok"], false, "{response}");
 
-        client.send_command("p0", json!({ "type": "list_agent_peers" }));
+        client.send_command("p0", &json!({ "type": "list_agent_peers" }));
         let response = client.read_response("p0");
         assert_eq!(response["success"], false, "{response}");
         assert_eq!(response["error"], "Worker authentication failed");
@@ -584,7 +615,7 @@ fn wave_b11_saved_sessions_wire_shapes() {
         // The live session's file: read it off the worker's state.
         client.send_command(
             "g0",
-            json!({ "type": "get_state", "activeSessionId": session_id }),
+            &json!({ "type": "get_state", "activeSessionId": session_id }),
         );
         let response = client.read_response("g0");
         assert_eq!(response["success"], true, "{response}");
@@ -614,7 +645,7 @@ fn wave_b11_saved_sessions_wire_shapes() {
     // The offline rename: the session_info entry lands in the file.
     client.send_command(
         "r1",
-        json!({
+        &json!({
             "type": "rename_saved_session",
             "sessionPath": saved_path.to_string_lossy(),
             "name": "renamed"
@@ -630,7 +661,7 @@ fn wave_b11_saved_sessions_wire_shapes() {
     // The offline delete: the file and its artifact partition go.
     client.send_command(
         "d1",
-        json!({
+        &json!({
             "type": "delete_saved_session",
             "sessionPath": saved_path.to_string_lossy()
         }),
@@ -644,7 +675,7 @@ fn wave_b11_saved_sessions_wire_shapes() {
     // success and the live name follows.
     client.send_command(
         "r2",
-        json!({
+        &json!({
             "type": "rename_saved_session",
             "activeSessionId": session_id,
             "sessionPath": live_file,
@@ -656,7 +687,7 @@ fn wave_b11_saved_sessions_wire_shapes() {
     assert_eq!(response["data"], Value::Null, "{response}");
     client.send_command(
         "g1",
-        json!({ "type": "get_state", "activeSessionId": session_id }),
+        &json!({ "type": "get_state", "activeSessionId": session_id }),
     );
     let response = client.read_response("g1");
     assert_eq!(response["success"], true, "{response}");
@@ -665,7 +696,7 @@ fn wave_b11_saved_sessions_wire_shapes() {
     // The active session refuses the delete.
     client.send_command(
         "d2",
-        json!({
+        &json!({
             "type": "delete_saved_session",
             "sessionPath": live_file
         }),
@@ -696,14 +727,14 @@ fn wave_b10_heartbeat_snapshot_fallback() {
     // holds the row.
     client.send_command(
         "s1",
-        json!({
+        &json!({
             "type": "heartbeat_set", "activeSessionId": session_id,
             "schedule": "every 10m", "prompt": "check in"
         }),
     );
     let response = client.read_response("s1");
     assert_eq!(response["success"], true, "{response}");
-    client.send_command("s2", json!({ "type": "heartbeats_list" }));
+    client.send_command("s2", &json!({ "type": "heartbeats_list" }));
     let response = client.read_response("s2");
     assert_eq!(response["success"], true, "{response}");
     let heartbeats = response["data"]["heartbeats"].as_array().expect("rows");
@@ -713,7 +744,7 @@ fn wave_b10_heartbeat_snapshot_fallback() {
     // last-good snapshot keeps the row in the merged catalog.
     let pid = worker_pid(&agent_dir);
     stop(pid);
-    client.send_command("s3", json!({ "type": "heartbeats_list" }));
+    client.send_command("s3", &json!({ "type": "heartbeats_list" }));
     let response = client.read_response("s3");
     assert_eq!(response["success"], true, "{response}");
     let heartbeats = response["data"]["heartbeats"].as_array().expect("rows");
@@ -725,7 +756,7 @@ fn wave_b10_heartbeat_snapshot_fallback() {
     // fails the response instead of serving the stale rows (TS `failed`).
     client.send_command(
         "s4",
-        json!({
+        &json!({
             "type": "heartbeat_update", "activeSessionId": session_id,
             "action": "pause"
         }),
@@ -733,7 +764,7 @@ fn wave_b10_heartbeat_snapshot_fallback() {
     let response = client.read_response("s4");
     assert_eq!(response["success"], true, "{response}");
     stop(pid);
-    client.send_command("s5", json!({ "type": "heartbeats_list" }));
+    client.send_command("s5", &json!({ "type": "heartbeats_list" }));
     let response = client.read_response("s5");
     assert_eq!(response["success"], false, "{response}");
     cont(pid);
@@ -753,7 +784,7 @@ fn wave_b10_single_worker_slice_is_byte_identical() {
     let (_daemon, mut client, session_id, _socket) = scripted_session(dir.path(), &agent_dir);
     client.send_command(
         "add",
-        json!({
+        &json!({
             "type": "cron_add", "activeSessionId": session_id,
             "schedule": "in 10m", "prompt": "run me"
         }),
@@ -762,7 +793,7 @@ fn wave_b10_single_worker_slice_is_byte_identical() {
     assert_eq!(response["success"], true, "{response}");
     client.send_command(
         "set",
-        json!({
+        &json!({
             "type": "heartbeat_set", "activeSessionId": session_id,
             "schedule": "every 10m", "prompt": "check in"
         }),
@@ -770,10 +801,10 @@ fn wave_b10_single_worker_slice_is_byte_identical() {
     let response = client.read_response("set");
     assert_eq!(response["success"], true, "{response}");
 
-    client.send_command("fresh1", json!({ "type": "heartbeats_list" }));
+    client.send_command("fresh1", &json!({ "type": "heartbeats_list" }));
     let first = client.read_response("fresh1");
     assert_eq!(first["success"], true, "{first}");
-    client.send_command("cron1", json!({ "type": "cron_list" }));
+    client.send_command("cron1", &json!({ "type": "cron_list" }));
     let first_cron = client.read_response("cron1");
     assert_eq!(first_cron["success"], true, "{first_cron}");
 
@@ -782,7 +813,7 @@ fn wave_b10_single_worker_slice_is_byte_identical() {
     let pid = worker_pid(&agent_dir);
     stop(pid);
     let started = Instant::now();
-    client.send_command("fresh2", json!({ "type": "heartbeats_list" }));
+    client.send_command("fresh2", &json!({ "type": "heartbeats_list" }));
     let second = client.read_response("fresh2");
     let served = started.elapsed();
     assert_eq!(second["success"], true, "{second}");
@@ -791,7 +822,7 @@ fn wave_b10_single_worker_slice_is_byte_identical() {
         served < Duration::from_secs(2),
         "a re-forward would hold the 5s timeout: {served:?}"
     );
-    client.send_command("cron2", json!({ "type": "cron_list" }));
+    client.send_command("cron2", &json!({ "type": "cron_list" }));
     let second_cron = client.read_response("cron2");
     assert_eq!(second_cron["success"], true, "{second_cron}");
     assert_eq!(
@@ -830,7 +861,7 @@ fn wave_b10_catalog_slices_served_without_reforwarding() {
     ] {
         client.send_command(
             "set",
-            json!({
+            &json!({
                 "type": "heartbeat_set", "activeSessionId": session,
                 "schedule": "every 10m", "prompt": format!("check in {suffix}")
             }),
@@ -840,7 +871,7 @@ fn wave_b10_catalog_slices_served_without_reforwarding() {
     }
 
     // The merged catalog carries each worker's own slice.
-    client_a.send_command("list1", json!({ "type": "heartbeats_list" }));
+    client_a.send_command("list1", &json!({ "type": "heartbeats_list" }));
     let response = client_a.read_response("list1");
     assert_eq!(response["success"], true, "{response}");
     let prompts = heartbeat_prompts(&response);
@@ -862,7 +893,7 @@ fn wave_b10_catalog_slices_served_without_reforwarding() {
     stop(pid_a);
     stop(pid_b);
     let started = Instant::now();
-    client_a.send_command("list2", json!({ "type": "heartbeats_list" }));
+    client_a.send_command("list2", &json!({ "type": "heartbeats_list" }));
     let response = client_a.read_response("list2");
     let served = started.elapsed();
     assert_eq!(response["success"], true, "{response}");
@@ -881,7 +912,7 @@ fn wave_b10_catalog_slices_served_without_reforwarding() {
     cont(pid_b);
     client_b.send_command(
         "pause",
-        json!({
+        &json!({
             "type": "heartbeat_update", "activeSessionId": session_b,
             "action": "pause"
         }),
@@ -890,7 +921,7 @@ fn wave_b10_catalog_slices_served_without_reforwarding() {
     assert_eq!(response["success"], true, "{response}");
     stop(pid_a);
     stop(pid_b);
-    client_a.send_command("list3", json!({ "type": "heartbeats_list" }));
+    client_a.send_command("list3", &json!({ "type": "heartbeats_list" }));
     let response = client_a.read_response("list3");
     assert_eq!(response["success"], false, "{response}");
     cont(pid_a);
@@ -958,7 +989,7 @@ fn create_scripted_session(
     .expect("write script");
     client.send_command(
         format!("create-{suffix}").as_str(),
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.to_string_lossy(),

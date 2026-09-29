@@ -1,7 +1,12 @@
 //! The saved-session surfaces: the `list`/`list_saved_sessions`/`create`
 //! handlers, the stale-id binding and rebind seam, and the saved-row
 //! builders.
-use super::*;
+use super::{
+    anyhow, bail, json, list_sessions, mpsc, name_unavailable_error, paths, reservation_key,
+    response_failure, response_line, response_success, subscribers, Arc, DaemonCommand,
+    DaemonResponse, DaemonSessionLifecycle, NameScope, Outbound, Path, PathBuf, ResidentWorker,
+    Result, RouteAdmission, Supervisor, Value, ROUTE_TIMEOUT_MS,
+};
 
 /// One spawn-name reservation held across a fresh-launch create (TS
 /// `createRlmSubagentRuntime`'s `pendingSessionNames` hold, #2396): the
@@ -52,7 +57,7 @@ impl Supervisor {
                     "sessionId": binding.session_id,
                     "sessionFile": binding.session_file,
                 });
-                self.publish_session_event(&previous, std::sync::Arc::new(event));
+                self.publish_session_event(&previous, &std::sync::Arc::new(event));
             }
         }
     }
@@ -90,7 +95,7 @@ impl Supervisor {
             };
             self.publish_session_event(
                 &current,
-                std::sync::Arc::new(json!({
+                &std::sync::Arc::new(json!({
                     "type": "session_binding",
                     "previousActiveSessionId": selector,
                     "activeSessionId": current,
@@ -232,7 +237,7 @@ impl Supervisor {
         // store never head-of-lines a runtime worker (the #2723 class).
         let stream_rows = stream.clone();
         let scan_command_id = command_id.to_string();
-        let scan_active_session_id = active_session_id.as_ref().cloned();
+        let scan_active_session_id = active_session_id.clone();
         let scan_cwd = cwd.clone();
         let scan = tokio::task::spawn_blocking(move || {
             let mut file_total = 0usize;

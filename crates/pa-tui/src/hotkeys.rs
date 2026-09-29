@@ -152,7 +152,7 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
 | `{paste_image}` | Paste image from clipboard |
 | `/` | Slash commands |
 
-**Fullscreen mode (`/fullscreen`)**
+**Transcript navigation (the always-fullscreen surface)**
 | Key | Action |
 |-----|--------|
 | `{viewport_page_up}` / `{viewport_page_down}` | Scroll transcript by page |
@@ -183,10 +183,15 @@ mod tests {
         // The `?` quick-shortcut overlay is removed (the operator's
         // 2026-09-26 directive): the guide keeps no reference to it.
         assert!(!guide.contains("quick shortcuts"), "{guide}");
+        // The fullscreen toggle is retired (the surface is
+        // fullscreen-only, the operator's 2026-09-28 ruling): the guide's
+        // navigation section keeps the transcript keys under the plain
+        // heading and never advertises `/fullscreen`.
         assert!(
-            guide.contains("**Fullscreen mode (`/fullscreen`)**"),
+            guide.contains("**Transcript navigation (the always-fullscreen surface)**"),
             "{guide}"
         );
+        assert!(!guide.contains("/fullscreen"), "{guide}");
         // The completeness audit's additions: the suspend binding and
         // the paragraph/doc selection pairs gained rows, and the queue
         // browse row names both of its keys.

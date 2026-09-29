@@ -233,10 +233,7 @@ async fn run_interactive_surface(
     // The `terminal.showImages` setting rides the startup options (TS
     // `getShowImages`), resolved by the composition root.
     view.show_images = options.show_images;
-    // The persisted `terminal.fullscreen` preference seeds the runtime
-    // toggle (TS `fullscreenEnabled`); the compose gates the top bar on it.
     if let Some(settings) = &options.client_settings {
-        view.fullscreen = settings.fullscreen();
         // TS constructs the chat TUI with the live `showHardwareCursor`
         // value (interactive-mode.ts `new TUI(..., getShowHardwareCursor())`);
         // the settings menu's toggle updates it in place.

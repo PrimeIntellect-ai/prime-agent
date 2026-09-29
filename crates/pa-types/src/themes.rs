@@ -20,6 +20,7 @@ pub const DARK_THEME_JSON: &str = include_str!("../themes/dark.json");
 pub const LIGHT_THEME_JSON: &str = include_str!("../themes/light.json");
 
 /// The bundled theme file for `name`, when `name` is a built-in theme.
+#[must_use]
 pub fn builtin_theme_json(name: &str) -> Option<&'static str> {
     match name {
         "prime" => Some(PRIME_THEME_JSON),

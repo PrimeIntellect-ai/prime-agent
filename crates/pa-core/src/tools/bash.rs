@@ -340,7 +340,7 @@ pub async fn execute_bash(
 
     // Stream output through the accumulator with throttled updates.
     let acc = Arc::new(Mutex::new(OutputAccumulator::new(
-        OutputAccumulatorOptions {
+        &OutputAccumulatorOptions {
             temp_file_prefix: "pi-bash".to_string(),
             ..OutputAccumulatorOptions::default()
         },
@@ -500,13 +500,15 @@ pub fn bash_tool_description() -> String {
 }
 
 /// The `bash` tool definition: exact name, schema, and description.
+#[must_use]
 pub fn create_bash_tool_definition(cwd: &str) -> ToolDefinition {
-    create_bash_tool_definition_with_options(cwd, BashToolOptions::default())
+    create_bash_tool_definition_with_options(cwd, &BashToolOptions::default())
 }
 
+#[must_use]
 pub fn create_bash_tool_definition_with_options(
     cwd: &str,
-    options: BashToolOptions,
+    options: &BashToolOptions,
 ) -> ToolDefinition {
     let cwd = cwd.to_string();
     let operations = options.operations.clone();

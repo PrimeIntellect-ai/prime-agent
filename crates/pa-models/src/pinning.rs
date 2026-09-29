@@ -23,6 +23,7 @@ pub struct PinnedTemplates {
 
 impl PinnedTemplates {
     /// Index the compiled catalog (production use).
+    #[must_use]
     pub fn from_compiled() -> Self {
         Self::from_models(crate::transports::compiled_models().iter().cloned())
     }

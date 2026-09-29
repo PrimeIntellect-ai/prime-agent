@@ -92,7 +92,7 @@ impl AgentSessionEngine {
         }
         pa_core::session_engine::compaction_trace::trace(
             "auto.threshold_start_emitted",
-            serde_json::Value::Null,
+            &serde_json::Value::Null,
         );
         // TS assigns `_autoCompactionAbortController` for the run's
         // duration: an `abort_compaction` command lands in the slot and
@@ -129,7 +129,7 @@ impl AgentSessionEngine {
         };
         pa_core::session_engine::compaction_trace::trace(
             "auto.compact_returned",
-            match &outcome {
+            &(match &outcome {
                 Ok(Ok(CompactOutcome::Ran(_))) => {
                     serde_json::json!({ "outcome": "ran" })
                 }
@@ -146,7 +146,7 @@ impl AgentSessionEngine {
                 Ok(Err(_)) | Err(_) => {
                     serde_json::json!({ "outcome": "failed" })
                 }
-            },
+            }),
         );
         match &outcome {
             Ok(Ok(CompactOutcome::Ran(run))) => {
@@ -162,7 +162,7 @@ impl AgentSessionEngine {
                     }
                     pa_core::session_engine::compaction_trace::trace(
                         "auto.notice_emitted",
-                        serde_json::Value::Null,
+                        &serde_json::Value::Null,
                     );
                 }
                 // Adoption telemetry (TS `compaction_end` handling counts
@@ -173,7 +173,7 @@ impl AgentSessionEngine {
                         .as_deref()
                         .and_then(|engine| engine.telemetry.as_ref())
                     {
-                        telemetry.note_compaction();
+                        telemetry.note_compaction(Some(run.duration_ms));
                     }
                 }
                 // TS `_scheduleAutoRefineAfterCompaction`: the compaction
@@ -192,7 +192,7 @@ impl AgentSessionEngine {
                 }
                 pa_core::session_engine::compaction_trace::trace(
                     "auto.end_emitted",
-                    serde_json::Value::Null,
+                    &serde_json::Value::Null,
                 );
             }
             // A skip consumed the check (TS `CompactionSkippedError`): the

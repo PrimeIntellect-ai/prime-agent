@@ -33,6 +33,7 @@ pub const CONTENT_ENTRY_TYPES: [&str; 10] = [
 ];
 
 /// ISO-8601 timestamp -> unix milliseconds (best effort, UTC assumed).
+#[must_use]
 pub fn timestamp_to_millis(timestamp: &str) -> u64 {
     // Accept common forms: with/without fractional seconds and Z/offset.
     timeparse(timestamp).unwrap_or(0)
@@ -102,6 +103,7 @@ fn civil_days(year: i64, month: i64, day: i64) -> Option<i64> {
 }
 
 /// Parse a session file body into entries; malformed lines are skipped.
+#[must_use]
 pub fn parse_session_entries(content: &str) -> Vec<FileEntry> {
     let mut entries = Vec::new();
     for line in content.trim().lines() {
@@ -267,6 +269,7 @@ pub fn migrate_session_entries(entries: &mut [FileEntry]) {
 }
 
 /// The latest compaction on a leaf's ancestor path, or the last one anywhere.
+#[must_use]
 pub fn get_latest_compaction_entry(entries: &[FileEntry]) -> Option<&CompactionEntry> {
     entries.iter().rev().find_map(|entry| match entry {
         FileEntry::Compaction { payload, .. } => Some(payload),
@@ -535,15 +538,18 @@ mod context_tests {
             assistant_json = assistant_json("a1", "u1", "claude-x", 10),
         );
         let entries = parse_session_entries(&content);
-        let context = build_session_context(&entries, None);
-        assert_eq!(context.thinking_level, "high");
+        let session_context = build_session_context(&entries, None);
+        assert_eq!(session_context.thinking_level, "high");
         assert_eq!(
-            context.model,
+            session_context.model,
             Some(("openai".to_string(), "gpt-x".to_string()))
         );
-        assert_eq!(context.messages.len(), 2);
-        assert!(matches!(context.messages[0], AgentMessage::User(_)));
-        assert!(matches!(context.messages[1], AgentMessage::Assistant(_)));
+        assert_eq!(session_context.messages.len(), 2);
+        assert!(matches!(session_context.messages[0], AgentMessage::User(_)));
+        assert!(matches!(
+            session_context.messages[1],
+            AgentMessage::Assistant(_)
+        ));
     }
 
     #[test]
@@ -558,10 +564,10 @@ mod context_tests {
 "#,
         );
         let entries = parse_session_entries(&content);
-        let context = build_session_context(&entries, None);
+        let session_context = build_session_context(&entries, None);
         // Summary message, then kept message, then post-compaction message.
-        assert_eq!(context.messages.len(), 3);
-        match &context.messages[0] {
+        assert_eq!(session_context.messages.len(), 3);
+        match &session_context.messages[0] {
             AgentMessage::CompactionSummary(summary) => {
                 assert_eq!(summary.summary, "the story so far");
                 assert_eq!(summary.tokens_before, 1234);
@@ -569,14 +575,14 @@ mod context_tests {
             }
             _ => panic!("expected compaction summary first"),
         }
-        match &context.messages[2] {
+        match &session_context.messages[2] {
             AgentMessage::User(user) => {
                 assert_eq!(user.content.text(), "after");
             }
             _ => panic!("expected final user message"),
         }
         // The retained pre-compaction message follows the summary.
-        match &context.messages[1] {
+        match &session_context.messages[1] {
             AgentMessage::User(user) => assert_eq!(user.content.text(), "kept"),
             _ => panic!("expected retained user message"),
         }
@@ -591,8 +597,8 @@ mod context_tests {
         )
     }
 
-    fn digest_rows(context: &super::SessionContext) -> Vec<String> {
-        context
+    fn digest_rows(session_context: &super::SessionContext) -> Vec<String> {
+        session_context
             .messages
             .iter()
             .filter_map(|message| match message {
@@ -607,11 +613,14 @@ mod context_tests {
             .collect()
     }
 
-    fn summary_digest(context: &super::SessionContext) -> Option<String> {
-        context.messages.iter().find_map(|message| match message {
-            AgentMessage::CompactionSummary(summary) => summary.harness_digest.clone(),
-            _ => None,
-        })
+    fn summary_digest(session_context: &super::SessionContext) -> Option<String> {
+        session_context
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                AgentMessage::CompactionSummary(summary) => summary.harness_digest.clone(),
+                _ => None,
+            })
     }
 
     #[test]
@@ -628,12 +637,12 @@ mod context_tests {
             digest_b = digest_entry_json("d2", "\"m2\"", "digest-b"),
         );
         let entries = parse_session_entries(&content);
-        let context = build_session_context(&entries, None);
-        // Only the newest digest custom message rides the built context;
+        let session_context = build_session_context(&entries, None);
+        // Only the newest digest custom message rides the built session_context;
         // older copies are regenerable redundancy (TS #2394).
-        assert_eq!(digest_rows(&context), vec!["digest-b".to_string()]);
+        assert_eq!(digest_rows(&session_context), vec!["digest-b".to_string()]);
         // Non-digest rows keep their order.
-        assert_eq!(context.messages.len(), 3);
+        assert_eq!(session_context.messages.len(), 3);
     }
 
     #[test]
@@ -649,13 +658,16 @@ mod context_tests {
             digest_a = digest_entry_json("d1", "null", "retained digest"),
         );
         let entries = parse_session_entries(&content);
-        let context = build_session_context(&entries, None);
+        let session_context = build_session_context(&entries, None);
         // The snapshot outranks every retained digest copy, so no digest
-        // custom message rides the context and the summary keeps its
+        // custom message rides the session_context and the summary keeps its
         // snapshot (with the fingerprint of the state behind it).
-        assert!(digest_rows(&context).is_empty());
-        assert_eq!(summary_digest(&context).as_deref(), Some("snapshot digest"));
-        match &context.messages[0] {
+        assert!(digest_rows(&session_context).is_empty());
+        assert_eq!(
+            summary_digest(&session_context).as_deref(),
+            Some("snapshot digest")
+        );
+        match &session_context.messages[0] {
             AgentMessage::CompactionSummary(summary) => {
                 assert_eq!(
                     summary.harness_state_fingerprint.as_deref(),
@@ -678,13 +690,16 @@ mod context_tests {
             digest_b = digest_entry_json("d2", "\"c1\"", "newest digest"),
         );
         let entries = parse_session_entries(&content);
-        let context = build_session_context(&entries, None);
+        let session_context = build_session_context(&entries, None);
         // A digest appended after the compaction outranks the snapshot: the
         // summary yields its digest block (and fingerprint), and only the
-        // newest digest custom message rides the context.
-        assert_eq!(digest_rows(&context), vec!["newest digest".to_string()]);
-        assert_eq!(summary_digest(&context), None);
-        match &context.messages[0] {
+        // newest digest custom message rides the session_context.
+        assert_eq!(
+            digest_rows(&session_context),
+            vec!["newest digest".to_string()]
+        );
+        assert_eq!(summary_digest(&session_context), None);
+        match &session_context.messages[0] {
             AgentMessage::CompactionSummary(summary) => {
                 assert_eq!(summary.harness_digest, None);
                 assert_eq!(summary.harness_state_fingerprint, None);
@@ -708,11 +723,14 @@ mod context_tests {
             digest_new = digest_entry_json("d2", "\"d1\"", "retained newest"),
         );
         let entries = parse_session_entries(&content);
-        let context = build_session_context(&entries, None);
+        let session_context = build_session_context(&entries, None);
         // A compaction without a snapshot never suppresses the retained
-        // digests; only the newest one rides the context.
-        assert_eq!(digest_rows(&context), vec!["retained newest".to_string()]);
-        assert_eq!(summary_digest(&context), None);
+        // digests; only the newest one rides the session_context.
+        assert_eq!(
+            digest_rows(&session_context),
+            vec!["retained newest".to_string()]
+        );
+        assert_eq!(summary_digest(&session_context), None);
     }
 
     #[test]

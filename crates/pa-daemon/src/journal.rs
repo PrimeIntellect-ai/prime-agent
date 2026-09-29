@@ -150,6 +150,7 @@ impl CommandRecoveryJournal {
         serde_json::json!([client_id, command_id]).to_string()
     }
 
+    #[must_use]
     pub fn lookup(&self, client_id: &str, command_id: &str) -> Option<CommandJournalEntry> {
         self.entries.get(&Self::key(client_id, command_id)).cloned()
     }
@@ -464,6 +465,7 @@ impl WorkerRecoveryJournal {
     /// record marks an in-flight turn or an admitted-but-undelivered
     /// prompt/queue lane. An unreadable journal proves nothing —
     /// uncertainty must not revive a session.
+    #[must_use]
     pub fn read_interrupted(path: &Path) -> bool {
         Self::read_latest(path).is_ok_and(|records| records.iter().any(|record| record.busy))
     }
@@ -473,6 +475,7 @@ impl WorkerRecoveryJournal {
     /// against (an old busy record is residue of an era that already
     /// ended, not interrupted work this boot must heal). A journal with
     /// no busy record answers `None`.
+    #[must_use]
     pub fn latest_busy_recorded_at(path: &Path) -> Option<String> {
         Self::read_latest(path)
             .ok()?
@@ -557,6 +560,7 @@ impl WorkerRecoveryJournal {
         Ok(())
     }
 
+    #[must_use]
     pub fn get_latest(&self) -> Vec<WorkerRecoveryRecord> {
         self.latest.values().cloned().collect()
     }
@@ -660,6 +664,7 @@ impl WorkerRecoveryJournal {
     }
 
     /// The latest persisted queue rows for `active_session_id`.
+    #[must_use]
     pub fn latest_queue_snapshot(
         &self,
         active_session_id: &str,
@@ -724,7 +729,7 @@ fn parse_queue_snapshot_records(path: &Path) -> Result<HashMap<String, WorkerQue
             continue;
         }
         let version = record.get("version").and_then(Value::as_u64);
-        if version != Some(1) && version != Some(QUEUE_SNAPSHOT_VERSION as u64) {
+        if version != Some(1) && version != Some(u64::from(QUEUE_SNAPSHOT_VERSION)) {
             continue;
         }
         let Some(active_session_id) = record.get("active_session_id").and_then(Value::as_str)

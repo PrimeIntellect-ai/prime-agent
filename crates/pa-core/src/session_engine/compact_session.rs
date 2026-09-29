@@ -41,8 +41,14 @@ mod prepare;
 pub use prepare::{compute_cut, prepare_compaction, CompactSkip, CompactionPreparation};
 
 // The test mass (the in-file unit battery) moved to the child module at
-// the same tree position (compact_session::tests); the tests' `super` and
-// `super::super` paths resolve unchanged.
+// the same tree position (compact_session::tests) and splits by test
+// family under compact_session::tests; the moved blocks keep their
+// `super` and `super::super` path literals, and these session_engine
+// module bindings re-anchor those literals one level deeper (the same
+// pattern the summarization bindings above serve for
+// `super::compaction_exec::`).
+#[cfg(test)]
+use super::{compaction, harness_digest, messages, session_message_to_loop};
 #[cfg(test)]
 mod tests;
 
@@ -139,6 +145,9 @@ fn context_tokens(entries: &[FileEntry], leaf_id: Option<&str>) -> u64 {
 pub struct CompactRun {
     pub result: CompactionResult,
     pub entry: pa_types::session::CompactionEntry,
+    /// The whole compaction's wall duration (the `agent timing` compaction
+    /// stage; measured here once, centrally, for every arm).
+    pub duration_ms: u64,
     /// The post-compaction `ipython_state` kernel-persistence notice, when a
     /// kernel was running (TS `_syncKernelStateAfterCompaction`): the row is
     /// already durable and in the live context; surfaces broadcast it as a
@@ -167,6 +176,7 @@ pub async fn execute_compaction(
     session: &mut SessionManager,
     options: CompactOptions<'_>,
 ) -> anyhow::Result<CompactOutcome> {
+    let started_at = std::time::Instant::now();
     let entries = session.retained_entries().to_vec();
     let preparation = match prepare_compaction(&entries, options.settings.keep_recent_tokens) {
         Ok(preparation) => preparation,
@@ -199,7 +209,7 @@ pub async fn execute_compaction(
         .collect();
     super::compaction_trace::trace(
         "compact.cut_prepared",
-        serde_json::json!({
+        &serde_json::json!({
             "entries": entries.len(),
             "firstKeptEntryIndex": cut.first_kept_entry_index,
             "isSplitTurn": cut.is_split_turn,
@@ -210,7 +220,7 @@ pub async fn execute_compaction(
     let tokens_before = context_tokens(&entries, session.get_leaf_id());
     super::compaction_trace::trace(
         "compact.tokens_before_computed",
-        serde_json::json!({ "tokensBefore": tokens_before }),
+        &serde_json::json!({ "tokensBefore": tokens_before }),
     );
     let prev_compaction_index = entries[..cut.first_kept_entry_index]
         .iter()
@@ -267,7 +277,7 @@ pub async fn execute_compaction(
                         &context,
                         "compaction summary",
                         &session_model,
-                        session_api_key,
+                        session_api_key.as_deref(),
                         Some(required),
                     )
                 })
@@ -293,7 +303,7 @@ pub async fn execute_compaction(
         turn_prefix_summary_completion_budget(options.settings.reserve_tokens);
     super::compaction_trace::trace(
         "compact.summarizer_request",
-        serde_json::json!({
+        &serde_json::json!({
             "historyMaxTokens": history_max_tokens,
             "turnPrefixMaxTokens": turn_prefix_max_tokens,
         }),
@@ -312,7 +322,7 @@ pub async fn execute_compaction(
             }
             super::compaction_trace::trace(
                 "compact.summarizer_no_history",
-                serde_json::Value::Null,
+                &serde_json::Value::Null,
             );
             return Ok(SummarySlice {
                 summary: NO_PRIOR_HISTORY.to_string(),
@@ -366,7 +376,7 @@ pub async fn execute_compaction(
     let turn_prefix_slice = turn_prefix_slice?;
     super::compaction_trace::trace(
         "compact.summarizer_resolved",
-        serde_json::json!({
+        &serde_json::json!({
             "summaryBytes": history_slice.summary.len()
                 + turn_prefix_slice
                     .as_ref()
@@ -445,7 +455,7 @@ pub async fn execute_compaction(
         .unwrap_or_default();
     super::compaction_trace::trace(
         "compact.digest_rendered",
-        serde_json::json!({ "digest": harness_digest.is_some() }),
+        &serde_json::json!({ "digest": harness_digest.is_some() }),
     );
     let entry = compaction_entry_for(
         &result,
@@ -461,7 +471,7 @@ pub async fn execute_compaction(
     session.append_compaction(entry.clone())?;
     super::compaction_trace::trace(
         "compact.entry_appended",
-        serde_json::json!({
+        &serde_json::json!({
             "firstKeptEntryId": first_kept_entry,
             "persisted": session.is_persisted(),
         }),
@@ -469,12 +479,14 @@ pub async fn execute_compaction(
     Ok(CompactOutcome::Ran(Box::new(CompactRun {
         result,
         entry,
+        duration_ms: started_at.elapsed().as_millis() as u64,
         ipython_state: None,
     })))
 }
 
 /// Rebuild the live agent context after compaction. Keep session-only roles
 /// (especially the compaction boundary) until the provider conversion seam.
+#[must_use]
 pub fn rebuilt_context_after_compaction(session: &SessionManager) -> Vec<AgentMessage> {
     session.active_context().messages
 }

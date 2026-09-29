@@ -19,6 +19,7 @@ pub const SESSION_SLASH_COMMAND_CUSTOM_TYPE: &str = "session_slash_command";
 pub const SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE: &str = "session_slash_command_result";
 
 /// True when `value` names a session-executed command.
+#[must_use]
 pub fn is_session_slash_command_name(value: &str) -> bool {
     SESSION_SLASH_COMMAND_NAMES.contains(&value)
 }
@@ -84,7 +85,6 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
     BuiltinSlashCommand { name: "heartbeats", description: "View and manage all user and agent heartbeats", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
     BuiltinSlashCommand { name: "resume", description: "Open the agents view, or resume a session by id or path", execution: SlashCommandExecution::Client, argument_hint: Some("[id|path]"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "reload", description: "Reload keybindings, extensions, skills, prompts, and themes", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
-    BuiltinSlashCommand { name: "fullscreen", description: "Toggle fullscreen (alternate screen) rendering with scrollable transcript", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off]"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "speed", description: "Toggle footer readout of model output tok/sec (latest response and session average)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off]"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "quit", description: "Quit Prime Agent", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
 ];
@@ -97,6 +97,7 @@ pub struct SlashCommandRegistry {
 }
 
 impl SlashCommandRegistry {
+    #[must_use]
     pub fn builtin() -> Self {
         let mut by_name = HashMap::new();
         let mut alias_to_name = HashMap::new();
@@ -120,11 +121,13 @@ impl SlashCommandRegistry {
         REGISTRY.get_or_init(Self::builtin)
     }
 
+    #[must_use]
     pub fn all(&self) -> &'static [BuiltinSlashCommand] {
         self.commands
     }
 
     /// Resolve an alias to its canonical name.
+    #[must_use]
     pub fn resolve_name(&self, name: &str) -> Option<&'static str> {
         self.alias_to_name
             .get(name)
@@ -135,10 +138,12 @@ impl SlashCommandRegistry {
             })
     }
 
+    #[must_use]
     pub fn is_builtin(&self, name: &str) -> bool {
         self.by_name.contains_key(name) || self.alias_to_name.contains_key(name)
     }
 
+    #[must_use]
     pub fn get(&self, name: &str) -> Option<&'static BuiltinSlashCommand> {
         self.resolve_name(name)
             .and_then(|name| self.by_name.get(name).copied())
@@ -146,6 +151,7 @@ impl SlashCommandRegistry {
 
     /// Whether a builtin command consumes an argument (aliases included).
     /// `/clear` stays the no-argument compat alias even though `/new` takes one.
+    #[must_use]
     pub fn takes_argument(&self, name: &str) -> bool {
         if name == "clear" {
             return false;
@@ -154,6 +160,7 @@ impl SlashCommandRegistry {
     }
 
     /// Parse and resolve a full input line.
+    #[must_use]
     pub fn parse(&self, text: &str) -> Option<ResolvedSlashCommand> {
         let (name, args) = parse_slash_command(text)?;
         let resolved = self.resolve_name(&name)?;
@@ -169,6 +176,7 @@ impl SlashCommandRegistry {
     /// The suggestion candidates for a mistyped command: every canonical
     /// name and alias, in registry order (`findSlashCommandSuggestion` in
     /// core/slash-commands.ts searches this list).
+    #[must_use]
     pub fn suggestion_candidates(&self) -> Vec<&'static str> {
         let mut candidates = Vec::new();
         for command in self.commands {
@@ -210,6 +218,7 @@ pub fn parse_slash_command(text: &str) -> Option<(String, String)> {
 ///
 /// Cannot panic: the `unwrap` below only runs when `closest` already holds
 /// a candidate, because the `||` in the loop guard short-circuits first.
+#[must_use]
 pub fn find_slash_command_suggestion<'a>(input: &str, candidates: &[&'a str]) -> Option<&'a str> {
     let mut closest: Option<(&str, usize)> = None;
     for &candidate in candidates {

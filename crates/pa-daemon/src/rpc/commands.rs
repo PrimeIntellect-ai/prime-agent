@@ -356,7 +356,7 @@ async fn get_state(state: &Arc<RpcState>) -> Result<ResponseData, String> {
     let goal_driver = engine.goal_driver.lock().await;
     object.insert(
         "goal".to_string(),
-        serde_json::to_value(goal_driver.state()).unwrap_or(Value::Null),
+        serde_json::to_value(goal_driver.state_with_creation_elapsed()).unwrap_or(Value::Null),
     );
     Ok(ResponseData::Present(Value::Object(object)))
 }
@@ -508,6 +508,7 @@ async fn compact(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData,
 /// `compaction_start {type, reason, customInstructions?}` and
 /// `compaction_end {type, reason, result?, aborted, willRetry,
 /// customInstructions?}`.
+#[must_use]
 pub fn compaction_frame(kind: &str, instructions: Option<&str>, result: Option<&Value>) -> Value {
     if kind == "compaction_start" {
         let mut frame = json!({ "type": kind, "reason": "requested" });

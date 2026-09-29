@@ -2,12 +2,16 @@
 //! `/config` groups its settings into tab categories; ours adapts the
 //! grouping to our rows, inline in the shared menu-panel grammar): a tab
 //! strip under the bordered search field, each tab a list of label/value
-//! rows with descriptions, Enter/Space cycling values, Enter opening the
-//! submenus (thinking level, theme, warnings), Esc closing, and
-//! type-to-search over the active tab's labels. The caller owns the row
-//! data (daemon state + settings seam reads) and executes the change
-//! actions; this module owns navigation, filtering, and rendering, and
-//! `tabs` owns the grouping and the strip.
+//! rows with descriptions, the arrows and Enter/Space cycling values
+//! (the operator's 2026-09-28 rebind: the tabs move on Tab and the number
+//! keys only), Enter opening the submenus (thinking level, theme,
+//! warnings), Esc closing, and type-to-search over the active tab's
+//! labels. The caller owns the row data (daemon state + settings seam
+//! reads) and executes the change actions; this module owns navigation,
+//! filtering, and rendering, and `tabs` owns the grouping and the strip.
+//! The fullscreen row is retired: the surface always renders on the
+//! alternate screen, so a fullscreen toggle advertised a mode the product
+//! no longer has (the operator's 2026-09-28 retirement ruling).
 
 mod tabs;
 
@@ -242,14 +246,6 @@ pub fn settings_menu_rows(current: &SettingsCurrentValues) -> Vec<SettingsMenuRo
             submenu: None,
         },
         SettingsMenuRow {
-            id: "fullscreen",
-            label: "Fullscreen rendering",
-            description: "Alternate-screen UI with scrollable transcript and pinned prompt",
-            current: current.fullscreen.to_string(),
-            values: Some(bool_value()),
-            submenu: None,
-        },
-        SettingsMenuRow {
             id: "idle-eviction-minutes",
             label: "Idle worker eviction",
             description: "Stop fully idle agent trees after this many minutes (global daemon policy)",
@@ -359,7 +355,6 @@ pub struct SettingsCurrentValues {
     pub autocomplete_max_visible: u64,
     pub clear_on_shrink: bool,
     pub terminal_progress: bool,
-    pub fullscreen: bool,
     pub idle_eviction_minutes: String,
     pub steering_mode: String,
     pub follow_up_mode: String,
@@ -428,21 +423,34 @@ impl SettingsMenu {
             }
             return SettingsMenuAction::None;
         }
-        // Tab switching (Claude Code's /config switches its tabs with Tab
-        // and the arrows): the arrows and Tab keys always switch; digits
+        // Tab switching (the operator's 2026-09-28 rebind: the tabs move
+        // with Tab and the number keys ONLY, freeing the arrows for the
+        // value cycling below): Tab and Shift+Tab always switch; digits
         // jump straight to their tab while the search field is empty (an
         // active query takes digits as search text, so type-to-search is
         // never blocked).
         match key {
-            "left" | "shift+tab" => {
+            "shift+tab" => {
                 self.switch_tab((self.tab + self.tabs.len() - 1) % self.tabs.len());
                 return SettingsMenuAction::None;
             }
-            "right" | "tab" => {
+            "tab" => {
                 self.switch_tab((self.tab + 1) % self.tabs.len());
                 return SettingsMenuAction::None;
             }
             _ => {}
+        }
+        // The value cycling (the operator's 2026-09-28 directive): the
+        // arrows cycle the focused setting's value in place — left the
+        // previous option, right the next (toggles flip true/false,
+        // multi-option rows walk their list; a submenu row has no inline
+        // values, so the arrows no-op there). Enter keeps its own
+        // cycle/open behavior below.
+        if key == "left" {
+            return self.cycle_selected(-1);
+        }
+        if key == "right" {
+            return self.cycle_selected(1);
         }
         if self.tabs[self.tab].search.value().is_empty() {
             if let [character] = key.chars().collect::<Vec<char>>()[..] {
@@ -520,15 +528,33 @@ impl SettingsMenu {
             });
             return SettingsMenuAction::None;
         }
+        self.cycle_selected(1)
+    }
+
+    /// Cycle the selected row's value by `delta` steps (right/Enter +1,
+    /// left -1), wrapping at the list's ends, and report the change: the
+    /// caller's apply arm persists it through the same write path Enter's
+    /// cycle always used. A submenu row (no inline values) and a missing
+    /// selection no-op.
+    fn cycle_selected(&mut self, delta: isize) -> SettingsMenuAction {
+        let Some(tab) = self.tabs.get(self.tab) else {
+            return SettingsMenuAction::None;
+        };
+        let Some(&row_index) = tab.filtered.get(tab.selected) else {
+            return SettingsMenuAction::None;
+        };
+        let row = &mut self.rows[row_index];
         let Some(values) = &row.values else {
             return SettingsMenuAction::None;
         };
-        let current = &row.current;
-        let next = values
+        let count = values.len();
+        let index = values
             .iter()
-            .position(|value| value == current)
-            .map_or(0, |index| (index + 1) % values.len());
-        let value = values[next].clone();
+            .position(|value| *value == row.current)
+            .map_or(0, |index| {
+                (index as isize + delta).rem_euclid(count as isize) as usize
+            });
+        let value = values[index].clone();
         row.current.clone_from(&value);
         SettingsMenuAction::Change { id: row.id, value }
     }
@@ -698,7 +724,7 @@ impl SettingsMenu {
                 width,
                 "No settings available",
             ));
-            lines.push(crate::menu_panel::hint_row(theme, width, &hint(kb, 0)));
+            lines.push(hint_row(theme, width, &hint(kb, 0)));
             return lines;
         }
         let tab = &self.tabs[self.tab];
@@ -712,21 +738,21 @@ impl SettingsMenu {
             true,
             "Search settings",
         ));
-        // The tab strip rides directly under the search field's bottom
-        // border: the tabs name the lists below them.
+        // The tab strip sits under the search field with a blank row on
+        // either side (the operator's 2026-09-28 spacing pass: the header
+        // area breathes away from the strip, and the strip away from the
+        // settings list it names).
+        lines.push(Vec::new());
         let names: Vec<&'static str> = self.tabs.iter().map(|tab| tab.name).collect();
         lines.push(tabs::strip_row(theme, width, &names, self.tab));
+        lines.push(Vec::new());
         if tab.filtered.is_empty() {
             lines.push(crate::menu_panel::no_match_row(
                 theme,
                 width,
                 "No matching settings",
             ));
-            lines.push(crate::menu_panel::hint_row(
-                theme,
-                width,
-                &hint(kb, self.tabs.len()),
-            ));
+            lines.push(hint_row(theme, width, &hint(kb, self.tabs.len())));
             return lines;
         }
         let start = tab
@@ -769,13 +795,14 @@ impl SettingsMenu {
                         "",
                     ));
                 }
+                // The separator rule rides below the description, above
+                // the keyboard-shortcuts row (the operator's 2026-09-28
+                // directive): the same full-width border grammar the
+                // search field's rules carry, closing the detail block.
+                lines.push(crate::menu_panel::rule_row(theme, width));
             }
         }
-        lines.push(crate::menu_panel::hint_row(
-            theme,
-            width,
-            &hint(kb, self.tabs.len()),
-        ));
+        lines.push(hint_row(theme, width, &hint(kb, self.tabs.len())));
         lines
     }
 
@@ -818,10 +845,32 @@ impl SettingsMenu {
                 ),
             };
         let mut lines: Vec<crate::Line> = Vec::new();
-        lines.push(vec![theme.fg_span(ThemeColor::Accent, title)]);
+        // The top bar the menu's list view opens with — the full-width
+        // rule under the prompt-context row — stays over the submenu too
+        // (the operator's 2026-09-28 regression pin): the settings
+        // surface keeps its bar separating it from the chat view.
+        lines.push(crate::menu_panel::rule_row(theme, width));
+        // The setting's name and description carry the list rows' own
+        // padding-x (the operator's 2026-09-28 regression pin): the
+        // detail block never loses its horizontal padding.
+        lines.push(crate::width::truncate_line(
+            &vec![
+                crate::Span::raw("  ".to_string()),
+                theme.fg_span(ThemeColor::Accent, title.to_string()),
+            ],
+            width,
+            "",
+        ));
         if !description.is_empty() {
             lines.push(Vec::new());
-            lines.push(vec![theme.fg_span(ThemeColor::Muted, description)]);
+            lines.push(crate::width::truncate_line(
+                &vec![
+                    crate::Span::raw("  ".to_string()),
+                    theme.fg_span(ThemeColor::Muted, description.to_string()),
+                ],
+                width,
+                "",
+            ));
         }
         lines.push(Vec::new());
         let max_visible = options.len().min(10);
@@ -845,28 +894,38 @@ impl SettingsMenu {
             ));
         }
         lines.push(Vec::new());
-        lines.push(crate::menu_panel::hint_row(theme, width, &submenu_hint(kb)));
+        lines.push(hint_row(theme, width, &submenu_hint(kb)));
         lines
     }
 }
 
+/// The settings page's own key-hint row (the operator's 2026-09-28
+/// padding pass): the shared `menu_panel::hint_row` rides one space, but
+/// this surface's keyboard-shortcuts row carries the description's
+/// padding-x — the two-space inner column the detail block and the menu
+/// rows align on.
+fn hint_row(theme: &Theme, width: usize, hint: &str) -> crate::Line {
+    let line = vec![
+        crate::Span::raw("  ".to_string()),
+        theme.fg_span(ThemeColor::Dim, hint.to_string()),
+    ];
+    crate::width::truncate_line(&line, width, "")
+}
+
 /// The menu's key hint: the shared hint-row grammar, this surface's
-/// vocabulary (the search field types, the arrows and the number keys
-/// switch tabs, Enter/Space cycles a row; Space is a literal key the menu
-/// always handles, an unbound Enter drops its label, an unbound Esc drops
-/// the close segment).
+/// vocabulary (the search field types, Tab and the number keys switch
+/// tabs, the arrows cycle the focused row's value with Enter/Space; Space
+/// is a literal key the menu always handles, an unbound Enter drops its
+/// label, an unbound Esc drops the close segment).
 fn hint(kb: &KeybindingsManager, tabs: usize) -> String {
     let mut segments = vec!["Type to search".to_string()];
     if tabs > 0 {
-        segments.push(format!(
-            "{}/{}/1-{tabs} tabs",
-            format_key_text("left"),
-            format_key_text("right")
-        ));
+        segments.push(format!("{}/1-{tabs} tabs", format_key_text("tab")));
     }
+    let arrows = format!("{}/{}", format_key_text("left"), format_key_text("right"));
     segments.push(match kb.first_key("tui.select.confirm") {
-        Some(key) => format!("{}/Space change", format_key_text(&key)),
-        None => "Space change".to_string(),
+        Some(key) => format!("{arrows}/{}/Space change", format_key_text(&key)),
+        None => format!("{arrows}/Space change"),
     });
     if let Some(close) = crate::menu_panel::key_hint(kb, &["tui.select.cancel"], "close") {
         segments.push(close);
@@ -888,390 +947,7 @@ fn submenu_hint(kb: &KeybindingsManager) -> String {
     .join(" · ")
 }
 
+// The inline unit battery lives in the child module (settings_menu::menu_tests);
+// its use-super glob resolves through this facade's bindings.
 #[cfg(test)]
-mod menu_tests {
-    use super::*;
-    use crate::keybindings::KeybindingsManager;
-
-    fn kb() -> KeybindingsManager {
-        KeybindingsManager::new()
-    }
-
-    fn menu() -> SettingsMenu {
-        let values = SettingsCurrentValues {
-            autocompact: true,
-            steering_mode: "all".to_string(),
-            available_thinking_levels: vec!["low".to_string(), "high".to_string()],
-            thinking_level: Some("low".to_string()),
-            available_themes: vec!["prime".to_string(), "dark".to_string()],
-            theme: "prime".to_string(),
-            idle_eviction_minutes: "90".to_string(),
-            ..Default::default()
-        };
-        SettingsMenu::new(settings_menu_rows(&values))
-    }
-
-    fn render_text(menu: &SettingsMenu) -> Vec<String> {
-        let theme = crate::theme::Theme::builtin("prime", crate::theme::ColorMode::Color256);
-        menu.render(&theme, 100, &KeybindingsManager::new())
-            .iter()
-            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
-            .collect()
-    }
-
-    #[test]
-    fn tabs_partition_the_settings_rows() {
-        let menu = menu();
-        let tabs: Vec<(&str, Vec<&str>)> = menu
-            .tabs
-            .iter()
-            .map(|tab| {
-                (
-                    tab.name,
-                    tab.rows.iter().map(|&index| menu.rows[index].id).collect(),
-                )
-            })
-            .collect();
-        assert_eq!(
-            tabs,
-            vec![
-                (
-                    "General",
-                    vec![
-                        "autocompact",
-                        "steering-mode",
-                        "follow-up-mode",
-                        "quiet-startup",
-                        "warnings"
-                    ]
-                ),
-                (
-                    "Models",
-                    vec!["thinking", "transport", "default-service-tier"]
-                ),
-                (
-                    "Display",
-                    vec![
-                        "theme",
-                        "fullscreen",
-                        "terminal-progress",
-                        "clear-on-shrink",
-                        "show-images",
-                        "auto-resize-images",
-                        "block-images",
-                        "mermaid-rendering"
-                    ]
-                ),
-                (
-                    "Editor",
-                    vec![
-                        "editor-padding",
-                        "autocomplete-max-visible",
-                        "show-hardware-cursor"
-                    ]
-                ),
-                (
-                    "Agents",
-                    vec![
-                        "skill-commands",
-                        "builtin-skills",
-                        "idle-eviction-minutes",
-                        "tree-filter-mode"
-                    ]
-                ),
-            ]
-        );
-        // The tabs carry every settings row exactly once.
-        let grouped: usize = menu.tabs.iter().map(|tab| tab.rows.len()).sum();
-        assert_eq!(grouped, menu.rows.len());
-    }
-
-    #[test]
-    fn an_empty_row_set_keeps_the_empty_state_and_closes() {
-        let mut menu = SettingsMenu::new(Vec::new());
-        // No tab state exists: the navigation keys no-op (never panic)
-        // and the empty state renders with the tab-less hint.
-        assert_eq!(menu.handle_key("down", &kb()), SettingsMenuAction::None);
-        assert_eq!(menu.handle_key("2", &kb()), SettingsMenuAction::None);
-        let text = render_text(&menu);
-        assert!(text.iter().any(|row| row.contains("No settings available")));
-        assert!(text
-            .iter()
-            .any(|row| row.contains("Type to search · Enter/Space change · Esc close")));
-        assert_eq!(menu.handle_key("esc", &kb()), SettingsMenuAction::Cancel);
-    }
-
-    #[test]
-    fn confirm_cycles_values_and_reports_the_change() {
-        let mut menu = menu();
-        // Auto-compact starts true; Enter flips it to false.
-        assert_eq!(
-            menu.handle_key("enter", &kb()),
-            SettingsMenuAction::Change {
-                id: "autocompact",
-                value: "false".to_string()
-            }
-        );
-        assert_eq!(
-            menu.handle_key("enter", &kb()),
-            SettingsMenuAction::Change {
-                id: "autocompact",
-                value: "true".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn enter_opens_the_thinking_submenu_and_selection_applies() {
-        let mut menu = menu();
-        // 2 jumps to the Models tab (thinking lives there).
-        menu.handle_key("2", &kb());
-        assert_eq!(menu.handle_key("enter", &kb()), SettingsMenuAction::None);
-        // The submenu renders its title and options.
-        let text = render_text(&menu);
-        assert!(text.iter().any(|row| row.contains("Thinking Level")));
-        assert!(text
-            .iter()
-            .any(|row| row.contains("Select reasoning depth for thinking-capable models")));
-        // Down selects `high`; Enter applies and closes the submenu.
-        menu.handle_key("down", &kb());
-        assert_eq!(
-            menu.handle_key("enter", &kb()),
-            SettingsMenuAction::Change {
-                id: "thinking",
-                value: "high".to_string()
-            }
-        );
-        // The submenu is gone (the hint line is back).
-        let text = render_text(&menu);
-        assert!(text.iter().any(|row| {
-            row.contains("Type to search · ←/→/1-5 tabs · Enter/Space change · Esc close")
-        }));
-    }
-
-    #[test]
-    fn theme_submenu_previews_and_esc_restores() {
-        let mut menu = menu();
-        // 3 jumps to the Display tab (theme leads it).
-        menu.handle_key("3", &kb());
-        menu.handle_key("enter", &kb());
-        // Selection change previews.
-        assert_eq!(
-            menu.handle_key("down", &kb()),
-            SettingsMenuAction::PreviewTheme {
-                name: "dark".to_string()
-            }
-        );
-        // Esc restores the row's theme (prime) and closes.
-        assert_eq!(
-            menu.handle_key("esc", &kb()),
-            SettingsMenuAction::RestoreTheme {
-                name: "prime".to_string()
-            }
-        );
-        let text = render_text(&menu);
-        assert!(text.iter().any(|row| row.contains("Theme")));
-    }
-
-    #[test]
-    fn enter_opens_the_service_tier_submenu_preselected_and_selection_applies() {
-        let values = SettingsCurrentValues {
-            default_service_tier: "flex".to_string(),
-            ..Default::default()
-        };
-        let mut menu = SettingsMenu::new(settings_menu_rows(&values));
-        // 2 jumps to the Models tab; two downs reach the tier row
-        // (thinking, transport, default-service-tier).
-        menu.handle_key("2", &kb());
-        menu.handle_key("down", &kb());
-        menu.handle_key("down", &kb());
-        assert_eq!(menu.handle_key("enter", &kb()), SettingsMenuAction::None);
-        let text = render_text(&menu);
-        assert!(text.iter().any(|row| row.contains("Default Service Tier")));
-        assert!(text
-            .iter()
-            .any(|row| row.contains("Cheaper, slower, may hit capacity limits")));
-        // The submenu preselects the current value (flex is the second
-        // option): Enter applies it as the row's change.
-        assert_eq!(
-            menu.handle_key("enter", &kb()),
-            SettingsMenuAction::Change {
-                id: "default-service-tier",
-                value: "flex".to_string()
-            }
-        );
-        // A walk down to auto applies the same change shape.
-        assert_eq!(menu.handle_key("enter", &kb()), SettingsMenuAction::None);
-        menu.handle_key("down", &kb());
-        menu.handle_key("down", &kb());
-        assert_eq!(
-            menu.handle_key("enter", &kb()),
-            SettingsMenuAction::Change {
-                id: "default-service-tier",
-                value: "auto".to_string()
-            }
-        );
-        // Esc inside the submenu closes it (TS `onCancel` → `done()`)
-        // while the menu itself stays open.
-        assert_eq!(menu.handle_key("enter", &kb()), SettingsMenuAction::None);
-        assert_eq!(
-            menu.handle_key("esc", &kb()),
-            SettingsMenuAction::SubmenuClosed
-        );
-        let text = render_text(&menu);
-        // The menu hint returns with its full grammar (the tabs segment
-        // sits between the search and change segments).
-        assert!(text
-            .iter()
-            .any(|row| row.contains("Enter/Space change · Esc close")));
-    }
-
-    #[test]
-    fn typing_filters_the_active_tab_and_esc_cancels() {
-        let mut menu = menu();
-        // 2 jumps to the Models tab (thinking + transport).
-        menu.handle_key("2", &kb());
-        for key in ["t", "r", "a", "n", "s", "p"] {
-            menu.handle_key(key, &kb());
-        }
-        let text = render_text(&menu);
-        // The filter keeps the transport row visible and drops the
-        // tab's other row from the window.
-        assert!(text.iter().any(|row| row.contains("Transport")));
-        assert!(!text.iter().any(|row| row.contains("Thinking")));
-        assert_eq!(menu.handle_key("esc", &kb()), SettingsMenuAction::Cancel);
-    }
-
-    #[test]
-    fn switching_tabs_shows_that_tabs_settings() {
-        let mut menu = menu();
-        // General opens first.
-        assert!(render_text(&menu)
-            .iter()
-            .any(|row| row.contains("Auto-compact")));
-        // 4 jumps to the Editor tab: the editor-side settings only.
-        menu.handle_key("4", &kb());
-        let text = render_text(&menu);
-        assert!(text.iter().any(|row| row.contains("Editor padding")));
-        assert!(text
-            .iter()
-            .any(|row| row.contains("Autocomplete max items")));
-        assert!(text.iter().any(|row| row.contains("Show hardware cursor")));
-        assert!(!text.iter().any(|row| row.contains("Auto-compact")));
-        assert!(!text.iter().any(|row| row.contains("Theme")));
-    }
-
-    #[test]
-    fn arrows_and_tab_keys_switch_tabs() {
-        let mut menu = menu();
-        // right: General → Models.
-        menu.handle_key("right", &kb());
-        assert!(render_text(&menu)
-            .iter()
-            .any(|row| row.contains("Transport")));
-        // tab: Models → Display.
-        menu.handle_key("tab", &kb());
-        assert!(render_text(&menu)
-            .iter()
-            .any(|row| row.contains("Fullscreen rendering")));
-        // shift+tab: Display → Models.
-        menu.handle_key("shift+tab", &kb());
-        // left: Models → General.
-        menu.handle_key("left", &kb());
-        assert!(render_text(&menu)
-            .iter()
-            .any(|row| row.contains("Auto-compact")));
-        // left from the first tab wraps to the last (Agents).
-        menu.handle_key("left", &kb());
-        assert!(render_text(&menu)
-            .iter()
-            .any(|row| row.contains("Skill commands")));
-    }
-
-    #[test]
-    fn digits_type_into_an_active_query() {
-        let mut menu = menu();
-        // With an active query, digits are search text: 2 does not jump
-        // to the Models tab (a jump would clear the search).
-        menu.handle_key("s", &kb());
-        menu.handle_key("2", &kb());
-        let text = render_text(&menu);
-        assert!(text.iter().any(|row| row.contains("s2")));
-        assert!(text.iter().any(|row| row.contains("No matching settings")));
-    }
-
-    #[test]
-    fn switching_tabs_keeps_each_tabs_search_and_selection() {
-        let mut menu = menu();
-        // Down selects steering mode on General; the round trip keeps it.
-        menu.handle_key("down", &kb());
-        menu.handle_key("2", &kb());
-        menu.handle_key("1", &kb());
-        assert_eq!(
-            menu.handle_key("enter", &kb()),
-            SettingsMenuAction::Change {
-                id: "steering-mode",
-                value: "one-at-a-time".to_string()
-            }
-        );
-        // Each tab keeps its own query: typing on General, switching to
-        // Models and back, the filter and the field still hold. The
-        // arrows switch even under an active query (digits would type).
-        for key in ["w", "a", "r", "n"] {
-            menu.handle_key(key, &kb());
-        }
-        menu.handle_key("right", &kb());
-        assert!(render_text(&menu)
-            .iter()
-            .any(|row| row.contains("Transport")));
-        menu.handle_key("left", &kb());
-        let text = render_text(&menu);
-        assert!(text.iter().any(|row| row.contains("warn")));
-        assert!(text.iter().any(|row| row.contains("Warnings")));
-        assert!(!text.iter().any(|row| row.contains("Quiet startup")));
-    }
-
-    #[test]
-    fn the_strip_lists_the_tabs_and_marks_the_active_one() {
-        let theme = crate::theme::Theme::builtin("prime", crate::theme::ColorMode::Color256);
-        let lines = menu().render(&theme, 100, &KeybindingsManager::new());
-        // The strip rides directly under the search field.
-        let text: String = lines[3].iter().map(|span| span.content.as_str()).collect();
-        assert_eq!(text, "  1 General  2 Models  3 Display  4 Editor  5 Agents");
-        let active = lines[3]
-            .iter()
-            .find(|span| span.content == "General")
-            .expect("the active tab renders");
-        assert_eq!(
-            active.style,
-            theme
-                .fg_style(ThemeColor::Accent)
-                .add_modifier(ratatui::style::Modifier::BOLD)
-        );
-        let inactive = lines[3]
-            .iter()
-            .find(|span| span.content == "Models")
-            .expect("an inactive tab renders");
-        assert_eq!(inactive.style, theme.fg_style(ThemeColor::Muted));
-    }
-
-    #[test]
-    fn render_shows_value_and_selected_description() {
-        let text = render_text(&menu());
-        assert!(text.iter().any(|row| row.contains("Auto-compact")));
-        assert!(text
-            .iter()
-            .any(|row| row.contains("Automatically compact context when it gets too large")));
-        assert!(text.iter().any(|row| {
-            row.contains("Type to search · ←/→/1-5 tabs · Enter/Space change · Esc close")
-        }));
-        // The selected first row carries the menu marker and its value
-        // rides the row's trailing cluster (the shared menu-row grammar).
-        let selected = text
-            .iter()
-            .find(|row| row.starts_with("\u{203a}"))
-            .expect("the selected row carries the marker");
-        assert!(selected.contains("Auto-compact"));
-        assert!(selected.contains("true"));
-    }
-}
+mod menu_tests;

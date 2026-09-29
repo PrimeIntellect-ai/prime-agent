@@ -129,6 +129,7 @@ fn empty_usage() -> Usage {
 ///
 /// The consumer side implements [`crate::stream::ModelStream`]; use it as the
 /// `streamFn` for an agent that goes through the proxy.
+#[must_use]
 pub fn stream_proxy(
     model: Model,
     context: LlmContext,
@@ -362,11 +363,14 @@ async fn run_aborting<T>(
 /// Port of `processProxyEvent`: mutate the reconstructed partial message and
 /// return the full assistant event to push. `Err` mirrors the TS `throw`s for
 /// mismatched content types.
+// One arm per proxy event kind, mirroring the TS switch; refactoring is out
+// of scope for this zero-behavior-change sweep.
+#[allow(clippy::too_many_lines)]
 fn process_proxy_event(
     proxy_event: ProxyAssistantMessageEvent,
     state: &mut ProxyReconstruction,
 ) -> Result<Option<AssistantMessageEvent>, String> {
-    fn ensure_content(partial: &mut AssistantMessage, index: usize) -> Result<usize, String> {
+    fn ensure_content(partial: &mut AssistantMessage, index: usize) -> usize {
         if partial.content.len() < index + 1 {
             partial.content.resize(
                 index + 1,
@@ -376,7 +380,7 @@ fn process_proxy_event(
                 }),
             );
         }
-        Ok(index)
+        index
     }
     let partial = &mut state.partial;
 
@@ -385,7 +389,7 @@ fn process_proxy_event(
             partial: partial.clone(),
         })),
         ProxyAssistantMessageEvent::TextStart { content_index } => {
-            ensure_content(partial, content_index)?;
+            ensure_content(partial, content_index);
             partial.content[content_index] = AssistantContent::Text(TextContent {
                 text: String::new(),
                 text_signature: None,
@@ -425,7 +429,7 @@ fn process_proxy_event(
             _ => Err("Received text_end for non-text content".to_string()),
         },
         ProxyAssistantMessageEvent::ThinkingStart { content_index } => {
-            ensure_content(partial, content_index)?;
+            ensure_content(partial, content_index);
             partial.content[content_index] = AssistantContent::Thinking(ThinkingContent {
                 thinking: String::new(),
                 thinking_signature: None,
@@ -468,7 +472,7 @@ fn process_proxy_event(
             id,
             tool_name,
         } => {
-            ensure_content(partial, content_index)?;
+            ensure_content(partial, content_index);
             partial.content[content_index] = AssistantContent::ToolCall(ToolCall {
                 id,
                 name: tool_name,
@@ -603,6 +607,7 @@ fn escape_control_character(ch: char) -> String {
 
 /// Port of `repairJson`: escape raw control characters inside strings and
 /// double backslashes before invalid escape characters.
+#[must_use]
 pub fn repair_json(json: &str) -> String {
     let mut repaired = String::new();
     let mut in_string = false;
@@ -694,7 +699,10 @@ enum Expect {
 /// filling missing values with `null` and dropping dangling separators - the
 /// same results the TS `partial-json` library produces for streaming tool-call
 /// arguments.
-fn complete_partial_json(input: &str) -> Option<String> {
+// State machine over the input; refactoring is out of scope for this
+// zero-behavior-change sweep.
+#[allow(clippy::too_many_lines)]
+fn complete_partial_json(input: &str) -> String {
     let mut stack: Vec<ContainerKind> = Vec::new();
     let mut expects: Vec<Expect> = Vec::new();
     let mut in_string = false;
@@ -843,11 +851,12 @@ fn complete_partial_json(input: &str) -> Option<String> {
         let _ = last_comma.take();
     }
 
-    Some(completed)
+    completed
 }
 
 /// Port of `parseStreamingJson`: parse potentially incomplete JSON, always
 /// returning a value (empty object on total failure).
+#[must_use]
 pub fn parse_streaming_json(partial_json: &str) -> serde_json::Value {
     if partial_json.trim().is_empty() {
         return serde_json::Value::Object(serde_json::Map::new());
@@ -857,10 +866,9 @@ pub fn parse_streaming_json(partial_json: &str) -> serde_json::Value {
         return value;
     }
     for candidate in [partial_json.to_string(), repair_json(partial_json)] {
-        if let Some(completed) = complete_partial_json(&candidate) {
-            if let Ok(value) = serde_json::from_str(&completed) {
-                return value;
-            }
+        let completed = complete_partial_json(&candidate);
+        if let Ok(value) = serde_json::from_str(&completed) {
+            return value;
         }
     }
     serde_json::Value::Object(serde_json::Map::new())
@@ -1116,6 +1124,8 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept proxy request");
+            // 64 KiB read buffer on a dedicated stub thread is fine for a test.
+            #[allow(clippy::large_stack_arrays)]
             let mut buffer = [0u8; 64 * 1024];
             let mut request = String::new();
             loop {

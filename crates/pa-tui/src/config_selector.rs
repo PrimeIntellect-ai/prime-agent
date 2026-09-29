@@ -580,6 +580,9 @@ fn run_selector_surface(
     // teardown must still hand the terminal back whole (the same
     // unwind-guard contract the session surface arms).
     let _surface_restore = crate::exit_restore::SurfaceRestore::armed();
+    // The raw-mode bracket's `cfmakeraw` write clears IXON, which is the
+    // kernel's one trigger for lifting a pending Ctrl+S stop (see the
+    // flow e2e's launch route).
     terminal::enable_raw_mode()?;
     // The alternate screen mounts through the ownership module (the same
     // `pendingAltScreenHandoff` semantics the session surface uses), so

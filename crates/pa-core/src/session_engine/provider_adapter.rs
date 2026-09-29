@@ -22,6 +22,7 @@ where
 }
 
 /// Thinking-level mapping across the two crates.
+#[must_use]
 pub fn map_thinking_level(level: pa_types::ai::ModelThinkingLevel) -> ThinkingLevel {
     match level {
         pa_types::ai::ModelThinkingLevel::Off => ThinkingLevel::Off,
@@ -36,6 +37,7 @@ pub fn map_thinking_level(level: pa_types::ai::ModelThinkingLevel) -> ThinkingLe
 
 /// The inverse of [`map_thinking_level`]: the pa-types view of the agent
 /// state's thinking level.
+#[must_use]
 pub fn model_thinking_level(level: ThinkingLevel) -> pa_types::ai::ModelThinkingLevel {
     match level {
         ThinkingLevel::Off => pa_types::ai::ModelThinkingLevel::Off,
@@ -117,9 +119,9 @@ pub fn switchable_stream_fn(target: Arc<std::sync::RwLock<Option<ProviderTarget>
                 .expect("provider target lock")
                 .clone()
                 .expect("provider target set before the first stream");
-            Box::pin(
-                async move { stream_once(model, api_key, service_tier, headers, context, options) },
-            )
+            Box::pin(async move {
+                stream_once(&model, api_key, service_tier, headers, context, options)
+            })
         },
     )
 }
@@ -136,7 +138,7 @@ pub fn switchable_stream_fn(target: Arc<std::sync::RwLock<Option<ProviderTarget>
 /// Returns the provider stream's error when the request fails (the
 /// per-attempt failures the retry driver classifies).
 pub fn stream_once(
-    model: Model,
+    model: &Model,
     api_key: Option<String>,
     service_tier: Option<pa_types::ai::ServiceTier>,
     headers: Option<std::collections::BTreeMap<String, String>>,
@@ -186,7 +188,7 @@ pub fn stream_once(
         reasoning: Some(model_thinking_level(options.reasoning)),
         thinking_budgets: None,
     };
-    let stream = pa_ai::stream_simple(&model, &ai_context, Some(stream_options))
+    let stream = pa_ai::stream_simple(model, &ai_context, Some(stream_options))
         .map_err(|error| anyhow::anyhow!("{error:?}"))?;
     // Pump pa-ai events into a pa-agent event stream (the loop's
     // ModelStream): each provider event is forwarded verbatim.
@@ -212,6 +214,7 @@ pub fn stream_once(
 
 /// A stream adapter pinned to one target: the headless runtimes (print and
 /// json modes) resolve their model once, so the slot never changes.
+#[must_use]
 pub fn real_stream_fn(api_key: Option<String>, model: Model) -> StreamFn {
     switchable_stream_fn(Arc::new(std::sync::RwLock::new(Some(ProviderTarget {
         api_key,
@@ -228,6 +231,7 @@ pub fn real_stream_fn(api_key: Option<String>, model: Model) -> StreamFn {
 ///
 /// Panics when an assistant message cannot round-trip across the two
 /// crates' wire shapes (a structural shape-mismatch bug).
+#[must_use]
 pub fn convert_stream_event(
     event: &pa_types::ai::AssistantMessageEvent,
 ) -> Option<pa_agent::stream::AssistantMessageEvent> {

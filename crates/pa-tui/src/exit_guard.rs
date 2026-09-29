@@ -45,7 +45,7 @@ pub(crate) const FORCE_QUIT_AFTER_MS: u64 = 1_500;
 /// How long the exit path may stay silent after a real observation of
 /// progress before the watchdog treats it as stalled. The exit flush
 /// hands the whole transcript to the terminal in bounded chunks
-/// (view.rs `FlushSink`), and a slow terminal consumes those chunks at
+/// (view/flush.rs `FlushSink`), and a slow terminal consumes those chunks at
 /// its own pace: the writer blocks inside `write` while the terminal
 /// drains, which looks exactly like a wedged shutdown to a pure wall
 /// clock. A completed chunk write is proof the exit is moving, so the

@@ -54,6 +54,7 @@ fn resolve_skill_path(path: &str, cwd: &Path) -> PathBuf {
 }
 
 /// canonicalizePath: realpath on success, the input path otherwise.
+#[must_use]
 pub fn canonicalize_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
@@ -65,8 +66,14 @@ fn is_under_path(target: &Path, root: &Path) -> bool {
 }
 
 /// Load skills from all configured locations.
+#[must_use]
 pub fn load_skills(options: &LoadSkillsOptions) -> LoadSkillsResult {
-    let mut skill_map: HashMap<String, Skill> = HashMap::new();
+    // TS keeps a JS `Map` (insertion-ordered): skills list in load order
+    // (first-wins collisions), so the prompt inventory and the `skill:`
+    // command enumeration are deterministic. The vector preserves that
+    // order; the name index answers the collision lookup.
+    let mut skills: Vec<Skill> = Vec::new();
+    let mut name_winner: HashMap<String, PathBuf> = HashMap::new();
     let mut real_path_set: HashSet<PathBuf> = HashSet::new();
     let mut python_import_map: HashMap<String, String> = HashMap::new();
     let mut all_diagnostics: Vec<ResourceDiagnostic> = Vec::new();
@@ -74,7 +81,8 @@ pub fn load_skills(options: &LoadSkillsOptions) -> LoadSkillsResult {
     let mut python_import_diagnostics: Vec<ResourceDiagnostic> = Vec::new();
 
     let add_skill = |skill: Skill,
-                     skill_map: &mut HashMap<String, Skill>,
+                     skills: &mut Vec<Skill>,
+                     name_winner: &mut HashMap<String, PathBuf>,
                      real_path_set: &mut HashSet<PathBuf>,
                      python_import_map: &mut HashMap<String, String>,
                      collision_diagnostics: &mut Vec<ResourceDiagnostic>,
@@ -83,14 +91,14 @@ pub fn load_skills(options: &LoadSkillsOptions) -> LoadSkillsResult {
         if real_path_set.contains(&real_path) {
             return;
         }
-        if let Some(existing) = skill_map.get(&skill.name) {
+        if let Some(winner_path) = name_winner.get(&skill.name) {
             collision_diagnostics.push(ResourceDiagnostic::Collision {
                 message: format!("name \"{}\" collision", skill.name),
                 path: skill.file_path.display().to_string(),
                 collision: ResourceCollision {
                     resource_type: "skill",
                     name: skill.name.clone(),
-                    winner_path: existing.file_path.display().to_string(),
+                    winner_path: winner_path.display().to_string(),
                     loser_path: skill.file_path.display().to_string(),
                 },
             });
@@ -111,7 +119,8 @@ pub fn load_skills(options: &LoadSkillsOptions) -> LoadSkillsResult {
                     }
                 }
             }
-            skill_map.insert(skill.name.clone(), skill);
+            name_winner.insert(skill.name.clone(), skill.file_path.clone());
+            skills.push(skill);
         }
     };
 
@@ -124,7 +133,8 @@ pub fn load_skills(options: &LoadSkillsOptions) -> LoadSkillsResult {
         for skill in user_result.skills {
             add_skill(
                 skill,
-                &mut skill_map,
+                &mut skills,
+                &mut name_winner,
                 &mut real_path_set,
                 &mut python_import_map,
                 &mut collision_diagnostics,
@@ -136,7 +146,8 @@ pub fn load_skills(options: &LoadSkillsOptions) -> LoadSkillsResult {
         for skill in project_result.skills {
             add_skill(
                 skill,
-                &mut skill_map,
+                &mut skills,
+                &mut name_winner,
                 &mut real_path_set,
                 &mut python_import_map,
                 &mut collision_diagnostics,
@@ -179,7 +190,8 @@ pub fn load_skills(options: &LoadSkillsOptions) -> LoadSkillsResult {
             for skill in result.skills {
                 add_skill(
                     skill,
-                    &mut skill_map,
+                    &mut skills,
+                    &mut name_winner,
                     &mut real_path_set,
                     &mut python_import_map,
                     &mut collision_diagnostics,
@@ -193,7 +205,8 @@ pub fn load_skills(options: &LoadSkillsOptions) -> LoadSkillsResult {
                     all_diagnostics.extend(diagnostics);
                     add_skill(
                         skill,
-                        &mut skill_map,
+                        &mut skills,
+                        &mut name_winner,
                         &mut real_path_set,
                         &mut python_import_map,
                         &mut collision_diagnostics,
@@ -214,7 +227,7 @@ pub fn load_skills(options: &LoadSkillsOptions) -> LoadSkillsResult {
     diagnostics.extend(collision_diagnostics);
     diagnostics.extend(python_import_diagnostics);
     LoadSkillsResult {
-        skills: skill_map.into_values().collect(),
+        skills,
         diagnostics,
     }
 }
@@ -265,6 +278,40 @@ mod tests {
             .diagnostics
             .iter()
             .any(|d| matches!(d, ResourceDiagnostic::Collision { .. })));
+    }
+
+    #[test]
+    fn skills_list_in_load_order_ts_map_semantics() {
+        // TS `Map` insertion order: user dir first, then project, then the
+        // explicit paths in order — the loser of a collision never appears.
+        let tmp = tempfile::tempdir().unwrap();
+        let agent_dir = tmp.path().join("agent");
+        let project = tmp.path().join("project");
+        fs::create_dir_all(agent_dir.join("skills")).unwrap();
+        fs::create_dir_all(project.join(".prime").join("agent").join("skills")).unwrap();
+        // One skill per source: the cross-source order is the contract
+        // (intra-directory order is readdir order on both sides).
+        write_skill(&agent_dir.join("skills"), "zeta", "user zeta");
+        write_skill(
+            &project.join(".prime").join("agent").join("skills"),
+            "alpha",
+            "project alpha",
+        );
+        let extra = tmp.path().join("extra");
+        fs::create_dir_all(extra.join("gamma")).unwrap();
+        fs::write(
+            extra.join("gamma").join("SKILL.md"),
+            "---\nname: gamma\ndescription: extra gamma\n---\nbody",
+        )
+        .unwrap();
+        let result = load_skills(&LoadSkillsOptions {
+            cwd: project,
+            agent_dir,
+            skill_paths: vec![extra.display().to_string()],
+            include_defaults: true,
+        });
+        let names: Vec<&str> = result.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["zeta", "alpha", "gamma"]);
     }
 
     #[test]

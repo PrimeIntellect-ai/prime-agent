@@ -15,6 +15,7 @@ use crate::Model;
 
 /// The compiled catalog, shared as one immutable list (the TS
 /// `installedModels`).
+#[must_use]
 pub fn compiled_models() -> &'static [Model] {
     static COMPILED: LazyLock<Vec<Model>> = LazyLock::new(|| {
         let mut models: Vec<Model> = pa_ai::models_generated::get_providers()
@@ -30,6 +31,7 @@ pub fn compiled_models() -> &'static [Model] {
 
 /// Distinct compiled `(provider, api, baseUrl)` tuples (Prime Inference
 /// excluded — its transport is served by the live-fetch domain).
+#[must_use]
 pub fn compiled_transport_tuples() -> Vec<(&'static str, &'static str, &'static str)> {
     let mut tuples: Vec<(&'static str, &'static str, &'static str)> = Vec::new();
     let mut seen: HashSet<(&str, &str, &str)> = HashSet::new();
@@ -55,6 +57,7 @@ pub fn compiled_transport_tuples() -> Vec<(&'static str, &'static str, &'static 
 /// The compiled offline Prime Inference entries (the onboarding fallback
 /// before the first credentialed fetch). Private ids (internal/, dev/, ids
 /// containing `:`) never ship compiled.
+#[must_use]
 pub fn prime_inference_offline_entries() -> Vec<Model> {
     compiled_models()
         .iter()

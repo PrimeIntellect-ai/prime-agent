@@ -86,12 +86,14 @@ impl ExtensionRunner {
     }
 
     /// The handshake result: registrations as loaded plus per-path errors.
+    #[must_use]
     pub fn hello(&self) -> &HelloResult {
         self.host.hello()
     }
 
     /// Per-path load errors (never fatal; surfaced by the caller in
     /// startup notices).
+    #[must_use]
     pub fn load_errors(&self) -> &[pa_types::extension_rpc::ExtensionLoadError] {
         &self.host.hello().errors
     }
@@ -106,11 +108,13 @@ impl ExtensionRunner {
 
     /// Whether the runner is still usable (§2.4: a dead sidecar degrades to
     /// no-ops; requests fail fast).
+    #[must_use]
     pub fn is_alive(&self) -> bool {
         self.host.is_alive()
     }
 
     /// The sidecar process id (diagnostics and tests).
+    #[must_use]
     pub fn pid(&self) -> Option<u32> {
         self.host.pid()
     }

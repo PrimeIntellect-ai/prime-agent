@@ -1,3 +1,15 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
+// crate root: the same bounded-boundary disposition as src/lib.rs
+// (large_futures/too_many_lines/the cast family; details there).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! Kernel bootstrap / lifecycle benchmark harness (verifier tooling, not a
 //! test): measures the cold and warm kernel bootstrap paths, per-execute
 //! overhead, and snapshot/restore cost against a real `python -m rlm.repl`
@@ -161,7 +173,11 @@ async fn main() {
             let total = ms(t);
             println!(
                 "execute-rounds {rounds} total-ms {total} per-execute-ms {}",
-                if rounds > 0 { total / rounds as u64 } else { 0 }
+                if rounds > 0 {
+                    total / u64::from(rounds)
+                } else {
+                    0
+                }
             );
             let _ = manager
                 .shutdown(KernelShutdownOptions {

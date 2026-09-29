@@ -88,6 +88,8 @@ impl<'a> ResponsesStreamProcessor<'a> {
 
     /// Process one parsed stream event. Errors mirror the TS thrown
     /// `StreamFailureError`s.
+    // Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+    #[allow(clippy::too_many_lines)]
     pub fn handle_event(&mut self, event: &Value) -> Result<(), ProviderError> {
         let event_type = event
             .get("type")

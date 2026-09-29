@@ -424,6 +424,7 @@ pub(crate) fn direct_attach_capabilities() -> Vec<DaemonClientCapability> {
         "attach_snapshot".to_string(),
         "event_sequence".to_string(),
         "slim_attach".to_string(),
+        "elide_snapshot_images".to_string(),
     ]
 }
 

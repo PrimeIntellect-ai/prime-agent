@@ -211,7 +211,7 @@ impl RlmSubagentHost for NoRlmChildren {
         targets: Vec<String>,
         _timeout_ms: u64,
     ) -> RlmHostFuture<Vec<RlmChildResult>> {
-        Box::pin(async move { no_children_collect(targets) })
+        Box::pin(async move { no_children_collect(&targets) })
     }
 }
 
@@ -221,7 +221,7 @@ impl RlmSubagentHost for NoRlmChildren {
 ///
 /// Returns an error naming the first requested target when any targets are
 /// requested; an empty target list collects to an empty result.
-pub fn no_children_collect(targets: Vec<String>) -> anyhow::Result<Vec<RlmChildResult>> {
+pub fn no_children_collect(targets: &[String]) -> anyhow::Result<Vec<RlmChildResult>> {
     if let Some(target) = targets.first() {
         anyhow::bail!("No direct RLM child matches \"{target}\" in the current parent session");
     }
@@ -805,7 +805,7 @@ mod tests {
         )
         .unwrap();
         let auth = crate::auth::AuthStorage::in_memory_with_env(
-            crate::auth::types::AuthStorageData::default(),
+            &crate::auth::types::AuthStorageData::default(),
             std::sync::Arc::new(crate::auth::NoOAuth),
             std::sync::Arc::new(NoEnvCredentials),
         );

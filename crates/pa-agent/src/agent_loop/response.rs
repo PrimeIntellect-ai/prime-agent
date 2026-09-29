@@ -72,6 +72,9 @@ pub(crate) async fn stream_assistant_response(
 }
 
 /// Inner body of `streamAssistantResponse` (the TS `try` block).
+// Direct port of the TS `try` block; refactoring is out of scope for this
+// zero-behavior-change sweep.
+#[allow(clippy::too_many_lines)]
 async fn stream_assistant_response_inner(
     context: &mut AgentContext,
     config: &AgentLoopConfig,

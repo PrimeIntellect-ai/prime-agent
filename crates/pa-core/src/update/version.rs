@@ -17,6 +17,7 @@ pub struct ParsedVersion<'a> {
 /// Parse `v?-?`-prefixed semver (`1.2.3`, `v1.2.3`, `1.2.3-beta.4+meta`).
 /// Returns `None` for anything else (TS `parsePackageVersion` parity: an
 /// unparseable version is never a downgrade and never a strict upgrade).
+#[must_use]
 pub fn parse_package_version(version: &str) -> Option<ParsedVersion<'_>> {
     let trimmed = version.trim().trim_start_matches('v');
     let without_build = trimmed.split('+').next().unwrap_or(trimmed);
@@ -78,6 +79,7 @@ fn compare_prerelease_identifiers(left: &str, right: &str) -> std::cmp::Ordering
 
 /// Three-way semver compare (`Some(-1|0|1)`); `None` when either side does
 /// not parse (TS `comparePackageVersions`).
+#[must_use]
 pub fn compare_package_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
     let left = parse_package_version(left)?;
     let right = parse_package_version(right)?;
@@ -101,6 +103,7 @@ pub fn compare_package_versions(left: &str, right: &str) -> Option<std::cmp::Ord
 /// Whether `candidate_version` is strictly newer than `current_version`
 /// (TS `isNewerPackageVersion`; unparsable sides fall back to string
 /// inequality).
+#[must_use]
 pub fn is_newer_package_version(candidate_version: &str, current_version: &str) -> bool {
     match compare_package_versions(candidate_version, current_version) {
         Some(ordering) => ordering == std::cmp::Ordering::Greater,
@@ -111,6 +114,7 @@ pub fn is_newer_package_version(candidate_version: &str, current_version: &str) 
 /// Whether installing `candidate_version` would lower the
 /// `major.minor.patch` base (prerelease tags aside) — the `Planning`
 /// refusal (TS `isBaseVersionDowngrade`).
+#[must_use]
 pub fn is_base_version_downgrade(candidate_version: &str, current_version: &str) -> bool {
     let Some(candidate) = parse_package_version(candidate_version) else {
         return false;
@@ -129,6 +133,7 @@ pub fn is_base_version_downgrade(candidate_version: &str, current_version: &str)
 
 /// Strip a leading `v` and surrounding whitespace (TS
 /// `normalizeReleaseVersion`).
+#[must_use]
 pub fn normalize_release_version(version: &str) -> &str {
     version.trim().trim_start_matches('v')
 }
@@ -137,6 +142,7 @@ pub fn normalize_release_version(version: &str) -> &str {
 /// channel wins; otherwise a `-beta*` prerelease stays on nightly and
 /// anything else follows stable. Nightly builds are what the release
 /// bucket publishes as beta.
+#[must_use]
 pub fn resolve_update_channel(
     current_version: &str,
     preferred: Option<UpdateChannel>,
@@ -159,6 +165,7 @@ pub enum UpdateChannel {
 
 impl UpdateChannel {
     /// The manifest file the channel publishes at the download base URL.
+    #[must_use]
     pub fn manifest_path(self) -> &'static str {
         match self {
             Self::Stable => "latest.json",
@@ -167,6 +174,7 @@ impl UpdateChannel {
     }
 
     /// The channel's wire name (the TS `UpdateChannel` string values).
+    #[must_use]
     pub fn wire_name(self) -> &'static str {
         match self {
             Self::Stable => "stable",
@@ -176,6 +184,7 @@ impl UpdateChannel {
 
     /// Parse the wire name; an unknown value reads as unset (a preferred
     /// channel then infers from the running version).
+    #[must_use]
     pub fn from_wire(wire: &str) -> Option<Self> {
         match wire {
             "stable" => Some(Self::Stable),
@@ -190,6 +199,7 @@ impl UpdateChannel {
 /// releases; a tagged version there is a build train that was never
 /// promoted, and installing it can replace newer code with an obsolete
 /// train (the `0.10.0-rust-*` dogfood trains over the port).
+#[must_use]
 pub fn has_prerelease_tag(version: &str) -> bool {
     parse_package_version(version)
         .and_then(|parsed| parsed.prerelease)
@@ -247,6 +257,7 @@ fn same_base_opaque_build_tag(candidate_version: &str, current_version: &str) ->
 /// different version whose base version is not older, so a stable `1.2.3`
 /// can move onto `1.2.3-beta.5` even though prerelease ordering ranks that
 /// lower.
+#[must_use]
 pub fn is_release_update_candidate(
     candidate_version: &str,
     current_version: &str,

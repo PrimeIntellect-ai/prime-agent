@@ -1,6 +1,15 @@
 //! Client connections: the per-connection task - read loop, dispatch,
 //! and the parsed-command execution surface.
-use super::*;
+use super::{
+    broadcast, command_type_name, current_protocol_info, daemon_closing_shutdown_event,
+    default_server_capabilities, input_admission_id, json, parse_supervisor_command_line,
+    response_failure, response_line, response_success, salvage_command_type, salvage_id,
+    subscribers, update_gate_refuses, util, Arc, AsyncBufReadExt, AsyncWriteExt, BufReader,
+    ClientRouting, DaemonCommand, DaemonOutbound, DaemonRuntimeIdentity, EnvelopeParseError, Map,
+    Ordering, Outbound, Result, RouteAdmission, Supervisor, TransportStream, TypedCreateRejection,
+    Value, DAEMON_APP_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION, ROUTE_TIMEOUT_MS,
+    UPDATE_PREPARING_MESSAGE,
+};
 
 async fn write_line<W: AsyncWriteExt + Unpin>(writer: &mut W, value: &Value) -> Result<usize> {
     let mut line = serde_json::to_string(value)?;
@@ -93,7 +102,7 @@ impl Supervisor {
                 launcher_path: None,
             }),
             supervisor_generation: Some(format!("sup:{}", std::process::id())),
-            supervisor_pid: Some(std::process::id() as u64),
+            supervisor_pid: Some(u64::from(std::process::id())),
             supervisor_owner_token: Some(uuid::Uuid::new_v4().to_string()),
             supervisor_process_start_id: crate::protocol::process_start_id(std::process::id()),
             supervisor_socket_path: Some(self.options.socket_path.to_string_lossy().to_string()),
@@ -427,6 +436,16 @@ impl Supervisor {
             }
         };
         let command_id = envelope.id.clone();
+        // THE REQUEST'S OWN CLIENT ID, captured at parse time (the bots'
+        // finding): `effective_client_id` is per-connection state a later
+        // command on the same connection can overwrite while this
+        // dispatch is still running, and the shutdown attribution must
+        // name the client that SENT the shutdown, not whoever spoke next.
+        // An envelope without a clientId rides the connection's sticky id.
+        let request_client_id = envelope
+            .client_id
+            .clone()
+            .unwrap_or_else(|| effective_client_id.lock().unwrap().clone());
         if let Some(client_id) = envelope.client_id.clone() {
             *effective_client_id.lock().unwrap() = client_id;
         }
@@ -474,7 +493,7 @@ impl Supervisor {
         // transaction whose marker expired returns the supervisor to Serving
         // before the command is served.
         if let Some(abort) = self.update_prepare.abort_if_expired(util::now_ms()) {
-            self.finish_update_abort(abort).await;
+            self.finish_update_abort(&abort);
         }
         // Admission gate: mutating commands are refused while a prepare
         // transaction is active (TS "Daemon is preparing an update restart"),
@@ -513,6 +532,7 @@ impl Supervisor {
             .execute_parsed_command(
                 &envelope.command,
                 effective_client_id,
+                &request_client_id,
                 attached,
                 roster_subscribed,
                 connection,
@@ -541,6 +561,7 @@ impl Supervisor {
         self: &Arc<Self>,
         command: &DaemonCommand,
         effective_client_id: &Arc<std::sync::Mutex<String>>,
+        request_client_id: &str,
         attached: &Arc<crate::supervisor::subscribers::ClientSubscriptions>,
         roster_subscribed: &Arc<std::sync::atomic::AtomicBool>,
         connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
@@ -552,6 +573,22 @@ impl Supervisor {
         match command {
             DaemonCommand::AckResult { .. } => (Vec::new(), false),
             DaemonCommand::Restart { .. } | DaemonCommand::Shutdown { .. } => {
+                // WHO asked (the twice-killed fleet's field diagnosis: a
+                // stop seen from the outside was unattributable until the
+                // wire was reconstructed): the request's client id and
+                // command id land in the daemon log the moment the drain
+                // commits, so the client that stopped the daemon - the
+                // installer, an agent session, a person - is nameable
+                // from the log alone. The id is the REQUEST's own (parse-
+                // time capture, not the connection's mutable effective
+                // id), and both values are newline-stripped: the log is
+                // line-structured, and a client-chosen id carrying \n
+                // must not forge attribution lines (the bots' finding).
+                let logged_client = request_client_id.replace(['\n', '\r'], " ");
+                let logged_command = command_id.replace(['\n', '\r'], " ");
+                self.log_line(&format!(
+                    "{type_name} requested by client {logged_client} (command {logged_command})"
+                ));
                 let response = response_success(Some(&command_id), &type_name, None);
                 let mut lines = vec![response_line(&response)];
                 // daemon_closing goes to every client before the exit.
@@ -604,7 +641,7 @@ impl Supervisor {
             }
             DaemonCommand::RosterUnsubscribe { .. } => {
                 roster_subscribed.store(false, std::sync::atomic::Ordering::SeqCst);
-                let response = self.handle_roster_unsubscribe(&command_id, &type_name);
+                let response = Self::handle_roster_unsubscribe(&command_id, &type_name);
                 (vec![response_line(&response)], false)
             }
             DaemonCommand::WorkerRosterDelta {
@@ -835,13 +872,11 @@ impl Supervisor {
                 // arm ordering).
                 let client_id = effective_client_id.lock().unwrap().clone();
                 let attached_ids = attached.session_ids();
-                let marked = self
-                    .begin_detach_pause_bookkeeping(
-                        connection,
-                        active_session_id.as_deref(),
-                        &attached_ids,
-                    )
-                    .await;
+                let marked = Self::begin_detach_pause_bookkeeping(
+                    connection,
+                    active_session_id.as_deref(),
+                    &attached_ids,
+                );
                 let outcome = self
                     .route_client_command(
                         command,
@@ -905,7 +940,7 @@ impl Supervisor {
                 if let Ok(resident) = self.registry.resolve(target_active_session_id).await {
                     cleared.push(resident.worker_id.clone());
                 }
-                self.clear_detaching_after_reattach(connection, &cleared);
+                Self::clear_detaching_after_reattach(connection, &cleared);
                 outcome
             }
             DaemonCommand::AgentMessagesStatus {
@@ -1053,12 +1088,81 @@ mod tests {
     use pa_types::platform::transport::TransportStream;
     use serde_json::json;
     use std::sync::Arc;
+    use std::time::Duration;
+
+    /// A shutdown or restart request is attributable from the daemon log
+    /// alone (the field diagnosis's ask: the stop that killed the fleet
+    /// twice was unattributable until the wire was reconstructed): the
+    /// request's client id and command id land in the log the moment the
+    /// drain commits. Drives a real connection loop (`handle_client`)
+    /// with the installer probe's own envelope shape.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_shutdown_request_logs_its_client() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let options = SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        };
+        let log_path = crate::paths::daemon_log_path(&options.socket_path, &options.agent_dir);
+        let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+        let (server_side, client_side) = tokio::net::UnixStream::pair().expect("socket pair");
+        let connection = {
+            let supervisor = Arc::clone(&supervisor);
+            let stream: Box<dyn TransportStream> = Box::new(server_side);
+            tokio::spawn(async move { supervisor.handle_client(stream).await })
+        };
+        // The greeting arrives before the loop reads: consume it, then send
+        // the installer probe's exact envelope shape (clientId + command
+        // id riding the protocol-7 envelope).
+        let (client_read, mut client_write) = client_side.into_split();
+        let mut client = BufReader::new(client_read);
+        let mut hello = String::new();
+        client.read_line(&mut hello).await.expect("hello line");
+        assert!(
+            hello.contains("\"type\":\"daemon_hello\""),
+            "the greeting: {hello}"
+        );
+        let envelope = json!({
+            "type": "command",
+            "id": "installer-stop",
+            "protocol": {"name": "prime-agent.daemon", "version": 7},
+            "clientId": "install-rust-sh",
+            "command": {"type": "shutdown", "force": true, "id": "installer-stop"},
+        });
+        client_write
+            .write_all((serde_json::to_string(&envelope).unwrap() + "\n").as_bytes())
+            .await
+            .expect("send the shutdown envelope");
+        // The drain commits synchronously with the log line (the gate
+        // flips before the response is even written), so the log is the
+        // wait point; the response and daemon_closing follow on their own
+        // schedule.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let log = loop {
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            if log.contains("shutdown requested by client") {
+                break log;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the shutdown request was never logged; log: {log}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert!(
+            log.contains("shutdown requested by client install-rust-sh (command installer-stop)"),
+            "the log names the requesting client and its command: {log}"
+        );
+        connection.abort();
+    }
 
     /// A client that falls behind the shared event ring loses events (the
     /// broadcast's defined backpressure), but never silently anymore
     /// (finding 4a): the loss becomes a durable daemon-log line naming the
     /// client and the dropped count. Drives a real connection loop
     /// (`handle_client`) over a real socket pair with a flooded ring.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_lagged_client_event_stream_is_logged() {
         use tokio::io::AsyncReadExt as _;

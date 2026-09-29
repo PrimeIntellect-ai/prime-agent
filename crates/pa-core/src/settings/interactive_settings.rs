@@ -1,5 +1,5 @@
 //! The interactive settings-menu accessors (TS settings-manager getters and
-//! setters behind the `/settings` rows and `/fullscreen` persistence). Every
+//! setters behind the `/settings` rows). Every
 //! setter writes the global scope like the TS `markModified` + `save` pair;
 //! every getter reads the merged effective settings with the TS defaults.
 
@@ -22,32 +22,9 @@ impl SettingsManager {
         self.save_global_scope()
     }
 
-    /// `terminal.fullscreen` (TS `getFullscreen`/`setFullscreen`; the Rust
-    /// surface always renders on the alternate screen, so the value is the
-    /// persisted preference the startup surface would read).
-    pub fn get_fullscreen(&self) -> bool {
-        self.settings()
-            .terminal
-            .as_ref()
-            .and_then(|terminal| terminal.fullscreen)
-            .unwrap_or(true)
-    }
-
-    /// `terminal.fullscreen` setter.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the global settings scope cannot be saved.
-    pub fn set_fullscreen(&mut self, enabled: bool) -> Result<()> {
-        self.global_mut()
-            .terminal
-            .get_or_insert_with(Default::default)
-            .fullscreen = Some(enabled);
-        self.save_global_scope()
-    }
-
     /// `terminal.clearOnShrink` (TS default: the `PI_CLEAR_ON_SHRINK`
     /// environment value; this port has no such override).
+    #[must_use]
     pub fn get_clear_on_shrink(&self) -> bool {
         self.settings()
             .terminal
@@ -70,6 +47,7 @@ impl SettingsManager {
     }
 
     /// `terminal.showTerminalProgress` (TS default false).
+    #[must_use]
     pub fn get_show_terminal_progress(&self) -> bool {
         self.settings()
             .terminal
@@ -106,6 +84,7 @@ impl SettingsManager {
     }
 
     /// `images.autoResize` (TS default true).
+    #[must_use]
     pub fn get_image_auto_resize(&self) -> bool {
         self.settings()
             .images
@@ -128,6 +107,7 @@ impl SettingsManager {
     }
 
     /// `images.blockImages` (TS default false).
+    #[must_use]
     pub fn get_block_images(&self) -> bool {
         self.settings()
             .images
@@ -150,6 +130,7 @@ impl SettingsManager {
     }
 
     /// `enableSkillCommands` (TS default true).
+    #[must_use]
     pub fn get_enable_skill_commands(&self) -> bool {
         self.settings().enable_skill_commands.unwrap_or(true)
     }
@@ -165,6 +146,7 @@ impl SettingsManager {
     }
 
     /// `enableBuiltinSkills` (TS default true).
+    #[must_use]
     pub fn get_enable_builtin_skills(&self) -> bool {
         self.settings().enable_builtin_skills.unwrap_or(true)
     }
@@ -181,6 +163,7 @@ impl SettingsManager {
 
     /// `showHardwareCursor` (TS default false; the `PI_HARDWARE_CURSOR`
     /// override is not part of this port).
+    #[must_use]
     pub fn get_show_hardware_cursor(&self) -> bool {
         self.settings().show_hardware_cursor.unwrap_or(false)
     }
@@ -196,6 +179,7 @@ impl SettingsManager {
     }
 
     /// `editorPaddingX` (TS default 0, clamped 0-3).
+    #[must_use]
     pub fn get_editor_padding_x(&self) -> u64 {
         self.settings().editor_padding_x.unwrap_or(0)
     }
@@ -211,6 +195,7 @@ impl SettingsManager {
     }
 
     /// `autocompleteMaxVisible` (TS default 5, clamped 3-20).
+    #[must_use]
     pub fn get_autocomplete_max_visible(&self) -> u64 {
         self.settings().autocomplete_max_visible.unwrap_or(5)
     }
@@ -226,6 +211,7 @@ impl SettingsManager {
     }
 
     /// `quietStartup` (TS default false).
+    #[must_use]
     pub fn get_quiet_startup(&self) -> bool {
         self.settings().quiet_startup.unwrap_or(false)
     }
@@ -242,6 +228,7 @@ impl SettingsManager {
 
     /// `idleEvictionMinutes` (TS `number | "off"`; a `none` value or an
     /// invalid number falls back to the default like the TS getter).
+    #[must_use]
     pub fn get_idle_eviction_minutes(&self) -> String {
         match self.settings().idle_eviction_minutes.as_ref() {
             Some(value) if value.as_str() == Some("off") || value.as_str() == Some("none") => {
@@ -287,6 +274,7 @@ impl SettingsManager {
 
     /// `markdown.mermaid` (TS default `streaming`; only `off` and `final`
     /// are recognized).
+    #[must_use]
     pub fn get_mermaid_rendering_mode(&self) -> &'static str {
         match self
             .settings()
@@ -322,6 +310,7 @@ impl SettingsManager {
 
     /// `warnings` (TS `WarningSettings`; a missing document is all-default,
     /// and `anthropicExtraUsage` defaults true).
+    #[must_use]
     pub fn get_warnings_anthropic_extra_usage(&self) -> bool {
         self.settings()
             .warnings
@@ -367,6 +356,7 @@ impl SettingsManager {
 
     /// `enabledModels` (TS `getEnabledModels`/`setEnabledModels`): the
     /// persisted model-scope patterns (`None` is no filter).
+    #[must_use]
     pub fn get_enabled_models(&self) -> Option<Vec<String>> {
         self.settings().enabled_models.clone()
     }

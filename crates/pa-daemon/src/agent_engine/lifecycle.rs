@@ -2,7 +2,15 @@
 //! build/adopt/retire cycle, the closed-state markers, the skill
 //! expansion and session-command funnels, and the kernel host
 //! wiring the session build installs (moved with its concern).
-use super::*;
+use super::{
+    execute_session_command, json_round_trip, map_thinking_level,
+    register_agent_message_host_handlers, register_agent_observe_host_handlers,
+    switchable_stream_fn, AgentEngineConfig, AgentSessionEngine, Arc, CoreSessionEngine,
+    EngineModelSelection, HostRequestHandlers, LinkAgentMessageController,
+    LinkAgentObserveController, Model, OverflowRecovery, ProducerUsageSink, ProviderTarget,
+    QuotaParkState, SessionCommandExecution, SessionCommandParams, SessionEngineConfig,
+    SupervisorChildSessions, Value,
+};
 
 impl AgentSessionEngine {
     /// Build the engine: the shared async runtime, the model selection
@@ -151,6 +159,7 @@ impl AgentSessionEngine {
             mcp,
             published_goal: std::sync::Mutex::new(None),
             goal_runtime: std::sync::Mutex::new(None),
+            pending_goal_continuation: std::sync::Mutex::new(None),
             goal_budget_crossed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             goal_input_probe: std::sync::Mutex::new(None),
             goal_admission_sink: std::sync::Mutex::new(None),
@@ -303,7 +312,7 @@ impl AgentSessionEngine {
     /// first must adopt it, or a read-seam build would strand the parked
     /// branch and the session would start off the moved branch's entries.
     async fn adopt_built_session(&self, built: &CoreSessionEngine) -> anyhow::Result<()> {
-        self.mirror_goal_runtime(built);
+        self.mirror_goal_runtime(built).await;
         // The live compaction summary-delta sink (the worker's
         // `compaction_summary_delta` broadcast): adopted onto the built
         // session like the goal runtime mirrors, so every rebuild's
@@ -854,10 +863,10 @@ impl AgentSessionEngine {
         // under a scoped lock — a std guard must never ride the build's
         // awaits below.
         let (steering_mode, follow_up_mode) = {
-            let modes = self.queue_modes.lock().expect("queue modes");
+            let delivery_modes = self.queue_modes.lock().expect("queue modes");
             (
-                modes.0.as_deref().and_then(Self::queue_mode),
-                modes.1.as_deref().and_then(Self::queue_mode),
+                delivery_modes.0.as_deref().and_then(Self::queue_mode),
+                delivery_modes.1.as_deref().and_then(Self::queue_mode),
             )
         };
 
@@ -1036,10 +1045,10 @@ impl AgentSessionEngine {
             // built once per session, so the race does not exist there;
             // this port's lazy build needs the catch-up).
             let (steering_mode, follow_up_mode) = {
-                let modes = self.queue_modes.lock().expect("queue modes");
+                let delivery_modes = self.queue_modes.lock().expect("queue modes");
                 (
-                    modes.0.as_deref().and_then(Self::queue_mode),
-                    modes.1.as_deref().and_then(Self::queue_mode),
+                    delivery_modes.0.as_deref().and_then(Self::queue_mode),
+                    delivery_modes.1.as_deref().and_then(Self::queue_mode),
                 )
             };
             if let Some(mode) = steering_mode {

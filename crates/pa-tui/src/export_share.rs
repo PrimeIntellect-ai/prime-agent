@@ -72,7 +72,11 @@ pub enum GhAuthStatus {
 /// installed. The probe never opens a window (hidden spawn).
 #[must_use]
 pub fn probe_gh_auth() -> GhAuthStatus {
-    let Ok(output) = gh_probe_command().args(["auth", "status"]).output() else {
+    // No inherited fds: a probe must never hold the terminal the TUI owns
+    // (the fd-set audit's rule — no child holds /dev/tty).
+    let mut command = gh_probe_command();
+    command.stdin(std::process::Stdio::null());
+    let Ok(output) = command.args(["auth", "status"]).output() else {
         return GhAuthStatus::NotInstalled;
     };
     if output.status.success() {

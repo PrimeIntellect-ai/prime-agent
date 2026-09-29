@@ -190,6 +190,14 @@ pub struct GoalContinuation {
     /// The `goal_update` event's `goal` payload, `None` when an
     /// unchanged state stays silent.
     pub goal_update: Option<Value>,
+    /// This mint's own pending-continuation guard handle, captured under
+    /// the driver lock at the mint: the admission and drop surfaces
+    /// release exactly the mint's guard, never whichever handle the
+    /// engine's mutable mirror currently holds (a stale task from before
+    /// a core rebuild must not clear a replacement session's guard).
+    /// `None` when the item armed no guard (the budget steer mints no
+    /// continuation slot).
+    pub pending_handle: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// The goal-driven work a settled run boundary owes: TS
@@ -322,6 +330,31 @@ pub trait SessionEngine: Send + Sync {
     /// the turn; the resume site admits it.
     fn mint_post_compaction_goal_continuation(&self) -> Option<GoalContinuation> {
         None
+    }
+
+    /// Release the engine's pending-continuation guard: the caller
+    /// admitted (or withdrew) a minted goal continuation, so the next
+    /// boundary may mint again (the pending-never-re-arms contract —
+    /// the owed flag clears at the queue). Engines without thread goals
+    /// do nothing.
+    fn clear_pending_goal_continuation(&self) {}
+
+    /// The engine's current pending-continuation handle, READ without
+    /// clearing (the mirror read — the core a mint about to spawn will
+    /// use). Engines without thread goals have none.
+    fn goal_pending_handle(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        None
+    }
+
+    /// Release one mint's OWN pending-continuation handle (the item's
+    /// captured handle, or the spawn-captured handle for a lost task):
+    /// an admission or drop names the specific mint, never the mutable
+    /// mirror. An item that armed no guard releases nothing. Engines
+    /// without thread goals release nothing.
+    fn release_goal_continuation_handle(
+        &self,
+        _handle: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) {
     }
 
     /// Run one prompt. `prompt_index` counts accepted prompts for this
@@ -829,6 +862,7 @@ pub trait SessionEngine: Send + Sync {
 /// The resource snapshot for a session without a resource surface (the TS
 /// loader shape over empty lists): every category present, every list
 /// empty.
+#[must_use]
 pub fn empty_resource_snapshot() -> Value {
     json!({
         "contextFiles": [],
@@ -956,6 +990,7 @@ pub const SIDE_QUESTION_STATUS_CANCELLED: &str = "cancelled";
 pub const SIDE_QUESTION_STATUS_ERROR: &str = "error";
 
 /// Wire form of one side-question event (TS `SideQuestionEvent`).
+#[must_use]
 pub fn side_question_event_value(
     request: &SideQuestionRequest,
     answer: &str,
@@ -976,6 +1011,7 @@ pub fn side_question_event_value(
 
 impl SideQuestionOutcome {
     /// The TS wire status of this outcome.
+    #[must_use]
     pub fn status_str(&self) -> &'static str {
         match self {
             SideQuestionOutcome::Complete { .. } => SIDE_QUESTION_STATUS_COMPLETE,
@@ -985,6 +1021,7 @@ impl SideQuestionOutcome {
     }
 
     /// The answer text carried by the final event (partial on abort/failure).
+    #[must_use]
     pub fn answer(&self) -> &str {
         match self {
             SideQuestionOutcome::Complete { answer }
@@ -994,6 +1031,7 @@ impl SideQuestionOutcome {
     }
 
     /// The error message carried by the final event, when the run failed.
+    #[must_use]
     pub fn error_message(&self) -> Option<&str> {
         match self {
             SideQuestionOutcome::Failed { error, .. } => Some(error.as_str()),
@@ -1082,7 +1120,7 @@ impl ScriptedEngine {
     /// Never errors (the script shape is total and every field defaults);
     /// the `Result` return keeps the constructor uniform with the other
     /// builders.
-    pub fn from_value(script: Value) -> Result<Self> {
+    pub fn from_value(script: &Value) -> Result<Self> {
         let responses = script
             .get("responses")
             .and_then(Value::as_array)
@@ -1181,7 +1219,7 @@ impl ScriptedEngine {
     /// [`ScriptedEngine::from_value`]).
     pub fn from_file(path: &std::path::Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        Self::from_value(serde_json::from_str(&content)?)
+        Self::from_value(&serde_json::from_str(&content)?)
     }
 
     fn response_text(response: &Value) -> String {
@@ -1258,6 +1296,8 @@ impl SessionEngine for ScriptedEngine {
                 })),
             },
             goal_update: Some(goal.state.clone()),
+            // The scripted faux mints through no real driver: no guard.
+            pending_handle: None,
         })
     }
 
@@ -1798,7 +1838,7 @@ mod tests {
     #[test]
     fn scripted_engine_replays_then_echoes() {
         let engine = ScriptedEngine::from_value(
-            json!({"responses": ["first", {"text": "second", "delayMs": 0}]}),
+            &json!({"responses": ["first", {"text": "second", "delayMs": 0}]}),
         )
         .unwrap();
         let request_for = |message: &str| PromptRequest {

@@ -1,5 +1,6 @@
-//! Boot sweep + roster restore + scheduled-work re-arm (spec §6, update
-//! flow slice 5).
+//! Boot sweep + roster restore + the dormant scheduled-jobs report (spec
+//! §6, update flow slice 5; the takeover field fix supersedes its wake
+//! half).
 //!
 //! The new supervisor owns the whole boot side of the update (spec §3):
 //! the scratch-dir sweep (invariant I2 by construction), the roster-via-env
@@ -7,9 +8,26 @@
 //! TS coordinator replays its manifest over the client wire; here the
 //! durable truth rehydrates from the workers' recovery journals and the
 //! sessions' durable files, and the supervisor creates or adopts each
-//! roster row in place), and the scheduled-jobs re-arm with due-run
-//! catch-up (spec §8: `scheduled-jobs.json` is the only write path; the
-//! update flow never archives it).
+//! roster row in place).
+//!
+//! THE NO-AUTO-RESUME CONTRACT (the takeover field fix): a daemon boot
+//! never creates a worker for a session the user did not ask for. The
+//! spec §6 step-3 "scheduled-work re-arm" that woke the sessions of
+//! due scheduled jobs is gone — it booted saved sessions on every
+//! normal boot (not just update boots), and its ungated artifacts scan
+//! (no session-state check, no session-file liveness check, no
+//! parent-coverage walk — the TS `scanPassiveScheduledJobs` gates TS
+//! itself applies) read a TS-era `scheduled-jobs.json` heartbeat row
+//! whose `nextRunAt` had gone stale as DUE, so a fresh install over a
+//! shared store booted a random old session the operator's friend had
+//! not had running. The new contract: a session that was not running
+//! when the daemon stopped stays down after the daemon restarts; a
+//! schedule fires only while its session is live (the worker's own
+//! in-process scheduler claims due jobs once the user resumes it);
+//! due heartbeats on not-running sessions stay dormant, surfaced by
+//! the agents-view heartbeat catalog (`heartbeats_list`'s passive
+//! rows) instead of firing. The boot only reports how many are
+//! dormant.
 //!
 //! Restore never fails the boot (spec §9): a row that cannot come up is
 //! recorded as a per-session failure and its session stays on disk for
@@ -26,16 +44,12 @@ use pa_types::daemon::update_flow::{
     UpdateRosterSession, UpdateStatusCounts, UpdateStatusFailure, UPDATE_ROSTER_ENV,
 };
 use pa_types::daemon::{DaemonCommand, UpdateId};
-use serde_json::{json, Map};
+use serde_json::json;
 use tokio::sync::Notify;
 
 use crate::backpressure::RouteAdmission;
 use crate::registry::ResidentWorker;
 use crate::supervisor::Supervisor;
-
-/// TS `SCHEDULED_WAKE_CLIENT_ID`, verbatim: the client id the supervisor
-/// uses when it wakes a saved session for a due scheduled job.
-pub(crate) const SCHEDULED_WAKE_CLIENT_ID: &str = "scheduled-wake";
 
 /// The client id the supervisor uses for roster-row creates (the Rust
 /// design's counterpart of the TS coordinator's restore client).
@@ -415,7 +429,7 @@ fn sort_rows_bottom_up(rows: &mut [&UpdateRosterSession]) {
             let subagent = |row: &UpdateRosterSession| {
                 row.kind == pa_types::daemon::update_flow::UpdateRosterSessionKind::Subagent
             };
-            (subagent(b) as u8).cmp(&(subagent(a) as u8))
+            u8::from(subagent(b)).cmp(&u8::from(subagent(a)))
         })
     });
 }
@@ -423,9 +437,17 @@ fn sort_rows_bottom_up(rows: &mut [&UpdateRosterSession]) {
 /// The boot restore driver: run after the descriptor-adoption task settles
 /// (kept workers relaunch from their descriptors), then walk the roster
 /// session rows bottom-up — deepest first (spec §8: parents attach to
-/// existing children) — creating or adopting each row, then re-arm
-/// scheduled work. Finally the pass settles the shared state, waking the
-/// queued attaches and unblocking the `update_restore_status` poll.
+/// existing children) — creating or adopting each row. The no-auto-resume
+/// contract ends the old scheduled-work re-arm: NOT-RUNNING sessions stay
+/// down at every boot (normal and update alike), so this pass never
+/// creates a worker for a due scheduled job — it only reports how many
+/// are dormant. THE REPORT'S ORDER (the bots' finding): on an update boot
+/// it runs AFTER the roster replay, so a due job on a session the user
+/// asked to restore is NOT reported dormant right before its own
+/// scheduler arms with the restored worker — only sessions that stay
+/// down after the replay are dormant. Finally the pass settles the
+/// shared state, waking the queued attaches and unblocking the
+/// `update_restore_status` poll.
 pub(crate) async fn restore_pass(
     supervisor: &std::sync::Arc<Supervisor>,
     adoption: tokio::task::JoinHandle<()>,
@@ -433,11 +455,7 @@ pub(crate) async fn restore_pass(
 ) {
     let _ = adoption.await;
     let Some(roster) = roster else {
-        // Normal boot (spec §6 step 3 still applies): re-arm only.
-        let woke = rearm_scheduled_wake(supervisor).await;
-        if woke > 0 {
-            supervisor.log_line(&format!("scheduled-work re-arm woke {woke} session(s)"));
-        }
+        report_dormant_scheduled_jobs(supervisor).await;
         supervisor
             .restore
             .settle(UpdateStatusCounts::default(), Vec::new());
@@ -492,10 +510,11 @@ pub(crate) async fn restore_pass(
             },
         }
     }
-    let woke = rearm_scheduled_wake(supervisor).await;
-    if woke > 0 {
-        supervisor.log_line(&format!("scheduled-work re-arm woke {woke} session(s)"));
-    }
+    // The update boot's dormant report runs here, AFTER the replay: the
+    // roster's restored sessions are live now, so a due job they own is
+    // NOT dormant (its scheduler armed with the worker); only the
+    // sessions that stayed down count.
+    report_dormant_scheduled_jobs(supervisor).await;
     supervisor.restore.settle(counts, failures);
 }
 
@@ -573,100 +592,51 @@ async fn continuation_treatment(
     }
 }
 
-/// Spec §6 step 3: the scheduled-work re-arm. `scheduled-jobs.json` in the
-/// session artifacts is the only write path (spec §8); this pass rescans
-/// it and wakes the sessions of due active jobs that have no live worker,
-/// so a job that came due during the update window (and never ran) fires
-/// on the first re-arm pass — `next_run_at` is never advanced to hide a
-/// gap. Live sessions need no wake: their in-process scheduler claims due
-/// jobs itself. Returns how many sessions were woken.
-async fn rearm_scheduled_wake(supervisor: &std::sync::Arc<Supervisor>) -> usize {
+/// The boot's dormant-scheduled-jobs report (the no-auto-resume contract
+/// that replaces spec §6 step 3's wake): scan `scheduled-jobs.json` (the
+/// only write path, spec §8) for ACTIVE jobs that read as DUE and whose
+/// session has no live worker — and report them, never wake them. A due
+/// job on a not-running session stays dormant: a schedule fires only
+/// while its session is live (the worker's own in-process scheduler
+/// claims due jobs once the user resumes the session), and the dormant
+/// rows stay surfaced by the agents-view heartbeat catalog
+/// (`heartbeats_list`'s passive rows) instead of auto-firing. This is
+/// what the old re-arm got wrong in the field: a TS-era heartbeat row
+/// whose `next_run_at` had gone stale read as DUE and the boot created a
+/// worker for a session the user had not had running.
+async fn report_dormant_scheduled_jobs(supervisor: &std::sync::Arc<Supervisor>) {
     let jobs = crate::update_roster::scan_scheduled_jobs(&supervisor.options.agent_dir);
     let now = crate::util::now_ms();
-    // The wake-scan target verification (TS `collectPassiveScheduledJobs`'s
-    // scan gates): a due job may only wake a session that still exists —
-    // the file present, still the job's session, still carrying the
-    // `active` state — and that no live worker covers (a covered tree's
-    // scheduler owns the fire itself). A killed (state `archived`) or
-    // deleted session is never revived (TS parity; the zombie fix).
     let live = supervisor.live_session_files().await;
-    let mut woke = 0usize;
-    for job in jobs {
-        if job.status != pa_core::cron::JobStatus::Active {
-            continue;
-        }
-        if !pa_core::cron::is_due_job(&job, now) {
-            continue;
-        }
-        if job.session_file.is_empty() {
-            continue;
-        }
-        if !crate::stop_cleanup::due_job_target_alive(&job, &live) {
-            continue;
-        }
-        match wake_saved_session(supervisor, &job.session_file).await {
-            Ok(()) => woke += 1,
-            Err(error) => supervisor.log_line(&format!(
-                "scheduled-work re-arm failed for {}: {error:#}",
-                job.session_file
-            )),
-        }
+    let dormant: Vec<&pa_core::cron::AgentCronJob> = jobs
+        .iter()
+        .filter(|job| {
+            job.status == pa_core::cron::JobStatus::Active
+                && pa_core::cron::is_due_job(job, now)
+                && !job.session_file.is_empty()
+                && !live.contains(
+                    &crate::lease::canonical_session_path(std::path::Path::new(&job.session_file))
+                        .to_string_lossy()
+                        .to_string(),
+                )
+        })
+        .collect();
+    if dormant.is_empty() {
+        return;
     }
-    woke
-}
-
-/// Wake one saved session for its due scheduled jobs (TS
-/// `wakeDueScheduledSessions`: a create with just the session path, under
-/// the scheduled-wake client id). The wake reuses an existing worker if
-/// one already owns the file (the caller checked; this is the second
-/// line of defense).
-async fn wake_saved_session(
-    supervisor: &std::sync::Arc<Supervisor>,
-    session_file: &str,
-) -> Result<()> {
-    if supervisor
-        .registry
-        .find_by_session_file(session_file)
-        .await
-        .is_some()
-    {
-        return Ok(());
-    }
-    // One owning daemon: the session-lease table is the one cross-daemon
-    // ownership record a shared agent dir offers. A live holder — this
-    // daemon's own surviving process, or another daemon's worker serving
-    // the same file — owns the session and its scheduler; waking a rival
-    // would either fail on the lease (the 6-strike storm) or, with leases
-    // off, double-serve the file. The wake skips; the owner's own
-    // scheduler fires the job.
-    if let Some(owner) = crate::lease::live_lease_owner(
-        &supervisor.options.agent_dir,
-        std::path::Path::new(session_file),
-    ) {
+    // One log line per dormant job keeps the daemon log greppable for the
+    // field shape (the job id + the session file), without ever creating
+    // a worker for it.
+    for job in &dormant {
         supervisor.log_line(&format!(
-            "scheduled-work re-arm skipped {session_file}: a live worker (pid {}) holds its session lease",
-            owner.pid
+            "scheduled job {} on {} is due but stays dormant: no session auto-boots on daemon start (resume the session to arm its schedule; the heartbeat catalog surfaces it)",
+            job.id, job.session_file
         ));
-        return Ok(());
     }
-    let command = DaemonCommand::Create {
-        id: None,
-        session_path: Some(session_file.to_string()),
-        continue_recent: None,
-        no_session: None,
-        name: None,
-        config: None,
-        telemetry_disabled: None,
-        runtime_metadata: None,
-        lifecycle: None,
-        env: None,
-        launch_env: None,
-        rest: Map::default(),
-    };
-    supervisor
-        .handle_create(&command, SCHEDULED_WAKE_CLIENT_ID.to_string())
-        .await
-        .map(|_| ())
+    supervisor.log_line(&format!(
+        "{} due scheduled job(s) stayed dormant on not-running sessions (no auto-resume)",
+        dormant.len()
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -729,6 +699,7 @@ impl Supervisor {
 mod tests {
     use super::*;
     use pa_types::daemon::update_flow::UpdateStatusCounts;
+    use serde_json::Map;
 
     /// A two-row roster (update `u-1`): row `a-1`, and row `durable-b`
     /// whose session-file stem (`b-2`) differs from its durable id (the

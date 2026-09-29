@@ -51,6 +51,9 @@ fn escape_html(text: &str) -> String {
 
 /// The SGR state carried across one conversion.
 #[derive(Debug, Default, PartialEq, Eq)]
+// The mirrored TS API shape is deliberate (the booleans are the
+// product's own surface, not a refactor target).
+#[allow(clippy::struct_excessive_bools)]
 struct TextStyle {
     fg: Option<String>,
     bg: Option<String>,
@@ -171,6 +174,7 @@ fn sgr_params(sequence: &str) -> Vec<u64> {
 /// then digits/semicolons then `m`) convert — any other escape byte
 /// passes through as escaped literal text, exactly like the TS regex
 /// converter.
+#[must_use]
 pub fn ansi_to_html(text: &str) -> String {
     let mut style = TextStyle::default();
     let mut result = String::new();
@@ -221,6 +225,7 @@ pub fn ansi_to_html(text: &str) -> String {
 
 /// Convert ANSI-escaped lines to HTML: each line is one
 /// `<div class="ansi-line">` row; an empty line renders as `&nbsp;`.
+#[must_use]
 pub fn ansi_lines_to_html(lines: &[String]) -> String {
     lines
         .iter()

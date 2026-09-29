@@ -1,6 +1,14 @@
 //! Client connections: accept, authenticate, and the frame/event plumbing
 //! between the worker and its supervisor.
-use super::*;
+use super::{
+    active_session_id_of, anyhow, bind_transport, broadcast, create_daemon_replay_info,
+    current_protocol_info, default_client_capabilities, json, normalize_client_capabilities,
+    peer_command_allowed, response_failure, response_success, worker_peer_command_allowed,
+    worker_server_capabilities, write_frame, write_frame_segments, Arc, AtomicU64, ConnectionRole,
+    Context, DaemonOutbound, DaemonResponse, DaemonResumeCursor, Map, Ordering, Result,
+    TransportStream, Value, Worker, WorkerRecoveryJournal, DAEMON_APP_VERSION, DAEMON_SCHEMA_ID,
+    DAEMON_SCHEMA_REVISION, DEFAULT_PRIVATE_FRAME_LIMITS, PEER_COMMAND_NOT_ALLOWED,
+};
 
 /// Result of one connection's authentication command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,7 +277,7 @@ impl Worker {
             app_version: Some(DAEMON_APP_VERSION.to_string()),
             runtime: None,
             supervisor_generation: None,
-            supervisor_pid: Some(std::process::id() as u64),
+            supervisor_pid: Some(u64::from(std::process::id())),
             supervisor_owner_token: None,
             supervisor_process_start_id: None,
             supervisor_socket_path: None,
@@ -770,11 +778,23 @@ impl Worker {
             core.attached_client_ids.push(client_id.clone());
         }
         let summary = self.summary_locked(&core);
-        let messages: Vec<Value> = core
+        let mut messages: Vec<Value> = core
             .store
             .as_ref()
             .map(crate::session_store::SessionFile::messages)
             .unwrap_or_default();
+        // The image-payload elision (the image-heavy session-open fix): a
+        // client that advertised `elide_snapshot_images` reads the
+        // transcript without the base64 payloads (their fallback-only
+        // metadata rows travel in the marker); the client's own set is
+        // the worker-facing `capabilities` here unless the supervisor's
+        // routed attach carried the client's set in `clientCapabilities`.
+        let client_capabilities = echoed_client_capabilities
+            .clone()
+            .unwrap_or_else(|| capabilities.clone());
+        if crate::snapshot_stream::wants_image_elision(&client_capabilities) {
+            crate::snapshot_stream::elide_snapshot_image_payloads(&mut messages);
+        }
         let state = self.connection_state_locked(&core);
         let last_event_sequence = core.last_event_sequence;
         let generation = core.generation.clone();

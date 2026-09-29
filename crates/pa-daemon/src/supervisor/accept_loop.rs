@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use pa_types::platform::transport::TransportListener;
 
-use super::*;
+use super::{anyhow, Arc, Ordering, Result, Supervisor};
 
 /// The backoff before retrying a non-recoverable accept error (Codex
 /// parity: the control-socket acceptor sleeps 1s between retries).
@@ -194,7 +194,7 @@ mod tests {
     /// platform-free, so the tests run on Windows too). The dropped peer
     /// half makes the accepted side read EOF, like a client that
     /// connected and vanished.
-    async fn accepted_stream() -> Box<dyn TransportStream> {
+    fn accepted_stream() -> Box<dyn TransportStream> {
         let (_, accepted) = tokio::io::duplex(4096);
         Box::new(DuplexTransport(Mutex::new(accepted)))
     }
@@ -227,7 +227,7 @@ mod tests {
                     accept_error(ErrorKind::ConnectionAborted, "aborted"),
                     accept_error(ErrorKind::ConnectionReset, "reset"),
                     accept_error(ErrorKind::Interrupted, "interrupted"),
-                    Ok(accepted_stream().await),
+                    Ok(accepted_stream()),
                 ]
                 .into(),
             ),
@@ -261,7 +261,7 @@ mod tests {
         for _ in 0..(2 * GIVE_UP_AFTER) {
             results.push_back(accept_error(ErrorKind::ConnectionAborted, "storm"));
         }
-        results.push_back(Ok(accepted_stream().await));
+        results.push_back(Ok(accepted_stream()));
         let scripted = ScriptedAccepts {
             results: Mutex::new(results),
             supervisor: Arc::clone(&supervisor),
@@ -297,7 +297,7 @@ mod tests {
             results: Mutex::new(
                 vec![
                     accept_error(ErrorKind::Other, "too many open files"),
-                    Ok(accepted_stream().await),
+                    Ok(accepted_stream()),
                 ]
                 .into(),
             ),
@@ -335,7 +335,7 @@ mod tests {
         for _ in 0..burst {
             results.push_back(accept_error(ErrorKind::Other, "transient"));
         }
-        results.push_back(Ok(accepted_stream().await));
+        results.push_back(Ok(accepted_stream()));
         for _ in 0..burst {
             results.push_back(accept_error(ErrorKind::Other, "transient"));
         }

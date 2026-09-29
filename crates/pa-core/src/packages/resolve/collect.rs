@@ -16,7 +16,6 @@ impl PackageManager {
     /// Collect a package's resources. True when the package contributes any
     /// resources (filter patterns always count as contributing).
     pub(super) fn collect_package_resources(
-        &self,
         package_root: &Path,
         accumulator: &mut ResourceAccumulator,
         filter: Option<&PackageFilter>,
@@ -25,14 +24,14 @@ impl PackageManager {
         if let Some(filter) = filter {
             for resource_type in RESOURCE_TYPES {
                 match filter.get(resource_type) {
-                    Some(patterns) => self.apply_package_filter(
+                    Some(patterns) => Self::apply_package_filter(
                         package_root,
                         patterns,
                         resource_type,
                         accumulator,
                         metadata,
                     ),
-                    None => self.collect_default_resources(
+                    None => Self::collect_default_resources(
                         package_root,
                         resource_type,
                         accumulator,
@@ -47,7 +46,7 @@ impl PackageManager {
         if let Some(manifest) = manifest {
             for resource_type in RESOURCE_TYPES {
                 let entries = manifest.entries(resource_type);
-                self.add_manifest_entries(
+                Self::add_manifest_entries(
                     entries.as_deref(),
                     package_root,
                     resource_type,
@@ -76,14 +75,13 @@ impl PackageManager {
     /// One resource kind of a package with user filter patterns applied on
     /// top of the package's own manifest patterns.
     fn apply_package_filter(
-        &self,
         package_root: &Path,
         user_patterns: &[String],
         resource_type: ResourceType,
         accumulator: &mut ResourceAccumulator,
         metadata: &PathMetadata,
     ) {
-        let all_files = self.collect_manifest_files(package_root, resource_type);
+        let all_files = Self::collect_manifest_files(package_root, resource_type);
         // An explicit empty list disables this resource type.
         if user_patterns.is_empty() {
             for file in &all_files {
@@ -104,11 +102,7 @@ impl PackageManager {
 
     /// All files a package offers for one kind: manifest entries (filtered by
     /// the manifest's own override patterns) or the convention directory.
-    fn collect_manifest_files(
-        &self,
-        package_root: &Path,
-        resource_type: ResourceType,
-    ) -> Vec<PathBuf> {
+    fn collect_manifest_files(package_root: &Path, resource_type: ResourceType) -> Vec<PathBuf> {
         let manifest = read_pi_manifest(package_root);
         let entries = manifest
             .as_ref()
@@ -116,7 +110,7 @@ impl PackageManager {
             .unwrap_or_default();
         if !entries.is_empty() {
             let all_files =
-                self.collect_files_from_manifest_entries(&entries, package_root, resource_type);
+                Self::collect_files_from_manifest_entries(&entries, package_root, resource_type);
             let manifest_patterns: Vec<String> = entries
                 .iter()
                 .filter(|entry| is_override_pattern(entry))
@@ -140,7 +134,6 @@ impl PackageManager {
     /// Manifest entries of one kind: non-override entries resolve to paths
     /// (plain or glob), override patterns filter them.
     fn add_manifest_entries(
-        &self,
         entries: Option<&[String]>,
         root: &Path,
         resource_type: ResourceType,
@@ -150,7 +143,7 @@ impl PackageManager {
         let Some(entries) = entries else {
             return;
         };
-        let all_files = self.collect_files_from_manifest_entries(entries, root, resource_type);
+        let all_files = Self::collect_files_from_manifest_entries(entries, root, resource_type);
         let patterns: Vec<String> = entries
             .iter()
             .filter(|entry| is_override_pattern(entry))
@@ -167,7 +160,6 @@ impl PackageManager {
     }
 
     fn collect_files_from_manifest_entries(
-        &self,
         entries: &[String],
         root: &Path,
         resource_type: ResourceType,
@@ -186,7 +178,6 @@ impl PackageManager {
     /// Manifest-less default collection for one kind: manifest entries when
     /// present, else the convention directory.
     fn collect_default_resources(
-        &self,
         package_root: &Path,
         resource_type: ResourceType,
         accumulator: &mut ResourceAccumulator,
@@ -197,7 +188,7 @@ impl PackageManager {
             .as_ref()
             .and_then(|manifest| manifest.entries(resource_type));
         if entries.is_some() {
-            self.add_manifest_entries(
+            Self::add_manifest_entries(
                 entries.as_deref(),
                 package_root,
                 resource_type,

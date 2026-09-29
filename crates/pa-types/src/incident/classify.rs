@@ -1,7 +1,13 @@
 //! Log-entry classification into incident events (TS
 //! `classifyIncidentEntry` and its helpers).
 
-use super::patterns::*;
+use super::patterns::{
+    ADOPT_FAILED, AUTH_FAILED, CATCH_UP, CRASH_LINE, CRASH_PREFIX, DAEMON_COMMAND, EVICTED_EMPTY,
+    EVICTED_IDLE, FAILED_AFTER_RETRIES, HEARTBEATS_LIST, MIGRATED, PASSIVATED, RECLAIMED,
+    RECOVERED, RECOVERED_PLAIN, RECOVER_FAILED, REPLACEMENT, SHUTDOWN_EXIT, SIGNAL_SHUTDOWN,
+    STACK_FRAME, STARTUP_FAILED, STDERR_FORWARD, STOP_REQUESTED, SUPERVISOR_COMMAND,
+    SUPERVISOR_LISTENING, UNKNOWN_SESSION, UNRESPONSIVE, WOKE, WORKER_LISTENING, WORKER_SOCKET,
+};
 use super::{
     error_message, first_line, lifecycle_classes, truncate_text, IncidentCategory, IncidentEvent,
     IncidentLogEntry, IncidentSeverity, RECOVERY_BREAKDOWN_LIMIT, SUMMARY_TRUNCATION,
@@ -41,6 +47,7 @@ pub type WorkerPidMap = HashMap<i64, Vec<WorkerPidSighting>>;
 
 /// Map pid -> worker-id sightings from entries whose socket path names a
 /// worker socket (TS `collectWorkerPidMap`).
+#[must_use]
 pub fn collect_worker_pid_map(entries: &[IncidentLogEntry]) -> WorkerPidMap {
     let mut map: WorkerPidMap = WorkerPidMap::new();
     for entry in entries {
@@ -400,6 +407,9 @@ fn provider_failure_event(entry: &IncidentLogEntry, worker_pids: &WorkerPidMap) 
 
 /// Classify one log entry into an incident event; `None` when the entry is
 /// noise (TS `classifyIncidentEntry`).
+// One arm per incident kind, mirroring the TS switch; refactoring is out of
+// scope for this zero-behavior-change sweep.
+#[allow(clippy::too_many_lines)]
 pub fn classify_incident_entry(
     entry: &IncidentLogEntry,
     worker_pids: &WorkerPidMap,
@@ -773,6 +783,7 @@ pub fn classify_incident_entry(
 /// Classify every entry, dropping the duplicate event the daemon writes
 /// both to the structured log and to the worker stderr forward (same
 /// summary, same second) (TS `collectIncidentEvents`).
+#[must_use]
 pub fn collect_incident_events(
     entries: &[IncidentLogEntry],
     worker_pids: &WorkerPidMap,
