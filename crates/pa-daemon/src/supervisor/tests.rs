@@ -779,12 +779,17 @@ struct FakeWorkerSocket {
     write_half: Box<dyn pa_types::platform::transport::AsyncWriteHalf>,
 }
 
-async fn fake_worker(socket_path: &Path) -> FakeWorkerSocket {
-    let listener = pa_types::platform::transport::bind_transport(socket_path)
+async fn bind_fake_worker(socket_path: &Path) -> Box<dyn pa_types::platform::transport::TransportListener> {
+    pa_types::platform::transport::bind_transport(socket_path)
         .await
-        .expect("bind fake worker socket");
-    // `connect_worker` dials the socket directly (its probe already
-    // succeeded), so the first accepted stream is the handshake's own.
+        .expect("bind fake worker socket")
+}
+
+/// Accept the connection `connect_worker` dials (its probe already
+/// succeeded), once the connect task is in flight.
+async fn accept_fake_worker(
+    listener: Box<dyn pa_types::platform::transport::TransportListener>,
+) -> FakeWorkerSocket {
     let stream = listener.accept().await.expect("accept fake worker");
     let (read_half, write_half) = stream.split();
     FakeWorkerSocket {
@@ -879,7 +884,7 @@ async fn handshake_channel_stays_private_until_auth_answers() {
     );
     supervisor.registry.insert(Arc::clone(&resident)).await;
 
-    let mut fake = fake_worker(&socket_path).await;
+    let listener = bind_fake_worker(&socket_path).await;
     let connect = {
         let supervisor = Arc::clone(&supervisor);
         let resident = Arc::clone(&resident);
@@ -889,6 +894,7 @@ async fn handshake_channel_stays_private_until_auth_answers() {
                 .await
         })
     };
+    let mut fake = accept_fake_worker(listener).await;
     // The handshake's auth frame is the FIRST thing on the wire.
     let frame = read_supervisor_frame(&mut fake).await;
     assert_eq!(frame.header.get("commandType"), Some(&json!("worker_auth")));
@@ -960,7 +966,7 @@ async fn a_mid_handshake_registration_cannot_kill_the_handshake() {
     let resident = ResidentWorker::new("w-wedge".to_string(), descriptor, dir.join("w-wedge.json"));
     supervisor.registry.insert(Arc::clone(&resident)).await;
 
-    let mut fake = fake_worker(&socket_path).await;
+    let listener = bind_fake_worker(&socket_path).await;
     let connect = {
         let supervisor = Arc::clone(&supervisor);
         let resident = Arc::clone(&resident);
@@ -970,6 +976,7 @@ async fn a_mid_handshake_registration_cannot_kill_the_handshake() {
                 .await
         })
     };
+    let mut fake = accept_fake_worker(listener).await;
     let frame = read_supervisor_frame(&mut fake).await;
     assert_eq!(frame.header.get("commandType"), Some(&json!("worker_auth")));
     let request_id = frame
