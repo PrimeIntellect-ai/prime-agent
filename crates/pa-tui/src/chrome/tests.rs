@@ -317,15 +317,15 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
 }
 
 /// The focused dock's selection reads as the ONE shared selection
-/// band (the operator's 2026-09-29 revert ruling, superseding
-/// #3031's purple): the gray `selectedBg` — the exact gray the agents
-/// view's rows carried before #3031 (prime #222226), the same gray
-/// on both surfaces — at full opacity, never #3031's accent purple
-/// and never the 2026-09-26 dark-green `ToolSuccessBg` band, across
-/// exactly the group's spans, while each span keeps its own status
-/// color (the selection never repaints the text).
+/// band (the operator's 2026-09-29 one-color ruling, superseding
+/// #3031's purple): the selection paints the hover band's own light
+/// color — the same ONE color on the dock's tab and the agents view's
+/// rows — never #3031's accent purple and never the 2026-09-26
+/// dark-green `ToolSuccessBg` band, across exactly the group's spans,
+/// while each span keeps its own status color (the selection never
+/// repaints the text).
 #[test]
-fn activity_dock_selection_is_the_gray_band() {
+fn activity_dock_selection_is_the_hover_colored_band() {
     let theme = Theme::builtin("prime", ColorMode::TrueColor);
     let dock = ActivityDock {
         subagents_running_direct: 1,
@@ -339,13 +339,15 @@ fn activity_dock_selection_is_the_gray_band() {
     };
     let frame = render_activity_dock(&dock, &theme, 120);
     let row = &frame[1];
-    // The band is the theme's gray `selectedBg` (prime #222226 — the
-    // pre-#3031 gray, the operator's revert ruling) with no extra
-    // modifiers: the ONE style every activity surface's selected row
-    // paints (`theme::selection_row_style`), never the accent purple
-    // and never the 2026-09-26 dark-green panel background.
+    // The band is the theme's hover color (`Theme::hover_row_style`,
+    // the #3109 light wash — the live reference, the operator's
+    // one-color ruling) with no extra modifiers: the ONE style every
+    // activity surface's selected row paints
+    // (`theme::selection_row_style`), never the accent purple and
+    // never the 2026-09-26 dark-green panel background.
     let band = theme.selection_row_style();
-    assert_eq!(band.bg, Some(Color::Rgb(0x22, 0x22, 0x26)));
+    assert_eq!(band.bg, theme.hover_row_style().bg);
+    assert_ne!(band.bg, theme.fg_style(ThemeColor::Accent).fg);
     assert!(band.add_modifier.is_empty());
     let span = |text: &str| {
         row.iter()
@@ -375,8 +377,8 @@ fn activity_dock_selection_is_the_gray_band() {
             span.content
         );
     }
-    // No purple on the selection: the accent color never rides the
-    // row as the band.
+    // The pink is gone: the accent never rides the row as the band
+    // (the selection is the hover's own light color).
     let accent = theme.fg_style(ThemeColor::Accent).fg;
     assert!(row.iter().all(|span| span.style.bg != accent));
     // The band is a focus-owned signal: the same dock without focus
@@ -528,7 +530,7 @@ fn dock_goal_group_unmounts_with_its_row() {
 }
 
 /// Entering an empty group still renders it: the focused selection's
-/// band — the ONE shared gray selection style — rides the group's
+/// band — the ONE shared selection style — rides the group's
 /// zero-count segment on the row — the dock-level empty state is
 /// the zero readout itself (the view the group opens carries the
 /// pane's own empty-state row).

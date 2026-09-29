@@ -669,31 +669,35 @@ impl Theme {
     /// operator's consistency rule: the selected row's background is
     /// IDENTICAL across the dock's groups, the agents view's rows, the
     /// heartbeats picker, and the bash view — one style, not
-    /// per-surface copies): the theme's `selectedBg` — the plain gray
-    /// band the agents view's rows carried before #3031 (prime
-    /// `#222226`) — at full opacity, with no extra modifiers: the
-    /// 2026-09-28 purple+opaque+bold treatment (#3031's fix 3) is
-    /// reverted by the operator's 2026-09-29 ruling (the pink read
-    /// ugly; the selection returns to the gray). Each surface keeps
-    /// its own foreground colors; the style patches only the
-    /// background — TS parity, which paints `theme.bg("selectedBg")`
-    /// on its focused rows the same way. A theme whose `selectedBg`
-    /// is unresolvable or explicitly empty (the empty string resolves
-    /// to `Color::Reset`, which paints no band) falls through to the
-    /// onboarding wash, so a selected row always reads as selected
-    /// (Macroscope PR #2908's contract).
+    /// per-surface copies): the SAME light band the hover paints
+    /// ([`Theme::hover_row_style`] — the #3109 hover band is the live
+    /// reference; the operator's 2026-09-29 one-color ruling: the
+    /// #3031 purple+opaque+bold selection read ugly and dies by
+    /// replacement, never by restoring an older gray). The two states
+    /// distinguish by their CUES, never by color: the hover is
+    /// transient and rides the mouse position; the selection is
+    /// sticky and rides the keyboard — and where they overlap the
+    /// hover paint skips cells that already carry the selection's
+    /// background, so the focused state is never repainted. Each
+    /// surface keeps its own foreground colors; the style patches
+    /// only the background, with no extra modifiers. A theme whose
+    /// slots resolve to no band (a `selectedBg` that is missing or
+    /// explicitly empty resolves to `Color::Reset`, which paints
+    /// nothing) falls through to the onboarding wash, so a selected
+    /// row always reads as selected (Macroscope PR #2908's contract).
     #[must_use]
     pub fn selection_row_style(&self) -> Style {
-        let gray = self
-            .bg_color(ThemeBg::SelectedBg)
+        let band = self
+            .hover_row_style()
+            .bg
             .filter(|color| *color != Color::Reset)
             .unwrap_or_else(|| crate::onboarding::highlight_wash(self));
-        Style::default().bg(gray)
+        Style::default().bg(band)
     }
 
     /// Paint one line's spans with [`Theme::selection_row_style`] —
     /// the `bg_paint` counterpart for the one selection style: each
-    /// span keeps its own foreground, gains the gray band.
+    /// span keeps its own foreground, gains the one band.
     #[must_use]
     pub fn selection_paint(&self, line: crate::Line) -> crate::Line {
         let style = self.selection_row_style();
@@ -708,14 +712,17 @@ impl Theme {
     /// The ONE hover affordance style every clickable surface paints
     /// (the operator's 2026-09-29 consistency rule): a LIGHT
     /// background band — the same soft wash the menu panels' selected
-    /// rows carry — that marks "the mouse can click here", never the
-    /// focused state's gray [`Theme::selection_row_style`], so
-    /// hoverable and focused read as two different things everywhere
-    /// (the dock's group segments, the tray's `← manage` hint, the
-    /// agents view's rows). The wash is the established light band:
-    /// it clears the visibility bar over the surfaces it renders on
-    /// and follows the theme in both color modes, so one style serves
-    /// every surface instead of a per-surface copy.
+    /// rows carry — that marks "the mouse can click here" (the dock's
+    /// group segments, the tray's `← manage` hint, the agents view's
+    /// rows). The wash is the established light band: it clears the
+    /// visibility bar over the surfaces it renders on and follows the
+    /// theme in both color modes, so one style serves every surface
+    /// instead of a per-surface copy. The operator's 2026-09-29
+    /// one-color ruling: the keyboard selection paints this SAME band
+    /// ([`Theme::selection_row_style`] reads this very style) — the
+    /// two states distinguish by their cues (the hover is transient,
+    /// rides the mouse position; the selection is sticky, rides the
+    /// keyboard), never by color.
     #[must_use]
     pub fn hover_row_style(&self) -> Style {
         self.soft_selection_style()
@@ -726,9 +733,9 @@ impl Theme {
     /// span's edge splits, so the band covers exactly the hovered
     /// region - a dock group's own segment, the hint's own text - and
     /// cells that already carry a background keep it (a cell inside
-    /// the gray selection band keeps the focused state's band: both
-    /// styles apply where the two states overlap, and the hover never
-    /// demotes the selection).
+    /// the selection band keeps the focused state's band: the one
+    /// shared color makes the overlap read as one band, and the hover
+    /// never demotes the selection).
     ///
     /// The split walks GRAPHEME CLUSTERS, never scalar values: a
     /// combining mark stays with its base (`e` + U+0301 is one cell)
@@ -933,23 +940,23 @@ mod tests {
         assert_eq!(theme.background_rgb(), Some((0x0a, 0x0b, 0x0c)));
     }
 
-    /// The ONE selection style is the gray `selectedBg` band (the
-    /// operator's 2026-09-29 revert ruling: the #3031 purple read
-    /// ugly; the selection returns to the exact gray the agents view's
-    /// rows carried before #3031): the theme's own `selectedBg`, never
-    /// the accent, never a bold modifier. A `selectedBg` that is
-    /// unresolvable or explicitly empty (the empty string resolves to
-    /// `Color::Reset`, a band painted with it shows nothing) falls
-    /// through to the onboarding wash (Macroscope 2026-09-28: an
-    /// empty slot must fall through, not strand the selection without
-    /// a band).
+    /// The ONE selection style paints the hover band's own color (the
+    /// operator's 2026-09-29 one-color ruling: the #3031 purple read
+    /// ugly and dies by replacement — the #3109 light hover band is
+    /// the live reference, no archaeology): the selection IS the
+    /// hover color in every theme, never the accent, never a bold
+    /// modifier. A theme whose slots resolve to no band (a `selectedBg`
+    /// that is missing or explicitly empty resolves to `Color::Reset`,
+    /// which paints nothing) falls through to the onboarding wash
+    /// (Macroscope 2026-09-28: an unresolvable slot must fall through,
+    /// not strand the selection without a band).
     #[test]
-    fn the_selection_style_is_the_gray_selected_bg_never_the_accent() {
+    fn the_selection_style_is_the_hover_color_never_the_accent() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
         assert_eq!(
             theme.selection_row_style(),
-            Style::default().bg(Color::Rgb(0x22, 0x22, 0x26)),
-            "prime: the gray `selectedBg` band, no bold — the pre-#3031 gray"
+            theme.hover_row_style(),
+            "prime: the selection paints the hover's own band — the one-color ruling"
         );
         assert_ne!(
             theme.selection_row_style().bg,
@@ -966,7 +973,7 @@ mod tests {
         let loud = Theme::from_json(&json, ColorMode::TrueColor);
         assert_eq!(
             loud.selection_row_style().bg,
-            loud.bg_color(ThemeBg::SelectedBg),
+            loud.hover_row_style().bg,
             "the accent stays out of the band even when it is loud"
         );
         let bare = serde_json::from_str::<ThemeJson>(
@@ -977,7 +984,7 @@ mod tests {
         assert_eq!(
             bare.selection_row_style().bg,
             Some(crate::onboarding::highlight_wash(&bare)),
-            "with no selectedBg, the wash keeps the selected row readable"
+            "with no resolvable band, the wash keeps the selected row readable"
         );
         // An empty `selectedBg` resolves the same way: the slot's
         // Reset is filtered too, so the wash takes the band.
@@ -1096,17 +1103,17 @@ mod tests {
         }
     }
 
-    /// The ONE hover affordance (the operator's 2026-09-29 consistency
-    /// rule): a LIGHT background band, never the gray selection — the
-    /// two state styles stay distinct in every theme and color mode,
-    /// so "hoverable" and "focused" read as different things on every
-    /// surface that paints both. The selection is the gray
-    /// `selectedBg` band with NO modifiers (the operator's 2026-09-29
-    /// revert ruling); the hover keeps the light wash, and the two
-    /// bands never share a row's cell — the hover paint skips cells
-    /// that already carry the selection's background.
+    /// The ONE band color (the operator's 2026-09-29 one-color
+    /// ruling): the hover and the keyboard selection paint the SAME
+    /// light band in every theme and color mode — the states
+    /// distinguish by their cues (the hover is transient and rides the
+    /// mouse position; the selection is sticky and rides the
+    /// keyboard), never by color, and where they overlap the hover
+    /// paint skips cells that already carry the selection's
+    /// background. The selection carries NO modifiers (#3031's bold
+    /// dies with its purple).
     #[test]
-    fn the_hover_band_is_light_never_the_gray_selection() {
+    fn the_hover_band_and_the_selection_share_one_color() {
         for name in ["prime", "dark", "light"] {
             for mode in [ColorMode::TrueColor, ColorMode::Color256] {
                 let theme = Theme::builtin(name, mode);
@@ -1118,17 +1125,12 @@ mod tests {
                     "{name}/{mode:?}: the hover is the one light wash"
                 );
                 assert_eq!(
-                    selection.bg,
-                    theme.bg_color(ThemeBg::SelectedBg),
-                    "{name}/{mode:?}: the selection is the gray selectedBg band"
-                );
-                assert_ne!(
                     hover.bg, selection.bg,
-                    "{name}/{mode:?}: the hover band and the selection band differ"
+                    "{name}/{mode:?}: the selection paints the hover's own band color"
                 );
                 assert!(
                     selection.add_modifier.is_empty(),
-                    "{name}/{mode:?}: the reverted selection carries no modifiers"
+                    "{name}/{mode:?}: the selection carries no modifiers"
                 );
                 let band = hover.bg.expect("the hover paints a background");
                 let band_lum = quantized_luminance(band)
@@ -1187,8 +1189,9 @@ mod tests {
 
     /// The hover band paints only its own column span: a span
     /// straddling an edge splits, and a cell already carrying the
-    /// selection's gray keeps it (both state styles apply where they
-    /// overlap — the hover never demotes the focused band).
+    /// selection's band keeps it (both state styles apply where they
+    /// overlap — the hover never demotes the focused band, and the
+    /// one shared color makes the overlap read as one band).
     #[test]
     fn the_hover_band_covers_its_columns_and_never_demotes_the_selection() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
@@ -1218,12 +1221,12 @@ mod tests {
         assert_eq!(
             line[2].style.bg,
             theme.selection_row_style().bg,
-            "the selection's own cells keep the gray under the hover"
+            "the selection's own cells keep their band under the hover"
         );
         assert_eq!(
             line[3].style.bg,
             theme.selection_row_style().bg,
-            "the focused cells keep the gray selection"
+            "the focused cells keep the selection band"
         );
         assert_eq!(line[4].style.bg, None, "the tail stays bare");
     }
