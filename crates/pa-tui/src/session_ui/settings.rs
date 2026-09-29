@@ -1,7 +1,9 @@
 //! The settings concern: the `/settings` menu and its row-apply/persist
 //! switches, the `/import` confirm flow, and the fast/rlm-max-depth/
-//! fullscreen/reload command surface, plus the parked `ReloadNote` and
-//! `PendingConfirm` types.
+//! reload command surface, plus the parked `ReloadNote` and
+//! `PendingConfirm` types. The fullscreen toggle is retired (the surface
+//! always renders on the alternate screen; the operator's 2026-09-28
+//! ruling removed the setting and the command).
 use super::*;
 
 /// The `/reload` task's report: the daemon reloaded the session's live
@@ -247,7 +249,6 @@ impl SessionUi {
             values.autocomplete_max_visible = settings.autocomplete_max_visible();
             values.clear_on_shrink = settings.clear_on_shrink();
             values.terminal_progress = settings.show_terminal_progress();
-            values.fullscreen = settings.fullscreen();
             values.idle_eviction_minutes = settings.idle_eviction_minutes();
             values.mermaid = settings.mermaid_rendering_mode();
             values.quiet_startup = settings.quiet_startup();
@@ -263,7 +264,6 @@ impl SessionUi {
             values.auto_resize_images = true;
             values.skill_commands = true;
             values.builtin_skills = true;
-            values.fullscreen = self.fullscreen_enabled;
             values.idle_eviction_minutes = "90".to_string();
             values.mermaid = "streaming".to_string();
             values.tree_filter_mode = "user-only".to_string();
@@ -449,9 +449,6 @@ impl SessionUi {
                     value,
                     view,
                 );
-            }
-            "fullscreen" => {
-                self.set_fullscreen_mode(value == "true", view);
             }
             "idle-eviction-minutes" => {
                 if let Some(settings) = &self.client_settings {
@@ -641,8 +638,7 @@ impl SessionUi {
     }
 
     // ------------------------------------------------------------------
-    // Fast mode, depth, fullscreen, and reload (/fast, /rlm-max-depth,
-    // /fullscreen, /reload)
+    // Fast mode, depth, and reload (/fast, /rlm-max-depth, /reload)
     // ------------------------------------------------------------------
 
     /// `/fast` (TS `handleFastCommand`): toggle the priority service tier.
@@ -795,38 +791,6 @@ impl SessionUi {
             }
             Err(error) => self.error_row(&format!("{error:#}"), view),
         }
-    }
-
-    /// `/fullscreen` (TS `setFullscreenMode`): persist the preference and
-    /// report the TS status row. This surface always renders on the
-    /// alternate screen — the Rust TUI has no inline rendering mode yet
-    /// (the main-screen rendering path is flagged for the TUI-polish
-    /// lane) — so the toggle moves the persisted preference and the
-    /// reported state; TS's non-TTY branch cannot trigger here because
-    /// the surface draws its frames headless as well.
-    pub(super) fn set_fullscreen_mode(&mut self, enabled: bool, view: &mut AgentView) {
-        if let Some(settings) = &self.client_settings {
-            if let Err(error) = settings.set_fullscreen(enabled) {
-                self.error_row(&format!("{error:#}"), view);
-                return;
-            }
-        }
-        self.fullscreen_enabled = enabled;
-        view.fullscreen = enabled;
-        let status = if enabled {
-            let follow = view
-                .editor
-                .keybindings()
-                .first_key("tui.viewport.follow")
-                .map_or_else(
-                    || "ctrl+shift+down".to_string(),
-                    |key| crate::keybindings::format_key_text(&key),
-                );
-            format!("Fullscreen rendering on — wheel/pageUp scroll, {follow} follows output")
-        } else {
-            "Fullscreen rendering off".to_string()
-        };
-        self.note(&status, view);
     }
 
     /// TS #2709: the Ctrl+O cycle saves the new level as the global

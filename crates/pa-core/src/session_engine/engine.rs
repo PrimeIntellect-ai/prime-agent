@@ -357,8 +357,11 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
                 client.track("mcp connector used", properties);
             })));
         }
-        manager.register_host_handlers(&mut handlers);
     }
+    // The `mcp.*` host-request registration takes the shared manager: the
+    // inventory handlers (list_plugins/search_plugins/list_connections)
+    // serve live views per request.
+    crate::mcp::McpManager::register_host_handlers(&mcp_manager, &mut handlers);
     // The turn-boundary surface: `model.info` always; `compact.*` behind
     // the compaction `agentCallable` setting; `refine.*` behind the TS
     // `_autoRefineAllowedForSession` gate (depth 0 with a local harness
