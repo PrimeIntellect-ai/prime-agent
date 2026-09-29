@@ -1,6 +1,7 @@
 //! The RLM ledger test battery (moved with its concern): grammar,
 //! replay, tombstone, seed, display, and usage-bucket families.
 use super::*;
+use crate::session_usage::SessionUsageSummary;
 
 fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("pa-ledger-{name}-{}", uuid::Uuid::new_v4()));
@@ -693,9 +694,9 @@ fn bucket_folds_own_snapshots_post_order_without_double_counting() {
             &usage_summary(0.10),
         )
         .unwrap();
-    // The tombstoned children's transcripts are gone (a delete that
-    // leaves the file alive rides the row — the bucket is for files
-    // that died).
+    // The tombstoned children's transcripts are gone (a transcript
+    // directly in the sessions dir keeps its catalog row and the bucket
+    // skips it).
     fs::remove_file(&child_1).unwrap();
     fs::remove_file(&grandchild_1).unwrap();
     // The live child subtree never enters the bucket.
@@ -776,10 +777,10 @@ fn bucket_legacy_tombstones_fall_back_then_gap_to_zero() {
     let parent_key = crate::lease::canonical_session_path(&parent)
         .to_string_lossy()
         .to_string();
-    // A tombstoned path whose transcript still exists rides its own
-    // archived row (the rollup sums the row AND the parent bucket, so
-    // billing both would double the spend) — the bucket never claims
-    // a live file, legacy tombstone or not.
+    // A tombstoned transcript directly in the sessions dir keeps its
+    // catalog row (the rollup sums the row AND the parent bucket, so
+    // billing both would double the spend): the bucket skips it,
+    // legacy tombstone or not.
     let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
     assert!(
         !bucket.contains_key(&parent_key),
@@ -890,17 +891,18 @@ fn bucket_bills_tombstoned_children_without_catalog_rows() {
     let parent_key = crate::lease::canonical_session_path(&parent)
         .to_string_lossy()
         .to_string();
-    let deleted = bucket
-        .get(&parent_key)
-        .expect("the parent bills its tombstoned children without catalog rows");
-    assert_eq!(deleted.input_tokens, 2_000);
-    assert_eq!(deleted.output_tokens, 200);
-    assert!(
-        (deleted.cost - 0.55).abs() < 1e-9,
-        "the captured snapshot 0.30 + the legacy transcript's own fold 0.25, got {}",
-        deleted.cost
+    assert_eq!(
+        bucket,
+        HashMap::from([(
+            parent_key,
+            SessionUsageSummary {
+                input_tokens: 2_000,
+                output_tokens: 200,
+                cost: 0.55,
+            },
+        )]),
+        "the captured snapshot 0.30 + the legacy transcript's own fold 0.25; only the parent bills"
     );
-    assert_eq!(bucket.len(), 1, "only the parent bills");
 }
 
 /// A raced ledger claims each tombstoned path once (first writer wins):

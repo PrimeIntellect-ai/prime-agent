@@ -215,7 +215,7 @@ impl Supervisor {
     /// canonical parent session path), computed off the async runtime:
     /// the fold reads the ledger, stats tombstoned paths, and may
     /// cold-scan a legacy child's transcript once. `None` is the
-    /// degrade (a ledger failure, logged) - the roster keeps its last
+    /// degrade (a failed fold is logged) - the roster keeps its last
     /// bucket instead of billing a broken read as zero.
     pub(crate) async fn deleted_descendant_usage_bucket(
         self: &Arc<Self>,
@@ -244,9 +244,9 @@ impl Supervisor {
     /// a stop passivation (the RLM delete's tombstone landed before the
     /// stop, and the later capture amendment yields the same value),
     /// and a saved-session delete. The worker-process delete arm and
-    /// the forwarded-owner arm stay uncovered by design: their
-    /// tombstones are picked up at the next registration or stop, so a
-    /// refresh there would duplicate the event, not add one.
+    /// the forwarded-owner arm stay uncovered by design: the TUI never
+    /// sends those forms, and their tombstones are picked up at the
+    /// next registration or stop.
     pub(crate) async fn refresh_deleted_descendant_usage(
         self: &Arc<Self>,
     ) -> Vec<AgentRosterEntry> {

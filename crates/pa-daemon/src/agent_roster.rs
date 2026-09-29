@@ -259,19 +259,11 @@ impl AgentRoster {
         // key the index converges on (a summary rewritten for another
         // worker keeps its family's deleted spend, and a rewrite whose
         // family no longer has any sheds the stale value).
-        if let Value::Object(object) = &mut summary {
-            match file
-                .as_deref()
-                .and_then(|key| self.deleted_descendant_usage.get(key))
-            {
-                Some(usage) => {
-                    object.insert("deletedDescendantUsage".to_string(), json!(usage));
-                }
-                None => {
-                    object.remove("deletedDescendantUsage");
-                }
-            }
-        }
+        attach_deleted_descendant_usage(
+            &mut summary,
+            file.as_deref()
+                .and_then(|key| self.deleted_descendant_usage.get(key)),
+        );
         let stored = AgentRosterEntry {
             agent_id: agent_id.clone(),
             queued_child,
@@ -315,41 +307,27 @@ impl AgentRoster {
     /// Replace the deleted-descendant bucket (the ledger fold keyed by
     /// canonical parent session path) and rewrite in place every row
     /// whose attached value differs, returning those rows for the
-    /// caller's push. The bucket changes only at ledger events and when
-    /// a root appears, so the event's one fold rewrites the rows that
-    /// did not re-store (a passivated parent, a live worker's row); a
-    /// row whose value did not change never ships.
+    /// caller's push. Rows are visited by their store-time canonical key
+    /// (the session-file index). The bucket changes only at ledger
+    /// events and when a root appears, so the event's one fold rewrites
+    /// the rows that did not re-store (a passivated parent, a live
+    /// worker's row); a row whose value did not change never ships.
     pub(crate) fn set_deleted_descendant_usage(
         &mut self,
         bucket: HashMap<String, SessionUsageSummary>,
     ) -> Vec<AgentRosterEntry> {
         self.deleted_descendant_usage = bucket;
         let mut changed = Vec::new();
-        for entry in self.entries.values_mut() {
-            let file = entry
-                .summary
-                .get("sessionFile")
-                .and_then(Value::as_str)
-                .filter(|file| !file.is_empty())
-                .map(canonical_roster_path);
-            let next = file
-                .as_deref()
-                .and_then(|key| self.deleted_descendant_usage.get(key))
-                .and_then(|usage| serde_json::to_value(usage).ok());
-            if entry.summary.get("deletedDescendantUsage") == next.as_ref() {
+        for (file, agent_id) in &self.agent_id_by_session_file {
+            let Some(entry) = self.entries.get_mut(agent_id) else {
                 continue;
+            };
+            if attach_deleted_descendant_usage(
+                &mut entry.summary,
+                self.deleted_descendant_usage.get(file),
+            ) {
+                changed.push(entry.clone());
             }
-            if let Some(object) = entry.summary.as_object_mut() {
-                match &next {
-                    Some(value) => {
-                        object.insert("deletedDescendantUsage".to_string(), value.clone());
-                    }
-                    None => {
-                        object.remove("deletedDescendantUsage");
-                    }
-                }
-            }
-            changed.push(entry.clone());
         }
         changed
     }
@@ -442,6 +420,32 @@ fn canonical_roster_path(path: &str) -> String {
         |_| path.to_string(),
         |canonical| canonical.to_string_lossy().to_string(),
     )
+}
+
+/// Set or clear the row's `deletedDescendantUsage`; `true` when it
+/// changed. One rule for both writers: the store attach and the event
+/// refresh rewrite the same key the same way, so a re-stored row and a
+/// refreshed one can never disagree.
+fn attach_deleted_descendant_usage(
+    summary: &mut Value,
+    usage: Option<&SessionUsageSummary>,
+) -> bool {
+    let Value::Object(object) = summary else {
+        return false;
+    };
+    let next = usage.map(|usage| json!(usage));
+    if object.get("deletedDescendantUsage") == next.as_ref() {
+        return false;
+    }
+    match next {
+        Some(value) => {
+            object.insert("deletedDescendantUsage".to_string(), value);
+        }
+        None => {
+            object.remove("deletedDescendantUsage");
+        }
+    }
+    true
 }
 
 #[cfg(test)]

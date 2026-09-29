@@ -872,6 +872,40 @@ mod tests {
             .join("sub-9.jsonl");
         std::fs::create_dir_all(child_artifact.parent().expect("artifact dir")).unwrap();
         write_display_file(&child_artifact, "/the/deleted/cwd");
+        // The flushed transcript carries the child's final own spend
+        // ($0.30): the kill route was the flush barrier, so the
+        // passivation fold reads this row.
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&child_artifact)
+                .expect("open the child transcript for its billed turn");
+            writeln!(
+                file,
+                "{}",
+                json!({
+                    "type": "message",
+                    "id": "dm1a",
+                    "parentId": null,
+                    "timestamp": "2026-09-29T00:00:02.100Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "work complete"}],
+                        "timestamp": 2100,
+                        "usage": {
+                            "input": 60,
+                            "output": 6,
+                            "cacheRead": 0,
+                            "cacheWrite": 0,
+                            "totalTokens": 66,
+                            "cost": {"input": 0.0, "output": 0.3, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.3}
+                        }
+                    }
+                })
+            )
+            .expect("append the billed turn");
+        }
         append_family_edge(
             &agent_dir,
             &sessions_dir,
@@ -879,21 +913,17 @@ mod tests {
             &root_file,
             &child_artifact,
         );
-        // The RLM delete's tombstone carrying the captured usage (the
-        // amendment the stop finalize appends after the flush barrier).
+        // The RLM delete's tombstone carries no usage yet (the capture
+        // amendment lands after the stop); the passivation fold bills
+        // the flushed transcript.
         let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
         ledger
-            .append_delete_with_usage(
+            .append_delete(
                 "sub-9",
                 &child_artifact.to_string_lossy(),
                 crate::rlm_ledger::RlmLedgerDeleteReason::User,
-                &crate::session_usage::SessionUsageSummary {
-                    input_tokens: 60,
-                    output_tokens: 6,
-                    cost: 0.3,
-                },
             )
-            .expect("append delete with usage");
+            .expect("append delete");
         // The child's live roster row, owned by the stopping worker.
         let mut events = supervisor.events.subscribe();
         supervisor.write_roster_summary(
