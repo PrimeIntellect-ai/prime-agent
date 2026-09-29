@@ -557,7 +557,7 @@ impl AgentSessionEngine {
                     status: pa_core::goals::GoalStatus::Error,
                     last_reason: Some(error.clone()),
                     last_error: Some(error),
-                    ..state
+                    ..state.clone()
                 };
                 let handles = self.goal_runtime.lock().expect("goal runtime lock").clone();
                 if let Some(handles) = handles {
@@ -568,8 +568,16 @@ impl AgentSessionEngine {
                 *self
                     .stale_goal_terminal_pending
                     .lock()
-                    .expect("stale terminal pending lock") = Some(terminal.clone());
-                *self.published_goal.lock().expect("published goal lock") = Some(terminal);
+                    .expect("stale terminal pending lock") = Some(terminal);
+                // The published baseline keeps the RAW row (not the
+                // terminal verdict): the driver's terminal state then
+                // DIFFERS from the baseline, so the first
+                // `goal_update_if_changed` EMITS the `goal_update` event —
+                // the worker's durable mirror (EngineEvent::GoalUpdate ->
+                // the store's thread_goal_state row) is the ONE path the
+                // terminal row reaches the worker-owned session file; the
+                // core manager's in-memory append alone does not.
+                *self.published_goal.lock().expect("published goal lock") = Some(state);
             } else {
                 let handles = self.goal_runtime.lock().expect("goal runtime lock").clone();
                 if let Some(handles) = handles {

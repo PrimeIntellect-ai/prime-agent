@@ -251,7 +251,27 @@ impl GoalDriver {
                 self.no_progress_streak = reloaded.no_progress_streak.unwrap_or(0);
                 self.no_progress_backoff_until_ms = 0;
                 self.counted_no_progress_turn_ms = reloaded.no_progress_turn_ms;
-                reloaded
+                // The restore-resurrection guard (the 402 diagnosis's
+                // (d)) applies to the branch move exactly as it does to
+                // `load_persisted` and the daemon's seed: an adopted
+                // `active` row with a terminal provider failure settled
+                // after it never resurrects — navigating back onto the
+                // branch must not revive a goal whose provider died
+                // before the settle's error row landed.
+                if reloaded.status == GoalStatus::Active {
+                    match session.stale_active_goal_failure() {
+                        Some(error) => GoalState {
+                            active: false,
+                            status: GoalStatus::Error,
+                            last_reason: Some(error.clone()),
+                            last_error: Some(error),
+                            ..reloaded
+                        },
+                        None => reloaded,
+                    }
+                } else {
+                    reloaded
+                }
             }
         };
     }
@@ -674,8 +694,15 @@ impl GoalDriver {
                 // wake re-probes; the park's budget declines): a parked
                 // corpse never consumes the no-progress budget — three
                 // quota parks must not mark an otherwise live goal dead.
+                // The refusal STICKS: the standard backoff window arms (a
+                // re-consult inside it — the same corpse, or the older
+                // progress row the pair-drop exposes — refuses too), and
+                // the wake's own turn (minutes later, a NEW row) re-enters
+                // normally.
                 if provider_stream_failure_kind(turn).as_deref() == Some("rate_limit") {
                     self.counted_no_progress_turn_ms = Some(turn.timestamp);
+                    self.no_progress_backoff_until_ms =
+                        now_millis() + CONTINUATION_NO_PROGRESS_BACKOFF_BASE_MS;
                     return Ok(None);
                 }
                 if turn_produced_no_output(turn) {
@@ -1393,8 +1420,17 @@ mod tests {
             .is_none());
         assert_eq!(driver.state().status, GoalStatus::Active);
         assert!(driver.state().last_error.is_none());
-        // The park's wake turn makes progress: the mint resumes.
+        // Inside the refusal's backoff window even a progress row
+        // refuses (the window is the refusal's stickiness).
         let wake_progress = test_progress_turn(created_at as i64 + 2);
+        assert!(driver
+            .next_continuation_message(&mut session, Some(&wake_progress))
+            .unwrap()
+            .is_none());
+        // The park's wake, minutes later: the window has elapsed (the
+        // wall clock modeled directly in the unit), and the NEW progress
+        // turn mints — the goal resumes.
+        driver.no_progress_backoff_until_ms = 0;
         assert!(driver
             .next_continuation_message(&mut session, Some(&wake_progress))
             .unwrap()
@@ -1637,6 +1673,47 @@ mod tests {
             .is_some());
         assert_eq!(driver.no_progress_streak(), 0);
         driver.continuation_consumed();
+    }
+
+    /// THE WAVE-4 REGRESSION: the quota-park refusal STICKS — the
+    /// standard backoff window arms, so a re-consult (the same corpse,
+    /// or the older progress row the pair-drop exposes) refuses too;
+    /// only a NEW turn (the wake's) re-enters.
+    #[test]
+    fn the_rate_limit_refusal_sticks_across_reconsults() {
+        let mut session = persisted_session();
+        let mut driver = GoalDriver::new();
+        driver.start(&mut session, "work", None).unwrap();
+        let created_at = driver.state().created_at.unwrap();
+        let parked = test_error_turn(
+            "rate_limit",
+            Some(429),
+            "429 Too many concurrent requests",
+            created_at as i64 + 1,
+        );
+        assert!(driver
+            .next_continuation_message(&mut session, Some(&parked))
+            .unwrap()
+            .is_none());
+        assert_eq!(driver.state().status, GoalStatus::Active);
+        assert_eq!(driver.no_progress_streak(), 0);
+        // The re-consult of the SAME corpse: refused (the window).
+        assert!(driver
+            .next_continuation_message(&mut session, Some(&parked))
+            .unwrap()
+            .is_none());
+        // The drop-revealed OLDER progress row: refused too (the window
+        // holds; the row never resets anything).
+        let older_progress = test_progress_turn(created_at as i64 - 1);
+        assert!(driver
+            .next_continuation_message(&mut session, Some(&older_progress))
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            driver.no_progress_streak(),
+            0,
+            "no strikes for parked corpses"
+        );
     }
 
     /// THE WAVE-3 REGRESSION: a restored goal already AT the cap (a
