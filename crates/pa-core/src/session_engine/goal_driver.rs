@@ -93,6 +93,12 @@ pub struct GoalDriver {
     /// just-settled turn.
     no_progress_streak: u32,
     no_progress_backoff_until_ms: u64,
+    /// The quota-park corpse's refusal window (in-memory; separate from
+    /// the backoff window so the wake machinery never schedules a probe
+    /// into a parked session — the park's own wake owns the retry): a
+    /// re-consult of the parked corpse, or of the older row the
+    /// pair-drop exposes, refuses inside it.
+    parked_refusal_until_ms: u64,
     /// The last turn the streak counted (the re-consult dedup): adopted
     /// from the durable `no_progress_turn_ms` so a restart never
     /// re-counts the same corpse.
@@ -172,6 +178,7 @@ impl GoalDriver {
             pending_continuation: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             no_progress_streak: 0,
             no_progress_backoff_until_ms: 0,
+            parked_refusal_until_ms: 0,
             counted_no_progress_turn_ms: None,
         }
     }
@@ -250,6 +257,7 @@ impl GoalDriver {
                 // strikes); the backoff window does not survive the move.
                 self.no_progress_streak = reloaded.no_progress_streak.unwrap_or(0);
                 self.no_progress_backoff_until_ms = 0;
+                self.parked_refusal_until_ms = 0;
                 self.counted_no_progress_turn_ms = reloaded.no_progress_turn_ms;
                 // The restore-resurrection guard (the 402 diagnosis's
                 // (d)) applies to the branch move exactly as it does to
@@ -303,6 +311,7 @@ impl GoalDriver {
         // a restart outlives it, so the next consult passes the gate.
         self.no_progress_streak = self.state.no_progress_streak.unwrap_or(0);
         self.no_progress_backoff_until_ms = 0;
+        self.parked_refusal_until_ms = 0;
         self.counted_no_progress_turn_ms = self.state.no_progress_turn_ms;
         self.continuation_consumed();
     }
@@ -379,9 +388,11 @@ impl GoalDriver {
         self.owed_continuation_for_rlm_work = false;
         let previous_streak = self.no_progress_streak;
         let previous_backoff = self.no_progress_backoff_until_ms;
+        let previous_parked = self.parked_refusal_until_ms;
         let previous_counted = self.counted_no_progress_turn_ms;
         self.no_progress_streak = 0;
         self.no_progress_backoff_until_ms = 0;
+        self.parked_refusal_until_ms = 0;
         self.counted_no_progress_turn_ms = None;
         self.continuation_consumed();
         if let Err(error) = self.set_state(session, goal) {
@@ -391,6 +402,7 @@ impl GoalDriver {
             self.owed_continuation_for_rlm_work = previous_owed;
             self.no_progress_streak = previous_streak;
             self.no_progress_backoff_until_ms = previous_backoff;
+            self.parked_refusal_until_ms = previous_parked;
             self.counted_no_progress_turn_ms = previous_counted;
             if previous_pending {
                 self.mark_continuation_pending();
@@ -681,7 +693,19 @@ impl GoalDriver {
             let turn_is_new = self
                 .counted_no_progress_turn_ms
                 .is_none_or(|examined| turn.timestamp > examined);
-            if turn_is_this_goals && turn_is_new {
+            // The TERMINAL kill is UNCONDITIONAL — outside the examined
+            // gate: the wire assistant rows carry no stable per-attempt id
+            // (the error corpses' `responseId` is None; the entry id lives
+            // on the file entry, not the loop row), so a timestamp-keyed
+            // dedup is not a total order across settle paths — a terminal
+            // error that shares (or precedes) the examined turn's
+            // millisecond must still refuse the continuation. The kill is
+            // idempotent (an already-finished goal never re-enters the
+            // mint), so re-consulting an examined corpse is harmless; only
+            // the no-progress COUNT keeps the dedup, whose collision is
+            // provably safe-direction (a missed strike is a one-strike
+            // grace, never a resurrection).
+            if turn_is_this_goals {
                 if let Some(error) = terminal_provider_failure(turn) {
                     self.finish_for_terminal_message(
                         session,
@@ -690,18 +714,24 @@ impl GoalDriver {
                     )?;
                     return Ok(None);
                 }
+            }
+            if turn_is_this_goals && turn_is_new {
                 // The quota-park class owns its own retry cadence (the
-                // wake re-probes; the park's budget declines): a parked
-                // corpse never consumes the no-progress budget — three
-                // quota parks must not mark an otherwise live goal dead.
-                // The refusal STICKS: the standard backoff window arms (a
-                // re-consult inside it — the same corpse, or the older
-                // progress row the pair-drop exposes — refuses too), and
-                // the wake's own turn (minutes later, a NEW row) re-enters
+                // park's wake re-probes; the park's budget declines): a
+                // parked corpse never consumes the no-progress budget —
+                // three quota parks must not mark an otherwise live goal
+                // dead. The refusal STICKS through the PARKED-REFUSAL
+                // window, NOT the backoff window (`backoff_wake_at` must
+                // never expose a parked refusal, or the daemon would
+                // schedule a 10s marker probe into the parked session and
+                // keep 429ing a still-limited wallet — the park's own wake
+                // owns the retry). A re-consult of the same corpse, or of
+                // the older row the pair-drop exposes, refuses inside it;
+                // the park's wake turn (minutes later, a NEW row) re-enters
                 // normally.
                 if provider_stream_failure_kind(turn).as_deref() == Some("rate_limit") {
                     self.counted_no_progress_turn_ms = Some(turn.timestamp);
-                    self.no_progress_backoff_until_ms =
+                    self.parked_refusal_until_ms =
                         now_millis() + CONTINUATION_NO_PROGRESS_BACKOFF_BASE_MS;
                     return Ok(None);
                 }
@@ -757,6 +787,7 @@ impl GoalDriver {
                 if self.no_progress_streak != 0 {
                     self.no_progress_streak = 0;
                     self.no_progress_backoff_until_ms = 0;
+                    self.parked_refusal_until_ms = 0;
                     self.counted_no_progress_turn_ms = Some(turn.timestamp);
                     self.set_state(
                         session,
@@ -792,10 +823,13 @@ impl GoalDriver {
             )?;
             return Ok(None);
         }
-        // The backoff gate: a consult inside the window mints nothing;
-        // the next boundary after the window re-mints (the goal stays
-        // Active — this is a delay, not a death).
-        if now_millis() < self.no_progress_backoff_until_ms {
+        // The backoff gate (and the parked-refusal window): a consult
+        // inside either window mints nothing; the next boundary after the
+        // window re-mints (the goal stays Active — a delay, not a death).
+        // The parked window never reaches `backoff_wake_at` — no probe
+        // wake is ever scheduled for a parked session.
+        let now = now_millis();
+        if now < self.no_progress_backoff_until_ms || now < self.parked_refusal_until_ms {
             return Ok(None);
         }
         // The pending-never-re-arms contract: a continuation minted but
@@ -1427,10 +1461,11 @@ mod tests {
             .next_continuation_message(&mut session, Some(&wake_progress))
             .unwrap()
             .is_none());
-        // The park's wake, minutes later: the window has elapsed (the
-        // wall clock modeled directly in the unit), and the NEW progress
-        // turn mints — the goal resumes.
+        // The park's wake, minutes later: both refusal windows have
+        // elapsed (the wall clock modeled directly in the unit), and the
+        // NEW progress turn mints — the goal resumes.
         driver.no_progress_backoff_until_ms = 0;
+        driver.parked_refusal_until_ms = 0;
         assert!(driver
             .next_continuation_message(&mut session, Some(&wake_progress))
             .unwrap()
@@ -1673,6 +1708,76 @@ mod tests {
             .is_some());
         assert_eq!(driver.no_progress_streak(), 0);
         driver.continuation_consumed();
+    }
+
+    /// THE ORDER-SAFETY PIN (the operator's ruling, the last thread): the
+    /// wire rows carry no per-attempt id, so the examined-turn dedup keys
+    /// on the millisecond timestamp — NOT a total order across settle
+    /// paths. A TERMINAL provider error that shares the preceding
+    /// no-output turn's millisecond (or precedes it) must still refuse the
+    /// continuation: the kill is UNCONDITIONAL (outside the dedup gate),
+    /// so the collision can never resurrect the loop.
+    #[test]
+    fn a_terminal_error_sharing_the_millisecond_still_refuses() {
+        let mut session = persisted_session();
+        let mut driver = GoalDriver::new();
+        driver.start(&mut session, "work", None).unwrap();
+        let created_at = driver.state().created_at.unwrap();
+
+        // Strike one: a no-output turn at millisecond T (the streak
+        // counts, the examined key adopts T).
+        let empty = test_empty_turn(created_at as i64 + 1000);
+        assert!(driver
+            .next_continuation_message(&mut session, Some(&empty))
+            .unwrap()
+            .is_none());
+        assert_eq!(driver.no_progress_streak(), 1);
+
+        // The same millisecond T: a TERMINAL provider error — the dedup's
+        // timestamp comparison alone would skip it as already-examined
+        // (`T > T` is false). The unconditional kill refuses the
+        // continuation and finishes the goal.
+        let same_ms_corpse = test_error_turn(
+            "invalid_request",
+            Some(400),
+            "402 Insufficient balance (team wallet drained)",
+            created_at as i64 + 1000,
+        );
+        assert!(driver
+            .next_continuation_message(&mut session, Some(&same_ms_corpse))
+            .unwrap()
+            .is_none());
+        assert_eq!(driver.state().status, GoalStatus::Error);
+        assert_eq!(
+            driver.state().last_error.as_deref(),
+            Some("402 Insufficient balance (team wallet drained)")
+        );
+        // An EARLIER-millisecond terminal error on a fresh goal refuses
+        // too (the wall clock is not monotonic across settle paths).
+        let mut session = persisted_session();
+        let mut driver = GoalDriver::new();
+        driver.start(&mut session, "work", None).unwrap();
+        let created_at = driver.state().created_at.unwrap();
+        assert!(driver
+            .next_continuation_message(
+                &mut session,
+                Some(&test_empty_turn(created_at as i64 + 2000))
+            )
+            .unwrap()
+            .is_none());
+        assert!(driver
+            .next_continuation_message(
+                &mut session,
+                Some(&test_error_turn(
+                    "invalid_request",
+                    Some(400),
+                    "an earlier-ms terminal error",
+                    created_at as i64 + 1999,
+                ))
+            )
+            .unwrap()
+            .is_none());
+        assert_eq!(driver.state().status, GoalStatus::Error);
     }
 
     /// THE WAVE-4 REGRESSION: the quota-park refusal STICKS — the
