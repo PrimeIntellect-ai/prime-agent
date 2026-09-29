@@ -154,7 +154,12 @@ impl AgentsViewMode {
                 (
                     Vec::new(),
                     prompt,
-                    4 + str_width(&self.query).min(width.saturating_sub(4)),
+                    // The cursor caps at the same width the query
+                    // displays (`truncate_text` keeps width - 5, the
+                    // rename arm's own cap): a longer query would
+                    // otherwise park the caret past the last rendered
+                    // cell, where the terminal frame skips it.
+                    4 + str_width(&self.query).min(width.saturating_sub(5)),
                 )
             }
             Composer::Rename(rename) => {
