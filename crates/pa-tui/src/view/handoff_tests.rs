@@ -5,6 +5,7 @@
 //! exactly as before the cut. The served-path assertions ride the
 //! test-only `ENTRY_RENDERS` counter (a held pack serving a window never
 //! enters `render_entry`).
+use super::super::expansion::tests::finished_tool_card;
 use super::super::layout::{EntryLayout, ENTRY_RENDERS};
 use super::super::AgentView;
 use super::*;
@@ -379,5 +380,62 @@ fn a_retry_episode_pop_retires_the_held_handoff() {
     assert!(
         ENTRY_RENDERS.with(std::cell::Cell::get) > 0,
         "the popped transcript re-renders: the pre-pop packs never served"
+    );
+}
+
+/// A clicked card is not held across the round trip: its slot holds the
+/// flipped rows, but the re-entry mounts every card at the level (the
+/// toggles live in the exiting view). The card follows a status row, so
+/// its leading spacing is the same either way and the spacing guard
+/// cannot discard a stale pack.
+#[test]
+fn a_clicked_card_re_renders_at_the_level_after_the_round_trip() {
+    let _guard = HANDOFF_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset();
+    let fill_card = |view: &mut AgentView| {
+        view.push_entry(ChatEntry::Status {
+            text: "one".to_string(),
+            kind: StatusKind::Info,
+        });
+        view.push_entry(finished_tool_card("c0", "alpha"));
+    };
+    let text = |rows: &[crate::Line]| -> String {
+        rows.iter()
+            .flatten()
+            .map(|span| span.content.as_str())
+            .collect()
+    };
+    let mut left = view();
+    fill_card(&mut left);
+    left.toggle_card_expansion(1);
+    assert!(text(&left.visible_transcript_window(80, 24).0).contains("alpha 1"));
+    left.stash_layout_handoff("sess", "gen-1", 7);
+
+    let mut reentry = view();
+    fill_card(&mut reentry);
+    reentry.adopt_layout_handoff("sess", "gen-1", 7);
+    let rows = reentry.visible_transcript_window(80, 24).0;
+    assert_eq!(
+        reentry.handoff_seeds, 1,
+        "the round trip adopted the handoff"
+    );
+    let mut fresh = view();
+    fill_card(&mut fresh);
+    assert_eq!(
+        rows,
+        fresh.visible_transcript_window(80, 24).0,
+        "the card renders at the level, like a fresh mount"
+    );
+    assert_eq!(
+        reentry.count_entry_rows(1, 80),
+        reentry.sparse_entry_rows(1, 80).len(),
+        "the card's row count matches the rows it renders"
+    );
+    reentry.toggle_card_expansion(1);
+    assert!(
+        text(&reentry.visible_transcript_window(80, 24).0).contains("alpha 1"),
+        "the next click expands the card"
     );
 }

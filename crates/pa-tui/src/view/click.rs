@@ -7,12 +7,10 @@
 //! it, so a click hit-tests a bounded scan over the visible rows and
 //! never re-walks transcript geometry.
 //!
-//! The actions mirror the keyboard grammar exactly: an activity card
-//! cycles the conversation detail (`app.tools.expand`'s action), an
-//! editor content row places the caret (TS `placeCursorFromClick`), and
-//! a picker row moves the selection. The TS card components own a
-//! per-card `expanded` state; this port's cards are detail-mode driven,
-//! so every card family maps to the same detail cycle.
+//! The actions mirror the keyboard grammar: an activity card toggles its
+//! own expansion (TS per-component `expanded`), an editor content row
+//! places the caret (TS `placeCursorFromClick`), and a picker row moves
+//! the selection.
 
 use super::AgentView;
 use crate::chat::ChatEntry;
@@ -22,16 +20,9 @@ use crate::chat::ChatEntry;
 /// vocabulary).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClickAction {
-    /// Toggle the clicked card's own expansion (TS's per-card `expanded`
-    /// state mapped onto the detail level, operator directive
-    /// 2026-09-26: the click lands on the card the user means, so the
-    /// level jumps to `all` — where the card's own content expands
-    /// (tool output, notice body, completion content) — and back to the
-    /// collapsed `overview`; the `details` level a blind cycle would
-    /// reach only expands the thinking blocks around the card): the
-    /// click target spans a tool card, a bash execution card, an
-    /// agent-message notice, or a shell-completion row.
-    ToggleCardExpansion,
+    /// Toggle the card at this chat-entry index (a tool card, a bash
+    /// execution card, an agent-message row, or a shell-completion row).
+    ToggleCardExpansion(usize),
     /// Place the editor caret at the clicked cell: `row` indexes the
     /// editor's visible content rows, `col` is the column relative to
     /// the row's text start, and `content_width` is the width the
@@ -321,7 +312,7 @@ impl AgentView {
         let hover = matches!(
             target,
             Some(
-                ClickAction::ToggleCardExpansion
+                ClickAction::ToggleCardExpansion(_)
                     | ClickAction::OpenDockGroup(_)
                     | ClickAction::OpenAgentsView
             )
@@ -358,7 +349,7 @@ impl AgentView {
                 | ChatEntry::AgentMessage(_)
                 | ChatEntry::ShellCompletion(_)
         ))
-        .then_some(ClickAction::ToggleCardExpansion)
+        .then_some(ClickAction::ToggleCardExpansion(section.entry))
     }
 }
 
@@ -411,12 +402,12 @@ mod tests {
     }
 
     #[test]
-    fn a_click_on_a_card_row_cycles_the_detail() {
+    fn a_click_on_a_card_row_targets_that_card() {
         let view = frame_with_a_card();
         let card_row = section_screen_row(&view, 1);
         assert_eq!(
             view.click_target_at(card_row, 2),
-            Some(ClickAction::ToggleCardExpansion)
+            Some(ClickAction::ToggleCardExpansion(1))
         );
         // Every row the card occupies is clickable, not just its first.
         let section = view
@@ -428,7 +419,7 @@ mod tests {
         for window_row in section.from..section.to {
             assert_eq!(
                 view.click_target_at(view.click.window_screen_start + window_row, 0),
-                Some(ClickAction::ToggleCardExpansion)
+                Some(ClickAction::ToggleCardExpansion(1))
             );
         }
     }
