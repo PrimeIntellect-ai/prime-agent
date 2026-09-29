@@ -258,7 +258,16 @@ impl Inner {
                  Update prime-agent-runtime in the kernel Python (PRIME_AGENT_KERNEL_PYTHON) to match this prime-agent."
             ));
         }
-        lock(&self.guarded).state = KernelState::Running;
+        {
+            let mut g = lock(&self.guarded);
+            g.state = KernelState::Running;
+            // The freshness memo describes the namespace of the kernel
+            // that committed it: a freshly started kernel has no committed
+            // description yet (its restore/bootstrap settles clear it too,
+            // see resolve_execution — this is the boundary itself).
+            g.capture_freshness = None;
+            g.freshness_epoch += 1;
+        }
         Ok(())
     }
 

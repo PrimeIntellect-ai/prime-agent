@@ -95,6 +95,12 @@ pub(crate) struct ActiveExecution {
     started: Instant,
     max_chars: usize,
     opts: ExecuteOptions,
+    /// The request runs user-namespace code (an execute — the bootstrap
+    /// class included, internal or not): its settle can rebind or mutate
+    /// names, which ends the capture-freshness memo's description.
+    namespace_code: bool,
+    /// The request replaces the namespace wholesale (a restore).
+    restores_namespace: bool,
     buffers: Mutex<ExecBuffers>,
     result_tx: Mutex<Option<oneshot::Sender<anyhow::Result<InternalExecuteResult>>>>,
 }
@@ -213,6 +219,45 @@ struct RestoredNamespaceSkip {
     completed_executions: u64,
 }
 
+/// The last committed capture, replayed while the namespace provably cannot
+/// have changed since it: the recurring freshness memo. Fresh means no USER
+/// execution settled since the commit — a settled cell is the only product
+/// path that rebinds or mutates namespace objects; internal state requests
+/// (the namespace listing, the captures themselves, the repair bootstrap)
+/// settle without touching the user namespace — and the committed manifest
+/// is still the one on disk (nothing external replaced the payload). A fresh
+/// capture would reproduce the committed payload byte-for-byte, so the
+/// kernel request — a full-namespace re-dump serialized on the kernel's
+/// single request queue — is skipped wholesale. The same witness class as
+/// the shipped post-restore skip and boot hold, held across every capture:
+/// the compact-time prune, the dispose flush, and the debounced fire.
+#[derive(Clone)]
+struct CaptureFreshness {
+    /// Settled USER-execution count at the commit; any later user settle
+    /// defeats the memo (internal state requests never move it), and any
+    /// settled request that runs namespace code or restores the namespace
+    /// clears the memo outright (see `resolve_execution`).
+    user_executions: u64,
+    /// The invalidation epoch at the commit: any later bump (a
+    /// namespace-code or restore settle, a kernel start) defeats the
+    /// memo even if the count and the stat pair still match.
+    epoch: u64,
+    /// The payload stat right after the commit: the load-bearing witness —
+    /// it fingerprints the file a later restore actually reads, so an
+    /// external payload replacement defeats the skip.
+    payload_stat: Option<ManifestStat>,
+    /// The manifest stat right after the commit, re-checked at every consult.
+    manifest_stat: Option<ManifestStat>,
+    /// The committed capture's result, replayed to callers while fresh: a
+    /// fresh capture reports the same lists (the namespace is unchanged),
+    /// except the prune, whose names are already gone from the live
+    /// namespace (a fresh prune finds nothing).
+    result: SnapshotResult,
+    /// Live names above the per-variable cap survived the commit: a pruning
+    /// capture must still run to remove and disclose them (#227 semantics).
+    live_over_cap: bool,
+}
+
 struct Guarded {
     state: KernelState,
     start_generation: u64,
@@ -231,6 +276,12 @@ struct Guarded {
     /// Settled-execution counter: the post-restore skip arm and the debounced
     /// snapshot compare it to spot a real cell in between.
     completed_executions: u64,
+    /// Settled USER executions only: internal state requests (the namespace
+    /// listing, the captures, the repair bootstrap) settle like any request
+    /// but never change the user namespace, so the capture-freshness memo
+    /// compares this counter — a real cell is the only product path that
+    /// rebinds or mutates namespace objects between captures.
+    user_executions: u64,
     /// A restore attempt failed outright or revived only part of the saved
     /// namespace: the on-disk payload stays the fresher copy, so the dispose
     /// flush must not overwrite it. Unlike `pending_restore`, the reprovision
@@ -247,6 +298,20 @@ struct Guarded {
     restored_manifest_stat: Option<Option<ManifestStat>>,
     /// Armed one-shot post-restore snapshot skip (see `RestoredNamespaceSkip`).
     restored_namespace_skip: Option<RestoredNamespaceSkip>,
+    /// The last committed capture while the namespace provably cannot have
+    /// changed: the recurring freshness memo every capture entry consults
+    /// (see `CaptureFreshness`).
+    capture_freshness: Option<CaptureFreshness>,
+    /// Bumped by every memo invalidation (a namespace-code or restore
+    /// settle, a kernel start): the consult and the arm compare it, so an
+    /// invalidation that lands while a capture's own request is in flight
+    /// can never be re-described by that capture's post-await arm.
+    freshness_epoch: u64,
+    /// Bumped by every capture COMMIT: the arm compares it so only the
+    /// LATEST capture's record arms — a straggling earlier capture's
+    /// delayed stat probe could otherwise pair its stale result lists with
+    /// the newer capture's files.
+    capture_sequence: u64,
     /// Unattributed stream text that arrived between cells; surfaced on the next execution.
     pending_background_output: String,
     pending_background_output_chars: usize,
@@ -295,6 +360,7 @@ impl std::fmt::Debug for ReplKernelManager {
 
 pub(crate) struct Inner {
     options: KernelManagerOptions,
+    freshness_stat_probe: std::sync::atomic::AtomicBool,
     resolved_python: Mutex<Option<std::path::PathBuf>>,
     guarded: Mutex<Guarded>,
     child: Mutex<Option<ChildHandle>>,
@@ -372,6 +438,7 @@ impl ReplKernelManager {
     pub fn new(options: KernelManagerOptions) -> Self {
         let inner = Arc::new(Inner {
             options,
+            freshness_stat_probe: std::sync::atomic::AtomicBool::new(false),
             resolved_python: Mutex::new(None),
             guarded: Mutex::new(Guarded {
                 state: KernelState::Idle,
@@ -382,10 +449,14 @@ impl ReplKernelManager {
                 pending_rebootstrap: false,
                 pending_restore: false,
                 completed_executions: 0,
+                user_executions: 0,
                 restore_incomplete: false,
                 restore_boot_hold: None,
                 restored_manifest_stat: None,
                 restored_namespace_skip: None,
+                capture_freshness: None,
+                freshness_epoch: 0,
+                capture_sequence: 0,
                 pending_background_output: String::new(),
                 pending_background_output_chars: 0,
                 pending_background_output_truncated: false,
