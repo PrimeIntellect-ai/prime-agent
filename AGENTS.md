@@ -41,6 +41,7 @@
 - Tests using subprocesses, sockets, concurrency, or shared process state must bind port `0`, use unique temporary paths, restore environment/cwd/globals/fake timers, and close every resource in `finally`.
 - Run every modified test file directly. For concurrency, process, timer, or ordering changes, also run the focused suite repeatedly with multiple shuffle seeds. Stop on the first failure; repeated runs are evidence, never retries.
 - A change may not add more lines of test than source. A test-only change must delete at least as many test lines as it adds.
+- `scripts/test-policy-baseline.json` freezes the per-file matches that predate the policy. They may only go down: after removing one, regenerate the file with `npm run check:test-policy -- --update-baseline` in the same change.
 - Regressions go in the existing suite for the module that broke, with the issue number in the test name. Never create one file per issue. One test file per source module; repeated cases belong in an `it.each` table.
 - Deleting code deletes its tests. A flaky test is made deterministic or deleted, never skipped or retried.
 
