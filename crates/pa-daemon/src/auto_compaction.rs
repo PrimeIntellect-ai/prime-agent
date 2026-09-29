@@ -129,7 +129,7 @@ impl AgentSessionEngine {
         };
         pa_core::session_engine::compaction_trace::trace(
             "auto.compact_returned",
-            match &outcome {
+            &(match &outcome {
                 Ok(Ok(CompactOutcome::Ran(_))) => {
                     serde_json::json!({ "outcome": "ran" })
                 }
@@ -146,7 +146,7 @@ impl AgentSessionEngine {
                 Ok(Err(_)) | Err(_) => {
                     serde_json::json!({ "outcome": "failed" })
                 }
-            },
+            }),
         );
         match &outcome {
             Ok(Ok(CompactOutcome::Ran(run))) => {

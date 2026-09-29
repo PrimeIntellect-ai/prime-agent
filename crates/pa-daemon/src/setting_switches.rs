@@ -217,7 +217,7 @@ impl Worker {
             };
             // TS persists the default so the next session starts here.
             let mut settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
-            let _ = settings.set_default_model_and_provider(provider, model_id);
+            let _ = settings.set_default_model_and_provider(&provider, &model_id);
             Some(())
         })
         .await

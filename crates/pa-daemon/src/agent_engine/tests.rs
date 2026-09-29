@@ -2442,7 +2442,7 @@ fn settings_default_drives_unflagged_resolution() {
     write_custom_provider_models_json(&agent_dir, "http://127.0.0.1:9");
     let mut settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
     settings
-        .set_default_model_and_provider("battery".into(), "mock-1".into())
+        .set_default_model_and_provider("battery", "mock-1")
         .unwrap();
     let engine = AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.path().to_path_buf(),
