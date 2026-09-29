@@ -607,6 +607,19 @@ impl SupervisorChildSessions {
         }
     }
 
+    /// Test seam: settle a pushed child record (the passivation-gate
+    /// tests exercise a registry that holds only settled children).
+    #[cfg(test)]
+    pub(crate) async fn settle_test_child(&self, child_active_session_id: &str) {
+        let children = self.inner.children.lock().await;
+        for record in children.iter() {
+            let mut record = record.lock().await;
+            if record.active_session_id == child_active_session_id {
+                record.settled_status = Some("done");
+            }
+        }
+    }
+
     /// Test seam: admit one child record without the supervisor round trip
     /// (the controller tests exercise the family join on registry state).
     #[cfg(test)]

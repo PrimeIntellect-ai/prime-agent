@@ -304,6 +304,32 @@ impl AgentSessionEngine {
             .is_some_and(|probe| probe())
     }
 
+    /// The settled passivation gates shared by the settled-child kernel
+    /// release and the whole-worker idle passivation (TS #2483's
+    /// `canPassivateSettledSession`): no unsettled RLM descendant work,
+    /// no live background `bash()` handle (a kernel snapshot cannot
+    /// resurrect a live process — TS `isSessionActive`'s
+    /// `hasBackgroundWork` arm), and no registered active-or-paused
+    /// scheduled job. The jobs gate covers plain cron jobs AND armed
+    /// heartbeats alike (the shared scheduled-jobs store holds both):
+    /// the port has no relaunch-on-fire for a stopped worker's jobs, so
+    /// unlike TS's tier-2 (which evicts cron-armed workers and lets the
+    /// fire relaunch) the port BLOCKS while any job is armed — the
+    /// wake-blind substitution, a disclosed deliberate divergence until
+    /// a relaunch-on-fire port exists. An unwired jobs probe passes (an
+    /// engine without a scheduled-jobs store has no job to protect).
+    pub(crate) async fn settled_passivation_gates_pass(&self) -> bool {
+        if self.has_unsettled_rlm_work().await || self.has_live_background_bash_handles() {
+            return false;
+        }
+        let probe = self
+            .registered_jobs_probe
+            .lock()
+            .expect("registered jobs probe lock")
+            .clone();
+        !probe.is_some_and(|probe| probe())
+    }
+
     /// The worker's session-input probe: `true` while queued user work or
     /// the queued-input suspension owns the next turn boundary. An
     /// unwired probe (engine without a worker) answers `false`.
