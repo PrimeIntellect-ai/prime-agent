@@ -513,13 +513,21 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 			if (response?.usage) {
 				const cachedTokens = response.usage.input_tokens_details?.cached_tokens || 0;
+				const reportedInputTokens = response.usage.input_tokens || 0;
+				// OpenAI includes cached tokens in input_tokens, so subtract to get non-cached input.
+				// Gateways and caching proxies can report more cached than total, so clamp at zero
+				// instead of letting a negative input reach cost accounting.
+				const inputTokens = Math.max(0, reportedInputTokens - cachedTokens);
+				const outputTokens = response.usage.output_tokens || 0;
 				output.usage = {
-					// OpenAI includes cached tokens in input_tokens, so subtract to get non-cached input
-					input: (response.usage.input_tokens || 0) - cachedTokens,
-					output: response.usage.output_tokens || 0,
+					input: inputTokens,
+					output: outputTokens,
 					cacheRead: cachedTokens,
 					cacheWrite: 0,
-					totalTokens: response.usage.total_tokens || 0,
+					// total_tokens is input_tokens + output_tokens, which is already exactly
+					// input + output + cacheRead here. Derive it so a gateway that omits or
+					// misreports it cannot break the components invariant.
+					totalTokens: inputTokens + outputTokens + cachedTokens,
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 				};
 			}

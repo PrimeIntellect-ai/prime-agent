@@ -233,14 +233,22 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 				}
 
 				if (chunk.usageMetadata) {
+					const cachedTokens = chunk.usageMetadata.cachedContentTokenCount || 0;
+					// cachedContentTokenCount is a subset of promptTokenCount; clamp so a
+					// misreported cache figure cannot produce negative input usage.
+					const inputTokens = Math.max(0, (chunk.usageMetadata.promptTokenCount || 0) - cachedTokens);
+					const outputTokens =
+						(chunk.usageMetadata.candidatesTokenCount || 0) + (chunk.usageMetadata.thoughtsTokenCount || 0);
 					output.usage = {
-						input:
-							(chunk.usageMetadata.promptTokenCount || 0) - (chunk.usageMetadata.cachedContentTokenCount || 0),
-						output:
-							(chunk.usageMetadata.candidatesTokenCount || 0) + (chunk.usageMetadata.thoughtsTokenCount || 0),
-						cacheRead: chunk.usageMetadata.cachedContentTokenCount || 0,
+						input: inputTokens,
+						output: outputTokens,
+						cacheRead: cachedTokens,
 						cacheWrite: 0,
-						totalTokens: chunk.usageMetadata.totalTokenCount || 0,
+						// totalTokenCount is promptTokenCount + candidates + thoughts, which is
+						// already exactly input + output + cacheRead here. Derive it so a chunk
+						// that omits it, or reports a figure inconsistent with the components,
+						// cannot break the components invariant.
+						totalTokens: inputTokens + outputTokens + cachedTokens,
 						cost: {
 							input: 0,
 							output: 0,

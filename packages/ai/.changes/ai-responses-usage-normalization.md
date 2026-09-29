@@ -1,0 +1,2 @@
+- Fixed token accounting for Responses-compatible and Gemini endpoints reporting more cached than prompt tokens, which produced negative input usage and negative cost.
+- Fixed `totalTokens` silently becoming zero when an endpoint omits the total, so it is now always derived from the input, output, and cache components.
