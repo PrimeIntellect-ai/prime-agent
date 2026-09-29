@@ -151,8 +151,16 @@ def fold(repo: Path, changes_dir: Path, changelog: Path, version: str,
         # --ignore-unmatch removes tracked fragments despite local edits;
         # the unlink sweep then removes whatever git cannot, so no
         # half-fold can exist in any working-tree state.
+        # A fragment name is DATA, never a pathspec: a file literally named
+        # `:(top,glob)*.md` would be parsed as git pathspec magic and delete
+        # matching ROOT markdown files (README.md, CHANGELOG.md itself) -
+        # the fold would then stage their deletion. The `:(literal)` prefix
+        # disables magic and globbing for every name, and with cwd pinned to
+        # the fragments directory the deletion candidates are exactly the
+        # consumed fragments; the unlink sweep uses the very same scoped
+        # paths. A root-level file is never a deletion candidate.
         subprocess.run(["git", "rm", "-q", "-f", "--ignore-unmatch", "--",
-                        *[p.name for p in consumed]],
+                        *[f":(literal){path.name}" for path in consumed]],
                        cwd=changes_dir, check=False)
         for path in consumed:
             if path.is_file():

@@ -19,13 +19,15 @@
 #      staged next stable), the rolling `nightly` release's beta.json (the
 #      published nightly counter), and the latest stable release.
 #   3. Compute vNEXT-beta.N: base = max(workspace version, latest stable + one
-#      patch) - before the first stable the nightlies prerelease the staged
-#      version (v0.10.0-beta.N); once a stable ships, the base moves a patch
-#      ahead so nightlies always outrank the last stable on the channel
-#      reader; when the tip is staged a release ahead (release-prepare bumped
-#      to 0.11.0), the nightlies prerelease THAT version. The counter N
-#      advances from beta.json; it restarts at 1 when the base moves (semver
-#      orders by base first, so a restart cannot regress the train).
+#      patch) - the tree holds the LAST SHIPPED release (the operator's
+#      ruling), so from a 0.9.7 tree with v0.9.7 shipped the first nightlies
+#      are v0.9.8-beta.N (always outranking the last stable on the channel
+#      reader); once a release-prepare dispatch stages the next version in
+#      the tree (0.10.0), the nightlies prerelease THAT (v0.10.0-beta.N);
+#      after that stable ships, the base moves a patch ahead again. The
+#      counter N advances from beta.json; it restarts at 1 when the base
+#      moves (semver orders by base first, so a restart cannot regress the
+#      train).
 #   4. Create the tag-only commit via the git data API: Cargo.toml + the
 #      Cargo.lock member rows at the beta version (the rewrite is
 #      byte-identical to `cargo update --workspace`, validated 2026-09-29 on

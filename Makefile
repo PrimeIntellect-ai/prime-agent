@@ -158,4 +158,11 @@ package:
 catalog-assets-gates:
 	python3 scripts/release/test_catalog_assets.py
 
-.PHONY: check deny windows-cross actionlint perf-wave glibc-gate release-dry-run continuous-dry-run audit-build package catalog-assets catalog-assets-fixture catalog-assets-gates
+# The changelog fold's contract battery (RELEASE-FLOW-PROPOSAL.md §8): the
+# fold is the release-PR's changelog half, and the pathspec security case is
+# first - a fragment NAME is data, never a git pathspec, so no root-level
+# markdown file can ever become a fold deletion candidate.
+fold-gates:
+	python3 scripts/release/test_fold_changelog.py
+
+.PHONY: check deny windows-cross actionlint perf-wave glibc-gate release-dry-run continuous-dry-run audit-build package catalog-assets catalog-assets-fixture catalog-assets-gates fold-gates
