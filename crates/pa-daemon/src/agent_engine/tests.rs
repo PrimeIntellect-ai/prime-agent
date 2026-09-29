@@ -239,7 +239,7 @@ pub(crate) fn assert_cancelled_end_event(
     assert_eq!(row["content"], serde_json::json!(expected_row_message));
     assert_eq!(
         row["details"],
-        &serde_json::json!({
+        serde_json::json!({
             "reason": expected_reason,
             "outcome": "cancelled",
         })

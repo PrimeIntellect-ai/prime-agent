@@ -690,7 +690,7 @@ fn outcome_row_and_end_event(
     assert_eq!(row["display"], serde_json::json!(true));
     assert_eq!(
         row["details"],
-        &serde_json::json!({
+        serde_json::json!({
             "reason": expected_reason,
             "outcome": expected_outcome,
         })
@@ -886,7 +886,7 @@ fn threshold_compaction_aborted_mid_run_records_the_cancelled_outcome() {
     let big_tokens = (48_000 + "seed turn  crossing".len() as u64).div_ceil(4);
     let headroom = baseline + big_tokens / 2;
     let (engine, _engine_dir) = faux_engine_with_settings(
-        serde_json::json!({
+        &serde_json::json!({
             "responses": [
                 {"text": "seed reply"},
                 {"text": "crossing reply"},
@@ -955,7 +955,7 @@ fn requested_compaction_aborted_mid_run_records_the_cancelled_outcome() {
     // the whole window) while the 10-token keep-recent budget leaves
     // the turns summarizable for the requested run.
     let (engine, _engine_dir) = faux_engine_with_settings(
-        serde_json::json!({
+        &serde_json::json!({
             "responses": [
                 {"text": "seed reply"},
                 {"text": "second reply"},
