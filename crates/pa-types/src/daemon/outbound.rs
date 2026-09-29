@@ -1,7 +1,13 @@
 //! Responses and outbound events: `DaemonResponse`, `DaemonErrorInfo`, session
 //! snapshot payloads, and the `DaemonOutbound` event union.
 
-use super::*;
+#[cfg(test)]
+use super::rt;
+use super::{
+    AgentMessage, DaemonClientId, DaemonCommandId, DaemonEventCursor, DaemonEventId,
+    DaemonEventMeta, DaemonEventSequence, DaemonProtocolInfo, DaemonReplayInfo,
+    DaemonServerCapability, Deserialize, JsonMap, Serialize, Value,
+};
 
 // ---------------------------------------------------------------------------
 // Responses and outbound events

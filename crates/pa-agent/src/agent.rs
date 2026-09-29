@@ -954,6 +954,7 @@ impl Agent {
     ///
     /// Panics if the `steering_queue` mutex is poisoned (another thread
     /// panicked while holding it).
+    #[must_use]
     pub fn steering_mode(&self) -> QueueMode {
         self.inner.steering_queue.lock().unwrap().mode
     }
@@ -974,6 +975,7 @@ impl Agent {
     ///
     /// Panics if the `follow_up_queue` mutex is poisoned (another thread
     /// panicked while holding it).
+    #[must_use]
     pub fn follow_up_mode(&self) -> QueueMode {
         self.inner.follow_up_queue.lock().unwrap().mode
     }
@@ -1064,6 +1066,7 @@ impl Agent {
     ///
     /// Panics if the `steering_queue` mutex is poisoned (another thread
     /// panicked while holding it).
+    #[must_use]
     pub fn steering_previews(&self) -> Vec<String> {
         self.inner
             .steering_queue
@@ -1083,6 +1086,7 @@ impl Agent {
     ///
     /// Panics if the `follow_up_queue` mutex is poisoned (another thread
     /// panicked while holding it).
+    #[must_use]
     pub fn follow_up_previews(&self) -> Vec<String> {
         self.inner
             .follow_up_queue
@@ -1122,6 +1126,7 @@ impl Agent {
     ///
     /// Panics if the `steering_queue` or `follow_up_queue` mutex is poisoned
     /// (another thread panicked while holding one of them).
+    #[must_use]
     pub fn has_queued_messages(&self) -> bool {
         self.inner.steering_queue.lock().unwrap().has_items()
             || self.inner.follow_up_queue.lock().unwrap().has_items()
@@ -1129,11 +1134,13 @@ impl Agent {
 
     /// The loop's provider stream function (the side-thread clone passes the
     /// same function to its own loop, TS `parent.streamFn`).
+    #[must_use]
     pub fn stream_fn(&self) -> Option<&StreamFn> {
         self.inner.stream_fn.as_ref()
     }
 
     /// The active run's abort signal, if any (TS `get signal`).
+    #[must_use]
     pub fn signal(&self) -> Option<AbortSignal> {
         self.inner.current_signal()
     }
@@ -1330,6 +1337,7 @@ impl Agent {
     /// The loop's event sink for external embedding: forwards events through
     /// this agent's listener processing (not part of the TS public API; the
     /// TS class keeps this private).
+    #[must_use]
     pub fn event_sink(self: &Arc<Self>) -> AgentEventSink {
         let inner = Arc::clone(&self.inner);
         Arc::new(move |event| {

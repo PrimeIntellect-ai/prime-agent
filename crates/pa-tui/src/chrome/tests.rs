@@ -1,3 +1,131 @@
+/// The dock segments' column spans (the click regions, operator
+/// directive 2026-09-29): each group's segment covers exactly its own
+/// rendered cells — the separators between groups stay inert — in the
+/// group order the row renders, and a truncated row keeps no region
+/// for groups the truncation dropped.
+#[test]
+fn the_dock_segments_cover_each_groups_own_cells() {
+    let theme = Theme::builtin("prime", ColorMode::TrueColor);
+    let dock = ActivityDock {
+        subagents_running_direct: 2,
+        heartbeats: 3,
+        heartbeats_paused: 1,
+        bash_running: 1,
+        ..ActivityDock::default()
+    };
+    let (frame, segments) = render_activity_dock_segments(&dock, &theme, 120).unwrap();
+    let text = frame[1]
+        .iter()
+        .map(|span| span.content.as_str())
+        .collect::<String>();
+    assert_eq!(
+        text,
+        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell"
+    );
+    let ordered: Vec<ActivityGroup> = segments.iter().map(|segment| segment.group).collect();
+    assert_eq!(
+        ordered,
+        vec![
+            ActivityGroup::Subagents,
+            ActivityGroup::Heartbeats,
+            ActivityGroup::Bash
+        ],
+        "the segments follow the row's group order"
+    );
+    // Each segment covers exactly its own cells: the subagents segment
+    // starts at the row's leading space end and ends before the
+    // separator; the heartbeat segment covers the paused cluster too
+    // (the cluster is the heartbeats group's own readout).
+    let of = |text: &str| text.find(text).map(|_| 0);
+    let _ = of;
+    let subagents = &segments[0].cols;
+    let heartbeats = &segments[1].cols;
+    let bash = &segments[2].cols;
+    // The recorded columns are display cells, and the row's glyphs are
+    // one cell wide: slice the text by char, never by byte.
+    let cells = |cols: &std::ops::Range<usize>| -> String {
+        text.chars()
+            .skip(cols.start)
+            .take(cols.end - cols.start)
+            .collect()
+    };
+    assert_eq!(cells(subagents), "◆ 2 subagents");
+    assert_eq!(cells(heartbeats), "◷ 3 heartbeats · ◐ 1 paused");
+    assert_eq!(cells(bash), "▸ 1 shell");
+    // The separators between the segments stay inert.
+    let between = |a: &std::ops::Range<usize>, b: &std::ops::Range<usize>| -> String {
+        text.chars().skip(a.end).take(b.start - a.end).collect()
+    };
+    assert_eq!(between(subagents, heartbeats), "  ·  ");
+    assert_eq!(between(heartbeats, bash), "  ·  ");
+    // A truncation that drops the trailing group keeps no region for
+    // it: the segments clamp to the row the terminal kept.
+    let (frame, segments) = render_activity_dock_segments(&dock, &theme, 20).unwrap();
+    let used = crate::width::spans_width(&frame[1]);
+    assert!(used <= 20, "the row truncates inside the width");
+    for segment in &segments {
+        assert!(
+            segment.cols.start < used,
+            "a dropped segment records no span"
+        );
+        assert!(segment.cols.end <= used);
+    }
+    // The goal group rides the segments when its row mounts.
+    let dock = ActivityDock {
+        goal_label: Some("Pursuing goal (0s)".to_string()),
+        ..ActivityDock::default()
+    };
+    let (_, segments) = render_activity_dock_segments(&dock, &theme, 120).unwrap();
+    assert_eq!(
+        segments.last().map(|segment| segment.group),
+        Some(ActivityGroup::Goal)
+    );
+}
+
+/// The tray's `← manage` hint reports its own cells (the click region,
+/// operator directive 2026-09-29): the hint spans exactly the arrow and
+/// the label — never the depth metadata beside them — and a tray whose
+/// left label is an override or hidden reports none.
+#[test]
+fn the_tray_reports_the_manage_hints_own_cells() {
+    let theme = Theme::builtin("prime", ColorMode::TrueColor);
+    let state = ChromeState {
+        show_manage: true,
+        tray_depth: Some(2),
+        ..Default::default()
+    };
+    let (line, hint) = render_tray_with_hint(&state, &theme, 120);
+    let hint = hint.expect("the manage hint reports its cells");
+    let text = line
+        .iter()
+        .map(|span| span.content.as_str())
+        .collect::<String>();
+    assert_eq!(
+        text.chars()
+            .skip(hint.start)
+            .take(hint.end - hint.start)
+            .collect::<String>(),
+        "\u{2190} manage"
+    );
+    assert_eq!(
+        text.chars().skip(hint.end).take(2).collect::<String>(),
+        "  ",
+        "the depth label stays outside the hint's span"
+    );
+    // The override label replaces the hint: no region.
+    let state = ChromeState {
+        show_manage: true,
+        tray_override: Some("Press ctrl+c again to exit".to_string()),
+        ..Default::default()
+    };
+    let (_, hint) = render_tray_with_hint(&state, &theme, 120);
+    assert_eq!(hint, None, "an override label carries no hint region");
+    // A hidden hint (a non-attachable run) carries none either.
+    let state = ChromeState::default();
+    let (_, hint) = render_tray_with_hint(&state, &theme, 120);
+    assert_eq!(hint, None, "a hidden manage hint carries no region");
+}
+
 #[test]
 fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
     let theme = Theme::builtin("prime", ColorMode::TrueColor);

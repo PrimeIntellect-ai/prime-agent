@@ -62,6 +62,7 @@ pub struct StreamFailureInfo {
 }
 
 impl StreamFailureInfo {
+    #[must_use]
     pub fn unknown() -> Self {
         Self {
             kind: StreamFailureKind::Unknown,
@@ -166,6 +167,7 @@ pub const AWS_DESERIALIZATION_HINT: &str =
 
 /// The base failure text of an http2 transport failure (without the
 /// deserialization hint).
+#[must_use]
 pub fn h2_failure_text(failure: &H2Failure) -> String {
     match failure {
         H2Failure::StreamReset { nghttp2_code } => {
@@ -179,6 +181,7 @@ pub fn h2_failure_text(failure: &H2Failure) -> String {
 
 /// The user-facing failure text, with the AWS SDK deserialization hint for
 /// mid-body failures.
+#[must_use]
 pub fn h2_failure_message(failure: &H2Failure, mid_stream: bool) -> String {
     let mut message = h2_failure_text(failure);
     if mid_stream {
@@ -236,6 +239,7 @@ pub const RUNTIME_CONNECT_REFUSED_MESSAGE: &str =
 
 impl ProviderConnectionError {
     /// The user-facing text the TS binary surfaces for this failure.
+    #[must_use]
     pub fn message(&self) -> String {
         // A peer reset before the response carries the same fixed text as the
         // connect failure for the raw-fetch/SDK families (the TS binary
@@ -318,6 +322,7 @@ impl ProviderConnectionError {
 
     /// The TS runtime/SDK error class name recorded in the
     /// `provider_stream_failure` diagnostic.
+    #[must_use]
     pub fn error_name(&self) -> &'static str {
         if matches!(self.profile, ConnectionErrorProfile::RawFetch) {
             return "TypeError";
@@ -341,6 +346,7 @@ impl ProviderConnectionError {
     /// mistral, node's `ECONNREFUSED` for the AWS http1 handler and bun's
     /// `ERR_HTTP2_*` codes for the AWS http2 handler; the openai/anthropic
     /// SDK family records none).
+    #[must_use]
     pub fn error_code(&self) -> Option<&'static str> {
         match (&self.profile, &self.kind) {
             (ConnectionErrorProfile::RawFetch, _) => Some("ConnectionRefused"),
@@ -395,6 +401,7 @@ pub struct ProviderWsTransportError {
 impl ProviderWsTransportError {
     /// The TS runtime/WS error class name recorded in the diagnostic
     /// (`error.name`); the close-code presence decides it.
+    #[must_use]
     pub fn error_name(&self) -> &'static str {
         match self.close_code {
             Some(_) => "WebSocketCloseError",
@@ -443,6 +450,7 @@ impl std::error::Error for ProviderError {}
 impl ProviderError {
     /// Build an HTTP error from a status code and response body, classifying
     /// the failure from the body text like the TS `stream-failure.ts` parser.
+    #[must_use]
     pub fn from_http_status_body(
         status: u16,
         body: &str,
@@ -527,6 +535,7 @@ fn kind_message(kind: StreamFailureKind) -> &'static str {
 }
 
 /// Build a user-facing message like "Provider overloaded (`overloaded_error`, 529) [`request_id`: `req_abc`]".
+#[must_use]
 pub fn stream_failure_message(info: &StreamFailureInfo, detail: Option<&str>) -> String {
     let mut qualifiers: Vec<String> = Vec::new();
     if let Some(provider_error_type) = &info.provider_error_type {
@@ -554,6 +563,7 @@ pub fn stream_failure_message(info: &StreamFailureInfo, detail: Option<&str>) ->
 ///
 /// Panics only if one of the built-in regex patterns fails to compile; the
 /// patterns are static literals, so this never fires in practice.
+#[must_use]
 pub fn classify_stream_failure(
     provider_error_type: Option<&str>,
     status: Option<u16>,
@@ -653,6 +663,7 @@ pub fn stream_failure_from_stop_reason(
 
 const MAX_RAW_LENGTH: usize = 2000;
 
+#[must_use]
 pub fn truncate_raw_payload(raw: &str) -> String {
     if raw.len() > MAX_RAW_LENGTH {
         // Match the TS slice-by-16-bit-code-unit behavior closely enough for
@@ -667,7 +678,10 @@ pub fn truncate_raw_payload(raw: &str) -> String {
     }
 }
 
-fn header_value(headers: &std::collections::HashMap<String, String>, name: &str) -> Option<String> {
+fn header_value<S: std::hash::BuildHasher>(
+    headers: &std::collections::HashMap<String, String, S>,
+    name: &str,
+) -> Option<String> {
     headers
         .iter()
         .find(|(key, _)| key.eq_ignore_ascii_case(name))
@@ -675,9 +689,14 @@ fn header_value(headers: &std::collections::HashMap<String, String>, name: &str)
 }
 
 /// Parse Retry-After / Retry-After-Ms headers into a millisecond wait.
-pub fn parse_retry_after_ms(headers: &std::collections::HashMap<String, String>) -> Option<u64> {
+#[must_use]
+pub fn parse_retry_after_ms<S: std::hash::BuildHasher>(
+    headers: &std::collections::HashMap<String, String, S>,
+) -> Option<u64> {
     if let Some(value) = header_value(headers, "retry-after-ms") {
         if let Ok(ms) = value.parse::<f64>() {
+            // The wire's retry-after-ms is a lenient header value (finite, non-negative); u64 ms is the wait's unit.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             if ms.is_finite() && ms >= 0.0 {
                 return Some(ms as u64);
             }
@@ -685,6 +704,8 @@ pub fn parse_retry_after_ms(headers: &std::collections::HashMap<String, String>)
     }
     let raw = header_value(headers, "retry-after")?;
     if let Ok(seconds) = raw.parse::<f64>() {
+        // The wire's retry-after is a lenient second count (finite, non-negative); u64 ms is the wait's unit.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         if seconds.is_finite() && seconds >= 0.0 {
             return Some((seconds * 1000.0) as u64);
         }
@@ -692,8 +713,12 @@ pub fn parse_retry_after_ms(headers: &std::collections::HashMap<String, String>)
     // HTTP-date form: compute the delta against now.
     match parse_http_date(&raw) {
         Some(date_ms) => {
+            // Epoch millis fit i64; the max(0) floor keeps the delta non-negative for the u64 wait.
+            #[allow(clippy::cast_possible_wrap)]
             let now = now_ms() as i64;
-            Some((date_ms - now).max(0) as u64)
+            #[allow(clippy::cast_sign_loss)]
+            let wait = (date_ms - now).max(0) as u64;
+            Some(wait)
         }
         None => None,
     }
@@ -855,6 +880,7 @@ pub fn extract_stream_failure_info(error: &ProviderError) -> StreamFailureInfo {
 /// the provider's own short message, never the raw payload/trace. Unrecognized
 /// errors pass through verbatim so their text (which downstream retry matching
 /// may depend on) is preserved.
+#[must_use]
 pub fn format_stream_failure_message(error: &ProviderError) -> String {
     match error {
         ProviderError::StreamFailure(failure) => failure.message.clone(),

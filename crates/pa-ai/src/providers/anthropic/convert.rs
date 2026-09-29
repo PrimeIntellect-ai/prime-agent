@@ -69,6 +69,8 @@ pub(crate) fn convert_content_blocks(content: &[UserOrToolContent]) -> Value {
     json!(blocks)
 }
 
+// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+#[allow(clippy::too_many_lines)]
 pub fn convert_messages(
     context: &Context,
     model: &Model,
@@ -231,8 +233,8 @@ pub fn convert_messages(
     if let Some(cache_control) = cache_control {
         if let Some(last) = params.last_mut() {
             if last.get("role").and_then(|value| value.as_str()) == Some("user") {
-                let content = &mut last["content"];
-                if let Value::String(text) = content {
+                let content_value = &mut last["content"];
+                if let Value::String(text) = content_value {
                     let text = text.clone();
                     *last = json!({
                         "role": "user",
@@ -242,7 +244,7 @@ pub fn convert_messages(
                             "cache_control": cache_control.to_json(),
                         }],
                     });
-                } else if let Value::Array(blocks) = content {
+                } else if let Value::Array(blocks) = content_value {
                     if let Some(last_block) = blocks.last_mut() {
                         let block_type = last_block
                             .get("type")

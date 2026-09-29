@@ -13,7 +13,9 @@ impl EpochMs {
     pub fn now() -> Self {
         let millis = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64);
+            .map_or(0, |d| {
+                u64::try_from(d.as_millis()).expect("millis since epoch fit in u64")
+            });
         Self(millis)
     }
 
@@ -23,7 +25,8 @@ impl EpochMs {
         let millis = self.0 % 1000;
         let days = total_secs / 86_400;
         let secs_of_day = total_secs % 86_400;
-        let (year, month, day) = civil_from_days(days as i64);
+        let days_since_epoch = i64::try_from(days).expect("days since epoch fit in i64");
+        let (year, month, day) = civil_from_days(days_since_epoch);
         let (hour, minute, second) = (
             secs_of_day / 3600,
             (secs_of_day / 60) % 60,
@@ -45,7 +48,9 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = if m <= 2 { y + 1 } else { y };
-    (year, m as u32, d as u32)
+    let month = u32::try_from(m).expect("month of a civil date is 1..=12");
+    let day = u32::try_from(d).expect("day of a civil date is 1..=31");
+    (year, month, day)
 }
 
 #[cfg(test)]

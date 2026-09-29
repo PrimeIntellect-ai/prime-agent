@@ -68,7 +68,7 @@ async fn supports_helper_blocks_for_text_thinking_and_tool_calls() {
     registration.set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
         vec![
             faux_thinking("think"),
-            faux_tool_call("echo", serde_json::json!({"text": "hi"}), None),
+            faux_tool_call("echo", &serde_json::json!({"text": "hi"}), None),
             faux_text("done"),
         ],
         FauxAssistantMessageOptions {
@@ -723,7 +723,7 @@ async fn streams_thinking_text_and_partial_tool_call_deltas() {
             faux_text("answer text"),
             faux_tool_call(
                 "echo",
-                serde_json::json!({"text": "hi", "count": 12}),
+                &serde_json::json!({"text": "hi", "count": 12}),
                 Some("tool-1"),
             ),
         ],
@@ -788,7 +788,7 @@ async fn streams_an_exact_event_order_for_fixed_size_chunks() {
         vec![
             faux_thinking("go"),
             faux_text("ok"),
-            faux_tool_call("echo", serde_json::json!({}), Some("tool-1")),
+            faux_tool_call("echo", &serde_json::json!({}), Some("tool-1")),
         ],
         FauxAssistantMessageOptions {
             stop_reason: Some(StopReason::ToolUse),
@@ -830,8 +830,8 @@ async fn streams_multiple_tool_calls_in_one_message() {
     let registration = register();
     registration.set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
         vec![
-            faux_tool_call("echo", serde_json::json!({"text": "one"}), Some("tool-1")),
-            faux_tool_call("echo", serde_json::json!({"text": "two"}), Some("tool-2")),
+            faux_tool_call("echo", &serde_json::json!({"text": "one"}), Some("tool-1")),
+            faux_tool_call("echo", &serde_json::json!({"text": "two"}), Some("tool-2")),
         ],
         FauxAssistantMessageOptions {
             stop_reason: Some(StopReason::ToolUse),
