@@ -12,6 +12,12 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 libc = "0.2"
+# Cloud wire canonical JSON renders numbers as JavaScript `String(number)`
+# (the TS protocol digests depend on those exact bytes); `ryu-js` is the
+# ECMAScript Number::toString algorithm.
+ryu-js = "1"
+# Request digests for the cloud wire protocol (sha256:<hex> strings).
+sha2 = "0.10"
 # The incident classifier's log-message patterns are the TS regexes
 # (src/cli/incident.ts); the `regex` crate keeps their semantics 1:1.
 regex = "1"

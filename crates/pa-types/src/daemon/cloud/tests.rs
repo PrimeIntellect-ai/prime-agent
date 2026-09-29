@@ -110,6 +110,35 @@ fn canonical_json_sorts_keys_and_preserves_array_order() {
 }
 
 #[test]
+fn canonical_json_renders_numbers_like_javascript() {
+    // TS digests are computed over `String(number)` bytes; serde_json's own
+    // rendering diverges on integral floats, -0, and plain-decimal-range
+    // magnitudes, so the parity cases here pin the JS-exact rendering.
+    let cases = [
+        ("2.0", "2"),
+        ("0.5", "0.5"),
+        ("-0", "0"),
+        ("1e21", "1e+21"),
+        ("1e-7", "1e-7"),
+        ("1e20", "100000000000000000000"),
+        // JSON integers beyond 2^53 round through f64, exactly like JS
+        // JSON.parse.
+        ("9007199254740993", "9007199254740992"),
+        ("-9007199254740993", "-9007199254740992"),
+        ("2.5", "2.5"),
+        ("3.14159", "3.14159"),
+    ];
+    for (source, expected) in cases {
+        let value: Value = serde_json::from_str(&format!("{{\"n\":{source}}}")).unwrap();
+        assert_eq!(
+            canonical_json(&value).unwrap(),
+            format!("{{\"n\":{expected}}}"),
+            "source {source}"
+        );
+    }
+}
+
+#[test]
 fn canonical_json_depth_bound() {
     let mut value = json!(1);
     for _ in 0..(CLOUD_MAX_JSON_DEPTH + 2) {
@@ -119,8 +148,8 @@ fn canonical_json_depth_bound() {
     assert_eq!(problem, "canonical JSON depth exceeds 64");
 }
 
-fn problem(value: Value) -> Option<String> {
-    cloud_family_event_problem(&value, "event")
+fn problem(value: &Value) -> Option<String> {
+    cloud_family_event_problem(value, "event")
 }
 
 #[test]
@@ -128,34 +157,34 @@ fn event_validation_problem_strings_match_ts() {
     // Missing recordedAt reports before the kind check, exactly like the TS
     // validator's base problem order.
     assert_eq!(
-        problem(json!({"sequence": 1})).unwrap(),
+        problem(&json!({"sequence": 1})).unwrap(),
         "event.recordedAt must be a string of 1-64 characters"
     );
-    assert_eq!(problem(json!({"sequence": 1, "recordedAt": "x"})).unwrap(),
+    assert_eq!(problem(&json!({"sequence": 1, "recordedAt": "x"})).unwrap(),
         "event.kind must be one of command_accepted, command_state, session_status, output_delta, session_entry, session_event, session_meta, roster_delta, child_update, usage, family_roster_request, agent_message_request");
     assert_eq!(
-        problem(json!({"sequence": 0, "kind": "family_roster_request", "recordedAt": "x", "requestId": "f", "fromRemoteSessionId": "r"}))
+        problem(&json!({"sequence": 0, "kind": "family_roster_request", "recordedAt": "x", "requestId": "f", "fromRemoteSessionId": "r"}))
             .unwrap(),
         "event.sequence must be an integer of at least 1"
     );
     assert_eq!(
-        problem(json!({"sequence": 1, "kind": "family_roster_request", "recordedAt": "x", "requestId": "", "fromRemoteSessionId": "r"}))
+        problem(&json!({"sequence": 1, "kind": "family_roster_request", "recordedAt": "x", "requestId": "", "fromRemoteSessionId": "r"}))
             .unwrap(),
         "event.requestId must be a string of 1-128 characters"
     );
     assert_eq!(
-        problem(json!({"sequence": 1, "kind": "family_roster_request", "recordedAt": "x", "requestId": "f", "fromRemoteSessionId": "r", "extra": 1}))
+        problem(&json!({"sequence": 1, "kind": "family_roster_request", "recordedAt": "x", "requestId": "f", "fromRemoteSessionId": "r", "extra": 1}))
             .unwrap(),
         "unexpected field: extra"
     );
     assert_eq!(
-        problem(json!({"sequence": 1, "kind": "agent_message_request", "recordedAt": "x", "requestId": "f", "fromRemoteSessionId": "r", "targetSelector": "s", "message": ""}))
+        problem(&json!({"sequence": 1, "kind": "agent_message_request", "recordedAt": "x", "requestId": "f", "fromRemoteSessionId": "r", "targetSelector": "s", "message": ""}))
             .unwrap(),
         "event.message must be a string of 1-65536 characters"
     );
     // Known non-family kinds are out of this slice's scope.
     assert!(problem(
-        json!({"sequence": 1, "kind": "session_status", "recordedAt": "x", "status": "idle"})
+        &json!({"sequence": 1, "kind": "session_status", "recordedAt": "x", "status": "idle"})
     )
     .unwrap()
     .starts_with("event.kind must be one of"));
@@ -171,7 +200,7 @@ fn selector_bound_counts_utf16_units_like_ts_length() {
         "requestId": "f", "fromRemoteSessionId": "r",
         "targetSelector": at_bound, "message": "m",
     });
-    assert_eq!(problem(at_bound_event), None);
+    assert_eq!(problem(&at_bound_event), None);
 
     // 64 astral + one BMP character = 129 units: over the bound in TS too.
     let over = format!("{at_bound}x");
@@ -182,7 +211,7 @@ fn selector_bound_counts_utf16_units_like_ts_length() {
         "targetSelector": over, "message": "m",
     });
     assert_eq!(
-        problem(over_event).unwrap(),
+        problem(&over_event).unwrap(),
         "event.targetSelector must be a string of 1-128 characters"
     );
 }
@@ -199,33 +228,33 @@ fn message_bound_counts_utf16_units() {
         "requestId": "f", "fromRemoteSessionId": "r",
         "targetSelector": "s", "message": astral_at_bound,
     });
-    assert_eq!(problem(event), None);
+    assert_eq!(problem(&event), None);
 }
 
-fn command_problem(value: Value) -> Option<String> {
-    cloud_family_command_problem(&value, "request")
+fn command_problem(value: &Value) -> Option<String> {
+    cloud_family_command_problem(value, "request")
 }
 
 #[test]
 fn command_validation_problem_strings_match_ts() {
     assert_eq!(
         command_problem(
-            json!({"kind": "family_roster_result", "requestId": "f", "entries": {"id": "x"}})
+            &json!({"kind": "family_roster_result", "requestId": "f", "entries": {"id": "x"}})
         )
         .unwrap(),
         "request.entries must be an array"
     );
     assert_eq!(
-        command_problem(json!({"kind": "family_roster_result", "requestId": "f", "entries": []})),
+        command_problem(&json!({"kind": "family_roster_result", "requestId": "f", "entries": []})),
         None
     );
     assert_eq!(
-        command_problem(json!({"kind": "agent_message_result", "requestId": "f", "ok": true}))
+        command_problem(&json!({"kind": "agent_message_result", "requestId": "f", "ok": true}))
             .unwrap(),
         "request.receipt is required when ok is true"
     );
     assert_eq!(
-        command_problem(json!({
+        command_problem(&json!({
             "kind": "agent_message_result", "requestId": "f", "ok": false,
             "error": "x", "receipt": {"id": "a"},
         }))
@@ -233,12 +262,12 @@ fn command_validation_problem_strings_match_ts() {
         "request.receipt must be omitted when ok is false"
     );
     assert_eq!(
-        command_problem(json!({"kind": "agent_message_result", "requestId": "f", "ok": "yes"}))
+        command_problem(&json!({"kind": "agent_message_result", "requestId": "f", "ok": "yes"}))
             .unwrap(),
         "request.ok must be a boolean"
     );
     assert_eq!(
-        command_problem(json!({
+        command_problem(&json!({
             "kind": "agent_message_result", "requestId": "f", "ok": true,
             "receipt": {"id": "a", "deliveryStatus": "delivered", "padded": "x".repeat(2048)},
         }))
@@ -246,7 +275,7 @@ fn command_validation_problem_strings_match_ts() {
         "request.receipt exceeds 2048 bytes"
     );
     assert_eq!(
-        command_problem(json!({"kind": "release"})).unwrap(),
+        command_problem(&json!({"kind": "release"})).unwrap(),
         format!("request.kind must be one of {CLOUD_COMMAND_KINDS}")
     );
 }
@@ -337,16 +366,16 @@ fn family_info_and_send_message_validation() {
 #[test]
 fn receipt_canonical_problem_bounds() {
     let receipt = CloudAgentMessageReceipt {
-        id: "agentmsg_9".to_string(),
-        delivery_status: CloudAgentMessageDeliveryStatus::Delivered,
+        id: Some("agentmsg_9".to_string()),
+        delivery_status: Some(CloudAgentMessageDeliveryStatus::Delivered),
         rest: serde_json::from_str(r#"{"source":"agent","message":"m","deliveryMode":"steer"}"#)
             .unwrap(),
     };
     assert_eq!(receipt.canonical_problem(), None);
 
     let oversized = CloudAgentMessageReceipt {
-        id: "agentmsg_9".to_string(),
-        delivery_status: CloudAgentMessageDeliveryStatus::Queued,
+        id: Some("agentmsg_9".to_string()),
+        delivery_status: Some(CloudAgentMessageDeliveryStatus::Queued),
         rest: {
             let mut map = serde_json::Map::new();
             map.insert("padded".to_string(), json!("x".repeat(2048)));
@@ -356,5 +385,69 @@ fn receipt_canonical_problem_bounds() {
     assert_eq!(
         oversized.canonical_problem().unwrap(),
         "request.receipt exceeds 2048 bytes"
+    );
+}
+
+/// The wire domain of an `agent_message_result` receipt is any
+/// canonical-JSON object (TS `cloudRequestProblem`; the empty object is
+/// protocol-valid — the TS-recorded corpus case
+/// `agent_message_result_ok_empty_receipt` pins it), so the typed carrier
+/// deserializes every object, extracts the deliverer's `id` /
+/// `deliveryStatus` only when present and well-formed, and keeps
+/// everything else verbatim in `rest`.
+#[test]
+fn receipt_carries_the_protocol_domain() {
+    rt::<CloudFamilyCommand>(
+        r#"{"kind":"agent_message_result","requestId":"msgreq_3","ok":true,"receipt":{}}"#,
+    );
+    rt::<CloudFamilyCommand>(
+        r#"{"kind":"agent_message_result","requestId":"msgreq_4","ok":true,"receipt":{"id":42,"deliveryStatus":"bogus","note":"kept"}}"#,
+    );
+
+    let empty: CloudFamilyCommand = serde_json::from_str(
+        r#"{"kind":"agent_message_result","requestId":"msgreq_3","ok":true,"receipt":{}}"#,
+    )
+    .unwrap();
+    let CloudFamilyCommandPayload::AgentMessageResult {
+        receipt: Some(empty),
+        ..
+    } = empty.payload
+    else {
+        panic!("agent_message_result payload");
+    };
+    assert_eq!(empty.id, None);
+    assert_eq!(empty.delivery_status, None);
+    assert_eq!(Value::Object(empty.rest), json!({}));
+
+    let mistyped: CloudFamilyCommand = serde_json::from_str(
+        r#"{"kind":"agent_message_result","requestId":"msgreq_4","ok":true,"receipt":{"id":42,"deliveryStatus":"bogus","note":"kept"}}"#,
+    )
+    .unwrap();
+    let CloudFamilyCommandPayload::AgentMessageResult {
+        receipt: Some(mistyped),
+        ..
+    } = mistyped.payload
+    else {
+        panic!("agent_message_result payload");
+    };
+    assert_eq!(mistyped.id, None);
+    assert_eq!(mistyped.delivery_status, None);
+    assert_eq!(
+        Value::Object(mistyped.rest),
+        json!({"id": 42, "deliveryStatus": "bogus", "note": "kept"})
+    );
+
+    let real: CloudFamilyCommand = serde_json::from_str(MESSAGE_RESULT_OK).unwrap();
+    let CloudFamilyCommandPayload::AgentMessageResult {
+        receipt: Some(real),
+        ..
+    } = real.payload
+    else {
+        panic!("agent_message_result payload");
+    };
+    assert_eq!(real.id.as_deref(), Some("agentmsg_9"));
+    assert_eq!(
+        real.delivery_status,
+        Some(CloudAgentMessageDeliveryStatus::Delivered)
     );
 }
