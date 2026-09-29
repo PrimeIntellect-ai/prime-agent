@@ -1,0 +1,1 @@
+- Added session-owned filesystem watch subscriptions: agent sessions can watch a path and receive change notices for the life of the session.
