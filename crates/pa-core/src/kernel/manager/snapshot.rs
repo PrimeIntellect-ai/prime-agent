@@ -2,8 +2,9 @@
 //! and flush on dispose.
 
 use super::{
-    describe_failure, lock, Arc, Duration, ExecuteOptions, ExecuteStatus, Inner, Instant,
-    KernelState, ManifestStat, MemoSlot, Request, RestoreResult, RestoredNamespaceSkip,
+    describe_failure, lock, Arc, CaptureFreshness, Duration, ExecuteOptions, ExecuteStatus,
+    Inner, Instant, KernelState, ManifestStat, MemoSlot, Request, RestoreResult,
+    RestoredNamespaceSkip,
     SnapshotResult, SnapshotSkip, Value, DEFAULT_SNAPSHOT_DEBOUNCE_MS, DEFAULT_SNAPSHOT_MAX_BYTES,
     DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES, REPAIR_STEP_TIMEOUT_MS, RESTORE_EXECUTION_TIMEOUT_MS,
     SNAPSHOT_EXECUTION_TIMEOUT_MS,

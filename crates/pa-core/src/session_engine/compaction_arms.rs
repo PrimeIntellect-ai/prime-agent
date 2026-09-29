@@ -1,5 +1,5 @@
 use super::compact_session::CompactOutcome;
-use super::*;
+use super::{AgentSession, SessionAgentMessage, compaction, provider_adapter, TrailingAssistantFilter, standard_message, compaction_trace, AgentMessage, rebuilt_loop_messages, ipython_state, session_message_to_loop, FileEntry, refine};
 
 impl AgentSession {
     /// The latest compaction boundary in the live loop context, if any
@@ -120,12 +120,12 @@ impl AgentSession {
         // harness state read fresh from disk when the snapshot renders.
         compaction_trace::trace(
             "compact.enter",
-            serde_json::json!({
+            &serde_json::json!({
                 "customInstructions": custom_instructions.is_some(),
             }),
         );
         let digest_inputs = self.harness_digest_inputs().await;
-        compaction_trace::trace("compact.digest_captured", serde_json::Value::Null);
+        compaction_trace::trace("compact.digest_captured", &serde_json::Value::Null);
         let mut outcome = {
             let mut session = self.session.lock().await;
             let summary_delta = self
@@ -149,7 +149,7 @@ impl AgentSession {
             .await?
         };
         if matches!(outcome, CompactOutcome::Skipped(_)) {
-            compaction_trace::trace("compact.skipped", serde_json::Value::Null);
+            compaction_trace::trace("compact.skipped", &serde_json::Value::Null);
             return Ok(outcome);
         }
         // Rebuild the loop context from the post-compaction session.
@@ -162,7 +162,7 @@ impl AgentSession {
         self.agent.set_messages(loop_messages).await;
         compaction_trace::trace(
             "compact.rebuilt_context",
-            serde_json::json!({ "messages": rebuilt_message_count }),
+            &serde_json::json!({ "messages": rebuilt_message_count }),
         );
         // TS `_performCompaction` ends with
         // `_syncKernelStateAfterCompaction()`: a kernel that survived the
@@ -185,7 +185,7 @@ impl AgentSession {
         }
         compaction_trace::trace(
             "compact.returned",
-            serde_json::json!({
+            &serde_json::json!({
                 "notice": notice_landed,
             }),
         );

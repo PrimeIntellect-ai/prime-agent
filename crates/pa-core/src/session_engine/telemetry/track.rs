@@ -3,7 +3,7 @@
 //! notes/adoption/sessions and model-allowlist seams call once per lifecycle
 //! event. Counts/categories only, never session payload (the module's
 //! privacy contract).
-use super::*;
+use super::{TelemetryClient, base_properties, Value, provider_category, model_category};
 
 /// Track a supervision-lifecycle event (`daemon event`, schema v1): kinds
 /// and counts only, never session payload. `exit_reason` rides only the

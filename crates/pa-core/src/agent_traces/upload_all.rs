@@ -3,7 +3,7 @@
 //! and the concurrent sweep with its progress notes and cancel checks
 //! (TS uploadAllAgentTraces).
 
-use super::*;
+use super::{TraceUploadCancel, TraceUploadDelaySink, TraceHttpError, now_ms, TraceUploadDelay, delay, TRACE_UPLOAD_ALL_MIN_REQUEST_INTERVAL_MS, Path, TraceHttp, TraceUploadAllProgress, PathBuf, read_trace_session_header, resolve_path, TraceUploadAllResult, TraceUploadResult, TRACE_UPLOAD_ALL_CONCURRENCY, Ordering, TraceUploadOptions, perform_agent_trace_upload, log_agent_trace_outcome};
 use std::collections::HashSet;
 use std::sync::atomic::AtomicUsize;
 
@@ -16,6 +16,7 @@ pub struct TraceRequestGate {
 }
 
 impl TraceRequestGate {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -86,6 +87,7 @@ fn find_session_files_under(root: &Path, files: &mut HashSet<PathBuf>) {
 }
 
 /// TS `getSessionArtifactsRoot`: the sibling `session-artifacts` directory.
+#[must_use]
 pub fn session_artifacts_root(session_dir: &Path) -> PathBuf {
     session_dir
         .parent()
@@ -94,6 +96,7 @@ pub fn session_artifacts_root(session_dir: &Path) -> PathBuf {
 }
 
 /// TS `findAgentTraceFiles`: both roots walked, deduplicated, sorted.
+#[must_use]
 pub fn find_trace_files(session_dir: &Path) -> Vec<PathBuf> {
     let mut files: HashSet<PathBuf> = HashSet::new();
     let roots = [

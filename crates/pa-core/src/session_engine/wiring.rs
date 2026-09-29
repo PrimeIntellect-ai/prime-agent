@@ -1,4 +1,4 @@
-use super::*;
+use super::{AgentSession, image_model_routing, PromptBatchRow, provider_adapter, compaction, auxiliary_model, telemetry, refine, ipython_state, compaction_exec};
 
 impl AgentSession {
     /// Install the image-model routing host seam (the headless surfaces'

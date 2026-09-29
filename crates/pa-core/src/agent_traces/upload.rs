@@ -3,7 +3,7 @@
 //! with its cursor/header/context resolution, and the retriable
 //! `fetch_with_retry` loop (TS uploadAgentTraceFile).
 
-use super::*;
+use super::{Path, TraceHttp, TraceUploadCancel, TraceUploadDelaySink, TraceUploadResult, log_agent_trace_outcome, TraceRequestGate, TraceUploadSignature, MAX_TRACE_BYTES, signature_equals, read_agent_trace_outbox_entry, read_trace_session_header, trace_credential, resolve_trace_context, active_git_context, resolve_traces_base_url, encode_uri_component, read_response_message, retry_after_delay, MAX_TIMER_DELAY_MS, Value, record_agent_trace_outbox_upload, TraceHttpResponse, TraceHttpError, TRACE_UPLOAD_MAX_RETRIES, RETRIABLE_HTTP_STATUSES, TRACE_UPLOAD_RATE_LIMIT_WINDOW_MS, is_retriable_transport_error, trace_upload_retry_delay, TraceUploadDelay, delay};
 
 /// One upload arm's inputs (TS `AgentTraceUploadOptions`): the session
 /// file (None is TS's `no_session_file`), the daemon-shared directories
