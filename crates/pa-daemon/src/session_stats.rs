@@ -874,7 +874,7 @@ mod tests {
         assert!(
             (stats["ownCost"].as_f64().unwrap() + stats["subagentsCost"].as_f64().unwrap()
                 - stats["totalCost"].as_f64().unwrap())
-                .abs()
+            .abs()
                 < 1e-9
         );
     }
@@ -1053,7 +1053,7 @@ mod tests {
         assert!(
             (stats["ownCost"].as_f64().unwrap() + stats["subagentsCost"].as_f64().unwrap()
                 - stats["totalCost"].as_f64().unwrap())
-                .abs()
+            .abs()
                 < 1e-9
         );
     }
