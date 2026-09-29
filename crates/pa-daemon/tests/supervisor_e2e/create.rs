@@ -19,7 +19,7 @@ fn create_config_model_flags_reach_the_worker_engine() {
     // only way the worker can resolve it is the wire config.
     std::fs::write(
         agent_dir.join("models.json"),
-        serde_json::json!({
+        &serde_json::json!({
             "providers": {
                 "battery": {
                     "api": "openai-completions",
@@ -44,7 +44,7 @@ fn create_config_model_flags_reach_the_worker_engine() {
     let (mut client, _hello) = Client::connect(&socket);
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -63,7 +63,7 @@ fn create_config_model_flags_reach_the_worker_engine() {
         .to_string();
     client.send_command(
         "s1",
-        serde_json::json!({ "type": "get_session_stats", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "get_session_stats", "activeSessionId": session_id }),
     );
     let stats = client.read_response("s1");
     assert_eq!(stats["success"], true, "get_session_stats failed: {stats}");
@@ -95,7 +95,7 @@ fn create_path_duplicate_name_fails_with_current_ts_string() {
     // First create reserves the name (worker reports it via get_state).
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "name": "dup",
             "config": {
@@ -115,7 +115,7 @@ fn create_path_duplicate_name_fails_with_current_ts_string() {
     // phrasing broke both parity and that fallback.
     client.send_command(
         "c2",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "name": "dup",
             "config": {
@@ -139,7 +139,7 @@ fn create_path_duplicate_name_fails_with_current_ts_string() {
     // An empty name keeps its own error (worker-side parity string).
     client.send_command(
         "c3",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "name": "  ",
             "config": {
@@ -194,7 +194,7 @@ fn create_with_continue_recent_is_refused() {
 
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "continueRecent": true,
             "config": {
@@ -218,7 +218,7 @@ fn create_with_continue_recent_is_refused() {
     // refusal never widened into a general create gate.
     client.send_command(
         "c2",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": cwd,

@@ -1,6 +1,10 @@
 //! Session lifecycle on the worker: shutdown, replacement handoff,
 //! resume, compaction triggers, and the wait-for-settled arms.
-use super::*;
+use super::{
+    json, queue_lanes, response_failure, response_success, session_snapshot, DaemonResponse,
+    QueueCheckpoint, QueuePriority, QueuedItem, SessionFile, TurnPolicy, Value, Worker,
+    SIDE_QUESTION_SETTLE_TIMEOUT,
+};
 
 impl Worker {
     /// `update_snapshot` (supervisor plane, update flow spec §8): a
@@ -399,6 +403,18 @@ impl Worker {
             .compaction
             .run(custom_instructions, &self.idle_notify)
             .await;
+        // TS `compact()`'s `finally` re-schedules the input pump on
+        // every outcome (`_notifySessionInputCheckpointChange()` +
+        // `_scheduleSessionInputPump()`): a resume site that cleared
+        // the suspension MID-window (a steer's `wake: "immediate"`
+        // resume) left its item parked in the lane behind the
+        // compacting gate, and without this wake the runner never
+        // re-checks - the parked steer would strand forever (the lost
+        // steer is worse than the racing turn the gate defers). The
+        // suspension-cleared case delivers here; the still-suspended
+        // case parks again on the suspension gate, exactly like TS's
+        // rescheduled pump re-blocking on `_sessionInputPumpSuspended`.
+        self.work_notify.notify_one();
         // The TS `compact()` `didCompact` + active-goal branch
         // (agent-session.ts): with `this._goalState.status === "active"`
         // and the run not aborted,
@@ -548,7 +564,7 @@ impl Worker {
                         if let Ok(value) = serde_json::to_value(
                             pa_types::session::AgentMessage::Custom(outcome_row),
                         ) {
-                            self.emit_custom_row(value);
+                            self.emit_custom_row(&value);
                         }
                         if result.applied_edits.iter().any(|edit| edit.applied) {
                             let notice =
@@ -559,7 +575,7 @@ impl Worker {
                             if let Ok(value) = serde_json::to_value(
                                 pa_types::session::AgentMessage::Custom(notice),
                             ) {
-                                self.emit_custom_row(value);
+                                self.emit_custom_row(&value);
                             }
                         }
                     }

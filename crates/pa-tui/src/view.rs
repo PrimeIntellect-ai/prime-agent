@@ -2201,6 +2201,7 @@ mod tests {
             lane: crate::queued::QueueLane::Steering,
             index: 0,
             text: "turn right".to_string(),
+            internal: false,
         });
         let frame = v.render_frame(80, 24);
         let joined = frame.iter().map(text_of).collect::<Vec<_>>().join("\n");
@@ -3529,6 +3530,7 @@ mod tests {
             lane: crate::queued::QueueLane::Steering,
             index: 0,
             text: "turn right".to_string(),
+            internal: false,
         });
         let frame = v.render_frame(80, 24);
         let joined: Vec<String> = frame.iter().map(text_of).collect();

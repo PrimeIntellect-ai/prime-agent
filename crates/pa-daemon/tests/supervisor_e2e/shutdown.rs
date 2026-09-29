@@ -8,10 +8,10 @@ fn child_pids_of(ppid: u32) -> Vec<u32> {
     let mut pids = Vec::new();
     let entries = std::fs::read_dir("/proc").expect("read /proc");
     for entry in entries.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+        let Ok(entry_pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
             continue;
         };
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{entry_pid}/stat")) else {
             continue;
         };
         // `comm` can contain spaces and parens, so parse after the last ')'.
@@ -24,7 +24,7 @@ fn child_pids_of(ppid: u32) -> Vec<u32> {
             continue;
         };
         if parent == ppid {
-            pids.push(pid);
+            pids.push(entry_pid);
         }
     }
     pids
@@ -83,7 +83,7 @@ fn shutdown_command_exits_the_supervisor_process() {
     .expect("write script");
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -106,7 +106,7 @@ fn shutdown_command_exits_the_supervisor_process() {
     };
     assert_eq!(worker_pids.len(), 1, "one worker per session");
 
-    client.send_command("sd", serde_json::json!({ "type": "shutdown" }));
+    client.send_command("sd", &serde_json::json!({ "type": "shutdown" }));
     let shutdown = client.read_response("sd");
     assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");
 

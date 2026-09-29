@@ -1,3 +1,22 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
+// by design on hot paths (boxing 130 fns is allocation-churn with zero
+// correctness gain); the fn-length threshold is a style gate, not
+// correctness (the harness fns are intentionally linear); 64-bit targets -
+// the narrowing sits at OS/protocol boundaries where the values are
+// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
+// guarded parses), and checked conversions would add panic paths where
+// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
+// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
+// dossier for the conductor).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! Latency regression guard for the operators' agents-view round trip
 //! ("when I go to subagents view and hit esc to come back to this chat
 //! view, it takes close to 5-10 seconds", 2026-09-24): the Esc handoff
@@ -270,7 +289,7 @@ async fn agents_view_round_trip_reattaches_under_the_ceiling() {
     // The multi-hundred-message transcript, written directly (the
     // operator-scale attach snapshot ships the whole history): a parent-
     // chained user/assistant run.
-    let durable = format!("01a0vs-{:012x}", std::process::id() as u64);
+    let durable = format!("01a0vs-{:012x}", u64::from(std::process::id()));
     let transcript_path = session_dir.join(format!("{durable}.jsonl"));
     {
         let filler = "a".repeat(1024);

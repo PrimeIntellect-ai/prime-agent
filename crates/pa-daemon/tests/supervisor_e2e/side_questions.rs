@@ -21,7 +21,7 @@ fn side_questions_start_abort_and_events_scripted() {
     let script_path = dir.path().join("script.json");
     std::fs::write(
         &script_path,
-        serde_json::json!({
+        &serde_json::json!({
             "responses": [],
             "sideQuestion": {
                 "responses": [
@@ -39,7 +39,7 @@ fn side_questions_start_abort_and_events_scripted() {
     .expect("write script");
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -60,7 +60,7 @@ fn side_questions_start_abort_and_events_scripted() {
     // `side_question_event`) out to clients attached to the session.
     client.send_command(
         "a1",
-        serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let attached = client.read_response("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
@@ -68,7 +68,7 @@ fn side_questions_start_abort_and_events_scripted() {
     // Unknown session fails with the TS routing error.
     client.send_command(
         "sq-missing",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "start_side_question",
             "activeSessionId": "no-such-session",
             "sideQuestionId": "q0",

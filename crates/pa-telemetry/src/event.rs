@@ -6,9 +6,8 @@ use serde_json::{json, Value};
 use crate::properties::Properties;
 use crate::time::EpochMs;
 
-/// A single telemetry event. Carries a stable event name (see
-/// `docs/telemetry-events.md` for the versioned catalog) and a primitive-only
-/// property map. Timestamps are captured at `track()` time.
+/// A single telemetry event. Carries a stable event name and a
+/// primitive-only property map. Timestamps are captured at `track()` time.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TelemetryEvent {
     /// Stable event name, e.g. `agent started`.

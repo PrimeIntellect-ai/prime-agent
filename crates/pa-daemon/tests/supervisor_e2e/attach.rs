@@ -30,7 +30,7 @@ fn telemetry_disabled_attach_guard_matches_ts_error() {
     });
     client.send_command(
         "tc1",
-        serde_json::json!({ "type": "create", "config": session_config }),
+        &serde_json::json!({ "type": "create", "config": session_config }),
     );
     let created = client.read_response("tc1");
     assert_eq!(created["success"], true, "create failed: {created}");
@@ -43,7 +43,7 @@ fn telemetry_disabled_attach_guard_matches_ts_error() {
     // Disabled attach to an enabled worker: the exact TS error.
     client.send_command(
         "ta1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "attach",
             "activeSessionId": session_id,
             "telemetryDisabled": true,
@@ -62,7 +62,7 @@ fn telemetry_disabled_attach_guard_matches_ts_error() {
     // Enabled attach to the same worker stays fine (guard does not over-block).
     client.send_command(
         "ta2",
-        serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let attached = client.read_response("ta2");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
@@ -71,7 +71,7 @@ fn telemetry_disabled_attach_guard_matches_ts_error() {
     // allowed against its worker.
     client.send_command(
         "tc2",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": session_config,
             "telemetryDisabled": true,
@@ -86,7 +86,7 @@ fn telemetry_disabled_attach_guard_matches_ts_error() {
         .to_string();
     client.send_command(
         "ta3",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "attach",
             "activeSessionId": session_id2,
             "telemetryDisabled": true,
@@ -121,7 +121,7 @@ fn chunked_snapshot_attach_streams_begin_chunk_end() {
     let script_path = dir.path().join("script.json");
     std::fs::write(
         &script_path,
-        serde_json::json!({
+        &serde_json::json!({
             "responses": [{ "text": "x".repeat(700_000) }]
         })
         .to_string(),
@@ -130,7 +130,7 @@ fn chunked_snapshot_attach_streams_begin_chunk_end() {
     let (mut client, _hello) = Client::connect(&socket);
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -151,7 +151,7 @@ fn chunked_snapshot_attach_streams_begin_chunk_end() {
     // stream; its result is also the no-capability echo golden.
     client.send_command(
         "a0",
-        serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let plain_attach = client.read_response("a0");
     assert_eq!(plain_attach["success"], true, "plain attach failed");
@@ -162,7 +162,7 @@ fn chunked_snapshot_attach_streams_begin_chunk_end() {
 
     client.send_command(
         "p1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "prompt",
             "activeSessionId": session_id,
             "message": "give me a big answer"
@@ -182,7 +182,7 @@ fn chunked_snapshot_attach_streams_begin_chunk_end() {
     ]);
     client.send_command(
         "a1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "attach",
             "activeSessionId": session_id,
             "capabilities": caps,
@@ -346,7 +346,7 @@ fn chunked_snapshot_attach_streams_begin_chunk_end() {
     let (mut legacy, _hello) = Client::connect(&socket);
     legacy.send_command(
         "a2",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "attach",
             "activeSessionId": session_id,
             "capabilities": ["attach_snapshot", "event_sequence", "slim_attach"],

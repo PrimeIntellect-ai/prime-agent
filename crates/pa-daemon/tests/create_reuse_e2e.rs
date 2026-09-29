@@ -94,7 +94,7 @@ impl Client {
         client
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let mut line = serde_json::to_string(&json!({
             "type": "command",
             "id": id,
@@ -157,7 +157,7 @@ impl Client {
 
     /// Drive one prompt to its final scripted text: send, await the ack,
     /// then read streamed session events to the turn end.
-    fn prompt_and_final_text(&mut self, id: &str, command: Value) -> String {
+    fn prompt_and_final_text(&mut self, id: &str, command: &Value) -> String {
         self.send_command(id, command);
         let mut final_text = String::new();
         let mut acked = false;
@@ -203,7 +203,7 @@ fn write_script(dir: &Path, responses: &[&str]) -> PathBuf {
 fn session_file_of(client: &mut Client, id: &str, request_id: &str) -> String {
     client.send_command(
         request_id,
-        json!({ "type": "get_session_stats", "activeSessionId": id }),
+        &json!({ "type": "get_session_stats", "activeSessionId": id }),
     );
     let stats = client.read_response(request_id);
     assert_eq!(stats["success"], true, "stats failed: {stats}");
@@ -216,7 +216,7 @@ fn session_file_of(client: &mut Client, id: &str, request_id: &str) -> String {
 /// The active id a create response answered (the summary's `id`, the same
 /// field a pane attaches by).
 fn create_session(client: &mut Client, request_id: &str, config: &Value) -> (String, Value) {
-    client.send_command(request_id, json!({ "type": "create", "config": config }));
+    client.send_command(request_id, &json!({ "type": "create", "config": config }));
     let created = client.read_response(request_id);
     assert_eq!(created["success"], true, "create failed: {created}");
     let id = created["data"]["id"]
@@ -251,7 +251,7 @@ fn create_over_a_live_worker_answers_the_live_binding() {
     let (first_id, _created) = create_session(&mut first_pane, "c1", &create_config);
     first_pane.send_command(
         "a1",
-        json!({ "type": "attach", "activeSessionId": first_id }),
+        &json!({ "type": "attach", "activeSessionId": first_id }),
     );
     let attached = first_pane.read_response("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
@@ -268,7 +268,7 @@ fn create_over_a_live_worker_answers_the_live_binding() {
     let mut second_pane = Client::connect(&socket);
     second_pane.send_command(
         "c2",
-        json!({
+        &json!({
             "type": "create",
             "sessionPath": session_file,
             "config": create_config,
@@ -293,7 +293,7 @@ fn create_over_a_live_worker_answers_the_live_binding() {
     // prompt runs its turn (multi-client attach, not a zombie id).
     second_pane.send_command(
         "a2",
-        json!({ "type": "attach", "activeSessionId": reused_id }),
+        &json!({ "type": "attach", "activeSessionId": reused_id }),
     );
     let second_attached = second_pane.read_response("a2");
     assert_eq!(
@@ -302,12 +302,12 @@ fn create_over_a_live_worker_answers_the_live_binding() {
     );
     let first_text = second_pane.prompt_and_final_text(
         "p1",
-        json!({ "type": "prompt", "activeSessionId": reused_id, "message": "hi" }),
+        &json!({ "type": "prompt", "activeSessionId": reused_id, "message": "hi" }),
     );
     assert_eq!(first_text, "first scripted");
 
     // Exactly one session serves the file: the reuse launched nothing.
-    second_pane.send_command("l1", json!({ "type": "list", "all": true }));
+    second_pane.send_command("l1", &json!({ "type": "list", "all": true }));
     let listed = second_pane.read_response("l1");
     assert_eq!(listed["success"], true, "list failed: {listed}");
     let sessions = listed["data"]["sessions"]
@@ -393,7 +393,7 @@ fn create_over_a_dead_workers_file_launches_and_rebinds() {
     let (first_id, _created) = create_session(&mut first_pane, "c1", &create_config);
     first_pane.send_command(
         "a1",
-        json!({ "type": "attach", "activeSessionId": first_id }),
+        &json!({ "type": "attach", "activeSessionId": first_id }),
     );
     let attached = first_pane.read_response("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
@@ -407,7 +407,7 @@ fn create_over_a_dead_workers_file_launches_and_rebinds() {
     // The worker dies (registry entry and descriptor gone): the binding
     // left behind is stale.
     let mut driver = Client::connect(&socket);
-    driver.send_command("k1", json!({ "type": "kill", "activeSessionId": old_id }));
+    driver.send_command("k1", &json!({ "type": "kill", "activeSessionId": old_id }));
     let killed = driver.read_response("k1");
     assert_eq!(killed["success"], true, "kill failed: {killed}");
 
@@ -415,7 +415,7 @@ fn create_over_a_dead_workers_file_launches_and_rebinds() {
     // is reclaimed) and mints the successor binding.
     driver.send_command(
         "c2",
-        json!({
+        &json!({
             "type": "create",
             "sessionPath": session_file,
             "config": create_config,
@@ -482,7 +482,7 @@ fn concurrent_creates_for_one_file_share_a_single_launch() {
     let mut second = Client::connect(&socket);
     first.send_command(
         "c-first",
-        json!({
+        &json!({
             "type": "create",
             "sessionPath": session_path.to_string_lossy(),
             "config": create_config,
@@ -490,7 +490,7 @@ fn concurrent_creates_for_one_file_share_a_single_launch() {
     );
     second.send_command(
         "c-second",
-        json!({
+        &json!({
             "type": "create",
             "sessionPath": session_path.to_string_lossy(),
             "config": create_config,
@@ -523,18 +523,18 @@ fn concurrent_creates_for_one_file_share_a_single_launch() {
     // prompt runs its turn.
     second.send_command(
         "a-second",
-        json!({ "type": "attach", "activeSessionId": second_id }),
+        &json!({ "type": "attach", "activeSessionId": second_id }),
     );
     let attached = second.read_response("a-second");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
     let text = second.prompt_and_final_text(
         "p-second",
-        json!({ "type": "prompt", "activeSessionId": second_id, "message": "hi" }),
+        &json!({ "type": "prompt", "activeSessionId": second_id, "message": "hi" }),
     );
     assert_eq!(text, "first scripted");
 
     // Exactly one session serves the file: the single launch.
-    first.send_command("l1", json!({ "type": "list", "all": true }));
+    first.send_command("l1", &json!({ "type": "list", "all": true }));
     let listed = first.read_response("l1");
     let sessions = listed["data"]["sessions"]
         .as_array()

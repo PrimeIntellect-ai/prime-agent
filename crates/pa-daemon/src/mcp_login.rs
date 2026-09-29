@@ -31,6 +31,7 @@ impl WorkerMcpLoginUi {
     }
 
     /// An explicit URL record path (tests).
+    #[must_use]
     pub fn with_auth_url_file(path: Option<PathBuf>) -> Self {
         WorkerMcpLoginUi {
             auth_url_file: path,

@@ -52,13 +52,13 @@ fn tool_result_entries_persisted_and_streamed() {
         .to_string();
     client.send_command(
         "a1",
-        serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
     );
     assert_eq!(client.read_response("a1")["success"], true, "attach failed");
 
     client.send_command(
         "p1",
-        serde_json::json!({ "type": "prompt", "activeSessionId": session_id, "message": "hi" }),
+        &serde_json::json!({ "type": "prompt", "activeSessionId": session_id, "message": "hi" }),
     );
     let (prompt_ack, mut lines) = client.read_response_and_lines("p1");
     assert_eq!(prompt_ack["success"], true, "prompt failed: {prompt_ack}");
@@ -106,7 +106,7 @@ fn tool_result_entries_persisted_and_streamed() {
     // The stats command counts the persisted entry.
     client.send_command(
         "s1",
-        serde_json::json!({ "type": "get_session_stats", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "get_session_stats", "activeSessionId": session_id }),
     );
     let stats = client.read_response("s1");
     assert_eq!(stats["success"], true, "get_session_stats failed: {stats}");

@@ -49,6 +49,7 @@ impl SessionAlreadyActiveError {
     /// The typed wire info for the refusal (`session_already_active`, the
     /// TS `serializeDaemonError` shape): the raw fields a client renders
     /// or acts on itself, carried beside the user-facing refusal text.
+    #[must_use]
     pub fn error_info(&self) -> pa_types::daemon::DaemonErrorInfo {
         pa_types::daemon::DaemonErrorInfo::SessionAlreadyActive {
             session_path: self.session_path.clone(),
@@ -86,6 +87,7 @@ pub fn canonical_session_path(path: &Path) -> PathBuf {
 
 /// `proc:<starttime>` start identity (TS `getProcessStartId`); shared with
 /// pa-core through `pa_types::platform`.
+#[must_use]
 pub fn get_process_start_id(pid: u32) -> Option<String> {
     pa_types::platform::process::process_start_id(pid)
 }
@@ -316,7 +318,7 @@ fn with_lease_guard<T>(
                 {
                     continue;
                 }
-                std::thread::sleep(Duration::from_millis(10 + (attempt % 5) as u64));
+                std::thread::sleep(Duration::from_millis(10 + u64::from(attempt % 5)));
             }
             Err(error) => return Err(error.into()),
         }
@@ -423,6 +425,7 @@ pub struct LiveLeaseOwner {
 /// worker already serves — one owning daemon. A dead owner, a missing
 /// record, or an unreadable one answers `None` (a stale record is not
 /// live ownership).
+#[must_use]
 pub fn live_lease_owner(agent_dir: &Path, session_path: &Path) -> Option<LiveLeaseOwner> {
     let directory = lease_directory(agent_dir, session_path);
     let owner = read_owner(&directory).ok()??;

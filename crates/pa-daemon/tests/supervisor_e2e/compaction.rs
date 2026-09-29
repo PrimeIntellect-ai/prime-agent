@@ -25,7 +25,7 @@ fn compaction_commands_scripted_session() {
     let script_path = dir.path().join("script.json");
     std::fs::write(
         &script_path,
-        serde_json::json!({
+        &serde_json::json!({
             "responses": [{ "text": "one turn" }],
             "compaction": { "responses": [
                 // Run 1 (aborted mid-delay), run 2 (success), run 3 (skip).
@@ -50,7 +50,7 @@ fn compaction_commands_scripted_session() {
     .expect("write script");
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -69,7 +69,7 @@ fn compaction_commands_scripted_session() {
 
     client.send_command(
         "a1",
-        serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let attached = client.read_response("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
@@ -83,7 +83,7 @@ fn compaction_commands_scripted_session() {
     // One scripted turn so the session has content.
     client.send_command(
         "p1",
-        serde_json::json!({ "type": "prompt", "activeSessionId": session_id, "message": "hi" }),
+        &serde_json::json!({ "type": "prompt", "activeSessionId": session_id, "message": "hi" }),
     );
     let (prompt_ack, mut turn_lines) = client.read_response_and_lines("p1");
     assert_eq!(prompt_ack["success"], true, "prompt failed");
@@ -93,7 +93,7 @@ fn compaction_commands_scripted_session() {
     // Unknown session selector fails with the TS routing error.
     client.send_command(
         "cp-missing",
-        serde_json::json!({ "type": "compact", "activeSessionId": "no-such-session" }),
+        &serde_json::json!({ "type": "compact", "activeSessionId": "no-such-session" }),
     );
     let missing = client.read_response("cp-missing");
     assert_eq!(missing["success"], false);
@@ -103,7 +103,7 @@ fn compaction_commands_scripted_session() {
     // observes `isCompacting` mid-run, then aborts it.
     client.send_command(
         "cp1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "compact",
             "activeSessionId": session_id,
             "customInstructions": "focus on the goal",
@@ -119,7 +119,7 @@ fn compaction_commands_scripted_session() {
     };
     assert_eq!(
         start,
-        serde_json::json!({
+        &serde_json::json!({
             "type": "compaction_start",
             "reason": "manual",
             "customInstructions": "focus on the goal",
@@ -129,7 +129,7 @@ fn compaction_commands_scripted_session() {
     let (mut second, _hello) = Client::connect(&socket);
     second.send_command(
         "a2",
-        serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let second_attach = second.read_response("a2");
     assert_eq!(
@@ -138,7 +138,7 @@ fn compaction_commands_scripted_session() {
     );
     second.send_command(
         "st1",
-        serde_json::json!({ "type": "get_state", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "get_state", "activeSessionId": session_id }),
     );
     let state = second.read_response("st1");
     assert_eq!(state["success"], true, "get_state failed: {state}");
@@ -151,7 +151,7 @@ fn compaction_commands_scripted_session() {
     // cancelled compact response and aborted `compaction_end` event.
     second.send_command(
         "ab1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "abort_compaction",
             "activeSessionId": session_id,
         }),
@@ -182,7 +182,7 @@ fn compaction_commands_scripted_session() {
     // `CompactionResult` response shape.
     client.send_command(
         "cp2",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "compact",
             "activeSessionId": session_id,
             "customInstructions": "focus on the goal",
@@ -241,7 +241,7 @@ fn compaction_commands_scripted_session() {
     // messages after it (the scripted empty cut keeps the whole transcript).
     client.send_command(
         "gm1",
-        serde_json::json!({ "type": "get_messages", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "get_messages", "activeSessionId": session_id }),
     );
     let messages = client.read_response("gm1");
     assert_eq!(messages["success"], true, "get_messages failed: {messages}");
@@ -261,7 +261,7 @@ fn compaction_commands_scripted_session() {
     let (mut third, _hello) = Client::connect(&socket);
     third.send_command(
         "a3",
-        serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let reattached = third.read_response("a3");
     assert_eq!(reattached["success"], true, "reattach failed: {reattached}");
@@ -281,7 +281,7 @@ fn compaction_commands_scripted_session() {
     // nothing-to-compact skip.
     client.send_command(
         "cp3",
-        serde_json::json!({ "type": "compact", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "compact", "activeSessionId": session_id }),
     );
     let (skipped, mut cp3_lines) = client.read_response_and_lines("cp3");
     assert_eq!(skipped["success"], false, "skip must fail: {skipped}");
@@ -306,7 +306,7 @@ fn compaction_commands_scripted_session() {
     // connection state.
     client.send_command(
         "sac1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "set_auto_compaction",
             "activeSessionId": session_id,
             "enabled": false,
@@ -315,7 +315,7 @@ fn compaction_commands_scripted_session() {
     let disabled = client.read_response("sac1");
     assert_eq!(
         disabled,
-        serde_json::json!({
+        &serde_json::json!({
             "id": "sac1",
             "type": "response",
             "command": "set_auto_compaction",
@@ -324,7 +324,7 @@ fn compaction_commands_scripted_session() {
     );
     client.send_command(
         "a4",
-        serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let reattached = client.read_response("a4");
     assert_eq!(
@@ -334,7 +334,7 @@ fn compaction_commands_scripted_session() {
     );
     client.send_command(
         "sac2",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "set_auto_compaction",
             "activeSessionId": session_id,
             "enabled": true,
@@ -346,7 +346,7 @@ fn compaction_commands_scripted_session() {
     // abort_compaction with nothing running still succeeds (TS parity).
     client.send_command(
         "ab2",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "abort_compaction",
             "activeSessionId": session_id,
         }),

@@ -605,7 +605,6 @@ mod tests {
         let staging = dir.join("staging");
         std::fs::create_dir_all(staging.join("prime-agent-runtime")).unwrap();
         std::fs::create_dir_all(staging.join("skills")).unwrap();
-        std::fs::create_dir_all(staging.join("docs")).unwrap();
         for file in ["prime-agent", "LICENSE", "README.md"] {
             std::fs::write(staging.join(file), "payload").unwrap();
         }
@@ -617,7 +616,7 @@ mod tests {
             tar.append_path_with_name(staging.join(entry), entry)
                 .unwrap();
         }
-        for dir_entry in ["prime-agent-runtime", "skills", "docs"] {
+        for dir_entry in ["prime-agent-runtime", "skills"] {
             tar.append_dir_all(dir_entry, staging.join(dir_entry))
                 .unwrap();
         }
@@ -682,7 +681,6 @@ mod tests {
         let payload = dir.join(name);
         std::fs::create_dir_all(payload.join("prime-agent-runtime")).unwrap();
         std::fs::create_dir_all(payload.join("skills")).unwrap();
-        std::fs::create_dir_all(payload.join("docs")).unwrap();
         for file in ["LICENSE", "README.md"] {
             std::fs::write(payload.join(file), "payload").unwrap();
         }
@@ -774,6 +772,8 @@ mod tests {
 
     /// A release archive whose `prime-agent` is an executable script
     /// reporting a fixed version (the probe path a real binary takes).
+    /// Unix only: its callers are the unix symlink/exec probe tests.
+    #[cfg(unix)]
     fn fixture_versioned_archive(dir: &Path, name: &str, version: &str) -> (PathBuf, String) {
         let payload = fixture_payload(dir, "archive-staging", version);
         let archive = dir.join(name);
@@ -784,7 +784,7 @@ mod tests {
             tar.append_path_with_name(payload.join(entry), entry)
                 .unwrap();
         }
-        for dir_entry in ["prime-agent-runtime", "skills", "docs"] {
+        for dir_entry in ["prime-agent-runtime", "skills"] {
             tar.append_dir_all(dir_entry, payload.join(dir_entry))
                 .unwrap();
         }

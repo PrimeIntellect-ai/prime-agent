@@ -3,7 +3,6 @@
 //!
 //! Fidelity probes are cheap (bounded reads, no subprocesses) and memoised per
 //! process; any failure degrades to `"unknown"`. Values are never faked.
-//! Schema doc: `docs/telemetry-events.md` (version 1).
 
 use std::sync::OnceLock;
 

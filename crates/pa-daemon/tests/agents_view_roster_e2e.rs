@@ -4,6 +4,31 @@
 //! push when the worker stops. The supervisor is the real binary driving a
 //! scripted worker, so the deltas exercise the full worker->supervisor
 //! roster push path.
+// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
+// the full rationale).
+// Stack-resident futures by design on the daemon's hot paths; boxing the
+// call sites for a lint tick is a perf regression with zero correctness gain.
+#![allow(clippy::large_futures)]
+// 64-bit-only targets; the narrowing casts sit at OS boundaries
+// (pid/fd/time/size) where the values are bounded by the kernel - the
+// dead-guard expect()s would add panic paths where silent wrap was
+// deliberate.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// The fn-length threshold is a style gate, not correctness; the structure
+// campaign owns the god-fn splits as a follow-up.
+#![allow(clippy::too_many_lines)]
+// API-shape opinions, not defects; the surfaces are deliberate.
+#![allow(
+    clippy::unnecessary_wraps,
+    clippy::zero_sized_map_values,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names
+)]
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -92,7 +117,7 @@ impl Client {
         self.writer.flush().expect("flush");
     }
 
-    fn send_command(&mut self, id: &str, command: serde_json::Value) {
+    fn send_command(&mut self, id: &str, command: &serde_json::Value) {
         self.send(&serde_json::json!({
             "type": "command",
             "id": id,
@@ -176,7 +201,7 @@ fn roster_subscribe_snapshot_and_live_update_pushes() {
     .expect("write script");
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -194,7 +219,7 @@ fn roster_subscribe_snapshot_and_live_update_pushes() {
         .to_string();
 
     // Subscribe: the snapshot carries the session as an idle roster entry.
-    client.send_command("r1", serde_json::json!({ "type": "roster_subscribe" }));
+    client.send_command("r1", &serde_json::json!({ "type": "roster_subscribe" }));
     let subscribed = client.read_response("r1");
     assert_eq!(
         subscribed["success"], true,
@@ -220,7 +245,7 @@ fn roster_subscribe_snapshot_and_live_update_pushes() {
     // arrive.
     client.send_command(
         "p1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "prompt_and_wait",
             "activeSessionId": session_id,
             "message": "go",
@@ -259,9 +284,9 @@ fn roster_subscribe_snapshot_and_live_update_pushes() {
     // Unsubscribe: no further roster pushes reach this client. A second
     // subscriber keeps receiving them, proving the flag gates delivery.
     let (mut client_b, _hello_b) = Client::connect(&socket);
-    client_b.send_command("r2", serde_json::json!({ "type": "roster_subscribe" }));
+    client_b.send_command("r2", &serde_json::json!({ "type": "roster_subscribe" }));
     assert_eq!(client_b.read_response("r2")["success"], true);
-    client.send_command("u1", serde_json::json!({ "type": "roster_unsubscribe" }));
+    client.send_command("u1", &serde_json::json!({ "type": "roster_unsubscribe" }));
     assert_eq!(client.read_response("u1")["success"], true);
 
     // Stopping the session passivates its row (TS
@@ -273,7 +298,7 @@ fn roster_subscribe_snapshot_and_live_update_pushes() {
     // flipped to "inactive", and the live-only fields gone.
     client.send_command(
         "k1",
-        serde_json::json!({ "type": "kill", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "kill", "activeSessionId": session_id }),
     );
     let stopped = client.read_response("k1");
     assert_eq!(stopped["success"], true, "kill failed: {stopped}");
@@ -294,7 +319,7 @@ fn roster_subscribe_snapshot_and_live_update_pushes() {
     );
     // The snapshot keeps the passivated row: a fresh subscriber (the
     // agents view's open) still sees the stopped session.
-    client_b.send_command("r3", serde_json::json!({ "type": "roster_subscribe" }));
+    client_b.send_command("r3", &serde_json::json!({ "type": "roster_subscribe" }));
     let resubscribed = client_b.read_response("r3");
     assert_eq!(
         resubscribed["success"], true,
@@ -324,7 +349,7 @@ fn worker_roster_delta_requires_authentication() {
     let (mut client, _hello) = Client::connect(&socket);
     client.send_command(
         "w1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "worker_roster_delta",
             "workerToken": "not-a-real-token",
             "summary": { "sessionId": "s-forged", "activeSessionId": "a-forged" },
@@ -432,7 +457,7 @@ async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
         .expect("spawn child");
 
     // The roster snapshot keys the child `parentSessionPath#childId`.
-    client.send_command("r1", serde_json::json!({ "type": "roster_subscribe" }));
+    client.send_command("r1", &serde_json::json!({ "type": "roster_subscribe" }));
     let subscribed = client.read_response("r1");
     assert_eq!(
         subscribed["success"], true,
@@ -467,7 +492,7 @@ async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
         .to_string();
     client.send_command(
         "w1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "wait_for_idle",
             "activeSessionId": child_active_id,
         }),
@@ -478,11 +503,11 @@ async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
         "wait_for_idle failed"
     );
     let (mut client_b, _hello_b) = Client::connect(&socket);
-    client_b.send_command("r2", serde_json::json!({ "type": "roster_subscribe" }));
+    client_b.send_command("r2", &serde_json::json!({ "type": "roster_subscribe" }));
     assert_eq!(client_b.read_response("r2")["success"], true);
     client.send_command(
         "p1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "prompt",
             "activeSessionId": child_active_id,
             "message": "go",

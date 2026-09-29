@@ -25,7 +25,7 @@ fn session_stats_and_header_match_live_daemon_goldens() {
     .expect("write script");
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -52,14 +52,14 @@ fn session_stats_and_header_match_live_daemon_goldens() {
     // attached clients only.
     client.send_command(
         "a1",
-        serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let attached = client.read_response("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
 
     client.send_command(
         "p1",
-        serde_json::json!({ "type": "prompt", "activeSessionId": session_id, "message": "hi" }),
+        &serde_json::json!({ "type": "prompt", "activeSessionId": session_id, "message": "hi" }),
     );
     let ack = client.read_response("p1");
     assert_eq!(ack["success"], true, "prompt failed: {ack}");
@@ -75,7 +75,7 @@ fn session_stats_and_header_match_live_daemon_goldens() {
     // {"header": { type, version, id, timestamp, cwd, parentSession?, rlmDepth?, git? }}.
     client.send_command(
         "h1",
-        serde_json::json!({ "type": "get_session_header", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "get_session_header", "activeSessionId": session_id }),
     );
     let header = client.read_response("h1");
     assert_eq!(
@@ -108,7 +108,7 @@ fn session_stats_and_header_match_live_daemon_goldens() {
     // a TS session without a model context window.
     client.send_command(
         "st1",
-        serde_json::json!({ "type": "get_session_stats", "activeSessionId": session_id }),
+        &serde_json::json!({ "type": "get_session_stats", "activeSessionId": session_id }),
     );
     let stats = client.read_response("st1");
     assert_eq!(stats["success"], true, "get_session_stats failed: {stats}");
@@ -172,7 +172,7 @@ fn session_stats_and_header_match_live_daemon_goldens() {
     // Unknown active session selector fails with the TS error string.
     client.send_command(
         "h2",
-        serde_json::json!({ "type": "get_session_stats", "activeSessionId": "nope" }),
+        &serde_json::json!({ "type": "get_session_stats", "activeSessionId": "nope" }),
     );
     let missing = client.read_response("h2");
     assert_eq!(missing["success"], false);
