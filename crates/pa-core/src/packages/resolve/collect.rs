@@ -16,7 +16,6 @@ impl PackageManager {
     /// Collect a package's resources. True when the package contributes any
     /// resources (filter patterns always count as contributing).
     pub(super) fn collect_package_resources(
-        &self,
         package_root: &Path,
         accumulator: &mut ResourceAccumulator,
         filter: Option<&PackageFilter>,

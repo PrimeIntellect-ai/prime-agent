@@ -197,10 +197,7 @@ pub async fn install_session_telemetry(
             let client = subscriber_client.clone();
             let execution_mode = subscriber_mode.clone();
             Box::pin(async move {
-                if let Err(error) = handle_event(&client, &execution_mode, &state, event) {
-                    // Telemetry must never fail the agent: swallow to a debug log.
-                    tracing::debug!(error = %error, "session telemetry event failed");
-                }
+                handle_event(&client, &execution_mode, &state, event);
                 Ok(())
             })
         })
@@ -406,7 +403,7 @@ fn handle_event(
     execution_mode: &str,
     state: &Arc<Mutex<TelemetryState>>,
     event: AgentEvent,
-) -> anyhow::Result<()> {
+) {
     let mut state = state.lock().expect("telemetry state poisoned");
     let now = (state.now)();
     match event {
@@ -525,7 +522,6 @@ fn handle_event(
         // from TurnStart); ToolExecutionUpdate is mid-execution progress.
         AgentEvent::TurnEnd { .. } | AgentEvent::ToolExecutionUpdate { .. } => {}
     }
-    Ok(())
 }
 
 /// Finalize the active run and emit `agent run completed` (TS
@@ -1018,8 +1014,7 @@ mod tests {
     }
 
     fn emit(fixture: &Fixture, event: AgentEvent) {
-        handle_event(&fixture.client, "interactive", &fixture.state, event)
-            .expect("telemetry event handled");
+        handle_event(&fixture.client, "interactive", &fixture.state, event);
     }
 
     fn assistant_message() -> AssistantMessage {

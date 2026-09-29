@@ -137,7 +137,7 @@ pub fn parse_agent_cron_schedule(
     // `in <n> <unit>`: one-shot.
     let lower = text.to_lowercase();
     if let Some(rest) = lower.strip_prefix("in ") {
-        if let Some(next) = parse_in_delay(rest, now_millis)? {
+        if let Some(next) = parse_in_delay(rest, now_millis) {
             return Ok((
                 AgentCronSchedule {
                     kind: ScheduleKind::Once,
@@ -210,14 +210,10 @@ fn unit_multiplier(unit: &str, allow_seconds: bool) -> Option<u64> {
     None
 }
 
-fn parse_in_delay(rest: &str, now_millis: u64) -> anyhow::Result<Option<u64>> {
-    let Some((amount, unit)) = split_amount_unit(rest) else {
-        return Ok(None);
-    };
-    let Some(multiplier) = unit_multiplier(unit, false) else {
-        return Ok(None);
-    };
-    Ok(Some(now_millis + amount.saturating_mul(multiplier)))
+fn parse_in_delay(rest: &str, now_millis: u64) -> Option<u64> {
+    let (amount, unit) = split_amount_unit(rest)?;
+    let multiplier = unit_multiplier(unit, false)?;
+    Some(now_millis + amount.saturating_mul(multiplier))
 }
 
 /// `<digits> <unit?>` with the unit optionally attached (`10m`, `10 m`).

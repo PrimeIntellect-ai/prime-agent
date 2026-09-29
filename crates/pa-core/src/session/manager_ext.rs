@@ -15,10 +15,7 @@ impl SessionManager {
     pub fn get_session_state(&self) -> Option<SessionStateStatus> {
         for entry in self.get_entries().iter().rev() {
             if let FileEntry::SessionState { payload, .. } = entry {
-                let status = normalize_state(payload.state.status);
-                if let Some(status) = status {
-                    return Some(status);
-                }
+                return Some(normalize_state(payload.state.status));
             }
         }
         None
@@ -273,12 +270,12 @@ impl SessionManager {
     }
 }
 
-fn normalize_state(status: SessionStateStatus) -> Option<SessionStateStatus> {
-    Some(match status {
+fn normalize_state(status: SessionStateStatus) -> SessionStateStatus {
+    match status {
         SessionStateStatus::Active | SessionStateStatus::Archived | SessionStateStatus::Crash => {
             status
         }
-    })
+    }
 }
 
 fn entry_type(entry: &FileEntry) -> &'static str {

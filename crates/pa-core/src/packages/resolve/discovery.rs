@@ -132,7 +132,7 @@ impl IgnoreMatcher {
             if rule.dir_only && !is_dir {
                 continue;
             }
-            let matched = if rule.anchored {
+            let path_matched = if rule.anchored {
                 matcher.is_match(path)
             } else {
                 // Unanchored patterns match at any depth.
@@ -141,7 +141,7 @@ impl IgnoreMatcher {
                     .enumerate()
                     .any(|(index, _)| matcher.is_match(segments[index..].join("/")))
             };
-            if matched {
+            if path_matched {
                 return !rule.negated;
             }
         }
@@ -383,13 +383,13 @@ pub(crate) fn resolve_extension_entries(dir: &Path) -> Option<Vec<PathBuf>> {
         }
     }
 
-    let index_ts = dir.join("index.ts");
-    if index_ts.exists() {
-        return Some(vec![index_ts]);
+    let ts_entry = dir.join("index.ts");
+    if ts_entry.exists() {
+        return Some(vec![ts_entry]);
     }
-    let index_js = dir.join("index.js");
-    if index_js.exists() {
-        return Some(vec![index_js]);
+    let js_entry = dir.join("index.js");
+    if js_entry.exists() {
+        return Some(vec![js_entry]);
     }
     None
 }

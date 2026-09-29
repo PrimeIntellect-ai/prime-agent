@@ -243,7 +243,7 @@ impl PackageManager {
             match &parsed {
                 ParsedSource::Local(local) => {
                     let base_dir = self.base_dir_for_scope(configured.scope);
-                    self.resolve_local_extension_source(
+                    Self::resolve_local_extension_source(
                         &local.path,
                         accumulator,
                         configured.filter.as_ref(),
@@ -267,7 +267,7 @@ impl PackageManager {
                         continue;
                     }
                     metadata.base_dir = Some(installed_path.clone());
-                    self.collect_package_resources(
+                    PackageManager::collect_package_resources(
                         &installed_path,
                         accumulator,
                         configured.filter.as_ref(),
@@ -296,7 +296,7 @@ impl PackageManager {
                         self.refresh_temporary_git_source(git_source, &configured.source);
                     }
                     metadata.base_dir = Some(installed_path.clone());
-                    self.collect_package_resources(
+                    PackageManager::collect_package_resources(
                         &installed_path,
                         accumulator,
                         configured.filter.as_ref(),
@@ -344,7 +344,6 @@ impl PackageManager {
     /// contributes its package resources (or binds as one extension when it
     /// provides none).
     fn resolve_local_extension_source(
-        &self,
         path: &str,
         accumulator: &mut ResourceAccumulator,
         filter: Option<&PackageFilter>,
@@ -368,7 +367,7 @@ impl PackageManager {
         if stats.is_dir() {
             metadata.base_dir = Some(resolved.clone());
             let has_resources =
-                self.collect_package_resources(&resolved, accumulator, filter, metadata);
+                PackageManager::collect_package_resources(&resolved, accumulator, filter, metadata);
             if !has_resources {
                 accumulator
                     .extensions

@@ -214,8 +214,8 @@ pub fn toggle_resource(
     enabled: bool,
 ) -> Result<String> {
     match item.metadata.origin {
-        ResourceOrigin::TopLevel => toggle_top_level(settings, cwd, agent_dir, item, enabled),
-        ResourceOrigin::Package => toggle_package_resource(settings, item, enabled),
+        ResourceOrigin::TopLevel => Ok(toggle_top_level(settings, cwd, agent_dir, item, enabled)),
+        ResourceOrigin::Package => Ok(toggle_package_resource(settings, item, enabled)),
     }
 }
 
@@ -225,7 +225,7 @@ fn toggle_top_level(
     agent_dir: &Path,
     item: &ResourceItem,
     enabled: bool,
-) -> Result<String> {
+) -> String {
     let project = item.metadata.scope == SourceScope::Project;
     let pattern = top_level_pattern(cwd, agent_dir, item);
     let disable = format!("-{pattern}");
@@ -247,7 +247,7 @@ fn toggle_top_level(
     let written = if enabled { enable } else { disable };
     updated.push(written.clone());
     write_resource_array(settings, project, item.resource_type, updated);
-    Ok(written)
+    written
 }
 
 /// The settings-array pattern for a top-level resource: relative to the
@@ -272,7 +272,7 @@ fn toggle_package_resource(
     settings: &mut SettingsManager,
     item: &ResourceItem,
     enabled: bool,
-) -> Result<String> {
+) -> String {
     let project = item.metadata.scope == SourceScope::Project;
     let scope = if project {
         settings.project_settings()
@@ -291,7 +291,7 @@ fn toggle_package_resource(
             )
     });
     let Some(index) = index else {
-        return Ok(String::new());
+        return String::new();
     };
     let mut entry = packages[index].clone();
     if entry.is_string() {
@@ -340,7 +340,7 @@ fn toggle_package_resource(
     } else {
         settings.set_packages(updated_packages);
     }
-    Ok(written)
+    written
 }
 
 fn resource_array(

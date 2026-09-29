@@ -959,9 +959,9 @@ Reviewer instructions: record it"
                 messages,
                 refinement_history,
             } = parts.await.unwrap();
-            let captures: std::sync::Arc<std::sync::Mutex<Vec<CapturedRequest>>> =
+            let captured_requests: std::sync::Arc<std::sync::Mutex<Vec<CapturedRequest>>> =
                 std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-            let sink = std::sync::Arc::clone(&captures);
+            let sink = std::sync::Arc::clone(&captured_requests);
             let reply = r#"{"summary":"bench","edits":[]}"#.to_string();
             let result = execute_refinement(
                 &mut session,
@@ -986,7 +986,7 @@ Reviewer instructions: record it"
             .await
             .unwrap_or_else(|error| panic!("'{leg}' leg failed: {error:#}"));
             assert!(result.applied_edits.is_empty());
-            let got = captures.lock().unwrap().clone();
+            let got = captured_requests.lock().unwrap().clone();
             assert_eq!(got.len(), 1, "'{leg}' leg: exactly one refiner call");
             captured.push(got[0].clone());
         }

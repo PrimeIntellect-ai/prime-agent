@@ -103,10 +103,10 @@ fn own_kernel_processes() -> Vec<i32> {
         let Some(state) = fields.next() else {
             continue;
         };
-        let Some(ppid) = fields.next().and_then(|raw| raw.parse::<u32>().ok()) else {
+        let Some(parent_pid) = fields.next().and_then(|raw| raw.parse::<u32>().ok()) else {
             continue;
         };
-        if ppid == me && state != "Z" && state != "X" {
+        if parent_pid == me && state != "Z" && state != "X" {
             let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{pid}/cmdline")) else {
                 continue;
             };

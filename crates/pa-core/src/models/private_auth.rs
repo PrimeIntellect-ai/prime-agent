@@ -147,6 +147,9 @@ struct CacheFileIdentity {
     len: u64,
 }
 
+// The fallible non-Unix twin pins the Option shape across
+// platforms - unwrapping only this arm would split the contract.
+#[allow(clippy::unnecessary_wraps)]
 #[cfg(unix)]
 fn cache_file_identity(metadata: &std::fs::Metadata) -> Option<CacheFileIdentity> {
     use std::os::unix::fs::MetadataExt;
