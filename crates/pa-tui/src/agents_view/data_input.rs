@@ -39,9 +39,7 @@ impl AgentsViewMode {
                 } else {
                     self.scope_depth = None;
                     self.scope_dropped = true;
-                    self.set_status(
-                        "Scope is no longer available; returned to the global view".to_string(),
-                    );
+                    self.set_status("Scope is no longer available; returned to the global view");
                     None
                 }
             }
@@ -657,22 +655,35 @@ impl AgentsViewMode {
         }
     }
 
+    /// Materialize the armed composer's parked suggestion request (TS's
+    /// editor contract: `getSuggestions` resolves after the keystroke
+    /// batch, so the host materializes it — the chat's
+    /// `materialize_editor_autocomplete`). The search field and the
+    /// provider-less editors park nothing.
+    pub(super) fn materialize_composer_autocomplete(&mut self) {
+        match &mut self.composer {
+            Composer::Search => {}
+            Composer::Rename(rename) => rename.editor.materialize_autocomplete(),
+            Composer::Reply(reply) => reply.editor.materialize_autocomplete(),
+        }
+    }
+
     /// One paste (bracketed, or the paste-aware reader's coalesced
     /// marker-less burst — tmux ≤3.2 forwards pastes without markers,
     /// and Enter submits in the composers, so a burst typed line by
     /// line would submit per line): the armed composer's editor takes
     /// it through TS's paste path (inline, or an atomic marker for a
     /// large one); the search field ignores it, exactly as before.
-    pub(super) fn handle_paste(&mut self, text: String) {
+    pub(super) fn handle_paste(&mut self, text: &str) {
         match std::mem::replace(&mut self.composer, Composer::Search) {
             Composer::Search => {}
             Composer::Rename(mut rename) => {
-                rename.editor.handle_paste(&text);
+                rename.editor.handle_paste(text);
                 let _ = rename.editor.take_events();
                 self.composer = Composer::Rename(rename);
             }
             Composer::Reply(mut reply) => {
-                reply.editor.handle_paste(&text);
+                reply.editor.handle_paste(text);
                 let _ = reply.editor.take_events();
                 self.composer = Composer::Reply(reply);
             }

@@ -63,17 +63,14 @@ fn space_arms_the_live_reply_and_fetches_the_headline() {
     );
     // The landed headline renders its first line; a re-targeted or
     // disarmed composer drops a late result (the key guard).
-    mode.headline_result(
-        "p-live".to_string(),
-        Ok(Some("line one\nline two".to_string())),
-    );
+    mode.headline_result("p-live", Ok(Some("line one\nline two".to_string())));
     let frame = frame_text(&mut mode);
     assert!(
         frame.contains("line one") && !frame.contains("line two"),
         "the header renders the first collapsed line only:\n{frame}"
     );
     // A result for another key drops.
-    mode.headline_result("other".to_string(), Ok(Some("nope".to_string())));
+    mode.headline_result("other", Ok(Some("nope".to_string())));
     assert!(frame_text(&mut mode).contains("line one"));
 }
 
@@ -129,15 +126,23 @@ fn armed_keys_route_to_the_editor_and_the_cancels_disarm() {
     );
 }
 
-/// A move off the targeted row disarms (TS `moveSelection`'s guard).
+/// A selection move off the targeted row disarms (TS `moveSelection`'s
+/// guard, :1487-1493). The guard rides the move itself, not the key:
+/// while armed the composer owns the navigation keys (they edit the
+/// draft, exactly like TS's gated list navigation), so the drive calls
+/// the production move directly — the shape a future move path takes.
 #[test]
 fn a_selection_move_off_the_target_disarms() {
     let mut mode = armed_live();
-    mode.handle_key("down");
+    mode.move_selection(1);
     assert!(
         matches!(mode.composer, Composer::Search),
         "the move disarms the reply"
     );
+    // The move back onto the row does not re-arm (the arm is the space
+    // key's act, never a selection side effect).
+    mode.move_selection(-1);
+    assert!(matches!(mode.composer, Composer::Search));
 }
 
 /// The submit: Enter on a typed draft dispatches the whole-object
@@ -165,7 +170,7 @@ fn enter_submits_the_reply_and_the_outcomes_land() {
     );
     // The failure restores the draft and reports; a re-armed composer on
     // the same key keeps its fresh compose (the in-flight guard).
-    mode.reply_result("p-live".to_string(), Err("daemon down".to_string()));
+    mode.reply_result("p-live", Err("daemon down".to_string()));
     assert_eq!(
         mode.status_text(),
         Some("Failed to send reply: daemon down")
@@ -182,7 +187,7 @@ fn enter_submits_the_reply_and_the_outcomes_land() {
         "the re-armed draft resubmits"
     );
     mode.reply_result(
-        "p-live".to_string(),
+        "p-live",
         Ok(ReplySent {
             resumed: None,
             cwd_notice: None,
@@ -231,10 +236,21 @@ fn the_follow_up_queues_and_streaming_steers() {
         streaming.pending_reply.take().expect("the send").behavior,
         Some(StreamingBehavior::Steer)
     );
-    // The saved target resumes: the config drops the cwd (or overrides
-    // it with the notice when the saved directory is gone — the fixture
-    // row's /x cwd does not exist).
-    let mut saved = armed_saved();
+    // The saved target resumes: the config drops the cwd, or overrides
+    // it with the notice when the saved directory is gone (the catalog
+    // row's cwd points at a path that does not exist — the submit
+    // resolves the CURRENT summary from the records).
+    let mut saved = mode_with_anchor(None, Vec::new());
+    let mut row = saved_catalog_row("/x/saved.jsonl", "saved-1", "a saved session");
+    row["cwd"] = serde_json::json!("/nonexistent-reply-e2e");
+    saved.saved = vec![row];
+    saved.rebuild_rows();
+    saved.selected = saved
+        .rows
+        .iter()
+        .position(|row| row.identity.contains("saved.jsonl"))
+        .expect("the saved row");
+    saved.handle_key("space");
     for ch in "resume me".chars() {
         saved.handle_key(ch.to_string().as_str());
     }
@@ -270,7 +286,10 @@ fn view_commands_route_and_reject() {
         matches!(&mode.composer, Composer::Reply(reply) if reply.editor.get_text() == "/tree"),
         "the rejected command keeps its draft"
     );
-    // /name with no args: the usage warning, the draft stays.
+    // /name with no args: the usage warning, the draft stays (the
+    // restored old draft clears first — the editor kept the rejected
+    // command, TS's restore).
+    mode.handle_key("ctrl+u");
     for ch in "/name".chars() {
         mode.handle_key(ch.to_string().as_str());
     }
@@ -320,7 +339,7 @@ fn view_commands_route_and_reject() {
             active_session_id: "p-live".to_string(),
         })
     );
-    live.kill_result("p-live".to_string(), Ok(()));
+    live.kill_result("p-live", Ok(()));
     assert!(
         matches!(live.composer, Composer::Search),
         "the stopped target disarms"
@@ -358,5 +377,67 @@ fn the_reply_hints_follow_the_target_state() {
     assert_eq!(
         flat(&saved.render_hints(120, None)),
         "Enter resume & send   Esc/Ctrl+C cancel"
+    );
+}
+
+/// The reply autocomplete (TS `createReplyComposerAutocompleteProvider`):
+/// only the armed composer completes — the session-owned builtins plus
+/// the view commands, never the client builtins (the rejection family).
+#[test]
+fn the_reply_completion_lists_session_and_view_commands() {
+    let mut mode = armed_live();
+    mode.handle_key("/");
+    mode.materialize_composer_autocomplete();
+    let Composer::Reply(reply) = &mode.composer else {
+        panic!("armed");
+    };
+    let labels: Vec<String> = reply
+        .editor
+        .autocomplete_state()
+        .map(|state| state.items.iter().map(|item| item.label.clone()).collect())
+        .unwrap_or_default();
+    assert!(
+        labels.iter().any(|label| label.contains("compact")),
+        "the session commands suggest: {labels:?}"
+    );
+    for expected in ["kill", "name"] {
+        assert!(
+            labels.iter().any(|label| label.contains(expected)),
+            "the view commands suggest: {labels:?}"
+        );
+    }
+    assert!(
+        !labels
+            .iter()
+            .any(|label| label.contains("tree") || label.contains("model")),
+        "the client builtins never suggest: {labels:?}"
+    );
+}
+
+/// An open completion owns Enter (TS's editor applies the selected
+/// item; the typed-exact fall-through is what submits): typing `/`
+/// completes into the buffer instead of submitting the partial.
+#[test]
+fn an_open_completion_owns_enter() {
+    let mut mode = armed_live();
+    mode.handle_key("/");
+    mode.materialize_composer_autocomplete();
+    assert!(
+        matches!(&mode.composer, Composer::Reply(reply)
+            if reply.editor.is_showing_autocomplete()),
+        "the typed slash opens the completion"
+    );
+    mode.handle_key("enter");
+    let Composer::Reply(reply) = &mode.composer else {
+        panic!("the composer stays armed");
+    };
+    assert!(
+        reply.editor.get_text().starts_with('/'),
+        "Enter applied the completion instead of submitting:\n{:?}",
+        reply.editor.get_text()
+    );
+    assert!(
+        mode.pending_reply.is_none() && mode.pending_kill.is_none(),
+        "nothing dispatched behind the popup"
     );
 }

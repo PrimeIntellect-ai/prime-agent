@@ -93,23 +93,20 @@ fn a_single_line_notice_keeps_the_status_line() {
 #[test]
 fn the_status_line_carries_its_tone() {
     let mut mode = mode_with_parent_and_child();
-    mode.set_status("Renamed to new".to_string());
+    mode.set_status("Renamed to new");
     assert_eq!(
         mode.status.as_ref().map(Status::tone),
         Some(StatusTone::Muted)
     );
     // The Failed prefix is an error without an explicit tone.
-    mode.set_status("Failed to rename agent: nope".to_string());
+    mode.set_status("Failed to rename agent: nope");
     assert_eq!(
         mode.status.as_ref().map(Status::tone),
         Some(StatusTone::Error)
     );
     // An explicit tone wins over the prefix rule, and the text
     // collapses to one line (TS `formatAgentsViewStatusLine`).
-    mode.set_status_tone(
-        "Saved sessions\n   unavailable".to_string(),
-        StatusTone::Error,
-    );
+    mode.set_status_tone("Saved sessions\n   unavailable", StatusTone::Error);
     assert_eq!(mode.status_text(), Some("Saved sessions unavailable"));
     assert_eq!(
         mode.status.as_ref().map(Status::tone),
@@ -117,7 +114,7 @@ fn the_status_line_carries_its_tone() {
     );
     // The rendered row paints in the tone's color, not the fixed
     // error color: a muted report renders muted.
-    mode.set_status("Renaming agent...".to_string());
+    mode.set_status("Renaming agent...");
     let span = mode
         .render_hints(120, None)
         .last()
@@ -126,10 +123,7 @@ fn the_status_line_carries_its_tone() {
     assert_eq!(span.content, "Renaming agent...");
     assert_eq!(span.style, mode.theme.fg_style(StatusTone::Muted.color()));
     // An explicit error renders error.
-    mode.set_status_tone(
-        "Saved sessions unavailable: gone".to_string(),
-        StatusTone::Error,
-    );
+    mode.set_status_tone("Saved sessions unavailable: gone", StatusTone::Error);
     let span = mode
         .render_hints(120, None)
         .last()
@@ -145,7 +139,7 @@ fn the_status_line_carries_its_tone() {
 #[test]
 fn the_status_expires_through_the_loop_deadline() {
     let mut mode = mode_with_parent_and_child();
-    mode.set_status("Reply sent".to_string());
+    mode.set_status("Reply sent");
     let now = std::time::Instant::now();
     assert!(
         mode.status_expiry(now).is_some(),
@@ -164,7 +158,7 @@ fn the_status_expires_through_the_loop_deadline() {
     assert_eq!(mode.status_text(), None, "the cleared line renders nothing");
     // The unchanged-line guard: a replacement line's own deadline is
     // fresh again at the expired line's wake.
-    mode.set_status("Reply sent again".to_string());
+    mode.set_status("Reply sent again");
     assert!(
         !mode.expire_status(after),
         "the replacement keeps its own new window"

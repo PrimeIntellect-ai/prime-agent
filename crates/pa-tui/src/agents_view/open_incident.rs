@@ -11,7 +11,7 @@ use super::{
 impl AgentsViewMode {
     pub(super) fn open_selected(&mut self) {
         if self.anchor_selection_pending && self.options.scope.is_none() {
-            self.set_status(ANCHOR_LOADING_HINT.to_string());
+            self.set_status(ANCHOR_LOADING_HINT);
             return;
         }
         let Some(row) = self.rows.get(self.selected).cloned() else {
@@ -59,7 +59,7 @@ impl AgentsViewMode {
             _ => None,
         };
         let Some(target) = target else {
-            self.set_status("No program recorded for these subagents".to_string());
+            self.set_status("No program recorded for these subagents");
             return;
         };
         // TS :1709-1717: the program only renders inside the expanded
@@ -117,9 +117,7 @@ impl AgentsViewMode {
         // the child row selected, and surface why.
         let root = self.find_subagent_root_row(row);
         let Some(root) = root else {
-            self.set_status(
-                "Cannot open agent without an active runtime or saved session file".to_string(),
-            );
+            self.set_status("Cannot open agent without an active runtime or saved session file");
             return;
         };
         let root = root.clone();
@@ -197,9 +195,7 @@ impl AgentsViewMode {
             );
             return;
         }
-        self.set_status(
-            "Cannot open agent without an active runtime or saved session file".to_string(),
-        );
+        self.set_status("Cannot open agent without an active runtime or saved session file");
     }
 
     /// Record the open outcome (TS the run result the loop consumes): the
@@ -310,7 +306,7 @@ impl AgentsViewMode {
         {
             return false;
         }
-        self.set_status("Incident notice dismissed".to_string());
+        self.set_status("Incident notice dismissed");
         true
     }
 

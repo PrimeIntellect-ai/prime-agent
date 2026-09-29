@@ -223,11 +223,12 @@ impl AgentsViewMode {
     /// word it armed with — executes the stop-or-delete dispatch;
     /// anything else (re-)arms the confirm over the selected row.
     pub(super) fn confirm_delete_for_selected(&mut self, was_armed: Option<PendingDelete>) {
-        if was_armed.as_ref().is_some_and(|pending| {
+        let executes = was_armed.is_some_and(|pending| {
             self.rows.get(self.selected).is_some_and(|row| {
                 row.identity == pending.identity && Self::delete_arm_word(row) == pending.stop
             })
-        }) {
+        });
+        if executes {
             if let Some(action) = self.delete_action_for_selected() {
                 self.pending_delete_action = Some(action);
             }
@@ -424,7 +425,7 @@ impl AgentsViewMode {
     /// roster push covers the other arms; saved rows have no push).
     pub(super) fn delete_result(
         &mut self,
-        message: String,
+        message: &str,
         tone: StatusTone,
         deleted_saved_path: Option<String>,
     ) {

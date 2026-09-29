@@ -62,22 +62,25 @@ impl Status {
     }
 
     /// TS `setStatusMessage(message)`: the default tone, the expiry armed.
-    pub(super) fn transient(text: String) -> Self {
-        let text = Self::collapse(&text);
+    #[must_use]
+    pub(super) fn transient(text: &str) -> Self {
+        let text = Self::collapse(text);
         let tone = Self::default_tone(&text);
         Self::with(text, tone, false)
     }
 
     /// TS `setStatusMessage(message, { tone })`: the explicit tone and
     /// the expiry armed.
-    pub(super) fn with_tone(text: String, tone: StatusTone) -> Self {
-        Self::with(Self::collapse(&text), tone, false)
+    #[must_use]
+    pub(super) fn with_tone(text: &str, tone: StatusTone) -> Self {
+        Self::with(Self::collapse(text), tone, false)
     }
 
     /// TS `setStatusMessage(message, { sticky: true })`: the default tone
     /// rule, no expiry — the line stays until the next keypress.
-    pub(super) fn sticky(text: String) -> Self {
-        let text = Self::collapse(&text);
+    #[must_use]
+    pub(super) fn sticky(text: &str) -> Self {
+        let text = Self::collapse(text);
         let tone = Self::default_tone(&text);
         Self::with(text, tone, true)
     }
@@ -117,13 +120,13 @@ impl Status {
 impl super::AgentsViewMode {
     /// TS `setStatusMessage(message)`: the default tone rule, the
     /// expiry armed.
-    pub(super) fn set_status(&mut self, text: String) {
+    pub(super) fn set_status(&mut self, text: &str) {
         self.status = Some(Status::transient(text));
     }
 
     /// TS `setStatusMessage(message, { tone })`: the explicit tone, the
     /// expiry armed.
-    pub(super) fn set_status_tone(&mut self, text: String, tone: StatusTone) {
+    pub(super) fn set_status_tone(&mut self, text: &str, tone: StatusTone) {
         self.status = Some(Status::with_tone(text, tone));
     }
 

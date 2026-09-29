@@ -144,7 +144,7 @@ fn write_fixture(dir: &Path, id: &str, name: &str, turns: &[(&str, &str)]) -> Pa
 
 /// The daemon-connection ask behind one raw command: the hello-greeting
 /// envelope, the request, and the response line.
-fn ask(socket: &Path, command: serde_json::Value) -> Option<serde_json::Value> {
+fn ask(socket: &Path, command: &serde_json::Value) -> Option<serde_json::Value> {
     let stream = UnixStream::connect(socket).ok()?;
     let write_half = stream.try_clone().ok()?;
     let mut reader = BufReader::new(stream);
@@ -234,7 +234,7 @@ async fn reply_to_live_session_delivers_the_prompt() {
     // the view lists).
     let created = ask(
         &supervisor.socket,
-        serde_json::json!({ "type": "create", "config": config }),
+        &serde_json::json!({ "type": "create", "config": config }),
     )
     .expect("the create answered")
     .get("data")
@@ -254,9 +254,9 @@ async fn reply_to_live_session_delivers_the_prompt() {
             }
             ask(
                 &supervisor.socket,
-                serde_json::json!({ "type": "roster_subscribe" }),
+                &serde_json::json!({ "type": "roster_subscribe" }),
             )
-            .map(|response| {
+            .is_some_and(|response| {
                 response
                     .get("data")
                     .and_then(|data| data.get("roster"))
@@ -271,7 +271,6 @@ async fn reply_to_live_session_delivers_the_prompt() {
                         })
                     })
             })
-            .unwrap_or(false)
         })
     };
     assert!(
@@ -285,7 +284,7 @@ async fn reply_to_live_session_delivers_the_prompt() {
     // the warm-up turn must COMPLETE before the view runs.
     let warmed = ask(
         &supervisor.socket,
-        serde_json::json!({
+        &serde_json::json!({
             "type": "prompt",
             "activeSessionId": active,
             "message": "warm up",
@@ -302,9 +301,9 @@ async fn reply_to_live_session_delivers_the_prompt() {
             }
             ask(
                 &supervisor.socket,
-                serde_json::json!({ "type": "roster_subscribe" }),
+                &serde_json::json!({ "type": "roster_subscribe" }),
             )
-            .map(|response| {
+            .is_some_and(|response| {
                 response
                     .get("data")
                     .and_then(|data| data.get("roster"))
@@ -322,7 +321,6 @@ async fn reply_to_live_session_delivers_the_prompt() {
                         })
                     })
             })
-            .unwrap_or(false)
         })
     };
     assert!(
@@ -359,18 +357,29 @@ async fn reply_to_live_session_delivers_the_prompt() {
     );
     // The reply ran on the targeted session: its last assistant text
     // echoes the prompt through the faux script.
-    let last = ask(
-        &supervisor.socket,
-        serde_json::json!({ "type": "get_last_assistant_text", "activeSessionId": active }),
-    )
-    .expect("the last-assistant ask answered")
-    .get("data")
-    .and_then(|data| data.get("text"))
-    .and_then(serde_json::Value::as_str)
-    .unwrap_or_default()
-    .to_string();
+    // The reply's turn runs behind the send's ack: poll the session's
+    // last assistant text until the reply's scripted answer lands.
+    let mut last = String::new();
+    let reply_landed = (0..50).any(|attempt| {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        last = ask(
+            &supervisor.socket,
+            &serde_json::json!({ "type": "get_last_assistant_text", "activeSessionId": active }),
+        )
+        .and_then(|response| {
+            response
+                .get("data")
+                .and_then(|data| data.get("text"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+        last.contains("the reply landed")
+    });
     assert!(
-        last.contains("the reply landed"),
+        reply_landed,
         "the reply delivered to the live session (last assistant: {last:?})"
     );
 }
@@ -427,14 +436,22 @@ async fn reply_to_saved_session_resumes_and_sends() {
         "the resume's status rendered:\n{rendered}"
     );
     // The fixture file carries the reply: the resumed session appended
-    // the user message to the SAME durable file.
-    let content = std::fs::read_to_string(&fixture).expect("read fixture");
+    // the user message to the SAME durable file (the turn persists
+    // behind the send's ack — poll until it lands).
+    let mut content = String::new();
+    let reply_persisted = (0..50).any(|attempt| {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        content = std::fs::read_to_string(&fixture).unwrap_or_default();
+        content.contains("resume me")
+    });
     assert!(
-        content.contains("resume me"),
+        reply_persisted,
         "the resumed session's file holds the reply:\n{content}"
     );
     // The resumed session is live on the daemon.
-    let list = ask(&supervisor.socket, serde_json::json!({ "type": "list" }))
+    let list = ask(&supervisor.socket, &serde_json::json!({ "type": "list" }))
         .expect("the list answered")
         .get("data")
         .and_then(|data| data.get("sessions"))

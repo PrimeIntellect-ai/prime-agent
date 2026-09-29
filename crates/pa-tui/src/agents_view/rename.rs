@@ -89,7 +89,7 @@ impl AgentsViewMode {
                 .get(self.selected)
                 .is_some_and(|row| row.kind == RowKind::Agent)
             {
-                self.set_status("This session cannot be renamed".to_string());
+                self.set_status("This session cannot be renamed");
             }
             return;
         };
@@ -119,7 +119,7 @@ impl AgentsViewMode {
         if self.keybindings.matches(key, "tui.select.confirm") {
             let name = rename.editor.get_text().trim().to_string();
             if !name.is_empty() {
-                self.set_status("Renaming agent...".to_string());
+                self.set_status("Renaming agent...");
                 self.pending_rename = Some(Rename {
                     target: rename.target,
                     name,
@@ -166,7 +166,7 @@ impl AgentsViewMode {
         }
         match outcome {
             Ok(()) => {
-                self.set_status(format!("Renamed to {}", rename.name));
+                self.set_status(&format!("Renamed to {}", rename.name));
                 self.actions.push("renamed");
                 if let RenameTarget::Saved { session_path } = rename.target {
                     if let Some(saved) = self.saved.iter_mut().find(|saved| {
@@ -178,7 +178,7 @@ impl AgentsViewMode {
                 }
             }
             Err(error) => {
-                self.set_status(format!("Failed to rename agent: {error}"));
+                self.set_status(&format!("Failed to rename agent: {error}"));
             }
         }
     }

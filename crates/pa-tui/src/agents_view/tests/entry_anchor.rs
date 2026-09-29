@@ -60,7 +60,7 @@ fn open_waits_out_the_entry_anchor() {
     // The user's first move ends the wait the same way: the hint it
     // left behind clears too.
     mode.anchor_selection_pending = true;
-    mode.set_status(ANCHOR_LOADING_HINT.to_string());
+    mode.set_status(ANCHOR_LOADING_HINT);
     mode.handle_key("down");
     assert!(!mode.anchor_selection_pending);
     assert!(
@@ -157,7 +157,7 @@ fn a_saved_catalog_failure_settles_the_anchor_wait() {
         Some("s2"),
         vec![roster_entry("s1", "idle", &parent_summary("s1"))],
     );
-    mode.set_status(ANCHOR_LOADING_HINT.to_string());
+    mode.set_status(ANCHOR_LOADING_HINT);
     mode.settle_anchor_wait_on_saved_failure();
     assert!(
         !mode.anchor_selection_pending,
@@ -247,7 +247,7 @@ fn a_noop_edit_on_an_empty_query_never_rearms() {
 #[test]
 fn a_successful_load_retires_the_failure_status() {
     let mut mode = mode_with_anchor(None, Vec::new());
-    mode.set_status("Saved sessions unavailable: scan failed".to_string());
+    mode.set_status("Saved sessions unavailable: scan failed");
     mode.saved_fetch_failed = true;
     mode.saved = Vec::new();
     // The load arm's own logic (the loop's SavedLoaded handler): the
@@ -261,7 +261,7 @@ fn a_successful_load_retires_the_failure_status() {
     }
     assert_eq!(mode.status_text(), None, "the stale failure status retired");
     // An unrelated status (the flow's own notice) survives a load.
-    mode.set_status("Session s1 is no longer running".to_string());
+    mode.set_status("Session s1 is no longer running");
     if mode
         .status_text()
         .is_some_and(|status| status.starts_with("Saved sessions unavailable"))

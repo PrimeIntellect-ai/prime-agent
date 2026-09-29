@@ -440,6 +440,7 @@ impl InteractiveOptions {
     /// The `create` config carried on every new-session request (the
     /// agents view reuses it as the base of a resume's config — TS's
     /// `AgentsViewModeOptions.config`).
+    #[must_use]
     pub fn create_config(&self) -> Value {
         let mut config = json!({ "cwd": self.cwd.display().to_string() });
         if let Some(session_dir) = &self.session_dir {

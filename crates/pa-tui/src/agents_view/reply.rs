@@ -16,6 +16,7 @@ use crate::{Line, Span};
 use pa_types::daemon::{DaemonCommand, PromptInput, StreamingBehavior};
 use pa_types::slash_commands::{
     is_session_slash_command_name, parse_slash_command, SlashCommandRegistry,
+    SESSION_SLASH_COMMAND_NAMES,
 };
 use tokio::sync::mpsc;
 
@@ -23,6 +24,66 @@ use tokio::sync::mpsc;
 /// one name list the parser, the rejection rule, and the autocomplete
 /// entries all read.
 pub(super) const VIEW_COMMAND_NAMES: [&str; 2] = ["name", "kill"];
+
+/// TS `AGENTS_VIEW_COMMAND_DESCRIPTIONS` (the autocomplete entries'
+/// labels): the view commands' own descriptions, `/name`'s argument
+/// hint, and its takes-argument.
+const VIEW_COMMAND_DESCRIPTIONS: [(&str, &str, Option<&str>, bool); 2] = [
+    ("name", "Set session display name", Some("<name>"), true),
+    (
+        "kill",
+        "Stop this agent's runtime (session stays resumable)",
+        None,
+        false,
+    ),
+];
+
+/// TS `createReplyComposerAutocompleteProvider` (:813-824): the
+/// session-owned builtins plus the view commands, path completion
+/// based at the target's own cwd (the reply runs in the target's
+/// directory, not the view's).
+fn reply_autocomplete_provider(
+    summary: &Value,
+    fallback_cwd: &std::path::Path,
+) -> Box<dyn crate::autocomplete::AutocompleteProvider + Send> {
+    let registry = SlashCommandRegistry::builtin_cached();
+    let mut commands: Vec<crate::autocomplete::SlashCommandEntry> = SESSION_SLASH_COMMAND_NAMES
+        .iter()
+        .filter_map(|name| registry.get(name))
+        .map(|command| crate::autocomplete::SlashCommandEntry {
+            name: command.name.to_string(),
+            aliases: command.aliases.iter().map(ToString::to_string).collect(),
+            description: Some(command.description.to_string()),
+            argument_hint: command.argument_hint.map(str::to_string),
+            takes_argument: command.takes_argument,
+            source_tag: None,
+        })
+        .collect();
+    for (name, description, argument_hint, takes_argument) in VIEW_COMMAND_DESCRIPTIONS {
+        let builtin = registry.get(name);
+        commands.push(crate::autocomplete::SlashCommandEntry {
+            name: name.to_string(),
+            aliases: builtin
+                .map(|command| command.aliases.to_vec())
+                .unwrap_or_default()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            description: Some(description.to_string()),
+            argument_hint: argument_hint.map(str::to_string),
+            takes_argument,
+            source_tag: None,
+        });
+    }
+    let base = summary
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|cwd| !cwd.is_empty())
+        .map_or_else(|| fallback_cwd.to_path_buf(), std::path::PathBuf::from);
+    Box::new(crate::autocomplete::CombinedAutocompleteProvider::new(
+        commands, base,
+    ))
+}
 
 /// The reply target (TS `replyTarget`): the row's key
 /// (`activeSessionId ?? id`) plus the summary captured at arm.
@@ -207,7 +268,13 @@ impl AgentsViewMode {
     fn arm_reply(&mut self, target: ReplyTarget) {
         let mut editor = Editor::new();
         editor.set_keybindings(self.keybindings.clone());
-        editor.clear_autocomplete_provider();
+        // TS `setReplyTarget` swaps the editor's provider for the
+        // reply one (the session commands + the view commands, the
+        // target's cwd behind `@` completion).
+        editor.set_autocomplete_provider(reply_autocomplete_provider(
+            &target.summary,
+            &self.options.cwd,
+        ));
         let active = target
             .summary
             .get("activeSessionId")
@@ -402,10 +469,18 @@ impl AgentsViewMode {
             self.running = false;
             return;
         }
-        // Enter submits (TS `submitValue`: the editor clears first, its
-        // paste markers expanded; the draft rides in_flight for the
-        // restore).
+        // Enter: an open completion owns the key first (TS's editor
+        // applies the selected item — the typed-exact fall-through is
+        // what submits), and a plain Enter submits (TS `submitValue`:
+        // the editor clears first, its paste markers expanded; the
+        // draft rides in_flight for the restore).
         if self.keybindings.matches(key, "tui.select.confirm") {
+            if reply.editor.is_showing_autocomplete() {
+                reply.editor.handle_input(key);
+                let _ = reply.editor.take_events();
+                self.composer = Composer::Reply(reply);
+                return;
+            }
             let value = reply.editor.get_expanded_text();
             reply.editor.set_text("");
             self.submit_reply(reply, value, None);
@@ -437,7 +512,7 @@ impl AgentsViewMode {
         // text).
         if let Some((name, args)) = parse_view_command(&text) {
             if name == "name" {
-                self.submit_name_command(&mut reply, &value, args);
+                self.submit_name_command(&mut reply, &value, &args);
             } else {
                 self.submit_kill_command(&mut reply, &value);
             }
@@ -448,7 +523,7 @@ impl AgentsViewMode {
         // neither session-owned nor a view command never goes to the
         // model as prompt text; the draft stays.
         if let Some(rejection) = reply_command_rejection(&text) {
-            self.set_status_tone(rejection, StatusTone::Warning);
+            self.set_status_tone(&rejection, StatusTone::Warning);
             restore_reply_draft(&mut reply, &value);
             self.composer = Composer::Reply(reply);
             return;
@@ -467,7 +542,7 @@ impl AgentsViewMode {
         });
         let (resume_config, cwd_notice) = self.resume_config(&current);
         if current.get("activeSessionId").is_none() {
-            self.set_status("Resuming session...".to_string());
+            self.set_status("Resuming session...");
         }
         reply.in_flight = Some(value);
         self.pending_reply = Some(ReplyRequest {
@@ -485,27 +560,21 @@ impl AgentsViewMode {
     /// the rename flow against the CURRENT summary — the wire statuses
     /// ride the rename dispatch; on success the reply disarms, on
     /// failure the draft restores.
-    fn submit_name_command(&mut self, reply: &mut Box<ReplyComposer>, value: &str, args: String) {
+    fn submit_name_command(&mut self, reply: &mut Box<ReplyComposer>, value: &str, args: &str) {
         let name = args.trim().to_string();
         if name.is_empty() {
-            self.set_status_tone(
-                "Usage: /name <session name>".to_string(),
-                StatusTone::Warning,
-            );
+            self.set_status_tone("Usage: /name <session name>", StatusTone::Warning);
             restore_reply_draft(reply, value);
             return;
         }
         let current = self.current_reply_summary(&reply.target);
         let Some(target) = rename_target_from_summary(&current) else {
-            self.set_status_tone(
-                "This session cannot be renamed".to_string(),
-                StatusTone::Warning,
-            );
+            self.set_status_tone("This session cannot be renamed", StatusTone::Warning);
             restore_reply_draft(reply, value);
             return;
         };
         reply.in_flight = Some(value.to_string());
-        self.set_status("Renaming agent...".to_string());
+        self.set_status("Renaming agent...");
         self.pending_rename = Some(Rename { target, name });
     }
 
@@ -520,7 +589,7 @@ impl AgentsViewMode {
             .filter(|id| !id.is_empty())
         else {
             self.set_status_tone(
-                "/kill needs a running agent; this session is inactive".to_string(),
+                "/kill needs a running agent; this session is inactive",
                 StatusTone::Warning,
             );
             restore_reply_draft(reply, value);
@@ -556,10 +625,8 @@ impl AgentsViewMode {
         let override_cwd = notice.is_some().then_some(fallback);
         if let Some(override_cwd) = override_cwd {
             config["cwd"] = serde_json::json!(override_cwd);
-        } else {
-            if let Some(object) = config.as_object_mut() {
-                object.remove("cwd");
-            }
+        } else if let Some(object) = config.as_object_mut() {
+            object.remove("cwd");
         }
         (config, notice)
     }
@@ -568,8 +635,8 @@ impl AgentsViewMode {
     /// header renders the first line of the fetched text — a
     /// re-targeted or disarmed composer drops the result (the key
     /// comparison, TS's `replyTarget?.key === key` guard).
-    pub(super) fn headline_result(&mut self, key: String, result: Result<Option<String>, String>) {
-        if !self.reply_armed_on(&key) {
+    pub(super) fn headline_result(&mut self, key: &str, result: Result<Option<String>, String>) {
+        if !self.reply_armed_on(key) {
             return;
         }
         match result {
@@ -582,7 +649,7 @@ impl AgentsViewMode {
                 if let Composer::Reply(reply) = &mut self.composer {
                     reply.headline = Headline::Loaded(None);
                 }
-                self.set_status(format!("Failed to load latest response: {error}"));
+                self.set_status(&format!("Failed to load latest response: {error}"));
             }
         }
     }
@@ -592,32 +659,32 @@ impl AgentsViewMode {
     /// selects when the composer still targets it, and the composer
     /// disarms under TS's unchanged-target-empty-editor guard), the
     /// failure status and the draft restore on error.
-    pub(super) fn reply_result(&mut self, key: String, outcome: Result<ReplySent, String>) {
+    pub(super) fn reply_result(&mut self, key: &str, outcome: Result<ReplySent, String>) {
         match outcome {
             Ok(sent) => {
                 self.actions.push("reply_sent");
                 if let Some(notice) = sent.cwd_notice {
-                    self.status = Some(Status::sticky(notice));
+                    self.status = Some(Status::sticky(&notice));
                 } else {
-                    self.set_status("Reply sent".to_string());
+                    self.set_status("Reply sent");
                 }
                 // The selection follows the resumed summary, and the
                 // composer disarms, both under TS's unchanged-composer
                 // guard (`this.replyTarget === target`): a re-armed
                 // composer carries no in-flight draft, so a late result
                 // never disarms over the user's fresh compose.
-                if self.reply_in_flight(&key) {
+                if self.reply_in_flight(key) {
                     if let Some(resumed) = sent.resumed {
                         self.select_summary_row(&resumed);
                     }
-                    if self.reply_editor_empty(&key) {
+                    if self.reply_editor_empty(key) {
                         self.disarm_reply();
                     }
                 }
             }
             Err(error) => {
-                self.set_status(format!("Failed to send reply: {error}"));
-                if self.reply_in_flight(&key) && self.reply_editor_empty(&key) {
+                self.set_status(&format!("Failed to send reply: {error}"));
+                if self.reply_in_flight(key) && self.reply_editor_empty(key) {
                     self.restore_reply_draft(key);
                 }
             }
@@ -628,21 +695,21 @@ impl AgentsViewMode {
     /// composer disarms under the unchanged-target guard, the status
     /// reports the stop, and the roster push refreshes the rows behind
     /// it (the live row leaves the Running section on the next push).
-    pub(super) fn kill_result(&mut self, key: String, outcome: Result<(), String>) {
+    pub(super) fn kill_result(&mut self, key: &str, outcome: Result<(), String>) {
         match outcome {
             Ok(()) => {
                 self.actions.push("killed");
                 // TS's kill arm disarms the unchanged composer with no
                 // editor check (`disarmIfUnchanged`); the in-flight
                 // draft marks it.
-                if self.reply_in_flight(&key) {
+                if self.reply_in_flight(key) {
                     self.disarm_reply();
                 }
-                self.set_status("Agent stopped".to_string());
+                self.set_status("Agent stopped");
             }
             Err(error) => {
-                self.set_status(format!("Failed to run /kill: {error}"));
-                if self.reply_in_flight(&key) && self.reply_editor_empty(&key) {
+                self.set_status(&format!("Failed to run /kill: {error}"));
+                if self.reply_in_flight(key) && self.reply_editor_empty(key) {
                     self.restore_reply_draft(key);
                 }
             }
@@ -669,7 +736,7 @@ impl AgentsViewMode {
     /// TS's draft-restore guard: the in-flight draft goes back only when
     /// the composer is still armed on the same target with an empty
     /// editor (the user did not re-arm elsewhere or start typing).
-    fn restore_reply_draft(&mut self, key: String) {
+    fn restore_reply_draft(&mut self, key: &str) {
         if let Composer::Reply(reply) = &mut self.composer {
             if reply.target.key == key && reply.editor.get_text().is_empty() {
                 if let Some(draft) = reply.in_flight.take() {

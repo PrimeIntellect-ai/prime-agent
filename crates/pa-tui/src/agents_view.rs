@@ -578,7 +578,7 @@ impl AgentsViewMode {
             // TS seeds the run's status with the carried line through
             // `setStatusMessage` (the default tone rule and the timer
             // apply to it, exactly like any later line).
-            status => (status.map(Status::transient), None),
+            status => (status.as_deref().map(Status::transient), None),
         };
         let pending_ancestors =
             (!options.expanded_ancestors.is_empty()).then(|| options.expanded_ancestors.clone());
@@ -1003,9 +1003,7 @@ async fn run_agents_view_surface(
                     // needle itself — the note renders into frames, and
                     // quoting the needle would satisfy the very
                     // condition that failed).
-                    mode.set_status(
-                        "timed out waiting for the headless render condition".to_string(),
-                    );
+                    mode.set_status("timed out waiting for the headless render condition");
                     redraw = true;
                     continue;
                 }
@@ -1033,6 +1031,10 @@ async fn run_agents_view_surface(
             match input {
                 UiInput::Key(key) => {
                     mode.handle_key(&key);
+                    // The composer's parked suggestion request
+                    // materializes once the key's edits landed (TS's
+                    // editor materializes after the keystroke batch).
+                    mode.materialize_composer_autocomplete();
                     // TS `queryChanged` -> `armSavedSearchFetch`: a failed
                     // saved-catalog fetch re-arms on the next query change,
                     // so the Inactive section gets one honest retry behind
@@ -1104,7 +1106,7 @@ async fn run_agents_view_surface(
                     mode.handle_mouse(&event);
                 }
                 UiInput::Paste(text) => {
-                    mode.handle_paste(text);
+                    mode.handle_paste(&text);
                 }
                 // `Settled` is the plan's own settle no-op;
                 // `WaitRender` never reaches the batch pop (the
@@ -1116,26 +1118,26 @@ async fn run_agents_view_surface(
                     tone,
                     deleted_saved_path,
                 } => {
-                    mode.delete_result(message, tone, deleted_saved_path);
+                    mode.delete_result(&message, tone, deleted_saved_path);
                 }
                 UiInput::RenameResult { rename, outcome } => {
                     mode.rename_result(rename, outcome);
                 }
                 UiInput::HeadlineResult { key, result } => {
-                    mode.headline_result(key, result);
+                    mode.headline_result(&key, result);
                 }
                 // The saved-resume path's own status (TS's mid-send
                 // "Sending reply..."): it lands between the resume and
                 // the prompt like any set_status, never queued behind
                 // the result it precedes.
                 UiInput::ReplyProgress(text) => {
-                    mode.set_status(text);
+                    mode.set_status(&text);
                 }
                 UiInput::ReplyResult { key, outcome } => {
-                    mode.reply_result(key, outcome);
+                    mode.reply_result(&key, outcome);
                 }
                 UiInput::KillResult { key, outcome } => {
-                    mode.kill_result(key, outcome);
+                    mode.kill_result(&key, outcome);
                 }
                 // The saved-catalog scan landed (TS `armSavedSearchFetch`
                 // applying its result): the Inactive section builds now.
@@ -1190,7 +1192,7 @@ async fn run_agents_view_surface(
                     mode.settle_anchor_wait_on_saved_failure();
                     mode.saved_fetch_failed = true;
                     mode.set_status_tone(
-                        format!("Saved sessions unavailable: {error}"),
+                        &format!("Saved sessions unavailable: {error}"),
                         StatusTone::Error,
                     );
                 }
@@ -1214,93 +1216,92 @@ async fn run_agents_view_surface(
             let flush_at = saved_flush;
             let status_at = mode.status_expiry(std::time::Instant::now());
             tokio::select! {
-                maybe_event = events.recv() => {
-                    match maybe_event {
-                        Some(DaemonClientEvent::RosterUpdate { changed, removed, resync }) => {
-                            mode.apply_roster_update(changed, removed, resync);
-                            redraw = true;
-                        }
-                        // The saved-catalog scan streams its rows while it
-                        // runs (newest first): the view buffers the live
-                        // fetch's frames and flushes them in one rebuild
-                        // per batch window, so the Inactive section (and
-                        // the entry anchor's row) appears progressively
-                        // instead of after the whole scan (TS
-                        // `refreshSavedSessions`'s `onSession` batching).
-                        Some(DaemonClientEvent::SessionListItem { session, request_id }) => {
-                            if catalog_request.as_deref() == Some(request_id.as_str()) {
-                                mode.buffer_saved_stream_item(session);
-                                if saved_flush.is_none() {
-                                    saved_flush = Some(
-                                        tokio::time::Instant::now()
-                                            + Duration::from_millis(
-                                                SAVED_CATALOG_RECONCILE_INTERVAL_MS,
-                                            ),
-                                    );
+                    maybe_event = events.recv() => {
+                        match maybe_event {
+                            Some(DaemonClientEvent::RosterUpdate { changed, removed, resync }) => {
+                                mode.apply_roster_update(changed, removed, resync);
+                                redraw = true;
+                            }
+                            // The saved-catalog scan streams its rows while it
+                            // runs (newest first): the view buffers the live
+                            // fetch's frames and flushes them in one rebuild
+                            // per batch window, so the Inactive section (and
+                            // the entry anchor's row) appears progressively
+                            // instead of after the whole scan (TS
+                            // `refreshSavedSessions`'s `onSession` batching).
+                            Some(DaemonClientEvent::SessionListItem { session, request_id }) => {
+                                if catalog_request.as_deref() == Some(request_id.as_str()) {
+                                    mode.buffer_saved_stream_item(session);
+                                    if saved_flush.is_none() {
+                                        saved_flush = Some(
+                                            tokio::time::Instant::now()
+                                                + Duration::from_millis(
+                                                    SAVED_CATALOG_RECONCILE_INTERVAL_MS,
+                                                ),
+                                        );
+                                    }
                                 }
                             }
+                            Some(_) => {}
+                            None => {
+                                mode.set_status_tone("the daemon connection closed",
+                                    StatusTone::Error
+            );
+                                mode.running = false;
+                                redraw = true;
+                            }
                         }
-                        Some(_) => {}
-                        None => {
-                            mode.set_status_tone(
-                                "the daemon connection closed".to_string(),
-                                StatusTone::Error,
-                            );
-                            mode.running = false;
+                    }
+                    maybe_input = ui_rx.recv() => {
+                        if let Some(input) = maybe_input {
+                            pending.push(input);
+                            continue;
+                        }
+                    }
+                    // Only a running row needs a periodic frame. The timer
+                    // stays tied to the last pulse across unrelated inputs.
+                    () = tokio::time::sleep_until(last_pulse + Duration::from_millis(PULSE_INTERVAL_MS)),
+                        if mode.rows.iter().any(|row| row.section == Section::Running) => {}
+                    // The streamed-catalog batch window: the buffered rows
+                    // flush as one rebuild. A closed window pends forever
+                    // (the copied deadline is None) instead of unwrapping.
+                    () = async {
+                        match flush_at {
+                            Some(at) => tokio::time::sleep_until(at).await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if mode.flush_saved_stream() {
                             redraw = true;
                         }
+                        saved_flush = None;
                     }
+                    // The incident-notice poll's wake-up: the deadline drain
+                    // below the select does the refresh, so the arm only ends
+                    // the wait (the pulse arm's shape).
+                    () = tokio::time::sleep_until(incident_poll_at) => {}
+                    // The render barrier's deadline: an armed hold whose
+                    // needle never lands still pops here — the plan proceeds
+                    // and the assertion then reports the actual frame — so a
+                    // quiet daemon (a catalog answer that never comes)
+                    // cannot wedge the loop waiting on events that never
+                    // arrive.
+                    () = async {
+                        match wait_render_deadline {
+                            Some(at) => tokio::time::sleep_until(at).await,
+                            None => std::future::pending().await,
+                        }
+                    } => {}
+                    // The status line's expiry wake (TS `setStatusMessage`'s
+                    // timer): the line clears at its deadline even on a quiet
+                    // view, and the expiry check below repaints it away.
+                    () = async {
+                        match status_at.map(tokio::time::Instant::from_std) {
+                            Some(at) => tokio::time::sleep_until(at).await,
+                            None => std::future::pending().await,
+                        }
+                    } => {}
                 }
-                maybe_input = ui_rx.recv() => {
-                    if let Some(input) = maybe_input {
-                        pending.push(input);
-                        continue;
-                    }
-                }
-                // Only a running row needs a periodic frame. The timer
-                // stays tied to the last pulse across unrelated inputs.
-                () = tokio::time::sleep_until(last_pulse + Duration::from_millis(PULSE_INTERVAL_MS)),
-                    if mode.rows.iter().any(|row| row.section == Section::Running) => {}
-                // The streamed-catalog batch window: the buffered rows
-                // flush as one rebuild. A closed window pends forever
-                // (the copied deadline is None) instead of unwrapping.
-                () = async {
-                    match flush_at {
-                        Some(at) => tokio::time::sleep_until(at).await,
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    if mode.flush_saved_stream() {
-                        redraw = true;
-                    }
-                    saved_flush = None;
-                }
-                // The incident-notice poll's wake-up: the deadline drain
-                // below the select does the refresh, so the arm only ends
-                // the wait (the pulse arm's shape).
-                () = tokio::time::sleep_until(incident_poll_at) => {}
-                // The render barrier's deadline: an armed hold whose
-                // needle never lands still pops here — the plan proceeds
-                // and the assertion then reports the actual frame — so a
-                // quiet daemon (a catalog answer that never comes)
-                // cannot wedge the loop waiting on events that never
-                // arrive.
-                () = async {
-                    match wait_render_deadline {
-                        Some(at) => tokio::time::sleep_until(at).await,
-                        None => std::future::pending().await,
-                    }
-                } => {}
-                // The status line's expiry wake (TS `setStatusMessage`'s
-                // timer): the line clears at its deadline even on a quiet
-                // view, and the expiry check below repaints it away.
-                () = async {
-                    match status_at.map(tokio::time::Instant::from_std) {
-                        Some(at) => tokio::time::sleep_until(at).await,
-                        None => std::future::pending().await,
-                    }
-                } => {}
-            }
         }
         // The status line's timer (TS's `setTimeout`): an expired line
         // clears here after every arm — the wake's own and any input's —
@@ -1375,7 +1376,7 @@ async fn run_agents_view_surface(
                 tone,
                 deleted_saved_path,
             } => {
-                mode.delete_result(message, tone, deleted_saved_path);
+                mode.delete_result(&message, tone, deleted_saved_path);
             }
             UiInput::RenameResult { rename, outcome } => {
                 mode.rename_result(rename, outcome);
@@ -1387,16 +1388,16 @@ async fn run_agents_view_surface(
             // result still disarms or restores the composer's draft for
             // the run's final state.
             UiInput::HeadlineResult { key, result } => {
-                mode.headline_result(key, result);
+                mode.headline_result(&key, result);
             }
             UiInput::ReplyProgress(text) => {
-                mode.set_status(text);
+                mode.set_status(&text);
             }
             UiInput::ReplyResult { key, outcome } => {
-                mode.reply_result(key, outcome);
+                mode.reply_result(&key, outcome);
             }
             UiInput::KillResult { key, outcome } => {
-                mode.kill_result(key, outcome);
+                mode.kill_result(&key, outcome);
             }
             _ => {}
         }

@@ -326,7 +326,7 @@ fn a_deleted_path_survives_a_late_catalog_apply() {
     )];
     mode.rebuild_rows();
     mode.delete_result(
-        "Deleted session a deleted session".to_string(),
+        "Deleted session a deleted session",
         StatusTone::Muted,
         Some("/x/gone.jsonl".to_string()),
     );
@@ -423,7 +423,7 @@ fn a_deleted_saved_row_leaves_the_catalog_by_path() {
     ];
     mode.rebuild_rows();
     mode.delete_result(
-        "Deleted session a deleted session".to_string(),
+        "Deleted session a deleted session",
         StatusTone::Muted,
         Some("/x/gone.jsonl".to_string()),
     );
@@ -443,7 +443,7 @@ fn a_deleted_saved_row_leaves_the_catalog_by_path() {
     // The name-matching trap: a path that never appears in any
     // display name still matches by its own key.
     mode.delete_result(
-        "Deleted session Some Other Name".to_string(),
+        "Deleted session Some Other Name",
         StatusTone::Muted,
         Some("/x/stays.jsonl".to_string()),
     );
