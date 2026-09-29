@@ -132,7 +132,6 @@ impl SequenceGuard {
         }
     }
 
-    /// The poll wait: never past a pending sequence's deadline.
     /// The parking wait: the remaining flush deadline while a partial
     /// sequence is held, or `None` to park until real input — an idle
     /// wait has no tick of its own to bound.
