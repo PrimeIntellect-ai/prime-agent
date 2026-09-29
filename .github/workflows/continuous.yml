@@ -50,7 +50,14 @@ jobs:
         id: tip
         run: |
           set -eu
-          tip="$(git -c "http.extraheader=AUTHORIZATION: bearer ${{ github.token }}" ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" "refs/heads/${GITHUB_REF_NAME}" | cut -f1 || true)"
+          # Git-over-HTTPS wants Basic (x-access-token), not Bearer: a Bearer
+          # header is answered with "invalid credentials" EVEN on a public
+          # repo (an offered-but-bad credential 401s instead of serving
+          # anonymously), which would swallow every lookup and no-op the
+          # gate. The Basic form is verified working; empty tip builds as
+          # before (fail-open).
+          basic="$(printf 'x-access-token:%s' "${{ github.token }}" | base64 | tr -d '\n')"
+          tip="$(git -c "http.extraheader=AUTHORIZATION: basic ${basic}" ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" "refs/heads/${GITHUB_REF_NAME}" | cut -f1 || true)"
           if [ -n "${tip}" ] && [ "${tip}" != "${GITHUB_SHA}" ]; then
             echo "superseded=true" >> "${GITHUB_OUTPUT}"
             echo "superseded: ${GITHUB_SHA} is no longer the tip of ${GITHUB_REF_NAME} (tip ${tip}); the build jobs skip"
