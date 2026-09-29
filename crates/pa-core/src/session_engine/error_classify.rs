@@ -314,7 +314,10 @@ fn bounded_http_status(message: &str) -> Option<u64> {
         }
         let digit_before = index > 0 && bytes[index - 1].is_ascii_digit();
         let digit_after = index + 3 < bytes.len() && bytes[index + 3].is_ascii_digit();
-        if !digit_before && !digit_after {
+        // A word boundary, not just a digit boundary: `500ms` / `429s`
+        // (durations in the message text) never read as statuses.
+        let unit_after = index + 3 < bytes.len() && bytes[index + 3].is_ascii_alphabetic();
+        if !digit_before && !digit_after && !unit_after {
             let status =
                 (bytes[index] - b'0') as u64 * 100 + (b - b'0') as u64 * 10 + (c - b'0') as u64;
             return Some(status);
@@ -350,6 +353,10 @@ mod tests {
         assert_eq!(bounded_http_status("error 4012 nope"), None);
         assert_eq!(bounded_http_status("14043"), None);
         assert_eq!(bounded_http_status("no status at all"), None);
+        // Durations in the text never read as statuses.
+        assert_eq!(bounded_http_status("timed out after 500ms"), None);
+        assert_eq!(bounded_http_status("retry in 429s"), None);
+        assert_eq!(bounded_http_status("wait 30m"), None);
     }
 
     #[test]

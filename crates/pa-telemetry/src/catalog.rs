@@ -887,6 +887,7 @@ const AGENT_RUN_COMPLETED: EventRule = EventRule {
         // v2 enrichment:
         ("run_id", optional(uuid())),
         ("run_index", optional(count())),
+        ("trigger", optional(enum_rule(RUN_TRIGGERS, "unknown"))),
         ("stop_reason", optional(enum_rule(STOP_REASONS, "unknown"))),
         (
             "terminal_outcome",

@@ -446,15 +446,19 @@ impl PhaseTelemetry {
         if self.emitted.contains(&status.state) {
             return;
         }
-        let Some(event) = phase_event_name(status.state) else {
-            return;
-        };
         self.emitted.push(status.state);
         let now = std::time::Instant::now();
         let duration_ms = self
             .last_observed
             .map_or(0, |last| now.duration_since(last).as_millis() as u64);
         self.last_observed = Some(now);
+        // The v2 installation stage fires for EVERY mapped transition -
+        // including the ones without their own v1 phase event (`Skipped`:
+        // the already-current path still reports `completed`/`skipped`).
+        self.installation_stage(status, duration_ms);
+        let Some(event) = phase_event_name(status.state) else {
+            return;
+        };
         let mut properties = pa_telemetry::base_properties("cli");
         properties.set("phase", serde_json::Value::from(event));
         properties.set("duration_ms", serde_json::Value::from(duration_ms));
@@ -473,7 +477,6 @@ impl PhaseTelemetry {
             );
         }
         client.track(event, properties);
-        self.installation_stage(status, duration_ms);
     }
 
     /// `agent installation stage` (v2, #2117): the same status-file

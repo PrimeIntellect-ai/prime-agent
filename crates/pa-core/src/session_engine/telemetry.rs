@@ -407,12 +407,12 @@ impl SessionTelemetry {
                     }
                     .track(&self.client);
                 }
+                // The failed model call already counted its own chain
+                // link at its `MessageEnd`; the give-up never
+                // double-counts (the chain stays visible for the next
+                // occurrence's counter until a success resets it).
                 if *success {
                     state.consecutive_failure_count = 0;
-                } else {
-                    // The retry loop gave up: the chain stays visible for
-                    // the next occurrence's consecutive counter.
-                    state.consecutive_failure_count += 1;
                 }
             }
         }
@@ -830,8 +830,9 @@ fn handle_event(
                 // A tool failure is an error occurrence too: component
                 // `tools`, operation `execute`, stage `tool_execution`.
                 // The tool output never uploads (privacy contract), so the
-                // subtype is unknown and only the length flags ride.
-                state.consecutive_failure_count += 1;
+                // subtype is unknown. Tool failures never touch the
+                // model-failure chain (the consecutive counter is the
+                // provider chain's own signal).
                 AgentError {
                     error_id: uuid(),
                     kind: Some(ErrorEventKind::Occurrence),
@@ -844,11 +845,9 @@ fn handle_event(
                     operation: Some("execute"),
                     stage: Some("tool_execution"),
                     retryable: Some(false),
-                    consecutive_failure_count: Some(state.consecutive_failure_count),
                     ..Default::default()
                 }
                 .track(client);
-                state.consecutive_failure_count = 0;
             }
         }
         AgentEvent::AgentEnd { .. } => {
@@ -998,7 +997,7 @@ fn finalize_run_locked(client: &TelemetryClient, execution_mode: &str, state: &m
         "stop_reason",
         Value::from(stop_reason(run.last_assistant.as_ref())),
     );
-    properties.set("terminal_outcome", Value::from(outcome));
+    properties.set("terminal_outcome", Value::from(terminal_outcome(outcome)));
     properties.set(
         "successful_model_call_count",
         Value::from(run.successful_model_call_count),
@@ -1031,6 +1030,18 @@ fn finalize_run_locked(client: &TelemetryClient, execution_mode: &str, state: &m
     properties.set("retry_wait_ms", Value::from(run.retry_wait_ms));
     properties.set("max_stream_gap_ms", opt_value(run.max_stream_gap_ms));
     client.track("agent run completed", properties);
+}
+
+/// The #2117 `terminal_outcome` vocabulary: the legacy run outcome
+/// (`success`/`error`/`aborted`) onto the terminal vocabulary (the legacy
+/// `aborted` is the terminal `cancelled`).
+fn terminal_outcome(run_outcome: &str) -> &'static str {
+    match run_outcome {
+        "success" => "success",
+        "error" => "error",
+        "aborted" => "cancelled",
+        _ => "unknown",
+    }
 }
 
 /// The #2117 `stop_reason` vocabulary for the final assistant message.

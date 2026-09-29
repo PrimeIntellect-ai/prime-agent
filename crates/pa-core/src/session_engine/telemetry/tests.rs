@@ -878,3 +878,108 @@ async fn stream_gap_tracks_the_largest_quiet_stretch() {
     assert_eq!(runs[0]["max_stream_gap_ms"], serde_json::json!(150));
     assert_eq!(runs[0]["run_to_first_text_ms"], serde_json::json!(0));
 }
+
+/// The bot-found edges, pinned: the trigger lands on run completed (the
+/// catalog lists it), an aborted run's terminal outcome is the #2117
+/// `cancelled`, a tool failure never touches the model-failure chain,
+/// and a retry give-up never double-counts the chain.
+#[tokio::test]
+async fn bot_edges_the_trigger_lands_and_terminal_outcome_maps() {
+    let fixture = fixture();
+    let mut aborted = assistant_message();
+    aborted.stop_reason = StopReason::Aborted;
+    emit(&fixture, AgentEvent::AgentStart);
+    emit(
+        &fixture,
+        AgentEvent::MessageStart {
+            message: user_message(),
+        },
+    );
+    emit(&fixture, AgentEvent::TurnStart);
+    emit(&fixture, message_end_event(aborted));
+    emit(
+        &fixture,
+        AgentEvent::AgentEnd {
+            messages: Vec::new(),
+        },
+    );
+    emit(&fixture, AgentEvent::AgentStart);
+    let runs = event_properties(&fixture.mock, "agent run completed").await;
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["trigger"], serde_json::json!("prompt"));
+    assert_eq!(runs[0]["terminal_outcome"], serde_json::json!("cancelled"));
+}
+
+#[tokio::test]
+async fn bot_edges_tool_failure_never_touches_the_model_failure_chain() {
+    let fixture = fixture();
+    emit(&fixture, AgentEvent::AgentStart);
+    // The model failure counts chain link 1.
+    emit(
+        &fixture,
+        message_end_event(assistant_with_error("API Error: 429 rate limit exceeded")),
+    );
+    // A tool failure between model failures emits its own occurrence but
+    // neither increments nor wipes the model chain.
+    let (start, end) = tool_execution_event("bash", true);
+    emit(&fixture, start);
+    emit(&fixture, end);
+    // The next model failure still reports chain link 2.
+    emit(
+        &fixture,
+        message_end_event(assistant_with_error("API Error: 429 rate limit exceeded")),
+    );
+    let errors = event_properties(&fixture.mock, "agent error").await;
+    let model_occurrences: Vec<_> = errors
+        .iter()
+        .filter(|error| error["component"] == serde_json::json!("provider"))
+        .collect();
+    assert_eq!(
+        model_occurrences[0]["consecutive_failure_count"],
+        serde_json::json!(1)
+    );
+    assert_eq!(
+        model_occurrences[1]["consecutive_failure_count"],
+        serde_json::json!(2),
+        "the tool failure in between never reset the chain"
+    );
+    let tool_occurrence = errors
+        .iter()
+        .find(|error| error["component"] == serde_json::json!("tools"))
+        .expect("the tool occurrence fired");
+    assert!(
+        tool_occurrence.get("consecutive_failure_count").is_none(),
+        "tool occurrences never carry the model chain counter"
+    );
+}
+
+#[tokio::test]
+async fn bot_edges_the_give_up_never_double_counts_the_chain() {
+    let fixture = fixture();
+    let failed = assistant_with_error("API Error: 429 rate limit exceeded");
+    emit(&fixture, AgentEvent::AgentStart);
+    emit(&fixture, message_end_event(failed));
+    let telemetry = SessionTelemetry::detached(
+        fixture.client.clone(),
+        fixture.state.clone(),
+        "interactive".to_string(),
+    );
+    // The retry gives up: the failed call already counted its link; the
+    // give-up adds nothing.
+    telemetry.note_auto_retry_event(&AutoRetryEvent::End {
+        success: false,
+        attempt: 1,
+        final_error: Some("gave up".to_string()),
+        restored_model: None,
+    });
+    let errors = event_properties(&fixture.mock, "agent error").await;
+    let occurrence = errors
+        .iter()
+        .find(|error| error["error_event_kind"] == serde_json::json!("occurrence"))
+        .expect("the occurrence");
+    assert_eq!(
+        occurrence["consecutive_failure_count"],
+        serde_json::json!(1),
+        "the give-up never inflated the chain to 2"
+    );
+}
