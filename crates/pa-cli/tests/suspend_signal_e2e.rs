@@ -79,6 +79,27 @@ const KITTY_QUERY: &str = "\x1b[?u\x1b[c";
 /// binary is re-executed as the product-under-test.
 const CHILD_SOCKET_ENV: &str = "PA_SUSPEND_CHILD_SOCKET";
 
+/// The mock's wire traffic, in arrival order, for the timeout
+/// diagnostics: the requests the child sent and the responses the mock
+/// served. The dock-fed state (roster, heartbeats, bash capability,
+/// attach snapshot) all travels on this wire, so a timeout dump that
+/// includes it says exactly what the child was fed.
+static WIRE_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn log_wire(frame: &str) {
+    WIRE_LOG
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(frame.to_string());
+}
+
+fn wire_log_dump() -> String {
+    WIRE_LOG
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .join("\n")
+}
+
 /// The child half of the e2e: runs the real interactive loop in terminal
 /// mode against the parent's mock supervisor. A plain `cargo test` run
 /// (no `CHILD_SOCKET_ENV`) passes trivially — only the parent harnesses
@@ -491,7 +512,8 @@ impl PtyReader {
             if Instant::now() > deadline {
                 let text = String::from_utf8_lossy(&self.output[mark..]);
                 panic!(
-                    "timeout waiting for {what} (needle {needle:?}); pty tail since mark:\n{text}"
+                    "timeout waiting for {what} (needle {needle:?}); wire log:\n{}\npty tail since mark:\n{text}",
+                    wire_log_dump()
                 );
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -695,6 +717,7 @@ impl MockSupervisor {
         let Ok((stream, _)) = self.listener.accept() else {
             return;
         };
+        log_wire("[accept] the child connected");
         let write_stream = stream.try_clone().expect("clone mock socket");
         let mut writer = write_stream;
         let mut reader = std::io::BufReader::new(stream);
@@ -714,6 +737,7 @@ impl MockSupervisor {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {}
             }
+            log_wire(&format!("[req] {line}"));
             let Ok(envelope) = serde_json::from_str::<Value>(line.trim()) else {
                 continue;
             };
@@ -764,6 +788,7 @@ impl MockSupervisor {
 
 fn write_json(writer: &mut std::os::unix::net::UnixStream, value: &Value) {
     let mut line = serde_json::to_string(value).expect("serialize mock frame");
+    log_wire(&format!("[res] {line}"));
     line.push('\n');
     writer.write_all(line.as_bytes()).expect("write mock frame");
     writer.flush().expect("flush mock frame");
