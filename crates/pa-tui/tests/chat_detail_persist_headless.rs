@@ -174,13 +174,16 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
     fn theme(&self) -> Option<String> {
         None
     }
-    fn set_theme(&self, _theme: &str) -> Result<()> {
+    fn image_model(&self) -> Option<String> {
+        None
+    }
+    fn default_service_tier(&self) -> String {
+        "default".to_string()
+    }
+    fn set_default_service_tier(&self, _tier: &str) -> Result<()> {
         Ok(())
     }
-    fn fullscreen(&self) -> bool {
-        true
-    }
-    fn set_fullscreen(&self, _enabled: bool) -> Result<()> {
+    fn set_theme(&self, _theme: &str) -> Result<()> {
         Ok(())
     }
     fn show_images(&self) -> bool {

@@ -94,7 +94,9 @@ fn skill(import_name: &str, path: &str, hash: &str) -> BootstrapPythonSkill {
 static MEMO_STATE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Collect every `.runtime-probe-memo.json` under `root` (the override
-/// boundary pin: the override path must create none).
+/// boundary pin: the override path must create none). Unix only: its
+/// callers are the unix override-path tests.
+#[cfg(unix)]
 fn collect_memo_files(root: &Path, found: &mut Vec<std::path::PathBuf>) {
     if let Ok(entries) = std::fs::read_dir(root) {
         for entry in entries.flatten() {
@@ -596,7 +598,9 @@ fn disk_memo_late_write_after_invalidate_is_benign() {
 }
 
 /// Env-mutating tests serialize on this lock: the process env is
-/// global (same pattern as the request-timing env lock).
+/// global (same pattern as the request-timing env lock). Unix only:
+/// its takers are the unix env-override tests.
+#[cfg(unix)]
 static PRIME_AGENT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// The d14 boundary pinned at the observable-facts level: a

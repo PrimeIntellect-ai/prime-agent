@@ -69,6 +69,7 @@ pub fn sessions_dir(agent_dir: &Path) -> Result<PathBuf> {
     }
 }
 
+#[must_use]
 pub fn logs_dir(agent_dir: &Path) -> PathBuf {
     agent_dir.join("logs")
 }
@@ -87,6 +88,7 @@ pub fn ensure_dir(path: &Path) -> Result<()> {
 }
 
 /// sha256 hex, first `chars` characters.
+#[must_use]
 pub fn hash_key(input: &str, chars: usize) -> String {
     let digest = Sha256::digest(input.as_bytes());
     digest.iter().fold(String::new(), |mut key, b| {
@@ -99,6 +101,7 @@ pub fn hash_key(input: &str, chars: usize) -> String {
 
 /// Log path for a daemon socket (port of `getDaemonLogPath`): readable basename
 /// plus an 8-char hash of the normalized socket path.
+#[must_use]
 pub fn daemon_log_path(socket_path: &Path, agent_dir: &Path) -> PathBuf {
     let normalized = socket_path.to_string_lossy().to_string();
     let base = socket_path.file_name().map_or_else(
@@ -116,6 +119,7 @@ pub struct RotatingLog {
 }
 
 impl RotatingLog {
+    #[must_use]
     pub fn new(path: PathBuf) -> Self {
         RotatingLog {
             path,
@@ -159,6 +163,7 @@ impl RotatingLog {
 use std::io::Write as _;
 
 /// Age of a file's mtime, for stale-lease detection.
+#[must_use]
 pub fn mtime_age(path: &Path) -> Option<Duration> {
     let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
     SystemTime::now().duration_since(modified).ok()

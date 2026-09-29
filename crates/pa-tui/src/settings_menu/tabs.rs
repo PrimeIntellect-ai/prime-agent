@@ -4,7 +4,8 @@
 //! Interaction, Output & Display, …); ours adapts the same grouping to
 //! our own settings rows, rendered inline through the shared
 //! menu-panel grammar — one `N Name` strip row under the search field,
-//! the active tab accent bold, the rest muted.
+//! the active tab white bold (the settings page's own selection styling,
+//! the operator's 2026-09-28 ruling), the rest muted.
 //!
 //! The layout is the single source of the grouping: every settings row
 //! id rides exactly one tab (pinned by the tests here and in
@@ -39,13 +40,12 @@ const TAB_LAYOUT: &[TabLayout] = &[
     },
     TabLayout {
         name: "Models",
-        ids: &["thinking", "transport"],
+        ids: &["thinking", "transport", "default-service-tier"],
     },
     TabLayout {
         name: "Display",
         ids: &[
             "theme",
-            "fullscreen",
             "terminal-progress",
             "clear-on-shrink",
             "show-images",
@@ -112,12 +112,14 @@ pub(crate) fn row_indices(rows: &[SettingsMenuRow]) -> Vec<(&'static str, Vec<us
     tabs
 }
 
-/// The tab strip (one row directly under the search field's bottom
-/// border, aligned with the rows' inner column): one `N Name` per tab —
-/// the number dim, the name muted, the active tab accent bold — two
-/// spaces between tabs, truncated to the frame width like every
-/// status row. The numbers are the digit keys that jump straight to
-/// the tab.
+/// The tab strip (one row under the search field, aligned with the rows'
+/// inner column): one `N Name` per tab — the number dim, the name muted,
+/// the active tab white bold (the operator's 2026-09-28 selection
+/// ruling: the settings page's own selected-section styling renders the
+/// theme's text color, distinct from the dock's accent-purple selection)
+/// — four spaces between tabs (the operator's 2026-09-28 spacing pass),
+/// truncated to the frame width like every status row. The numbers are
+/// the digit keys that jump straight to the tab.
 pub(crate) fn strip_row(
     theme: &Theme,
     width: usize,
@@ -127,12 +129,12 @@ pub(crate) fn strip_row(
     let mut line: Line = vec![Span::raw("  ")];
     for (index, name) in names.iter().enumerate() {
         if index > 0 {
-            line.push(Span::raw("  "));
+            line.push(Span::raw("    "));
         }
         line.push(theme.fg_span(ThemeColor::Dim, (index + 1).to_string()));
         line.push(Span::raw(" "));
         line.push(if index == active {
-            theme.bold(theme.fg_span(ThemeColor::Accent, name.to_string()))
+            theme.bold(theme.fg_span(ThemeColor::Text, name.to_string()))
         } else {
             theme.fg_span(ThemeColor::Muted, name.to_string())
         });
@@ -164,7 +166,11 @@ mod tabs_tests {
     fn the_strip_lists_the_tabs_and_marks_the_active_one() {
         let line = strip_row(&theme(), 80, &["General", "Models"], 1);
         let text: String = line.iter().map(|span| span.content.as_str()).collect();
-        assert_eq!(text, "  1 General  2 Models");
+        // Four spaces between tabs (the operator's 2026-09-28 spacing
+        // pass; two before).
+        assert_eq!(text, "  1 General    2 Models");
+        // The active tab renders white bold — the theme's text color,
+        // not the dock's accent purple (the selection ruling).
         let active = line
             .iter()
             .find(|span| span.content == "Models")
@@ -172,7 +178,7 @@ mod tabs_tests {
         assert_eq!(
             active.style,
             theme()
-                .fg_style(ThemeColor::Accent)
+                .fg_style(ThemeColor::Text)
                 .add_modifier(ratatui::style::Modifier::BOLD)
         );
         let inactive = line

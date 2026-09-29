@@ -4,7 +4,7 @@
 //! requested-refinement streaming, and the disposal drain — the child
 //! cut of the `print_boundary` facade.
 
-use super::*;
+use super::{json, Model, PathBuf, SessionAgentMessage, SessionEngine, TurnBoundary};
 
 /// Wall-clock milliseconds (the review-cooldown stamps, TS `Date.now()`).
 fn now_millis() -> u64 {
@@ -178,7 +178,7 @@ impl TurnBoundary {
                             (self.sink)(&json!({ "type": event_type, "message": value }));
                         }
                     }
-                    self.emit_json(json!({
+                    self.emit_json(&json!({
                         "type": "refine_complete",
                         "result": serde_json::to_value(result)
                             .unwrap_or(serde_json::Value::Null),
@@ -188,7 +188,7 @@ impl TurnBoundary {
             Err(error) => {
                 if emit {
                     if self.json_mode {
-                        self.emit_json(json!({
+                        self.emit_json(&json!({
                             "type": "refine_failed",
                             "error": format!("{error}"),
                         }));

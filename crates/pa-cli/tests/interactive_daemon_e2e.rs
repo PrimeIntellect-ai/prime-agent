@@ -1,3 +1,22 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
+// by design on hot paths (boxing 130 fns is allocation-churn with zero
+// correctness gain); the fn-length threshold is a style gate, not
+// correctness (the harness fns are intentionally linear); 64-bit targets -
+// the narrowing sits at OS/protocol boundaries where the values are
+// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
+// guarded parses), and checked conversions would add panic paths where
+// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
+// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
+// dossier for the conductor).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! End-to-end verifier for the interactive TUI: spawn the real supervisor
 //! (`prime-agent --mode daemon`, the same binary the interactive runtime
 //! launches when no daemon is running), then drive the TUI headlessly
@@ -45,7 +64,7 @@ impl Drop for Supervisor {
         let _ = self.child.kill();
         let _ = self.child.wait();
         for pid in worker_pids {
-            kill_worker(&pid);
+            kill_worker(pid);
         }
         let _ = std::fs::remove_file(&self.socket);
     }
@@ -53,7 +72,7 @@ impl Drop for Supervisor {
 
 /// Kill a leaked worker process (SIGKILL; it already failed the graceful
 /// path) and wait briefly for it to disappear.
-fn kill_worker(pid: &u32) {
+fn kill_worker(pid: u32) {
     // The worker pid is a child of the supervisor we just killed, so it is
     // not our child and cannot be waited on directly; poll /proc liveness.
     // Best effort by design: this runs inside `Drop` (a failing test's
@@ -64,16 +83,16 @@ fn kill_worker(pid: &u32) {
     // worker is re-killed and reported to stderr instead.
     for round in 0..2 {
         unsafe {
-            libc::kill(*pid as i32, libc::SIGKILL);
+            libc::kill(pid as i32, libc::SIGKILL);
         }
         let deadline = Instant::now() + Duration::from_secs(5);
-        while process_alive(*pid) {
+        while process_alive(pid) {
             if Instant::now() >= deadline {
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        if !process_alive(*pid) {
+        if !process_alive(pid) {
             return;
         }
         eprintln!("worker {pid} survived teardown kill round {round}; re-killing");
@@ -111,7 +130,7 @@ impl Drop for DetachedDaemon {
                 std::thread::sleep(Duration::from_millis(20));
             }
             for worker in worker_pids {
-                kill_worker(&worker);
+                kill_worker(worker);
             }
         }
         let _ = std::fs::remove_file(&self.socket);
@@ -123,10 +142,10 @@ fn child_pids_of(ppid: u32) -> Vec<u32> {
     let mut pids = Vec::new();
     let entries = std::fs::read_dir("/proc").expect("read /proc");
     for entry in entries.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+        let Ok(entry_pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
             continue;
         };
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{entry_pid}/stat")) else {
             continue;
         };
         // `comm` can contain spaces and parens, so parse after the last ')'.
@@ -139,7 +158,7 @@ fn child_pids_of(ppid: u32) -> Vec<u32> {
             continue;
         };
         if parent == ppid {
-            pids.push(pid);
+            pids.push(entry_pid);
         }
     }
     pids
@@ -287,7 +306,7 @@ async fn run_headless_bounded(
     .await
     {
         Ok(outcome) => outcome,
-        Err(_expired) => panic!(
+        Err(tokio::time::error::Elapsed { .. }) => panic!(
             "the headless run exceeded the {HEADLESS_RUN_BOUND:?} wall after {:?}: the wedge class - a turn never settled and the idle gate never opened",
             started.elapsed()
         ),
@@ -353,7 +372,7 @@ fn sweep_orphan_test_daemons() {
         let Some((_, rest)) = stat.rsplit_once(')') else {
             continue;
         };
-        let Ok(ppid) = rest
+        let Ok(parsed_ppid) = rest
             .split_whitespace()
             .nth(1)
             .unwrap_or_default()
@@ -361,7 +380,7 @@ fn sweep_orphan_test_daemons() {
         else {
             continue;
         };
-        if ppid != 1 && process_alive(ppid) {
+        if parsed_ppid != 1 && process_alive(parsed_ppid) {
             continue; // a live run's daemon: its test binary is still up
         }
         unsafe {
@@ -3443,11 +3462,11 @@ async fn tui_settings_menu_cycles_rows() {
         "the settings menu rendered its first row:\n{rendered}"
     );
     assert!(
-        rendered.contains("1 General  2 Models  3 Display  4 Editor  5 Agents"),
+        rendered.contains("1 General    2 Models    3 Display    4 Editor    5 Agents"),
         "the settings menu rendered its tab strip:\n{rendered}"
     );
     assert!(
-        rendered.contains("Type to search · ←/→/1-5 tabs · Enter/Space change · Esc close"),
+        rendered.contains("Type to search · Tab/1-5 tabs · ←/→/Enter/Space change · Esc close"),
         "the settings hint rendered:\n{rendered}"
     );
 }

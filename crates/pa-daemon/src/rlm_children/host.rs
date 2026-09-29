@@ -2,7 +2,15 @@
 //! (`spawn`, `create_session`, `list_subagents`, `delete_subagent`,
 //! `collect`) over the supervisor's child-sessions registry, with the
 //! spawn-admission helpers only this surface uses.
-use super::*;
+use super::{
+    assert_thinking_supported, bail, create_default_rlm_subagent_session_name, json, now_ms,
+    resolve_child_model, rlm_child_label, spawn_name_unavailable, Arc, ChildCloseReason,
+    ChildRecord, Context, DaemonCommand, Duration, Instant, Mutex, Path, PathBuf, Result,
+    RlmChildResult, RlmChildTerminalNotice, RlmCreateSessionHandle, RlmCreateSessionRequest,
+    RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry,
+    RlmSubagentHost, SpawnNameReservationGuard, SupervisorChildSessions,
+    SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS,
+};
 
 /// Resolve the child model with the daemon `allowedModels` allowlist
 /// enforced (the parent's cwd scopes the settings read), refusing a model

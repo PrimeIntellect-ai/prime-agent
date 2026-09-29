@@ -232,8 +232,9 @@ pub fn invalidate_runtime_probe_cache() {
 
 /// Drop only the in-process memo layer, leaving the on-disk layer intact:
 /// the fresh-process simulation the disk-memo oracles use (a real fresh
-/// process starts with an empty map and the disk file on disk).
-#[cfg(test)]
+/// process starts with an empty map and the disk file on disk). Unix
+/// only: its callers are the unix socket-harness tests.
+#[cfg(all(test, unix))]
 pub(crate) fn clear_in_process_probe_memo_for_tests() {
     *lock_probe_memo() = None;
 }

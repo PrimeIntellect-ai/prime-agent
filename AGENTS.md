@@ -50,8 +50,6 @@ Every contributor (human or agent) must read this before working on this repo.
   A new dependency is an architectural change: state in the PR why the existing crates cannot
   host the functionality, and `make deny` must stay clean for it.
 - If a change starts forcing edits across many crate internals, stop and fix the boundary instead.
-- Cache-prefix stability is first-class: never adopt a pattern without checking its effect on the
-  cacheable prompt prefix (cross-check against ~/codex).
 
 ## Tests
 

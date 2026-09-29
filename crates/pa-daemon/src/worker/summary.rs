@@ -1,7 +1,12 @@
 //! The worker's client-visible surface: summaries, snapshots, the
 //! roster push, and the event emission family.
 use super::lifecycle::active_lifecycle;
-use super::*;
+use super::{
+    checkpoint_queue_recovery, create_daemon_event_meta, is_injected_prompt_item,
+    is_rlm_child_status_item, json, AgentConnectionState, Arc, DaemonOutbound,
+    DaemonSessionClosedReason, EventPump, Map, Mutex, OutboundFrame, QueueCheckpoint, QueueLanes,
+    QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine, Value, Worker,
+};
 
 use crate::types::SessionSummary;
 
@@ -47,7 +52,7 @@ impl Worker {
         summary
     }
 
-    pub(crate) fn snapshot_locked(&self, core: &SessionCore) -> SessionActionSnapshot {
+    pub(crate) fn snapshot_locked(core: &SessionCore) -> SessionActionSnapshot {
         session_snapshot(core)
     }
 
@@ -64,11 +69,7 @@ impl Worker {
     pub(crate) fn connection_state_locked(&self, core: &SessionCore) -> AgentConnectionState {
         let store = core.store.as_ref();
         let model = self.engine.model_metadata();
-        let model_fast_mode = model
-            .as_ref()
-            .and_then(|model| model.get("id"))
-            .and_then(Value::as_str)
-            .is_some_and(supports_fast_mode);
+
         AgentConnectionState {
             is_streaming: core.busy,
             is_compacting: core.compacting,
@@ -79,10 +80,11 @@ impl Worker {
                 .engine
                 .effective_thinking_level()
                 .unwrap_or_else(|| "default".to_string()),
-            // The effective tier: the preference clamped to the model's
-            // fast-mode support (`priority` degrades to `default`).
+            // The ACTIVE tier: the preference clamped to the model's
+            // tier support (`clampServiceTier`; the worker keeps the
+            // clamped value current on every switch and restore).
             service_tier: crate::setting_switches::service_tier_wire_name(
-                effective_service_tier(core.service_tier, model_fast_mode)
+                core.active_service_tier
                     .unwrap_or(pa_types::ai::ServiceTier::Auto),
             )
             .to_string(),
@@ -164,7 +166,7 @@ impl Worker {
     /// `message_start`/`message_end` pair (the TS `_emit` for rows the
     /// session appends outside a turn: `append_custom_message`, the
     /// `refine` outcome and notice, restored prefix rows).
-    pub(crate) fn emit_custom_row(&self, message: Value) {
+    pub(crate) fn emit_custom_row(&self, message: &Value) {
         {
             let mut core = self.core.lock().unwrap();
             if let Some(store) = core.store.as_mut() {

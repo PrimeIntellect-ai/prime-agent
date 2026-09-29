@@ -6,6 +6,31 @@
 //! event, and keep it out of the provider request (the model never sees
 //! the disclosure, so the KV-cacheable prefix is unaffected — the TS
 //! contract, pinned by `agent-session-compaction.test.ts`).
+// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
+// the full rationale).
+// Stack-resident futures by design on the daemon's hot paths; boxing the
+// call sites for a lint tick is a perf regression with zero correctness gain.
+#![allow(clippy::large_futures)]
+// 64-bit-only targets; the narrowing casts sit at OS boundaries
+// (pid/fd/time/size) where the values are bounded by the kernel - the
+// dead-guard expect()s would add panic paths where silent wrap was
+// deliberate.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// The fn-length threshold is a style gate, not correctness; the structure
+// campaign owns the god-fn splits as a follow-up.
+#![allow(clippy::too_many_lines)]
+// API-shape opinions, not defects; the surfaces are deliberate.
+#![allow(
+    clippy::unnecessary_wraps,
+    clippy::zero_sized_map_values,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names
+)]
 #![cfg(unix)]
 
 use std::fmt::Write as _;
@@ -63,7 +88,7 @@ impl CompactionMock {
                 let requests = Arc::clone(&requests_for_thread);
                 let fail = Arc::clone(&fail_for_thread);
                 std::thread::spawn(move || {
-                    let _ = serve(stream, requests, fail);
+                    let _ = serve(stream, &requests, &fail);
                 });
             }
         });
@@ -83,7 +108,7 @@ impl CompactionMock {
     }
 }
 
-fn chunk(delta: Value, finish_reason: Option<&str>, usage: Value) -> String {
+fn chunk(delta: &Value, finish_reason: Option<&str>, usage: &Value) -> String {
     json!({
         "id": "chatcmpl-test",
         "object": "chat.completion.chunk",
@@ -137,8 +162,8 @@ fn is_summarizer_request(body: &Value) -> bool {
 
 fn serve(
     mut stream: TcpStream,
-    requests: Arc<Mutex<Vec<Value>>>,
-    fail_summarizer: Arc<AtomicBool>,
+    requests: &Arc<Mutex<Vec<Value>>>,
+    fail_summarizer: &Arc<AtomicBool>,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut head = String::new();
@@ -188,11 +213,11 @@ fn serve(
     let mut payload = String::new();
     for data in [
         chunk(
-            json!({"role": "assistant", "content": "parity reply"}),
+            &json!({"role": "assistant", "content": "parity reply"}),
             None,
-            small_usage(),
+            &small_usage(),
         ),
-        chunk(json!({}), Some("stop"), usage.clone()),
+        chunk(&json!({}), Some("stop"), &usage),
         json!({
             "id": "chatcmpl-test",
             "object": "chat.completion.chunk",
@@ -267,7 +292,7 @@ impl Client {
         client
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -398,7 +423,7 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
 
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -419,7 +444,7 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
 
     client.send_command(
         "a1",
-        json!({ "type": "attach", "activeSessionId": session_id }),
+        &json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let attached = client.read_response("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
@@ -427,7 +452,7 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
     // Seed turn (small usage): the compaction threshold stays silent.
     client.send_command(
         "p1",
-        json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "seed turn"}),
+        &json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "seed turn"}),
     );
     let seeded = client.read_response("p1");
     assert_eq!(seeded["success"], true, "seed prompt failed: {seeded}");
@@ -438,7 +463,7 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
     mock.fail_summarizer.store(true, Ordering::SeqCst);
     client.send_command(
         "p2",
-        json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "crossing turn"}),
+        &json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "crossing turn"}),
     );
     let crossed = client.read_response("p2");
     assert_eq!(
@@ -554,7 +579,7 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
     let before_next = mock.request_count();
     client.send_command(
         "p3",
-        json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "next turn"}),
+        &json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "next turn"}),
     );
     let next = client.read_response("p3");
     assert_eq!(next["success"], true, "next prompt failed: {next}");

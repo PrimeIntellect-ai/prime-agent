@@ -375,17 +375,17 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
     }
 
     let mut stdin = BufReader::new(tokio::io::stdin());
-    let mut line = String::new();
+    let mut input_line = String::new();
     loop {
-        line.clear();
-        match stdin.read_line(&mut line).await {
+        input_line.clear();
+        match stdin.read_line(&mut input_line).await {
             Ok(0) | Err(_) => break,
             Ok(_) => {}
         }
-        if line.trim().is_empty() {
+        if input_line.trim().is_empty() {
             continue;
         }
-        let incoming = match jsonrpc::parse_line(&line) {
+        let incoming = match jsonrpc::parse_line(&input_line) {
             Ok(incoming) => incoming,
             Err(error_response) => {
                 let _ = tx.send(error_response);
@@ -460,7 +460,7 @@ async fn handle_request(
         "initialize" => {
             let result = serde_json::to_value(types::initialize_result(&options.product_version))
                 .expect("serializes");
-            let _ = tx.send(jsonrpc::response(id, result));
+            let _ = tx.send(jsonrpc::response(&id, &result));
         }
         "session/new" => {
             handle_session_new(id, params, link, state, options, tx).await;
@@ -470,7 +470,7 @@ async fn handle_request(
         }
         "session/cancel" => {
             let _ = session_cancel(params, link, state).await;
-            let _ = tx.send(jsonrpc::response(id, json!({})));
+            let _ = tx.send(jsonrpc::response(&id, &json!({})));
         }
         "session/set_config_option" => {
             handle_set_config_option(id, params, link, state, tx).await;
@@ -480,10 +480,10 @@ async fn handle_request(
         }
         other => {
             let _ = tx.send(jsonrpc::error_response(
-                id,
+                &id,
                 jsonrpc::METHOD_NOT_FOUND,
                 &format!("\"Method not found\": {other}"),
-                Some(json!({ "method": other })),
+                Some(&json!({ "method": other })),
             ));
         }
     }
@@ -521,10 +521,10 @@ async fn handle_session_new(
             Err(reason) => {
                 *state.lock().await = DaemonAcpState::default();
                 let _ = tx.send(jsonrpc::error_response(
-                    id,
+                    &id,
                     jsonrpc::INVALID_PARAMS,
                     "Invalid params",
-                    Some(json!({ "reason": reason })),
+                    Some(&json!({ "reason": reason })),
                 ));
                 return;
             }
@@ -637,7 +637,7 @@ async fn handle_session_new(
             .await
             .unwrap_or_default(),
     );
-    let published = picker_options_from_state(&state_value, &models);
+    let published = picker_options_from_state(state_value.as_ref(), &models);
     let config = Arc::new(HostedConfig {
         queue: tokio::sync::Mutex::new(()),
         published: tokio::sync::Mutex::new(published),
@@ -689,7 +689,7 @@ async fn handle_session_new(
     if let Some(requested) = params.cwd.as_deref().filter(|cwd| !cwd.is_empty()) {
         let actual = options.actual_cwd.display().to_string();
         if !super::same_cwd(Path::new(requested), &options.actual_cwd) {
-            result["_meta"] = meta::prime_agent_meta(PrimeAgentSessionMeta {
+            result["_meta"] = meta::prime_agent_meta(&PrimeAgentSessionMeta {
                 cwd: Some(meta::PrimeAgentCwdMeta {
                     requested: requested.to_string(),
                     actual,
@@ -710,7 +710,7 @@ async fn handle_session_new(
         guard.session_new_in_flight = false;
         guard.session = Some(hosted);
     }
-    let _ = tx.send(jsonrpc::response(id, result));
+    let _ = tx.send(jsonrpc::response(&id, &result));
     producer.commit_session_new_response().await;
 }
 
@@ -753,7 +753,7 @@ async fn handle_session_prompt(
     let admitted = match super::session::AdmittedPrompt::parse(&params.prompt) {
         Ok(admitted) => admitted,
         Err(error) => {
-            let _ = tx.send(super::session::prompt_block_error(&id, error));
+            let _ = tx.send(super::session::prompt_block_error(&id, &error));
             return;
         }
     };
@@ -771,8 +771,8 @@ async fn handle_session_prompt(
                 // prompt frame's admission and this task starting.
                 if std::mem::take(&mut hosted.cancel_requested) {
                     let _ = tx.send(jsonrpc::response(
-                        id,
-                        serde_json::to_value(types::AcpStopReasonResponse {
+                        &id,
+                        &serde_json::to_value(types::AcpStopReasonResponse {
                             stop_reason: types::AcpStopReason::Cancelled,
                         })
                         .expect("serializes"),
@@ -864,8 +864,8 @@ async fn handle_session_prompt(
     if cancelled {
         producer.finish_prompt(turn_id).await;
         let _ = tx.send(jsonrpc::response(
-            id,
-            serde_json::to_value(types::AcpStopReasonResponse {
+            &id,
+            &serde_json::to_value(types::AcpStopReasonResponse {
                 stop_reason: types::AcpStopReason::Cancelled,
             })
             .expect("serializes"),
@@ -905,7 +905,7 @@ async fn handle_session_prompt(
     // The boundary, completion, and terminal quiescence frames match the
     // in-process settlement because both serve the same captures.
     let boundary = types::AcpSessionUpdate::SessionInfoUpdate {
-        meta: meta::prime_agent_meta(PrimeAgentSessionMeta {
+        meta: meta::prime_agent_meta(&PrimeAgentSessionMeta {
             terminal_quiescence_expected: Some(true),
             ..Default::default()
         }),
@@ -922,7 +922,7 @@ async fn handle_session_prompt(
     // autonomous accounting rides the quiescence event, then the terminal
     // quiescence envelope repeats the observation.
     let quiescence = types::AcpSessionUpdate::SessionInfoUpdate {
-        meta: meta::prime_agent_meta(PrimeAgentSessionMeta {
+        meta: meta::prime_agent_meta(&PrimeAgentSessionMeta {
             autonomous: autonomous_meta.clone(),
             quiescence: Some(meta::PrimeAgentQuiescenceMeta {
                 outstanding_subagents: 0,
@@ -935,7 +935,7 @@ async fn handle_session_prompt(
         .publish(&quiescence, turn_id, PrimeAgentEventPhase::Event, None)
         .await;
     let terminal = types::AcpSessionUpdate::SessionInfoUpdate {
-        meta: meta::prime_agent_meta(PrimeAgentSessionMeta {
+        meta: meta::prime_agent_meta(&PrimeAgentSessionMeta {
             autonomous: autonomous_meta.clone(),
             quiescence: Some(meta::PrimeAgentQuiescenceMeta {
                 outstanding_subagents: 0,
@@ -974,8 +974,8 @@ async fn handle_session_prompt(
     // reached on the enabled run is the only non-end_turn outcome.
     let stop_reason = meta::acp_stop_reason_for_status(false, autonomous_status.as_ref());
     let _ = tx.send(jsonrpc::response(
-        id,
-        serde_json::to_value(types::AcpStopReasonResponse { stop_reason }).expect("serializes"),
+        &id,
+        &serde_json::to_value(types::AcpStopReasonResponse { stop_reason }).expect("serializes"),
     ));
 }
 
@@ -1095,7 +1095,7 @@ async fn handle_session_close(
         .await;
     let _ = hosted.config.queue.lock().await;
     hosted.producer.close().await;
-    let _ = tx.send(jsonrpc::response(id, json!({})));
+    let _ = tx.send(jsonrpc::response(&id, &json!({})));
     let mut guard = state.lock().await;
     guard.session_close_in_flight = false;
 }

@@ -1,6 +1,14 @@
 //! Client connections: accept, authenticate, and the frame/event plumbing
 //! between the worker and its supervisor.
-use super::*;
+use super::{
+    active_session_id_of, anyhow, bind_transport, broadcast, create_daemon_replay_info,
+    current_protocol_info, default_client_capabilities, json, normalize_client_capabilities,
+    peer_command_allowed, response_failure, response_success, worker_peer_command_allowed,
+    worker_server_capabilities, write_frame, write_frame_segments, Arc, AtomicU64, ConnectionRole,
+    Context, DaemonOutbound, DaemonResponse, DaemonResumeCursor, Map, Ordering, Result,
+    TransportStream, Value, Worker, WorkerRecoveryJournal, DAEMON_APP_VERSION, DAEMON_SCHEMA_ID,
+    DAEMON_SCHEMA_REVISION, DEFAULT_PRIVATE_FRAME_LIMITS, PEER_COMMAND_NOT_ALLOWED,
+};
 
 /// Result of one connection's authentication command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,7 +277,7 @@ impl Worker {
             app_version: Some(DAEMON_APP_VERSION.to_string()),
             runtime: None,
             supervisor_generation: None,
-            supervisor_pid: Some(std::process::id() as u64),
+            supervisor_pid: Some(u64::from(std::process::id())),
             supervisor_owner_token: None,
             supervisor_process_start_id: None,
             supervisor_socket_path: None,

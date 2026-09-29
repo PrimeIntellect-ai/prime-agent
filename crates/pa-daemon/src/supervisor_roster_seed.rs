@@ -397,7 +397,7 @@ impl Supervisor {
         // content-diff guard (which would drop a byte-identical replay)
         // does not apply here — the identity gate above is this path's
         // own unchanged-row filter.
-        self.push_roster_update_unguarded(changed, Vec::new());
+        self.push_roster_update_unguarded(&changed, Vec::new());
     }
 
     /// Whether the roster still holds exactly the given seeded row (the
@@ -731,7 +731,7 @@ pub(crate) mod tests {
     ) {
         let ledger = crate::rlm_ledger::RlmSpawnLedger::new(agent_dir, sessions_dir, |_| {});
         ledger
-            .append_spawn(crate::rlm_ledger::RlmSpawnInput {
+            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
                 child_id: child_id.to_string(),
                 parent: parent.to_string_lossy().to_string(),
                 child: child.to_string_lossy().to_string(),

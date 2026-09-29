@@ -1,6 +1,6 @@
 //! The client-settings seam. pa-tui depends on pa-types only, so the
-//! interactive commands that read or persist user settings (`/settings`,
-//! `/fullscreen`) call this trait; the composition
+//! interactive commands that read or persist user settings (`/settings`)
+//! call this trait; the composition
 //! root (pa-cli) implements it over the real settings manager. Every
 //! getter reads the effective settings with the TS default; every setter
 //! persists the global scope (TS `markModified` + `save`).
@@ -17,15 +17,6 @@ pub trait ClientSettings: Send + Sync {
     /// Returns `Err` when opening or persisting the settings
     /// store fails.
     fn set_theme(&self, theme: &str) -> Result<()>;
-    /// `terminal.fullscreen` (TS default true).
-    fn fullscreen(&self) -> bool;
-    /// Persists `terminal.fullscreen` to the global scope.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` when opening or persisting the settings
-    /// store fails.
-    fn set_fullscreen(&self, enabled: bool) -> Result<()>;
     /// `terminal.showImages` (TS default true).
     fn show_images(&self) -> bool;
     /// Persists `terminal.showImages` to the global scope.
@@ -71,6 +62,10 @@ pub trait ClientSettings: Send + Sync {
     /// Returns `Err` when opening or persisting the settings
     /// store fails.
     fn set_block_images(&self, blocked: bool) -> Result<()>;
+    /// `imageModel` (TS `getImageModel`: "provider/model-id" or a bare id;
+    /// unset by default). Read-only for the paste-time hint that names the
+    /// setting when the session model lacks image input.
+    fn image_model(&self) -> Option<String>;
     /// `enableSkillCommands` (TS default true).
     fn enable_skill_commands(&self) -> bool;
     /// Persists `enableSkillCommands` to the global scope.
@@ -152,6 +147,19 @@ pub trait ClientSettings: Send + Sync {
     /// Returns `Err` when opening or persisting the settings
     /// store fails.
     fn set_tree_filter_mode(&self, mode: &str) -> Result<()>;
+    /// `defaultServiceTier` (TS `getDefaultServiceTier`, default
+    /// "default"): the wire name of the persisted default tier — the
+    /// settings row's bound value.
+    fn default_service_tier(&self) -> String;
+    /// TS `settingsManager.setDefaultServiceTier` — persists the wire name.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when the tier name is not a known service tier or
+    /// opening or persisting the settings store fails.
+    fn set_default_service_tier(&self, tier: &str) -> Result<()>;
+    /// `chatDetail` (`overview`/`details`/`all`; TS #2709 default
+    /// `details`): the conversation-detail level the chat starts at.
     /// `chatDetail` (`overview`/`details`/`all`; the default reads as
     /// `overview`, the collapse mode): the conversation-detail level the
     /// chat starts at.

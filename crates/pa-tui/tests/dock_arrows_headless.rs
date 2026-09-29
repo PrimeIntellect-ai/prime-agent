@@ -327,11 +327,14 @@ fn run_plan(
 /// mounts the dock (0 subagents, 0 heartbeats, 0 shells) and the arrows
 /// still visit each section in order — right through the empty
 /// heartbeats and shells sections to the goal section, then left back
-/// through them, with the wrap landing on the row's last section. Each
-/// visited section opens its own view, whose existing empty state reads
-/// the pane grammar. The panel-exit ruling (2026-09-26) keeps the dock
-/// focused on the closed section's own item, so the walk needs no
-/// re-grab press between the sections.
+/// through them to the subagents section. Each visited section opens
+/// its own view, whose existing empty state reads the pane grammar.
+/// The panel-exit ruling (2026-09-26) keeps the dock focused on the
+/// closed section's own item, so the walk needs no re-grab press
+/// between the sections. Left from the subagents section no longer
+/// wraps to the row's last section (the operator's 2026-09-28 ask): it
+/// opens the scoped agents view — the run hands the pane to the agents
+/// surface and ends (the pure `step` tests keep pinning the wrap).
 #[test]
 fn dock_arrows_visit_each_empty_section_in_order_both_directions() {
     let steps = vec![
@@ -389,19 +392,16 @@ fn dock_arrows_visit_each_empty_section_in_order_both_directions() {
         },
         HeadlessStep::Key(escape()),
         HeadlessStep::WaitMs(100),
-        // Left wraps past the row's first section: two presses from the
-        // heartbeats section land on the row's last section (the goal).
+        // Left from the heartbeats section lands on the subagents section —
+        // the reverse walk's last stop before the row's first section.
         HeadlessStep::Key(left()),
         HeadlessStep::WaitMs(100),
+        // Left from the subagents selection no longer wraps to the
+        // row's last section: it opens the scoped agents view (the
+        // operator's 2026-09-28 ask), the run hands the pane to the
+        // agents surface, and the plan ends there.
         HeadlessStep::Key(left()),
-        HeadlessStep::WaitMs(100),
-        HeadlessStep::Key(enter()),
-        HeadlessStep::WaitRender {
-            needle: "status   active".to_string(),
-            timeout_ms: 5_000,
-        },
-        HeadlessStep::Key(escape()),
-        HeadlessStep::WaitMs(100),
+        HeadlessStep::WaitMs(300),
     ];
     let outcome = run_plan(steps, None);
     let all = outcome.frames.join("\n");
@@ -423,11 +423,11 @@ fn dock_arrows_visit_each_empty_section_in_order_both_directions() {
         all.contains("No background commands"),
         "the empty shells section opens its view's empty state:\n{all}"
     );
-    // The run never left the session view: no press opened the scoped
+    // The left handoff from the subagents section reached the scoped
     // agents view (the subagents section's destination).
     assert!(
-        !outcome.return_to_agents_view,
-        "the empty traversal stays in the session view"
+        outcome.return_to_agents_view,
+        "left from the subagents selection hands the pane to the agents view"
     );
 }
 
@@ -506,4 +506,43 @@ fn dock_arrows_visit_the_same_sections_when_one_has_rows() {
         "the filled heartbeats section lists its rows:\n{all}"
     );
     assert!(!outcome.return_to_agents_view);
+}
+
+/// Left from the subagents selection opens the agents view (the
+/// operator's 2026-09-28 ask, reported as "right now nothing
+/// happens"): with the dock focused and the selection on the subagents
+/// section — its landing spot — one left press takes the same route as
+/// Enter and clicking the group (the scoped agents view handoff), so
+/// the pane leaves the session for the agents surface. The TS dock has
+/// no left/right handling at all (`subagent-summary-line.ts` handles
+/// confirm/cancel only), so this is the documented Rust divergence;
+/// the editor's `agents back` (left on an empty draft) is the same
+/// muscle-memory rule on the adjacent surface.
+#[test]
+fn left_from_the_subagents_selection_opens_the_agents_view() {
+    let steps = vec![
+        // The goal row mounts the dock; the sections render their zero
+        // counts.
+        HeadlessStep::WaitRender {
+            needle: "Pursuing goal (0s)".to_string(),
+            timeout_ms: 5_000,
+        },
+        // Focus the dock: the selection starts on the subagents
+        // section.
+        HeadlessStep::Key(alt_a()),
+        HeadlessStep::WaitMs(100),
+        // The operator's left: one press, the agents view.
+        HeadlessStep::Key(left()),
+        HeadlessStep::WaitMs(300),
+    ];
+    let outcome = run_plan(steps, None);
+    assert!(
+        outcome.return_to_agents_view,
+        "left from the subagents selection hands the pane to the agents view"
+    );
+    let all = outcome.frames.join("\n");
+    assert!(
+        all.contains("\u{25c6} 0 subagents"),
+        "the dock row mounted before the handoff:\n{all}"
+    );
 }

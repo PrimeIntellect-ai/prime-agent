@@ -1,6 +1,14 @@
 //! The update/restart flow: prepare/commit/abort transactions, the prepared
 //! dir + watchdog, exit-for-update, and the attach-stream salvage helpers.
-use super::*;
+use super::{
+    anyhow, build_update_roster, join_all, json, marker_expires_at_iso, paths, response_failure,
+    response_line, response_success, stop_workers_gracefully, stream_attach, supervisor_identity,
+    util, write_prepared_artifacts, AbortOutcome, Arc, BeginOutcome, ClientRouting, DaemonCommand,
+    DaemonErrorInfo, DaemonResponse, Duration, Map, Ordering, Path, PathBuf, PrepareOp, Result,
+    RouteAdmission, SnapshotPurpose, Supervisor, UpdateId, UpdatePreparedMarker,
+    UpdateRosterInputs, Value, WorkerSnapshot, WorkerStopVerdict, DAEMON_APP_VERSION,
+    WORKER_REQUEST_TIMEOUT_MS,
+};
 
 pub(super) fn streamed_attach_lines(
     mut response: DaemonResponse,
@@ -117,7 +125,7 @@ impl Supervisor {
                     + Duration::from_millis(prepare_deadline_ms.saturating_sub(now));
                 if let Err(error) = self.mutation_drain.wait_for_drain(0, deadline).await {
                     if let Some(abort) = self.update_prepare.abort(&update_id) {
-                        self.finish_update_abort(abort).await;
+                        self.finish_update_abort(&abort);
                     }
                     return response_failure(Some(command_id), type_name, &error.to_string(), None);
                 }
@@ -141,7 +149,7 @@ impl Supervisor {
                                 // Rollback is the default on any failure:
                                 // abort, delete the artifacts, Serving.
                                 if let Some(abort) = self.update_prepare.abort(&update_id) {
-                                    self.finish_update_abort(abort).await;
+                                    self.finish_update_abort(&abort);
                                 }
                                 response_failure(
                                     Some(command_id),
@@ -261,7 +269,7 @@ impl Supervisor {
                 created_at_ms: now,
                 ledger: &ledger,
             },
-            snapshots,
+            &snapshots,
         )?;
         let marker = UpdatePreparedMarker {
             update_id: update_id.clone(),
@@ -348,7 +356,7 @@ impl Supervisor {
                     // the ones that already stopped relaunch over their own
                     // session files.
                     if let Some(abort) = self.update_prepare.abandon_stopping(&update_id) {
-                        self.finish_update_abort(abort).await;
+                        self.finish_update_abort(&abort);
                     }
                     for (resident, (_, verdict)) in residents.iter().zip(&verdicts) {
                         match verdict {
@@ -484,7 +492,7 @@ impl Supervisor {
     /// Apply one abort outcome: delete the prepared artifacts if any, and
     /// log the return to `Serving` (clients are notified through the
     /// aborting RPC response; the per-phase banner event is the UX slice).
-    pub(super) async fn finish_update_abort(self: &Arc<Self>, abort: AbortOutcome) {
+    pub(super) fn finish_update_abort(self: &Arc<Self>, abort: &AbortOutcome) {
         if abort.delete_prepared {
             let prepared_dir = self.update_prepared_dir(&abort.update_id);
             if let Err(error) = crate::update_prepare::delete_prepared_dir(&prepared_dir) {
@@ -516,7 +524,7 @@ impl Supervisor {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             if let Some(abort) = self.update_prepare.abort_if_expired(util::now_ms()) {
-                self.finish_update_abort(abort).await;
+                self.finish_update_abort(&abort);
             }
         }
     }

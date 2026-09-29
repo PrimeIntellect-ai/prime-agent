@@ -139,10 +139,10 @@ pub fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
     let handle = winapi::open_process(winapi::PROCESS_QUERY_LIMITED_INFORMATION, pid)?;
     let mut buffer = [0u16; 1024];
     let mut size = buffer.len() as u32;
-    // SAFETY: writes the process image path into `buffer` (at most `size`
-    // wide chars, NUL-terminated); a 0 return means the query failed.
-    let written =
-        unsafe { winapi::query_full_process_image_name(handle, buffer.as_mut_ptr(), &mut size) };
+    // Writes the process image path into `buffer` (at most `size` wide
+    // chars, NUL-terminated); a 0 return means the query failed. The
+    // hand-declared `winapi` wrappers are safe fns, so no `unsafe` here.
+    let written = winapi::query_full_process_image_name(handle, buffer.as_mut_ptr(), &mut size);
     winapi::close_handle(handle);
     if written == 0 {
         return None;
@@ -200,6 +200,7 @@ pub fn stop_own_process_group() -> anyhow::Result<()> {
 /// pends, and it would then arrive after this cycle restored the default
 /// disposition and kill the process. A handler runs (and does nothing)
 /// at that delivery instead.
+#[cfg(unix)]
 extern "C" fn swallow_sigint(_signal: libc::c_int) {}
 
 /// Ignore SIGINT for the suspended window (TS installs a no-op `SIGINT`
@@ -245,16 +246,37 @@ pub fn restore_default_sigint() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Suspend-to-background is a POSIX process-group surface: the
+/// non-unix arm refuses (the TS `handleCtrlZ` has no win32 path either).
+///
+/// # Errors
+///
+/// Always errors on non-unix platforms: there is no POSIX process
+/// group to stop.
 #[cfg(not(unix))]
 pub fn stop_own_process_group() -> anyhow::Result<()> {
     anyhow::bail!("suspend to background requires a POSIX process group")
 }
 
+/// The suspended-window SIGINT shield is POSIX-only (the unix arm swaps
+/// the disposition to a no-op handler).
+///
+/// # Errors
+///
+/// Always errors on non-unix platforms: there is no SIGINT disposition
+/// to set.
 #[cfg(not(unix))]
 pub fn ignore_sigint_for_suspend() -> anyhow::Result<()> {
     anyhow::bail!("suspend to background requires a POSIX process group")
 }
 
+/// The resume-side SIGINT restore is POSIX-only (the unix arm returns
+/// the default disposition).
+///
+/// # Errors
+///
+/// Always errors on non-unix platforms: there is no SIGINT disposition
+/// to restore.
 #[cfg(not(unix))]
 pub fn restore_default_sigint() -> anyhow::Result<()> {
     anyhow::bail!("suspend to background requires a POSIX process group")
@@ -314,12 +336,18 @@ pub fn is_process_alive(pid: u32) -> anyhow::Result<bool> {
         .starts_with('Z'))
 }
 
-/// Windows: a handle-existence probe with the STILL_ACTIVE exit-code check
+/// Windows: a handle-existence probe with the `STILL_ACTIVE` exit-code check
 /// (TS `isProcessAlive` = `processIdExists` && !zombie; win32 has no zombie
 /// state, and Node's `kill(pid, 0)` is the same exit-code probe). A pid the
 /// caller may not query exists (TS counts EPERM as existing) and reads
 /// alive: lease owners must not treat an access-denied probe as a dead
 /// owner.
+///
+/// # Errors
+///
+/// This arm does not fail: every query outcome maps to alive or dead
+/// (the handle probe's own failure reads as dead, never as a stale-owner
+/// reclaim).
 #[cfg(windows)]
 pub fn is_process_alive(pid: u32) -> anyhow::Result<bool> {
     if pid == 0 {

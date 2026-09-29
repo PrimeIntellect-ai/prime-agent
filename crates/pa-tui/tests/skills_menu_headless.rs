@@ -217,12 +217,6 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
     fn set_theme(&self, _theme: &str) -> Result<()> {
         Ok(())
     }
-    fn fullscreen(&self) -> bool {
-        true
-    }
-    fn set_fullscreen(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
     fn show_images(&self) -> bool {
         true
     }
@@ -252,6 +246,9 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
     }
     fn set_block_images(&self, _blocked: bool) -> Result<()> {
         Ok(())
+    }
+    fn image_model(&self) -> Option<String> {
+        None
     }
     fn enable_skill_commands(&self) -> bool {
         *self
@@ -312,6 +309,12 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
         "user-only".to_string()
     }
     fn set_tree_filter_mode(&self, _mode: &str) -> Result<()> {
+        Ok(())
+    }
+    fn default_service_tier(&self) -> String {
+        "default".to_string()
+    }
+    fn set_default_service_tier(&self, _tier: &str) -> Result<()> {
         Ok(())
     }
     fn chat_detail(&self) -> String {

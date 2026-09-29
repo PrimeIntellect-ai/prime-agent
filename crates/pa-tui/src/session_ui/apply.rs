@@ -410,6 +410,9 @@ impl SessionUi {
             // patches the connection state; `/fast` reads it).
             TurnUpdate::ServiceTierChanged { tier } => {
                 self.service_tier = Some(tier);
+                // The tray badge follows the applied tier (the `fast`
+                // token for priority).
+                view.chrome.service_tier.clone_from(&self.service_tier);
                 self.dirty = true;
             }
             TurnUpdate::CustomRow(entry) => {
