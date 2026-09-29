@@ -1729,13 +1729,13 @@ mod tests {
             agent_dir,
             session_model,
         );
-        let routed = pa_core::models::ResolvedImageModel {
+        let expected_route = pa_core::models::ResolvedImageModel {
             model: fixture_model("image-model"),
             thinking_level: pa_types::ai::ModelThinkingLevel::High,
             service_tier: None,
         };
         // Arm: the slot now serves the routed image model.
-        (router.swap_target)(Some(&routed));
+        (router.swap_target)(Some(&expected_route));
         assert_eq!(
             provider_target.read().unwrap().as_ref().unwrap().model.id,
             "image-model"
@@ -1755,7 +1755,7 @@ mod tests {
         // baseline is the post-switch session model: the plain arm ->
         // serve -> settle contract restores that baseline (the
         // capture-at-arm, restore-at-settle pair).
-        (router.swap_target)(Some(&routed));
+        (router.swap_target)(Some(&expected_route));
         (router.swap_target)(None);
         assert_eq!(
             provider_target.read().unwrap().as_ref().unwrap().model.id,

@@ -1270,7 +1270,7 @@ impl TimedRpcChild {
             use std::io::Read;
             let mut stdout = stdout;
             let mut buf: Vec<u8> = Vec::new();
-            let mut chunk = [0u8; 65536];
+            let mut chunk = vec![0u8; 65536].into_boxed_slice();
             loop {
                 match stdout.read(&mut chunk) {
                     Ok(0) | Err(_) => break,
@@ -1296,8 +1296,8 @@ impl TimedRpcChild {
         self.frames = Some(frames);
     }
 
-    fn send(&mut self, frame: Value) {
-        let mut line = serde_json::to_string(&frame).unwrap();
+    fn send(&mut self, frame: &Value) {
+        let mut line = serde_json::to_string(frame).unwrap();
         line.push('\n');
         self.stdin.write_all(line.as_bytes()).unwrap();
         self.stdin.flush().unwrap();
@@ -1309,7 +1309,7 @@ impl TimedRpcChild {
         let mut frame = command.clone();
         frame["id"] = json!(id);
         let sent = Instant::now();
-        self.send(frame);
+        self.send(&frame);
         (id, sent)
     }
 
@@ -1584,18 +1584,18 @@ fn rpc_prompt_admitted_compact_frames_flush_after_the_response() {
         .expect("the prompt response");
     let response = &seen[response_at];
     assert_eq!(response["success"], true, "the response: {response}");
-    let cs_at = position("compaction_start")
+    let start_at = position("compaction_start")
         .expect("the buffered compaction_start flushed with the response window");
-    let ce_at = position("compaction_end")
+    let end_at = position("compaction_end")
         .expect("the buffered compaction_end flushed with the response window");
     assert!(
-        response_at < cs_at,
+        response_at < start_at,
         "the TS promptResponsePending contract: the prompt response (at {response_at}) \
-         must precede the buffered compaction_start (at {cs_at})"
+         must precede the buffered compaction_start (at {start_at})"
     );
     assert!(
-        cs_at < ce_at,
-        "compaction_end (at {ce_at}) must follow compaction_start (at {cs_at})"
+        start_at < end_at,
+        "compaction_end (at {end_at}) must follow compaction_start (at {start_at})"
     );
-    assert_eq!(seen[cs_at]["reason"], "requested");
+    assert_eq!(seen[start_at]["reason"], "requested");
 }
