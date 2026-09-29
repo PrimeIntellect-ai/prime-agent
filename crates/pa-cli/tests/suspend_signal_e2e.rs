@@ -309,11 +309,11 @@ fn ctrl_g_hands_the_terminal_to_the_external_editor() {
     // The first content frame is the readiness marker: keystrokes that
     // arrive earlier race the child's kitty capability probe, which
     // still owns the event reader in the startup window. The frame's
-    // layout is environment-dependent (CI runs this harness without a
-    // controlling terminal and renders one more row than a
-    // terminal-attached run), so the prompt row is DERIVED from the
-    // frame's final caret park and the assertions below key off it —
-    // never off a hard-coded row.
+    // layout follows the chrome the build carries — #3036 made the
+    // activity dock render in every session (all-zero counts included),
+    // and its rule-plus-row pushed the prompt dock up by two rows —
+    // so the prompt row is DERIVED from the frame's final caret park
+    // and the assertions below key off it, never off a hard-coded row.
     harness.wait_from_start(" >  ", "the first frame's prompt row rendered");
     let prompt_row = harness.wait_caret_row_from(0, 5, "the first frame's empty editor rendered");
 
