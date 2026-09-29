@@ -137,7 +137,22 @@ pub struct Editor {
     /// the dropdown's confirm arm). The host loop materializes it once the
     /// input queue drains.
     pending_autocomplete: Option<PendingAutocomplete>,
+    /// The in-flight `@` file search with the editor state it answers
+    /// (TS `isAutocompleteRequestCurrent`): a result that lands after the
+    /// lines or cursor moved is dropped, never applied.
+    autocomplete_search: Option<AutocompleteSearch>,
     events: Vec<EditorEvent>,
+}
+
+/// A background `@` file search (the provider's async lookup) plus the
+/// request and editor state it must still match to apply its result.
+#[derive(Debug)]
+struct AutocompleteSearch {
+    search: crate::autocomplete::FileSearch,
+    request: PendingAutocomplete,
+    lines: Vec<String>,
+    cursor_line: usize,
+    cursor_col: usize,
 }
 
 /// A deferred suggestion request (TS `requestAutocomplete` -> async
@@ -184,6 +199,7 @@ impl Editor {
             )),
             autocomplete: None,
             pending_autocomplete: None,
+            autocomplete_search: None,
             events: Vec::new(),
         }
     }
@@ -259,11 +275,11 @@ impl Editor {
         self.autocomplete.is_some()
     }
 
-    /// Whether a completion request is parked: Tab or a trigger key
-    /// queued it and the host loop materializes it at the next
-    /// input-idle tick, so the dropdown is about to open.
+    /// Whether a completion request is parked or a background `@`
+    /// search is running: a menu may open, so the guards that close it
+    /// (Esc) treat this like an open menu.
     pub fn has_pending_autocomplete(&self) -> bool {
-        self.pending_autocomplete.is_some()
+        self.pending_autocomplete.is_some() || self.autocomplete_search.is_some()
     }
 
     /// Drain pending editor events (change/submit) for the host loop.
