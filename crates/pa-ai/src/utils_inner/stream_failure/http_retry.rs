@@ -2,7 +2,7 @@
 //! seconds-vs-HTTP-date forms, and the civil-date math behind the date form.
 use super::*;
 
-fn header_value<S: std::hash::BuildHasher>(
+pub(super) fn header_value<S: std::hash::BuildHasher>(
     headers: &std::collections::HashMap<String, String, S>,
     name: &str,
 ) -> Option<String> {
@@ -92,9 +92,4 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let doy = (153 * mp + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146_097 + doe - 719_468
-}
-
-struct ExtractedParts {
-    info: StreamFailureInfo,
-    detail: Option<String>,
 }

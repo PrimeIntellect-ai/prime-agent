@@ -660,9 +660,17 @@ pub fn truncate_raw_payload(raw: &str) -> String {
 
 // The HTTP `retry-after` parsing family lives in the child module
 // (stream_failure::http_retry); `parse_retry_after_ms` keeps its `pub` level
-// and the private helpers stay private (child-internal callers).
+// (the pub(crate) re-export serves its external importer) and `header_value`
+// gets ONE pub(super) bump (the facade's extract_parts calls);
+// `ExtractedParts` re-homes facade-side (its consumer is facade-resident).
 mod http_retry;
+use http_retry::header_value;
 pub(crate) use http_retry::parse_retry_after_ms;
+
+struct ExtractedParts {
+    info: StreamFailureInfo,
+    detail: Option<String>,
+}
 
 fn extract_parts_from_http(error: &ProviderHttpError) -> ExtractedParts {
     let mut body_type: Option<String> = None;
