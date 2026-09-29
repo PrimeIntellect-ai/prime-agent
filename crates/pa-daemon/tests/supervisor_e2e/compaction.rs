@@ -119,7 +119,7 @@ fn compaction_commands_scripted_session() {
     };
     assert_eq!(
         start,
-        &serde_json::json!({
+        serde_json::json!({
             "type": "compaction_start",
             "reason": "manual",
             "customInstructions": "focus on the goal",
@@ -315,7 +315,7 @@ fn compaction_commands_scripted_session() {
     let disabled = client.read_response("sac1");
     assert_eq!(
         disabled,
-        &serde_json::json!({
+        serde_json::json!({
             "id": "sac1",
             "type": "response",
             "command": "set_auto_compaction",

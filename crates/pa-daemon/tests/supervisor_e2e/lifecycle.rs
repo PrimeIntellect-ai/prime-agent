@@ -20,7 +20,7 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
     // TS-main bundle reports the same schema id at the hello).
     assert_eq!(
         hello["protocol"],
-        &serde_json::json!({
+        serde_json::json!({
             "name": "prime-agent.daemon", "version": 7
         })
     );
