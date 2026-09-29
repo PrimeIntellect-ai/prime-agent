@@ -247,7 +247,9 @@ impl Supervisor {
     /// seed (create, resume, and supervisor-restart re-registration),
     /// a stop passivation (the RLM delete's tombstone landed before the
     /// stop, and the later capture amendment yields the same value),
-    /// and a saved-session delete. The worker-process delete arm and
+    /// a stopped-child delete (the idle-passivated child's tombstone -
+    /// no stop runs for it, so the delete settles the row itself), and
+    /// a saved-session delete. The worker-process delete arm and
     /// the forwarded-owner arm stay uncovered by design: the TUI never
     /// sends those forms, and their tombstones are picked up at the
     /// next registration or stop.

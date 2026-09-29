@@ -1247,6 +1247,26 @@ impl Supervisor {
         crate::saved_session_commands::remove_session_artifacts(std::path::Path::new(
             &session_file,
         ));
+        // The resident delete's end state, continued: no stop ran for
+        // this child (its worker was already passivated), so the
+        // passivation's row lingers unowned while the bucket bills the
+        // captured spend on the parent - the same settle the resident
+        // delete's pass performs, in one push.
+        let changed = self.refresh_deleted_descendant_usage().await;
+        let canonical = crate::lease::canonical_session_path(std::path::Path::new(&session_file))
+            .to_string_lossy()
+            .to_string();
+        let removed: Vec<String> = {
+            let mut roster = self.roster.lock().unwrap();
+            let agent_id = roster
+                .by_session_file(&canonical)
+                .map(|row| row.agent_id.clone());
+            if let Some(agent_id) = &agent_id {
+                roster.delete(agent_id);
+            }
+            agent_id.into_iter().collect()
+        };
+        self.push_roster_update(changed, removed);
         Ok(())
     }
 }
