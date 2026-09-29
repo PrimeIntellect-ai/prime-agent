@@ -591,7 +591,7 @@ fn post_compaction_mint_delivers_the_armed_deferral_once() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "goal turn reply"}] }),
+        &serde_json::json!({ "responses": [{"text": "goal turn reply"}] }),
         1,
     );
     let engine = std::sync::Arc::new(engine);

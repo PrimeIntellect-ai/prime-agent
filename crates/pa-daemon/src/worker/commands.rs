@@ -1,9 +1,9 @@
 //! The dispatch surface: command routing, the command handlers,
 //! and the abort family.
 use super::{
-    json, response_failure, response_success, KillCloseReason, Lane, QueueCheckpoint, QueuedItem,
-    Result, SessionFile, TurnSettle, VecDeque, Worker, PROMPT_ABORTED_BEFORE_DELIVERY,
-    SIDE_QUESTION_SETTLE_TIMEOUT,
+    is_goal_context_item, json, response_failure, response_success, KillCloseReason, Lane,
+    QueueCheckpoint, QueuedItem, Result, SessionFile, TurnSettle, VecDeque, Worker,
+    PROMPT_ABORTED_BEFORE_DELIVERY, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 use serde_json::Value;
