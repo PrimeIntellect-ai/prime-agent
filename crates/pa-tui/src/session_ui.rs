@@ -941,7 +941,16 @@ impl SessionUi {
             active_session_id: session_id.to_string(),
             supports_extension_ui: None,
             client_id: None,
-            capabilities: None,
+            // `elide_snapshot_images`: the transcript arrives without the
+            // base64 image payloads (their fallback-only metadata rows
+            // ride the marker), so an image-heavy session's attach stops
+            // transferring megabytes the rows never render.
+            capabilities: Some(vec![
+                "attach_snapshot".to_string(),
+                "event_sequence".to_string(),
+                "slim_attach".to_string(),
+                "elide_snapshot_images".to_string(),
+            ]),
             resume_cursor: None,
             telemetry_disabled: self.telemetry_disabled.filter(|disabled| *disabled),
             recovery_config: None,
