@@ -14,6 +14,7 @@ use super::{
     Duration, EngineModelSelection, Map, Ordering, Path, ResidentWorker, Result, RouteAdmission,
     Supervisor, TypedCreateRejection, Value, LONG_ROUTE_TIMEOUT_MS, ROUTE_TIMEOUT_MS,
 };
+use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::lease::is_process_alive;
 
 impl Supervisor {

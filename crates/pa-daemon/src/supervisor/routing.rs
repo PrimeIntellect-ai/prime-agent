@@ -1,5 +1,6 @@
 //! Command routing between clients and workers: the route tables, the
 //! per-request deadlines, and the worker-not-connected refusal.
+use anyhow::Context as _;
 use super::{
     anyhow, attach_client_capabilities, bail, client_command_payload, command_active_session_id,
     json, mpsc, oneshot, response_failure, response_line, response_success, streamed_attach_lines,
@@ -1014,7 +1015,7 @@ impl Supervisor {
             lifecycle: None,
             env: None,
             launch_env: None,
-            rest: Map::default(),
+            rest: serde_json::Map::default(),
         };
         match self.launch_worker(&create, None).await {
             Ok((resident, _create_summary)) => {
