@@ -778,11 +778,23 @@ impl Worker {
             core.attached_client_ids.push(client_id.clone());
         }
         let summary = self.summary_locked(&core);
-        let messages: Vec<Value> = core
+        let mut messages: Vec<Value> = core
             .store
             .as_ref()
             .map(crate::session_store::SessionFile::messages)
             .unwrap_or_default();
+        // The image-payload elision (the image-heavy session-open fix): a
+        // client that advertised `elide_snapshot_images` reads the
+        // transcript without the base64 payloads (their fallback-only
+        // metadata rows travel in the marker); the client's own set is
+        // the worker-facing `capabilities` here unless the supervisor's
+        // routed attach carried the client's set in `clientCapabilities`.
+        let client_capabilities = echoed_client_capabilities
+            .clone()
+            .unwrap_or_else(|| capabilities.clone());
+        if crate::snapshot_stream::wants_image_elision(&client_capabilities) {
+            crate::snapshot_stream::elide_snapshot_image_payloads(&mut messages);
+        }
         let state = self.connection_state_locked(&core);
         let last_event_sequence = core.last_event_sequence;
         let generation = core.generation.clone();

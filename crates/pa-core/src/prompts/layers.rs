@@ -167,8 +167,11 @@ mod tests {
 
     #[test]
     fn per_model_map_ships_empty() {
-        // The shipped map documents the format but contains no instructions.
+        // The shipped map is the blockless format reference: nothing parses
+        // as a block, so no model selects any per-model text.
         assert!(parse_per_model_blocks(PER_MODEL_MAP).is_empty());
+        assert!(per_model_text(None).is_empty());
+        assert!(per_model_text(Some("mock/mock-1")).is_empty());
     }
 
     #[test]
