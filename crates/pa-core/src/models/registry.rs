@@ -438,7 +438,7 @@ impl ModelRegistry {
         let credentials = self.prime_credentials();
         let mut built_in = self.load_built_in_models(&result, credentials.as_ref());
         built_in.extend(private_models.into_values());
-        self.models = self.merge_custom_models(built_in, result.models);
+        self.models = Self::merge_custom_models(built_in, result.models);
         self.apply_subscription_model_adaptations();
     }
 
@@ -617,7 +617,7 @@ impl ModelRegistry {
     }
 
     /// Custom models win on provider+id conflicts.
-    fn merge_custom_models(&self, mut built_in: Vec<Model>, custom: Vec<Model>) -> Vec<Model> {
+    fn merge_custom_models(mut built_in: Vec<Model>, custom: Vec<Model>) -> Vec<Model> {
         for custom_model in custom {
             match built_in.iter().position(|model| {
                 model.provider == custom_model.provider && model.id == custom_model.id

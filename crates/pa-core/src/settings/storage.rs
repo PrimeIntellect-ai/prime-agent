@@ -87,7 +87,7 @@ impl FileSettingsStorage {
         }
     }
 
-    fn acquire_lock(&self, path: &Path) -> Result<LockGuard> {
+    fn acquire_lock(path: &Path) -> Result<LockGuard> {
         let max_attempts = 10;
         let mut last_error: Option<std::io::Error> = None;
         for _ in 1..=max_attempts {
@@ -238,7 +238,7 @@ impl SettingsStorage for FileSettingsStorage {
             }
         }
         // Miss: the full protocol read — the lock protocol is unchanged.
-        let guard = self.acquire_lock(path)?;
+        let guard = Self::acquire_lock(path)?;
         let content = fs::read_to_string(path)?;
         drop(guard);
         read_cache()
@@ -264,7 +264,7 @@ impl SettingsStorage for FileSettingsStorage {
         let file_exists = path.exists();
         let mut held: Option<LockGuard> = None;
         if file_exists {
-            held = Some(self.acquire_lock(path)?);
+            held = Some(Self::acquire_lock(path)?);
         }
         let current = if file_exists {
             Some(fs::read_to_string(path)?)
@@ -279,7 +279,7 @@ impl SettingsStorage for FileSettingsStorage {
                 }
             }
             if held.is_none() {
-                held = Some(self.acquire_lock(path)?);
+                held = Some(Self::acquire_lock(path)?);
                 // A racing first writer may have landed since the unlocked read.
                 if path.exists() {
                     next = update(Some(fs::read_to_string(path)?));

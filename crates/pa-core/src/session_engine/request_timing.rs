@@ -738,7 +738,7 @@ impl RequestTiming {
 // ---------------------------------------------------------------------------
 
 /// The TS wire `stopReason` strings.
-fn stop_reason_string(reason: &StopReason) -> String {
+fn stop_reason_string(reason: StopReason) -> String {
     match reason {
         StopReason::Stop => "stop",
         StopReason::Length => "length",
@@ -873,7 +873,7 @@ impl ModelStream for TimingStream {
                 }
                 AssistantMessageEvent::Done { reason, message } => {
                     timing.mark_stream_done(
-                        stop_reason_string(reason),
+                        stop_reason_string(*reason),
                         message.error_message.clone(),
                     );
                     timing.mark_usage(&message.usage);
@@ -881,7 +881,7 @@ impl ModelStream for TimingStream {
                 }
                 AssistantMessageEvent::Error { reason, error } => {
                     timing
-                        .mark_stream_done(stop_reason_string(reason), error.error_message.clone());
+                        .mark_stream_done(stop_reason_string(*reason), error.error_message.clone());
                     timing.mark_usage(&error.usage);
                     // A terminal provider error is a failed (or aborted)
                     // request, not a completed one.

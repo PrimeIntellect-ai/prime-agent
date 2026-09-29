@@ -633,7 +633,6 @@ impl AuthStorage {
     }
 
     fn token_for(
-        &self,
         provider: &str,
         candidate: &AuthSourceCandidate,
     ) -> Option<AuthSourceToken> {
@@ -695,7 +694,7 @@ impl AuthStorage {
         let Some(candidate) = self.available_candidate(provider, true) else {
             return false;
         };
-        let Some(token) = self.token_for(provider, &candidate) else {
+        let Some(token) = Self::token_for(provider, &candidate) else {
             return false;
         };
         self.mark_auth_source_stale(token)
@@ -813,7 +812,7 @@ impl AuthStorage {
                 if let Some(api_key) = self.runtime_overrides.get(provider_id).cloned() {
                     return AuthApiKeyResult {
                         api_key: Some(api_key),
-                        source_token: self.token_for(provider_id, &candidate),
+                        source_token: Self::token_for(provider_id, &candidate),
                         credential_type: Some("api_key"),
                     };
                 }
@@ -829,7 +828,7 @@ impl AuthStorage {
                 if !self.is_stale(provider_id, &candidate) {
                     return AuthApiKeyResult {
                         api_key: Some(api_key),
-                        source_token: self.token_for(provider_id, &candidate),
+                        source_token: Self::token_for(provider_id, &candidate),
                         credential_type: Some("api_key"),
                     };
                 }
@@ -851,7 +850,7 @@ impl AuthStorage {
                             };
                             return AuthApiKeyResult {
                                 api_key,
-                                source_token: self.token_for(provider_id, &candidate),
+                                source_token: Self::token_for(provider_id, &candidate),
                                 credential_type: Some("api_key"),
                             };
                         }
@@ -866,7 +865,7 @@ impl AuthStorage {
                                     return AuthApiKeyResult {
                                         api_key: self.oauth.api_key_for(provider_id, &refreshed),
                                         source_token: candidate
-                                            .and_then(|c| self.token_for(provider_id, &c)),
+                                            .and_then(|c| Self::token_for(provider_id, &c)),
                                         credential_type: Some("oauth"),
                                     };
                                 }
@@ -876,7 +875,7 @@ impl AuthStorage {
                             }
                             return AuthApiKeyResult {
                                 api_key: self.oauth.api_key_for(provider_id, &credential),
-                                source_token: self.token_for(provider_id, &candidate),
+                                source_token: Self::token_for(provider_id, &candidate),
                                 credential_type: Some("oauth"),
                             };
                         }
@@ -886,7 +885,7 @@ impl AuthStorage {
                         AuthCredential::McpStaticToken { bearer, .. } => {
                             return AuthApiKeyResult {
                                 api_key: Some(bearer.clone()),
-                                source_token: self.token_for(provider_id, &candidate),
+                                source_token: Self::token_for(provider_id, &candidate),
                                 credential_type: Some("mcp_static_token"),
                             };
                         }
@@ -901,7 +900,7 @@ impl AuthStorage {
                 if !self.is_stale(provider_id, &candidate) {
                     return AuthApiKeyResult {
                         api_key: Some(api_key),
-                        source_token: self.token_for(provider_id, &candidate),
+                        source_token: Self::token_for(provider_id, &candidate),
                         credential_type: None,
                     };
                 }
@@ -918,7 +917,7 @@ impl AuthStorage {
                         .and_then(|resolver| resolver(provider_id));
                     return AuthApiKeyResult {
                         api_key,
-                        source_token: self.token_for(provider_id, &candidate),
+                        source_token: Self::token_for(provider_id, &candidate),
                         credential_type: None,
                     };
                 }

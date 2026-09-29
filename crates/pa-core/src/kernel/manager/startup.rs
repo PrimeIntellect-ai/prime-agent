@@ -427,7 +427,7 @@ impl Inner {
                 Ok(status) => ExitInfo {
                     code: status.code(),
                     #[cfg(unix)]
-                    signal: unix_signal_of(&status),
+                    signal: unix_signal_of(status),
                     #[cfg(not(unix))]
                     signal: None,
                 },
@@ -531,8 +531,8 @@ impl Inner {
 }
 
 #[cfg(unix)]
-fn unix_signal_of(status: &std::process::ExitStatus) -> Option<i32> {
-    crate::platform::process::termination_signal(status)
+fn unix_signal_of(status: std::process::ExitStatus) -> Option<i32> {
+    crate::platform::process::termination_signal(&status)
 }
 
 #[cfg(test)]

@@ -111,7 +111,7 @@ impl OAuthHttp for ReqwestOAuthHttp {
                 builder = builder.body(body.clone());
             }
             let response = builder.send().await.with_context(|| {
-                format!("{} {} failed", method_label(&request.method), request.url)
+                format!("{} {} failed", method_label(request.method), request.url)
             })?;
             let status = response.status().as_u16();
             let headers = response
@@ -127,7 +127,7 @@ impl OAuthHttp for ReqwestOAuthHttp {
             let body = response.text().await.with_context(|| {
                 format!(
                     "{} {} body read failed",
-                    method_label(&request.method),
+                    method_label(request.method),
                     request.url
                 )
             })?;
@@ -140,7 +140,7 @@ impl OAuthHttp for ReqwestOAuthHttp {
     }
 }
 
-fn method_label(method: &OAuthHttpMethod) -> &'static str {
+fn method_label(method: OAuthHttpMethod) -> &'static str {
     match method {
         OAuthHttpMethod::Get => "GET",
         OAuthHttpMethod::Post => "POST",

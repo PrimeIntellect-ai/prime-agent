@@ -121,7 +121,7 @@ async fn restored_functions_run_against_live_namespace_globals() {
     assert_eq!(defined.status, ExecuteStatus::Ok);
     let snapshot = writer.snapshot_state().await.expect("snapshot");
     assert!(snapshot.saved.iter().any(|name| name == "reader"));
-    writer.kill().await;
+    writer.kill();
 
     // A fresh kernel on the same snapshot: the restore revives the saved
     // functions against the live namespace of THIS kernel.

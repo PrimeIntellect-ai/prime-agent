@@ -819,7 +819,7 @@ impl ReplKernelManager {
         self.start(KernelStartOptions::default()).await
     }
 
-    pub async fn kill(&self) {
+    pub fn kill(&self) {
         self.supersede_protocol_repair();
         {
             let mut g = lock(&self.inner.guarded);

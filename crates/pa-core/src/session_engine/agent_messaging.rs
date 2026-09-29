@@ -1142,15 +1142,15 @@ mod tests {
     struct RecordingMessageController;
 
     impl AgentMessageController for RecordingMessageController {
-        async fn family(&self) -> anyhow::Result<Vec<AgentFamilyMember>> {
-            Ok(family())
+        fn family(&self) -> impl std::future::Future<Output = anyhow::Result<Vec<AgentFamilyMember>>> {
+            std::future::ready(Ok(family()))
         }
 
-        async fn send_agent_message(
+        fn send_agent_message(
             &self,
             input: AgentMessageSendInput,
-        ) -> anyhow::Result<AgentMessageReceipt> {
-            Ok(AgentMessageReceipt {
+        ) -> impl std::future::Future<Output = anyhow::Result<AgentMessageReceipt>> {
+            std::future::ready(Ok(AgentMessageReceipt {
                 id: create_agent_session_message_id(),
                 target_session_id: Some(format!("{}-session", input.target)),
                 target: input.target,
@@ -1162,7 +1162,7 @@ mod tests {
                 receiver_role: input.receiver_role,
                 delivered_at: Some("2024-01-01T00:00:00.000Z".to_string()),
                 queued_at: None,
-            })
+            }))
         }
     }
 
@@ -1302,31 +1302,31 @@ mod tests {
     async fn broadcast_without_family_is_empty_and_failures_settle() {
         struct NoFamilyController;
         impl AgentMessageController for NoFamilyController {
-            async fn family(&self) -> anyhow::Result<Vec<AgentFamilyMember>> {
-                Ok(Vec::new())
+            fn family(&self) -> impl std::future::Future<Output = anyhow::Result<Vec<AgentFamilyMember>>> {
+                std::future::ready(Ok(Vec::new()))
             }
-            async fn send_agent_message(
+            fn send_agent_message(
                 &self,
                 _input: AgentMessageSendInput,
-            ) -> anyhow::Result<AgentMessageReceipt> {
-                anyhow::bail!("no route")
+            ) -> impl std::future::Future<Output = anyhow::Result<AgentMessageReceipt>> {
+                std::future::ready(Err(anyhow::anyhow!("no route")))
             }
         }
         struct LoneFamilyController;
         impl AgentMessageController for LoneFamilyController {
-            async fn family(&self) -> anyhow::Result<Vec<AgentFamilyMember>> {
-                Ok(vec![AgentFamilyMember {
+            fn family(&self) -> impl std::future::Future<Output = anyhow::Result<Vec<AgentFamilyMember>>> {
+                std::future::ready(Ok(vec![AgentFamilyMember {
                     relationship: AgentFamilyRelationship::Sibling,
                     id: "sib-1".to_string(),
                     name: None,
                     aliases: Vec::new(),
-                }])
+                }]))
             }
-            async fn send_agent_message(
+            fn send_agent_message(
                 &self,
                 _input: AgentMessageSendInput,
-            ) -> anyhow::Result<AgentMessageReceipt> {
-                anyhow::bail!("peer unreachable")
+            ) -> impl std::future::Future<Output = anyhow::Result<AgentMessageReceipt>> {
+                std::future::ready(Err(anyhow::anyhow!("peer unreachable")))
             }
         }
         let mut handlers = HostRequestHandlers::default();

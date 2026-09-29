@@ -62,7 +62,7 @@ fn dedupe_configured_sources(
             }
             ParsedSource::Local(local) => {
                 let base_dir = manager.base_dir_for_scope(scope);
-                let resolved = manager.resolve_path_from_base(&local.path, &base_dir);
+                let resolved = PackageManager::resolve_path_from_base(&local.path, &base_dir);
                 format!("local:{}", resolved.display())
             }
         };
@@ -166,14 +166,14 @@ impl PackageManager {
         for resource_type in RESOURCE_TYPES {
             let project_entries = settings_array(&project, resource_type);
             let global_entries = settings_array(&global, resource_type);
-            self.resolve_local_entries(
+            Self::resolve_local_entries(
                 &project_entries,
                 resource_type,
                 &mut accumulator,
                 &top_level_metadata(MetadataSource::Local, SourceScope::Project),
                 &project_base_dir,
             );
-            self.resolve_local_entries(
+            Self::resolve_local_entries(
                 &global_entries,
                 resource_type,
                 &mut accumulator,
@@ -351,7 +351,7 @@ impl PackageManager {
         metadata: &mut PathMetadata,
         base_dir: &Path,
     ) {
-        let resolved = self.resolve_path_from_base(path, base_dir);
+        let resolved = PackageManager::resolve_path_from_base(path, base_dir);
         if !resolved.exists() {
             return;
         }
@@ -380,7 +380,6 @@ impl PackageManager {
     /// Settings top-level array entries: plain paths relative to the
     /// settings base, pattern entries applied as filters.
     fn resolve_local_entries(
-        &self,
         entries: &[String],
         resource_type: ResourceType,
         accumulator: &mut ResourceAccumulator,
@@ -393,7 +392,7 @@ impl PackageManager {
         let (plain, pattern_entries) = split_patterns(entries);
         let resolved_plain: Vec<PathBuf> = plain
             .iter()
-            .map(|path| self.resolve_path_from_base(path, base_dir))
+            .map(|path| PackageManager::resolve_path_from_base(path, base_dir))
             .collect();
         let all_files = collect_files_from_paths(&resolved_plain, resource_type);
         let enabled_paths = apply_patterns(&all_files, &pattern_entries, base_dir);

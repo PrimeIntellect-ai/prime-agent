@@ -1063,7 +1063,7 @@ impl AgentSession {
     /// Queue one custom row for the next admitted turn (TS
     /// `_pendingNextTurnMessages.push`): the row rides the turn's prompt
     /// messages ahead of the prompt's own user row.
-    pub async fn queue_next_turn_row(&self, message: pa_types::session::CustomMessage) {
+    pub fn queue_next_turn_row(&self, message: pa_types::session::CustomMessage) {
         self.pending_next_turn_rows
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1103,13 +1103,13 @@ impl AgentSession {
     /// Drain the queued next-turn rows (TS `_takePendingNextTurnMessages`):
     /// the admitting turn owns them; an empty take leaves nothing for later
     /// turns.
-    pub async fn take_next_turn_rows(&self) -> Vec<pa_agent::types::AgentMessage> {
-        self.pending_next_turn_rows
+    pub fn take_next_turn_rows(&self) -> impl std::future::Future<Output = Vec<pa_agent::types::AgentMessage>> {
+        std::future::ready(self.pending_next_turn_rows
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .drain(..)
             .filter_map(|row| session_message_to_loop(&SessionAgentMessage::Custom(row)))
-            .collect()
+            .collect())
     }
 
     /// Session id (persistence identity).

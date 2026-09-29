@@ -321,17 +321,17 @@ impl IpythonKernelProvisioner {
 
     /// After the memoized startup settles, return the manager it produced —
     /// or its error when it failed and nothing superseded it.
-    async fn settled_manager(
+    fn settled_manager(
         &self,
         signal: Option<AbortSignal>,
-    ) -> anyhow::Result<ReplKernelManager> {
+    ) -> impl std::future::Future<Output = anyhow::Result<ReplKernelManager>> {
         if let Some(signal) = signal {
             if signal.is_aborted() {
-                return Err(anyhow!("Python execution aborted"));
+                return std::future::ready(Err(anyhow!("Python execution aborted")));
             }
         }
         let state = self.lock_state();
-        match state.manager.clone() {
+        std::future::ready(match state.manager.clone() {
             Some(manager) => Ok(manager),
             None => match state.last_startup_failure.clone() {
                 Some(failure) => Err(anyhow!(
@@ -341,7 +341,7 @@ impl IpythonKernelProvisioner {
                 )),
                 None => Err(anyhow!("kernel startup failed")),
             },
-        }
+        })
     }
 
     /// Remove live variables above the snapshot's per-variable size limit.
@@ -437,10 +437,10 @@ impl IpythonKernelProvisioner {
     }
 
     /// Kill the owned kernel without a final snapshot (busy-kernel restart).
-    pub async fn kill(&self) {
+    pub fn kill(&self) {
         let manager = self.lock_state().manager.take();
         if let Some(manager) = manager {
-            manager.kill().await;
+            manager.kill();
         }
     }
 }

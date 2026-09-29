@@ -104,7 +104,7 @@ pub enum RefinementSource {
 }
 
 impl RefinementSource {
-    fn as_str(&self) -> &'static str {
+    fn as_str(self) -> &'static str {
         match self {
             RefinementSource::Auto => "auto",
             RefinementSource::User => "user",

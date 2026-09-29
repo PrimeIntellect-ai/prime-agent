@@ -76,7 +76,7 @@ impl SessionEngine {
         drop(session);
         drop(driver);
         let context = create_goal_context_message(&state, GoalContextKind::Continuation)?;
-        self.session.queue_next_turn_row(context).await;
+        self.session.queue_next_turn_row(context);
         Ok(true)
     }
 

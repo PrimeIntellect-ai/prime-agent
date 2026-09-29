@@ -26,7 +26,7 @@ pub enum GoalContextKind {
 }
 
 impl GoalContextKind {
-    fn label(&self) -> &'static str {
+    fn label(self) -> &'static str {
         match self {
             GoalContextKind::Continuation => "continuation",
             GoalContextKind::BudgetLimit => "budget-limit",

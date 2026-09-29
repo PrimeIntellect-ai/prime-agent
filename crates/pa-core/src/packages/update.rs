@@ -43,7 +43,7 @@ impl PackageManager {
                         .unwrap_or_default(),
                 ]
                 .concat();
-                bail!(self.build_no_matching_package_message(source, &configured));
+                bail!(Self::build_no_matching_package_message(source, &configured));
             }
         }
 
@@ -235,7 +235,6 @@ impl PackageManager {
     /// `No matching package found for <source>` with the configured source the
     /// input most plausibly meant, if any.
     fn build_no_matching_package_message(
-        &self,
         source: &str,
         configured: &[serde_json::Value],
     ) -> String {

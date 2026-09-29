@@ -462,7 +462,7 @@ async fn kernel_teardown_with_live_handles_settles_the_callback_once() {
     // TS #2053's teardown shape: kill() tears the handles down with the
     // kernel, and the settlement fires once for the whole track —
     // synchronously with the teardown, so the state is assertable here.
-    manager.kill().await;
+    manager.kill();
     assert!(!manager.has_background_work());
     assert_eq!(settled.load(std::sync::atomic::Ordering::SeqCst), 1);
 }

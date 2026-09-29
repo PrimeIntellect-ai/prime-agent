@@ -458,13 +458,13 @@ mod tests {
             panic_first: AtomicBool,
         }
         impl AgentCronSchedulerHooks for PanickingHooks {
-            async fn run_job(&self, _job: &AgentCronJob) -> anyhow::Result<Option<&'static str>> {
+            fn run_job(&self, _job: &AgentCronJob) -> impl std::future::Future<Output = anyhow::Result<Option<&'static str>>> {
                 self.runs.fetch_add(1, Ordering::SeqCst);
                 assert!(
                     !self.panic_first.swap(false, Ordering::SeqCst),
                     "the first dispatch unwinds"
                 );
-                Ok(Some("ran"))
+                std::future::ready(Ok(Some("ran")))
             }
             fn now(&self) -> u64 {
                 1_700_000_000_000
@@ -818,13 +818,13 @@ mod tests {
     }
 
     impl AgentCronSchedulerHooks for FailingHooks {
-        async fn run_job(&self, _job: &AgentCronJob) -> anyhow::Result<Option<&'static str>> {
+        fn run_job(&self, _job: &AgentCronJob) -> impl std::future::Future<Output = anyhow::Result<Option<&'static str>>> {
             self.runs.fetch_add(1, Ordering::SeqCst);
             let error = self.error.lock().unwrap().clone();
-            match error {
+            std::future::ready(match error {
                 Some(message) => Err(anyhow::anyhow!(message)),
                 None => Ok(None),
-            }
+            })
         }
         fn now(&self) -> u64 {
             *self.now.lock().unwrap()

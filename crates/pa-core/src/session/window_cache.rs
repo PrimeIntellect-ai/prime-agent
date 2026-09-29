@@ -241,7 +241,10 @@ pub fn append_cached(path: &Path, bytes: &[u8], ownership: AppendOwnership) -> i
 // retain its bits so continuing chronological additions matches the full reader.
 pub(super) mod float_bits {
     use serde::{Deserialize, Deserializer, Serializer};
-    pub fn serialize<S: Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+    // serde's `serialize_with` contract pins `&T` - the lint's by-value
+// form would not be callable as a serde attribute helper.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+pub fn serialize<S: Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_u64(value.to_bits())
     }
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {

@@ -219,8 +219,8 @@ impl OutputSpill {
 
     /// Flush and settle: the complete file's path, or None when degraded.
     #[allow(dead_code)]
-    pub async fn finalize(&mut self) -> Option<String> {
-        self.finalize_sync()
+    pub fn finalize(&mut self) -> impl std::future::Future<Output = Option<String>> {
+        std::future::ready(self.finalize_sync())
     }
 
     /// Blocking form of [`Self::finalize`].

@@ -384,7 +384,7 @@ impl PackageManager {
             }
             ParsedSource::Local(local) => {
                 let base = self.base_dir_for_scope(SourceScope::from(scope));
-                let path = self.resolve_path_from_base(&local.path, &base);
+                let path = Self::resolve_path_from_base(&local.path, &base);
                 path.exists().then_some(path)
             }
         }
@@ -473,7 +473,7 @@ impl PackageManager {
                 let base = self.base_dir_for_scope(scope.into());
                 format!(
                     "local:{}",
-                    self.resolve_path_from_base(&local.path, &base).display()
+                    Self::resolve_path_from_base(&local.path, &base).display()
                 )
             }
         }
@@ -487,7 +487,7 @@ impl PackageManager {
         super::source::lexical_resolve(&self.cwd, trimmed)
     }
 
-    pub(super) fn resolve_path_from_base(&self, input: &str, base: &Path) -> PathBuf {
+    pub(super) fn resolve_path_from_base(input: &str, base: &Path) -> PathBuf {
         let trimmed = input.trim();
         if let Some(path) = expand_tilde(trimmed) {
             return path;
