@@ -245,10 +245,12 @@ impl AgentView {
     /// Whether one chat entry's rows are stable: content that later frames
     /// cannot change (nothing mutates status/user/slash rows once pushed;
     /// an assistant message stops changing when its stream settles; a tool
-    /// card stops animating once it holds a final result). Everything else
-    /// the rows depend on rides the cache key instead (the spacing
-    /// decision) or the cache key (width, detail, render options), so a settled
-    /// entry keeps its layout while another message streams — the
+    /// card stops animating once it holds a final result - except a cell
+    /// whose final result carries a still-running background shell, whose
+    /// summary line keeps animating with the working icon). Everything
+    /// else the rows depend on rides the cache key instead (the spacing
+    /// decision) or the cache key (width, detail, render options), so a
+    /// settled entry keeps its layout while another message streams — the
     /// transcript-wide "any streaming" exclusion re-rendered every
     /// settled agent message per streaming delta, the dogfood CPU spin.
     pub(super) fn entry_cacheable(&self, entry: &ChatEntry) -> bool {
@@ -270,10 +272,12 @@ impl AgentView {
             | ChatEntry::RefinementOutcome(_)
             | ChatEntry::CustomPanel(_) => true,
             ChatEntry::Assistant(message) => !message.streaming,
-            ChatEntry::Tool(card) => !matches!(
-                crate::tool_card::panel_status(card),
-                crate::tool_card::PanelStatus::Queued | crate::tool_card::PanelStatus::Running
-            ),
+            ChatEntry::Tool(card) => {
+                !matches!(
+                    crate::tool_card::panel_status(card),
+                    crate::tool_card::PanelStatus::Queued | crate::tool_card::PanelStatus::Running
+                ) && !crate::tool_card::ipython::background_shell_running(card)
+            }
             // A running bash card animates (the loader spinner frames);
             // a settled one caches like the other spacing-driven rows.
             ChatEntry::BashExecution(card) => !card.running,
@@ -356,7 +360,7 @@ impl AgentView {
         let mut preceded_by_tool_activity = false;
         for (index, entry) in self.chat.iter().enumerate() {
             let spacing = self.entry_spacing(index, entry, first, preceded_by_tool_activity);
-            let cacheable = self.entry_cacheable_at(index, entry);
+            let cacheable = self.entry_cacheable(entry);
             let cached_height = self.entry_heights[index][detail]
                 .filter(|(cached_spacing, _)| cacheable && *cached_spacing == spacing)
                 .map(|(_, height)| height);

@@ -165,6 +165,15 @@ async fn run_session_command(
                 None,
             ))
             .await;
+        // NO flush here, by TS parity: a prompt-admitted command runs
+        // with the prompt-response buffer armed (TS rpc-mode's
+        // `promptResponsePending`), so this `compaction_start` rides
+        // the buffered seam and publishes AFTER the prompt's response —
+        // the TS wire order (`outputConnectionEvent` buffers connection
+        // events while a prompt is pending; `handleInputLine`'s finally
+        // disarms and flushes them). The direct `compact` command's
+        // early flush lives in its own handler, where no prompt buffer
+        // stands between the frame and the writer.
     }
     let execution = {
         // The executor rebuilds session context on its compact branch

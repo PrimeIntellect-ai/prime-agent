@@ -108,6 +108,9 @@ use crate::update_prepare::{
     marker_expires_at_iso, update_gate_refuses, write_prepared_artifacts, AbortOutcome,
     BeginOutcome, MutationDrainLatch, PrepareCoordinator, PrepareOp, UPDATE_PREPARING_MESSAGE,
 };
+// The drain-state machine that names it is the unix signal path.
+#[cfg(unix)]
+use crate::update_prepare::PrepareState;
 use crate::update_roster::{
     build_update_roster, supervisor_identity, UpdateRosterInputs, WorkerSnapshot,
 };

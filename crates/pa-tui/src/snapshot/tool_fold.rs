@@ -216,17 +216,12 @@ pub fn assistant_value_to_entries(message: &Value) -> Vec<ChatEntry> {
             aborted: error.as_ref().is_some_and(|row| row.aborted),
         })));
     }
-    let started_ms = message
-        .get("timestamp")
-        .and_then(Value::as_u64)
-        .filter(|ms| *ms > 0);
     for (id, name, args) in tool_calls {
         entries.push(ChatEntry::Tool(Box::new(ToolCallCard {
             id,
             name,
             args,
             started: false,
-            started_ms,
             ..Default::default()
         })));
     }

@@ -139,6 +139,9 @@ pub fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
     let handle = winapi::open_process(winapi::PROCESS_QUERY_LIMITED_INFORMATION, pid)?;
     let mut buffer = [0u16; 1024];
     let mut size = buffer.len() as u32;
+    // Writes the process image path into `buffer` (at most `size` wide
+    // chars, NUL-terminated); a 0 return means the query failed. The
+    // hand-declared `winapi` wrappers are safe fns, so no `unsafe` here.
     let written = winapi::query_full_process_image_name(handle, buffer.as_mut_ptr(), &mut size);
     winapi::close_handle(handle);
     if written == 0 {
@@ -243,25 +246,37 @@ pub fn restore_default_sigint() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Suspend-to-background is a POSIX process-group surface: the
+/// non-unix arm refuses (the TS `handleCtrlZ` has no win32 path either).
+///
 /// # Errors
 ///
-/// The non-unix targets have no POSIX process groups: always errors.
+/// Always errors on non-unix platforms: there is no POSIX process
+/// group to stop.
 #[cfg(not(unix))]
 pub fn stop_own_process_group() -> anyhow::Result<()> {
     anyhow::bail!("suspend to background requires a POSIX process group")
 }
 
+/// The suspended-window SIGINT shield is POSIX-only (the unix arm swaps
+/// the disposition to a no-op handler).
+///
 /// # Errors
 ///
-/// The non-unix targets have no POSIX signals: always errors.
+/// Always errors on non-unix platforms: there is no SIGINT disposition
+/// to set.
 #[cfg(not(unix))]
 pub fn ignore_sigint_for_suspend() -> anyhow::Result<()> {
     anyhow::bail!("suspend to background requires a POSIX process group")
 }
 
+/// The resume-side SIGINT restore is POSIX-only (the unix arm returns
+/// the default disposition).
+///
 /// # Errors
 ///
-/// The non-unix targets have no POSIX signals: always errors.
+/// Always errors on non-unix platforms: there is no SIGINT disposition
+/// to restore.
 #[cfg(not(unix))]
 pub fn restore_default_sigint() -> anyhow::Result<()> {
     anyhow::bail!("suspend to background requires a POSIX process group")
@@ -330,8 +345,9 @@ pub fn is_process_alive(pid: u32) -> anyhow::Result<bool> {
 ///
 /// # Errors
 ///
-/// Never errors on this target: the probe answers dead for pid zero,
-/// alive otherwise.
+/// This arm does not fail: every query outcome maps to alive or dead
+/// (the handle probe's own failure reads as dead, never as a stale-owner
+/// reclaim).
 #[cfg(windows)]
 pub fn is_process_alive(pid: u32) -> anyhow::Result<bool> {
     if pid == 0 {

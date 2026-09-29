@@ -88,8 +88,9 @@ pub(crate) struct ReapTarget {
 pub(crate) enum ReapKind {
     /// A leftover session worker of a previous daemon on this socket.
     Worker,
-    /// A wedged supervisor process bound to this socket path.
-    #[cfg_attr(not(unix), allow(dead_code))]
+    /// A wedged supervisor process bound to this socket path. Constructed
+    /// only by the linux supervisor census.
+    #[cfg(target_os = "linux")]
     Supervisor,
 }
 
@@ -151,6 +152,7 @@ pub(crate) async fn reap_predecessors(supervisor: &Arc<Supervisor>) {
                     "boot reap: {} pid {} (start id {:?}) - {:?}",
                     match target.kind {
                         ReapKind::Worker => "leftover worker",
+                        #[cfg(target_os = "linux")]
                         ReapKind::Supervisor => "wedged supervisor",
                     },
                     target.pid,
@@ -472,6 +474,7 @@ fn socket_spelling_of(pid: u32, value: &str) -> String {
 /// what the harnesses execute). A reap target's executable must be one of
 /// these - a session's arbitrary long-running command (`python worker`, a
 /// tool server) never qualifies, whatever it inherited.
+/// Unix only: the same linux/unix callers as [`is_worker_argv`].
 #[cfg(unix)]
 pub(crate) fn is_product_binary(exe: &str) -> bool {
     matches!(
@@ -486,6 +489,7 @@ pub(crate) fn is_product_binary(exe: &str) -> bool {
 /// hazard classes this gate exists for: a session kernel, bash child, or
 /// tool server that merely INHERITED the worker env, and a user's
 /// same-socket command that happens to carry a `worker` argument.
+/// Unix only: the linux census and the unix tests are its users.
 #[cfg(unix)]
 pub(crate) fn is_worker_argv(argv: &[String]) -> bool {
     argv.first().is_some_and(|exe| is_product_binary(exe))
@@ -612,7 +616,9 @@ fn resolve_relative_socket_tokens(pid: u32, argv: &mut [String]) {
 /// daemon --daemon-socket <socket>`) or the pa-daemon binary form
 /// (`supervisor --socket <socket>`). The executable gate is
 /// load-bearing: an arbitrary inherited-socket command that merely carries
-/// the argument tokens is never a target.
+/// the argument tokens is never a target. Unix only: the spelling it
+/// compares against is the unix socket spelling, and every caller (the
+/// linux supervisor census, the unix tests) sits behind a unix gate.
 #[cfg(unix)]
 pub(crate) fn supervisor_argv_names_socket(argv: &[String], socket: &str) -> bool {
     let Some(exe) = argv.first() else {
@@ -661,7 +667,9 @@ fn is_unix_socket_file(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_socket())
 }
 
-/// Windows has no unix socket files to unlink: the probe always false.
+/// Windows endpoints are named pipes, not files: no path the reap can
+/// see is ever a socket file, so the endpoint-unlink gate never fires
+/// (the TS `daemon-ps` census is empty on win32 for the same reason).
 #[cfg(not(unix))]
 fn is_unix_socket_file(_path: &Path) -> bool {
     false

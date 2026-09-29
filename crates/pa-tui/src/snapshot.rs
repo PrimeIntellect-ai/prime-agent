@@ -66,6 +66,16 @@ pub struct Reconstructed {
     /// attach re-syncs the queue strip (TS re-reads the queue after
     /// subscribe because a `session_action_update` in the gap is lost).
     pub queued: crate::queued::QueuedMessages,
+    /// The LAST HUMAN PROMPT's wall-clock time (unix ms): the newest
+    /// user message's `timestamp` in fold order. The rebuilt loader
+    /// anchors its elapsed clock here (the operator's 2026-09-28
+    /// rule: the waiting/executing timer counts since the last human
+    /// prompt and never resets on a view transition — an agents-view
+    /// round trip re-attaches mid-turn and the clock keeps its
+    /// anchor). `None` when no user message carries a timestamp (an
+    /// old snapshot or a seeded replay) — the loader then keeps its
+    /// re-attach-instant anchor.
+    pub last_user_prompt_ms: Option<u64>,
     /// The session's effective service tier (`state.serviceTier`), the
     /// `/fast` toggle's baseline.
     pub service_tier: Option<String>,
@@ -88,12 +98,7 @@ impl Reconstructed {
                         name: view.name,
                         args: serde_json::Value::Null,
                         started: true,
-                        ended_ms: (view.timestamp > 0).then_some(view.timestamp),
                         result: Some(view.view),
-                        // An orphan keeps its own standalone row: it
-                        // never joins a condensed run (it is not a
-                        // call).
-                        unmatched_result: true,
                         ..Default::default()
                     })));
             }
@@ -111,10 +116,6 @@ struct ToolResultReplay {
     /// card matches).
     tool_name: String,
     view: crate::chat::ToolResultView,
-    /// The message's wire `timestamp` (Unix milliseconds; 0 when absent):
-    /// reading an existing field for the condensed runs' wall-clock - no
-    /// schema change.
-    timestamp: u64,
 }
 
 /// Decode a `role: "toolResult"` message into its replay view; `None` for
@@ -146,10 +147,6 @@ fn tool_result_message_view(message: &Value) -> Option<ToolResultReplay> {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
         },
-        timestamp: message
-            .get("timestamp")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
     })
 }
 
@@ -163,7 +160,6 @@ fn apply_tool_result(chat: &mut [ChatEntry], result: ToolResultReplay) -> Option
         tool_call_id,
         tool_name,
         view,
-        timestamp,
     } = result;
     for entry in chat.iter_mut() {
         if let ChatEntry::Tool(card) = entry {
@@ -175,7 +171,6 @@ fn apply_tool_result(chat: &mut [ChatEntry], result: ToolResultReplay) -> Option
                 let now = std::time::Instant::now();
                 card.started_at = Some(now);
                 card.ended_at = Some(now);
-                card.ended_ms = (timestamp > 0).then_some(timestamp);
                 card.result = Some(view);
                 card.result_partial = false;
                 return None;
@@ -186,7 +181,6 @@ fn apply_tool_result(chat: &mut [ChatEntry], result: ToolResultReplay) -> Option
         id: tool_call_id,
         name: tool_name,
         view,
-        timestamp,
     })
 }
 
@@ -195,7 +189,6 @@ struct OrphanResult {
     id: String,
     name: String,
     view: crate::chat::ToolResultView,
-    timestamp: u64,
 }
 
 /// Replay a whole transcript: map every message to its rows, then fold
@@ -309,7 +302,6 @@ fn settle_last_pending(
         tool_call_id: _,
         tool_name: _,
         view,
-        timestamp,
     } = result;
     if let Some(ChatEntry::Tool(card)) = chat.get_mut(index) {
         card.started = true;
@@ -319,7 +311,6 @@ fn settle_last_pending(
         let now = std::time::Instant::now();
         card.started_at = Some(now);
         card.ended_at = Some(now);
-        card.ended_ms = (timestamp > 0).then_some(timestamp);
         card.result = Some(view);
         card.result_partial = false;
     }
@@ -333,16 +324,13 @@ fn orphan_card(result: ToolResultReplay) -> ChatEntry {
         tool_call_id,
         tool_name,
         view,
-        timestamp,
     } = result;
     ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
         id: tool_call_id,
         name: tool_name,
         args: serde_json::Value::Null,
         started: true,
-        ended_ms: (timestamp > 0).then_some(timestamp),
         result: Some(view),
-        unmatched_result: true,
         ..Default::default()
     }))
 }
@@ -391,7 +379,11 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         starting: actions.as_ref().and_then(starting_from_actions),
         rlm_child_status: actions
             .as_ref()
-            .map(queue_rlm_child_status)
+            .map(|actions| queue_lane_indices(actions, "rlmChildStatus"))
+            .unwrap_or_default(),
+        injected_prompts: actions
+            .as_ref()
+            .map(|actions| queue_lane_indices(actions, "injectedPrompts"))
             .unwrap_or_default(),
     };
 
@@ -399,6 +391,20 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         .and_then(|state| state.get("serviceTier"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let last_user_prompt_ms =
+        snapshot
+            .get("messages")
+            .and_then(Value::as_array)
+            .and_then(|messages| {
+                messages
+                    .iter()
+                    .rev()
+                    .find(|message| {
+                        message.get("role").and_then(Value::as_str) == Some("user")
+                            && message_timestamp_ms(message).is_some()
+                    })
+                    .and_then(message_timestamp_ms)
+            });
     Reconstructed {
         chat: messages,
         model_id,
@@ -410,6 +416,26 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         last_event_sequence,
         queued,
         service_tier,
+        last_user_prompt_ms,
+    }
+}
+
+/// One message's wall-clock timestamp (unix ms): the wire's numeric
+/// `timestamp` (u64 or f64) or an ISO-8601 string. `None` when the
+/// message carries no readable time.
+fn message_timestamp_ms(message: &Value) -> Option<u64> {
+    match message.get("timestamp") {
+        Some(Value::Number(number)) => number.as_u64().or_else(|| {
+            number
+                .as_f64()
+                .filter(|value| value.is_finite())
+                .map(|value| value.max(0.0) as u64)
+        }),
+        Some(Value::String(iso)) => {
+            let ms = crate::agents_view_state::timestamp_ms(Some(iso));
+            (ms > 0).then_some(ms as u64)
+        }
+        _ => None,
     }
 }
 
@@ -432,15 +458,16 @@ fn starting_from_actions(actions: &Value) -> Option<String> {
     })
 }
 
-/// The RLM child status provenance rider of a `sessionActions` wire value
-/// (`rlmChildStatus`: the parked child-status notices by lane index —
-/// Rust-native typed provenance with no TS counterpart; the strip folds
-/// exactly these rows). A projection without parked notices omits the
-/// rider entirely.
-fn queue_rlm_child_status(actions: &Value) -> crate::queued::RlmChildStatusIndices {
+/// One typed-provenance rider of a `sessionActions` wire value (the
+/// parked lane indices it marks — Rust-native provenance with no TS
+/// counterpart; the strip folds exactly the marked rows): `rlmChildStatus`
+/// for the parked child-status notices, `injectedPrompts` for the
+/// engine-minted continuations. A projection without parked marks omits
+/// the rider entirely.
+fn queue_lane_indices(actions: &Value, rider: &str) -> crate::queued::QueueLaneIndices {
     let indices = |lane: &str| {
         actions
-            .get("rlmChildStatus")
+            .get(rider)
             .and_then(|rider| rider.get(lane))
             .and_then(Value::as_array)
             .map(|items| {
@@ -452,7 +479,7 @@ fn queue_rlm_child_status(actions: &Value) -> crate::queued::RlmChildStatusIndic
             })
             .unwrap_or_default()
     };
-    crate::queued::RlmChildStatusIndices {
+    crate::queued::QueueLaneIndices {
         steering: indices("steering"),
         follow_up: indices("followUp"),
     }

@@ -79,12 +79,12 @@ pub fn confirm_nightly_switch(
 /// command's `Error: …` line and exit 1 — including the installer-ownership
 /// message a binary the Prime Agent installer does not own produces verbatim
 /// (the actionable, install-method-specific instruction).
-pub fn run(options: &SelfUpdateOptions, persisted_wire: Option<String>) -> i32 {
+pub fn run(options: &SelfUpdateOptions, persisted_wire: Option<&str>) -> i32 {
     // The effective channel: an explicit flag wins, else the persisted
     // one, else the running version infers it.
     let channel = options
         .channel
-        .or_else(|| persisted_wire.as_deref().and_then(UpdateChannel::from_wire));
+        .or_else(|| persisted_wire.and_then(UpdateChannel::from_wire));
     let command_options = crate::update_flow::update_command::UpdateCommandOptions {
         force: options.force,
         rollback: options.rollback,
@@ -112,10 +112,7 @@ pub fn run(options: &SelfUpdateOptions, persisted_wire: Option<String>) -> i32 {
             // not-attempted exit (75) reaches here only as the child-mode
             // no-change skip: a declined confirmation never runs the flow.
             let flag_wire = options.channel.map(UpdateChannel::wire_name);
-            if (code == 0 || code == 75)
-                && flag_wire.is_some()
-                && flag_wire != persisted_wire.as_deref()
-            {
+            if (code == 0 || code == 75) && flag_wire.is_some() && flag_wire != persisted_wire {
                 let wire = flag_wire.unwrap_or_default();
                 if let Ok(cwd) = std::env::current_dir() {
                     let settings_channel = match wire {

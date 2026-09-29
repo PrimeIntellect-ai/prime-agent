@@ -415,7 +415,7 @@ fn sort_rows_bottom_up(rows: &mut [&UpdateRosterSession]) {
             let subagent = |row: &UpdateRosterSession| {
                 row.kind == pa_types::daemon::update_flow::UpdateRosterSessionKind::Subagent
             };
-            (subagent(b) as u8).cmp(&(subagent(a) as u8))
+            u8::from(subagent(b)).cmp(&u8::from(subagent(a)))
         })
     });
 }

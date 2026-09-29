@@ -1,3 +1,22 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
+// by design on hot paths (boxing 130 fns is allocation-churn with zero
+// correctness gain); the fn-length threshold is a style gate, not
+// correctness (the harness fns are intentionally linear); 64-bit targets -
+// the narrowing sits at OS/protocol boundaries where the values are
+// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
+// guarded parses), and checked conversions would add panic paths where
+// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
+// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
+// dossier for the conductor).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! End-to-end verifier for the subagent panel's keyboard path from the main
 //! chat (Kevin's live-dogfood ruling, TS parity): the attached session with a
 //! ledger-seeded child renders the subagent summary box; Down at the end of
@@ -90,6 +109,15 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     ] {
         command.env_remove(var);
     }
+    // The daemon's default sessions dir must stay the agent dir under the
+    // tempdir: an ambient `PRIME_AGENT_SESSION_DIR` (every agent-session
+    // shell on the fleet box exports one) would otherwise become the
+    // daemon's default session dir, so `rlm_spawn_ledger_for(None)`
+    // resolves the family ledger against the foreign dir and the seeded
+    // family never registers (the same env hygiene the sibling e2e
+    // spawns pin: ambient overrides must not leak in).
+    command.env_remove("PRIME_AGENT_SESSION_DIR");
+    command.env_remove("PRIME_AGENT_CODING_AGENT_SESSION_DIR");
     command.env(
         pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
         "15000",
@@ -248,7 +276,7 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
     // attached parent renders the subagent summary box from the real daemon.
     let ledger = pa_daemon::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &session_dir, |_m| {});
     ledger
-        .append_spawn(pa_daemon::rlm_ledger::RlmSpawnInput {
+        .append_spawn(&pa_daemon::rlm_ledger::RlmSpawnInput {
             child_id: "panel-nav-child".to_string(),
             parent: parent_path.to_string_lossy().to_string(),
             child: child_path.to_string_lossy().to_string(),

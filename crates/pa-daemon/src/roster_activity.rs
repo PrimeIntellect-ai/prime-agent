@@ -164,7 +164,7 @@ impl RosterPushQueue {
 /// flows through the worker's event pump enqueues a flush request. The
 /// watcher owns a receiver on the pump's broadcast, so it ends with the
 /// worker's process (a worker serves one session for its lifetime).
-pub(crate) fn spawn_roster_activity_watch(events: Arc<EventPump>, queue: RosterPushQueue) {
+pub(crate) fn spawn_roster_activity_watch(events: &Arc<EventPump>, queue: RosterPushQueue) {
     if queue.inner.is_none() {
         return;
     }
@@ -192,6 +192,9 @@ pub(crate) fn spawn_roster_activity_watch(events: Arc<EventPump>, queue: RosterP
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The socket-harness test below is the only user of these; the
+    // import gates keep the portable tests above import-clean on
+    // non-unix targets.
     #[cfg(unix)]
     use crate::supervisor_link::SupervisorLink;
     use serde_json::json;
@@ -202,7 +205,7 @@ mod tests {
     #[cfg(unix)]
     use std::time::Duration;
 
-    fn session_event_frame(event: serde_json::Value) -> OutboundFrame {
+    fn session_event_frame(event: &serde_json::Value) -> OutboundFrame {
         let payload = json!({
             "type": "session_event",
             "activeSessionId": "session-1",
@@ -214,7 +217,7 @@ mod tests {
     #[test]
     fn every_ts_trigger_event_type_flushes() {
         for event_type in ROSTER_SESSION_EVENT_TRIGGERS {
-            let frame = session_event_frame(json!({ "type": event_type }));
+            let frame = session_event_frame(&json!({ "type": event_type }));
             assert!(
                 frame_triggers_roster_flush(&frame),
                 "{event_type} must trigger a roster flush"
@@ -233,7 +236,7 @@ mod tests {
             "goal_update",
             "ipython_sent_agent_message",
         ] {
-            let frame = session_event_frame(json!({ "type": event_type }));
+            let frame = session_event_frame(&json!({ "type": event_type }));
             assert!(
                 !frame_triggers_roster_flush(&frame),
                 "{event_type} must not trigger a roster flush"

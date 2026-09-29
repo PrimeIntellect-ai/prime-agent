@@ -9,6 +9,31 @@
 //!
 //! Linux-only e2e (`AF_UNIX` sockets, `kill -9` semantics): compiles to
 //! nothing elsewhere, like the other pa-daemon e2e verifiers.
+// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
+// the full rationale).
+// Stack-resident futures by design on the daemon's hot paths; boxing the
+// call sites for a lint tick is a perf regression with zero correctness gain.
+#![allow(clippy::large_futures)]
+// 64-bit-only targets; the narrowing casts sit at OS boundaries
+// (pid/fd/time/size) where the values are bounded by the kernel - the
+// dead-guard expect()s would add panic paths where silent wrap was
+// deliberate.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// The fn-length threshold is a style gate, not correctness; the structure
+// campaign owns the god-fn splits as a follow-up.
+#![allow(clippy::too_many_lines)]
+// API-shape opinions, not defects; the surfaces are deliberate.
+#![allow(
+    clippy::unnecessary_wraps,
+    clippy::zero_sized_map_values,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names
+)]
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -70,10 +95,10 @@ fn child_pids_of(ppid: u32) -> Vec<u32> {
     let mut pids = Vec::new();
     let entries = std::fs::read_dir("/proc").expect("read /proc");
     for entry in entries.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+        let Ok(entry_pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
             continue;
         };
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{entry_pid}/stat")) else {
             continue;
         };
         let Some((_, rest)) = stat.rsplit_once(')') else {
@@ -85,7 +110,7 @@ fn child_pids_of(ppid: u32) -> Vec<u32> {
             continue;
         };
         if parent == ppid {
-            pids.push(pid);
+            pids.push(entry_pid);
         }
     }
     pids
@@ -167,7 +192,7 @@ impl Client {
         self.writer.flush().expect("flush");
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         self.send(&json!({
             "type": "command",
             "id": id,
@@ -240,7 +265,7 @@ fn control_plane_stays_responsive_while_a_large_adoption_pass_recovers() {
     for index in 0..SESSIONS {
         client.send_command(
             &format!("c{index}"),
-            json!({
+            &json!({
                 "type": "create",
                 "config": {
                     "cwd": dir.path().to_string_lossy(),
@@ -282,7 +307,7 @@ fn control_plane_stays_responsive_while_a_large_adoption_pass_recovers() {
     let restart_before = pa_daemon::util::now_iso();
     let daemon2 = spawn_supervisor(&socket, &agent_dir);
     wait_socket_ready(&socket);
-    let supervisor2_pid = daemon2.child.id();
+    let restart_supervisor_pid = daemon2.child.id();
 
     // The control plane answers mid-recovery: hello within the latency
     // bound while the pass is visibly unfinished (strictly fewer than
@@ -297,15 +322,15 @@ fn control_plane_stays_responsive_while_a_large_adoption_pass_recovers() {
         "hello starved behind the recovery: {hello_latency:?}"
     );
     assert!(
-        child_pids_of(supervisor2_pid).len() < SESSIONS,
+        child_pids_of(restart_supervisor_pid).len() < SESSIONS,
         "the recovery finished before the first hello; the responsiveness check is vacuous (children: {:?})",
-        child_pids_of(supervisor2_pid)
+        child_pids_of(restart_supervisor_pid)
     );
 
     // list answers mid-recovery too: it serves the registered rows instead
     // of queueing behind the rest of the pass.
     let list_start = Instant::now();
-    client.send_command("list-mid-recovery", json!({ "type": "list" }));
+    client.send_command("list-mid-recovery", &json!({ "type": "list" }));
     let list_response = client.read_response("list-mid-recovery");
     let list_latency = list_start.elapsed();
     assert_eq!(
@@ -343,7 +368,7 @@ fn control_plane_stays_responsive_while_a_large_adoption_pass_recovers() {
     // the recovered sessions.
     client.send_command(
         "attach-recovered",
-        json!({ "type": "attach", "activeSessionId": session_ids[0] }),
+        &json!({ "type": "attach", "activeSessionId": session_ids[0] }),
     );
     let attached = client.read_response("attach-recovered");
     assert_eq!(

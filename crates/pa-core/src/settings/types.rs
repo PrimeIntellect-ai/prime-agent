@@ -329,6 +329,11 @@ pub struct Settings {
     pub branch_summary: Option<BranchSummarySettings>,
     pub retry: Option<RetrySettings>,
     pub provider_backup_model: Option<String>,
+    /// Model ("provider/model-id" or a bare model id) that serves turns
+    /// attaching images when the session model does not accept image
+    /// input. Default: none - image turns on a text-only model fail with
+    /// a configuration hint instead of silently dropping the images.
+    pub image_model: Option<String>,
     pub autonomous: Option<AutonomousSettings>,
     pub shell_path: Option<String>,
     pub quiet_startup: Option<bool>,
@@ -360,7 +365,7 @@ pub struct Settings {
     pub tree_filter_mode: Option<String>,
     /// `chatDetail` (TS #2709): the conversation-detail level Ctrl+O
     /// cycles and persists ("overview"/"details"/"all"); `None` reads
-    /// as the TS default startup level, `details`.
+    /// as the `overview` startup level (the collapse mode).
     pub chat_detail: Option<String>,
     pub thinking_budgets: Option<ThinkingBudgetsSettings>,
     pub editor_padding_x: Option<u64>,

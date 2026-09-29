@@ -77,6 +77,11 @@ pub struct ChromeState {
     /// Thinking effort suffix rendered as `model:effort` in the tray (TS
     /// `getModelContextLabel`); `None` keeps the bare model id.
     pub thinking_suffix: Option<String>,
+    /// The session's effective service tier as its wire name (TS
+    /// `connectionState.serviceTier`): the tray badge after the model —
+    /// `fast` for priority, the tier name for any other non-default tier.
+    /// `None` (or `default`) renders no badge.
+    pub service_tier: Option<String>,
     /// Startup warning (tmux keyboard setup), rendered as a status row.
     pub tmux_notice: Option<String>,
     /// Tray override label (TS `getTrayOverrideLabel`): while the Ctrl+C
@@ -122,14 +127,12 @@ pub enum ActivityDirection {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActivityDock {
-    /// The directly-running children right now (the `direct` number of
-    /// the dock's rendered `direct, nested subagents` pair; the
-    /// operator's 2026-09-25 split).
+    /// The directly-running children right now (one addend of the
+    /// dock's single running total).
     pub subagents_running_direct: usize,
     /// The further running descendants below them (subagents of
-    /// subagents): the `nested` number of the rendered pair. Idle and
-    /// dead registry rows never count — they render in the scoped
-    /// agents view.
+    /// subagents): the total's other addend. Idle and dead registry
+    /// rows never count — they render in the scoped agents view.
     pub subagents_running_nested: usize,
     /// Every descendant, finished ones included: this keeps the dock
     /// mounted while any subagent history remains browsable (the
@@ -516,6 +519,19 @@ pub fn render_tray(state: &ChromeState, theme: &Theme, width: usize) -> Line {
         }
         right.push(Span::styled(label, dim));
     }
+    // TS footer badge (#2144): `fast` for the priority tier, the tier name
+    // for any other non-default tier.
+    let tier_badge = match state.service_tier.as_deref() {
+        Some("priority") => Some("fast"),
+        Some(tier) if tier != "default" => Some(tier),
+        _ => None,
+    };
+    if let Some(badge) = tier_badge {
+        if !right.is_empty() {
+            right.push(Span::styled(" \u{00b7} ".to_string(), dim));
+        }
+        right.push(Span::styled(badge.to_string(), dim));
+    }
     if let Some(context) = &state.context {
         if !right.is_empty() {
             right.push(Span::styled(" \u{00b7} ".to_string(), dim));
@@ -688,14 +704,14 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
         ]
     };
     // The live-only number: the count of actively-running subagents
-    // right now, split into the directly-running children and the
-    // running descendants nested below them (the operator's
-    // 2026-09-25 `direct, nested` pair — `◆ 1, 7 subagents` = one
-    // running child plus seven running descendants under it). Idle and
-    // finished descendants stay out of the indicator; they render in
-    // the scoped agents view. The pair rides the label itself (the
-    // operator's `◆ x subagents` consolidation) in the dock's running
-    // color; a quiet roster keeps the plain zero readout.
+    // right now, direct children and nested descendants together (the
+    // operator's 2026-09-28 ask: ONE number, never the `direct,
+    // nested` pair of the 2026-09-25 split — `◆ 9 subagents` is two
+    // running children plus seven running descendants under them).
+    // Idle and finished descendants stay out of the indicator; they
+    // render in the scoped agents view. The total rides the label in
+    // the dock's running color; a quiet roster keeps the plain zero
+    // readout.
     let running_color = |count: usize| {
         if count > 0 {
             ThemeColor::Success
@@ -715,17 +731,9 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
             line.push(theme.fg_span(ThemeColor::Dim, "  ·  "));
         }
         let spans = match group {
-            ActivityGroup::Subagents => vec![theme.fg_span(
-                running_color(running),
-                if running > 0 {
-                    format!(
-                        "◆ {}, {} subagents",
-                        dock.subagents_running_direct, dock.subagents_running_nested
-                    )
-                } else {
-                    "◆ 0 subagents".to_string()
-                },
-            )],
+            ActivityGroup::Subagents => {
+                vec![theme.fg_span(running_color(running), format!("◆ {running} subagents"))]
+            }
             ActivityGroup::Heartbeats => {
                 let mut heartbeats = vec![theme.fg_span(
                     running_color(dock.heartbeats),
@@ -771,11 +779,14 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
             }
         };
         if dock.focused && dock.selected == group {
-            // The focused group reads as one unit behind a slight green
-            // band (the theme's success-panel background — the operator's
-            // 2026-09-26 selection directive); each span keeps its own
+            // The focused group reads as one unit behind the ONE shared
+            // selection band (the operator's 2026-09-28 visibility
+            // directive: the 2026-09-26 dark-green ToolSuccessBg band
+            // read near-invisible) — the accent purple restored at full
+            // opacity with bold text, the same style every activity
+            // surface's selected row paints; each span keeps its own
             // status color, so the selection never repaints the text.
-            let band = theme.bg_style(ThemeBg::ToolSuccessBg);
+            let band = theme.selection_row_style();
             for span in spans {
                 line.push(Span::styled(span.content.clone(), span.style.patch(band)));
             }
@@ -837,7 +848,7 @@ mod tests {
             .collect::<String>();
         assert_eq!(
             text,
-            " ◆ 1, 1 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  Pursuing goal (0s)"
+            " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  Pursuing goal (0s)"
         );
         // The color-coding (the operator's 2026-09-24 directive): every
         // above-zero count segment and the active goal render green.
@@ -847,7 +858,7 @@ mod tests {
                 .iter()
                 .any(|span| span.content.contains(text) && span.style.fg == color)
         };
-        assert!(colored("◆ 1, 1 subagents", success));
+        assert!(colored("◆ 2 subagents", success));
         assert!(colored("◷ 3 heartbeats", success));
         assert!(colored("▸ 1 shell", success));
         assert!(colored("Pursuing goal", success));
@@ -967,20 +978,20 @@ mod tests {
     }
 
     /// The dock's subagents segment is one consolidated item (the
-    /// operator's `◆ x subagents` form, with the 2026-09-25 running
-    /// split): the counts are the running pair (direct, then nested),
-    /// never the descendant total, and no category breakdown rides the
-    /// row.
+    /// operator's `◆ x subagents` form): the count is the running
+    /// total — direct children and nested descendants summed into ONE
+    /// number (the operator's 2026-09-28 one-number ask; the 2026-09-25
+    /// `direct, nested` pair is gone) — never the descendant total and
+    /// never a category breakdown.
     #[test]
     fn prompt_bar_subagent_segment_is_the_running_count_only() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
-        // Two running among seven descendants (one direct child plus one
-        // nested worker): the readout is the running pair, not the
-        // descendant total and not a category breakdown.
+        // Two directly-running children, nothing nested: the readout is
+        // the running total alone.
         let dock = ActivityDock {
-            subagents_running_direct: 1,
-            subagents_running_nested: 1,
-            subagents_total: 7,
+            subagents_running_direct: 2,
+            subagents_running_nested: 0,
+            subagents_total: 40,
             ..ActivityDock::default()
         };
         let frame = render_activity_dock(&dock, &theme, 80).unwrap();
@@ -988,9 +999,28 @@ mod tests {
             .iter()
             .map(|span| span.content.as_str())
             .collect::<String>();
-        assert_eq!(text, " ◆ 1, 1 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
+        assert_eq!(text, " ◆ 2 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
+        // Two running children plus seven running descendants: ONE
+        // number — the summed total, never the pair, never the
+        // descendant total, and no category breakdown.
+        let dock = ActivityDock {
+            subagents_running_direct: 2,
+            subagents_running_nested: 7,
+            subagents_total: 50,
+            ..ActivityDock::default()
+        };
+        let frame = render_activity_dock(&dock, &theme, 80).unwrap();
+        let text = frame[1]
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert_eq!(text, " ◆ 9 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
+        assert!(!text.contains("2,"), "no direct/nested pair: {text}");
         assert!(!text.contains("idle"), "no category breakdown: {text}");
-        assert!(!text.contains('7'), "the total never renders: {text}");
+        assert!(
+            !text.contains('5'),
+            "the descendant total never renders: {text}"
+        );
         // A single running descendant keeps the same shape.
         let dock = ActivityDock {
             subagents_running_direct: 0,
@@ -1003,9 +1033,10 @@ mod tests {
             .iter()
             .map(|span| span.content.as_str())
             .collect::<String>();
-        assert_eq!(text, " ◆ 0, 1 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
+        assert_eq!(text, " ◆ 1 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
         // A quiet roster (history but nothing running) keeps the plain
-        // zero readout — the pair only renders while work runs.
+        // zero readout — the running count only renders while work
+        // runs.
         let dock = ActivityDock {
             subagents_total: 5,
             ..ActivityDock::default()
@@ -1018,13 +1049,15 @@ mod tests {
         assert_eq!(text, " ◆ 0 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
     }
 
-    /// The focused dock's selection reads as a slight green band behind
-    /// the selected group (the operator's 2026-09-26 directive), never as
-    /// an accent text repaint: the band is the theme's success-panel
-    /// background across exactly the group's spans, and each span keeps
-    /// its own status color.
+    /// The focused dock's selection reads as the ONE shared selection
+    /// band (the operator's 2026-09-28 visibility and consistency
+    /// directives): the accent purple restored as a FULLY OPAQUE
+    /// background — the 2026-09-26 dark-green `ToolSuccessBg` band read
+    /// near-invisible — with the selected group's text bold, across
+    /// exactly the group's spans, while each span keeps its own status
+    /// color (the selection never repaints the text).
     #[test]
-    fn activity_dock_selection_is_a_slight_green_band_not_accent_text() {
+    fn activity_dock_selection_is_the_purple_opaque_bold_band() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
         let dock = ActivityDock {
             subagents_running_direct: 1,
@@ -1040,41 +1073,51 @@ mod tests {
         };
         let frame = render_activity_dock(&dock, &theme, 120).unwrap();
         let row = &frame[1];
-        // The band is the theme's slight green panel background (prime:
-        // #0e1510 — green-leaning), never the accent.
-        let band = Some(Color::Rgb(0x0e, 0x15, 0x10));
-        assert_eq!(theme.bg_style(ThemeBg::ToolSuccessBg).bg, band);
+        // The band is the theme's accent purple (prime #7c6faf — the
+        // original selection shade) at FULL opacity, with bold text:
+        // the ONE style every activity surface's selected row paints
+        // (`theme::selection_row_style`), never the 2026-09-26
+        // dark-green panel background.
+        let band = theme.selection_row_style();
+        assert_eq!(band.bg, Some(Color::Rgb(0x7c, 0x6f, 0xaf)));
+        assert!(band.add_modifier.contains(Modifier::BOLD));
         let span = |text: &str| {
             row.iter()
                 .find(|span| span.content == text)
                 .unwrap_or_else(|| panic!("missing span {text:?}"))
         };
-        // The whole selected group carries the band while keeping its
-        // own status colors: the running count stays success green, the
-        // paused cluster stays amber, the in-group separator stays dim.
+        // The whole selected group carries the band and the bold
+        // modifier while keeping its own status colors: the running
+        // count stays success green, the paused cluster stays amber,
+        // the in-group separator stays dim.
         let success = theme.fg_style(ThemeColor::Success).fg;
         let warning = theme.fg_style(ThemeColor::Warning).fg;
         let dim = theme.fg_style(ThemeColor::Dim).fg;
-        assert_eq!(span("\u{25f7} 3 heartbeats").style.bg, band);
+        assert_eq!(span("\u{25f7} 3 heartbeats").style.bg, band.bg);
         assert_eq!(span("\u{25f7} 3 heartbeats").style.fg, success);
-        assert_eq!(span(" \u{b7} ").style.bg, band);
+        assert!(span("\u{25f7} 3 heartbeats")
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+        assert_eq!(span(" \u{b7} ").style.bg, band.bg);
         assert_eq!(span(" \u{b7} ").style.fg, dim);
-        assert_eq!(span("\u{25d0} 1 paused").style.bg, band);
+        assert_eq!(span("\u{25d0} 1 paused").style.bg, band.bg);
         assert_eq!(span("\u{25d0} 1 paused").style.fg, warning);
+        assert!(span("\u{25d0} 1 paused")
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
         // The band rides exactly the selected group: the other groups
         // and the separators between them carry no band.
         let selected = ["\u{25f7} 3 heartbeats", " \u{b7} ", "\u{25d0} 1 paused"];
         for span in row {
             assert_eq!(
-                span.style.bg == band,
+                span.style.bg == band.bg,
                 selected.contains(&span.content.as_str()),
                 "the band rides exactly the selected group: {:?}",
                 span.content
             );
         }
-        // No purple on selection: the accent color never rides the row.
-        let accent = theme.fg_style(ThemeColor::Accent).fg;
-        assert!(row.iter().all(|span| span.style.fg != accent));
         // The band is a focus-owned signal: the same dock without focus
         // renders no band at all.
         let unfocused = ActivityDock {
@@ -1229,9 +1272,10 @@ mod tests {
     }
 
     /// Entering an empty group still renders it: the focused selection's
-    /// slight green band rides the group's zero-count segment on the row
-    /// — the dock-level empty state is the zero readout itself (the view
-    /// the group opens carries the pane's own empty-state row).
+    /// band — the ONE shared purple selection style — rides the group's
+    /// zero-count segment on the row — the dock-level empty state is
+    /// the zero readout itself (the view the group opens carries the
+    /// pane's own empty-state row).
     #[test]
     fn dock_renders_the_focused_empty_group() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
@@ -1247,17 +1291,18 @@ mod tests {
             .map(|span| span.content.as_str())
             .collect::<String>();
         assert_eq!(text, " ◆ 0 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
-        // The selection's slight green band rides exactly the entered
-        // empty group's zero readout, which keeps its own muted color
-        // (the selection never repaints the text).
-        let band = theme.bg_style(ThemeBg::ToolSuccessBg).bg;
+        // The selection's band rides exactly the entered empty group's
+        // zero readout, which keeps its own muted color and gains the
+        // shared style's bold (the selection never repaints the text).
+        let band = theme.selection_row_style();
         let muted = theme.fg_style(ThemeColor::Muted).fg;
         let heartbeat = frame[1]
             .iter()
             .find(|span| span.content == "◷ 0 heartbeats")
             .unwrap_or_else(|| panic!("the empty heartbeats readout renders: {text}"));
-        assert_eq!(heartbeat.style.bg, band);
+        assert_eq!(heartbeat.style.bg, band.bg);
         assert_eq!(heartbeat.style.fg, muted);
+        assert!(heartbeat.style.add_modifier.contains(Modifier::BOLD));
     }
 
     /// The `/speed` footer row (TS `FooterComponent::render`): one dim row
@@ -1283,7 +1328,7 @@ mod tests {
 
     use super::*;
     use crate::theme::{ColorMode, Theme};
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Modifier};
     use serde_json::json;
 
     fn theme() -> Theme {
@@ -1385,6 +1430,34 @@ mod tests {
         assert!(text.starts_with("\u{2190} manage"));
         assert!(text.contains("faux-1 \u{00b7} 6.1k (5%)"));
         assert_eq!(str_width(&text), 120);
+    }
+
+    /// The tray's tier badge (TS footer badge, #2144): `fast` for the
+    /// priority tier, the tier name for any other non-default tier, and
+    /// nothing for `default` or an unset tier.
+    #[test]
+    fn tray_service_tier_badge_follows_the_ts_shape() {
+        let state = |tier: Option<&str>| ChromeState {
+            model_id: Some("gpt-5.5".to_string()),
+            service_tier: tier.map(str::to_string),
+            ..Default::default()
+        };
+        let badge = |tier: Option<&str>| {
+            let line = render_tray(&state(tier), &theme(), 120);
+            line.iter().map(|s| s.content.as_str()).collect::<String>()
+        };
+        assert!(
+            badge(Some("priority")).contains("gpt-5.5 \u{00b7} fast"),
+            "priority renders the fast token"
+        );
+        assert!(
+            badge(Some("flex")).contains("gpt-5.5 \u{00b7} flex"),
+            "a non-default tier renders its name"
+        );
+        for tier in [Some("default"), None] {
+            let text = badge(tier);
+            assert!(!text.contains(" \u{00b7} "), "{tier:?} renders no badge");
+        }
     }
 
     /// TS `getModelContextLabel`: the effort suffix is the state's

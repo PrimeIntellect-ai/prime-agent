@@ -3,7 +3,13 @@
 //! the turn state machine, and the export/telemetry reads - as one
 //! impl block (a trait impl is one block per type; it moved whole).
 
-use super::*;
+use super::{
+    artifact_reference, json, map_thinking_level, now_millis, persisted_rlm_max_depth,
+    AgentSessionEngine, Arc, BranchSummaryOutcome, BranchSummaryRequest, BranchSummaryRun,
+    CompactionOutcome, CompactionRequest, CompactionRun, EngineEvent, EngineModelSelection,
+    ParentIdentity, PromptRequest, ProviderTarget, SessionEngine, SideQuestionOutcome,
+    SideQuestionRequest, TurnPrompt, Value, DEFAULT_RLM_MAX_DEPTH,
+};
 
 impl SessionEngine for AgentSessionEngine {
     /// TS `_clearQueuedGoalContexts`: the worker-installed purge withdraws
@@ -499,6 +505,7 @@ impl SessionEngine for AgentSessionEngine {
         Some(json!({
             "id": model.id,
             "name": model.name,
+            "api": model.api,
             "provider": model.provider,
             "reasoning": model.reasoning,
         }))
@@ -1315,7 +1322,7 @@ impl SessionEngine for AgentSessionEngine {
             crate::session_commands::parse_prompt_session_command(&request.message)
         {
             let Some(execution) =
-                crate::session_commands::run_session_command(self, command, &mut emit)
+                crate::session_commands::run_session_command(self, &command, &mut emit)
             else {
                 return;
             };
@@ -1438,7 +1445,28 @@ impl SessionEngine for AgentSessionEngine {
                 batch: request.batch,
             },
         };
+        // TS commit-time routing decision (`_imageModelOverrideForTurns` at
+        // commit): a batch whose delivered messages attach image blocks
+        // routes to `settings.imageModel` when the session model cannot
+        // serve them, or the turn fails with the actionable refusal naming
+        // the setting - nothing silently downgrades the images to
+        // "(image omitted)" placeholders.
+        let carries_images = match &turn_prompt {
+            TurnPrompt::User { images, batch, .. } => {
+                !images.is_empty() || batch.iter().any(|row| !row.images.is_empty())
+            }
+            TurnPrompt::Injected(message) => Self::custom_message_carries_images(message),
+        };
+        if let Err(refusal) = self.arm_image_turn_route(carries_images) {
+            emit(EngineEvent::Done(Err(refusal)));
+            return;
+        }
         self.run_turns(turn_prompt, aborted, &mut emit);
+        // The episode settled: clear the routed image model and restore the
+        // session's serving target, so the next dispatched batch
+        // re-evaluates the routing against the session model (TS the next
+        // dispatch re-evaluates the override before pre-turn compaction).
+        self.clear_image_route();
     }
 
     fn abort_in_flight_turn(&self) {

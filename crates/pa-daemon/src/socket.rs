@@ -31,7 +31,8 @@ pub async fn can_connect(path: &Path, timeout: Duration) -> bool {
 }
 
 /// Staleness after which the cleanup lock of a crashed holder is reclaimed
-/// (TS `DAEMON_SOCKET_LOCK_STALE_MS`).
+/// (TS `DAEMON_SOCKET_LOCK_STALE_MS`). Unix only: every taker of the
+/// cleanup lock sits behind the unix stale-file wall.
 #[cfg(unix)]
 const LOCK_STALE_AFTER: Duration = Duration::from_secs(5);
 /// Live-lock retry cadence (TS `DAEMON_SOCKET_RELEASE_POLL_MS`) and cap
@@ -152,7 +153,8 @@ async fn prepare_locked_socket_path(path: &Path) -> Result<()> {
 /// The caller holds the cleanup lock, so competing startup workers are
 /// serialized out of this check-then-act window; the identity gate covers
 /// processes that do not take the lock (non-pa-daemon), like the TS gate
-/// behind proper-lockfile's lease.
+/// behind proper-lockfile's lease. Unix only: named-pipe endpoints leave
+/// no socket file to unlink, so the whole path stays unix.
 #[cfg(unix)]
 async fn unlink_stale_socket(path: &Path, expected: SocketIdentity) -> Result<()> {
     if can_connect(path, Duration::from_millis(250)).await {
@@ -171,12 +173,14 @@ async fn unlink_stale_socket(path: &Path, expected: SocketIdentity) -> Result<()
     }
 }
 
-/// Windows named pipes need no file-path preparation: the pipe object
-/// carries the lifecycle.
+/// Windows arm of [`prepare_socket_path`]: named-pipe endpoints have
+/// no filesystem residue (the first listener creates the pipe), so
+/// preparing the path is a no-op (the TS `prepareDaemonSocketPath`
+/// returns early on win32 for the same reason).
 ///
 /// # Errors
 ///
-/// Never errors on this target.
+/// Does not error: there is no path to prepare for a named pipe.
 #[cfg(not(unix))]
 pub async fn prepare_socket_path(_path: &Path) -> Result<()> {
     Ok(())

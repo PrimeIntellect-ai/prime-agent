@@ -111,13 +111,15 @@ pub enum TurnUpdate {
     /// #2063 `sessionActions.active` with `kind: "turn"` / `phase:
     /// "preparing"`), so the strip keeps it visible until the turn
     /// begins. `rlm_child_status` carries the parked RLM child status
-    /// notices' lane indices (the Rust-native typed provenance rider) so
+    /// notices' lane indices and `injected_prompts` the engine-minted
+    /// continuations' (the Rust-native typed provenance riders) so
     /// the strip folds exactly those rows, never a user-typed lookalike.
     QueueUpdated {
         steering: Vec<String>,
         follow_ups: Vec<String>,
         starting: Option<String>,
-        rlm_child_status: crate::queued::RlmChildStatusIndices,
+        rlm_child_status: crate::queued::QueueLaneIndices,
+        injected_prompts: crate::queued::QueueLaneIndices,
     },
     /// `bash_start` (the user-bash slot, TS `!command`): a command run
     /// outside the model loop; `transient` marks a side-conversation run
@@ -351,7 +353,8 @@ pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
                 steering: queue_lane(&actions, "steering"),
                 follow_ups: queue_lane(&actions, "followUps"),
                 starting: starting_from_actions(&actions),
-                rlm_child_status: queue_rlm_child_status(&actions),
+                rlm_child_status: queue_lane_indices(&actions, "rlmChildStatus"),
+                injected_prompts: queue_lane_indices(&actions, "injectedPrompts"),
             })
         }
         // `bash_start` (TS `runUserBash` emits before the process runs):

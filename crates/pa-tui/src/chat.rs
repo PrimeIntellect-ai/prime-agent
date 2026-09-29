@@ -64,13 +64,17 @@ impl Detail {
     }
 
     /// The level for a stored wire name (TS #2709 `getChatDetail`):
-    /// an unset or unknown value reads as the `details` startup level.
+    /// an unset or unknown value reads as the `overview` startup level -
+    /// the collapse mode, which renders every activity item exactly as
+    /// `details` does with only the thinking blocks hidden (operator
+    /// directive 2026-09-28: "collapse mode should just be details
+    /// mode, but WITHOUT THINKING BLOCKS").
     #[must_use]
     pub fn from_wire_name(name: &str) -> Self {
         match name {
-            "overview" => Detail::Overview,
+            "details" => Detail::Details,
             "all" => Detail::All,
-            _ => Detail::Details,
+            _ => Detail::Overview,
         }
     }
 }
@@ -685,14 +689,15 @@ mod tests {
     }
 
     #[test]
-    fn detail_wire_names_round_trip_with_ts_fallback() {
+    fn detail_wire_names_round_trip_with_the_startup_fallback() {
         // TS #2709: the Ctrl+O level persists as the `chatDetail` wire
-        // string and reads back; anything unknown is the startup level.
+        // string and reads back; anything unknown is the startup level
+        // (the collapse mode, operator directive 2026-09-28).
         for detail in [Detail::Overview, Detail::Details, Detail::All] {
             assert_eq!(Detail::from_wire_name(detail.wire_name()), detail);
         }
-        assert_eq!(Detail::from_wire_name(""), Detail::Details);
-        assert_eq!(Detail::from_wire_name("verbose"), Detail::Details);
+        assert_eq!(Detail::from_wire_name(""), Detail::Overview);
+        assert_eq!(Detail::from_wire_name("verbose"), Detail::Overview);
     }
 
     #[test]

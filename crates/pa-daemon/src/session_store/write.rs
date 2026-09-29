@@ -3,7 +3,10 @@
 //! persist paths, and the store lease discipline (the leased append arms
 //! and the unleased fallback) that serializes writers onto the file.
 
-use super::*;
+use super::{
+    fs, json, new_entry_id, Context, HashMap, PathBuf, Result, Serialize, SessionEntry,
+    SessionFile, SessionHeader, Value, Write,
+};
 
 impl SessionEntry {
     fn new(
@@ -58,7 +61,7 @@ impl SessionFile {
         id
     }
 
-    pub fn append_message(&mut self, message: Value) -> String {
+    pub fn append_message(&mut self, message: &Value) -> String {
         self.append_entry("message", serde_json::json!({ "message": message }))
     }
 
@@ -87,7 +90,11 @@ impl SessionFile {
         )
     }
 
-    /// Write the full file atomically (header + every entry), like `_rewriteFile`.
+    /// Write the full file atomically (header + every entry), like `_rewriteFile`
+    /// plus the port's session durability strengthening: the temp is fsynced
+    /// before the rename (the TS `_rewriteFile` passes no `fsync` option),
+    /// so rows the durable append path already landed are never regressed by
+    /// a rewrite that a hard crash could zero out.
     ///
     /// # Errors
     ///
@@ -233,6 +240,7 @@ impl SessionFile {
 /// JSON map preserves insertion order (the workspace's `serde_json` runs
 /// with `preserve_order`), so the tag is rebuilt into the leading slot
 /// instead of appended.
+#[must_use]
 pub fn session_header_line(header: &SessionHeader) -> Value {
     let value = serde_json::to_value(header).unwrap_or(Value::Null);
     let Some(object) = value.as_object() else {

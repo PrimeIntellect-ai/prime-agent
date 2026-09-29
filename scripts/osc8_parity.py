@@ -63,7 +63,7 @@ URL_TURN = (
     "\n"
     "WWW: www.example.com/path end\n"
     "\n"
-    "Email: kevin@example.co.uk bye\n"
+    "Email: user@example.com bye\n"
     "\n"
     "Angle: <https://angle.dev/x> done\n"
     "\n"
@@ -328,7 +328,7 @@ def leg_a(ts_bin, rust_bin, base):
         "https://github.com/PrimeIntellect-ai/prime-agent/pull/182",
         "https://x.dev/share/abc123?u=1",
         "http://www.example.com/path",
-        "mailto:kevin@example.co.uk",
+        "mailto:user@example.com",
         "https://angle.dev/x",
         "https://example.com/docs",
         "https://bare.dev/",

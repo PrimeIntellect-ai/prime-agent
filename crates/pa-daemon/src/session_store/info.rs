@@ -3,7 +3,10 @@
 //! resumed line fold over raw spans, the derived `SessionInfo`, and the
 //! most-recent-session lookup.
 
-use super::*;
+use super::{
+    fs, list_sessions, normalize_state_status, Cow, Deserialize, HashMap, Path, PathBuf,
+    SessionHeader, Usage, Value,
+};
 
 /// Port of `readSessionInfo`'s fold (single pass, no resume cache): the durable
 /// metadata the daemon list surfaces for one session file.
@@ -316,6 +319,7 @@ impl SessionScanState {
         // would instead certify an in-place rewrite as a resume.
         #[cfg(not(unix))]
         {
+            let _ = generation;
             false
         }
     }
@@ -437,6 +441,7 @@ pub(super) struct SessionInfoEntry<'a> {
 /// resumable per-file scan states): an unchanged file answers from the
 /// cached fold, a grown file folds ONLY its appended entries after the
 /// prefix-tail check, and a rewritten file rescans from the top.
+#[must_use]
 pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
     let mut file = fs::File::open(path).ok()?;
     read_session_info_from(&mut file, path)
@@ -778,6 +783,7 @@ pub(super) fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Op
 }
 
 /// Most recent valid session for a cwd (port of `findMostRecentSessionForCwd`).
+#[must_use]
 pub fn find_most_recent_session_for_cwd(session_dir: &Path, cwd: &str) -> Option<PathBuf> {
     list_sessions(session_dir)
         .into_iter()

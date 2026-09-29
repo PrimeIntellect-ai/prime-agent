@@ -47,6 +47,7 @@ fn current_uid() -> Option<String> {
 /// Default supervisor endpoint: `daemon.sock` in the socket dir (Unix) or
 /// the fixed daemon pipe name (Windows).
 #[cfg(unix)]
+#[must_use]
 pub fn default_daemon_socket_path() -> PathBuf {
     socket_dir().join("daemon.sock")
 }
@@ -59,6 +60,7 @@ pub fn default_daemon_socket_path() -> PathBuf {
 /// Worker endpoint next to the supervisor's: hashed supervisor key plus the
 /// worker id prefix (TS `workerSocketPath`).
 #[cfg(unix)]
+#[must_use]
 pub fn worker_socket_path(supervisor_socket_path: &Path, worker_id: &str) -> PathBuf {
     let key = hash_key(&supervisor_socket_path.to_string_lossy(), 12);
     socket_dir().join(format!(
@@ -97,5 +99,29 @@ mod tests {
         assert_eq!(a, worker_socket_path(supervisor, "0123456789abffff"));
         #[cfg(unix)]
         assert!(a.starts_with(socket_dir()));
+    }
+
+    /// The Windows endpoint names (TS `daemon-socket.ts` /
+    /// `daemon-supervisor.ts` win32 arms): the fixed daemon pipe name and
+    /// the hashed worker pipe name in the `\\.\pipe\` namespace. Runs
+    /// only on the windows-latest job; the cross job compiles it.
+    #[test]
+    #[cfg(windows)]
+    fn windows_endpoints_are_the_ts_pipe_names() {
+        assert_eq!(
+            default_daemon_socket_path(),
+            PathBuf::from(r"\\.\pipe\prime-agent-daemon")
+        );
+        let supervisor = Path::new(r"\\.\pipe\prime-agent-daemon");
+        let a = worker_socket_path(supervisor, "0123456789abcdef");
+        let rendered = a.to_string_lossy();
+        assert!(
+            rendered.starts_with(r"\\.\pipe\prime-agent-worker-"),
+            "the worker pipe namespace: {rendered}"
+        );
+        assert!(
+            rendered.ends_with("-0123456789ab"),
+            "the 12-char id suffix: {rendered}"
+        );
     }
 }

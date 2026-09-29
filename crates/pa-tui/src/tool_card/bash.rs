@@ -253,7 +253,6 @@ mod tests {
             }),
             result_partial: false,
             aborted: false,
-            ..Default::default()
         }
     }
 

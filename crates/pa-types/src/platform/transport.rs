@@ -217,8 +217,8 @@ fn pipe_name(path: &Path) -> Result<String> {
 ///
 /// # Errors
 ///
-/// Returns an error if `path` cannot be turned into a pipe name or if
-/// binding the named pipe fails.
+/// Returns an error when `path` is not valid UTF-8 (the pipe name
+/// surface) or the named-pipe listener cannot be created.
 #[cfg(windows)]
 pub async fn bind_transport(path: &Path) -> Result<Box<dyn TransportListener>> {
     let name = pipe_name(path)?;
@@ -230,8 +230,9 @@ pub async fn bind_transport(path: &Path) -> Result<Box<dyn TransportListener>> {
 ///
 /// # Errors
 ///
-/// Returns an error if `path` cannot be turned into a pipe name or if
-/// the pipe connection fails.
+/// Returns an error when `path` is not valid UTF-8 (the pipe name
+/// surface) or the connection attempt fails, including the
+/// busy-instance retry window.
 #[cfg(windows)]
 pub async fn connect_transport(path: &Path) -> Result<Box<dyn TransportStream>> {
     let name = pipe_name(path)?;
@@ -287,8 +288,8 @@ pub fn connect_blocking(path: &Path) -> std::io::Result<Box<dyn BlockingTranspor
 ///
 /// # Errors
 ///
-/// Returns an error if `path` cannot be turned into a pipe name or if
-/// the pipe connection fails.
+/// Returns an error when `path` is not valid UTF-8 (the pipe name
+/// surface) or the blocking connection attempt fails.
 #[cfg(windows)]
 pub fn connect_blocking(path: &Path) -> std::io::Result<Box<dyn BlockingTransportStream>> {
     let name = pipe_name(path).map_err(std::io::Error::other)?;

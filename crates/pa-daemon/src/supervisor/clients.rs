@@ -1,6 +1,15 @@
 //! Client connections: the per-connection task - read loop, dispatch,
 //! and the parsed-command execution surface.
-use super::*;
+use super::{
+    broadcast, command_type_name, current_protocol_info, daemon_closing_shutdown_event,
+    default_server_capabilities, input_admission_id, json, parse_supervisor_command_line,
+    response_failure, response_line, response_success, salvage_command_type, salvage_id,
+    subscribers, update_gate_refuses, util, Arc, AsyncBufReadExt, AsyncWriteExt, BufReader,
+    ClientRouting, DaemonCommand, DaemonOutbound, DaemonRuntimeIdentity, EnvelopeParseError, Map,
+    Ordering, Outbound, Result, RouteAdmission, Supervisor, TransportStream, TypedCreateRejection,
+    Value, DAEMON_APP_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION, ROUTE_TIMEOUT_MS,
+    UPDATE_PREPARING_MESSAGE,
+};
 
 async fn write_line<W: AsyncWriteExt + Unpin>(writer: &mut W, value: &Value) -> Result<usize> {
     let mut line = serde_json::to_string(value)?;
@@ -93,7 +102,7 @@ impl Supervisor {
                 launcher_path: None,
             }),
             supervisor_generation: Some(format!("sup:{}", std::process::id())),
-            supervisor_pid: Some(std::process::id() as u64),
+            supervisor_pid: Some(u64::from(std::process::id())),
             supervisor_owner_token: Some(uuid::Uuid::new_v4().to_string()),
             supervisor_process_start_id: crate::protocol::process_start_id(std::process::id()),
             supervisor_socket_path: Some(self.options.socket_path.to_string_lossy().to_string()),
@@ -474,7 +483,7 @@ impl Supervisor {
         // transaction whose marker expired returns the supervisor to Serving
         // before the command is served.
         if let Some(abort) = self.update_prepare.abort_if_expired(util::now_ms()) {
-            self.finish_update_abort(abort).await;
+            self.finish_update_abort(&abort);
         }
         // Admission gate: mutating commands are refused while a prepare
         // transaction is active (TS "Daemon is preparing an update restart"),
@@ -604,7 +613,7 @@ impl Supervisor {
             }
             DaemonCommand::RosterUnsubscribe { .. } => {
                 roster_subscribed.store(false, std::sync::atomic::Ordering::SeqCst);
-                let response = self.handle_roster_unsubscribe(&command_id, &type_name);
+                let response = Self::handle_roster_unsubscribe(&command_id, &type_name);
                 (vec![response_line(&response)], false)
             }
             DaemonCommand::WorkerRosterDelta {
@@ -835,13 +844,11 @@ impl Supervisor {
                 // arm ordering).
                 let client_id = effective_client_id.lock().unwrap().clone();
                 let attached_ids = attached.session_ids();
-                let marked = self
-                    .begin_detach_pause_bookkeeping(
-                        connection,
-                        active_session_id.as_deref(),
-                        &attached_ids,
-                    )
-                    .await;
+                let marked = Self::begin_detach_pause_bookkeeping(
+                    connection,
+                    active_session_id.as_deref(),
+                    &attached_ids,
+                );
                 let outcome = self
                     .route_client_command(
                         command,
@@ -905,7 +912,7 @@ impl Supervisor {
                 if let Ok(resident) = self.registry.resolve(target_active_session_id).await {
                     cleared.push(resident.worker_id.clone());
                 }
-                self.clear_detaching_after_reattach(connection, &cleared);
+                Self::clear_detaching_after_reattach(connection, &cleared);
                 outcome
             }
             DaemonCommand::AgentMessagesStatus {
@@ -1046,7 +1053,7 @@ impl Supervisor {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     #[cfg(unix)]
     use super::*;
@@ -1058,13 +1065,13 @@ mod tests {
     use serde_json::json;
     #[cfg(unix)]
     use std::sync::Arc;
+    use std::time::Duration;
 
     /// A client that falls behind the shared event ring loses events (the
     /// broadcast's defined backpressure), but never silently anymore
     /// (finding 4a): the loss becomes a durable daemon-log line naming the
     /// client and the dropped count. Drives a real connection loop
     /// (`handle_client`) over a real socket pair with a flooded ring.
-    #[cfg(unix)]
     #[tokio::test]
     async fn a_lagged_client_event_stream_is_logged() {
         use tokio::io::AsyncReadExt as _;

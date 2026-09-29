@@ -62,6 +62,8 @@ fn cooked(attrs: &libc::termios) -> bool {
 /// there is nothing to clear off it there.
 #[cfg(target_os = "linux")]
 const OLCUC: libc::tcflag_t = libc::OLCUC;
+/// Other unixes (and every non-unix build, where `tcflag_t` does not
+/// exist) never see the flag: the constant itself stays unix-only.
 #[cfg(all(unix, not(target_os = "linux")))]
 const OLCUC: libc::tcflag_t = 0;
 

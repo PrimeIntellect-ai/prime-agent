@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use pa_types::platform::transport::TransportListener;
 
-use super::*;
+use super::{anyhow, Arc, Ordering, Result, Supervisor};
 
 /// The backoff before retrying a non-recoverable accept error (Codex
 /// parity: the control-socket acceptor sleeps 1s between retries).
@@ -137,7 +137,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use pa_types::platform::transport::{AcceptFuture, TransportStream};
+    use pa_types::platform::transport::{
+        AcceptFuture, AsyncReadHalf, AsyncWriteHalf, TransportStream,
+    };
     use tempfile::TempDir;
 
     use crate::supervisor::{Supervisor, SupervisorOptions};
@@ -186,13 +188,28 @@ mod tests {
         )
     }
 
-    /// One end of a local socket pair as the accepted stream: the
-    /// dispatch writes its hello and parks on the unread peer, like an
-    /// idle client.
-    #[cfg(unix)]
-    async fn accepted_stream() -> Box<dyn TransportStream> {
-        let (_, accepted) = tokio::net::UnixStream::pair().expect("socket pair");
-        Box::new(accepted)
+    /// One end of an in-memory duplex as the accepted stream - the
+    /// portable stand-in for the local socket pair (the connection
+    /// dispatch takes any `TransportStream`; the loop's error policy is
+    /// platform-free, so the tests run on Windows too). The dropped peer
+    /// half makes the accepted side read EOF, like a client that
+    /// connected and vanished.
+    fn accepted_stream() -> Box<dyn TransportStream> {
+        let (_, accepted) = tokio::io::duplex(4096);
+        Box::new(DuplexTransport(Mutex::new(accepted)))
+    }
+
+    /// A duplex end as a [`TransportStream`]: a plain memory stream has
+    /// no `into_split`, so the halves come from the shared-lock split
+    /// (the `Mutex` cover carries the `Sync` the transport bound asks).
+    struct DuplexTransport(Mutex<tokio::io::DuplexStream>);
+
+    impl TransportStream for DuplexTransport {
+        fn split(self: Box<Self>) -> (Box<dyn AsyncReadHalf>, Box<dyn AsyncWriteHalf>) {
+            let stream = self.0.into_inner().expect("duplex lock");
+            let (reader, writer) = tokio::io::split(stream);
+            (Box::new(reader), Box::new(writer))
+        }
     }
 
     /// A recoverable transport error must not exit the accept loop (an
@@ -211,7 +228,7 @@ mod tests {
                     accept_error(ErrorKind::ConnectionAborted, "aborted"),
                     accept_error(ErrorKind::ConnectionReset, "reset"),
                     accept_error(ErrorKind::Interrupted, "interrupted"),
-                    Ok(accepted_stream().await),
+                    Ok(accepted_stream()),
                 ]
                 .into(),
             ),
@@ -246,7 +263,7 @@ mod tests {
         for _ in 0..(2 * GIVE_UP_AFTER) {
             results.push_back(accept_error(ErrorKind::ConnectionAborted, "storm"));
         }
-        results.push_back(Ok(accepted_stream().await));
+        results.push_back(Ok(accepted_stream()));
         let scripted = ScriptedAccepts {
             results: Mutex::new(results),
             supervisor: Arc::clone(&supervisor),
@@ -283,7 +300,7 @@ mod tests {
             results: Mutex::new(
                 vec![
                     accept_error(ErrorKind::Other, "too many open files"),
-                    Ok(accepted_stream().await),
+                    Ok(accepted_stream()),
                 ]
                 .into(),
             ),
@@ -322,7 +339,7 @@ mod tests {
         for _ in 0..burst {
             results.push_back(accept_error(ErrorKind::Other, "transient"));
         }
-        results.push_back(Ok(accepted_stream().await));
+        results.push_back(Ok(accepted_stream()));
         for _ in 0..burst {
             results.push_back(accept_error(ErrorKind::Other, "transient"));
         }

@@ -26,12 +26,12 @@ impl BurstStreamEngine {
         })
     }
 
-    fn delta_text(&self, index: usize) -> String {
+    fn delta_text(index: usize) -> String {
         "x".repeat((index + 1) * 4)
     }
 
     fn full_text(&self) -> String {
-        self.delta_text(self.deltas)
+        Self::delta_text(self.deltas)
     }
 }
 
@@ -101,7 +101,7 @@ impl SessionEngine for BurstStreamEngine {
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) {
         for index in 0..=self.deltas {
-            let message = Self::message_with(&self.delta_text(index));
+            let message = Self::message_with(&Self::delta_text(index));
             let stream_event = if index == 0 {
                 json!({ "type": "start" })
             } else {
@@ -263,6 +263,7 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         parent_session_id: None,
         child_script: None,
         service_tier: None,
+        active_service_tier: None,
         steering_mode: "all".to_string(),
         follow_up_mode: "one-at-a-time".to_string(),
         forced_all_steering: false,
@@ -446,7 +447,7 @@ fn delivered_rows(events: &[Value]) -> Vec<(String, String)> {
 #[tokio::test]
 async fn steering_mode_all_batches_the_queued_prefix_into_one_turn() {
     let engine: Arc<dyn SessionEngine> = Arc::new(
-        ScriptedEngine::from_value(json!({ "responses": ["batched reply"] })).unwrap_or_default(),
+        ScriptedEngine::from_value(&json!({ "responses": ["batched reply"] })).unwrap_or_default(),
     );
     let runner = burst_runner(Arc::clone(&engine));
     {
@@ -496,7 +497,7 @@ async fn steering_mode_all_batches_the_queued_prefix_into_one_turn() {
 #[tokio::test]
 async fn the_default_mode_co_delivers_the_queued_steering_prefix() {
     let engine: Arc<dyn SessionEngine> = Arc::new(
-        ScriptedEngine::from_value(json!({ "responses": ["batched reply"] })).unwrap_or_default(),
+        ScriptedEngine::from_value(&json!({ "responses": ["batched reply"] })).unwrap_or_default(),
     );
     let runner = burst_runner(Arc::clone(&engine));
     {
@@ -548,7 +549,7 @@ async fn one_at_a_time_delivers_each_queued_steer_as_its_own_turn() {
     // 0): the turns are discriminated by the agent_start count and
     // the user-row order, not the reply text.
     let engine: Arc<dyn SessionEngine> = Arc::new(
-        ScriptedEngine::from_value(json!({ "responses": ["settled reply"] })).unwrap_or_default(),
+        ScriptedEngine::from_value(&json!({ "responses": ["settled reply"] })).unwrap_or_default(),
     );
     let runner = burst_runner(Arc::clone(&engine));
     {
@@ -595,7 +596,7 @@ async fn forced_batch_delivers_the_armed_prefix_as_one_turn() {
     // (The burst harness serves the first scripted response for every
     // turn — see one_at_a_time above.)
     let engine: Arc<dyn SessionEngine> = Arc::new(
-        ScriptedEngine::from_value(json!({ "responses": ["batch reply"] })).unwrap_or_default(),
+        ScriptedEngine::from_value(&json!({ "responses": ["batch reply"] })).unwrap_or_default(),
     );
     let runner = burst_runner(Arc::clone(&engine));
     {
@@ -652,7 +653,7 @@ async fn mode_all_never_batches_across_policy_classes() {
     // (The burst harness serves the first scripted response for every
     // turn — see one_at_a_time above.)
     let engine: Arc<dyn SessionEngine> = Arc::new(
-        ScriptedEngine::from_value(json!({ "responses": ["lane reply"] })).unwrap_or_default(),
+        ScriptedEngine::from_value(&json!({ "responses": ["lane reply"] })).unwrap_or_default(),
     );
     let runner = burst_runner(Arc::clone(&engine));
     {
@@ -694,7 +695,7 @@ async fn mode_all_never_batches_across_policy_classes() {
 #[tokio::test]
 async fn follow_up_mode_all_batches_the_follow_up_lane() {
     let engine: Arc<dyn SessionEngine> = Arc::new(
-        ScriptedEngine::from_value(json!({ "responses": ["follow-up batch reply"] }))
+        ScriptedEngine::from_value(&json!({ "responses": ["follow-up batch reply"] }))
             .unwrap_or_default(),
     );
     let runner = burst_runner(Arc::clone(&engine));
@@ -1102,7 +1103,7 @@ async fn abort_and_send_queued_acks_before_the_follow_up_delivery() {
 #[tokio::test]
 async fn the_waiting_prompt_resolves_only_after_the_turn_settles() {
     let engine: Arc<dyn SessionEngine> = Arc::new(
-        ScriptedEngine::from_value(json!({ "responses": ["settled reply"] })).unwrap_or_default(),
+        ScriptedEngine::from_value(&json!({ "responses": ["settled reply"] })).unwrap_or_default(),
     );
     let runner = burst_runner(Arc::clone(&engine));
     let (done_tx, mut done_rx) = oneshot::channel();
@@ -1149,10 +1150,10 @@ async fn the_waiting_prompt_resolves_only_after_the_turn_settles() {
 /// A fake supervisor link endpoint: every `worker_roster_delta`
 /// command's summary is recorded in arrival order.
 #[cfg(unix)]
-async fn fake_supervisor(
-    socket: std::path::PathBuf,
+fn fake_supervisor(
+    socket: &std::path::Path,
 ) -> (Arc<Mutex<Vec<Value>>>, tokio::task::JoinHandle<()>) {
-    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let listener = tokio::net::UnixListener::bind(socket).unwrap();
     let recorded = Arc::new(Mutex::new(Vec::<Value>::new()));
     let sink = Arc::clone(&recorded);
     let server = tokio::spawn(async move {
@@ -1202,7 +1203,8 @@ async fn fake_supervisor(
 }
 
 /// A turn runner whose roster pushes and activity watcher ship to a
-/// live supervisor link (the burst runner keeps them disabled).
+/// live supervisor link (the burst runner keeps them disabled). Unix
+/// only: its one caller is the unix socket-harness test below.
 #[cfg(unix)]
 fn live_feed_runner(engine: Arc<dyn SessionEngine>, socket: std::path::PathBuf) -> TurnRunner {
     let core = Arc::new(Mutex::new(SessionCore::test_core(None, "/tmp".to_string())));
@@ -1219,7 +1221,7 @@ fn live_feed_runner(engine: Arc<dyn SessionEngine>, socket: std::path::PathBuf) 
             roster_delta_sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             roster_push_order: Arc::new(std::sync::Mutex::new(())),
         });
-    crate::roster_activity::spawn_roster_activity_watch(Arc::clone(&events), roster_pushes.clone());
+    crate::roster_activity::spawn_roster_activity_watch(&events, roster_pushes.clone());
     TurnRunner {
         recovery: Arc::new(Mutex::new(None)),
         core,
@@ -1244,9 +1246,9 @@ fn live_feed_runner(engine: Arc<dyn SessionEngine>, socket: std::path::PathBuf) 
 async fn roster_feed_publishes_live_tool_activity() {
     let dir = tempfile::TempDir::new().unwrap();
     let socket = dir.path().join("sup.sock");
-    let (recorded, server) = fake_supervisor(socket.clone()).await;
+    let (recorded, server) = fake_supervisor(&socket);
     let engine: Arc<dyn SessionEngine> = Arc::new(
-        ScriptedEngine::from_value(json!({
+        ScriptedEngine::from_value(&json!({
             "responses": [{
                 "text": "ran the tool",
                 "toolCalls": [{
@@ -1424,7 +1426,7 @@ async fn turn_session_events_with_custom_message(
 #[tokio::test]
 async fn an_injected_custom_turn_replaces_the_user_row() {
     let engine = Arc::new(
-        ScriptedEngine::from_value(json!({
+        ScriptedEngine::from_value(&json!({
             "responses": ["notice acknowledged"],
         }))
         .unwrap_or_default(),
@@ -1529,7 +1531,7 @@ async fn a_delivered_agent_message_turn_emits_the_custom_row() {
         .pop_front()
         .expect("the delivery parked on the steering lane");
     let engine: Arc<dyn SessionEngine> =
-        Arc::new(ScriptedEngine::from_value(json!({ "responses": ["ack"] })).unwrap_or_default());
+        Arc::new(ScriptedEngine::from_value(&json!({ "responses": ["ack"] })).unwrap_or_default());
     let runner = burst_runner(Arc::clone(&engine));
     let mut subscription = runner.events.subscribe();
     runner.run_turn(engine, vec![item]).await;
@@ -1574,7 +1576,7 @@ async fn a_delivered_agent_message_turn_emits_the_custom_row() {
 #[tokio::test]
 async fn a_settled_turn_broadcasts_the_engine_agent_end_with_its_messages() {
     let engine = Arc::new(
-        ScriptedEngine::from_value(json!({ "responses": ["settled reply"] })).unwrap_or_default(),
+        ScriptedEngine::from_value(&json!({ "responses": ["settled reply"] })).unwrap_or_default(),
     );
     let events = turn_session_events(engine).await;
     let agent_ends = positions_of(&events, "agent_end");
@@ -1994,4 +1996,141 @@ async fn the_idle_park_releases_a_parent_owned_childs_kernel_only() {
         0,
         "a compacting child keeps its kernel resident"
     );
+}
+
+/// A recording engine for the admission-gate tests: every `run_prompt`
+/// call lands in `prompts` (the served-path probe — a racing admission
+/// reaches the engine, a parked one never does).
+#[derive(Default)]
+struct AdmitProbeEngine {
+    prompts: Mutex<Vec<String>>,
+}
+
+impl SessionEngine for AdmitProbeEngine {
+    fn run_prompt(
+        &self,
+        _prompt_index: usize,
+        request: PromptRequest,
+        _aborted: &dyn Fn() -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> bool,
+    ) {
+        self.prompts.lock().unwrap().push(request.message);
+        emit(EngineEvent::Done(Ok(())));
+    }
+
+    fn run_side_question(
+        &self,
+        _request: SideQuestionRequest,
+        _signal: &pa_agent::abort::AbortSignal,
+        _sink: &pa_core::session_engine::side_question::SideQuestionSink,
+    ) -> SideQuestionOutcome {
+        SideQuestionOutcome::Failed {
+            answer: String::new(),
+            error: "unsupported".to_string(),
+        }
+    }
+
+    fn run_compaction(
+        &self,
+        _request: CompactionRequest,
+        _signal: &pa_agent::abort::AbortSignal,
+    ) -> CompactionOutcome {
+        CompactionOutcome::Skipped {
+            message: "nothing to compact".to_string(),
+        }
+    }
+
+    fn run_branch_summary(
+        &self,
+        _request: crate::engine::BranchSummaryRequest,
+        _signal: &pa_agent::abort::AbortSignal,
+    ) -> crate::engine::BranchSummaryOutcome {
+        crate::engine::BranchSummaryOutcome::Failed {
+            error: "unsupported".to_string(),
+        }
+    }
+
+    fn rebuild_session_context(
+        &self,
+        _branch_entries: Vec<pa_types::session::FileEntry>,
+        _goal_reload: pa_core::session_engine::goal_driver::GoalBranchReload,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// The compacting admission gate (TS `isCompacting` rides
+/// `_isBusyForSessionInput("pump")`'s `externalBusy`): a resume site that
+/// clears the queued-input suspension MID-WINDOW must not admit a racing
+/// turn — the queued item stays parked until the window ends. The
+/// served-path probe is the engine itself: `run_prompt` records every
+/// admission, so a racing turn would appear as a prompt while the window
+/// is open.
+#[tokio::test]
+async fn compacting_window_parks_a_cleared_suspension_until_it_ends() {
+    let engine = Arc::new(AdmitProbeEngine::default());
+    let runner = burst_runner(Arc::clone(&engine) as Arc<dyn SessionEngine>);
+    let (done_tx, mut done_rx) = oneshot::channel();
+    {
+        // The mid-compaction shape: the manual compact set the
+        // suspension with the window open, then a resume site (a steer's
+        // `wake: "immediate"` resume, TS `_admitSessionInput`) cleared
+        // the suspension and parked its item — the racing class.
+        let mut core = runner.core.lock().unwrap();
+        core.compacting = true;
+        core.queued_input_suspended = false;
+        core.steering.push_back(QueuedItem {
+            priority: QueuePriority::Human,
+            preview: None,
+            message: "racing steer".to_string(),
+            custom_message: None,
+            agent_message: None,
+            queue_key: None,
+            admission_id: None,
+            images: Vec::new(),
+            done: Some(done_tx),
+            queue_visible: true,
+            policy: TurnPolicy::Queued,
+            forced_batch: false,
+        });
+    }
+    let parked = std::sync::Arc::clone(&runner.core);
+    let work_notify = std::sync::Arc::clone(&runner.work_notify);
+    let running = tokio::spawn(async move { runner.run().await });
+    // The resume site's wake reaches the runner; the gate must park it
+    // again on the compacting term (the suspension is already clear).
+    work_notify.notify_one();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    {
+        let core = parked.lock().unwrap();
+        assert!(!core.busy, "the racing steer admitted mid-compaction");
+        assert_eq!(
+            core.steering.len(),
+            1,
+            "the parked steer left its lane mid-compaction"
+        );
+    }
+    assert!(
+        engine.prompts.lock().unwrap().is_empty(),
+        "the racing user row reached the engine mid-window"
+    );
+    // The window ends (the compact's tail clears the flag and wakes the
+    // runner): the parked steer delivers after it.
+    {
+        let mut core = parked.lock().unwrap();
+        core.compacting = false;
+    }
+    work_notify.notify_one();
+    let done = tokio::time::timeout(std::time::Duration::from_secs(5), &mut done_rx).await;
+    assert!(
+        done.is_ok(),
+        "the parked steer never delivered after the window"
+    );
+    let delivered = engine.prompts.lock().unwrap().clone();
+    assert_eq!(
+        delivered,
+        vec!["racing steer".to_string()],
+        "the steer must deliver after the window, not during it"
+    );
+    running.abort();
 }

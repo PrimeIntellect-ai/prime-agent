@@ -105,7 +105,22 @@ impl LineWriter {
     /// must fire even against a stalled reader, so the wait is bounded
     /// (a broken or slow pipe retires after the deadline).
     pub async fn drain_bounded(&self) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        self.drain_within(std::time::Duration::from_secs(2)).await;
+    }
+
+    /// Wait until the writer task has written every queued frame, giving
+    /// up once `budget` elapses. A frame queued right before a
+    /// non-yielding CPU span would otherwise sit unflushed behind it
+    /// (the writer task cannot run until the executor next polls), so a
+    /// transport that publishes a frame ahead of such a span flushes
+    /// first — TS writes stdout frames synchronously at the emit, and
+    /// the queue's deferral is the only thing that makes the frame late.
+    /// The budget keeps a stalled reader (a full pipe) from wedging the
+    /// command behind it: TS never blocks a command on the reader, so
+    /// the wait retires at the deadline and the writer task keeps its
+    /// queue.
+    pub async fn drain_within(&self, budget: std::time::Duration) {
+        let deadline = std::time::Instant::now() + budget;
         while self.pending.load(Ordering::SeqCst) > 0 {
             if std::time::Instant::now() >= deadline {
                 return;
@@ -114,6 +129,17 @@ impl LineWriter {
         }
     }
 }
+
+/// The compaction paths' frame-flush budget: after queueing
+/// `compaction_start` and before entering the compaction's pre-
+/// summarizer CPU span, the handler waits for the writer task to flush
+/// the frame (the span runs to the first `await` without an executor
+/// yield, so the queued frame would otherwise reach the client only
+/// when the span ends). The budget is sized far above a healthy pipe
+/// write (microseconds) and far below the command's own wall, and only
+/// binds against a reader that stopped draining its pipe.
+pub(crate) const COMPACT_FRAME_FLUSH_BUDGET: std::time::Duration =
+    std::time::Duration::from_millis(50);
 
 /// The signal exit codes (TS `runRpcModeWithConnectionInternal`).
 #[cfg(unix)]
@@ -132,6 +158,12 @@ const SIGHUP_EXIT: i32 = 129;
 fn exit_with(code: i32) -> ! {
     std::process::exit(code);
 }
+
+/// Windows delivers no SIGTERM/SIGHUP to a console-less process (the TS
+/// rpc mode's Node signal handlers never fire there either), so the
+/// stdin-close settle stays the only exit path.
+#[cfg(not(unix))]
+fn spawn_signal_handlers(_session: &Arc<RpcSession>, _writer: LineWriter) {}
 
 /// The async entry: serve the RPC stdio mode until stdin closes or a
 /// signal exits. Returns the process exit code.
@@ -180,8 +212,7 @@ pub async fn run_rpc_mode(options: RpcOptions) -> anyhow::Result<i32> {
             pa_core::models::ModelRegistry::create(auth, options.agent_dir.join("models.json"));
         let _ = registry.refresh_available_models().await;
     });
-    #[cfg(unix)]
-    spawn_signal_handlers(Arc::clone(&session), writer.clone());
+    spawn_signal_handlers(&session, writer.clone());
     Ok(serve_stdin(state).await)
 }
 
@@ -189,9 +220,9 @@ pub async fn run_rpc_mode(options: RpcOptions) -> anyhow::Result<i32> {
 /// pair): abort the running turn, settle it, dispose the kernel, drain
 /// the queued frames, exit.
 #[cfg(unix)]
-fn spawn_signal_handlers(session: Arc<RpcSession>, writer: LineWriter) {
+fn spawn_signal_handlers(session: &Arc<RpcSession>, writer: LineWriter) {
     use tokio::signal::unix::{signal, SignalKind};
-    let terminate_session = Arc::clone(&session);
+    let terminate_session = Arc::clone(session);
     let terminate_writer = writer.clone();
     tokio::spawn(async move {
         if let Ok(mut stream) = signal(SignalKind::terminate()) {
@@ -221,7 +252,7 @@ fn spawn_signal_handlers(session: Arc<RpcSession>, writer: LineWriter) {
             exit_with(SIGTERM_EXIT);
         }
     });
-    let hangup_session = Arc::clone(&session);
+    let hangup_session = Arc::clone(session);
     let hangup_writer = writer;
     tokio::spawn(async move {
         if let Ok(mut stream) = signal(SignalKind::hangup()) {

@@ -237,7 +237,11 @@ async fn run_interactive_surface(
         view.show_hardware_cursor = settings.show_hardware_cursor();
         // TS #2709: the interactive-mode constructor assigns the persisted
         // `chatDetail` level (`assignChatDetail(getChatDetail())`), so a
-        // chat opens at the level the last Ctrl+O pick saved.
+        // chat opens at the level the last Ctrl+O pick saved - and an
+        // unset store reads as the collapsed `overview` startup level
+        // (the collapse mode: every activity item renders as `details`
+        // does, only the thinking hidden; operator directive
+        // 2026-09-28).
         view.detail = crate::chat::Detail::from_wire_name(&settings.chat_detail());
     }
     apply_startup_chrome(&mut view, &options);

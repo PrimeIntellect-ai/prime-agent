@@ -10,8 +10,7 @@
 //! `AgentStart..AgentEnd` window and no turn-action tracking is needed.
 //!
 //! Privacy contract: this module emits counter/duration/category facts only —
-//! never prompt text, model output, tool arguments or results. Property
-//! schema: `docs/telemetry-events.md` (schema version 1).
+//! never prompt text, model output, tool arguments or results.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

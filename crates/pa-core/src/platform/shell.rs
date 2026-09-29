@@ -61,7 +61,9 @@ pub fn get_shell_config(custom_shell_path: Option<&str>) -> anyhow::Result<Shell
 ///
 /// # Errors
 ///
-/// Returns an error when no shell resolves.
+/// Returns an error when the explicit shell path does not exist; every
+/// other fallback (Git Bash dirs, `where bash.exe`, `sh`) resolves or
+/// the final error names the classes searched.
 #[cfg(windows)]
 pub fn get_shell_config(custom_shell_path: Option<&str>) -> anyhow::Result<ShellConfig> {
     if let Some(path) = custom_shell_path {

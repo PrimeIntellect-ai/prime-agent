@@ -359,7 +359,7 @@ fn info_commands_open_inline_panels_that_esc_closes_without_transcript_rows() {
     // (the operator's no-flooding directive).
     let last = frames.last().expect("frames");
     assert!(
-        last.contains("Details mode ("),
+        last.contains("Collapsed mode ("),
         "the editor dock returned after every panel closed:\n{last}"
     );
     for absent in [

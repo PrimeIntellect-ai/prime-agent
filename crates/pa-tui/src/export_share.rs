@@ -160,8 +160,8 @@ fn gh_command() -> tokio::process::Command {
 /// The blocking `gh` probe command, hidden on Windows the same way.
 #[cfg(windows)]
 fn gh_probe_command() -> std::process::Command {
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut command = std::process::Command::new("gh");
     command.creation_flags(CREATE_NO_WINDOW);
     command

@@ -253,12 +253,14 @@ impl SettingsManager {
 
     /// `chatDetail` (TS #2709 `getChatDetail`): the conversation-detail
     /// level the chat starts at; an unset or invalid value falls back to
-    /// `details` (the TS #2447 startup level).
+    /// `overview` (the collapse mode: every activity item renders as
+    /// `details` does with only the thinking hidden - operator
+    /// directive 2026-09-28).
     pub fn get_chat_detail(&self) -> String {
         match self.settings().chat_detail.as_deref() {
-            Some("overview") => "overview",
+            Some("details") => "details",
             Some("all") => "all",
-            _ => "details",
+            _ => "overview",
         }
         .to_string()
     }
@@ -612,6 +614,18 @@ impl SettingsManager {
 
     pub fn get_auxiliary_model(&self) -> Option<&str> {
         self.merged.auxiliary_model.as_deref()
+    }
+
+    /// TS `getImageModel`: the "provider/model-id" (or bare id) reference
+    /// that serves turns attaching images on session models without image
+    /// input. Same shape as `providerBackupModel`: malformed values behave
+    /// as unset and the image-turn refusal names the setting instead.
+    pub fn get_image_model(&self) -> Option<String> {
+        self.merged
+            .image_model
+            .as_ref()
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty())
     }
 
     /// The daemon-level model allowlist (settings `allowedModels`): model
@@ -1035,11 +1049,12 @@ mod tests {
 
     /// TS #2709: the Ctrl+O level persists as the global `chatDetail`
     /// setting — a later run reads it back — and anything but the three
-    /// TS levels reads as the `details` startup default.
+    /// TS levels reads as the `overview` startup default (the collapse
+    /// mode; operator directive 2026-09-28).
     #[test]
-    fn chat_detail_persists_the_chosen_level_with_ts_fallback() {
+    fn chat_detail_persists_the_chosen_level_with_the_startup_fallback() {
         let mut manager = SettingsManager::in_memory(Settings::default());
-        assert_eq!(manager.get_chat_detail(), "details");
+        assert_eq!(manager.get_chat_detail(), "overview");
         manager.set_chat_detail("all").unwrap();
         assert_eq!(manager.get_chat_detail(), "all");
         manager.reload().unwrap();
@@ -1048,11 +1063,17 @@ mod tests {
             "all",
             "the saved level survives a reload (a later chat re-reads it)"
         );
-        manager.set_chat_detail("verbose").unwrap();
+        manager.set_chat_detail("details").unwrap();
         assert_eq!(
             manager.get_chat_detail(),
             "details",
-            "an invalid value falls back to the TS startup default"
+            "a saved details level reads back exactly (the Ctrl+O thinking reveal persists)"
+        );
+        manager.set_chat_detail("verbose").unwrap();
+        assert_eq!(
+            manager.get_chat_detail(),
+            "overview",
+            "an invalid value falls back to the startup default"
         );
     }
 
@@ -1194,5 +1215,26 @@ mod tests {
         assert_eq!(manager.get_session_archive_policy().max_sessions, None);
         manager.global.session_archive_max_sessions = Some(serde_json::json!(50));
         assert_eq!(manager.get_session_archive_policy().max_sessions, Some(50));
+    }
+
+    /// TS `getImageModel`: the `imageModel` reference reads trimmed, and
+    /// malformed values (empty/whitespace) behave as unset.
+    #[test]
+    fn image_model_reads_trimmed_or_unset() {
+        let manager = SettingsManager::in_memory(Settings {
+            image_model: Some("  battery/mock-vision  ".to_string()),
+            ..Settings::default()
+        });
+        assert_eq!(
+            manager.get_image_model().as_deref(),
+            Some("battery/mock-vision")
+        );
+        let manager = SettingsManager::in_memory(Settings {
+            image_model: Some("   ".to_string()),
+            ..Settings::default()
+        });
+        assert_eq!(manager.get_image_model(), None);
+        let manager = SettingsManager::in_memory(Settings::default());
+        assert_eq!(manager.get_image_model(), None);
     }
 }

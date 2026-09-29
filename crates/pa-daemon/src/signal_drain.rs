@@ -23,7 +23,6 @@
 //! is gone, so a dropped stream swallows every later delivery).
 
 use std::sync::Arc;
-
 #[cfg(unix)]
 use tokio::signal::unix::{signal, Signal, SignalKind};
 
