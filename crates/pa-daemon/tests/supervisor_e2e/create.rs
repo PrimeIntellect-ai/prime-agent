@@ -19,7 +19,7 @@ fn create_config_model_flags_reach_the_worker_engine() {
     // only way the worker can resolve it is the wire config.
     std::fs::write(
         agent_dir.join("models.json"),
-        &serde_json::json!({
+        serde_json::json!({
             "providers": {
                 "battery": {
                     "api": "openai-completions",
