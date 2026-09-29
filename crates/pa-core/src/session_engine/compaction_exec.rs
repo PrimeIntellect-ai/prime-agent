@@ -45,6 +45,7 @@ pub type SummarizerFn = Box<
 /// conversation above — as the current state, so the update summary cannot
 /// lag behind the kept tail. The turn-prefix request never carries one
 /// (its slice is summarized away).
+#[must_use]
 pub fn build_summarization_request(
     messages: &[AgentMessage],
     custom_instructions: Option<&str>,
@@ -98,6 +99,7 @@ pub const NO_PRIOR_HISTORY: &str = "No prior history.";
 
 /// The merged summary of a split turn (TS `compact`'s split join): the
 /// history summary, the split marker, then the turn-prefix summary.
+#[must_use]
 pub fn split_summary(history: &str, turn_prefix: &str) -> String {
     format!("{history}\n\n---\n\n**Turn Context (split turn):**\n\n{turn_prefix}")
 }
@@ -105,6 +107,7 @@ pub fn split_summary(history: &str, turn_prefix: &str) -> String {
 /// The turn-prefix summarization request (TS `generateTurnPrefixSummary`):
 /// the serialized prefix conversation under the turn-prefix instruction —
 /// no custom instructions, no previous summary, no kernel note.
+#[must_use]
 pub fn build_turn_prefix_request(messages: &[AgentMessage]) -> Vec<AgentMessage> {
     let llm_messages = convert_to_llm(messages);
     let conversation_text = super::compaction_utils::serialize_conversation(&llm_messages);
@@ -402,6 +405,7 @@ pub fn compaction_entry_for(
 }
 
 /// Full-file-list details for a compact run (prev compaction ops + messages).
+#[must_use]
 pub fn details_for(
     messages: &[AgentMessage],
     entries: &[FileEntry],
@@ -416,6 +420,7 @@ pub fn details_for(
 }
 
 /// The XML file-ops block appended to a summary presentation.
+#[must_use]
 pub fn file_ops_block(read_files: &[String], modified_files: &[String]) -> String {
     format_file_operations(read_files, modified_files)
 }

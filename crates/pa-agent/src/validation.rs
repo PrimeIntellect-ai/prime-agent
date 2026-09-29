@@ -151,7 +151,10 @@ fn coerce_children(schema: &Value, value: &mut Value) {
 
 fn number_value(n: f64) -> Value {
     if n.fract() == 0.0 && n.abs() < 9.007_199_254_740_992e15 {
-        Value::from(n as i64)
+        // The guard proves the conversion exact: whole value, |n| < 2^53.
+        #[allow(clippy::cast_possible_truncation)]
+        let whole = n as i64;
+        Value::from(whole)
     } else {
         serde_json::Number::from_f64(n).map_or(Value::Null, Value::Number)
     }
@@ -169,6 +172,8 @@ fn format_path(path: &str) -> String {
 }
 
 /// Check `value` against `schema`, appending `(path, message)` errors.
+// One arm per JSON Schema keyword, mirroring the TS reference's shape.
+#[allow(clippy::too_many_lines)]
 fn check(schema: &Value, value: &Value, path: &str, errors: &mut Vec<(String, String)>) {
     let types = schema_type(schema);
     if !types.is_empty() && !types.iter().any(|ty| type_matches(ty, value)) {

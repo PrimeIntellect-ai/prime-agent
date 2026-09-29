@@ -28,6 +28,7 @@ pub enum HeadlessPrimary {
 
 impl HeadlessPrimary {
     /// Stdout content (None for failed assistant runs).
+    #[must_use]
     pub fn stdout_text(&self) -> Option<String> {
         match self {
             HeadlessPrimary::Assistant(message) => {
@@ -167,6 +168,7 @@ pub fn select_headless_terminal_result(messages: &[AgentMessage]) -> HeadlessTer
 }
 
 /// Terminal-selection over session entries (rebuilds the message list).
+#[must_use]
 pub fn select_from_entries(entries: &[FileEntry]) -> HeadlessTerminalResult {
     let messages: Vec<AgentMessage> = entries
         .iter()

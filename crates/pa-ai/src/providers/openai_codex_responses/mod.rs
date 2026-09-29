@@ -170,6 +170,8 @@ pub fn stream_openai_codex_responses(
     reader
 }
 
+// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+#[allow(clippy::too_many_lines)]
 async fn run_stream(
     model: &Model,
     context: &Context,
@@ -398,6 +400,8 @@ fn is_codex_visible_response_event(event: &Value) -> bool {
 
 /// One WebSocket attempt (port of the websocket branch of `streamOpenAICodexResponses`).
 #[allow(clippy::too_many_arguments)]
+// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+#[allow(clippy::too_many_lines)]
 async fn run_websocket_attempt(
     model: &Model,
     options: &OpenAICodexResponsesOptions,
@@ -1225,11 +1229,11 @@ mod tests {
         }
         let opcode = header[0] & 0x0F;
         let masked = header[1] & 0x80 != 0;
-        let mut length = (header[1] & 0x7F) as u64;
+        let mut length = u64::from(header[1] & 0x7F);
         if length == 126 {
             let mut extended = [0u8; 2];
             socket.read_exact(&mut extended).await?;
-            length = u16::from_be_bytes(extended) as u64;
+            length = u64::from(u16::from_be_bytes(extended));
         } else if length == 127 {
             let mut extended = [0u8; 8];
             socket.read_exact(&mut extended).await?;
@@ -1239,6 +1243,8 @@ mod tests {
         if masked {
             socket.read_exact(&mut mask).await?;
         }
+        // The mocked client frame's wire length (u64) is the vec's usize sizing; test frames are tiny.
+        #[allow(clippy::cast_possible_truncation)]
         let mut payload = vec![0u8; length as usize];
         socket.read_exact(&mut payload).await?;
         if masked {
@@ -1258,6 +1264,8 @@ mod tests {
         let body = serde_json::to_string(payload)?;
         let mut frame = vec![0x81u8];
         let length = body.len();
+        // The guards bound the wire length fields (< 126 for u8, < 65_536 for u16).
+        #[allow(clippy::cast_possible_truncation)]
         if length < 126 {
             frame.push(length as u8);
         } else if length < 65_536 {

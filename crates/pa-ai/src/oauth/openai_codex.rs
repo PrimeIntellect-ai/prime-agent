@@ -436,12 +436,16 @@ async fn token_post_bounded(
             "OpenAI Codex token {label} response missing fields: {json}"
         ));
     }
+    // Epoch millis fit i64 for ~292 million years; the u128 duration's millis are the i64 convention here.
+    #[allow(clippy::cast_possible_truncation)]
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(i64::MAX, |elapsed| elapsed.as_millis() as i64);
     // Saturating: an oversized `expires_in` cannot overflow the
     // epoch-millisecond sum (the worst case saturates at the never
     // until it refreshes).
+    // The wire's expires_in is a second count read through JSON f64; i64 ms is the credentials' convention.
+    #[allow(clippy::cast_possible_truncation)]
     let expires = now.saturating_add((expires_in * 1000.0) as i64);
     Ok(TokenSuccess {
         access: access.to_string(),

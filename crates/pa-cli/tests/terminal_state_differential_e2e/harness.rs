@@ -354,6 +354,19 @@ impl Termios {
             self.iflag, self.oflag, self.cflag, self.lflag
         )
     }
+
+    /// Whether the line discipline runs software flow control (IXON): the
+    /// flow e2e's routes are meaningless without it — a Ctrl+S byte must
+    /// be able to stop the tty for the stop-state contracts to prove
+    /// anything.
+    ///
+    /// The termios-process e2e binary's routes assert it; the
+    /// differential's own routes do not, so the method carries the
+    /// dead-code allow for that binary.
+    #[allow(dead_code)]
+    pub(crate) fn input_flow_control_on(&self) -> bool {
+        self.iflag & libc::IXON != 0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -366,7 +379,7 @@ impl Termios {
 /// for everything else. The stalled command types (`list`) are answered
 /// by silence — the bounded request hangs, the loop wedges, and the
 /// force-quit watchdog has its case.
-struct MockSupervisor;
+pub(crate) struct MockSupervisor;
 
 impl MockSupervisor {
     /// One listener, every connection served on its own thread: the

@@ -43,6 +43,7 @@ const SIDE_QUESTION_MAX_TURNS: u32 = 3;
 
 /// Prompt sent to the side loop: the question wrapped in a side-question tag,
 /// with the side-thread instruction prepended on the first turn.
+#[must_use]
 pub fn side_question_prompt(question: &str, is_first_turn: bool) -> String {
     let body = if is_first_turn {
         format!("{SIDE_QUESTION_INSTRUCTION}\n\n{question}")

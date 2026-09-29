@@ -21,7 +21,19 @@ use crate::kernel::cancellation::{merge_signals, AbortSignal};
 use crate::kernel::live_kernels;
 use crate::kernel::orphan_journal;
 use crate::kernel::protocol::{parse_event, Event, Request, REPL_PROTOCOL_VERSION};
-use crate::kernel::shared::*;
+use crate::kernel::shared::{
+    parse_attachment_display, parse_diff_display, parse_sent_agent_message, ExecuteOptions,
+    ExecuteResult, ExecuteStatus, HostRequestPayload, KernelAttachment, KernelDiffDisplay,
+    KernelError, KernelManagerOptions, KernelSentAgentMessage, KernelShutdownOptions,
+    LateSentAgentMessageCallback, StreamName, AGENT_MESSAGE_DISPLAY_MIME, ATTACHMENT_DISPLAY_MIME,
+    BASH_ACTIVITY_DISPLAY_MIME, DEFAULT_MAX_OUTPUT_CHARS, DEFAULT_SNAPSHOT_DEBOUNCE_MS,
+    DIFF_DISPLAY_MIME, HOST_REQUEST_SHUTDOWN_TIMEOUT_MS, KERNEL_ABORT_GRACE_MS,
+    KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE, KERNEL_BUSY_INTERRUPT_INTERVAL_MS,
+    KERNEL_BUSY_REUSE_WAIT_MS, KERNEL_SHUTDOWN_TIMEOUT_MS, KERNEL_STDERR_LOG_BUDGET_MARKER,
+    MAX_ATTACHMENT_DATA_CHARS, MAX_BACKGROUND_OUTPUT_CHARS, MAX_KERNEL_STDERR_CHARS,
+    MAX_KERNEL_STDERR_LOG_BYTES, MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS,
+    RESTORE_EXECUTION_TIMEOUT_MS, SNAPSHOT_EXECUTION_TIMEOUT_MS,
+};
 use crate::kernel::state_snapshot::{
     RestoreResult, SnapshotResult, SnapshotSkip, DEFAULT_SNAPSHOT_MAX_BYTES,
     DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
@@ -68,6 +80,9 @@ struct ExitInfo {
 
 /// Fields of a settled execution shared with the stdout reader task.
 #[derive(Default)]
+// The mirrored TS API shape is deliberate (the booleans are the
+// product's own surface, not a refactor target).
+#[allow(clippy::struct_excessive_bools)]
 struct ExecBuffers {
     stdout: String,
     stderr: String,
@@ -258,6 +273,9 @@ struct CaptureFreshness {
     live_over_cap: bool,
 }
 
+// The mirrored TS API shape is deliberate (the booleans are the
+// product's own surface, not a refactor target).
+#[allow(clippy::struct_excessive_bools)]
 struct Guarded {
     state: KernelState,
     start_generation: u64,
@@ -295,6 +313,7 @@ struct Guarded {
     restore_boot_hold: Option<u64>,
     /// Tri-state manifest stat of the last non-repair restore ATTEMPT:
     /// `None` = no attempt yet, `Some(None)` = manifest was missing at it.
+    #[allow(clippy::option_option)] // the tri-state IS the semantics
     restored_manifest_stat: Option<Option<ManifestStat>>,
     /// Armed one-shot post-restore snapshot skip (see `RestoredNamespaceSkip`).
     restored_namespace_skip: Option<RestoredNamespaceSkip>,
@@ -435,6 +454,7 @@ use requests::{append_truncated, describe_failure, Signal};
 // ---------------------------------------------------------------------------
 
 impl ReplKernelManager {
+    #[must_use]
     pub fn new(options: KernelManagerOptions) -> Self {
         let inner = Arc::new(Inner {
             options,
@@ -488,30 +508,36 @@ impl ReplKernelManager {
         Self { inner }
     }
 
+    #[must_use]
     pub fn owner_session_id(&self) -> Option<&str> {
         self.inner.options.session_id.as_deref()
     }
 
+    #[must_use]
     pub fn has_background_work(&self) -> bool {
         !lock(&self.inner.guarded).background_bash_handles.is_empty()
     }
 
     /// Process id of the spawned kernel child, when present. Used by tests and
     /// orphan bookkeeping; not part of the TS surface.
+    #[must_use]
     pub fn process_id(&self) -> Option<i32> {
         lock(&self.inner.child).as_ref().map(|c| c.pid)
     }
 
+    #[must_use]
     pub fn is_running(&self) -> bool {
         lock(&self.inner.guarded).state == KernelState::Running
     }
 
     /// Terminal: the kernel died or was torn down; only a fresh manager can serve again.
+    #[must_use]
     pub fn is_defunct(&self) -> bool {
         lock(&self.inner.guarded).state == KernelState::Shutdown
     }
 
     /// Diagnostics tail (kernel stderr, at most the last 8 KiB).
+    #[must_use]
     pub fn kernel_stderr(&self) -> String {
         lock(&self.inner.guarded).kernel_stderr.clone()
     }
@@ -882,7 +908,7 @@ impl ReplKernelManager {
         self.start(KernelStartOptions::default()).await
     }
 
-    pub async fn kill(&self) {
+    pub fn kill(&self) {
         self.supersede_protocol_repair();
         {
             let mut g = lock(&self.inner.guarded);

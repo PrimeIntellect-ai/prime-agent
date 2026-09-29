@@ -226,16 +226,19 @@ impl IpythonKernelProvisioner {
     }
 
     /// The kernel manager, once a startup has completed successfully.
+    #[must_use]
     pub fn manager(&self) -> Option<ReplKernelManager> {
         self.lock_state().manager.clone()
     }
 
     /// Result of reviving a prior session's namespace on the last kernel start.
+    #[must_use]
     pub fn last_restore(&self) -> Option<RestoreResult> {
         self.lock_state().last_restore.clone()
     }
 
     /// Whether a kernel has finished starting and is currently running.
+    #[must_use]
     pub fn has_running_kernel(&self) -> bool {
         self.manager().is_some_and(|m| m.is_running())
     }
@@ -318,17 +321,17 @@ impl IpythonKernelProvisioner {
 
     /// After the memoized startup settles, return the manager it produced —
     /// or its error when it failed and nothing superseded it.
-    async fn settled_manager(
+    fn settled_manager(
         &self,
         signal: Option<AbortSignal>,
-    ) -> anyhow::Result<ReplKernelManager> {
+    ) -> impl std::future::Future<Output = anyhow::Result<ReplKernelManager>> {
         if let Some(signal) = signal {
             if signal.is_aborted() {
-                return Err(anyhow!("Python execution aborted"));
+                return std::future::ready(Err(anyhow!("Python execution aborted")));
             }
         }
         let state = self.lock_state();
-        match state.manager.clone() {
+        std::future::ready(match state.manager.clone() {
             Some(manager) => Ok(manager),
             None => match state.last_startup_failure.clone() {
                 Some(failure) => Err(anyhow!(
@@ -338,7 +341,7 @@ impl IpythonKernelProvisioner {
                 )),
                 None => Err(anyhow!("kernel startup failed")),
             },
-        }
+        })
     }
 
     /// Remove live variables above the snapshot's per-variable size limit.
@@ -434,17 +437,17 @@ impl IpythonKernelProvisioner {
     }
 
     /// Kill the owned kernel without a final snapshot (busy-kernel restart).
-    pub async fn kill(&self) {
+    pub fn kill(&self) {
         let manager = self.lock_state().manager.take();
         if let Some(manager) = manager {
-            manager.kill().await;
+            manager.kill();
         }
     }
 }
 
 fn emit_startup_progress(
     inner: &Arc<ProvisionerInner>,
-    on_progress: &Option<KernelBootstrapProgressHandler>,
+    on_progress: Option<&KernelBootstrapProgressHandler>,
     message: &str,
 ) {
     let mut state = inner
@@ -521,7 +524,7 @@ async fn run_startup(
     let mut attempt: u32 = 0;
     let outcome = loop {
         attempt += 1;
-        match start_kernel(&inner, &on_progress).await {
+        match start_kernel(&inner, on_progress.as_ref()).await {
             Ok(manager) => break Ok(manager),
             Err(error) => {
                 if inner
@@ -540,7 +543,7 @@ async fn run_startup(
                     RETRY_BACKOFF_MS[(attempt as usize - 1).min(RETRY_BACKOFF_MS.len() - 1)];
                 emit_startup_progress(
                     &inner,
-                    &on_progress,
+                    on_progress.as_ref(),
                     &format!("Kernel start failed; retrying in {backoff_ms}ms…"),
                 );
                 tokio::select! {
@@ -617,7 +620,7 @@ async fn race_startup(
 /// spawn, `cold` means no prior namespace snapshot existed to restore.
 async fn start_kernel(
     inner: &Arc<ProvisionerInner>,
-    on_progress: &Option<KernelBootstrapProgressHandler>,
+    on_progress: Option<&KernelBootstrapProgressHandler>,
 ) -> anyhow::Result<ReplKernelManager> {
     let started = std::time::Instant::now();
     let cold = !inner
@@ -642,7 +645,7 @@ async fn start_kernel(
 /// The bootstrap itself; see [`start_kernel`].
 async fn start_kernel_impl(
     inner: &Arc<ProvisionerInner>,
-    on_progress: &Option<KernelBootstrapProgressHandler>,
+    on_progress: Option<&KernelBootstrapProgressHandler>,
 ) -> anyhow::Result<ReplKernelManager> {
     let options = &inner.options;
     let cwd = inner.cwd.clone();
@@ -713,7 +716,7 @@ async fn start_kernel_impl(
     // covers only start(). Restore/bootstrap run per-kernel afterwards.
     let start = manager.start(KernelStartOptions {
         signal: None,
-        on_bootstrap_progress: on_progress.clone(),
+        on_bootstrap_progress: on_progress.cloned(),
     });
     let boot = async {
         with_kernel_boot_permit(move || async move {
@@ -891,6 +894,7 @@ async fn start_kernel_impl(
 }
 
 /// Same as [`IpythonKernelProvisioner::new`] for a `Path`-shaped cwd.
+#[must_use]
 pub fn provisioner_for_path(
     cwd: &Path,
     options: IpythonKernelProvisionerOptions,

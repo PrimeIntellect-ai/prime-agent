@@ -65,6 +65,8 @@ impl GoogleStreamState {
     }
 
     /// Process one streamed `GenerateContentResponse` chunk.
+    // Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+    #[allow(clippy::too_many_lines)]
     pub fn handle_chunk(
         &mut self,
         chunk: &Value,

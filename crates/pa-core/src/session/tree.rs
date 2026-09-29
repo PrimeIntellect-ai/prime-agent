@@ -56,6 +56,7 @@ impl SessionTree {
     }
 
     /// The ancestor path (file order) from the root down to `leaf_id`.
+    #[must_use]
     pub fn path_to(&self, entries: &[FileEntry], leaf_id: &str) -> Vec<usize> {
         let by_id: HashMap<&str, usize> = entries
             .iter()
@@ -75,6 +76,7 @@ impl SessionTree {
     }
 
     /// The most recent leaf on the root path (the file's default leaf).
+    #[must_use]
     pub fn default_leaf(&self, entries: &[FileEntry]) -> Option<String> {
         // The deepest rightmost parentless chain: entries whose parent is not
         // present in the file start new branches; the last entry overall is a
@@ -86,6 +88,7 @@ impl SessionTree {
 }
 
 /// The latest label for a target entry id (None = no label entry).
+#[must_use]
 pub fn get_label(tree: &SessionTree, target_id: &str) -> Option<Option<String>> {
     tree.labels.get(target_id).cloned()
 }

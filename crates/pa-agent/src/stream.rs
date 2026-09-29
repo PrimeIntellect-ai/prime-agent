@@ -85,6 +85,7 @@ pub enum AssistantMessageEvent {
 
 impl AssistantMessageEvent {
     /// Terminal message for a `Done`/`Error` event (TS `getTerminalMessage`).
+    #[must_use]
     pub fn terminal_message(&self) -> Option<&AssistantMessage> {
         match self {
             AssistantMessageEvent::Done { message, .. } => Some(message),
@@ -95,6 +96,7 @@ impl AssistantMessageEvent {
 
     /// True for the partial-update events the loop applies to the streaming
     /// message (`text_*`, `thinking_*`, `toolcall_*`).
+    #[must_use]
     pub fn is_delta(&self) -> bool {
         matches!(
             self,
@@ -184,6 +186,7 @@ impl std::fmt::Debug for StreamRequestOptions {
             .field("max_tokens", &self.max_tokens)
             .field("reasoning", &self.reasoning)
             .field("session_id", &self.session_id)
+            .field("service_tier", &self.service_tier)
             .field("api_key", &self.api_key.as_ref().map(|_| "<set>"))
             .field("signal", &self.signal)
             .field("on_payload", &self.on_payload.is_some())
@@ -261,6 +264,7 @@ pub struct AssistantMessageEventStream {
 }
 
 /// Create a connected event stream pair.
+#[must_use]
 pub fn event_stream() -> (
     AssistantMessageEventStreamHandle,
     AssistantMessageEventStream,

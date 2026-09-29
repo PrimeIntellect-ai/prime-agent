@@ -190,6 +190,14 @@ pub struct GoalContinuation {
     /// The `goal_update` event's `goal` payload, `None` when an
     /// unchanged state stays silent.
     pub goal_update: Option<Value>,
+    /// This mint's own pending-continuation guard handle, captured under
+    /// the driver lock at the mint: the admission and drop surfaces
+    /// release exactly the mint's guard, never whichever handle the
+    /// engine's mutable mirror currently holds (a stale task from before
+    /// a core rebuild must not clear a replacement session's guard).
+    /// `None` when the item armed no guard (the budget steer mints no
+    /// continuation slot).
+    pub pending_handle: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// The goal-driven work a settled run boundary owes: TS
@@ -322,6 +330,31 @@ pub trait SessionEngine: Send + Sync {
     /// the turn; the resume site admits it.
     fn mint_post_compaction_goal_continuation(&self) -> Option<GoalContinuation> {
         None
+    }
+
+    /// Release the engine's pending-continuation guard: the caller
+    /// admitted (or withdrew) a minted goal continuation, so the next
+    /// boundary may mint again (the pending-never-re-arms contract —
+    /// the owed flag clears at the queue). Engines without thread goals
+    /// do nothing.
+    fn clear_pending_goal_continuation(&self) {}
+
+    /// The engine's current pending-continuation handle, READ without
+    /// clearing (the mirror read — the core a mint about to spawn will
+    /// use). Engines without thread goals have none.
+    fn goal_pending_handle(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        None
+    }
+
+    /// Release one mint's OWN pending-continuation handle (the item's
+    /// captured handle, or the spawn-captured handle for a lost task):
+    /// an admission or drop names the specific mint, never the mutable
+    /// mirror. An item that armed no guard releases nothing. Engines
+    /// without thread goals release nothing.
+    fn release_goal_continuation_handle(
+        &self,
+        _handle: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) {
     }
 
     /// Run one prompt. `prompt_index` counts accepted prompts for this
@@ -1263,6 +1296,8 @@ impl SessionEngine for ScriptedEngine {
                 })),
             },
             goal_update: Some(goal.state.clone()),
+            // The scripted faux mints through no real driver: no guard.
+            pending_handle: None,
         })
     }
 

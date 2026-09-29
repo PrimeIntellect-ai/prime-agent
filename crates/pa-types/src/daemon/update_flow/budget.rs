@@ -64,6 +64,7 @@ impl UpdateTimeoutBudget {
     /// download retry count) overrides from the process environment applied.
     /// An unparsable override falls back to the default: an override is test
     /// plumbing, and a typo must never wedge the FSM behind a huge budget.
+    #[must_use]
     pub fn from_env() -> Self {
         Self::from_overrides(|key| std::env::var(key).ok())
     }

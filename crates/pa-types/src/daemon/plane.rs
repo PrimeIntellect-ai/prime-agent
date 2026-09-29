@@ -21,6 +21,7 @@ pub enum DaemonCommandPlane {
 /// TS `DAEMON_COMMAND_PLANE`: every session-plane command the TS product
 /// defines has an entry; all other commands, known or unknown, are control
 /// (never forwarded on a peer link).
+#[must_use]
 pub fn command_plane(command_type: &str) -> DaemonCommandPlane {
     use DaemonCommandPlane::{Control, Session};
     match command_type {
@@ -107,6 +108,7 @@ pub fn command_plane(command_type: &str) -> DaemonCommandPlane {
 }
 
 /// TS `isSessionPlaneDaemonCommand`.
+#[must_use]
 pub fn is_session_plane_daemon_command(command_type: &str) -> bool {
     command_plane(command_type) == DaemonCommandPlane::Session
 }
@@ -157,6 +159,7 @@ const READ_ONLY_DAEMON_COMMANDS: &[&str] = &[
 
 /// TS `isDaemonMutatingCommand`: a command mutates daemon state unless it is
 /// in the read-only table.
+#[must_use]
 pub fn is_daemon_mutating_command(command_type: &str) -> bool {
     !READ_ONLY_DAEMON_COMMANDS.contains(&command_type)
 }
@@ -165,6 +168,7 @@ pub fn is_daemon_mutating_command(command_type: &str) -> bool {
 /// admission gate while the prepare transaction is `Draining` — they cancel
 /// or drain in-flight session work, so letting them through shortens the
 /// drain instead of fencing it off.
+#[must_use]
 pub fn is_update_drain_command(command_type: &str) -> bool {
     matches!(
         command_type,

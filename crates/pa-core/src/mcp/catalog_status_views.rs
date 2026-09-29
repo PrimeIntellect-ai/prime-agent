@@ -90,7 +90,7 @@ pub(crate) struct HttpStatusOptions<'a> {
 /// bearer token (TS `httpConnectionStatus`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn http_connection_status(
-    options: HttpStatusOptions<'_>,
+    options: &HttpStatusOptions<'_>,
     credentials: &SnapshotCredentials,
     records: &HashMap<String, McpConnectionRecord>,
 ) -> HttpStatusResult {
@@ -349,7 +349,7 @@ fn account_state_for(
     static_token: bool,
 ) -> McpAccountState {
     let state = http_connection_status(
-        HttpStatusOptions {
+        &HttpStatusOptions {
             connection_id,
             endpoint,
             uses_oauth,

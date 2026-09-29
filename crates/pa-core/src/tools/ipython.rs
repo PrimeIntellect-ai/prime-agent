@@ -139,11 +139,13 @@ pub enum KernelExecError {
 
 impl KernelExecError {
     /// True when this error is a busy-after-interrupt error.
+    #[must_use]
     pub fn is_busy_after_interrupt(&self) -> bool {
         matches!(self, KernelExecError::BusyAfterInterrupt(_))
     }
 
     /// The model-facing message.
+    #[must_use]
     pub fn message(&self) -> String {
         match self {
             KernelExecError::BusyAfterInterrupt(err) => err.message.clone(),
@@ -483,6 +485,7 @@ pub async fn execute_ipython(
 }
 
 /// The `ipython` tool definition: exact name, schema, and description.
+#[must_use]
 pub fn create_ipython_tool_definition(_cwd: &str, options: IpythonToolOptions) -> ToolDefinition {
     let options = Arc::new(options);
     let execute: crate::tools::tool_definition::ExecuteFn = {

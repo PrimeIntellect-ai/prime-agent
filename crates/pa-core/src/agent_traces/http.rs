@@ -27,6 +27,7 @@ pub enum TraceHttpError {
 
 impl TraceHttpError {
     /// TS `describeError`'s message for each class.
+    #[must_use]
     pub fn message(&self) -> String {
         match self {
             TraceHttpError::TimedOut { timeout_ms } => {
@@ -113,6 +114,7 @@ impl TraceHttp for ReqwestTraceHttp {
 
 /// TS `encodeURIComponent` (every byte outside the JS unreserved set
 /// escapes).
+#[must_use]
 pub fn encode_uri_component(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for &byte in value.as_bytes() {
@@ -174,6 +176,7 @@ pub fn read_response_message(status: u16, body: &str) -> String {
 
 /// TS `retryAfterDelay`: the `Retry-After` seconds, or an HTTP date,
 /// clamped to `cap_ms`.
+#[must_use]
 pub fn retry_after_delay(retry_after: Option<&str>, cap_ms: u64) -> Option<u64> {
     let value = retry_after?.trim();
     if value.is_empty() {
@@ -222,8 +225,8 @@ fn parse_http_date(value: &str) -> Option<u64> {
     let y = if month <= 2 { year - 1 } else { year };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
-    let mp = ((month + 9) % 12) as i64;
-    let doy = (153 * mp + 2) / 5 + day as i64 - 1;
+    let mp = i64::from((month + 9) % 12);
+    let doy = (153 * mp + 2) / 5 + i64::from(day) - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let days = era * 146_097 + doe - 719_468;
     if days < 0 {

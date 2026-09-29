@@ -18,6 +18,7 @@ pub struct SessionSlashCommand {
 }
 
 /// Parse a session command from input; None for non-session commands.
+#[must_use]
 pub fn parse_session_command(
     registry: &SlashCommandRegistry,
     text: &str,

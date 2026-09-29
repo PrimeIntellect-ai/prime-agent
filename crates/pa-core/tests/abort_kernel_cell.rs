@@ -1,3 +1,15 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
+// crate root: the same bounded-boundary disposition as src/lib.rs
+// (large_futures/too_many_lines/the cast family; details there).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! Verifier: an abort during a running kernel cell must settle the turn
 //! at once (dogfood P0): Ctrl+C must kill the in-flight tool execution -
 //! interrupt the cell, force-abort the execution after the grace window,
@@ -81,12 +93,12 @@ struct EnvOverride {
 }
 
 impl EnvOverride {
-    fn apply(pairs: Vec<(&str, Option<String>)>) -> Self {
+    fn apply(pairs: &[(&str, Option<String>)]) -> Self {
         let saved = pairs
             .iter()
             .map(|(key, _)| ((*key).to_string(), std::env::var(key).ok()))
             .collect();
-        for (key, value) in &pairs {
+        for (key, value) in pairs {
             match value {
                 Some(value) => std::env::set_var(key, value),
                 None => std::env::remove_var(key),
@@ -149,7 +161,7 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
     let started = dir.path().join("cell-started");
     let finished = dir.path().join("cell-finished");
 
-    let _env = EnvOverride::apply(vec![
+    let _env = EnvOverride::apply(&[
         (
             "PRIME_AGENT_KERNEL_PYTHON",
             Some(kernel_python.display().to_string()),

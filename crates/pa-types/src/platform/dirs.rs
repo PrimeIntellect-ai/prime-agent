@@ -18,6 +18,7 @@ use std::path::PathBuf;
 /// `USERPROFILE` / `HOMEDRIVE`+`HOMEPATH` chain. `None` means no
 /// environment source resolved a home; POSIX has no fallback here (the
 /// per-call-site fallback replaces the TS `os.homedir()` throw).
+#[must_use]
 pub fn home_dir() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {
         return Some(PathBuf::from(home));
@@ -49,6 +50,7 @@ pub const CONFIG_DIR_NAME: &str = ".prime/agent";
 /// leading `~`/`~/` expanded against [`home_dir`], else `<home>/.prime/agent`.
 /// `None` when no override is set and the home directory does not resolve
 /// (each caller owns its fallback).
+#[must_use]
 pub fn agent_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os(ENV_AGENT_DIR).filter(|dir| !dir.is_empty()) {
         return Some(expand_tilde(&dir.to_string_lossy()));

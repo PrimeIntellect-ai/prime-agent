@@ -29,6 +29,7 @@ fn now_millis() -> u64 {
 /// The notice text (TS `_onPythonSkillsUnavailable`'s builder): the
 /// `[python-skills-unavailable]` header, the per-skill import errors, and
 /// the fix hint.
+#[must_use]
 pub fn notice_content(errors: &UnavailablePythonSkills) -> String {
     let mut lines = vec!["[python-skills-unavailable]".to_string(), String::new()];
     lines.push(
@@ -48,6 +49,7 @@ pub fn notice_content(errors: &UnavailablePythonSkills) -> String {
 /// failed import names (TS `sendCustomMessage` with `deliverAs:
 /// "nextTurn"` — the row rides the next admitted turn ahead of its
 /// prompt).
+#[must_use]
 pub fn notice_message(errors: &UnavailablePythonSkills) -> CustomMessage {
     CustomMessage {
         custom_type: PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE.to_string(),

@@ -241,24 +241,24 @@ pub async fn execute_edit(
     let edits_for_task = edits.clone();
     let input_path = absolute_path.clone();
 
-    with_file_mutation_queue(&absolute_path, || {
+    with_file_mutation_queue(&absolute_path, || async {
         execute_edit_locked(
             &path_for_task,
             &input_path,
             ops,
             &edits_for_task,
-            signal.clone(),
+            signal.as_ref(),
         )
     })
     .await
 }
 
-async fn execute_edit_locked(
+fn execute_edit_locked(
     path: &str,
     absolute_path: &str,
     ops: &dyn EditOperations,
     edits: &[Edit],
-    signal: Option<crate::tools::tool_definition::AbortSignal>,
+    signal: Option<&crate::tools::tool_definition::AbortSignal>,
 ) -> anyhow::Result<ToolExecutionResult> {
     if let Some(signal) = &signal {
         if signal.is_cancelled() {

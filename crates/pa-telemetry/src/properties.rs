@@ -15,6 +15,7 @@ pub struct Properties(Map<String, Value>);
 
 impl Properties {
     /// An empty map.
+    #[must_use]
     pub fn new() -> Self {
         Self(Map::new())
     }
@@ -26,6 +27,13 @@ impl Properties {
             tracing::warn!(key, value = %value, "rejected non-primitive telemetry property");
             return;
         }
+        self.0.insert(key.to_string(), value);
+    }
+
+    /// Insert an already-validated value (the catalog sanitize path for the
+    /// documented primitive-map exception). Not public: the public
+    /// insertion surface stays primitive-only.
+    pub(crate) fn insert_validated(&mut self, key: &str, value: Value) {
         self.0.insert(key.to_string(), value);
     }
 
@@ -44,15 +52,18 @@ impl Properties {
     }
 
     /// Read back a property (test + schema-check surface).
+    #[must_use]
     pub fn get(&self, key: &str) -> Option<&Value> {
         self.0.get(key)
     }
 
     /// Number of properties.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }

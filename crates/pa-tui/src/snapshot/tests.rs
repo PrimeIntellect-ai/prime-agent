@@ -2169,3 +2169,120 @@ fn attach_snapshot_carries_the_goal_state() {
     assert_eq!(goal.status, pa_types::goal::GoalStatus::Active);
     assert_eq!(goal.objective.as_deref(), Some("keep shipping"));
 }
+
+/// The synthetic image-heavy tool-result row: a `role: "toolResult"`
+/// message with one 500KB image payload block (the `attach_image` emit's
+/// stored shape).
+fn image_heavy_tool_result(payload: &str) -> serde_json::Value {
+    json!({
+        "role": "toolResult",
+        "toolCallId": "call-img",
+        "toolName": "ipython",
+        "content": [
+            { "type": "text", "text": "Loaded 1 image(s) into context: /tmp/shot.png" },
+            { "type": "image", "data": payload, "mimeType": "image/png" }
+        ],
+        "details": { "status": "ok", "stdout": "Loaded 1 image(s) into context: /tmp/shot.png" },
+        "isError": false,
+        "timestamp": 10u64
+    })
+}
+
+fn elided_image_tool_result(elided_bytes: u64, width: u64, height: u64) -> serde_json::Value {
+    json!({
+        "role": "toolResult",
+        "toolCallId": "call-img",
+        "toolName": "ipython",
+        "content": [
+            { "type": "text", "text": "Loaded 1 image(s) into context: /tmp/shot.png" },
+            {
+                "type": "image",
+                "data": "",
+                "mimeType": "image/png",
+                "elidedBytes": elided_bytes,
+                "widthPx": width,
+                "heightPx": height
+            }
+        ],
+        "details": { "status": "ok", "stdout": "Loaded 1 image(s) into context: /tmp/shot.png" },
+        "isError": false,
+        "timestamp": 10u64
+    })
+}
+
+/// One row's joined span text.
+fn line_text(line: &crate::Line) -> String {
+    line.iter().map(|span| span.content.as_str()).collect()
+}
+
+#[test]
+fn an_image_heavy_transcript_replays_and_renders_its_first_frame() {
+    // The synthetic image-heavy fixture: a transcript whose tail carries
+    // many half-megabyte image tool results. The first-frame fold and the
+    // collapsed-detail layout must complete without any payload
+    // processing, and the expanded card renders the payload's
+    // placeholder, never its bytes.
+    let payload = "A".repeat(500 * 1024);
+    let mut messages = Vec::new();
+    for index in 0..16 {
+        messages.push(json!({
+            "role": "user", "content": format!("turn {index}"), "timestamp": index
+        }));
+        let mut result = image_heavy_tool_result(&payload);
+        result["toolCallId"] = json!(format!("call-img-{index}"));
+        messages.push(result);
+    }
+    let entries = transcript_to_entries(&messages);
+    assert_eq!(entries.len(), 32, "a user row and a card per turn");
+
+    // The first-frame geometry pass over the whole transcript completes.
+    let mut view = test_view();
+    for entry in entries {
+        view.push_entry(entry);
+    }
+    let layout = view.layout_pass(100);
+    // The whole first frame renders (the lazy walk's full-transcript
+    // request shape), and its rows carry no payload bytes.
+    let rows = view.transcript_window(&layout, 0, usize::MAX);
+    assert!(rows.len() > 40, "the transcript frame renders");
+    let flat: Vec<String> = rows.iter().map(line_text).collect();
+    assert!(
+        flat.iter().all(|row| !row.contains(&"A".repeat(64))),
+        "no payload bytes reach the frame: {flat:?}"
+    );
+}
+
+#[test]
+fn elided_image_tool_results_render_their_marker_metadata() {
+    // The elision marker the daemon's attach snapshot writes for an
+    // `elide_snapshot_images` client: the fold keeps the card, and the
+    // expanded card renders the marker's dimensions — the same row the
+    // payload's own metadata produced.
+    let entries = transcript_to_entries(&[elided_image_tool_result(500 * 1024, 64, 32)]);
+    let card = entries
+        .iter()
+        .find_map(|entry| match entry {
+            ChatEntry::Tool(card) => Some(card.as_ref()),
+            _ => None,
+        })
+        .expect("the tool card");
+    let rows = crate::tool_card::render_tool_card(
+        card,
+        0,
+        crate::chat::Detail::All,
+        &crate::theme::Theme::builtin("prime", crate::theme::ColorMode::TrueColor),
+        100,
+        true,
+    );
+    let flat: Vec<String> = rows.iter().map(line_text).collect();
+    assert!(
+        flat.iter()
+            .any(|row| row.contains("\u{2570}\u{2500} [image/png \u{b7} 64\u{d7}32]")),
+        "the marker's dimensions render: {flat:?}"
+    );
+    // The hidden form renders the same metadata with its size.
+    assert_eq!(
+        card.result.as_ref().unwrap().text_output(false),
+        "Loaded 1 image(s) into context: /tmp/shot.png\n[Image: [image/png]]"
+    );
+}

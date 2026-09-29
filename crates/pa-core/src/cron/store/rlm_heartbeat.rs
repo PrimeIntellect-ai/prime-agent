@@ -36,7 +36,9 @@ impl AgentCronJobStore {
                 matches!(job.status, JobStatus::Active | JobStatus::Paused)
             })
             .collect();
-        jobs.sort_by(|left, right| compare_optional_iso(&left.next_run_at, &right.next_run_at));
+        jobs.sort_by(|left, right| {
+            compare_optional_iso(left.next_run_at.as_deref(), right.next_run_at.as_deref())
+        });
         jobs
     }
 

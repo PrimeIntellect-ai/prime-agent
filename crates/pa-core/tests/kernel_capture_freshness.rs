@@ -153,7 +153,7 @@ async fn fresh_capture_skips_until_a_settled_cell_changes_the_namespace() {
 
     // The re-dumped payload restores the changed value, not the memo's
     // stale one (the crash-resume freshness contract).
-    manager.kill().await;
+    manager.kill();
     let Some(reader_options) = test_options(Some(dir.path())) else {
         return;
     };
@@ -172,7 +172,7 @@ async fn fresh_capture_skips_until_a_settled_cell_changes_the_namespace() {
         live.stderr
     );
     assert_eq!(live.result.as_deref(), Some("2"));
-    reader.kill().await;
+    reader.kill();
 }
 
 #[tokio::test]
@@ -255,7 +255,7 @@ async fn prune_capture_runs_while_over_cap_survivors_live_then_skips_back_to_bac
         ExecuteStatus::Ok,
         "big must be gone from the namespace"
     );
-    manager.kill().await;
+    manager.kill();
 }
 
 #[tokio::test]
@@ -313,7 +313,7 @@ async fn dispose_flush_skips_when_fresh_and_still_restores() {
         live.stderr
     );
     assert_eq!(live.result.as_deref(), Some("'before-exit'"));
-    reader.kill().await;
+    reader.kill();
 }
 
 #[tokio::test]
@@ -369,7 +369,7 @@ async fn dispose_flush_dumps_after_a_settled_cell() {
         live.stderr
     );
     assert_eq!(live.result.as_deref(), Some("'final'"));
-    reader.kill().await;
+    reader.kill();
 }
 
 #[tokio::test]
@@ -401,7 +401,7 @@ async fn an_externally_replaced_manifest_defeats_the_fresh_skip() {
         b"{\"version\": 1, \"savedNames\": []}" as &[u8],
         "the capture must commit a fresh manifest over the external one"
     );
-    manager.kill().await;
+    manager.kill();
 }
 
 #[tokio::test]
@@ -440,7 +440,7 @@ async fn an_internal_state_request_does_not_defeat_the_fresh_skip() {
         committed_manifest,
         "the capture after an internal listing must not rewrite the manifest"
     );
-    manager.kill().await;
+    manager.kill();
 }
 
 #[tokio::test]
@@ -501,7 +501,7 @@ async fn an_internal_execute_that_writes_a_user_variable_defeats_the_memo() {
         "the internal write must be persisted"
     );
 
-    manager.kill().await;
+    manager.kill();
     let Some(reader_options) = test_options(Some(dir.path())) else {
         return;
     };
@@ -519,7 +519,7 @@ async fn an_internal_execute_that_writes_a_user_variable_defeats_the_memo() {
         live.stderr
     );
     assert_eq!(live.result.as_deref(), Some("42"));
-    reader.kill().await;
+    reader.kill();
 }
 
 #[tokio::test]
@@ -564,7 +564,7 @@ async fn a_restore_settle_clears_the_memo() {
         redumped.saved.iter().any(|name| name == "value"),
         "the capture after the restore re-describes the namespace"
     );
-    manager.kill().await;
+    manager.kill();
 }
 
 #[tokio::test]
@@ -600,7 +600,7 @@ async fn an_externally_replaced_payload_defeats_the_fresh_skip() {
         restored_bytes, b"externally replaced" as &[u8],
         "the capture must commit a fresh payload over the external one"
     );
-    manager.kill().await;
+    manager.kill();
 }
 
 #[tokio::test]
@@ -679,5 +679,5 @@ async fn concurrent_settles_keep_the_boundary_invariant() {
         Some("39"),
         "the persisted payload must carry the LAST settled value through every racing capture"
     );
-    revived.kill().await;
+    revived.kill();
 }

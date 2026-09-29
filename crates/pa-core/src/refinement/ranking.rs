@@ -40,6 +40,7 @@ fn is_cjk(char: char) -> bool {
 ///
 /// The `next().unwrap()` on the first char of a run cannot fire: the run is
 /// checked non-empty right before.
+#[must_use]
 pub fn harness_query_terms(text: &str) -> Vec<String> {
     let mut terms: Vec<String> = Vec::new();
     let mut run = String::new();
@@ -107,6 +108,7 @@ fn push_segment(segment: &str, is_cjk_segment: bool, terms: &mut Vec<String>) {
 /// `ln(2)`, while a term in one entry of N weighs `ln(1 + N)`, so rare
 /// distinctive terms outrank ubiquitous ones. Terms matching no entry are
 /// absent (they cannot score anything).
+#[must_use]
 pub fn harness_query_term_idf(
     entries: &[HarnessEntry],
     terms: &HarnessQueryTerms,
@@ -142,6 +144,7 @@ pub fn harness_query_term_idf(
 /// title/content/identifier fields (field coverage weighted, not repetition),
 /// with each matched term's weight discounted by its document frequency in
 /// the ranked corpus (`idf`; a missing map weights every term at 1).
+#[must_use]
 pub fn score_harness_entry_for_query(
     entry: &HarnessEntry,
     terms: &HarnessQueryTerms,
@@ -169,7 +172,7 @@ pub fn score_harness_entry_for_query(
             let term_idf = idf
                 .and_then(|map| map.get(term.as_str()).copied())
                 .unwrap_or(1.0);
-            score += weight * term_idf * (1.0 + (fields - 1) as f64 * 0.5);
+            score += weight * term_idf * (1.0 + f64::from(fields - 1) * 0.5);
         }
     }
     score
@@ -193,6 +196,7 @@ pub struct HarnessStatePromptOptions {
 
 /// Render the harness state as the model-facing digest block. Strings must
 /// stay byte-identical with the TS formatter.
+#[must_use]
 pub fn format_harness_state_for_prompt(
     state: &HarnessState,
     options: &HarnessStatePromptOptions,
@@ -411,6 +415,7 @@ fn refinement_kind_name(kind: RefinementKind) -> &'static str {
 /// the fingerprint to keep an unchanged digest fresh. Excluded: `metadata`,
 /// `source`, the invisible `created_at`/`updated_at` bookkeeping, and
 /// relevance query terms.
+#[must_use]
 pub fn harness_digest_fingerprint(
     state: &HarnessState,
     render_flags: HarnessDigestRenderFlags,

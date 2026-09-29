@@ -199,7 +199,7 @@ fn parse_content_block(block: &Value) -> Result<super::AssistantContent, String>
                 .ok_or("a toolCall block needs a name")?;
             let arguments = object.get("arguments").cloned().unwrap_or(Value::Null);
             let id = object.get("id").and_then(Value::as_str);
-            Ok(faux_tool_call(name, arguments, id))
+            Ok(faux_tool_call(name, &arguments, id))
         }
         Some(other) => Err(format!("unknown faux script content type {other}")),
         None => Err("a faux script content block needs a type".to_string()),
@@ -207,6 +207,7 @@ fn parse_content_block(block: &Value) -> Result<super::AssistantContent, String>
 }
 
 /// Register a faux provider from a parsed script and queue its responses.
+#[must_use]
 pub fn register_faux_provider_from_script(script: &FauxScript) -> FauxProviderRegistration {
     let registration = register_faux_provider(RegisterFauxProviderOptions {
         api: Some("faux".to_string()),

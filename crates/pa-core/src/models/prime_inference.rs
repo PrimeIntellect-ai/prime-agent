@@ -7,6 +7,7 @@ use pa_types::JsNumber;
 pub const PRIME_INFERENCE_BASE_URL: &str = "https://api.pinference.ai/api/v1";
 
 /// Private ids: `internal/*`, `dev/*`, or any id containing `:`.
+#[must_use]
 pub fn is_private_prime_inference_model_id(model_id: &str) -> bool {
     let normalized = model_id.to_lowercase();
     normalized.starts_with("internal/")
@@ -14,12 +15,14 @@ pub fn is_private_prime_inference_model_id(model_id: &str) -> bool {
         || normalized.contains(':')
 }
 
+#[must_use]
 pub fn is_private_prime_inference_model(model: &Model) -> bool {
     model.provider == "prime-inference" && is_private_prime_inference_model_id(&model.id)
 }
 
 /// The bundled private model table. Private route templates matter: the public
 /// provider default carries request shapes the private endpoint rejects.
+#[must_use]
 pub fn private_prime_inference_models() -> Vec<Model> {
     vec![Model {
         id: "internal/glm-5.2-fast".to_string(),

@@ -93,6 +93,7 @@ impl Default for ReqwestCodexHttp {
 impl ReqwestCodexHttp {
     /// Construction is trivial: the client is built per request, so
     /// there is nothing to fail here.
+    #[must_use]
     pub fn new() -> Self {
         ReqwestCodexHttp
     }

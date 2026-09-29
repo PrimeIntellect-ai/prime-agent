@@ -265,7 +265,7 @@ fn long_session_names_clip_to_the_name_column() {
     // TS `buildCompactAgentsViewLayout` at width 120 with these rows.
     assert_eq!(layout.name_width, 28);
     assert_eq!(layout.model_width, 12);
-    let line = mode.render_row(&mode.rows[index], &layout, 120);
+    let line = mode.render_row(&mode.rows[index], &layout, 120, false);
     let text = flat(&line);
     // TS `formatTableCell` clips with an empty ellipsis marker: the
     // name cell keeps the icon and space plus 26 name characters.
@@ -281,7 +281,7 @@ fn short_session_names_pad_to_the_name_column() {
     let (mode, index) = mode_with_row("short name", "mock-1");
     let layout = build_layout(&mode.rows, 120);
     assert_eq!(layout.name_width, 28);
-    let line = mode.render_row(&mode.rows[index], &layout, 120);
+    let line = mode.render_row(&mode.rows[index], &layout, 120, false);
     let text = flat(&line);
     let name_cell = format!("short name{}", " ".repeat(28 - 2 - 10));
     assert_eq!(text, expected_row(&name_cell, &layout));

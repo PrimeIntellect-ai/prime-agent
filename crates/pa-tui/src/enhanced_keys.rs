@@ -535,11 +535,40 @@ fn spawn_kitty_probe() {
                     // the raw-mode save slot. The exit paths set the
                     // standdown before they restore, so settle with no
                     // answer instead of running the check.
-                    if EXIT_RELEASE.load(Ordering::SeqCst) {
+                    //
+                    // The same standdown holds for the SUSPEND window: the
+                    // check's bracket only runs when the app's raw mode is
+                    // off, and a suspend cycle that raced the probe's
+                    // thread start (early typing is delivered inside the
+                    // probe window) leaves exactly that state — the check
+                    // would re-arm raw on the terminal the shell now owns
+                    // while the process group stops (the probe-bracket
+                    // race the module docs warn about). Settle no-kitty
+                    // instead; the capability stays unresolved for this
+                    // run, never poisoned.
+                    //
+                    // The check is bracket-free by construction: the
+                    // probe takes `supports_keyboard_enhancement_checked_raw`
+                    // (the vendored facade's raw-read path), so NOTHING in
+                    // this thread can re-arm raw mode, whatever races the
+                    // guard's read. The mode lock serializes the guard
+                    // with the suspend's mode releases (the same
+                    // serialization every mode transition takes); the
+                    // once-per-process cost is a suspend racing the first
+                    // mount's probe window stalling behind the check's
+                    // 250ms bound before its teardown starts.
+                    let modes = lock_modes();
+                    let raw_bracket_on =
+                        crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
+                    if EXIT_RELEASE.load(Ordering::SeqCst) || !raw_bracket_on {
                         let _ = answer_tx.send(Ok(false));
                         return;
                     }
-                    let _ = answer_tx.send(crossterm::terminal::supports_keyboard_enhancement());
+                    let _ = answer_tx
+                        .send(crossterm::terminal::supports_keyboard_enhancement_checked_raw());
+                    // The guard releases at this scope's end; the answer
+                    // path's `enable_kitty` takes the lock after it.
+                    drop(modes);
                 });
             match answer_rx.recv_timeout(KITTY_QUERY_FALLBACK) {
                 Ok(Ok(true)) => {

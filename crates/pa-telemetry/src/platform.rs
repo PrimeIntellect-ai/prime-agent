@@ -10,11 +10,14 @@ use serde_json::Value;
 
 use crate::properties::Properties;
 
-/// Current schema version stamped on every event.
-pub const SCHEMA_VERSION: u64 = 1;
+/// Current schema version stamped on every event (the catalog's version).
+pub use crate::catalog::SCHEMA_VERSION;
 
 const UNKNOWN: &str = "unknown";
 const MAX_VERSION_LENGTH: usize = 64;
+
+/// The catalog's property-rule revision (additive rule changes bump it).
+pub const SCHEMA_REVISION: u64 = 2;
 
 /// The `cpu_baseline` values.
 const CPU_AVX2: &str = "avx2";
@@ -32,11 +35,21 @@ struct PlatformFidelity {
 }
 
 /// Base properties for one event, with the given `execution_mode`.
+#[must_use]
 pub fn base_properties(execution_mode: &str) -> Properties {
     let fidelity = fidelity();
     let mut properties = Properties::new();
     properties.set("version", Value::String(crate::VERSION.to_string()));
     properties.set("schema_version", Value::from(SCHEMA_VERSION));
+    // #2117/v2 common properties: the build channel, the workload origin
+    // (env override first, then the execution mode), and the catalog's
+    // property-rule revision.
+    properties.set("build_channel", Value::from(build_channel()));
+    properties.set(
+        "workload_origin",
+        Value::from(workload_origin(execution_mode)),
+    );
+    properties.set("schema_revision", Value::from(SCHEMA_REVISION));
     properties.set("os_family", Value::from(std::env::consts::OS));
     properties.set("architecture", Value::from(std::env::consts::ARCH));
     properties.set("install_method", Value::String("binary".to_string()));
@@ -52,6 +65,39 @@ pub fn base_properties(execution_mode: &str) -> Properties {
     properties
 }
 
+/// The build channel: debug builds are `development`, versions carrying a
+/// `beta` prerelease are `prerelease`, everything else `release`.
+fn build_channel() -> &'static str {
+    if cfg!(debug_assertions) {
+        return "development";
+    }
+    if crate::VERSION.contains('-') && crate::VERSION.contains("beta") {
+        return "prerelease";
+    }
+    "release"
+}
+
+/// The workload origin: `PRIME_AGENT_TELEMETRY_ORIGIN=internal|test` wins;
+/// otherwise the interactive execution mode is `interactive` and every
+/// headless mode is `automated` (the mode alone never identifies internal
+/// populations).
+fn workload_origin(execution_mode: &str) -> &'static str {
+    match std::env::var("PRIME_AGENT_TELEMETRY_ORIGIN")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("internal") => return "internal",
+        Some("test") => return "test",
+        _ => {}
+    }
+    if execution_mode == "interactive" {
+        "interactive"
+    } else {
+        "automated"
+    }
+}
+
 fn fidelity() -> &'static PlatformFidelity {
     static CACHE: OnceLock<PlatformFidelity> = OnceLock::new();
     CACHE.get_or_init(detect_fidelity)
@@ -63,8 +109,8 @@ fn detect_fidelity() -> PlatformFidelity {
         libc: detect_libc(),
         libc_version: detect_libc_version(),
         cpu_baseline: detect_cpu_baseline(),
-        os_release: sanitize_version(detect_os_release()),
-        os_product_version: sanitize_version(detect_os_product_version()),
+        os_release: sanitize_version(&detect_os_release()),
+        os_product_version: sanitize_version(&detect_os_product_version()),
     }
 }
 
@@ -155,7 +201,7 @@ fn read_text_prefix(path: &str, max_bytes: usize) -> Option<String> {
     String::from_utf8(buffer).ok()
 }
 
-fn sanitize_version(value: String) -> String {
+fn sanitize_version(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return UNKNOWN.to_string();
@@ -170,7 +216,28 @@ mod tests {
     #[test]
     fn base_properties_carry_schema_and_platform() {
         let properties = base_properties("interactive");
-        assert_eq!(properties.get("schema_version"), Some(&Value::from(1)));
+        // The #2117 vocabulary bumped the catalog to schema version 2.
+        assert_eq!(
+            properties.get("schema_version"),
+            Some(&Value::from(SCHEMA_VERSION))
+        );
+        assert_eq!(properties.get("schema_version"), Some(&Value::from(2u64)));
+        assert_eq!(
+            properties.get("schema_revision"),
+            Some(&Value::from(SCHEMA_REVISION))
+        );
+        assert_eq!(
+            properties.get("build_channel"),
+            Some(&Value::from(build_channel()))
+        );
+        assert_eq!(
+            properties.get("workload_origin"),
+            Some(&Value::from("interactive"))
+        );
+        assert_eq!(
+            base_properties("print").get("workload_origin"),
+            Some(&Value::from("automated"))
+        );
         assert_eq!(
             properties.get("version"),
             Some(&Value::from(crate::VERSION))
@@ -216,12 +283,9 @@ mod tests {
 
     #[test]
     fn sanitize_trims_and_caps() {
-        assert_eq!(
-            sanitize_version("  6.8.0-45-generic ".into()),
-            "6.8.0-45-generic"
-        );
-        assert_eq!(sanitize_version("   ".into()), UNKNOWN);
+        assert_eq!(sanitize_version("  6.8.0-45-generic "), "6.8.0-45-generic");
+        assert_eq!(sanitize_version("   "), UNKNOWN);
         let long = "a".repeat(MAX_VERSION_LENGTH + 10);
-        assert_eq!(sanitize_version(long).len(), MAX_VERSION_LENGTH);
+        assert_eq!(sanitize_version(&long).len(), MAX_VERSION_LENGTH);
     }
 }

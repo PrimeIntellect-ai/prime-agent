@@ -40,8 +40,8 @@ pub(crate) fn remove(inner: &Inner) {
     entries.retain(|weak| {
         weak.strong_count() == 0
             || !std::ptr::eq(
-                Weak::as_ptr(weak) as *const (),
-                std::ptr::from_ref(inner) as *const (),
+                Weak::as_ptr(weak).cast::<()>(),
+                std::ptr::from_ref(inner).cast::<()>(),
             )
     });
 }
