@@ -254,8 +254,7 @@ impl AgentSessionEngine {
                         // session was built with, restored when the turn
                         // settles.
                         if primary.is_none() {
-                            let (api_key, headers) =
-                                self.resolve_request_key_and_headers(&model);
+                            let (api_key, headers) = self.resolve_request_key_and_headers(&model);
                             *primary = Some(FailoverPrimary {
                                 model: model.clone(),
                                 thinking_level: map_thinking_level(self.effective_thinking()),
@@ -305,9 +304,7 @@ impl AgentSessionEngine {
                             }
                         }
                         agent.set_model(agent_model).await;
-                        agent
-                            .set_thinking_level(map_thinking_level(clamped))
-                            .await;
+                        agent.set_thinking_level(map_thinking_level(clamped)).await;
                         if let Some(persistence) = persistence {
                             let mut session = persistence.lock().await;
                             session.append_model_change(&next.provider, &next.id)?;
@@ -357,10 +354,8 @@ impl AgentSessionEngine {
                         agent.set_thinking_level(thinking_level).await;
                         if let Some(persistence) = persistence {
                             let mut session = persistence.lock().await;
-                            session.append_model_change(
-                                &primary_model.provider,
-                                &primary_model.id,
-                            )?;
+                            session
+                                .append_model_change(&primary_model.provider, &primary_model.id)?;
                         }
                         Ok(Some(format!(
                             "{}/{}",
