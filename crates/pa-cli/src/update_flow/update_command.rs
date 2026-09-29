@@ -102,6 +102,9 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
             archive_sha256,
             base_url,
         }) => {
+            // The release lookup resolved: the plan's target version rides
+            // the installation-stage events.
+            phases.target_version = Some(version.clone());
             // `Downloading`: stream + digest the archive (one wall-clock
             // budget across all attempts, spec §9).
             writer.set_state(UpdateState::Downloading)?;
@@ -409,6 +412,12 @@ struct PhaseTelemetry {
     /// own phases directly (Downloading/Staged) and the tail's first
     /// observation must not duplicate them.
     emitted: Vec<UpdateState>,
+    /// The installed version at update start (`from_version`; the running
+    /// binary's version).
+    from_version: Option<String>,
+    /// The plan's target release (`target_version`; set once the release
+    /// lookup resolved).
+    target_version: Option<String>,
 }
 
 impl PhaseTelemetry {
@@ -427,6 +436,8 @@ impl PhaseTelemetry {
             client,
             last_observed: None,
             emitted: Vec::new(),
+            from_version: Some(crate::config::version().to_string()),
+            target_version: None,
         }
     }
 
@@ -435,15 +446,29 @@ impl PhaseTelemetry {
         if self.emitted.contains(&status.state) {
             return;
         }
-        let Some(event) = phase_event_name(status.state) else {
+        // Only states with a v1 phase event OR a v2 stage mapping own a
+        // duration window; unmapped states (`Planning`, `Acquire`,
+        // `Join`, `Stopped`) never consume the window - a `Stopped`
+        // observation between mapped stages would otherwise shorten the
+        // next stage's duration instead of being skipped.
+        let v2_stage = installation_stage(status.state);
+        let v1_event = phase_event_name(status.state);
+        if v2_stage.is_none() && v1_event.is_none() {
             return;
-        };
+        }
         self.emitted.push(status.state);
         let now = std::time::Instant::now();
         let duration_ms = self
             .last_observed
             .map_or(0, |last| now.duration_since(last).as_millis() as u64);
         self.last_observed = Some(now);
+        // The v2 installation stage fires for EVERY mapped transition -
+        // including the ones without their own v1 phase event (`Skipped`:
+        // the already-current path still reports `completed`/`skipped`).
+        self.installation_stage(status, duration_ms, v2_stage);
+        let Some(event) = v1_event else {
+            return;
+        };
         let mut properties = pa_telemetry::base_properties("cli");
         properties.set("phase", serde_json::Value::from(event));
         properties.set("duration_ms", serde_json::Value::from(duration_ms));
@@ -464,9 +489,73 @@ impl PhaseTelemetry {
         client.track(event, properties);
     }
 
+    /// `agent installation stage` (v2, #2117): the same status-file
+    /// transitions mapped onto the installer-stage vocabulary, one event
+    /// per transition, carrying the attempt id, the version pair, and
+    /// the terminal restore counts. Primitives only: no paths, no
+    /// messages, no ids beyond the attempt id.
+    fn installation_stage(
+        &self,
+        status: &UpdateStatus,
+        duration_ms: u64,
+        mapping: Option<(&'static str, &'static str, Option<&'static str>)>,
+    ) {
+        let Some(client) = &self.client else { return };
+        let Some((stage, outcome, reason)) = mapping else {
+            return;
+        };
+        let mut event = pa_telemetry::AgentInstallationStage {
+            installation_attempt_id: status.update_id.to_string(),
+            installation_action: "update",
+            installation_source: "cli",
+            stage,
+            outcome,
+            reason,
+            from_version: self.from_version.clone(),
+            target_version: self.target_version.clone(),
+            observed_version: None,
+            duration_ms: Some(duration_ms),
+            exit_code: None,
+            session_restore_total: None,
+            session_restore_failed: None,
+        };
+        if status.state.is_terminal() {
+            event.session_restore_total = Some(status.counts.total);
+            event.session_restore_failed = Some(status.counts.failed);
+        }
+        event.track(client);
+    }
+
     async fn finish(self) {
         if let Some(client) = self.client {
             let _ = client.shutdown().await;
+        }
+    }
+}
+
+/// The #2117 installation-stage mapping for one coordinator state: the
+/// FSM's transition onto the installer vocabulary (`stage`, `outcome`,
+/// optional `reason`).
+fn installation_stage(
+    state: UpdateState,
+) -> Option<(&'static str, &'static str, Option<&'static str>)> {
+    match state {
+        UpdateState::Downloading => Some(("download", "started", None)),
+        UpdateState::Staged => Some(("verification", "success", None)),
+        UpdateState::Preparing => Some(("daemon_restart", "started", None)),
+        UpdateState::Prepared => Some(("daemon_restart", "success", None)),
+        UpdateState::Stopping => Some(("package_install", "started", None)),
+        UpdateState::Activating | UpdateState::Booting => {
+            Some(("package_install", "success", None))
+        }
+        UpdateState::Restoring => Some(("session_restore", "started", None)),
+        UpdateState::Complete => Some(("completed", "success", None)),
+        UpdateState::Rollback => Some(("completed", "failed", Some("install_failed"))),
+        UpdateState::Aborted => Some(("completed", "cancelled", Some("interrupted"))),
+        UpdateState::Failed => Some(("completed", "failed", None)),
+        UpdateState::Skipped => Some(("completed", "skipped", Some("up_to_date"))),
+        UpdateState::Acquire | UpdateState::Join | UpdateState::Stopped | UpdateState::Planning => {
+            None
         }
     }
 }

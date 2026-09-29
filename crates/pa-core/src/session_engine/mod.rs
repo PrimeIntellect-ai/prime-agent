@@ -18,6 +18,7 @@ pub mod compaction_exec;
 pub mod compaction_trace;
 pub mod compaction_utils;
 pub mod engine;
+pub mod error_classify;
 pub mod goal_boundary;
 pub mod goal_driver;
 pub mod harness_digest;
