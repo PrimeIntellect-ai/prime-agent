@@ -69,6 +69,68 @@ pub(crate) fn wants_chunked(capabilities: &[String]) -> bool {
     capabilities.iter().any(|cap| cap == "chunked_snapshot")
 }
 
+/// True when the client asked for image payloads to leave the snapshot
+/// (the `elide_snapshot_images` capability, the image-heavy session-open
+/// fix's fast path).
+pub(crate) fn wants_image_elision(capabilities: &[String]) -> bool {
+    capabilities
+        .iter()
+        .any(|cap| cap == "elide_snapshot_images")
+}
+
+/// The attach snapshot's image-payload elision (the image-heavy
+/// session-open fix): every `toolResult` message's image content blocks
+/// travel with their base64 payload replaced by an empty string plus the
+/// block's metadata — `elidedBytes` (the payload's character count) and,
+/// when the bounded header read parses them, `widthPx`/`heightPx`, so the
+/// client renders the same fallback metadata rows without the payload.
+/// The transcript's image rows are fallback-only metadata rows (TS
+/// `tool-execution.ts` mounts its `Image` components with
+/// `fallbackOnly`), so nothing a client renders consumes the payload; an
+/// image-heavy session's snapshot stops serializing megabytes of base64
+/// per attach. The store keeps the payload: model resend, persistence,
+/// and clients without the capability all read the untouched form.
+pub(crate) fn elide_snapshot_image_payloads(messages: &mut [Value]) {
+    for message in messages.iter_mut() {
+        if message.get("role").and_then(Value::as_str) != Some("toolResult") {
+            continue;
+        }
+        let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for block in content.iter_mut() {
+            let is_image = block.get("type").and_then(Value::as_str) == Some("image");
+            // The immutable reads (payload length, the bounded-prefix
+            // dimension parse) end here; the marker writes below borrow
+            // the block mutably.
+            let (payload_chars, dimensions) = match (
+                is_image,
+                block.get("data").and_then(Value::as_str),
+                block.get("mimeType").and_then(Value::as_str),
+            ) {
+                (true, Some(data), Some(mime)) if !data.is_empty() => (
+                    data.len(),
+                    pa_core::get_image_dimensions_prefix(
+                        data,
+                        mime,
+                        pa_core::IMAGE_DIMENSIONS_PREFIX_BYTES,
+                    ),
+                ),
+                _ => continue,
+            };
+            let Some(object) = block.as_object_mut() else {
+                continue;
+            };
+            object.insert("elidedBytes".to_string(), json!(payload_chars));
+            if let Some(dimensions) = dimensions {
+                object.insert("widthPx".to_string(), json!(dimensions.width_px));
+                object.insert("heightPx".to_string(), json!(dimensions.height_px));
+            }
+            object.insert("data".to_string(), json!(""));
+        }
+    }
+}
+
 /// Snapshot id: `<activeSessionId>-<generation>-<sequence>` derived from
 /// the event cursor, so a regenerated snapshot never reuses an old id.
 fn snapshot_stream_id(
@@ -287,6 +349,124 @@ mod tests {
 
     fn message(index: usize) -> Value {
         json!({ "role": "user", "content": format!("message {index}"), "timestamp": index as u64 })
+    }
+
+    /// A tiny PNG header payload (base64 of the signature + IHDR with the
+    /// given dimensions), built without a base64 dependency: the header
+    /// bytes are all one-byte base64 triples.
+    fn tiny_png(width: u32, height: u32) -> String {
+        let mut bytes = vec![0x89, b'P', b'N', b'G'];
+        bytes.extend(vec![0u8; 8]);
+        bytes.extend(*b"IHDR");
+        bytes.extend(width.to_be_bytes());
+        bytes.extend(height.to_be_bytes());
+        let table: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let b0 = chunk[0] as u32;
+            let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+            let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+            let triple = (b0 << 16) | (b1 << 8) | b2;
+            out.push(table[(triple >> 18) as usize & 63] as char);
+            out.push(table[(triple >> 12) as usize & 63] as char);
+            out.push(table[(triple >> 6) as usize & 63] as char);
+            out.push(table[triple as usize & 63] as char);
+        }
+        out
+    }
+
+    fn image_tool_result(payload: &str) -> Value {
+        json!({
+            "role": "toolResult",
+            "toolCallId": "call-1",
+            "toolName": "ipython",
+            "content": [
+                { "type": "text", "text": "Loaded 1 image(s) into context: /tmp/shot.png" },
+                { "type": "image", "data": payload, "mimeType": "image/png" }
+            ],
+            "isError": false,
+            "timestamp": 1
+        })
+    }
+
+    #[test]
+    fn elision_empties_image_payloads_and_keeps_their_metadata() {
+        let payload = format!("{}{}", tiny_png(64, 32), "A".repeat(500_000));
+        let mut messages = vec![
+            json!({ "role": "user", "content": "hello", "timestamp": 0 }),
+            image_tool_result(&payload),
+            json!({
+                "role": "assistant",
+                "content": [ { "type": "text", "text": "done" } ],
+                "timestamp": 2
+            }),
+        ];
+        elide_snapshot_image_payloads(&mut messages);
+        let block = &messages[1]["content"][1];
+        assert_eq!(block["data"], json!(""));
+        assert_eq!(block["elidedBytes"], json!(payload.len()));
+        assert_eq!(block["widthPx"], json!(64));
+        assert_eq!(block["heightPx"], json!(32));
+        assert_eq!(block["mimeType"], json!("image/png"));
+        // The other messages and the text block stay verbatim.
+        assert_eq!(
+            messages[0],
+            json!({ "role": "user", "content": "hello", "timestamp": 0 })
+        );
+        assert_eq!(
+            messages[1]["content"][0]["text"],
+            json!("Loaded 1 image(s) into context: /tmp/shot.png")
+        );
+        assert_eq!(messages[2]["content"][0]["text"], json!("done"));
+    }
+
+    #[test]
+    fn elision_marks_unparseable_headers_with_the_size_only() {
+        // A payload whose dimensions do not parse from the bounded prefix
+        // carries the byte count alone.
+        let payload = "x".repeat(186_328);
+        let mut messages = vec![image_tool_result(&payload)];
+        elide_snapshot_image_payloads(&mut messages);
+        let block = &messages[0]["content"][1];
+        assert_eq!(block["data"], json!(""));
+        assert_eq!(block["elidedBytes"], json!(186_328));
+        assert!(block.get("widthPx").is_none());
+    }
+
+    #[test]
+    fn elision_skips_empty_payloads_and_non_tool_results() {
+        // A user message carrying an image block (the pasted-image wire)
+        // stays verbatim: the elision targets tool-result payloads only.
+        let pasted = json!({
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "look" },
+                { "type": "image", "data": "QUJD", "mimeType": "image/png" }
+            ],
+            "timestamp": 0
+        });
+        let mut messages = vec![pasted.clone()];
+        elide_snapshot_image_payloads(&mut messages);
+        assert_eq!(messages[0], pasted);
+
+        // An already-elided block (empty data) is left as-is.
+        let mut elided = vec![image_tool_result("")];
+        elide_snapshot_image_payloads(&mut elided);
+        assert_eq!(elided[0]["content"][1]["data"], json!(""));
+        assert!(elided[0]["content"][1].get("elidedBytes").is_none());
+    }
+
+    #[test]
+    fn the_image_elision_capability_is_the_gate() {
+        assert!(wants_image_elision(&[
+            "attach_snapshot".to_string(),
+            "elide_snapshot_images".to_string()
+        ]));
+        assert!(!wants_image_elision(&[
+            "attach_snapshot".to_string(),
+            "slim_attach".to_string()
+        ]));
+        assert!(!wants_image_elision(&[]));
     }
 
     #[test]
