@@ -1,6 +1,6 @@
 //! The request-timing unit battery (moved with its concern): the flag,
 //! the log's rotation + emit shape, the wiring correlation, the transform
-//! + convert instrumentation, the stream seam's first-token capture, and
+//! and convert instrumentation, the stream seam's first-token capture, and
 //! the summary's usage fields (the TS test port).
 
 use super::*;

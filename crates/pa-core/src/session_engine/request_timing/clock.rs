@@ -1,7 +1,7 @@
 //! The per-request clock concern (moved with its concern): the request
-//! identity + usage records (RequestInfo, TimingUsage with its From
+//! identity + usage records (`RequestInfo`, `TimingUsage` with its From
 //! impl moving whole), the outcome + timing state machine, and the phase
-//! entries' emit (TS RequestTiming).
+//! entries' emit (TS `RequestTiming`).
 
 use super::*;
 use pa_agent::types::Usage;
