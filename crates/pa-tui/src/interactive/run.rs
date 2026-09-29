@@ -1068,7 +1068,7 @@ async fn run_interactive_surface(
         // these locals instead of borrowing the surface.
         let autocomplete_pending = view.editor.has_pending_autocomplete();
         let auto_scroll_armed = session.selection_auto_scroll_armed();
-        let bash_refresh_wanted = session.kernel_bash_refresh_wanted();
+        let bash_refresh_wanted = session.kernel_bash_supported();
         // A settle waiting out a member is pending work like the
         // autocomplete park: the gate runs at the loop top, so its
         // re-check (and the settle bound's expiry) needs this arm's

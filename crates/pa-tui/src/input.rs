@@ -74,7 +74,13 @@ pub(crate) fn request_reader_stop() {
         .lock()
         .expect("the input-reader registry lock is poisoned");
     if let Some(reader) = guard.as_ref() {
-        reader.stop.store(true, Ordering::Relaxed);
+        // The flag is released before the wake: the reader's drain of
+        // the wake pipe is a kernel round-trip whose completion
+        // orders the reader's subsequent (acquire) flag load after
+        // this store — the loop-top check right after the drain
+        // observes the stop even though the wake itself carried no
+        // payload, so the park that follows can never miss it.
+        reader.stop.store(true, Ordering::Release);
         if let Some(waker) = reader.waker.as_ref() {
             let _ = waker.wake();
         }
@@ -138,7 +144,10 @@ where
         .lock()
         .expect("the input-reader registry lock is poisoned");
     if let Some(reader) = previous.take() {
-        reader.stop.store(true, Ordering::Relaxed);
+        // The same release-before-wake protocol as
+        // [`request_reader_stop`]: the join below returns within one
+        // loop-top check of the drained wake.
+        reader.stop.store(true, Ordering::Release);
         if let Some(waker) = reader.waker.as_ref() {
             let _ = waker.wake();
         }
@@ -151,7 +160,7 @@ where
     let handle = std::thread::spawn(move || {
         let mut guard = SequenceGuard::default();
         loop {
-            if thread_stop.load(Ordering::Relaxed) {
+            if thread_stop.load(Ordering::Acquire) {
                 break;
             }
             // The wait never runs past a held escape sequence's deadline:
@@ -195,7 +204,7 @@ where
                     // `join()` waiting for this loop to end.
                     let mut events = Vec::new();
                     loop {
-                        if thread_stop.load(Ordering::Relaxed) {
+                        if thread_stop.load(Ordering::Acquire) {
                             break;
                         }
                         match crossterm::event::read() {
