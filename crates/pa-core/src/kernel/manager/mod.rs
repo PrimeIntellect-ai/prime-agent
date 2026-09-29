@@ -95,6 +95,12 @@ pub(crate) struct ActiveExecution {
     started: Instant,
     max_chars: usize,
     opts: ExecuteOptions,
+    /// The request runs user-namespace code (an execute — the bootstrap
+    /// class included, internal or not): its settle can rebind or mutate
+    /// names, which ends the capture-freshness memo's description.
+    namespace_code: bool,
+    /// The request replaces the namespace wholesale (a restore).
+    restores_namespace: bool,
     buffers: Mutex<ExecBuffers>,
     result_tx: Mutex<Option<oneshot::Sender<anyhow::Result<InternalExecuteResult>>>>,
 }
@@ -228,8 +234,14 @@ struct RestoredNamespaceSkip {
 #[derive(Clone)]
 struct CaptureFreshness {
     /// Settled USER-execution count at the commit; any later user settle
-    /// defeats the memo (internal state requests never move it).
+    /// defeats the memo (internal state requests never move it), and any
+    /// settled request that runs namespace code or restores the namespace
+    /// clears the memo outright (see `resolve_execution`).
     user_executions: u64,
+    /// The payload stat right after the commit: the load-bearing witness —
+    /// it fingerprints the file a later restore actually reads, so an
+    /// external payload replacement defeats the skip.
+    payload_stat: Option<ManifestStat>,
     /// The manifest stat right after the commit, re-checked at every consult.
     manifest_stat: Option<ManifestStat>,
     /// The committed capture's result, replayed to callers while fresh: a

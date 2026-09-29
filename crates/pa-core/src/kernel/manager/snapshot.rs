@@ -8,6 +8,11 @@ use super::*;
 /// over-cap survivor unless the same capture also pruned it.
 const OVER_CAP_SKIP_REASON: &str = "exceeds per-variable snapshot size cap";
 
+/// Bound on the witness stat pair's await: a stalled (network/FUSE)
+/// artifacts filesystem must not wedge a capture; a timed-out stat reads
+/// as "not fresh" (the consult skips the skip, the arm never matches).
+const STAT_TIMEOUT: Duration = Duration::from_millis(250);
+
 // ---------------------------------------------------------------------------
 // Snapshot / restore
 // ---------------------------------------------------------------------------
@@ -127,13 +132,21 @@ impl Inner {
             return None;
         }
         let cfg = self.options.snapshot.clone()?;
-        // Off the executor, like the arming stat in perform_restore.
-        let manifest_path = cfg.manifest_path.clone();
-        let current = tokio::task::spawn_blocking(move || manifest_stat_of(&manifest_path))
-            .await
-            .ok()
-            .flatten();
-        if current != memo.manifest_stat {
+        // Off the executor, like the arming stat in perform_restore, and
+        // bounded: a stalled (network/FUSE) artifacts filesystem must not
+        // wedge the capture path — a timed-out stat reads as "not fresh".
+        let current = stats_after_commit(&cfg).await;
+        if current != (memo.payload_stat, memo.manifest_stat) {
+            return None;
+        }
+        // The settle-race guard: the count was sampled before the stat
+        // await, and a user cell can settle while it runs. The decision
+        // must describe the namespace at decision time, so re-read the
+        // count under the same lock the settle bumps — a cell that settled
+        // in between defeats the skip here (a cell settling after this
+        // read is the settles-after-the-capture class a real dump misses
+        // too).
+        if lock(&self.guarded).user_executions != memo.user_executions {
             return None;
         }
         let mut result = memo.result;
@@ -145,20 +158,22 @@ impl Inner {
 
     /// Arm the freshness memo with a committed capture: the namespace on
     /// disk is the live one again, and stays provably unchanged until the
-    /// next settled USER execution or an external manifest replacement
-    /// (see `capture_snapshot` for why internal state requests cannot move
-    /// the claimed count).
+    /// next settled USER execution, a settled request that runs namespace
+    /// code or replaces the namespace (see `resolve_execution`), or an
+    /// external replacement of the committed payload or manifest.
     async fn record_capture_freshness(
         self: &Arc<Self>,
         cfg: &crate::kernel::shared::KernelSnapshotConfig,
         result: &SnapshotResult,
         user_executions: u64,
     ) {
-        let manifest_path = cfg.manifest_path.clone();
-        let manifest_stat = tokio::task::spawn_blocking(move || manifest_stat_of(&manifest_path))
-            .await
-            .ok()
-            .flatten();
+        // The stat pair is the witness artifact: the payload stat is the
+        // load-bearing one (it fingerprints what a later restore reads),
+        // the manifest stat catches the paired bookkeeping being replaced.
+        // Bounded like the consult: a stalled filesystem must not wedge the
+        // capture; a timed-out stat arms the memo with None, which never
+        // matches a later consult (the conservative direction).
+        let (payload_stat, manifest_stat) = stats_after_commit(cfg).await;
         let live_over_cap = result.skipped.iter().any(|skip| {
             skip.reason == OVER_CAP_SKIP_REASON
                 && !result
@@ -168,6 +183,7 @@ impl Inner {
         });
         lock(&self.guarded).capture_freshness = Some(CaptureFreshness {
             user_executions,
+            payload_stat,
             manifest_stat,
             result: result.clone(),
             live_over_cap,
@@ -452,6 +468,22 @@ impl Inner {
 }
 
 /// File-stat identity of a snapshot manifest; `None` when it cannot be stated.
+/// Stat the committed payload + manifest pair, off the executor and
+/// bounded: a stalled artifacts filesystem must not wedge the capture path.
+async fn stats_after_commit(
+    cfg: &crate::kernel::shared::KernelSnapshotConfig,
+) -> (Option<ManifestStat>, Option<ManifestStat>) {
+    let payload = cfg.path.clone();
+    let manifest = cfg.manifest_path.clone();
+    let stats = tokio::task::spawn_blocking(move || {
+        (manifest_stat_of(&payload), manifest_stat_of(&manifest))
+    });
+    match tokio::time::timeout(STAT_TIMEOUT, stats).await {
+        Ok(Ok(pair)) => pair,
+        _ => (None, None),
+    }
+}
+
 fn manifest_stat_of(path: &std::path::Path) -> Option<ManifestStat> {
     std::fs::metadata(path).ok().map(|m| ManifestStat {
         mtime: m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),

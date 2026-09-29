@@ -442,3 +442,220 @@ async fn an_internal_state_request_does_not_defeat_the_fresh_skip() {
     );
     manager.kill().await;
 }
+
+#[tokio::test]
+async fn an_internal_execute_that_writes_a_user_variable_defeats_the_memo() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let manifest_path = manifest_path_in(dir.path());
+    let Some(options) = test_options(Some(dir.path())) else {
+        return;
+    };
+
+    let manager = ReplKernelManager::new(options);
+    manager
+        .start(KernelStartOptions::default())
+        .await
+        .expect("kernel must start");
+    let defined = execute(&manager, "alpha = 1").await;
+    assert_eq!(defined.status, ExecuteStatus::Ok);
+    let committed = manager.snapshot_state().await.expect("capture");
+    assert!(committed.saved.iter().any(|name| name == "alpha"));
+    let committed_manifest = file_bytes(&manifest_path);
+
+    // An INTERNAL execute that writes a user name (the bootstrap class is
+    // the product's internal-execute shape): the settle must end the memo's
+    // description — a later capture re-dumps instead of replaying the old
+    // one and omitting the write.
+    let internal = manager
+        .execute(
+            "late_from_internal = 42",
+            ExecuteOptions {
+                internal: true,
+                ..ExecuteOptions::default()
+            },
+        )
+        .await
+        .expect("internal execute");
+    assert_eq!(
+        internal.status,
+        ExecuteStatus::Ok,
+        "cell: {:?}",
+        internal.stderr
+    );
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let redumped = manager
+        .snapshot_state()
+        .await
+        .expect("capture after the internal cell");
+    assert_ne!(
+        file_bytes(&manifest_path),
+        committed_manifest,
+        "an internal execute that writes a user name must defeat the memo"
+    );
+    assert!(
+        redumped
+            .saved
+            .iter()
+            .any(|name| name == "late_from_internal"),
+        "the internal write must be persisted"
+    );
+
+    manager.kill().await;
+    let Some(reader_options) = test_options(Some(dir.path())) else {
+        return;
+    };
+    let reader = ReplKernelManager::new(reader_options);
+    reader
+        .start(KernelStartOptions::default())
+        .await
+        .expect("kernel must start");
+    reader.restore_state().await.expect("restore");
+    let live = execute(&reader, "late_from_internal").await;
+    assert_eq!(
+        live.status,
+        ExecuteStatus::Ok,
+        "late_from_internal cell: {:?}",
+        live.stderr
+    );
+    assert_eq!(live.result.as_deref(), Some("42"));
+    reader.kill().await;
+}
+
+#[tokio::test]
+async fn a_restore_settle_clears_the_memo() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let manifest_path = manifest_path_in(dir.path());
+    let Some(options) = test_options(Some(dir.path())) else {
+        return;
+    };
+
+    let manager = ReplKernelManager::new(options);
+    manager
+        .start(KernelStartOptions::default())
+        .await
+        .expect("kernel must start");
+    let defined = execute(&manager, "value = 'committed'").await;
+    assert_eq!(defined.status, ExecuteStatus::Ok);
+    let committed = manager.snapshot_state().await.expect("capture");
+    assert!(committed.saved.iter().any(|name| name == "value"));
+    let committed_manifest = file_bytes(&manifest_path);
+
+    // A restore replaces the namespace wholesale: its settle ends the
+    // memo's description (this is the layer that covers the repair path's
+    // restart — the reprovision always runs through a restore or an
+    // internal bootstrap settle, and the start itself clears too). The
+    // next capture must re-dump even when the restored namespace happens
+    // to equal the committed one.
+    let restore = manager.restore_state().await.expect("restore");
+    assert!(restore.restored.iter().any(|name| name == "value"));
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let redumped = manager
+        .snapshot_state()
+        .await
+        .expect("capture after the restore");
+    assert_ne!(
+        file_bytes(&manifest_path),
+        committed_manifest,
+        "a restore settle must clear the memo"
+    );
+    assert!(
+        redumped.saved.iter().any(|name| name == "value"),
+        "the capture after the restore re-describes the namespace"
+    );
+    manager.kill().await;
+}
+
+#[tokio::test]
+async fn an_externally_replaced_payload_defeats_the_fresh_skip() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let payload_path = snapshot_path_in(dir.path());
+    let Some(options) = test_options(Some(dir.path())) else {
+        return;
+    };
+
+    let manager = ReplKernelManager::new(options);
+    manager
+        .start(KernelStartOptions::default())
+        .await
+        .expect("kernel must start");
+    let defined = execute(&manager, "alpha = 1").await;
+    assert_eq!(defined.status, ExecuteStatus::Ok);
+    let committed = manager.snapshot_state().await.expect("capture");
+    assert!(committed.saved.iter().any(|name| name == "alpha"));
+
+    // An external actor replaces the committed PAYLOAD while the manifest
+    // (the bookkeeping file) stands: the witness covers the payload itself —
+    // the file a later restore actually reads — so the next capture must
+    // run for real.
+    std::fs::write(&payload_path, b"externally replaced").expect("write");
+    let redumped = manager.snapshot_state().await.expect("capture");
+    assert!(
+        redumped.saved.iter().any(|name| name == "alpha"),
+        "the capture must re-dump over the replaced payload"
+    );
+    let restored_bytes = file_bytes(&payload_path);
+    assert_ne!(
+        restored_bytes, b"externally replaced" as &[u8],
+        "the capture must commit a fresh payload over the external one"
+    );
+    manager.kill().await;
+}
+
+#[tokio::test]
+async fn concurrent_settles_keep_the_boundary_invariant() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let Some(options) = test_options(Some(dir.path())) else {
+        return;
+    };
+
+    let manager = std::sync::Arc::new(ReplKernelManager::new(options));
+    manager
+        .start(KernelStartOptions::default())
+        .await
+        .expect("kernel must start");
+    let seeded = execute(&manager, "v = 0").await;
+    assert_eq!(seeded.status, ExecuteStatus::Ok);
+    let committed = manager.snapshot_state().await.expect("capture");
+    assert!(committed.saved.iter().any(|name| name == "v"));
+
+    // Cells and captures race for a bounded window (the settle-race class:
+    // a cell settling between a consult's count sample and its decision).
+    // The served-path boundary invariant: once every settle is done, the
+    // next capture must re-dump — the memo may never describe a namespace
+    // older than the last settled user execution.
+    let writer = {
+        let manager = manager.clone();
+        tokio::spawn(async move {
+            for i in 1..40 {
+                let cell = execute(&manager, &format!("v = {i}")).await;
+                assert_eq!(cell.status, ExecuteStatus::Ok);
+            }
+        })
+    };
+    let reader = {
+        let manager = manager.clone();
+        tokio::spawn(async move {
+            for _ in 0..20 {
+                let _ = manager.snapshot_state().await;
+            }
+        })
+    };
+    writer.await.expect("writer task");
+    reader.await.expect("reader task");
+
+    let before = file_bytes(&manifest_path_in(dir.path()));
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let boundary = manager.snapshot_state().await.expect("boundary capture");
+    assert!(
+        boundary.saved.iter().any(|name| name == "v"),
+        "the boundary capture describes the namespace"
+    );
+    assert_ne!(
+        file_bytes(&manifest_path_in(dir.path())),
+        before,
+        "after settled cells the capture must re-dump (never replay stale)"
+    );
+    manager.kill().await;
+}
