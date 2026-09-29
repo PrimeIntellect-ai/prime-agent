@@ -274,7 +274,10 @@ mod usage_bits {
 /// already in the map (the assistant entry precedes its children's settle
 /// in the file). Serialize is the persisted sidecar's form: every cost
 /// float rides as `to_bits()` ([`PersistedUsage`]) so a resumed fold sums
-/// bit-identical floats to a full scan.
+/// bit-identical floats to a full scan. Persisted in
+/// `<stem>.info-cache.json`: any change to this fold's semantics or fields
+/// must bump `info_sidecar::INFO_SIDECAR_VERSION`, or old sessions keep
+/// the old build's prefix fold.
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub struct UsageScan {
     assistant_usage_by_id: AssistantUsageById,

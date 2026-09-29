@@ -16,8 +16,10 @@ use super::info::{session_info_cache, SessionScanState};
 
 /// The sidecar format version: a sidecar serves only at exactly this
 /// version; any other version (an older or a newer build's) is a cold
-/// scan, the behavior without a sidecar. Bump on any change to the
-/// persisted accumulator or the fold's semantics.
+/// scan, the behavior without a sidecar. Bump on any change to
+/// [`SessionScanAccumulator`](super::info::SessionScanAccumulator) or
+/// [`UsageScan`](crate::session_usage::UsageScan) - the persisted fold's
+/// fields or semantics.
 const INFO_SIDECAR_VERSION: u32 = 1;
 
 /// The on-disk envelope: the version gate plus the scan state.
@@ -41,15 +43,23 @@ pub(super) fn load(path: &Path) -> Option<SessionScanState> {
     (sidecar.version == INFO_SIDECAR_VERSION).then_some(sidecar.state)
 }
 
-/// Write the sidecar for `path`: a fresh temp file, then the rename (a
-/// torn write never replaces a loadable sidecar; a reader that races the
-/// rename sees either the old or the new whole file).
-///
-/// # Errors
-///
-/// Returns the underlying io/serialization error from the temp write or
-/// the rename; the temp file is removed on failure.
-pub(super) fn save(path: &Path, state: SessionScanState) -> io::Result<()> {
+/// The lease-release write: persist the cached scan state for `path` (the
+/// same path form the lease keys the session file by) so the next process
+/// that opens the file folds only what was appended since. A fresh temp
+/// file, then the rename - a torn write never replaces a loadable sidecar,
+/// and a reader that races the rename sees either the old or the new
+/// whole file. A miss writes nothing; a failed write costs the next open
+/// its warm resume, nothing more - the same error policy as the window
+/// sidecar's flush.
+pub(crate) fn persist_info_sidecar(path: &Path) {
+    let Some(state) = session_info_cache().lock().ok().and_then(|cache| {
+        cache
+            .states
+            .get(path)
+            .map(SessionScanState::clone_for_resume)
+    }) else {
+        return;
+    };
     let temp = path.with_extension(format!("info-cache-{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| {
         // Buffered: the serialized state is megabytes of small map
@@ -74,22 +84,4 @@ pub(super) fn save(path: &Path, state: SessionScanState) -> io::Result<()> {
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
     }
-    result
-}
-
-/// The lease-release write: persist the cached scan state for `path` (the
-/// same path form the lease keys the session file by) so the next process
-/// that opens the file folds only what was appended since. A miss writes
-/// nothing; a failed write costs the next open its warm resume, nothing
-/// more - the same error policy as the window sidecar's flush.
-pub(crate) fn persist_info_sidecar(path: &Path) {
-    let Some(state) = session_info_cache().lock().ok().and_then(|cache| {
-        cache
-            .states
-            .get(path)
-            .map(SessionScanState::clone_for_resume)
-    }) else {
-        return;
-    };
-    let _ = save(path, state);
 }

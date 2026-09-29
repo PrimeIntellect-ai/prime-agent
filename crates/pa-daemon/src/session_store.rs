@@ -90,10 +90,7 @@ use view::message_role;
 // test-scoped binding keeps the scan internals' test callers in scope.
 mod info;
 
-// The persisted scan-state sidecar (the lease-release write and the
-// on-miss load beside the info scan's validation ladder) lives in its
-// own child module at the same tree position; the facade re-export
-// carries the lease release site's call.
+// The persisted scan-state sidecar.
 mod info_sidecar;
 
 pub(crate) use info::read_session_info_from;

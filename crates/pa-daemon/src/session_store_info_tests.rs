@@ -477,10 +477,10 @@ fn a_failed_prefix_check_rescans_from_byte_zero() {
 
 /// The persisted scan-state sidecar: a state written at lease release and
 /// loaded on a process-cache miss resumes the fold of the appended tail -
-/// the appended attribution targets a PREFIX assistant id, so the resumed
-/// fold must find it in the persisted per-id map - and the whole row
-/// equals the full scan's, float sums included. A replacement file (a new
-/// inode) rejects the stale sidecar and rescans whole.
+/// whole-row equality against the full fold, including a prefix-targeted
+/// attribution (the resumed fold must find the prefix id in the persisted
+/// per-id map). A replacement file (a new inode) rejects the stale sidecar
+/// and rescans whole.
 #[test]
 fn a_persisted_scan_state_resumes_like_the_full_fold() {
     let dir = test_dir();

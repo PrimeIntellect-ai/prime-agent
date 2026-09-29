@@ -233,6 +233,9 @@ pub(super) const SESSION_SCAN_RESUME_TAIL_BYTES: usize = 16;
 /// Clone is the snapshot fold's copy (TS `snapshotSessionInfo`). Serialize is
 /// the persisted sidecar's form ([`super::info_sidecar`]): a released lease
 /// holder writes it, a cold process loads it and folds only the tail.
+/// Persisted in `<stem>.info-cache.json`: any change to this fold's semantics
+/// or fields must bump `info_sidecar::INFO_SIDECAR_VERSION`, or old sessions
+/// keep the old build's prefix fold.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub(super) struct SessionScanAccumulator {
     header: Option<SessionHeader>,
@@ -477,8 +480,9 @@ pub(crate) fn read_session_info_from(file: &mut fs::File, path: &Path) -> Option
                     Some(SessionScanState::fresh(generation))
                 }
             }
-            // No in-process state serves: the persisted sidecar below
-            // decides, outside the lock (its load is file IO).
+            // No in-process state serves (absent or invalidated): the
+            // persisted sidecar below decides, outside the lock (its
+            // load is file IO).
             _ => None,
         }
     };
