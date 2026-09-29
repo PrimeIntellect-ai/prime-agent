@@ -339,6 +339,24 @@ pub trait SessionEngine: Send + Sync {
     /// do nothing.
     fn clear_pending_goal_continuation(&self) {}
 
+    /// The engine's current pending-continuation handle, READ without
+    /// clearing (the mirror read — the core a mint about to spawn will
+    /// use). Engines without thread goals have none.
+    fn goal_pending_handle(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        None
+    }
+
+    /// Release one mint's OWN pending-continuation handle (the item's
+    /// captured handle, or the spawn-captured handle for a lost task):
+    /// an admission or drop names the specific mint, never the mutable
+    /// mirror. An item that armed no guard releases nothing. Engines
+    /// without thread goals release nothing.
+    fn release_goal_continuation_handle(
+        &self,
+        _handle: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) {
+    }
+
     /// Run one prompt. `prompt_index` counts accepted prompts for this
     /// session. `aborted` is the worker's cancel probe (checked between
     /// retry waits, where no events flow to observe the flag through

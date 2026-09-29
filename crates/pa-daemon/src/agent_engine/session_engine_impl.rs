@@ -160,6 +160,17 @@ impl SessionEngine for AgentSessionEngine {
         AgentSessionEngine::clear_pending_goal_continuation(self);
     }
 
+    fn goal_pending_handle(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        AgentSessionEngine::goal_pending_handle(self)
+    }
+
+    fn release_goal_continuation_handle(
+        &self,
+        handle: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) {
+        AgentSessionEngine::release_goal_continuation_handle(self, handle)
+    }
+
     fn autonomous_status(
         &self,
     ) -> std::pin::Pin<
