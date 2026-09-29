@@ -193,7 +193,7 @@ pub fn retry_jitter_rand01() -> f64 {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| {
-            duration.subsec_nanos() as u64 ^ (duration.as_secs() << 32)
+            u64::from(duration.subsec_nanos()) ^ (duration.as_secs() << 32)
         });
     let mut x = nanos ^ count.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     x ^= x >> 12;

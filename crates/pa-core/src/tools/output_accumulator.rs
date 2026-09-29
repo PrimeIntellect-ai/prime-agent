@@ -35,7 +35,7 @@ fn default_temp_file_path(prefix: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    let id = nanos ^ ((std::process::id() as u128) << 64);
+    let id = nanos ^ (u128::from(std::process::id()) << 64);
     std::env::temp_dir().join(format!("{prefix}-{id:032x}.log"))
 }
 

@@ -80,7 +80,9 @@ impl std::fmt::Debug for KernelCronWiring {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KernelCronWiring")
             .field("binding", &self.binding)
-            .finish()
+            // The store + the hook are deliberately opaque (the type has no
+            // meaningful debug form): `..` documents the omission.
+            .finish_non_exhaustive()
     }
 }
 

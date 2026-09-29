@@ -297,7 +297,7 @@ impl Inner {
                 // (so a wedged child cannot block on backpressure) and discard.
                 let mut poisoned = false;
                 let mut buffered: Vec<u8> = Vec::new();
-                let mut chunk = [0u8; 64 * 1024];
+                let mut chunk = vec![0u8; 64 * 1024];
                 loop {
                     match reader.read(&mut chunk).await {
                         Ok(0) | Err(_) => break,

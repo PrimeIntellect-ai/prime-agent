@@ -769,7 +769,7 @@ impl SettingsManager {
                 .map_or(
                     crate::session_engine::provider_retry::DEFAULT_PROVIDER_RETRY_POLICY
                         .max_retries,
-                    |retries| retries.min(u32::MAX as u64) as u32,
+                    |retries| retries.min(u64::from(u32::MAX)) as u32,
                 ),
             base_delay_ms: self
                 .merged
@@ -812,7 +812,7 @@ impl SettingsManager {
             max_retries: failover
                 .and_then(|failover| failover.max_retries)
                 .map_or(defaults.max_retries, |retries| {
-                    retries.min(u32::MAX as u64) as u32
+                    retries.min(u64::from(u32::MAX)) as u32
                 }),
             base_delay_ms: failover
                 .and_then(|failover| failover.base_delay_ms)
@@ -849,7 +849,7 @@ impl SettingsManager {
             max_parks: wait
                 .and_then(|wait| wait.max_parks)
                 .map_or(defaults.max_parks, |parks| {
-                    parks.min(u32::MAX as u64) as u32
+                    parks.min(u64::from(u32::MAX)) as u32
                 }),
         }
     }

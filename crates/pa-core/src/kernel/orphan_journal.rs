@@ -130,7 +130,7 @@ fn civil_from_unix(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
 /// filter guarantees it is a positive integer, so the unwraps are
 /// unreachable.
 pub fn read_active_orphan_processes(path: &Path) -> anyhow::Result<Vec<ActiveOrphanProcess>> {
-    let owner_pid = std::process::id() as i64;
+    let owner_pid = i64::from(std::process::id());
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),

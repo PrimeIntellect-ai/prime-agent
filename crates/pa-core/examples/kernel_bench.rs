@@ -161,7 +161,7 @@ async fn main() {
             let total = ms(t);
             println!(
                 "execute-rounds {rounds} total-ms {total} per-execute-ms {}",
-                if rounds > 0 { total / rounds as u64 } else { 0 }
+                if rounds > 0 { total / u64::from(rounds) } else { 0 }
             );
             let _ = manager
                 .shutdown(KernelShutdownOptions {

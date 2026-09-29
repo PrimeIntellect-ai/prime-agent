@@ -329,7 +329,7 @@ pub fn create_agent_session_message_row(payload: &AgentSessionMessageRowPayload<
 #[must_use]
 pub fn parse_agent_session_message_prompt_id(text: &str) -> Option<String> {
     let lines: Vec<&str> = text.split('\n').collect();
-    let offset = lines.first().is_some_and(|line| line.starts_with("[from ")) as usize;
+    let offset = usize::from(lines.first().is_some_and(|line| line.starts_with("[from ")));
     if lines.get(offset).copied() != Some("Agent-to-agent message received.")
         || lines.get(offset + 1).copied()
             != Some(format!("Source: {AGENT_MESSAGE_SOURCE}").as_str())

@@ -805,8 +805,8 @@ pub(crate) fn parse_iso_millis(text: &str) -> Option<u64> {
     let y = if month <= 2 { year - 1 } else { year };
     let era = y.div_euclid(400);
     let yoe = y.rem_euclid(400);
-    let mp = if month > 2 { month - 3 } else { month + 9 } as i64;
-    let doy = (153 * mp + 2) / 5 + day as i64 - 1;
+    let mp = i64::from(if month > 2 { month - 3 } else { month + 9 });
+    let doy = (153 * mp + 2) / 5 + i64::from(day) - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let days = era * 146_097 + doe - 719_468;
     let (time, offset_ms) = parse_time_with_offset(time)?;

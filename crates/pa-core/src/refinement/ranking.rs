@@ -172,7 +172,7 @@ pub fn score_harness_entry_for_query(
             let term_idf = idf
                 .and_then(|map| map.get(term.as_str()).copied())
                 .unwrap_or(1.0);
-            score += weight * term_idf * (1.0 + (fields - 1) as f64 * 0.5);
+            score += weight * term_idf * (1.0 + f64::from(fields - 1) * 0.5);
         }
     }
     score

@@ -244,6 +244,7 @@ struct Guarded {
     restore_boot_hold: Option<u64>,
     /// Tri-state manifest stat of the last non-repair restore ATTEMPT:
     /// `None` = no attempt yet, `Some(None)` = manifest was missing at it.
+    #[allow(clippy::option_option)] // the tri-state IS the semantics
     restored_manifest_stat: Option<Option<ManifestStat>>,
     /// Armed one-shot post-restore snapshot skip (see `RestoredNamespaceSkip`).
     restored_namespace_skip: Option<RestoredNamespaceSkip>,
