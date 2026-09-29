@@ -74,6 +74,14 @@ impl Status {
         Self::with(Self::collapse(&text), tone, false)
     }
 
+    /// TS `setStatusMessage(message, { sticky: true })`: the default tone
+    /// rule, no expiry — the line stays until the next keypress.
+    pub(super) fn sticky(text: String) -> Self {
+        let text = Self::collapse(&text);
+        let tone = Self::default_tone(&text);
+        Self::with(text, tone, true)
+    }
+
     fn with(text: String, tone: StatusTone, sticky: bool) -> Self {
         Self {
             expires: (!sticky).then(|| std::time::Instant::now() + Self::DURATION),
@@ -94,7 +102,7 @@ impl Status {
     }
 
     /// Whether the line waits for the next keypress instead of the timer.
-    pub(super) fn sticky(&self) -> bool {
+    pub(super) fn is_sticky(&self) -> bool {
         self.sticky
     }
 
@@ -139,7 +147,7 @@ impl super::AgentsViewMode {
         let expired = self
             .status
             .as_ref()
-            .is_some_and(|status| status.expiry(now).is_none() && !status.sticky());
+            .is_some_and(|status| status.expiry(now).is_none() && !status.is_sticky());
         if expired {
             self.status = None;
         }
@@ -149,7 +157,7 @@ impl super::AgentsViewMode {
     /// TS `clearStickyStatusMessage`: a sticky line clears on any
     /// keypress (the transient timer never covered it).
     pub(super) fn clear_sticky_status(&mut self) {
-        if self.status.as_ref().is_some_and(Status::sticky) {
+        if self.status.as_ref().is_some_and(Status::is_sticky) {
             self.status = None;
         }
     }

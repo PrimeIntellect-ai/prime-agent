@@ -32,6 +32,7 @@ mod text_utils;
 mod wrap;
 
 pub use kill_ring::KillRing;
+pub(crate) use text_utils::decode_printable;
 pub use text_utils::normalize_text;
 pub use wrap::{is_atomic_marker, word_wrap_line, LayoutLine, Segment, TextChunk, VisualLine};
 

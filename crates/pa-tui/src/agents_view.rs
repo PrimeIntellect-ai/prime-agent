@@ -53,6 +53,11 @@ use delete::{spawn_delete_dispatch, DeleteAction, PendingDelete};
 mod rename;
 use rename::{spawn_rename_dispatch, Rename};
 
+mod reply;
+use reply::{
+    spawn_headline_fetch, spawn_kill_dispatch, spawn_reply_dispatch, KillRequest, ReplyRequest,
+};
+
 mod status;
 use status::{Status, StatusTone};
 
@@ -108,6 +113,11 @@ pub struct AgentsViewOptions {
     /// never comes back and the poll does not re-read consumed bytes.
     /// `None` on the first run creates a fresh state.
     pub incident_notice_state: Option<crate::incident_notices::IncidentNoticeState>,
+    /// The flow's own `create` config (TS `AgentsViewModeOptions.config`):
+    /// the base a saved reply's resume derives its config from (the
+    /// view's runtime config with the session's own cwd removed, or the
+    /// view's cwd when the saved directory no longer exists).
+    pub create_config: serde_json::Value,
 }
 
 /// The open action the run ended with (TS `AgentsViewRunResult`'s
@@ -294,6 +304,28 @@ enum UiInput {
         rename: Rename,
         outcome: Result<(), String>,
     },
+    /// The armed target's last-assistant headline landed (or failed):
+    /// the header renders it; a re-targeted or disarmed composer drops
+    /// it.
+    HeadlineResult {
+        key: String,
+        result: Result<Option<String>, String>,
+    },
+    /// The saved-resume path's mid-send status (TS `sendReply`: the
+    /// "Sending reply..." after "Resuming session..." — the loop paints
+    /// each as it lands, never both at once).
+    ReplyProgress(String),
+    /// One reply send landed: the resumed summary and the sticky cwd
+    /// notice on success, the wire's error on failure.
+    ReplyResult {
+        key: String,
+        outcome: Result<reply::ReplySent, String>,
+    },
+    /// One `/kill` view-command dispatch landed.
+    KillResult {
+        key: String,
+        outcome: Result<(), String>,
+    },
 }
 
 /// The flow's roster connection (TS `AgentsViewPersistentState.rosterClient`):
@@ -383,6 +415,17 @@ struct AgentsViewMode {
     /// `pending_delete_action` shape: the wire call runs off the key
     /// loop with the client).
     pending_rename: Option<Rename>,
+    /// The submitted reply the run loop dispatches (the reply flow's
+    /// same shape): the send runs off the key loop with the client, and
+    /// its keyed outcome re-enters as a `ReplyResult`.
+    pending_reply: Option<ReplyRequest>,
+    /// One `/kill` view command the run loop dispatches (the reply
+    /// flow's shape): the keyed outcome re-enters as a `KillResult`.
+    pending_kill: Option<KillRequest>,
+    /// The armed target whose headline fetch runs (its key and active
+    /// id): the loop dispatches the fetch, detached — its keyed result
+    /// drops when the composer is gone or re-targeted.
+    pending_headline: Option<(String, String)>,
     /// The executed delete the run loop takes (the dispatch runs off the
     /// key loop with the client, the saved-catalog fetch's pattern).
     pending_delete_action: Option<DeleteAction>,
@@ -520,6 +563,7 @@ struct PressedMouseClick {
 enum Composer {
     Search,
     Rename(Box<rename::RenameComposer>),
+    Reply(Box<reply::ReplyComposer>),
 }
 
 impl AgentsViewMode {
@@ -576,6 +620,9 @@ impl AgentsViewMode {
             pending_delete: None,
             composer: Composer::Search,
             pending_rename: None,
+            pending_reply: None,
+            pending_kill: None,
+            pending_headline: None,
             pending_delete_action: None,
             deleted_saved_paths: std::collections::HashSet::default(),
             scope_depth: None,
@@ -1026,6 +1073,30 @@ async fn run_agents_view_surface(
                             rename,
                         ));
                     }
+                    // The reply composer's dispatches (the send and the
+                    // `/kill` view command): the 2s exit drain covers an
+                    // Enter-then-exit the same way it covers a confirmed
+                    // stop-or-delete.
+                    if let Some(request) = mode.pending_reply.take() {
+                        action_dispatches.push(spawn_reply_dispatch(
+                            &client,
+                            ui_tx.clone(),
+                            request,
+                        ));
+                    }
+                    if let Some(request) = mode.pending_kill.take() {
+                        action_dispatches.push(spawn_kill_dispatch(
+                            &client,
+                            ui_tx.clone(),
+                            request,
+                        ));
+                    }
+                    // The armed target's headline fetch: detached (the
+                    // exit never waits on it), and its keyed result
+                    // drops when the composer is gone or re-targeted.
+                    if let Some((key, active_session_id)) = mode.pending_headline.take() {
+                        spawn_headline_fetch(&client, ui_tx.clone(), key, active_session_id);
+                    }
                 }
                 // A plain click opens the row under it (the Enter
                 // action); drags and wheel turns are consumed inside.
@@ -1049,6 +1120,22 @@ async fn run_agents_view_surface(
                 }
                 UiInput::RenameResult { rename, outcome } => {
                     mode.rename_result(rename, outcome);
+                }
+                UiInput::HeadlineResult { key, result } => {
+                    mode.headline_result(key, result);
+                }
+                // The saved-resume path's own status (TS's mid-send
+                // "Sending reply..."): it lands between the resume and
+                // the prompt like any set_status, never queued behind
+                // the result it precedes.
+                UiInput::ReplyProgress(text) => {
+                    mode.set_status(text);
+                }
+                UiInput::ReplyResult { key, outcome } => {
+                    mode.reply_result(key, outcome);
+                }
+                UiInput::KillResult { key, outcome } => {
+                    mode.kill_result(key, outcome);
                 }
                 // The saved-catalog scan landed (TS `armSavedSearchFetch`
                 // applying its result): the Inactive section builds now.
@@ -1293,6 +1380,24 @@ async fn run_agents_view_surface(
             UiInput::RenameResult { rename, outcome } => {
                 mode.rename_result(rename, outcome);
             }
+            // The reply outcomes apply on the exit path too (an
+            // Enter-then-exit): the statuses paint nothing on a run
+            // that ended, but the adoption actions (`reply_sent`,
+            // `killed`) must still reach the outcome — and a `/name`
+            // result still disarms or restores the composer's draft for
+            // the run's final state.
+            UiInput::HeadlineResult { key, result } => {
+                mode.headline_result(key, result);
+            }
+            UiInput::ReplyProgress(text) => {
+                mode.set_status(text);
+            }
+            UiInput::ReplyResult { key, outcome } => {
+                mode.reply_result(key, outcome);
+            }
+            UiInput::KillResult { key, outcome } => {
+                mode.kill_result(key, outcome);
+            }
             _ => {}
         }
     }
@@ -1382,6 +1487,10 @@ fn is_daemon_answer(input: &UiInput) -> bool {
             | UiInput::SavedFailed { .. }
             | UiInput::DeleteResult { .. }
             | UiInput::RenameResult { .. }
+            | UiInput::HeadlineResult { .. }
+            | UiInput::ReplyProgress(_)
+            | UiInput::ReplyResult { .. }
+            | UiInput::KillResult { .. }
     )
 }
 

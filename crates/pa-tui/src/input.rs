@@ -129,7 +129,7 @@ pub(crate) fn spawn_paste_aware_reader<F>(on_input: F)
 where
     F: FnMut(ReaderInput) -> bool + Send + 'static,
 {
-    spawn_reader(true, on_input);
+    spawn_reader(on_input);
 }
 
 /// The shared reader body: one reader per process, joined across surfaces.
@@ -851,7 +851,7 @@ mod tests {
     /// `forward` against a capturing sink (the paste-aware surface).
     fn collect_forwarded(outputs: Vec<GuardOutput>) -> Vec<ReaderInput> {
         let mut inputs = Vec::new();
-        let ok = forward(outputs, true, &mut |input| {
+        let ok = forward(outputs, &mut |input| {
             inputs.push(input);
             true
         });

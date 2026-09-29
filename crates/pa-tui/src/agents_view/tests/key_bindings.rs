@@ -154,9 +154,8 @@ fn rename_key_composes_edits_and_dispatches() {
         .iter()
         .position(|row| row.starts_with("  Rename agent session"))
         .expect("the rename header rendered with TS's two-space indent");
-    assert_eq!(
-        rendered[header_row - 1],
-        "",
+    assert!(
+        rendered[header_row - 1].trim().is_empty(),
         "the box's top bg row rides above the header"
     );
     assert!(

@@ -141,6 +141,29 @@ impl AgentsViewMode {
     /// get no push; a live row's roster flush rides the rename's
     /// `session_info_changed` broadcast).
     pub(super) fn rename_result(&mut self, rename: Rename, outcome: Result<(), String>) {
+        // The reply composer's `/name` view command (TS
+        // `runAgentsViewCommand`'s name arm): the in-flight draft marks
+        // the composer that dispatched the rename (TS's
+        // `armedAtStart === replyTarget` object guard — a re-armed
+        // composer carries no in-flight draft). Success disarms it
+        // (`disarmIfUnchanged`, no editor check); failure restores the
+        // draft under the empty-editor guard.
+        if let Composer::Reply(reply) = &mut self.composer {
+            if reply.in_flight.is_some() {
+                match &outcome {
+                    Ok(()) => {
+                        self.disarm_reply();
+                    }
+                    Err(_) => {
+                        if reply.editor.get_text().is_empty() {
+                            if let Some(draft) = reply.in_flight.take() {
+                                reply.editor.set_text(&draft);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         match outcome {
             Ok(()) => {
                 self.set_status(format!("Renamed to {}", rename.name));

@@ -21,6 +21,7 @@ fn mode_with_notice(notice: &str) -> AgentsViewMode {
         keybindings: crate::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
         incident_notice_state: None,
+        create_config: serde_json::json!({}),
     });
     mode.rebuild_rows();
     mode

@@ -437,8 +437,10 @@ impl std::fmt::Debug for InteractiveOptions {
 }
 
 impl InteractiveOptions {
-    /// The `create` config carried on every new-session request.
-    pub(crate) fn create_config(&self) -> Value {
+    /// The `create` config carried on every new-session request (the
+    /// agents view reuses it as the base of a resume's config — TS's
+    /// `AgentsViewModeOptions.config`).
+    pub fn create_config(&self) -> Value {
         let mut config = json!({ "cwd": self.cwd.display().to_string() });
         if let Some(session_dir) = &self.session_dir {
             config["sessionDir"] = json!(session_dir.display().to_string());
@@ -462,6 +464,11 @@ impl InteractiveOptions {
         // the daemon resolves them once per create (main.ts:838-851).
         if let Some(models) = &self.models {
             config["models"] = json!(models);
+        }
+        // TS main.ts's `telemetryDisabled` rides the runtime config: a
+        // resume's create reads it back (the agents view's saved reply).
+        if self.telemetry_disabled == Some(true) {
+            config["telemetryDisabled"] = json!(true);
         }
         config
     }

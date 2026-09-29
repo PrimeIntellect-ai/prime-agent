@@ -218,6 +218,24 @@ pub(super) fn spawn_delete_dispatch(
 }
 
 impl AgentsViewMode {
+    /// The ctrl+x two-press grammar (TS `handleDeleteSelected`'s confirm
+    /// arms): a second press on the same row — with the same live-work
+    /// word it armed with — executes the stop-or-delete dispatch;
+    /// anything else (re-)arms the confirm over the selected row.
+    pub(super) fn confirm_delete_for_selected(&mut self, was_armed: Option<PendingDelete>) {
+        if was_armed.as_ref().is_some_and(|pending| {
+            self.rows.get(self.selected).is_some_and(|row| {
+                row.identity == pending.identity && Self::delete_arm_word(row) == pending.stop
+            })
+        }) {
+            if let Some(action) = self.delete_action_for_selected() {
+                self.pending_delete_action = Some(action);
+            }
+        } else if let Some(pending) = self.delete_arm_target() {
+            self.pending_delete = Some(pending);
+        }
+    }
+
     pub(super) fn delete_arm_target(&self) -> Option<PendingDelete> {
         let row = self.rows.get(self.selected)?;
         let stop = Self::delete_arm_word(row);

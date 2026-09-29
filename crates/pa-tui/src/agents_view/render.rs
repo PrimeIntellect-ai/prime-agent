@@ -167,6 +167,23 @@ impl AgentsViewMode {
                     Some((0, 4 + str_width(&self.query).min(width.saturating_sub(5)))),
                 )
             }
+            // The reply composer's real editor box (the rename box's
+            // shape): the target's header line rides INSIDE the box, the
+            // placeholder names the action by the target's state, and
+            // the cursor comes from the box.
+            Composer::Reply(reply) => {
+                let header = reply.header_line(theme);
+                let placeholder = reply.placeholder();
+                let surface = crate::view::editor_surface::render(
+                    &mut reply.editor,
+                    theme,
+                    width,
+                    u16::try_from(self.last_height).unwrap_or(u16::MAX),
+                    Some(header),
+                    Some(placeholder),
+                );
+                (Vec::new(), surface.rows, surface.cursor)
+            }
             // The rename composer's real editor box (TS `CustomEditor.render`
             // over `Editor.render`): the warning header rides INSIDE the box
             // (the header block under the top row, TS `getHeaderLine` via
@@ -634,6 +651,46 @@ impl AgentsViewMode {
         if let Some(status) = status_override {
             return vec![theme.fg(ThemeColor::Error, truncate_text(status, width))];
         }
+        // The reply composer's hints (TS `renderReplyComposerHints`,
+        // :2964-2978): the confirm key's word by the target's CURRENT
+        // state (steer while it streams, send live, resume & send
+        // saved), the queue hint while the draft has text, and cancel
+        // over the cancel binding's every key.
+        if let Composer::Reply(reply) = &self.composer {
+            let current = self.current_reply_summary(&reply.target);
+            let live = current
+                .get("activeSessionId")
+                .and_then(serde_json::Value::as_str)
+                .is_some();
+            let streaming = live
+                && current
+                    .get("isStreaming")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true);
+            let word = if streaming {
+                "steer"
+            } else if live {
+                "send"
+            } else {
+                "resume & send"
+            };
+            let mut hints = vec![format!(
+                "{} {word}",
+                self.keybindings.key_text("tui.select.confirm")
+            )];
+            if !reply.editor.get_text().trim().is_empty() {
+                hints.push(format!(
+                    "{} queue",
+                    self.keybindings.key_text("app.message.followUp")
+                ));
+            }
+            hints.push(format!(
+                "{} cancel",
+                self.keybindings.key_text("tui.select.cancel")
+            ));
+            let hint = hints.join("   ");
+            return truncate_line(&vec![theme.fg(ThemeColor::Muted, hint)], width);
+        }
         // The rename composer's hint (TS :2942-2944): save/cancel over
         // the confirm/cancel bindings' every key (`keyText` — TS shows
         // "Enter save   Esc/Ctrl+C cancel").
@@ -697,6 +754,12 @@ impl AgentsViewMode {
             if let Some(keys) = all("app.agents.rename").filter(|_| self.rename_target().is_some())
             {
                 segments.push(format!("{keys} rename"));
+            }
+            // The reply slot (the operator's completeness directive: TS
+            // shows none — the space arm is undiscoverable without it):
+            // only while the selected row is replyable.
+            if let Some(keys) = all("app.agents.reply").filter(|_| self.reply_target().is_some()) {
+                segments.push(format!("{keys} reply"));
             }
             if let Some(pending) = self.delete_arm_target() {
                 if let Some(keys) = all("app.agents.delete") {
