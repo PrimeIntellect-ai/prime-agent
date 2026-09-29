@@ -1,0 +1,1 @@
+- Added the `factory` continual-harness entry kind: a versioned, validated DAG of subagent nodes (typed ports, task/resident lifecycles, budgets, retries, failure policies, bounded foreach fan-out) stored via `rlm.harness.create_factory/update_factory/delete_factory`; invalid specifications are rejected at write time.

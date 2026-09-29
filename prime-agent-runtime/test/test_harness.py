@@ -19,6 +19,23 @@ PYTHON_REFERENCE = {
     "call_pattern": "await run(...)",
 }
 
+FACTORY_DAG = {
+    "run": {"failure_policy": "continue", "max_parallel": 2},
+    "nodes": [
+        {
+            "id": "collect",
+            "subagent": "researcher",
+            "outputs": [{"name": "findings", "type": "text"}],
+        },
+        {
+            "id": "review",
+            "subagent": {"prompt": "Review the findings."},
+            "depends_on": ["collect"],
+            "inputs": [{"name": "draft", "type": "text", "from": "collect.findings"}],
+        },
+    ],
+}
+
 
 class HarnessStateTest(unittest.TestCase):
     def test_crud_for_all_entry_kinds(self) -> None:
@@ -56,6 +73,14 @@ class HarnessStateTest(unittest.TestCase):
                     path="subagent/path",
                     metadata={"kind": "subagent"},
                 ),
+                "factory": state.create_factory(
+                    "Factory",
+                    "Factory content",
+                    id="factory_entry",
+                    path="factory/path",
+                    dag=FACTORY_DAG,
+                    metadata={"kind": "factory"},
+                ),
             }
 
             for kind, entry in created.items():
@@ -73,8 +98,9 @@ class HarnessStateTest(unittest.TestCase):
                 arguments={"target": {"type": "string", "required": True}, "mode": {"type": "string"}},
             )
             state.update_subagent("subagent_entry", "Subagent", "Subagent content updated")
+            state.update_factory("factory_entry", "Factory", "Factory content updated", dag=FACTORY_DAG)
 
-            for kind in ("prompt", "memory", "skill", "subagent"):
+            for kind in ("prompt", "memory", "skill", "subagent", "factory"):
                 entry_id = f"{kind}_entry"
                 self.assertEqual(state.get(kind, entry_id).version, 2)
                 self.assertIn("updated", state.get(kind, entry_id).content)
@@ -106,6 +132,12 @@ class HarnessStateTest(unittest.TestCase):
                 "Review the proposed patch for regressions and missing tests.",
                 metadata={"max_turns": 3},
             )
+            factory = state.create_factory(
+                "PR review sweep",
+                "Sweep review across changed files.",
+                id="pr_sweep",
+                dag=FACTORY_DAG,
+            )
             state.create_prompt_note("Refinement cadence", "Refine only after repeated evidence.")
             event = state.record_refinement(
                 "skill failed twice",
@@ -120,6 +152,7 @@ class HarnessStateTest(unittest.TestCase):
             self.assertEqual(reloaded.get("skill", skill.id).version, 1)
             self.assertEqual(reloaded.get("skill", skill.id).arguments["failure_log"]["type"], "string")
             self.assertEqual(reloaded.get("subagent", subagent.id).metadata["max_turns"], 3)
+            self.assertEqual(reloaded.get("factory", factory.id).arguments["dag"], FACTORY_DAG)
             self.assertEqual(reloaded.refinements[0].id, event.id)
             self.assertIn("Prefer focused patches", reloaded.overview())
             self.assertIn(
@@ -133,6 +166,145 @@ class HarnessStateTest(unittest.TestCase):
             self.assertIn("await rlm.list_subagents()", overview)
             self.assertIn("receiver_role='child'", overview)
             self.assertIn("refinements: 1", reloaded.overview())
+            self.assertIn("factory", reloaded.overview())
+            self.assertIn("rlm.factory.run", reloaded.overview())
+            self.assertIn("create_factory/update_factory/delete_factory", reloaded.overview())
+
+    def test_create_factory_with_invalid_dag_raises_and_does_not_store(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+
+            invalid_dags = [
+                None,
+                "not a dag",
+                {"nodes": []},
+                {"nodes": [{"id": "a", "subagent": "w"}, {"id": "a", "subagent": "w"}]},
+                {"nodes": [{"id": "a", "subagent": "w", "depends_on": ["a"]}]},
+                {
+                    "nodes": [
+                        {"id": "a", "subagent": "w", "outputs": [{"name": "o", "type": "text"}]},
+                        {"id": "b", "subagent": "w", "inputs": [{"name": "i", "type": "json", "from": "a.o"}]},
+                    ]
+                },
+            ]
+            for index, dag in enumerate(invalid_dags):
+                with self.assertRaises(ValueError, msg=f"dag #{index}") as ctx:
+                    state.create_factory("Broken sweep", "Should never store.", id=f"broken_{index}", dag=dag)
+                self.assertTrue(str(ctx.exception).strip())
+
+            self.assertEqual(state.list("factory"), [])
+            for index in range(len(invalid_dags)):
+                self.assertIsNone(state.get("factory", f"broken_{index}"))
+
+            # An invalid dag leaves nothing on disk either.
+            reloaded = HarnessState(state.file_path)
+            self.assertEqual(reloaded.list("factory"), [])
+
+    def test_create_factory_with_valid_dag_stores_arguments_dag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+
+            entry = state.create_factory(
+                "PR review sweep",
+                "Sweep review across changed files.",
+                id="pr_sweep",
+                path="review",
+                dag=FACTORY_DAG,
+                metadata={"owner": "kernel"},
+            )
+
+            self.assertEqual(entry.kind, "factory")
+            self.assertEqual(entry.arguments["dag"], FACTORY_DAG)
+            self.assertEqual(state.get("factory", "pr_sweep").arguments["dag"], FACTORY_DAG)
+            self.assertIn(entry, state.list("factory"))
+
+            reloaded = HarnessState(state.file_path)
+            self.assertEqual(reloaded.get("factory", "pr_sweep").arguments["dag"], FACTORY_DAG)
+
+    def test_create_factory_with_machine_stores_arguments_machine(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            machine = {
+                "states": [
+                    {"id": "collect", "entry": True, "subagent": "researcher", "outputs": [{"name": "findings", "type": "text"}]},
+                    {
+                        "id": "fix",
+                        "subagent": {"prompt": "Fix the findings."},
+                        "max_entries": 3,
+                        "inputs": [{"name": "draft", "type": "text", "from": "collect.findings"}],
+                    },
+                ],
+                "transitions": [
+                    {"from": "collect", "to": "fix", "when": {"output": "findings", "op": "exists"}},
+                ],
+            }
+
+            entry = state.create_factory("Loop", "Fix-and-review loop.", id="loop", machine=machine)
+
+            self.assertEqual(entry.arguments, {"machine": machine})
+            self.assertEqual(state.get("factory", "loop").arguments["machine"], machine)
+
+            # An invalid machine is rejected exactly like an invalid dag.
+            with self.assertRaises(ValueError):
+                state.create_factory("Broken", "Never stores.", id="broken", machine={"states": [{}]})
+            self.assertIsNone(state.get("factory", "broken"))
+
+            # Supplying both forms at once is a usage error, not a validation one.
+            with self.assertRaisesRegex(ValueError, "not both"):
+                state.create_factory("Both", "Never stores.", id="both", dag=FACTORY_DAG, machine=machine)
+            self.assertIsNone(state.get("factory", "both"))
+
+    def test_update_factory_with_machine_replaces_the_spec(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_factory("PR review sweep", "Sweep.", id="pr_sweep", dag=FACTORY_DAG)
+
+            machine = {"states": [{"id": "solo", "entry": True, "subagent": "worker"}], "transitions": []}
+            updated = state.update_factory("pr_sweep", "PR review sweep", "Sweep v2.", machine=machine)
+            self.assertEqual(updated.version, 2)
+            self.assertEqual(state.get("factory", "pr_sweep").arguments, {"machine": machine})
+
+            # Omitting both forms still preserves the stored spec.
+            state.update_factory("pr_sweep", "PR review sweep", "Sweep v3.")
+            self.assertEqual(state.get("factory", "pr_sweep").arguments, {"machine": machine})
+
+            with self.assertRaises(ValueError):
+                state.update_factory("pr_sweep", "PR review sweep", "Bad machine.", machine={"states": "nope"})
+            self.assertEqual(state.get("factory", "pr_sweep").content, "Sweep v3.")
+
+    def test_update_factory_without_dag_preserves_stored_dag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            entry = state.create_factory("PR review sweep", "Sweep review.", id="pr_sweep", dag=FACTORY_DAG)
+            stored_at_create = dict(entry.arguments["dag"])
+
+            updated = state.update_factory("pr_sweep", "PR review sweep", "Sweep review across PRs.")
+
+            self.assertEqual(updated.version, 2)
+            self.assertEqual(state.get("factory", "pr_sweep").arguments["dag"], FACTORY_DAG)
+
+            replacement = {
+                "nodes": [
+                    {"id": "solo", "subagent": "worker", "outputs": [{"name": "report", "type": "text"}]}
+                ]
+            }
+            state.update_factory("pr_sweep", "PR review sweep", "Sweep review across PRs.", dag=replacement)
+            self.assertEqual(state.get("factory", "pr_sweep").arguments["dag"], replacement)
+
+            with self.assertRaises(ValueError):
+                state.update_factory("pr_sweep", "PR review sweep", "Bad dag.", dag={"nodes": []})
+            self.assertEqual(state.get("factory", "pr_sweep").arguments["dag"], replacement)
+            # The pre-update snapshot was taken before any replacement landed.
+            self.assertEqual(stored_at_create, FACTORY_DAG)
+
+    def test_delete_factory_removes_the_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_factory("PR review sweep", "Sweep review.", id="pr_sweep", dag=FACTORY_DAG)
+
+            self.assertTrue(state.delete_factory("pr_sweep"))
+            self.assertIsNone(state.get("factory", "pr_sweep"))
+            self.assertFalse(state.delete_factory("pr_sweep"))
 
     def test_save_failure_preserves_previous_state_on_disk(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

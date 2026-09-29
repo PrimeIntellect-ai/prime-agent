@@ -73,7 +73,7 @@ function makeTempDir(): string {
 	return tempDir;
 }
 
-const kinds = ["prompt", "memory", "skill", "subagent"] as const satisfies readonly RefinementKind[];
+const kinds = ["prompt", "memory", "skill", "subagent", "factory"] as const satisfies readonly RefinementKind[];
 const skillReference = {
 	type: "python",
 	import: "agent_skills.example",
@@ -83,6 +83,21 @@ const skillReference = {
 const skillContract = {
 	reference: skillReference,
 	arguments: { input: { type: "string", required: true, description: "Task input" } },
+};
+const factoryDag = {
+	nodes: [
+		{
+			id: "collect",
+			subagent: "researcher",
+			outputs: [{ name: "findings", type: "text" }],
+		},
+		{
+			id: "review",
+			subagent: { prompt: "Review the findings." },
+			depends_on: ["collect"],
+			inputs: [{ name: "draft", type: "text", from: "collect.findings" }],
+		},
+	],
 };
 
 function proposal(summary: string, edits: RefinementProposal["edits"]): RefinementProposal {
@@ -140,7 +155,7 @@ function seedEntry(state: HarnessState, kind: RefinementKind, id = `${kind}_entr
 				title: `${kind} title`,
 				content: `${kind} content`,
 				path: `${kind}/path`,
-				...(kind === "skill" ? skillContract : {}),
+				...(kind === "skill" ? skillContract : kind === "factory" ? { arguments: { dag: factoryDag } } : {}),
 				metadata: { seeded: true },
 			},
 		]),
@@ -214,7 +229,8 @@ describe("harness refinement", () => {
 	it.each(kinds)("applies the create/update/delete lifecycle for %s entries", (kind) => {
 		const state = loadHarnessState(makeTempDir());
 		const id = `${kind}_entry`;
-		const skillFields = kind === "skill" ? skillContract : {};
+		const skillFields =
+			kind === "skill" ? skillContract : kind === "factory" ? { arguments: { dag: factoryDag } } : {};
 		const apply = (edits: RefinementProposal["edits"], refinementId: string) =>
 			applyRefinementProposal(state, proposal(`${refinementId} ${kind}`, edits), { id: refinementId });
 
@@ -281,6 +297,101 @@ describe("harness refinement", () => {
 		expect(state.refinements.at(-1)?.changes).toEqual([`delete ${kind}:${id}`]);
 	});
 
+	it("requires a dag object in arguments for factory creates and updates", () => {
+		const state = loadHarnessState(makeTempDir());
+
+		const missingDag = applyRefinementProposal(
+			state,
+			proposal("Create factory without a dag", [
+				{
+					action: "create",
+					kind: "factory",
+					id: "factory_entry",
+					title: "Factory title",
+					content: "Factory content",
+				},
+			]),
+			{ id: "refine_factory_missing_dag" },
+		);
+
+		expect(missingDag.appliedEdits[0]).toMatchObject({
+			applied: false,
+			error: "factory entry requires a dag object in arguments",
+		});
+		expect(state.entries.factory.factory_entry).toBeUndefined();
+		expect(state.refinements.at(-1)?.changes).toEqual([]);
+
+		const nonObjectDag = applyRefinementProposal(
+			state,
+			proposal("Create factory with a non-object dag", [
+				{
+					action: "create",
+					kind: "factory",
+					id: "factory_entry",
+					title: "Factory title",
+					content: "Factory content",
+					arguments: { dag: ["not", "an", "object"] },
+				},
+			]),
+			{ id: "refine_factory_non_object_dag" },
+		);
+
+		expect(nonObjectDag.appliedEdits[0]).toMatchObject({
+			applied: false,
+			error: "factory entry requires a dag object in arguments",
+		});
+
+		const created = applyRefinementProposal(
+			state,
+			proposal("Create factory with a dag", [
+				{
+					action: "create",
+					kind: "factory",
+					id: "factory_entry",
+					title: "Factory title",
+					content: "Factory content",
+					path: "factory/created",
+					arguments: { dag: factoryDag },
+					metadata: { kind: "factory" },
+				},
+			]),
+			{ id: "refine_factory_valid" },
+		);
+
+		expect(created.appliedEdits[0].applied).toBe(true);
+		expect(state.entries.factory.factory_entry.arguments).toEqual({ dag: factoryDag });
+
+		const updateWithoutDag = applyRefinementProposal(
+			state,
+			proposal("Update factory without a dag", [
+				{
+					action: "update",
+					kind: "factory",
+					id: "factory_entry",
+					title: "Factory title updated",
+					content: "Factory content updated",
+				},
+			]),
+			{ id: "refine_factory_update_missing_dag" },
+		);
+
+		expect(updateWithoutDag.appliedEdits[0]).toMatchObject({
+			applied: false,
+			error: "factory entry requires a dag object in arguments",
+		});
+		expect(state.entries.factory.factory_entry.title).toBe("Factory title");
+	});
+
+	it("renders the factory invoke contract in the harness digest", () => {
+		const state = loadHarnessState(makeTempDir());
+		seedEntry(state, "factory", "sweep");
+
+		const digest = formatHarnessStateForPrompt(state);
+
+		expect(digest).toContain("factory: 1");
+		expect(digest).toContain("await rlm.factory.run('<id>')");
+	});
+
 	it("creates ids from titles and uses default path and metadata when omitted", () => {
 		const state = loadHarnessState(makeTempDir());
 
@@ -306,7 +417,8 @@ describe("harness refinement", () => {
 		error: string;
 		seed?: RefinementKind;
 	};
-	const skillFieldsFor = (kind: RefinementKind) => (kind === "skill" ? skillContract : {});
+	const skillFieldsFor = (kind: RefinementKind) =>
+		kind === "skill" ? skillContract : kind === "factory" ? { arguments: { dag: factoryDag } } : {};
 	// Raw (unnormalized) edit shapes for apply-time validation; overrides carry the violation.
 	const editWith = (
 		action: RefinementAction,
@@ -544,7 +656,7 @@ describe("harness refinement", () => {
 
 			const state = loadHarnessState(dir);
 
-			expect(state.entries).toEqual({ prompt: {}, memory: {}, skill: {}, subagent: {} });
+			expect(state.entries).toEqual({ prompt: {}, memory: {}, skill: {}, subagent: {}, factory: {} });
 			expect(state.refinements).toEqual([]);
 			applyRefinementProposal(
 				state,

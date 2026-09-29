@@ -30,7 +30,7 @@ async function requestRefinement(
 ) {
 	const state: HarnessState = {
 		schema: 1,
-		entries: { prompt: {}, memory: {}, skill: {}, subagent: {} },
+		entries: { prompt: {}, memory: {}, skill: {}, subagent: {}, factory: {} },
 		refinements: [],
 	};
 	const messages = content ? [{ role: "user" as const, content, timestamp: 1 }] : [];
