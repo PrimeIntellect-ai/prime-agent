@@ -2,7 +2,7 @@
 //! `.bootstrap-version` read/write, and the current-version predicates the
 //! flows and the readiness gates compose.
 
-use super::*;
+use super::{Path, BootstrapVersion, BootstrapPythonSkill, default_rlm_extra_uv_args};
 
 /// Schema of `.bootstrap-version`; a mismatch rebuilds the venv.
 pub(super) const BOOTSTRAP_SCHEMA: u64 = 9;
@@ -14,7 +14,7 @@ pub(super) fn read_bootstrap_version(venv: &Path) -> Option<BootstrapVersion> {
     (parsed.schema > 0).then_some(parsed)
 }
 
-fn extra_uv_args_match(a: &Option<Vec<String>>, b: &[&str]) -> bool {
+fn extra_uv_args_match(a: Option<&[String]>, b: &[&str]) -> bool {
     match a {
         None => false,
         Some(a) => a.iter().map(String::as_str).eq(b.iter().copied()),
@@ -32,7 +32,7 @@ pub(super) fn bootstrap_skill_key(skill: &BootstrapPythonSkill) -> String {
 /// sessions are fine: the venv is a shared cache, not a per-session manifest,
 /// so a session whose skill set differs must not force reinstalls.
 pub(super) fn recorded_skills_cover(
-    recorded: &Option<Vec<BootstrapPythonSkill>>,
+    recorded: Option<&[BootstrapPythonSkill]>,
     current: &[BootstrapPythonSkill],
 ) -> bool {
     if current.is_empty() {
@@ -59,22 +59,27 @@ pub(super) fn bootstrap_base_version_current(
             version.schema == BOOTSTRAP_SCHEMA
                 && version.runtime.as_deref() == Some(runtime_identity)
                 && version.snapshot.as_deref() == Some(STATE_SNAPSHOT_REQUIREMENT)
-                && extra_uv_args_match(&version.extra_uv_args, &default_rlm_extra_uv_args())
+                && extra_uv_args_match(
+                    version.extra_uv_args.as_deref(),
+                    &default_rlm_extra_uv_args(),
+                )
         }
         None => false,
     }
 }
 
 pub(super) fn bootstrap_version_current(
-    version: Option<BootstrapVersion>,
+    version: Option<&BootstrapVersion>,
     runtime_identity: &str,
     python_skills: &[BootstrapPythonSkill],
 ) -> bool {
-    bootstrap_base_version_current(version.clone(), runtime_identity)
-        && recorded_skills_cover(
-            &version.as_ref().and_then(|v| v.python_skills.clone()),
-            python_skills,
-        )
+    version.is_some_and(|version| {
+        bootstrap_base_version_current(Some(version.clone()), runtime_identity)
+            && recorded_skills_cover(
+                version.python_skills.as_deref(),
+                python_skills,
+            )
+    })
 }
 
 pub(crate) fn write_bootstrap_version(

@@ -2,7 +2,7 @@
 //! executable search and the `ensure_uv` resolution with its install
 //! guidance.
 
-use super::*;
+use super::{anyhow, PathBuf, Path, home_dir};
 
 const UV_INSTALL_COMMAND: &str = "curl -LsSf https://astral.sh/uv/install.sh | sh";
 
