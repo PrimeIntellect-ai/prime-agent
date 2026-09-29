@@ -7,14 +7,20 @@
 //! manifest that hashes them. [`verify_workspace_snapshot`] re-checks a
 //! staged snapshot offline before it is uploaded anywhere.
 //!
-//! The capture is bounded (entry count, per-file size, total size) and
-//! deliberately incomplete in a recorded way: credential-shaped file
-//! names, symlinks whose targets escape the worktree, nested repositories,
-//! and submodule gitlinks are excluded and listed in the manifest, so a
-//! materializer knows exactly what was and was not captured. This is
-//! foundation plumbing for cloud sessions; nothing wires it to a
-//! user-facing toggle yet, and there is no transport here — staging and
-//! verification only.
+//! The baseline is the caller's explicit choice ([`BaselineMode`]):
+//! HEAD's tree content staged through the same filters as the delta (no
+//! git history ships, and the secret file-name denylist applies to both
+//! layers), or none at all. That is not a secret-safety guarantee - a
+//! credential under an innocuous name still stages, in either layer.
+//! The capture is bounded (entry count, baseline count, per-file size,
+//! total size) and deliberately incomplete in a recorded way:
+//! credential-shaped file names, symlinks whose targets escape the
+//! worktree (and paths whose ancestors became symlinks), nested
+//! repositories, and submodule gitlinks are excluded and listed in the
+//! manifest, so a materializer knows exactly what was and was not
+//! captured. This is foundation plumbing for cloud sessions; nothing
+//! wires it to a user-facing toggle yet, and there is no transport here -
+//! staging and verification only.
 
 mod git;
 mod manifest;
@@ -22,14 +28,16 @@ mod manifest;
 mod tests;
 mod verify;
 
-pub use manifest::{CapturedEntry, ExcludeReason, ExcludedEntry, SnapshotManifest};
+pub use manifest::{Baseline, CapturedEntry, ExcludeReason, ExcludedEntry, SnapshotManifest};
 pub use verify::verify_workspace_snapshot;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
+use sha1::{Digest as Sha1Digest, Sha1};
+use sha2::Sha256;
 
-use git::{GitStatus, StatusEntry};
+use git::{GitStatus, HeadTreeEntry, StatusEntry};
 use manifest::{
     is_safe_relative_path, symlink_target_stays_inside, BLOBS_DIR, MANIFEST_FILE, MANIFEST_VERSION,
 };
@@ -45,20 +53,43 @@ pub struct SnapshotLimits {
     pub max_total_bytes: u64,
     /// Maximum size of one captured file.
     pub max_file_bytes: u64,
+    /// Maximum number of HEAD-tree paths staged as the baseline.
+    pub max_baseline_entries: usize,
     /// Timeout for each git child process.
     pub git_timeout_ms: u64,
 }
 
 impl Default for SnapshotLimits {
-    /// 20,000 entries, 512 MiB total, 64 MiB per file, 10s per git call.
+    /// 20,000 delta entries, 100,000 baseline paths, 512 MiB total
+    /// captured content, 64 MiB per file, 10s per git call.
     fn default() -> Self {
         Self {
             max_entries: 20_000,
             max_total_bytes: 512 * 1024 * 1024,
             max_file_bytes: 64 * 1024 * 1024,
+            max_baseline_entries: 100_000,
             git_timeout_ms: 10_000,
         }
     }
+}
+
+/// Whether [`create_workspace_snapshot`] ships the baseline alongside the
+/// delta. Explicit and required at every call site. The `HeadTree`
+/// baseline stages HEAD's tree content only - no commits, no reverted
+/// content from prior revisions - and the credential-shaped file-name
+/// filter applies to it exactly as to the delta. None of that is a
+/// secret-safety guarantee: a credential under an innocuous file name
+/// still stages, in either layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BaselineMode {
+    /// Stage HEAD's tree content into the snapshot, so a guest
+    /// materializes the base revision offline (unpushed worktrees
+    /// included) without inheriting any git history.
+    HeadTree,
+    /// Ship the delta only; the manifest records an `external` baseline
+    /// and the consumer must obtain the head commit itself, refusing to
+    /// materialize when it cannot.
+    External,
 }
 
 /// The outcome of a successful snapshot: where it staged and what it holds.
@@ -96,6 +127,12 @@ pub enum SnapshotError {
     /// offending path or size.
     #[error("snapshot limit exceeded ({limit}): {detail}")]
     Limit { limit: String, detail: String },
+    /// The worktree changed under the capture: a baseline path's staged
+    /// bytes (or its presence, or its mode) no longer reproduce what HEAD
+    /// records, so the snapshot fails loudly instead of shipping a
+    /// baseline that is not the stated commit.
+    #[error("worktree changed during capture: {detail}")]
+    ConcurrentMutation { detail: String },
     /// A filesystem error at `path`.
     #[error("io error at {}: {source}", path.display())]
     Io {
@@ -115,18 +152,22 @@ pub enum SnapshotError {
 }
 
 /// Capture the working state of the git worktree containing `root` into
-/// `staging_dir`, under `limits`.
+/// `staging_dir`, under `limits`, shipping the baseline according to
+/// `baseline_mode` (see [`BaselineMode`] for what a baseline does and
+/// does not protect).
 ///
-/// The staging directory is created if missing and must otherwise be
-/// empty, and it must lie outside the worktree. The snapshot layout is
-/// `manifest.json` plus `blobs/<sha256>` content-addressed blobs; the
-/// manifest is written last, after all blobs.
+/// The staging directory is created if missing, tightened to owner-only
+/// (0700), must otherwise be empty, and must lie outside the worktree.
+/// The snapshot layout is `manifest.json` plus `blobs/<sha256>`
+/// content-addressed blobs (staged owner-only, 0600) covering both the
+/// delta and - in [`BaselineMode::HeadTree`] - the HEAD-tree baseline;
+/// the manifest is written last, after everything it describes.
 ///
 /// # Errors
 /// Returns [`SnapshotError::NotAWorktree`] when `root` is not inside a
 /// git worktree, staging-guard errors for an unusable staging directory,
 /// [`SnapshotError::Limit`] when a bound is exceeded, and git/io errors
-/// for the enumeration and capture steps.
+/// for the enumeration, baseline, and capture steps.
 #[tracing::instrument(
     level = "debug",
     name = "workspace_snapshot_create",
@@ -136,12 +177,30 @@ pub enum SnapshotError {
 pub async fn create_workspace_snapshot(
     root: &Path,
     staging_dir: &Path,
+    baseline_mode: BaselineMode,
     limits: &SnapshotLimits,
 ) -> Result<WorkspaceSnapshot, SnapshotError> {
     let worktree_root = git::resolve_worktree_root(root, limits.git_timeout_ms).await?;
     prepare_staging_dir(staging_dir, &worktree_root)?;
     let status = git::read_worktree_status(&worktree_root, limits.git_timeout_ms).await?;
-    let manifest = build_manifest(&worktree_root, staging_dir, &status, limits)?;
+    // Baseline, in the mode the caller chose. An unborn repository has
+    // no commits and no tracked paths to restore - its delta already is
+    // the whole worktree - so it stages no baseline and the manifest
+    // says so explicitly (head commit and baseline are both null).
+    let head_tree = match (&status.head_commit, baseline_mode) {
+        (None, _) | (Some(_), BaselineMode::External) => Vec::new(),
+        (Some(_), BaselineMode::HeadTree) => {
+            git::read_head_tree(&worktree_root, limits.git_timeout_ms).await?
+        }
+    };
+    let manifest = build_manifest(
+        &worktree_root,
+        staging_dir,
+        &status,
+        baseline_mode,
+        &head_tree,
+        limits,
+    )?;
     let manifest_path = write_manifest(staging_dir, &manifest)?;
     Ok(WorkspaceSnapshot {
         staging_dir: staging_dir.to_path_buf(),
@@ -164,6 +223,7 @@ fn prepare_staging_dir(staging_dir: &Path, worktree_root: &Path) -> Result<(), S
             path: staging_dir.to_path_buf(),
         });
     }
+    tighten_private(staging_dir)?;
     let staging_canonical = staging_dir
         .canonicalize()
         .map_err(|error| io_error(staging_dir, error))?;
@@ -178,14 +238,16 @@ fn prepare_staging_dir(staging_dir: &Path, worktree_root: &Path) -> Result<(), S
     Ok(())
 }
 
-/// Classify every status entry and stage the result: captured files become
-/// content-addressed blobs, in-root symlinks and tracked deletions become
-/// manifest entries, and everything deliberately uncaptured becomes an
-/// excluded entry with its reason.
+/// Classify the delta (every `git status` entry) and the HEAD-tree
+/// baseline the caller chose, staging content-addressed blobs and
+/// recording in-root symlinks, tracked deletions, and every deliberate
+/// exclusion with its reason.
 fn build_manifest(
     worktree_root: &Path,
     staging_dir: &Path,
     status: &GitStatus,
+    baseline_mode: BaselineMode,
+    head_tree: &[HeadTreeEntry],
     limits: &SnapshotLimits,
 ) -> Result<SnapshotManifest, SnapshotError> {
     if status.entries.len() > limits.max_entries {
@@ -198,8 +260,19 @@ fn build_manifest(
             ),
         ));
     }
+    if head_tree.len() > limits.max_baseline_entries {
+        return Err(limit_error(
+            "max_baseline_entries",
+            format!(
+                "{} paths in HEAD's tree, cap is {}",
+                head_tree.len(),
+                limits.max_baseline_entries
+            ),
+        ));
+    }
     let blobs_dir = staging_dir.join(BLOBS_DIR);
     std::fs::create_dir_all(&blobs_dir).map_err(|error| io_error(&blobs_dir, error))?;
+    tighten_private(&blobs_dir)?;
     let mut captured: Vec<CapturedEntry> = Vec::new();
     let mut excluded: Vec<ExcludedEntry> = Vec::new();
     let mut total_bytes: u64 = 0;
@@ -220,17 +293,25 @@ fn build_manifest(
         let gitlink = matches!(entry, StatusEntry::Tracked { gitlink: true, .. });
         if gitlink {
             // A submodule reference's content is never captured; only its
-            // absence from the worktree is recorded (as a deletion).
-            if worktree_root.join(path).symlink_metadata().is_ok() {
-                excluded.push(ExcludedEntry {
-                    path: path.to_string(),
-                    reason: ExcludeReason::Submodule,
-                });
-            } else {
-                captured.push(CapturedEntry::Deleted {
+            // absence from the worktree is recorded (as a deletion). The
+            // probe refuses symlinked ancestors like every other read.
+            let cap = usize::try_from(limits.max_file_bytes).unwrap_or(usize::MAX);
+            match open_leaf(worktree_root, path, cap) {
+                Ok(OpenLeaf::Missing) => captured.push(CapturedEntry::Deleted {
                     path: path.to_string(),
                     status: entry_status(entry),
-                });
+                }),
+                Ok(OpenLeaf::AncestorSymlink) => excluded.push(ExcludedEntry {
+                    path: path.to_string(),
+                    reason: ExcludeReason::SymlinkedAncestor,
+                }),
+                Ok(OpenLeaf::File { .. } | OpenLeaf::Symlink { .. } | OpenLeaf::NotRegularFile) => {
+                    excluded.push(ExcludedEntry {
+                        path: path.to_string(),
+                        reason: ExcludeReason::Submodule,
+                    });
+                }
+                Err(error) => return Err(io_error(&worktree_root.join(path), error)),
             }
             continue;
         }
@@ -244,90 +325,438 @@ fn build_manifest(
             });
             continue;
         }
-        let absolute = worktree_root.join(path);
-        match std::fs::symlink_metadata(&absolute) {
-            Ok(metadata) if metadata.is_symlink() => {
-                let target =
-                    std::fs::read_link(&absolute).map_err(|error| io_error(&absolute, error))?;
-                let target = target
-                    .to_str()
-                    .ok_or_else(|| SnapshotError::MalformedStatus {
-                        detail: format!("non-UTF-8 symlink target at {path:?}"),
-                    })?;
-                if symlink_target_stays_inside(path, target) {
-                    captured.push(CapturedEntry::Symlink {
-                        path: path.to_string(),
-                        status: entry_status(entry),
-                        target: target.to_string(),
-                    });
-                } else {
-                    excluded.push(ExcludedEntry {
-                        path: path.to_string(),
-                        reason: ExcludeReason::EscapingSymlink,
-                    });
-                }
-            }
-            Ok(metadata) if metadata.is_file() => {
-                let content =
-                    std::fs::read(&absolute).map_err(|error| io_error(&absolute, error))?;
-                if content.len() as u64 > limits.max_file_bytes {
-                    return Err(limit_error(
-                        "max_file_bytes",
-                        format!(
-                            "{path} is {} bytes, cap is {}",
-                            content.len(),
-                            limits.max_file_bytes
-                        ),
-                    ));
-                }
-                total_bytes += content.len() as u64;
-                if total_bytes > limits.max_total_bytes {
-                    return Err(limit_error(
-                        "max_total_bytes",
-                        format!(
-                            "{total_bytes} bytes of captured content, cap is {}",
-                            limits.max_total_bytes
-                        ),
-                    ));
-                }
-                let sha256 = format!("{:x}", Sha256::digest(&content));
-                let blob = blobs_dir.join(&sha256);
-                if std::fs::symlink_metadata(&blob).is_err() {
-                    std::fs::write(&blob, &content).map_err(|error| io_error(&blob, error))?;
-                }
-                captured.push(CapturedEntry::File {
-                    path: path.to_string(),
-                    status: entry_status(entry),
-                    sha256,
-                    bytes: content.len() as u64,
-                    executable: is_executable(&metadata),
-                });
-            }
-            // A directory or special file a tracked path turned into, or
-            // an untracked fifo/socket: not portable content.
-            Ok(_) => excluded.push(ExcludedEntry {
+        match capture_leaf(
+            worktree_root,
+            &blobs_dir,
+            path,
+            &entry_status(entry),
+            None,
+            limits,
+            &mut total_bytes,
+        )? {
+            LeafOutcome::Entry(entry) => captured.push(entry),
+            LeafOutcome::Excluded(reason) => excluded.push(ExcludedEntry {
                 path: path.to_string(),
-                reason: ExcludeReason::NotRegularFile,
+                reason,
             }),
             // A tracked path missing from the worktree is a deletion; an
             // untracked path that vanished mid-capture never existed.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if !is_untracked {
-                    captured.push(CapturedEntry::Deleted {
-                        path: path.to_string(),
-                        status: entry_status(entry),
-                    });
-                }
-            }
-            Err(error) => return Err(io_error(&absolute, error)),
+            LeafOutcome::Missing if !is_untracked => captured.push(CapturedEntry::Deleted {
+                path: path.to_string(),
+                status: entry_status(entry),
+            }),
+            LeafOutcome::Missing => {}
         }
     }
+    let baseline = match (&status.head_commit, baseline_mode) {
+        (None, _) => None,
+        (Some(_), BaselineMode::External) => Some(Baseline::External),
+        (Some(_), BaselineMode::HeadTree) => {
+            // HEAD's tree content, staged from the worktree (a path git
+            // status does not list matches HEAD), minus every path the
+            // delta already carries - the delta holds the newer state.
+            // No history ships and the same secret denylist applies; a
+            // credential under an innocuous name still stages, in either
+            // layer.
+            let covered: HashSet<&str> = status.entries.iter().map(StatusEntry::path).collect();
+            let mut entries: Vec<CapturedEntry> = Vec::new();
+            let mut baseline_excluded: Vec<ExcludedEntry> = Vec::new();
+            for tree_entry in head_tree {
+                if covered.contains(tree_entry.path.as_str()) {
+                    continue;
+                }
+                if tree_entry.gitlink {
+                    baseline_excluded.push(ExcludedEntry {
+                        path: tree_entry.path.clone(),
+                        reason: ExcludeReason::Submodule,
+                    });
+                    continue;
+                }
+                match capture_leaf(
+                    worktree_root,
+                    &blobs_dir,
+                    &tree_entry.path,
+                    &tree_entry.mode,
+                    Some(tree_entry),
+                    limits,
+                    &mut total_bytes,
+                )? {
+                    LeafOutcome::Entry(entry) => entries.push(entry),
+                    LeafOutcome::Excluded(reason) => baseline_excluded.push(ExcludedEntry {
+                        path: tree_entry.path.clone(),
+                        reason,
+                    }),
+                    // The path HEAD records is absent from the worktree
+                    // (or turned into something unreadable): the baseline
+                    // can no longer be the stated commit, so the snapshot
+                    // fails loudly rather than omitting silently.
+                    LeafOutcome::Missing => {
+                        return Err(SnapshotError::ConcurrentMutation {
+                            detail: format!(
+                                "{:?} vanished from the worktree during capture",
+                                tree_entry.path
+                            ),
+                        })
+                    }
+                }
+            }
+            Some(Baseline::HeadTree {
+                entries,
+                excluded: baseline_excluded,
+            })
+        }
+    };
     Ok(SnapshotManifest {
         version: MANIFEST_VERSION,
         head_commit: status.head_commit.clone(),
+        baseline,
         captured,
         excluded,
     })
+}
+
+/// The git blob object id of `content` (`git hash-object` equivalent):
+/// sha1 of `blob <len>\0` followed by the bytes. The HEAD-tree baseline
+/// verifies every staged entry against the object id `ls-tree` recorded,
+/// so the manifest's baseline provably is the stated commit's content.
+pub(crate) fn git_blob_oid(content: &[u8]) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(format!("blob {}\0", content.len()).as_bytes());
+    hasher.update(content);
+    format!("{:x}", hasher.finalize())
+}
+
+/// What a single path's worktree leaf turned out to be.
+#[derive(Debug)]
+enum LeafOutcome {
+    Entry(CapturedEntry),
+    Excluded(ExcludeReason),
+    Missing,
+}
+
+/// What a path's leaf opened as, with every component walked via
+/// `openat` with `O_NOFOLLOW` on unix: no step follows a symlink.
+#[cfg(unix)]
+enum OpenLeaf {
+    File {
+        content: Vec<u8>,
+        executable: bool,
+    },
+    Symlink {
+        target: String,
+    },
+    /// An ancestor directory is a symlink: the leaf - if any - lives
+    /// outside the worktree and is never read.
+    AncestorSymlink,
+    Missing,
+    NotRegularFile,
+}
+
+/// Open one raw fd with `O_NOFOLLOW`, closing it on drop; the guard keeps
+/// the walk's error paths leak-free without unsafe constructors.
+#[cfg(unix)]
+struct FdGuard(nix::libc::c_int);
+
+#[cfg(unix)]
+impl Drop for FdGuard {
+    fn drop(&mut self) {
+        let _ = nix::unistd::close(self.0);
+    }
+}
+
+/// Open `path` beneath `root`, refusing to follow any symlink at any
+/// step (unix): ancestors via `openat(O_DIRECTORY | O_NOFOLLOW)`, the
+/// leaf via `openat(O_NOFOLLOW)` or `readlinkat`. A symlink swapped in
+/// after the walk started still cannot redirect the read, because every
+/// component is pinned by its opened fd, not its path.
+#[cfg(unix)]
+fn open_leaf(root: &Path, path: &str, max_bytes: usize) -> std::io::Result<OpenLeaf> {
+    use nix::fcntl::{openat, OFlag};
+    use nix::sys::stat::{fstat, Mode};
+    let dir_flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    let root = openat(None, root, dir_flags, Mode::empty()).map_err(io_from_errno)?;
+    let mut dir = FdGuard(root);
+    let components: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+    for component in &components[..components.len().saturating_sub(1)] {
+        let component = *component;
+        let fd = match openat(Some(dir.0), component, dir_flags, Mode::empty()) {
+            Ok(fd) => FdGuard(fd),
+            // A symlinked ancestor: linux reports ELOOP, darwin ENOTDIR
+            // for the O_DIRECTORY|O_NOFOLLOW open of a symlink.
+            Err(nix::errno::Errno::ELOOP | nix::errno::Errno::ENOTDIR) => {
+                return Ok(OpenLeaf::AncestorSymlink)
+            }
+            Err(nix::errno::Errno::ENOENT) => return Ok(OpenLeaf::Missing),
+            Err(errno) => return Err(io_from_errno(errno)),
+        };
+        dir = fd;
+    }
+    if let Some(leaf) = components.last() {
+        let leaf = *leaf;
+        match openat(
+            Some(dir.0),
+            leaf,
+            OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => {
+                let fd = FdGuard(fd);
+                let metadata = fstat(fd.0).map_err(io_from_errno)?;
+                let mode = nix::sys::stat::SFlag::from_bits_truncate(metadata.st_mode);
+                if mode.contains(nix::sys::stat::SFlag::S_IFREG) {
+                    let mut content = Vec::new();
+                    let mut buffer = vec![0u8; 128 * 1024];
+                    loop {
+                        let read = nix::unistd::read(fd.0, &mut buffer).map_err(io_from_errno)?;
+                        if read == 0 {
+                            return Ok(OpenLeaf::File {
+                                content,
+                                executable: metadata.st_mode & 0o111 != 0,
+                            });
+                        }
+                        content.extend_from_slice(&buffer[..read]);
+                        // Past the caller's cap, stop reading: the size
+                        // check errors on the oversized capture instead
+                        // of buffering an unbounded raced-grown file.
+                        if content.len() > max_bytes {
+                            return Ok(OpenLeaf::File {
+                                content,
+                                executable: metadata.st_mode & 0o111 != 0,
+                            });
+                        }
+                    }
+                }
+                // A directory, fifo, socket, or device: not portable
+                // content.
+                Ok(OpenLeaf::NotRegularFile)
+            }
+            // O_NOFOLLOW on a symlink leaf: read the link through the
+            // pinned parent fd instead.
+            Err(nix::errno::Errno::ELOOP) => {
+                let target = nix::fcntl::readlinkat(Some(dir.0), leaf).map_err(io_from_errno)?;
+                let target = target.into_string().map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "non-UTF-8 link target")
+                })?;
+                Ok(OpenLeaf::Symlink { target })
+            }
+            Err(nix::errno::Errno::ENOENT) => Ok(OpenLeaf::Missing),
+            Err(errno) => Err(io_from_errno(errno)),
+        }
+    } else {
+        Ok(OpenLeaf::Missing)
+    }
+}
+
+#[cfg(unix)]
+fn io_from_errno(errno: nix::errno::Errno) -> std::io::Error {
+    std::io::Error::from_raw_os_error(errno as i32)
+}
+
+/// Non-unix fallback: component validation before the read. Without
+/// `openat`, an untrusted concurrent actor can still swap an ancestor
+/// for a symlink between the check and the read, so the residual race is
+/// documented rather than closed: staging on non-unix targets must not
+/// run with untrusted concurrent filesystem actors.
+#[cfg(not(unix))]
+enum OpenLeaf {
+    File { content: Vec<u8>, executable: bool },
+    Symlink { target: String },
+    AncestorSymlink,
+    Missing,
+    NotRegularFile,
+}
+
+#[cfg(not(unix))]
+fn open_leaf(root: &Path, path: &str, _max_bytes: usize) -> std::io::Result<OpenLeaf> {
+    let components: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+    let mut prefix = PathBuf::new();
+    for component in &components[..components.len().saturating_sub(1)] {
+        prefix.push(component);
+        if let Ok(metadata) = std::fs::symlink_metadata(root.join(&prefix)) {
+            if metadata.is_symlink() {
+                return Ok(OpenLeaf::AncestorSymlink);
+            }
+        }
+    }
+    let absolute = root.join(path);
+    let metadata = std::fs::symlink_metadata(&absolute)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(OpenLeaf::Symlink {
+            target: std::fs::read_link(&absolute)?
+                .to_string_lossy()
+                .into_owned(),
+        });
+    }
+    if metadata.is_file() {
+        return Ok(OpenLeaf::File {
+            content: std::fs::read(&absolute)?,
+            executable: false,
+        });
+    }
+    Ok(OpenLeaf::NotRegularFile)
+}
+
+/// Classify and stage one path's worktree leaf: a regular file becomes a
+/// content-addressed blob (owner-only mode), an in-root symlink a link
+/// entry, and anything deliberately uncaptured an exclusion reason.
+/// `expected`, when present, is HEAD's `ls-tree` record for the path: the
+/// captured bytes and mode are verified against it, so a worktree that
+/// mutates under the capture fails loudly instead of shipping a baseline
+/// that is not the stated commit.
+fn capture_leaf(
+    worktree_root: &Path,
+    blobs_dir: &Path,
+    path: &str,
+    status: &str,
+    expected: Option<&HeadTreeEntry>,
+    limits: &SnapshotLimits,
+    total_bytes: &mut u64,
+) -> Result<LeafOutcome, SnapshotError> {
+    if is_secret_path(path) {
+        return Ok(LeafOutcome::Excluded(ExcludeReason::Secret));
+    }
+    let cap = usize::try_from(limits.max_file_bytes).unwrap_or(usize::MAX);
+    let absolute = worktree_root.join(path);
+    match open_leaf(worktree_root, path, cap) {
+        Ok(OpenLeaf::AncestorSymlink) => {
+            Ok(LeafOutcome::Excluded(ExcludeReason::SymlinkedAncestor))
+        }
+        Ok(OpenLeaf::Missing) => Ok(LeafOutcome::Missing),
+        Ok(OpenLeaf::NotRegularFile) => Ok(LeafOutcome::Excluded(ExcludeReason::NotRegularFile)),
+        Ok(OpenLeaf::Symlink { target }) => {
+            if symlink_target_stays_inside(path, &target) {
+                if let Some(expected) = expected {
+                    verify_against_head(
+                        path,
+                        "120000",
+                        &git_blob_oid(target.as_bytes()),
+                        expected,
+                    )?;
+                }
+                Ok(LeafOutcome::Entry(CapturedEntry::Symlink {
+                    path: path.to_string(),
+                    status: status.to_string(),
+                    target,
+                }))
+            } else {
+                Ok(LeafOutcome::Excluded(ExcludeReason::EscapingSymlink))
+            }
+        }
+        Ok(OpenLeaf::File {
+            content,
+            executable,
+        }) => {
+            if content.len() as u64 > limits.max_file_bytes {
+                return Err(limit_error(
+                    "max_file_bytes",
+                    format!(
+                        "{path} is {} bytes, cap is {}",
+                        content.len(),
+                        limits.max_file_bytes
+                    ),
+                ));
+            }
+            *total_bytes += content.len() as u64;
+            if *total_bytes > limits.max_total_bytes {
+                return Err(limit_error(
+                    "max_total_bytes",
+                    format!(
+                        "{total_bytes} bytes of captured content, cap is {}",
+                        limits.max_total_bytes
+                    ),
+                ));
+            }
+            if let Some(expected) = expected {
+                verify_against_head(
+                    path,
+                    if executable { "100755" } else { "100644" },
+                    &git_blob_oid(&content),
+                    expected,
+                )?;
+            }
+            let sha256 = format!("{:x}", Sha256::digest(&content));
+            let blob = blobs_dir.join(&sha256);
+            if std::fs::symlink_metadata(&blob).is_err() {
+                std::fs::write(&blob, &content).map_err(|error| io_error(&blob, error))?;
+                tighten_private_file(&blob)?;
+            }
+            Ok(LeafOutcome::Entry(CapturedEntry::File {
+                path: path.to_string(),
+                status: status.to_string(),
+                sha256,
+                bytes: content.len() as u64,
+                executable,
+            }))
+        }
+        Err(error) => Err(io_error(&absolute, error)),
+    }
+}
+
+/// Verify one captured baseline leaf against HEAD's `ls-tree` record:
+/// the mode must match and the staged bytes must hash to the recorded
+/// object id. Any mismatch is a concurrent worktree mutation, a loud
+/// error rather than a silently wrong baseline.
+fn verify_against_head(
+    path: &str,
+    mode: &str,
+    oid: &str,
+    expected: &HeadTreeEntry,
+) -> Result<(), SnapshotError> {
+    if expected.mode != mode {
+        return Err(SnapshotError::ConcurrentMutation {
+            detail: format!("{path} is mode {mode} but HEAD records {}", expected.mode),
+        });
+    }
+    if expected.oid != oid {
+        return Err(SnapshotError::ConcurrentMutation {
+            detail: format!(
+                "{path} hashes to object {oid} but HEAD records {}",
+                expected.oid
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Staged content files (blobs, the manifest) are tightened to
+/// owner-only (0600) regardless of umask, so a file later moved out of
+/// the private staging directory keeps no group/other access.
+fn tighten_private(dir: &Path) -> Result<(), SnapshotError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| io_error(dir, error))?;
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
+}
+
+fn tighten_private_file(path: &Path) -> Result<(), SnapshotError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| io_error(path, error))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+fn limit_error(limit: &str, detail: String) -> SnapshotError {
+    SnapshotError::Limit {
+        limit: limit.to_string(),
+        detail,
+    }
+}
+
+fn io_error(path: &Path, error: std::io::Error) -> SnapshotError {
+    SnapshotError::Io {
+        path: path.to_path_buf(),
+        source: error,
+    }
 }
 
 /// Write the manifest deterministically (path-sorted entries, no
@@ -346,6 +775,7 @@ fn write_manifest(
     std::fs::write(&temp_path, &bytes).map_err(|error| io_error(&temp_path, error))?;
     crate::platform::rename_onto(&temp_path, &manifest_path)
         .map_err(|error| io_error(&manifest_path, error))?;
+    tighten_private_file(&manifest_path)?;
     Ok(manifest_path)
 }
 
@@ -360,7 +790,7 @@ fn entry_status(entry: &StatusEntry) -> String {
 
 /// File names never captured, tracked or not: credential-shaped locals
 /// that must not ride along to a remote staging area. Deliberately small
-/// and exact — broadening the list is a policy decision, not a drive-by.
+/// and exact - broadening the list is a policy decision, not a drive-by.
 pub(crate) fn is_secret_path(path: &str) -> bool {
     const EXACT_NAMES: &[&str] = &[
         ".env",
@@ -381,31 +811,4 @@ pub(crate) fn is_secret_path(path: &str) -> bool {
     EXACT_NAMES.contains(&name)
         || name.starts_with(".env.")
         || SECRET_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
-}
-
-fn limit_error(limit: &str, detail: String) -> SnapshotError {
-    SnapshotError::Limit {
-        limit: limit.to_string(),
-        detail,
-    }
-}
-
-fn io_error(path: &Path, error: std::io::Error) -> SnapshotError {
-    SnapshotError::Io {
-        path: path.to_path_buf(),
-        source: error,
-    }
-}
-
-/// The captured executable bit, portably (the one mode git and every
-/// target filesystem agrees on).
-fn is_executable(metadata: &std::fs::Metadata) -> bool {
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()) & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
 }

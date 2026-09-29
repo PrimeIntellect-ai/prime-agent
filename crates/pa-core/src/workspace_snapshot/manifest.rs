@@ -19,7 +19,7 @@ use std::path::{Component, Path};
 use serde::{Deserialize, Serialize};
 
 /// The manifest format version this build reads and writes.
-pub const MANIFEST_VERSION: u32 = 1;
+pub const MANIFEST_VERSION: u32 = 2;
 
 /// The manifest file name inside a staging directory.
 pub const MANIFEST_FILE: &str = "manifest.json";
@@ -79,6 +79,9 @@ pub enum ExcludeReason {
     /// A path that is neither a regular file nor a symlink (a directory,
     /// fifo, socket, or device).
     NotRegularFile,
+    /// A path whose ancestor directory is a symlink; the leaf resolves
+    /// outside the worktree and is never read.
+    SymlinkedAncestor,
 }
 
 /// A path excluded from capture, with the reason it was left out.
@@ -88,12 +91,42 @@ pub struct ExcludedEntry {
     pub reason: ExcludeReason,
 }
 
+/// The baseline of a staged snapshot, stated explicitly so a materializer
+/// never guesses. Present exactly when `head_commit` is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Baseline {
+    /// HEAD's tree content staged as content-addressed blobs, minus
+    /// secret-named paths (the same denylist the delta applies) and
+    /// minus every path the delta already covers (the delta carries the
+    /// newer state). No git history ships - no commits, no reverted
+    /// content from any prior revision - and nothing here is a
+    /// secret-safety guarantee: a credential under an innocuous name
+    /// still stages, in the baseline or the delta.
+    HeadTree {
+        entries: Vec<CapturedEntry>,
+        excluded: Vec<ExcludedEntry>,
+    },
+    /// No baseline staged; the consumer must obtain `head_commit` itself
+    /// (e.g. via the origin remote) and refuse to materialize when it
+    /// cannot. Nothing here makes that reachable.
+    External,
+}
+
 /// The manifest of one staged snapshot; `captured` and `excluded` are
 /// sorted by path and written deterministically.
+///
+/// Invariant: `baseline` is present if and only if `head_commit` is. A
+/// committed repository always declares which baseline it ships - a
+/// staged bundle or an explicit external reference - and an unborn one
+/// (no commits, every path untracked) needs none because its delta is
+/// the whole worktree. Verification rejects any other combination, so a
+/// missing or ambiguous baseline is never silent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotManifest {
     pub version: u32,
     pub head_commit: Option<String>,
+    pub baseline: Option<Baseline>,
     pub captured: Vec<CapturedEntry>,
     pub excluded: Vec<ExcludedEntry>,
 }

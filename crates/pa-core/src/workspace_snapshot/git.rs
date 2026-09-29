@@ -97,6 +97,11 @@ pub(crate) async fn read_worktree_status(
 
 /// Run one git command, capturing stdout (bounded) and failing with a
 /// classified [`SnapshotError`] on a non-zero exit or a timeout.
+///
+/// The pipes are drained concurrently with the wait: a child that writes
+/// more than the OS pipe capacity would otherwise block forever on write
+/// (the status output of a large untracked tree easily exceeds it), so
+/// the drain futures, the wait, and one shared deadline race together.
 async fn run_git(args: &[&str], cwd: &Path, timeout_ms: u64) -> Result<Vec<u8>, SnapshotError> {
     let mut child = tokio::process::Command::new("git")
         .args(args)
@@ -109,46 +114,49 @@ async fn run_git(args: &[&str], cwd: &Path, timeout_ms: u64) -> Result<Vec<u8>, 
         .map_err(|error| SnapshotError::Git {
             detail: format!("failed to spawn git: {error}"),
         })?;
-    let stdout = read_pipe_capped(child.stdout.take(), MAX_STATUS_OUTPUT_BYTES);
-    let stderr = read_pipe_capped(child.stderr.take(), MAX_STDERR_BYTES);
-    let wait = async {
-        child.wait().await.map_err(|error| SnapshotError::Git {
-            detail: format!("failed to reap git: {error}"),
-        })
-    };
-    tokio::select! {
-        status = wait => {
-            let status = status?;
-            let (stdout, stdout_truncated) = stdout.await;
-            let (stderr, stderr_truncated) = stderr.await;
-            if !status.success() {
-                let mut detail = String::from_utf8_lossy(&stderr).trim().to_string();
-                if detail.is_empty() {
-                    detail = format!("git exited with status {status}");
-                }
-                if detail.contains("not a git repository")
-                    || detail.contains("must be run in a work tree")
-                {
-                    return Err(SnapshotError::NotAWorktree {
-                        path: cwd.to_path_buf(),
-                        detail,
-                    });
-                }
-                return Err(SnapshotError::Git { detail });
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let drain_and_wait = async {
+        let wait = async {
+            child.wait().await.map_err(|error| SnapshotError::Git {
+                detail: format!("failed to reap git: {error}"),
+            })
+        };
+        let stdout = read_pipe_capped(stdout_pipe, MAX_STATUS_OUTPUT_BYTES);
+        let stderr = read_pipe_capped(stderr_pipe, MAX_STDERR_BYTES);
+        let (status, (stdout, stdout_truncated), (stderr, stderr_truncated)) =
+            tokio::join!(wait, stdout, stderr);
+        let status = status?;
+        if !status.success() {
+            let mut detail = String::from_utf8_lossy(&stderr).trim().to_string();
+            if detail.is_empty() {
+                detail = format!("git exited with status {status}");
             }
-            if stdout_truncated || stderr_truncated {
-                return Err(SnapshotError::Git {
-                    detail: format!("git {} output exceeded its cap", args.join(" ")),
+            if detail.contains("not a git repository")
+                || detail.contains("must be run in a work tree")
+            {
+                return Err(SnapshotError::NotAWorktree {
+                    path: cwd.to_path_buf(),
+                    detail,
                 });
             }
-            Ok(stdout)
+            return Err(SnapshotError::Git { detail });
         }
-        () = tokio::time::sleep(tokio::time::Duration::from_millis(timeout_ms.max(1))) => {
-            Err(SnapshotError::Git {
-                detail: format!("git {} timed out after {timeout_ms}ms", args.join(" ")),
-            })
+        if stdout_truncated || stderr_truncated {
+            return Err(SnapshotError::Git {
+                detail: format!("git {} output exceeded its cap", args.join(" ")),
+            });
         }
-    }
+        Ok(stdout)
+    };
+    tokio::time::timeout(
+        tokio::time::Duration::from_millis(timeout_ms.max(1)),
+        drain_and_wait,
+    )
+    .await
+    .map_err(|_| SnapshotError::Git {
+        detail: format!("git {} timed out after {timeout_ms}ms", args.join(" ")),
+    })?
 }
 
 /// Read one output pipe to EOF, keeping at most `cap` bytes; the remainder
@@ -181,6 +189,70 @@ async fn read_pipe_capped<R: tokio::io::AsyncRead + Unpin>(
         }
     }
     (kept, truncated)
+}
+
+/// One entry of HEAD's tree, from `git ls-tree -r`: a path with its mode.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HeadTreeEntry {
+    pub(crate) path: String,
+    /// The git mode string (`100644`, `100755`, `120000`, `160000`).
+    pub(crate) mode: String,
+    /// A submodule gitlink rather than a file.
+    pub(crate) gitlink: bool,
+    /// The object id HEAD records for the path (a blob id, or the
+    /// gitlink commit id); the baseline verifies captured bytes against
+    /// it, `git hash-object` equivalent.
+    pub(crate) oid: String,
+}
+
+/// Read every path in HEAD's tree. The baseline stages these contents
+/// from the (unmodified) worktree, so this is enumeration only - no
+/// history, no object payloads.
+pub(crate) async fn read_head_tree(
+    root: &Path,
+    timeout_ms: u64,
+) -> Result<Vec<HeadTreeEntry>, SnapshotError> {
+    let output = run_git(&["ls-tree", "-r", "-z", "HEAD"], root, timeout_ms).await?;
+    parse_head_tree(&output)
+}
+
+/// Parse NUL-separated `git ls-tree -r -z` records:
+/// `<mode> <type> <object>\t<path>`.
+fn parse_head_tree(output: &[u8]) -> Result<Vec<HeadTreeEntry>, SnapshotError> {
+    let text = std::str::from_utf8(output).map_err(|_| SnapshotError::MalformedStatus {
+        detail: "ls-tree output is not UTF-8".to_string(),
+    })?;
+    let mut entries = Vec::new();
+    for record in text.split('\0') {
+        if record.is_empty() {
+            continue;
+        }
+        let Some((meta, path)) = record.split_once('\t') else {
+            return Err(SnapshotError::MalformedStatus {
+                detail: format!("unrecognized ls-tree record {record:?}"),
+            });
+        };
+        let mut fields = meta.split(' ');
+        let (Some(mode), Some(kind), Some(oid)) = (fields.next(), fields.next(), fields.next())
+        else {
+            return Err(SnapshotError::MalformedStatus {
+                detail: format!("malformed ls-tree metadata {meta:?}"),
+            });
+        };
+        if path.is_empty() {
+            return Err(SnapshotError::MalformedStatus {
+                detail: format!("empty ls-tree path for {meta:?}"),
+            });
+        }
+        entries.push(HeadTreeEntry {
+            path: path.to_string(),
+            mode: mode.to_string(),
+            gitlink: kind == "commit",
+            oid: oid.to_string(),
+        });
+    }
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(entries)
 }
 
 /// Parse NUL-separated `git status --porcelain=v2 --branch` output into a

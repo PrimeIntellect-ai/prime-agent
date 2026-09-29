@@ -9,8 +9,8 @@ use std::path::Path;
 use sha2::{Digest, Sha256};
 
 use super::manifest::{
-    is_safe_relative_path, symlink_target_stays_inside, CapturedEntry, SnapshotManifest, BLOBS_DIR,
-    MANIFEST_FILE, MANIFEST_VERSION,
+    is_safe_relative_path, symlink_target_stays_inside, Baseline, CapturedEntry, ExcludedEntry,
+    SnapshotManifest, BLOBS_DIR, MANIFEST_FILE, MANIFEST_VERSION,
 };
 use super::SnapshotError;
 
@@ -20,8 +20,9 @@ const COMMIT_HEX_LEN: usize = 40;
 /// The length of a SHA-256 digest.
 const DIGEST_HEX_LEN: usize = 64;
 
-/// Verify a staged snapshot: parse the manifest, re-hash every blob, and
-/// reject unreferenced or missing blobs. Returns the verified manifest.
+/// Verify a staged snapshot: parse the manifest, re-hash every blob
+/// (delta and baseline alike), and reject unreferenced or missing blobs.
+/// Returns the verified manifest.
 ///
 /// # Errors
 /// Returns [`SnapshotError::Manifest`] when the manifest is missing,
@@ -32,6 +33,7 @@ pub fn verify_workspace_snapshot(staging_dir: &Path) -> Result<SnapshotManifest,
     let manifest_path = staging_dir.join(MANIFEST_FILE);
     let manifest = read_manifest(&manifest_path)?;
     verify_structure(staging_dir, &manifest)?;
+    verify_baseline_invariant(staging_dir, &manifest)?;
     verify_blobs(staging_dir, &manifest)?;
     Ok(manifest)
 }
@@ -53,8 +55,9 @@ fn read_manifest(path: &Path) -> Result<SnapshotManifest, SnapshotError> {
     Ok(manifest)
 }
 
-/// Structural checks: safe and strictly path-sorted (hence duplicate-free)
-/// entry lists, well-formed digests, and in-root symlink targets.
+/// Structural checks: safe and strictly path-sorted (hence
+/// duplicate-free) entry lists, well-formed digests, and in-root symlink
+/// targets - for the delta lists and for a HEAD-tree baseline alike.
 fn verify_structure(staging_dir: &Path, manifest: &SnapshotManifest) -> Result<(), SnapshotError> {
     let reject = |detail: String| SnapshotError::Verification {
         staging_dir: staging_dir.to_path_buf(),
@@ -65,15 +68,33 @@ fn verify_structure(staging_dir: &Path, manifest: &SnapshotManifest) -> Result<(
             return Err(reject(format!("malformed head commit {head:?}")));
         }
     }
+    verify_captured_list(staging_dir, &manifest.captured, "captured")?;
+    verify_excluded_list(staging_dir, &manifest.excluded, "excluded")?;
+    if let Some(Baseline::HeadTree { entries, excluded }) = &manifest.baseline {
+        verify_captured_list(staging_dir, entries, "baseline")?;
+        verify_excluded_list(staging_dir, excluded, "baseline excluded")?;
+    }
+    Ok(())
+}
+
+fn verify_captured_list(
+    staging_dir: &Path,
+    entries: &[CapturedEntry],
+    list: &str,
+) -> Result<(), SnapshotError> {
+    let reject = |detail: String| SnapshotError::Verification {
+        staging_dir: staging_dir.to_path_buf(),
+        detail,
+    };
     let mut previous: Option<&str> = None;
-    for entry in &manifest.captured {
+    for entry in entries {
         let path = entry.path();
         if !is_safe_relative_path(path) {
-            return Err(reject(format!("unsafe captured path {path:?}")));
+            return Err(reject(format!("unsafe {list} path {path:?}")));
         }
         if previous.is_some_and(|prior| prior >= path) {
             return Err(reject(format!(
-                "captured entries out of order or duplicated at {path:?}"
+                "{list} entries out of order or duplicated at {path:?}"
             )));
         }
         previous = Some(path);
@@ -85,20 +106,34 @@ fn verify_structure(staging_dir: &Path, manifest: &SnapshotManifest) -> Result<(
             }
             CapturedEntry::Symlink { target, .. } => {
                 if !symlink_target_stays_inside(path, target) {
-                    return Err(reject(format!("symlink at {path:?} escapes the worktree")));
+                    return Err(reject(format!(
+                        "symlink at {path:?} in {list} escapes the worktree"
+                    )));
                 }
             }
             CapturedEntry::Deleted { .. } => {}
         }
     }
+    Ok(())
+}
+
+fn verify_excluded_list(
+    staging_dir: &Path,
+    entries: &[ExcludedEntry],
+    list: &str,
+) -> Result<(), SnapshotError> {
+    let reject = |detail: String| SnapshotError::Verification {
+        staging_dir: staging_dir.to_path_buf(),
+        detail,
+    };
     let mut previous: Option<&str> = None;
-    for entry in &manifest.excluded {
+    for entry in entries {
         if !is_safe_relative_path(&entry.path) {
-            return Err(reject(format!("unsafe excluded path {:?}", entry.path)));
+            return Err(reject(format!("unsafe {list} path {:?}", entry.path)));
         }
         if previous.is_some_and(|prior| prior >= entry.path.as_str()) {
             return Err(reject(format!(
-                "excluded entries out of order or duplicated at {:?}",
+                "{list} entries out of order or duplicated at {:?}",
                 entry.path
             )));
         }
@@ -107,8 +142,32 @@ fn verify_structure(staging_dir: &Path, manifest: &SnapshotManifest) -> Result<(
     Ok(())
 }
 
-/// Content checks: every file entry's blob exists with the recorded size
-/// and hash, and the blob directory holds nothing unreferenced.
+/// Baseline invariant: a manifest with a head commit must state which
+/// baseline it ships - HEAD-tree content or an explicit external
+/// reference - and a manifest without one must not carry a baseline. A
+/// missing or ambiguous baseline is never silent.
+fn verify_baseline_invariant(
+    staging_dir: &Path,
+    manifest: &SnapshotManifest,
+) -> Result<(), SnapshotError> {
+    let reject = |detail: String| SnapshotError::Verification {
+        staging_dir: staging_dir.to_path_buf(),
+        detail,
+    };
+    match (&manifest.head_commit, &manifest.baseline) {
+        // No commits need no baseline; a committed repository states
+        // which baseline it ships either way.
+        (None, None) | (Some(_), Some(Baseline::External | Baseline::HeadTree { .. })) => Ok(()),
+        (None, Some(_)) => Err(reject("baseline present without a head commit".to_string())),
+        (Some(head), None) => Err(reject(format!(
+            "head commit {head} has no baseline in the manifest"
+        ))),
+    }
+}
+
+/// Content checks: every file entry's blob (delta or baseline) exists
+/// with the recorded size and hash, and the blob directory holds nothing
+/// unreferenced.
 fn verify_blobs(staging_dir: &Path, manifest: &SnapshotManifest) -> Result<(), SnapshotError> {
     let reject = |detail: String| SnapshotError::Verification {
         staging_dir: staging_dir.to_path_buf(),
@@ -116,7 +175,16 @@ fn verify_blobs(staging_dir: &Path, manifest: &SnapshotManifest) -> Result<(), S
     };
     let blobs_dir = staging_dir.join(BLOBS_DIR);
     let mut referenced: HashSet<&str> = HashSet::new();
+    let mut file_entries: Vec<(&str, &CapturedEntry)> = Vec::new();
     for entry in &manifest.captured {
+        file_entries.push(("captured", entry));
+    }
+    if let Some(Baseline::HeadTree { entries, .. }) = &manifest.baseline {
+        for entry in entries {
+            file_entries.push(("baseline", entry));
+        }
+    }
+    for (list, entry) in file_entries {
         let CapturedEntry::File {
             path,
             sha256,
@@ -128,14 +196,17 @@ fn verify_blobs(staging_dir: &Path, manifest: &SnapshotManifest) -> Result<(), S
         };
         referenced.insert(sha256.as_str());
         let blob = blobs_dir.join(sha256);
-        let metadata = std::fs::symlink_metadata(&blob)
-            .map_err(|error| reject(format!("missing blob {sha256} for {path:?}: {error}")))?;
+        let metadata = std::fs::symlink_metadata(&blob).map_err(|error| {
+            reject(format!(
+                "missing blob {sha256} for {list} {path:?}: {error}"
+            ))
+        })?;
         if !metadata.is_file() {
             return Err(reject(format!("blob {sha256} is not a regular file")));
         }
         if metadata.len() != *bytes {
             return Err(reject(format!(
-                "blob {sha256} for {path:?} is {} bytes, manifest says {bytes}",
+                "blob {sha256} for {list} {path:?} is {} bytes, manifest says {bytes}",
                 metadata.len()
             )));
         }
@@ -144,7 +215,7 @@ fn verify_blobs(staging_dir: &Path, manifest: &SnapshotManifest) -> Result<(), S
         let digest = format!("{:x}", Sha256::digest(&content));
         if digest != *sha256 {
             return Err(reject(format!(
-                "blob {sha256} for {path:?} hashes to {digest}"
+                "blob {sha256} for {list} {path:?} hashes to {digest}"
             )));
         }
     }
