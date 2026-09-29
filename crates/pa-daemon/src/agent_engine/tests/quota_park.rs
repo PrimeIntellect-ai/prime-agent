@@ -422,7 +422,3 @@ async fn early_resume_clears_the_park_and_cancels_the_wake() {
         "the pending wake cancels on resume"
     );
 }
-
-// --- cold-open-residual oracles: the persisted depth scan and the shared
-// --- window goal seed (P2b/P3/P4). Both differential tests pin the new
-// --- fast paths against the reference readers over fixture classes.

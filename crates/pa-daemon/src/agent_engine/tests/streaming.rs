@@ -191,5 +191,3 @@ fn agent_engine_streams_updates_and_final_message() {
     assert_eq!(message["stopReason"], "stop");
     assert_eq!(events.last(), Some(&EngineEvent::Done(Ok(()))));
 }
-
-// --- TS #2375: the engine-side quota park ---

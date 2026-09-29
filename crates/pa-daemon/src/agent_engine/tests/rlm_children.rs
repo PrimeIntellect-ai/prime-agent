@@ -293,10 +293,3 @@ fn release_settled_child_kernel_defers_to_scheduled_jobs_and_fires_the_release_p
         ));
     assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
-
-// ---------------------------------------------------------------------------
-// saved_session_context differential oracle.
-//
-// The reader must return the same (provider, model) + thinking level as
-// the full-parse reference below, fixture class by fixture class.
-// ---------------------------------------------------------------------------
