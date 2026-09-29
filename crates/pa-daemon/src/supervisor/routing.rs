@@ -1057,9 +1057,9 @@ impl Supervisor {
         // never re-passivates).
         let (depth, child_id) = {
             let roster = self.roster.lock().unwrap();
-            roster.by_active_session_id(selector).map_or(
-                (0, String::new()),
-                |row| {
+            roster
+                .by_active_session_id(selector)
+                .map_or((0, String::new()), |row| {
                     (
                         row.summary
                             .get("rlmDepth")
@@ -1071,8 +1071,7 @@ impl Supervisor {
                             .unwrap_or_default()
                             .to_string(),
                     )
-                },
-            )
+                })
         };
         let cwd = crate::session_store::read_session_info(std::path::Path::new(&session_file))
             .map_or_else(|| "/".to_string(), |info| info.cwd);
