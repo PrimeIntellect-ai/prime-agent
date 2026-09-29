@@ -37,7 +37,7 @@
 	"types": "./dist/index.d.ts",
 	"dependencies": {
 		"get-east-asian-width": "^1.6.0",
-		"marked": "^18.0.7"
+		"marked": "^18.0.13"
 	},
 	"optionalDependencies": {
 		"koffi": "^2.9.0"
