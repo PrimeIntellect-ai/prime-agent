@@ -1166,6 +1166,61 @@ describe("agents view state", () => {
 		});
 	});
 
+	test("keeps a local saved session off a remote row that publishes the same ids", () => {
+		const sharedId = "01a0cba2-0000-7000-8000-abcdef123456";
+		const remote = makeSummary({
+			id: sharedId,
+			activeSessionId: sharedId,
+			sessionId: sharedId,
+			sessionName: "copied-worker",
+			remoteHost: "peer.tailnet.ts.net",
+		});
+		const saved = makeSessionInfo({ path: "/tmp/sessions/shared.jsonl", id: sharedId, name: "Local copy" });
+
+		const records = reconcileUnifiedSessions([remote], [saved]);
+		const remoteRecord = records.find((record) => record.daemon?.remoteHost !== undefined);
+		const savedRecord = records.find((record) => record.saved !== undefined);
+		// The remote row must not absorb the local file: remote rows refuse attachment.
+		expect(records).toHaveLength(2);
+		expect(remoteRecord?.saved).toBeUndefined();
+		expect(remoteRecord?.identity).toBe(`remote:peer.tailnet.ts.net:session:${sharedId}`);
+		expect(savedRecord?.daemon).toBeUndefined();
+		expect(summaryForUnifiedRecord(savedRecord!).sessionFile).toBe("/tmp/sessions/shared.jsonl");
+	});
+
+	test("scopes a remote row identity so a hidden local copy never hides it", () => {
+		const sharedId = "01a0cba2-0000-7000-8000-abcdef123456";
+		const local = makeSummary({ id: sharedId, activeSessionId: sharedId, sessionId: sharedId });
+		const remote = makeSummary({
+			id: sharedId,
+			activeSessionId: sharedId,
+			sessionId: sharedId,
+			remoteHost: "peer.tailnet.ts.net",
+		});
+		const hidden = new Set([getAgentsViewSummaryIdentity(local)]);
+
+		expect(getAgentsViewSummaryIdentity(remote)).toBe(`remote:peer.tailnet.ts.net:active:${sharedId}`);
+		expect(shouldShowAgentsViewSession(local, hidden.has(getAgentsViewSummaryIdentity(local)))).toBe(false);
+		expect(shouldShowAgentsViewSession(remote, hidden.has(getAgentsViewSummaryIdentity(remote)))).toBe(true);
+	});
+
+	test("keeps a local heartbeat off a remote row that shares the active id", () => {
+		const sharedId = "01a0cba2-0000-7000-8000-abcdef123456";
+		const local = makeSummary({ id: sharedId, activeSessionId: sharedId, sessionId: sharedId });
+		const remote = makeSummary({
+			id: sharedId,
+			activeSessionId: sharedId,
+			sessionId: sharedId,
+			remoteHost: "peer.tailnet.ts.net",
+		});
+
+		const records = reconcileUnifiedSessions([local, remote], [], [heartbeat("shared-job", undefined, sharedId)]);
+		const localRecord = records.find((record) => record.daemon?.remoteHost === undefined);
+		const remoteRecord = records.find((record) => record.daemon?.remoteHost !== undefined);
+		expect(localRecord?.heartbeat?.activeCount).toBe(1);
+		expect(remoteRecord?.heartbeat).toBeUndefined();
+	});
+
 	test("retains the ancestor chain when search matches only a nested subagent", () => {
 		const summaries = [
 			makeSummary({ id: "root", activeSessionId: "root", sessionId: "root-session", sessionName: "Root" }),
@@ -1557,6 +1612,33 @@ describe("agents view state", () => {
 		test("returns -1 with no stored selection", () => {
 			const rows = buildAgentsViewRows([opened, other]);
 			expect(resolveAgentsViewSelectionIndex(rows, undefined, undefined)).toBe(-1);
+		});
+
+		test("keeps a remote row selected while a local session reuses its ids", () => {
+			const sharedId = "01a0cba2-0000-7000-8000-abcdef123456";
+			const localTwin = makeSummary({ id: "local-active", activeSessionId: sharedId, sessionId: sharedId });
+			// The peer re-attached with a fresh active id, so the stored identity no longer matches.
+			const refreshedPeer = makeSummary({
+				id: "remote-active-2",
+				activeSessionId: "remote-active-2",
+				sessionId: sharedId,
+				remoteHost: "peer.tailnet.ts.net",
+			});
+			const rows = buildAgentsViewRows([localTwin, refreshedPeer]);
+			const selected = makeSummary({
+				id: sharedId,
+				activeSessionId: sharedId,
+				sessionId: sharedId,
+				remoteHost: "peer.tailnet.ts.net",
+			});
+
+			expect(
+				resolveAgentsViewSelectionIndex(
+					rows,
+					`remote:peer.tailnet.ts.net:active:${sharedId}`,
+					getAgentsViewSelectionKey(selected),
+				),
+			).toBe(rows.findIndex((row) => row.summary.activeSessionId === "remote-active-2"));
 		});
 	});
 

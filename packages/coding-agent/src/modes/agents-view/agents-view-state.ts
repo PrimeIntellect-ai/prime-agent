@@ -189,15 +189,25 @@ function fileIdentity(path: string): string {
 	return `file:${canonicalSessionPath(path)}`;
 }
 
+/**
+ * A remote row publishes a peer's own session ids, so every id-derived key
+ * scopes them to their host: a local session with the same ids keeps its own
+ * row, its own heartbeat, and its own manual-inactive state.
+ */
+function identityScope(summary: SessionSummary): string {
+	return summary.remoteHost ? `remote:${summary.remoteHost}:` : "";
+}
+
 function summaryIdentityAliases(summary: SessionSummary): string[] {
+	const scope = identityScope(summary);
 	return [
 		summary.runtimeKind === "subagent" && summary.rlmChildId
 			? `agent:${cachedRosterAgentIdForSummary(summary)}`
 			: undefined,
 		summary.sessionFile ? fileIdentity(summary.sessionFile) : undefined,
-		`session:${summary.sessionId}`,
-		summary.activeSessionId ? `active:${summary.activeSessionId}` : undefined,
-		`active:${summary.id}`,
+		`${scope}session:${summary.sessionId}`,
+		summary.activeSessionId ? `${scope}active:${summary.activeSessionId}` : undefined,
+		`${scope}active:${summary.id}`,
 	].filter((identity): identity is string => identity !== undefined);
 }
 
@@ -217,6 +227,8 @@ function createUnifiedSearchableText(
 		daemon?.cwd,
 		daemon?.sessionFile,
 		daemon?.summary,
+		daemon?.remoteHost,
+		daemon?.remoteModel ? `${daemon.remoteModel.provider}/${daemon.remoteModel.modelId}` : undefined,
 		saved?.id,
 		saved?.name,
 		saved?.firstMessage,
@@ -246,8 +258,10 @@ export function reconcileUnifiedSessions(
 
 	for (const daemon of daemonSummaries) {
 		const aliases = summaryIdentityAliases(daemon);
+		// Heartbeats are local cron jobs owned by bare ids, so a remote row reads its
+		// host-scoped key and never collects a local job that happens to share the id.
 		const heartbeat =
-			heartbeatByActiveId.get(daemon.activeSessionId ?? daemon.id) ??
+			heartbeatByActiveId.get(`${identityScope(daemon)}${daemon.activeSessionId ?? daemon.id}`) ??
 			(daemon.hasActiveHeartbeat ? { activeCount: 1 } : undefined);
 		const record: UnifiedSessionRecord = {
 			daemon:
@@ -764,19 +778,26 @@ export function getAgentsViewSummaryIdentity(summary: SessionSummary): string {
 	if (summary.sessionFile) {
 		return fileIdentity(summary.sessionFile);
 	}
+	const scope = identityScope(summary);
 	if (summary.activeSessionId) {
-		return `active:${summary.activeSessionId}`;
+		return `${scope}active:${summary.activeSessionId}`;
 	}
-	return `session:${summary.sessionId}`;
+	return `${scope}session:${summary.sessionId}`;
 }
 
 export interface AgentsViewSelectionKey {
 	sessionId: string;
 	activeSessionId?: string;
+	/** MagicDNS host of a remote row: the id fallbacks only match inside that host. */
+	remoteHost?: string;
 }
 
 export function getAgentsViewSelectionKey(summary: SessionSummary): AgentsViewSelectionKey {
-	return { sessionId: summary.sessionId, activeSessionId: summary.activeSessionId };
+	return {
+		sessionId: summary.sessionId,
+		activeSessionId: summary.activeSessionId,
+		remoteHost: summary.remoteHost,
+	};
 }
 
 // Matches by identity, then activeSessionId, then sessionId: a row's identity
@@ -792,6 +813,10 @@ export function resolveAgentsViewSelectionIndex(
 	const selectedSyntheticKind = identity?.startsWith("subagents:") ? "subagent-summary" : undefined;
 	const preservesSelectedKind = (row: AgentsViewRow): boolean =>
 		selectedSyntheticKind === undefined || row.kind === selectedSyntheticKind;
+	// Id fallbacks stay host-scoped, like the row identity: a local session that
+	// reuses a remote row's ids must never take that row's selection.
+	const selectionScope = key?.remoteHost ? `remote:${key.remoteHost}:` : "";
+	const preservesSelectedHost = (row: AgentsViewRow): boolean => identityScope(row.summary) === selectionScope;
 
 	if (identity !== undefined) {
 		const index = findSelectable((row) => row.identity === identity);
@@ -804,7 +829,10 @@ export function resolveAgentsViewSelectionIndex(
 	if (key?.activeSessionId !== undefined) {
 		const activeSessionId = key.activeSessionId;
 		const index = findSelectable(
-			(row) => preservesSelectedKind(row) && (row.summary.activeSessionId ?? row.summary.id) === activeSessionId,
+			(row) =>
+				preservesSelectedKind(row) &&
+				preservesSelectedHost(row) &&
+				(row.summary.activeSessionId ?? row.summary.id) === activeSessionId,
 		);
 		if (index >= 0) {
 			return index;
@@ -818,7 +846,9 @@ export function resolveAgentsViewSelectionIndex(
 	}
 	if (key?.sessionId !== undefined) {
 		const sessionId = key.sessionId;
-		return findSelectable((row) => preservesSelectedKind(row) && row.summary.sessionId === sessionId);
+		return findSelectable(
+			(row) => preservesSelectedKind(row) && preservesSelectedHost(row) && row.summary.sessionId === sessionId,
+		);
 	}
 	return -1;
 }
@@ -1140,9 +1170,10 @@ function buildRowKeyMap(rows: readonly MutableAgentsViewRow[]): Map<string, Muta
 }
 
 function getSummaryKeys(summary: SessionSummary): string[] {
+	const scope = identityScope(summary);
 	return [
-		`active:${summary.activeSessionId ?? summary.id}`,
-		`session:${summary.sessionId}`,
+		`${scope}active:${summary.activeSessionId ?? summary.id}`,
+		`${scope}session:${summary.sessionId}`,
 		summary.sessionFile ? fileIdentity(summary.sessionFile) : undefined,
 	].filter((key): key is string => key !== undefined);
 }
@@ -1210,6 +1241,7 @@ export function getAgentsViewSessionTitle(summary: SessionSummary): string {
 function getSessionSubtitle(summary: SessionSummary): string {
 	const parts = [
 		summary.model ? `${summary.model.provider}/${summary.model.id}` : undefined,
+		summary.remoteHost ? `on ${summary.remoteHost}` : undefined,
 		summary.cwd,
 		summary.activeSessionId ?? summary.id,
 	].filter((part): part is string => part !== undefined && part.length > 0);
@@ -1219,6 +1251,11 @@ function getSessionSubtitle(summary: SessionSummary): string {
 export function getSessionStatusLabel(summary: SessionSummary, heartbeat?: UnifiedSessionHeartbeat): string {
 	if (summary.statusLabel !== undefined) {
 		return summary.statusLabel;
+	}
+	// A remote mesh row the last scan could not reach reads "offline"; local
+	// runtime flags below would otherwise misreport its last known activity.
+	if (summary.remoteOffline === true) {
+		return "offline";
 	}
 	if (summary.lastHeardFromAt !== undefined) {
 		return `last heard ${formatAgeLabel(summary.lastHeardFromAt)}`;

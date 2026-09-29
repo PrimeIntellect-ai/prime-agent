@@ -269,6 +269,11 @@ describe("agent session bus", () => {
 		])("allows %s", (_name, request) => {
 			expect(() => assertAgentSessionNameAvailable(catalog, request)).not.toThrow();
 		});
+
+		it("ignores a tailnet peer name instead of gating a local one", () => {
+			const peer = { id: "remote", name: "peer", depth: 0, status: "idle" as const, remoteHost: "milk.ts.net" };
+			expect(() => assertAgentSessionNameAvailable([...catalog, peer], { name: "peer", depth: 0 })).not.toThrow();
+		});
 	});
 
 	it("builds a sorted nuclear-family roster with inactive members", () => {

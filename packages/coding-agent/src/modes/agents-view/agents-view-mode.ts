@@ -1660,6 +1660,12 @@ export class AgentsViewMode implements Component, Focusable {
 			this.openSelectedSubagent(row);
 			return;
 		}
+		if (row.summary.remoteHost !== undefined) {
+			this.setStatusMessage(
+				`Remote agent runs on ${row.summary.remoteHost}; attaching across the mesh is not available`,
+			);
+			return;
+		}
 		if (!row.summary.activeSessionId && !row.summary.sessionFile) {
 			this.setStatusMessage("Cannot open agent without an active runtime or saved session file");
 			return;
@@ -1799,6 +1805,11 @@ export class AgentsViewMode implements Component, Focusable {
 			return;
 		}
 		const summary = selectedRow.summary;
+		// Replies steer or resume through the local daemon; remote mesh rows have
+		// no local runtime or file, so the composer cannot deliver for them.
+		if (summary.remoteHost !== undefined) {
+			return;
+		}
 		// Live agents reply directly; saved sessions are resumed when the reply is
 		// sent. Rows with neither runtime nor file have nothing to receive a prompt.
 		if (!summary.activeSessionId && !summary.sessionFile) {
@@ -1873,6 +1884,10 @@ export class AgentsViewMode implements Component, Focusable {
 		}
 		const activeSessionId = row.summary.activeSessionId;
 		const sessionFile = row.summary.sessionFile;
+		if (row.summary.remoteHost !== undefined) {
+			this.setStatusMessage(`Remote agent runs on ${row.summary.remoteHost}; rename it on that machine`);
+			return;
+		}
 		if (!activeSessionId && !sessionFile) {
 			this.setStatusMessage("This session cannot be renamed");
 			return;
@@ -2138,6 +2153,10 @@ export class AgentsViewMode implements Component, Focusable {
 			return;
 		}
 		if (row.kind !== "agent") {
+			return;
+		}
+		if (row.summary.remoteHost !== undefined) {
+			this.setStatusMessage(`Remote agent runs on ${row.summary.remoteHost}; stop or delete it on that machine`);
 			return;
 		}
 		this.pendingKillSubagent = undefined;
@@ -2851,7 +2870,10 @@ export class AgentsViewMode implements Component, Focusable {
 				: row.summary.statusLabel !== undefined
 					? row.statusLabel
 					: undefined;
-		const activity = [status, row.summary.summary].filter(Boolean).join(" · ");
+		// Remote mesh rows lead with a dim "on <tailnet-host>" label in the activity
+		// cell: the 28-char name cell cannot hold a MagicDNS hostname, and the label
+		// stays visible when the bounded cell truncates a long summary.
+		const activity = [status, remoteHostLabel(row), row.summary.summary].filter(Boolean).join(" · ");
 		const cells = [
 			formatTableCell(title, layout.nameWidth),
 			formatTableCell(theme.fg("muted", formatSessionModel(row)), layout.modelWidth),
@@ -3108,6 +3130,11 @@ function padCellStart(value: string, width: number): string {
 
 // Explicit session names read bold so they stand out from fallback titles
 // (first prompt, cwd, ids); the "(no messages)" placeholder reads italic.
+function remoteHostLabel(row: AgentsViewRow): string | undefined {
+	// Reads "on milk.tailnet.ts.net"; the whole activity cell renders dim.
+	return row.summary.remoteHost !== undefined ? `on ${row.summary.remoteHost}` : undefined;
+}
+
 function styleRowTitle(row: AgentsViewRow): string {
 	if (row.summary.sessionName?.replace(/\s+/g, " ").trim()) {
 		return theme.bold(row.title);
@@ -3128,7 +3155,9 @@ function formatTableCell(value: string, width: number): string {
 // active — "off" reads as noise, so it and absent levels render bare (saved
 // rows carry no level).
 function formatSessionModel(row: AgentsViewRow): string {
-	const id = row.summary.model?.id ?? row.record?.saved?.model?.modelId;
+	// Remote mesh rows carry a display-only model identity (their daemon's
+	// full Model object never crosses the wire); saved rows carry a modelId.
+	const id = row.summary.model?.id ?? row.summary.remoteModel?.modelId ?? row.record?.saved?.model?.modelId;
 	if (!id) return "-";
 	const bare = id.slice(id.lastIndexOf("/") + 1) || id;
 	const level = row.summary.thinkingLevel;

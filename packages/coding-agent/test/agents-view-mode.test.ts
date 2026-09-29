@@ -1730,3 +1730,84 @@ describe("waitThroughDaemonUpdateRestart", () => {
 		}
 	});
 });
+
+describe("agents view remote mesh rows", () => {
+	const remoteSummary = (overrides: Partial<SessionSummary> = {}): SessionSummary =>
+		summary({
+			id: "remote-active",
+			activeSessionId: "remote-active",
+			sessionId: "remote-session",
+			sessionName: "mesh-agent",
+			remoteHost: "milk.tailnet.ts.net",
+			...overrides,
+		});
+
+	function renderSelf(rows: AgentsViewRow[]): Record<string, unknown> {
+		const self: Record<string, unknown> = {
+			rows,
+			selectedIndex: 0,
+			workingIconFrame: 0,
+			isPendingDeleteRow: () => false,
+			isPendingKillSubagentRow: () => false,
+			setStatusMessage: vi.fn(),
+			setReplyTarget: vi.fn(),
+			finish: vi.fn(),
+		};
+		self.getRowIcon = (section: AgentsViewRow["section"]) => invoke("getRowIcon", self, section);
+		self.formatRowIcon = (section: AgentsViewRow["section"], icon: string) =>
+			invoke("formatRowIcon", self, section, icon);
+		return self;
+	}
+
+	it("renders remote rows with host labels, offline state, and guarded local actions", () => {
+		initTheme("dark");
+		try {
+			const reachable = buildAgentsViewRows([
+				remoteSummary({ activity: "working", isStreaming: false, rosterStatus: "running" }),
+			]);
+			expect(reachable[0]).toMatchObject({ section: "running", statusLabel: "working" });
+			const self = renderSelf(reachable);
+			const line = stripAnsi(invoke("renderRow", self, reachable[0], 160) as string);
+			expect(line).toContain("on milk.tailnet.ts.net");
+
+			const offline = buildAgentsViewRows([
+				remoteSummary({
+					remoteOffline: true,
+					rosterStatus: "inactive",
+					statusLabel: "offline",
+					activity: "working",
+					isStreaming: false,
+				}),
+			]);
+			expect(offline[0]!.section).toBe("inactive");
+			expect(stripAnsi(invoke("renderRow", self, offline[0], 160) as string)).toContain(
+				"offline · on milk.tailnet.ts.net",
+			);
+
+			// A long summary must not truncate the leading host label away.
+			const long = buildAgentsViewRows([
+				remoteSummary({ summary: "investigating the regression suite across three repositories".repeat(2) }),
+			]);
+			self.rows = long;
+			const longLine = stripAnsi(invoke("renderRow", self, long[0], 120) as string);
+			expect(longLine).toContain("on milk.tailnet.ts.net");
+			expect(longLine.indexOf("on milk.tailnet.ts.net")).toBeLessThan(longLine.indexOf("investigating"));
+
+			// Local actions stay off remote rows: attach, reply, rename, delete.
+			self.rows = offline;
+			invoke("openSelected", self);
+			invoke("toggleReplyTarget", self);
+			invoke("enterRenameMode", self);
+			invoke("handleDeleteSelected", self);
+			expect(self.setReplyTarget).not.toHaveBeenCalled();
+			expect(self.setStatusMessage).toHaveBeenCalledWith(
+				"Remote agent runs on milk.tailnet.ts.net; attaching across the mesh is not available",
+			);
+			expect(self.setStatusMessage).toHaveBeenCalledWith(
+				"Remote agent runs on milk.tailnet.ts.net; stop or delete it on that machine",
+			);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+});
