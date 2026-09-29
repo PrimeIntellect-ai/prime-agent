@@ -545,12 +545,35 @@ mod h2_wire_tests {
         let addr_http1 = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buf = vec![0u8; 24];
-            socket.read_exact(&mut buf).await.unwrap();
+            // Drain the client's frames (settings, request headers, the
+            // end-of-stream data) before answering: a close over unread
+            // data turns into a reset, and Windows discards the queued
+            // answer bytes on the reset - the login would then see the
+            // canceled-stream text instead of the protocol error.
+            let mut preface = vec![0u8; PREFACE.len()];
+            socket.read_exact(&mut preface).await.unwrap();
+            loop {
+                let mut header = [0u8; 9];
+                socket.read_exact(&mut header).await.unwrap();
+                let length = (u32::from_be_bytes([0, header[0], header[1], header[2]])) as usize;
+                let flags = header[4];
+                let mut payload = vec![0u8; length];
+                if length > 0 {
+                    socket.read_exact(&mut payload).await.unwrap();
+                }
+                if flags & 0x1 != 0 {
+                    break;
+                }
+            }
             socket
                 .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\n\r\n{}")
                 .await
                 .unwrap();
+            socket.shutdown().await.ok();
+            socket.shutdown().await.ok();
+            let _ = socket.flush().await;
+            // hold the socket so the answer reaches the client before the drop
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         });
         let url = format!("http://{addr_http1}/model/m/converse-stream");
         let error = match send_h2(options(url.clone())).await {
