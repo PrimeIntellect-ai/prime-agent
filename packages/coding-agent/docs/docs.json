@@ -24,6 +24,10 @@
           "path": "rlm.md"
         },
         {
+          "title": "System Router (System 1 / System 2)",
+          "path": "system-router.md"
+        },
+        {
           "title": "Long-Running and Background Agents",
           "path": "long-running-agents.md"
         },

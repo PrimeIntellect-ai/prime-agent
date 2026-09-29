@@ -349,6 +349,7 @@ import {
 } from "./slash-commands.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
+import { parseSystemRouterRunSpec, runRouterSegment } from "./system-router/index.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
 import { acpMcpToolNames, createAcpMcpToolDefinitions } from "./tools/acp-mcp.js";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
@@ -4106,6 +4107,48 @@ export class AgentSession {
 			}
 			default:
 				throw new Error(`unknown refine request type "${type}"`);
+		}
+	}
+
+	/**
+	 * Handle a system_router.* request from the bundled system-router skill.
+	 *
+	 * The session model (System 2) declares the environment (stdio adapter
+	 * command + init payload), the finite action space (its own or the
+	 * adapter's defaults), and the System 1 action model; the segment runner
+	 * then runs observe -> decide (ONE call per step, thinking off, single
+	 * choice from the declared action space + confidence) -> gate -> execute
+	 * -> record until a terminal state, and returns the complete trace for
+	 * System 2 to review and steer.
+	 */
+	async handleSystemRouterHostRequest(
+		type: string,
+		payload: Record<string, unknown> = {},
+	): Promise<Record<string, unknown>> {
+		switch (type) {
+			case "system_router.run": {
+				const spec = parseSystemRouterRunSpec(payload);
+				const { model } = await this._resolveRlmSubagentModel(
+					spec.model ?? this.settingsManager.getSubagentDefaultModel(),
+					"system-router",
+				);
+				const auth = await this._getRequiredRequestAuth(model);
+				// Disposal aborts the segment instead of leaving the adapter
+				// subprocess and the action loop running until the segment budget
+				// expires past the host-request drain timeout.
+				const disposeSignal = this._sessionActionCommitDisposeAbortController.signal;
+				const result = await runRouterSegment(spec, {
+					model: auth.requestModel,
+					apiKey: auth.apiKey,
+					headers: auth.headers,
+					sessionId: this.sessionId,
+					policy: providerRetryPolicy(this.settingsManager),
+					signal: disposeSignal,
+				});
+				return result as unknown as Record<string, unknown>;
+			}
+			default:
+				throw new Error(`unknown system_router request type "${type}"`);
 		}
 	}
 
@@ -10986,6 +11029,7 @@ export class AgentSession {
 				provider: this.model?.provider ?? null,
 				input: this.model?.input ?? [],
 			}),
+			"system_router.run": async (payload) => this.handleSystemRouterHostRequest("system_router.run", payload),
 		};
 		if (this._includeGoals) {
 			for (const type of ["goal.get", "goal.create", "goal.complete"]) {

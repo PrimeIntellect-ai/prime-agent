@@ -1,0 +1,17 @@
+# Kernel-side package for the bundled system-router skill. It only talks to the host
+# through rlm.host_request; prime-agent-runtime is always installed in the kernel
+# venv before skills, so it is intentionally not declared as a dependency (it is
+# not published on PyPI).
+[project]
+name = "system-router"
+version = "0.1.0"
+description = "Prime Agent system-router skill: System 1 action loops over the host bridge"
+requires-python = ">=3.10"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/system_router"]
