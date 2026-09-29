@@ -4,8 +4,8 @@
 //! most-recent-session lookup.
 
 use super::{
-    fs, list_sessions, normalize_state_status, Cow, Deserialize, HashMap, Path, PathBuf,
-    SessionHeader, Usage, Value,
+    fs, info_sidecar, list_sessions, normalize_state_status, Cow, Deserialize, HashMap, Path,
+    PathBuf, Serialize, SessionHeader, Usage, Value,
 };
 
 /// Port of `readSessionInfo`'s fold (single pass, no resume cache): the durable
@@ -81,7 +81,7 @@ pub(super) fn append_capped_search_text(current: &mut String, text: &str, used: 
     count + taken
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct SessionInfoGeneration {
     pub(super) len: u64,
     pub(super) dev: u64,
@@ -230,8 +230,10 @@ pub(super) const SESSION_SCAN_RESUME_TAIL_BYTES: usize = 16;
 /// TS `SessionScanAccumulator`: the per-file fold state a resume continues
 /// from. The finished [`SessionInfo`] is derived from this; the cached state
 /// carries the accumulator so a grown file folds ONLY its appended entries.
-/// Clone is the snapshot fold's copy (TS `snapshotSessionInfo`).
-#[derive(Clone, Default)]
+/// Clone is the snapshot fold's copy (TS `snapshotSessionInfo`). Serialize is
+/// the persisted sidecar's form ([`super::info_sidecar`]): a released lease
+/// holder writes it, a cold process loads it and folds only the tail.
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub(super) struct SessionScanAccumulator {
     header: Option<SessionHeader>,
     name: Option<String>,
@@ -252,7 +254,10 @@ pub(super) struct SessionScanAccumulator {
 
 /// One cached scan state (TS `SessionScanState`): the generation the state
 /// was certified at, the fold accumulator, the consumed-prefix cursor, the
-/// resume tail, and the derived info.
+/// resume tail, and the derived info. Serialize is the persisted sidecar's
+/// form: `info` and the retained-usage accounting are skipped (the load
+/// rebuilds the row through the fold and `store_state` recounts).
+#[derive(Serialize, Deserialize)]
 pub(super) struct SessionScanState {
     generation: SessionInfoGeneration,
     pub(super) acc: SessionScanAccumulator,
@@ -260,9 +265,11 @@ pub(super) struct SessionScanState {
     offset: u64,
     /// The trailing window of the consumed prefix (TS `advanceScanTail`).
     pub(super) tail: [u8; SESSION_SCAN_RESUME_TAIL_BYTES],
+    #[serde(skip)]
     info: Option<SessionInfo>,
     /// Usage entries counted against the retained bound at the last store
     /// (TS `accountedUsageEntries`).
+    #[serde(skip)]
     accounted_usage_entries: usize,
 }
 
@@ -452,7 +459,7 @@ pub(crate) fn read_session_info_from(file: &mut fs::File, path: &Path) -> Option
     let generation = SessionInfoGeneration::from_metadata(&file.metadata().ok()?);
 
     // The unchanged case answers from the cache; the grown case resumes.
-    let mut state = {
+    let state = {
         let mut cache = session_info_cache().lock().ok()?;
         match cache.states.get(path) {
             Some(cached) if cached.generation == generation => {
@@ -465,12 +472,37 @@ pub(crate) fn read_session_info_from(file: &mut fs::File, path: &Path) -> Option
                     && generation.len > cached.generation.len =>
             {
                 if cached.prefix_intact(file) {
-                    cached.clone_for_resume()
+                    Some(cached.clone_for_resume())
                 } else {
-                    SessionScanState::fresh(generation)
+                    Some(SessionScanState::fresh(generation))
                 }
             }
-            _ => SessionScanState::fresh(generation),
+            // No in-process state serves: the persisted sidecar below
+            // decides, outside the lock (its load is file IO).
+            _ => None,
+        }
+    };
+    let mut state = match state {
+        Some(state) => state,
+        None => {
+            // A previous lease holder's certified fold state, loaded from
+            // the sidecar. It passes the same validation ladder a cached
+            // state passes, minus the derived-info shortcut (a loaded
+            // state carries none): an equal generation folds zero bytes
+            // and rebuilds the row, a grown same-inode file with an
+            // intact prefix folds its appended entries, and anything
+            // else is the cold scan the sidecar-less path always ran.
+            match info_sidecar::load(path) {
+                Some(cached) if cached.generation == generation => cached,
+                Some(cached)
+                    if cached.same_file_identity(&generation)
+                        && generation.len > cached.generation.len
+                        && cached.prefix_intact(file) =>
+                {
+                    cached
+                }
+                _ => SessionScanState::fresh(generation),
+            }
         }
     };
     // Position the shared cursor at the resume point. A fresh state rewinds

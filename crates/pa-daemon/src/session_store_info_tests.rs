@@ -475,6 +475,85 @@ fn a_failed_prefix_check_rescans_from_byte_zero() {
     assert_fold_matches(&path);
 }
 
+/// The persisted scan-state sidecar: a state written at lease release and
+/// loaded on a process-cache miss resumes the fold of the appended tail -
+/// the appended attribution targets a PREFIX assistant id, so the resumed
+/// fold must find it in the persisted per-id map - and the whole row
+/// equals the full scan's, float sums included. A replacement file (a new
+/// inode) rejects the stale sidecar and rescans whole.
+#[test]
+fn a_persisted_scan_state_resumes_like_the_full_fold() {
+    let dir = test_dir();
+    let path = dir.join("sidecar.jsonl");
+    let usage = |cost: f64| {
+        json!({
+            "input": 100, "output": 10, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 110,
+            "cost": { "input": 0.0, "output": cost, "cacheRead": 0.0, "cacheWrite": 0.0, "total": cost },
+        })
+    };
+    let assistant = |id: &str, cost: f64| {
+        json!({
+            "type": "message", "id": id, "timestamp": "2026-09-23T00:00:00.000Z",
+            "message": {
+                "role": "assistant", "content": format!("answer {id}"),
+                "timestamp": 1_790_110_000_000_u64, "usage": usage(cost),
+            },
+        })
+    };
+    let attribution = |id: &str, target: &str, child: f64, aggregate: f64| {
+        json!({
+            "type": "child_usage_attributed", "id": id, "timestamp": "2026-09-23T00:00:00.000Z",
+            "targetId": target, "childUsage": usage(child), "aggregateUsage": usage(aggregate),
+        })
+    };
+    append_rows(
+        &path,
+        &[
+            json!({"type":"session","id":"sc","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"}),
+            assistant("a1", 0.1),
+            assistant("a2", 0.2),
+            assistant("a3", 0.3),
+            json!({"type":"compaction","id":"c1","timestamp":"2026-09-23T00:00:00.000Z","summary":"s","usage":usage(0.25)}),
+            attribution("x1", "a2", 0.05, 0.45),
+        ],
+    );
+    assert_fold_matches(&path);
+    // The lease-release write persists the certified state beside the
+    // file; the in-process copy is gone, so the next read can only be
+    // served by the sidecar.
+    super::persist_info_sidecar(&path);
+    assert!(
+        path.with_extension("info-cache.json").is_file(),
+        "the release write persists the state"
+    );
+    super::session_info_cache()
+        .lock()
+        .unwrap()
+        .drop_state(&path);
+    append_rows(
+        &path,
+        &[attribution("x2", "a2", 0.02, 0.52), assistant("a4", 0.4)],
+    );
+    assert_fold_matches(&path);
+    // A replacement file (a new inode): the stale sidecar fails the
+    // same-file ladder and the scan runs cold from byte zero.
+    let replacement = dir.join("replacement.jsonl");
+    append_rows(
+        &replacement,
+        &[
+            json!({"type":"session","id":"sc2","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"}),
+            assistant("b1", 0.5),
+        ],
+    );
+    fs::rename(&replacement, &path).unwrap();
+    super::session_info_cache()
+        .lock()
+        .unwrap()
+        .drop_state(&path);
+    assert_fold_matches(&path);
+    fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn a_valid_unterminated_final_line_folds_into_the_snapshot() {
     let dir = test_dir();

@@ -34,7 +34,13 @@ impl Worker {
         }
         let session_path = match payload.get("sessionPath").and_then(Value::as_str) {
             Some(path) => match paths::expand_tilde(path) {
-                Ok(expanded) => Some(expanded),
+                // The runtime lease keys the session file by its canonical
+                // path (`canonical_session_path`); the store takes the
+                // same form so the usage-scan cache, the window cache,
+                // and the lease's release-time sidecar writes all key
+                // one path (a symlinked sessionPath would otherwise
+                // cache under a form the lease never sees).
+                Ok(expanded) => Some(crate::lease::canonical_session_path(&expanded)),
                 Err(error) => return response_failure(None, "create", &error.to_string(), None),
             },
             None => None,

@@ -96,6 +96,30 @@ impl AssistantUsageById {
     }
 }
 
+/// The persisted sidecar's per-assistant map: the entries vec in its
+/// insertion order (the fold's float-sum order — the index rebuilds from
+/// it on load, exactly what `set` maintains).
+impl Serialize for AssistantUsageById {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(
+            self.entries
+                .iter()
+                .map(|(id, usage)| (id.as_str(), PersistedUsage::from(*usage))),
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for AssistantUsageById {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let entries = Vec::<(String, PersistedUsage)>::deserialize(deserializer)?;
+        let mut map = AssistantUsageById::default();
+        for (id, usage) in entries {
+            map.set(&id, Usage::from(usage));
+        }
+        Ok(map)
+    }
+}
+
 /// The scan-side wire shape of a usage block. Persisted files carry
 /// partial objects (`{input, output, totalTokens}` without
 /// `cacheRead`/`cacheWrite`/`cost`), and TS `JSON.parse` never rejects
@@ -163,15 +187,100 @@ pub struct SessionUsageTotals {
     pub total: Usage,
 }
 
+/// The persisted form of one usage block (the scan-state sidecar's
+/// encoding): token counts unchanged, the five cost floats as
+/// `to_bits()` integers. The workspace's `serde_json` runs without
+/// `float_roundtrip`, and its decimal parse need not round-trip every
+/// shortest-repr float — a one-ulp drift in a persisted block would make
+/// a resumed fold's sums differ from a full scan's. The window sidecar
+/// encodes its floats the same way (pa-core `window_cache::float_bits`).
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedUsage {
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+    total_tokens: u64,
+    cost_input: u64,
+    cost_output: u64,
+    cost_cache_read: u64,
+    cost_cache_write: u64,
+    cost_total: u64,
+}
+
+impl From<Usage> for PersistedUsage {
+    fn from(usage: Usage) -> Self {
+        Self {
+            input: usage.input,
+            output: usage.output,
+            cache_read: usage.cache_read,
+            cache_write: usage.cache_write,
+            total_tokens: usage.total_tokens,
+            cost_input: usage.cost.input.as_f64().to_bits(),
+            cost_output: usage.cost.output.as_f64().to_bits(),
+            cost_cache_read: usage.cost.cache_read.as_f64().to_bits(),
+            cost_cache_write: usage.cost.cache_write.as_f64().to_bits(),
+            cost_total: usage.cost.total.as_f64().to_bits(),
+        }
+    }
+}
+
+impl From<PersistedUsage> for Usage {
+    fn from(persisted: PersistedUsage) -> Self {
+        Usage {
+            input: persisted.input,
+            output: persisted.output,
+            cache_read: persisted.cache_read,
+            cache_write: persisted.cache_write,
+            total_tokens: persisted.total_tokens,
+            cost: UsageCost {
+                input: JsNumber(f64::from_bits(persisted.cost_input)),
+                output: JsNumber(f64::from_bits(persisted.cost_output)),
+                cache_read: JsNumber(f64::from_bits(persisted.cost_cache_read)),
+                cache_write: JsNumber(f64::from_bits(persisted.cost_cache_write)),
+                total: JsNumber(f64::from_bits(persisted.cost_total)),
+            },
+        }
+    }
+}
+
+/// `#[serde(with)]` for every persisted `Usage` field: the bits encoding
+/// above, behind the plain `Usage` field type.
+mod usage_bits {
+    use super::{PersistedUsage, Usage};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    // serde's `serialize_with` contract pins `&T` - the lint's by-value
+    // form would not be callable as a serde attribute helper.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    pub(super) fn serialize<S: Serializer>(
+        value: &Usage,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        PersistedUsage::from(*value).serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Usage, D::Error> {
+        PersistedUsage::deserialize(deserializer).map(Usage::from)
+    }
+}
+
 /// The streaming whole-file own-usage accumulator: feed one entry at a
 /// time in file order, then read [`summary`](Self::summary). Line order is
 /// the fold's authority — an attribution folds only when its target is
 /// already in the map (the assistant entry precedes its children's settle
-/// in the file).
-#[derive(Default, Clone)]
+/// in the file). Serialize is the persisted sidecar's form: every cost
+/// float rides as `to_bits()` ([`PersistedUsage`]) so a resumed fold sums
+/// bit-identical floats to a full scan.
+#[derive(Default, Clone, Serialize, Deserialize)]
 pub struct UsageScan {
     assistant_usage_by_id: AssistantUsageById,
+    #[serde(with = "usage_bits")]
     attributed_child_usage: Usage,
+    #[serde(with = "usage_bits")]
     summarization_usage: Usage,
 }
 

@@ -352,6 +352,11 @@ impl SessionLease {
             return;
         }
         let _ = pa_core::session::window::flush_cache(&self.session_path);
+        // The usage-scan sidecar persists beside the window snapshot, in
+        // the same lease-keyed, best-effort shape: only the lease holder
+        // writes, and a failed write costs the next open its warm resume,
+        // nothing more.
+        crate::session_store::persist_info_sidecar(&self.session_path);
         let _ = with_lease_guard(&self.directory, GuardWait::Fast, || {
             if let Ok(Some(owner)) = read_owner(&self.directory) {
                 if owner.token == self.token {
