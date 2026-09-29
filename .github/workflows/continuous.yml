@@ -35,6 +35,10 @@ jobs:
   # builds as before. PR runs and tag-driven releases (release.yml) are
   # unaffected — this workflow only fires on branch pushes.
   staleness:
+    # After `deny`: the tip lookup runs as late in the DAG as the builds
+    # allow, so a push that lands while `deny` runs is still caught (the
+    # check-then-build window shrinks to the build's own startup).
+    needs: deny
     name: Superseded push check
     runs-on: ubuntu-latest
     permissions:
@@ -46,7 +50,7 @@ jobs:
         id: tip
         run: |
           set -eu
-          tip="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" "refs/heads/${GITHUB_REF_NAME}" | cut -f1 || true)"
+          tip="$(git -c "http.extraheader=AUTHORIZATION: bearer ${{ github.token }}" ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" "refs/heads/${GITHUB_REF_NAME}" | cut -f1 || true)"
           if [ -n "${tip}" ] && [ "${tip}" != "${GITHUB_SHA}" ]; then
             echo "superseded=true" >> "${GITHUB_OUTPUT}"
             echo "superseded: ${GITHUB_SHA} is no longer the tip of ${GITHUB_REF_NAME} (tip ${tip}); the build jobs skip"
