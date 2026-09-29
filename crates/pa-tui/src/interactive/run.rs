@@ -498,6 +498,10 @@ async fn run_interactive_surface(
     // named error when a member never drains — see
     // [`HEADLESS_SETTLE_TIMEOUT_MS`]).
     let mut headless_settle_deadline: Option<Instant> = None;
+    // Whether the settle gate is waiting out a member: the quiet
+    // tick's wake condition reads it (the gate re-checks each
+    // wake — see the gate below).
+    let mut headless_settle_pending = false;
     // First-run onboarding owns the pane before the session screen (TS
     // `runStartupOnboarding`): a home whose startup model is ready sees
     // the trace question alone, and a not-ready home runs the full
@@ -1002,6 +1006,7 @@ async fn run_interactive_surface(
         });
         if let Some(settle) = settle {
             if settle.settled() {
+                headless_settle_pending = false;
                 break;
             }
             // The settle bound: the gate's wait is the harness's only
@@ -1010,6 +1015,7 @@ async fn run_interactive_surface(
             // fails the run with its name instead of wedging the test
             // binary forever (the CI wedge family: a 30-45min job
             // budget with no failure row).
+            headless_settle_pending = true;
             let deadline = headless_settle_deadline
                 .get_or_insert(Instant::now() + Duration::from_millis(HEADLESS_SETTLE_TIMEOUT_MS));
             if Instant::now() >= *deadline {
@@ -1044,6 +1050,14 @@ async fn run_interactive_surface(
         let autocomplete_pending = view.editor.has_pending_autocomplete();
         let auto_scroll_armed = session.selection_auto_scroll_armed();
         let bash_refresh_wanted = session.kernel_bash_refresh_wanted();
+        // A settle waiting out a member is pending work like the
+        // autocomplete park: the gate runs at the loop top, so its
+        // re-check (and the settle bound's expiry) needs this arm's
+        // wake — a fully quiet select would otherwise park the
+        // settle forever, and the bound itself fires only on an
+        // iteration. Terminal runs never arm it (`headless_done`
+        // exists only on the headless harness).
+        let settle_recheck_wanted = headless_done && headless_settle_pending;
         tokio::select! {
             maybe_event = async {
                 // A closed channel's recv() resolves None instantly and
@@ -1683,7 +1697,7 @@ async fn run_interactive_surface(
                 // animates, scheduleRender arms only on a render
                 // request), so the unconditional tick spent its wakeups
                 // on nothing observable.
-                if !(autocomplete_pending || auto_scroll_armed) {
+                if !(autocomplete_pending || auto_scroll_armed || settle_recheck_wanted) {
                     std::future::pending::<()>().await;
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
