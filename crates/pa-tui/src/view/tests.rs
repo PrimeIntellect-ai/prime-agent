@@ -409,7 +409,7 @@ fn compaction_streams_the_summary_under_the_loader_in_expanded_detail() {
     );
     assert!(
         flat.iter()
-            .any(|l| l.trim() == "\u{25c6} Context compacted"),
+            .any(|l| l.trim() == "\u{25c6} Context compacted \u{b7} Compacted from 1,234 tokens"),
         "the durable summary row replaced the streamed block: {flat:?}"
     );
 }
