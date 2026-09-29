@@ -2,7 +2,6 @@
 //! re-pushes, and the list window that keeps the selection visible.
 
 use super::*;
-use ratatui::style::Modifier;
 
 /// A multi-session roster for the selection-persistence probes: six
 /// idle top-level sessions with distinct activity stamps (newest
@@ -187,10 +186,10 @@ fn list_window_follows_the_selection_below_the_fold() {
     assert!(!texts.iter().any(|t| t.contains("session 7")));
     assert_ne!(texts.last().map(|t| t.trim()), Some("..."));
     // The selected row carries the ONE shared selection style (the
-    // operator's 2026-09-28 consistency rule: the agents view's
-    // selected rows paint the same purple band and bold the dock's
-    // groups, the heartbeats picker, and the shell view carry —
-    // `Theme::selection_row_style`, one constant).
+    // operator's 2026-09-29 one-color ruling: the agents view's
+    // selected rows paint the hover band's own color, the same one
+    // color the dock's groups, the heartbeats picker, and the shell
+    // view paint — `Theme::selection_row_style`, one constant).
     let selected_line = mode.render_list(120, 8, 0);
     let band = mode.theme.selection_row_style();
     let painted = selected_line
@@ -199,13 +198,16 @@ fn list_window_follows_the_selection_below_the_fold() {
         .expect("the selected row renders with the selection background");
     assert!(
         painted.iter().all(|span| span.style.bg == band.bg),
-        "every span of the selected row carries the shared purple band: {painted:?}"
+        "every span of the selected row carries the shared band: {painted:?}"
+    );
+    assert_eq!(
+        band.bg,
+        mode.theme.hover_row_style().bg,
+        "the agents view selection paints the hover's own color — the one-color ruling"
     );
     assert!(
-        painted
-            .iter()
-            .all(|span| span.style.add_modifier.contains(Modifier::BOLD)),
-        "every span of the selected row carries the bold modifier: {painted:?}"
+        band.add_modifier.is_empty(),
+        "no bold modifier rides the selection; the row's own styles stay"
     );
     // Arrow back to the top: the leading ellipsis goes away and the
     // first rows render behind the legend again.

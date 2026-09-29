@@ -625,11 +625,13 @@ mod tests {
 
     /// The dock's hover affordance (operator directive 2026-09-29): the
     /// hovered group's segment carries the ONE light hover band over
-    /// exactly its own cells, the focused group's purple selection band
+    /// exactly its own cells, the focused group's selection band
     /// stays, and the tray's hovered hint band lands on the hint's own
-    /// text — both state styles coexist on the row.
+    /// text — the one-color ruling paints both states with the same
+    /// band color, so the row reads as one band per state, never a
+    /// repaint of the other.
     #[test]
-    fn the_dock_hover_paints_the_light_band_and_keeps_the_purple_selection() {
+    fn the_dock_hover_paints_the_one_band_and_never_demotes_the_selection() {
         let mut view = dock_frame(crate::chrome::ActivityGroup::Heartbeats);
         let (group_row, subagents) = region_span(
             &view,
@@ -637,10 +639,14 @@ mod tests {
         );
         let (hint_row, hint) = region_span(&view, &ClickAction::OpenAgentsView);
         let light = view.theme.hover_row_style().bg;
-        let purple = view.theme.selection_row_style().bg;
+        let gray = view.theme.selection_row_style().bg;
+        assert_eq!(
+            gray, light,
+            "the selection paints the hover's own color — the one-color ruling"
+        );
         // Hover the EMPTY subagents segment while the heartbeats group
         // holds the focused selection: the subagents cells gain the
-        // light band, the heartbeats cells keep the purple.
+        // band, the heartbeats cells keep theirs.
         assert!(view.note_hover(group_row, subagents.start));
         let hovered = view.render_frame(80, 24);
         let row_text = hovered[group_row]
@@ -671,8 +677,8 @@ mod tests {
         )
         .1;
         assert!(
-            band(&heartbeats).iter().all(|bg| *bg == purple),
-            "the focused group's cells keep the purple selection under the hover"
+            band(&heartbeats).iter().all(|bg| *bg == gray),
+            "the focused group's cells keep the selection band under the hover"
         );
         // The manage hint's own cells band the same way.
         assert!(view.note_hover(hint_row, hint.start));
@@ -685,9 +691,9 @@ mod tests {
             hint_cells.iter().any(|span| span.style.bg == light),
             "the hovered hint carries the light band: {hint_cells:?}"
         );
-        // A hover onto the FOCUSED group keeps the selection band: both
-        // state styles apply where they overlap, and the purple is
-        // never demoted.
+        // A hover onto the FOCUSED group keeps the selection band:
+        // the paint skips cells that already carry a background, so
+        // the selection is never demoted.
         assert!(view.note_hover(group_row, heartbeats.start));
         let hovered = view.render_frame(80, 24);
         let mut col = 0usize;
@@ -695,12 +701,12 @@ mod tests {
         for span in &hovered[group_row] {
             let width = crate::width::str_width(&span.content);
             let covered = col.max(heartbeats.start) < (col + width).min(heartbeats.end);
-            if covered && span.style.bg != purple {
+            if covered && span.style.bg != gray {
                 kept = false;
             }
             col += width;
         }
-        assert!(kept, "the hovered focused group keeps its purple band");
+        assert!(kept, "the hovered focused group keeps its band");
     }
 
     /// The dock's groups share one row: a hover that moves from one

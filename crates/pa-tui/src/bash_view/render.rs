@@ -121,8 +121,9 @@ impl Columns {
             plain_cell(&format!("{dot} {}", activity.status), self.status),
         ));
         // The selected row paints the ONE shared selection style (the
-        // operator's 2026-09-28 consistency rule): the same purple band
-        // and bold the dock's groups and the agents view's rows carry.
+        // operator's 2026-09-28 consistency rule): the same one band
+        // color the hover paints, the same band the dock's groups and
+        // the agents view's rows carry.
         fill_row(&row, selected, width, theme.selection_row_style())
     }
 }

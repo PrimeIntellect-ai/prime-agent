@@ -1,8 +1,10 @@
 //! The hover affordance (operator directive 2026-09-29): the row under
 //! the mouse carries the ONE light hover band — the "clickable"
-//! signal, distinct from the purple selection — on every row the click
-//! grammar covers (the agents-view rows, the inactive rows, the merged
-//! dropdown summary, and the children it expands).
+//! signal — on every row the click grammar covers (the agents-view
+//! rows, the inactive rows, the merged dropdown summary, and the
+//! children it expands). The one-color ruling: the keyboard selection
+//! paints the SAME band color; the two states distinguish by their
+//! cues (transient mouse vs sticky keyboard), never by color.
 
 use super::*;
 
@@ -87,12 +89,15 @@ fn a_motion_over_a_heading_or_hint_never_hovers() {
     crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
 }
 
-/// The ONE hover style is the light band, distinct from the purple
-/// selection (the operator's consistency rule): the selected row keeps
-/// the purple + bold band even under the mouse, and a hovered
-/// unselected row never takes the purple.
+/// The ONE band color (the operator's 2026-09-29 one-color ruling):
+/// the hover and the keyboard selection paint the SAME light band —
+/// the states distinguish by their cues (the hover is transient and
+/// rides the mouse position; the selection is sticky and rides the
+/// keyboard), never by color. The selected row keeps its band even
+/// under the mouse (the hover paint skips cells that already carry a
+/// background), and a hovered unselected row carries the same band.
 #[test]
-fn the_hover_band_is_light_and_the_selection_stays_purple() {
+fn the_hover_and_the_selection_share_the_one_band_color() {
     let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
@@ -103,36 +108,35 @@ fn the_hover_band_is_light_and_the_selection_stays_purple() {
     let held = row_of(&lines, "holder").expect("the holder row renders");
     let other = row_of(&lines, "hover me too").expect("the hovered row renders");
     let light = mode.theme.hover_row_style().bg;
-    let purple = mode.theme.selection_row_style().bg;
+    let band = mode.theme.selection_row_style().bg;
+    assert_eq!(
+        band, light,
+        "the selection paints the hover's own color — the one-color ruling"
+    );
     // The selected row (the holder, the default selection) under the
-    // mouse keeps its purple band: both state styles apply where they
-    // overlap — the focused state is never demoted.
+    // mouse keeps its band: the hover never demotes the focused state.
     mode.handle_mouse(&hover_motion(held));
+    assert_eq!(mode.hover_row, Some(held));
     let (lines, _) = mode.render_frame(120, 24);
     let selected = &lines[held];
     assert!(
-        selected.iter().all(|span| span.style.bg == purple),
-        "the hovered selected row keeps the purple band: {selected:?}"
+        selected.iter().all(|span| span.style.bg == band),
+        "the hovered selected row keeps its band: {selected:?}"
     );
-    assert!(
-        selected.iter().any(|span| span
-            .style
-            .add_modifier
-            .contains(ratatui::style::Modifier::BOLD)),
-        "the selected row keeps its bold: {selected:?}"
-    );
-    // The unselected hovered row takes the LIGHT band, never purple.
+    // The unselected hovered row carries the SAME band color — the
+    // hover's transient cue, one color for both states.
     mode.handle_mouse(&hover_motion(other));
+    assert_eq!(mode.hover_row, Some(other));
     let (lines, _) = mode.render_frame(120, 24);
     let hovered = &lines[other];
     assert!(
-        hovered.iter().all(|span| span.style.bg == light),
-        "the hovered unselected row carries the light band: {hovered:?}"
+        hovered.iter().all(|span| span.style.bg == band),
+        "the hovered unselected row carries the one band color: {hovered:?}"
     );
     let still_selected = &lines[held];
     assert!(
-        still_selected.iter().all(|span| span.style.bg == purple),
-        "the selection keeps its purple while another row hovers: {still_selected:?}"
+        still_selected.iter().all(|span| span.style.bg == band),
+        "the selection keeps its band while another row hovers: {still_selected:?}"
     );
     crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
 }
@@ -162,8 +166,8 @@ fn the_merged_dropdown_rows_hover_like_every_row() {
     );
     // Expanding the dropdown keeps the child rows hoverable: the
     // child under the mouse bands the same way (the summary row is
-    // selected here, so the child carries the light band while the
-    // selection's purple rides the summary).
+    // selected here, so the child carries the band too — the same
+    // one color; the states distinguish by cue, never by color).
     mode.handle_key("down");
     mode.handle_key("enter");
     let (lines, _) = mode.render_frame(120, 36);
