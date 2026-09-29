@@ -176,21 +176,6 @@ async fn stream_assistant_response_inner(
             break;
         };
 
-        // Deltas move into the update's shared snapshot; the remaining
-        // arms read the event by reference.
-        if event.is_delta() {
-            let event = Arc::new(event);
-            if let Some(partial) = event_partial(&event) {
-                *partial_event = Some(Arc::clone(&event));
-                emit(AgentEvent::MessageUpdate {
-                    message: Arc::new(AgentMessage::from(partial.clone())),
-                    assistant_message_event: event,
-                })
-                .await?;
-            }
-            continue;
-        }
-
         match event {
             crate::stream::AssistantMessageEvent::Start { partial } => {
                 let message = AgentMessage::from(partial.clone());
@@ -200,6 +185,17 @@ async fn stream_assistant_response_inner(
                     partial,
                 }));
                 emit(AgentEvent::MessageStart { message }).await?;
+            }
+            event if event.is_delta() => {
+                let event = Arc::new(event);
+                if let Some(partial) = event_partial(&event) {
+                    *partial_event = Some(Arc::clone(&event));
+                    emit(AgentEvent::MessageUpdate {
+                        message: Arc::new(AgentMessage::from(partial.clone())),
+                        assistant_message_event: event,
+                    })
+                    .await?;
+                }
             }
             ref event if event.terminal_message().is_some() => {
                 let mut final_message = event.terminal_message().unwrap().clone();

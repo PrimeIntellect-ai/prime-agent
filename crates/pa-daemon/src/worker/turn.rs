@@ -380,28 +380,25 @@ impl TurnRunner {
                 let aborted_row = matches!(
                     &event,
                     EngineEvent::AssistantMessage(message)
+                        | EngineEvent::AssistantUpdate { message: AssistantSnapshot::Wire(message), .. }
                         | EngineEvent::TurnEnd { message, .. }
                         if message.get("stopReason").and_then(Value::as_str) == Some("aborted")
+                ) || matches!(
+                    &event,
+                    EngineEvent::AssistantUpdate { message: AssistantSnapshot::Loop(message), .. }
+                        if matches!(
+                            &**message,
+                            pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::Assistant(
+                                assistant,
+                            )) if assistant.stop_reason == pa_agent::types::StopReason::Aborted
+                        )
                 ) || matches!(
                     &event,
                     EngineEvent::AgentEnd { messages }
                         if messages.iter().any(|message| {
                             message.get("stopReason").and_then(Value::as_str) == Some("aborted")
                         })
-                ) || match &event {
-                    EngineEvent::AssistantUpdate { message, .. } => match message {
-                        AssistantSnapshot::Wire(value) => {
-                            value.get("stopReason").and_then(Value::as_str) == Some("aborted")
-                        }
-                        AssistantSnapshot::Loop(agent_message) => matches!(
-                            &**agent_message,
-                            pa_agent::types::AgentMessage::Standard(
-                                pa_agent::types::Message::Assistant(assistant),
-                            ) if assistant.stop_reason == pa_agent::types::StopReason::Aborted
-                        ),
-                    },
-                    _ => false,
-                };
+                );
                 let abort_settle = matches!(
                     &event,
                     EngineEvent::ToolExecutionEnd { .. }

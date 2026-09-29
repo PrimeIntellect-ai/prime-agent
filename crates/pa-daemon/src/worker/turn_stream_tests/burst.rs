@@ -218,6 +218,50 @@ async fn streamed_turn_pipeline_benchmark() {
     }
 }
 
+/// The parked loop snapshot reaches the wire intact: the last flushed
+/// `text_delta` update before `message_end` carries the final content.
+#[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
+#[tokio::test]
+async fn the_last_parked_update_carries_the_final_content() {
+    let _faux = crate::agent_engine::FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let text = "pin word ".repeat(512);
+    let script = json!({ "engine": "faux", "responses": [{ "content": [{ "type": "text", "text": text }] }] });
+    let engine = AgentSessionEngine::new(AgentEngineConfig {
+        cwd: dir.path().to_path_buf(),
+        agent_dir: dir.path().join("agent"),
+        provider: None,
+        model: None,
+        api_key: None,
+        thinking: None,
+        session_dir: None,
+        session_file: None,
+        faux_script: Some(script.to_string()),
+        supervisor_link: None,
+        telemetry_disabled: Some(true),
+        cron_store: None,
+        queued_steering_probe: None,
+    })
+    .unwrap();
+    let events = turn_session_events(Arc::new(engine)).await;
+    let end = *positions_of(&events, "message_end")
+        .last()
+        .expect("message_end");
+    let last_delta = positions_of(&events, "message_update")
+        .into_iter()
+        .rfind(|index| {
+            *index < end && events[*index]["assistantMessageEvent"]["type"] == "text_delta"
+        })
+        .expect("a flushed text_delta update");
+    assert_eq!(
+        events[last_delta]["message"]["content"],
+        events[end]["message"]["content"]
+    );
+    assert_eq!(events[end]["message"]["content"][0]["text"], json!(text));
+}
+
 /// An instant burst (the provider outruns the tick entirely) parks one
 /// snapshot at a time; the settle frame flushes the final snapshot
 /// before `message_end`, so the client sees the full message without a
