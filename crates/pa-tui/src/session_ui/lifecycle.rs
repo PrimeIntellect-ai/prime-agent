@@ -49,6 +49,10 @@ impl SessionUi {
             client,
             active_session_id: String::new(),
             session_id: String::new(),
+            attach_event_generation: String::new(),
+            attach_event_sequence: 0,
+            last_event_sequence: 0,
+            attach_cursor_present: false,
             session_name: None,
             cwd: options.cwd.clone(),
             session_dir: options.session_dir.clone(),
@@ -426,6 +430,15 @@ impl SessionUi {
                 .await;
         }
         self.session_id = reconstructed.session_id;
+        self.attach_event_generation
+            .clone_from(&reconstructed.event_generation);
+        self.attach_event_sequence = reconstructed.last_event_sequence;
+        // The live tracker starts at the attach's value (the replayed
+        // events' sequences converge onto it by the monotonic max); the
+        // cursor-presence gate keeps a cursor-less attach from stashing
+        // a handoff under collapsed default key values.
+        self.last_event_sequence = reconstructed.last_event_sequence;
+        self.attach_cursor_present = reconstructed.cursor_present;
         // The closing notice is per-connection (TS #2458: it clears on
         // every attach): a later bare session stop must not route into a
         // stale shutdown recovery's reconnect hang.

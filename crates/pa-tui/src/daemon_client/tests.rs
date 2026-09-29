@@ -268,6 +268,58 @@ fn model_catalog_changed_parses_to_the_refresh_event() {
     ));
 }
 
+/// The cross-view layout handoff's live-sequence tracker keys the
+/// stash on the LATEST sequence the worker reported, so the
+/// session-event frame's `meta.sequence` must ride the parsed event
+/// (`view::handoff`): a turn during the run advances the tracker past
+/// the run's own attach value, and the post-turn sojourn re-entry
+/// matches the value the next attach reports.
+#[test]
+fn session_event_parses_the_meta_sequence_for_the_handoff_tracker() {
+    let with_sequence = json!({
+        "type": "session_event",
+        "activeSessionId": "sess-1",
+        "event": { "type": "message_end" },
+        "meta": {
+            "id": "sess-1:41",
+            "sequence": 41,
+            "cursor": { "generation": "g-1", "sequence": 41 }
+        }
+    });
+    match client_event_from_value(&with_sequence) {
+        Some(DaemonClientEvent::SessionEvent { meta_sequence, .. }) => {
+            assert_eq!(meta_sequence, 41);
+        }
+        other => panic!("the frame must parse as a session event: {other:?}"),
+    }
+    // The cursor's sequence is the fallback shape; a frame without
+    // either collapses to zero (the tracker's monotonic max ignores
+    // it - an unkeyed event never lowers the tracked sequence).
+    let cursor_only = json!({
+        "type": "session_event",
+        "activeSessionId": "sess-1",
+        "event": { "type": "message_end" },
+        "meta": { "cursor": { "generation": "g-1", "sequence": 12 } }
+    });
+    match client_event_from_value(&cursor_only) {
+        Some(DaemonClientEvent::SessionEvent { meta_sequence, .. }) => {
+            assert_eq!(meta_sequence, 12);
+        }
+        other => panic!("the frame must parse as a session event: {other:?}"),
+    }
+    let no_meta = json!({
+        "type": "session_event",
+        "activeSessionId": "sess-1",
+        "event": { "type": "message_end" }
+    });
+    match client_event_from_value(&no_meta) {
+        Some(DaemonClientEvent::SessionEvent { meta_sequence, .. }) => {
+            assert_eq!(meta_sequence, 0);
+        }
+        other => panic!("the frame must parse as a session event: {other:?}"),
+    }
+}
+
 #[test]
 fn plain_errors_are_not_rejections() {
     let error = anyhow!("the daemon connection is closed");

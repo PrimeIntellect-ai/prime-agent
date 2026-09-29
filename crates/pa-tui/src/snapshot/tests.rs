@@ -831,6 +831,47 @@ fn reconstructs_slim_attach() {
     assert_eq!(view.session_id, "0199-sess");
     assert_eq!(view.session_name.as_deref(), Some("my session"));
     assert_eq!(view.last_event_sequence, 9);
+    assert_eq!(
+        view.event_generation, "g",
+        "the cursor's generation reconstructs for the layout handoff's key"
+    );
+    assert!(
+        view.cursor_present,
+        "the cursor's presence reconstructs: the layout handoff keys on it"
+    );
+}
+
+/// The layout handoff's cursor-presence gate (`view::handoff`): an
+/// attach that omits the resume cursor reconstructs to collapsed default
+/// key values (an empty generation, a zero sequence), which could alias
+/// across cursor-less attaches of the same entry count — the handoff
+/// refuses to key on that shape.
+#[test]
+fn a_cursorless_attach_reconstructs_as_unkeyed_for_the_layout_handoff() {
+    let mut attach = slim_attach();
+    // The cursor rides both the snapshot block AND the attach's top-level
+    // optional fields: a cursor-less attach omits it in BOTH places.
+    let snapshot = attach
+        .get_mut("snapshot")
+        .expect("the slim attach carries a snapshot")
+        .as_object_mut()
+        .expect("the snapshot is a map");
+    snapshot.remove("lastEventSequence");
+    snapshot.remove("lastEventCursor");
+    let top = attach.as_object_mut().expect("the slim attach is a map");
+    top.remove("lastEventSequence");
+    top.remove("lastEventCursor");
+    let data = attach_data_from_response(attach).unwrap();
+    let view = reconstruct(&data);
+    assert!(!view.cursor_present, "no cursor means no handoff key");
+    assert_eq!(
+        view.last_event_sequence, 0,
+        "the collapsed sequence the gate protects against"
+    );
+    assert_eq!(
+        view.event_generation, "",
+        "the collapsed generation the gate protects against"
+    );
 }
 
 /// TS `getModelContextLabel`: the attach snapshot's state carries the

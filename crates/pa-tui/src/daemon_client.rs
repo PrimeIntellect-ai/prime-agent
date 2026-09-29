@@ -71,10 +71,17 @@ pub struct DaemonClosingUpdate {
 
 #[derive(Debug, Clone)]
 pub enum DaemonClientEvent {
-    /// `session_event`: one streamed agent/turn event for an attached session.
+    /// `session_event`: one streamed agent/turn event for an attached
+    /// session. The frame's `meta.sequence` (the worker's monotonic
+    /// event counter — the same counter the attach cursor rides) rides
+    /// along: the cross-view layout handoff's stash keys the LATEST
+    /// sequence the run has seen (`view::handoff`), so a turn during
+    /// the run advances the stash's key to the value the next attach
+    /// reports instead of the run's own stale attach sequence.
     SessionEvent {
         active_session_id: String,
         event: Value,
+        meta_sequence: u64,
     },
     /// `session_closed`: the attached session stopped existing.
     SessionClosed {
@@ -152,6 +159,14 @@ pub(crate) fn client_event_from_value(value: &Value) -> Option<DaemonClientEvent
                 .unwrap_or_default()
                 .to_string(),
             event: value.get("event").cloned().unwrap_or(Value::Null),
+            meta_sequence: value
+                .get("meta")
+                .and_then(|meta| {
+                    meta.get("sequence")
+                        .or_else(|| meta.get("cursor").and_then(|cursor| cursor.get("sequence")))
+                })
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
         }),
         "session_closed" => Some(DaemonClientEvent::SessionClosed {
             active_session_id: value

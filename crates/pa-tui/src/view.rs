@@ -15,6 +15,7 @@ pub(crate) mod click;
 mod flush;
 mod frame;
 mod geometry;
+mod handoff;
 mod layout;
 pub(crate) mod lazy;
 mod panels;
@@ -217,6 +218,20 @@ pub struct AgentView {
     /// the mutation's delta instead of resolving the whole geometry.
     sparse_mutation: Option<(usize, usize)>,
     sparse_entries: std::collections::BTreeSet<usize>,
+    /// The cross-view layout handoff held for this rebuild (see
+    /// `view::handoff`): consumed by the first layout preparation, which
+    /// validates the stored render shape and seeds the visible-window
+    /// entry packs; dropped by every chat mutation (the held packs are
+    /// only valid for the entries the rebuild pushed, so an append, an
+    /// in-place mutation, or a wipe must never serve them after the
+    /// transcript changed again).
+    pending_handoff: Option<handoff::LayoutHandoff>,
+    /// How many first-draw windows this view served from an adopted
+    /// layout handoff (the served-path observable: an adopted pack
+    /// serving a window never enters `render_entry` — the headless
+    /// verifiers assert the reuse actually happened, else the
+    /// byte-identical frames make a vacuous pass).
+    pub(crate) handoff_seeds: u32,
     /// Per-assistant-entry markdown block caches (TS `Markdown.blockCache`,
     /// one per component instance): a streaming message re-renders every
     /// frame, so its settled blocks replay from the cache instead of
@@ -376,6 +391,8 @@ impl AgentView {
             selection: crate::selection::SelectionState::default(),
             selection_restyle: restyle::SelectionRestyle::default(),
             sparse_mutation: None,
+            pending_handoff: None,
+            handoff_seeds: 0,
             click: click::ClickSurface::default(),
         }
     }
@@ -429,6 +446,10 @@ impl AgentView {
     /// the append folds into the sparse window's tail bookkeeping (TS
     /// keeps `scrollTop` while content appends), never a geometry resolve.
     pub fn push_entry(&mut self, entry: ChatEntry) {
+        // A held layout handoff is only valid for the entries the rebuild
+        // pushed; a later append means the transcript changed after the
+        // adopt, so the handoff must never serve its rows (view::handoff).
+        self.pending_handoff = None;
         self.chat.push(entry);
         self.entry_layout.push([None, None, None]);
         self.sparse_note_append();
@@ -446,6 +467,11 @@ impl AgentView {
     /// operator ruling 2026-09-23). The sparse window's tail shrinks by
     /// the entry's rows, mirroring `push_entry`'s growth note.
     pub fn pop_chat_entry(&mut self) -> Option<ChatEntry> {
+        // Same rule as `push_entry`: the pop is a transcript mutation
+        // (the transcript this handoff was held for is no longer the
+        // one under the view), so a held handoff must never serve its
+        // rows after it (view::handoff).
+        self.pending_handoff = None;
         let index = self.chat.len().checked_sub(1)?;
         if self.sparse_window_is_tail_anchored() && self.layout_width > 0 {
             let rows = self.count_entry_rows(index, self.layout_width);
@@ -561,6 +587,9 @@ impl AgentView {
     /// Drop the whole transcript and its cached layout (a fresh snapshot
     /// rebuild re-renders every row).
     pub fn clear_chat(&mut self) {
+        // Same rule as `push_entry`: a wipe retires any held handoff
+        // (the rebuilt transcript is not the one it was held for).
+        self.pending_handoff = None;
         self.sparse_enabled = true;
         self.sparse_entries.clear();
         self.sparse_window = None;
@@ -580,6 +609,9 @@ impl AgentView {
     /// entry's rows, never the transcript). Top-anchored windows are
     /// absolute already and need nothing.
     pub fn prepare_entry_mutation(&mut self, index: usize) {
+        // An in-place mutation changes the transcript after the adopt:
+        // the held handoff is retired before the mutation lands.
+        self.pending_handoff = None;
         if self.sparse_window_is_tail_anchored() && self.layout_width > 0 {
             let rows = self.count_entry_rows(index, self.layout_width);
             self.sparse_mutation = Some((index, rows));
@@ -595,6 +627,10 @@ impl AgentView {
     /// mutation point, which is the animating tail in the streaming case,
     /// not the whole transcript.
     pub fn mark_entry_stale(&mut self, index: usize) {
+        // The mutation choke point (every in-place entry change routes
+        // through here): the held handoff's packs are stale the moment
+        // the transcript mutates, so they must never serve after this.
+        self.pending_handoff = None;
         if let Some((pending, before)) = self.sparse_mutation.take() {
             if pending == index && self.layout_width > 0 {
                 let after = self.count_entry_rows(index, self.layout_width);
