@@ -83,6 +83,84 @@ impl AgentSession {
         }
     }
 
+    /// Drop the failed continuation pair from the live loop context (the
+    /// 402 diagnosis's (c)): the trailing no-progress assistant row (a
+    /// terminal provider failure or an empty settle) together with the
+    /// `goal_context` continuation row that drove it, directly under it.
+    /// The failed cycle's rows stop riding the context into every next
+    /// request — a fresh mint queues a fresh continuation row instead, and
+    /// a manual prompt runs on a context free of the corpse pair. A failed
+    /// USER turn's corpse (no continuation row under it) stays, like every
+    /// other non-goal row; the durable transcript keeps everything (this
+    /// drops only the live loop, like [`Self::drop_trailing_assistant`]).
+    pub async fn drop_failed_goal_continuation(&self) {
+        // The whole drop runs under ONE state lock (the atomic mutate):
+        // a concurrent append's rows cannot be dropped between a stale
+        // snapshot and the replace.
+        self.agent
+            .mutate_messages(|messages| {
+                // The failed assistant row: the LAST assistant, not the
+                // last row — a trailing `provider_retry_outcome`
+                // disclosure (a restored loop replays it after the
+                // corpse) must not hide the pair from the cleanup.
+                let Some(corpse_index) = messages
+                    .iter()
+                    .rposition(|message| standard_message(message).is_some())
+                else {
+                    return;
+                };
+                let Some(pa_agent::types::Message::Assistant(corpse)) =
+                    messages.get(corpse_index).and_then(standard_message)
+                else {
+                    return;
+                };
+                let no_progress = corpse.stop_reason == pa_agent::types::StopReason::Error
+                    || super::goal_driver::turn_produced_no_output(corpse);
+                if !no_progress {
+                    return;
+                }
+                // The driving continuation row sits under the corpse,
+                // possibly behind trailing display rows (the
+                // `provider_retry_outcome` disclosure): scan backward
+                // over Custom rows only — the first goal_context
+                // continuation row wins, and every display row it
+                // scanned past stays.
+                let goal_context_row_at = messages[..corpse_index]
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .take_while(|(_, message)| {
+                        matches!(message, pa_agent::types::AgentMessage::Custom(_))
+                    })
+                    .find(|(_, message)| {
+                        let pa_agent::types::AgentMessage::Custom(custom) = message else {
+                            return false;
+                        };
+                        custom
+                            .payload
+                            .get("customType")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("goal_context")
+                            && custom
+                                .payload
+                                .get("details")
+                                .and_then(|details| details.get("kind"))
+                                .and_then(serde_json::Value::as_str)
+                                == Some("continuation")
+                    })
+                    .map(|(index, _)| index);
+                let Some(context_index) = goal_context_row_at else {
+                    return;
+                };
+                // Remove the later index first so the earlier one keeps
+                // its position (a trailing disclosure row keeps the
+                // corpse above the removal pair).
+                messages.remove(corpse_index);
+                messages.remove(context_index);
+            })
+            .await;
+    }
+
     /// The last assistant message in the live loop context (TS
     /// `_findLastAssistantMessage`), in the session wire shape: trailing
     /// non-assistant rows (a compaction outcome disclosure, a compaction

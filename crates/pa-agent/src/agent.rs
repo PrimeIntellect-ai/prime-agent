@@ -943,6 +943,14 @@ impl Agent {
             .extend(messages);
     }
 
+    /// Mutate the transcript under ONE state lock: the atomic form of the
+    /// `state()` + `set_messages` read-modify-write the removal arms use,
+    /// so a concurrent writer's rows cannot be dropped between the two
+    /// locks (the snapshot-then-replace race the stateless setters carry).
+    pub async fn mutate_messages(&self, mutate: impl FnOnce(&mut Vec<AgentMessage>)) {
+        mutate(&mut self.inner.shared.lock().await.state.messages);
+    }
+
     /// The steering queue's mode.
     ///
     /// # Panics

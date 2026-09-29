@@ -36,6 +36,27 @@
 //! patch), so input typed during it delivers within a slice instead of
 //! waiting for the settle.
 //!
+//! THE VERDICT TIME (characterized 2026-09-29; the timed contract is
+//! locked by `kitty_verdict_time_e2e`): the probe concludes at the
+//! FIRST reply, and only the reply classes pay differently. A kitty
+//! terminal concludes at its flags reply. A DA1-answering non-kitty
+//! terminal — the common non-kitty class; tmux and screen answer DA1
+//! locally in microseconds and never answer the flags query —
+//! concludes AT THE DA1 ARRIVAL (crossterm's flags filter matches the
+//! primary-device-attributes reply; a flags reply arriving after the
+//! DA1 can never upgrade: the check has returned and the once-per-
+//! process probe never re-examines parked replies). Only a fully-silent
+//! pty (no DA1 ever — CI harnesses) waits the 250ms deadline. The
+//! deadline stays 250ms because it is also the LATE-KITTY catch window:
+//! a kitty terminal over a slow hop answers its flags at RTT (this
+//! fleet's own single public hop measures 24-29ms; the intercontinental
+//! SSH classes ride 80-250ms), so a shorter window would silently drop
+//! the enhancement for exactly the remote-SSH deployment this product
+//! primarily serves, while buying nothing a user rides (the silent
+//! class's only window cost is a mode transition raced inside the first
+//! 250ms — measured: the raced suspend's teardown waits to ~250ms on a
+//! silent pty and lands at its dispatch on every answered class).
+//!
 //! DIVERGENCE FROM TS (the shift-modified printable bug class): this port
 //! never arms modifyOtherKeys mode 2 and instead resets it
 //! (`\x1b[>4;0m`) at every surface start. TS parses the resulting
