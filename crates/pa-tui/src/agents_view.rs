@@ -370,8 +370,8 @@ struct AgentsViewMode {
     /// outcome so the flow drops the scope.
     scope_dropped: bool,
     /// Parent row identities whose subagents lines are expanded (TS
-    /// `expandedSubagentParents`; the operator's 2026-09-28 one-line
-    /// merge carries one set for the single group).
+    /// `expandedSubagentParents`): the one summary line per parent
+    /// reads a single set.
     expanded_parents: std::collections::HashSet<String>,
     /// Session ids to expand on the next rebuild (TS
     /// `pendingExpandedAncestorSessionIds`, consumed once).

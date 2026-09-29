@@ -128,9 +128,7 @@ pub enum ActivityDirection {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActivityDock {
     /// The directly-running children right now (one addend of the
-    /// dock's single running total; the rendered `direct, nested`
-    /// pair of the 2026-09-25 split is gone — the operator's
-    /// 2026-09-28 one-number ask).
+    /// dock's single running total).
     pub subagents_running_direct: usize,
     /// The further running descendants below them (subagents of
     /// subagents): the total's other addend. Idle and dead registry
