@@ -160,7 +160,7 @@ fn side_questions_start_abort_and_events_scripted() {
     // the partial answer streamed so far.
     client.send_command(
         "ab1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "abort_side_question",
             "activeSessionId": session_id,
             "sideQuestionId": "q1",
@@ -183,7 +183,7 @@ fn side_questions_start_abort_and_events_scripted() {
     // completes (the script replays from the top, fresh conversation).
     client.send_command(
         "sq2",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "start_side_question",
             "activeSessionId": session_id,
             "sideQuestionId": "q1",

@@ -34,7 +34,7 @@ fn tool_result_entries_persisted_and_streamed() {
     let (mut client, _hello) = Client::connect(&socket);
     client.send_command(
         "c1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
