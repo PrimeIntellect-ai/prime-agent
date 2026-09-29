@@ -3,7 +3,10 @@
 //! root navigation) and the incident-notice surface (the structured-
 //! log poll, the dismissal, and the panel render - moved with their
 //! concern).
-use super::*;
+use super::{
+    ancestor_session_ids, has_session_children, scope_ancestors, AgentsViewMode, AgentsViewRow,
+    Line, OpenedRow, PathBuf, RowKind, SessionSelection, Value, ANCHOR_LOADING_HINT,
+};
 
 impl AgentsViewMode {
     pub(super) fn open_selected(&mut self) {

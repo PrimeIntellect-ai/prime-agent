@@ -11,8 +11,8 @@ fn entry_anchor_selects_the_left_session() {
     let mode = mode_with_anchor(
         Some("s2"),
         vec![
-            roster_entry("s1", "idle", parent_summary("s1")),
-            roster_entry("s2", "idle", parent_summary("s2")),
+            roster_entry("s1", "idle", &parent_summary("s1")),
+            roster_entry("s2", "idle", &parent_summary("s2")),
         ],
     );
     assert_eq!(mode.rows[mode.selected].summary["sessionId"], "s2");
@@ -26,12 +26,12 @@ fn entry_anchor_selects_the_left_session() {
 fn anchor_wait_survives_until_the_row_arrives() {
     let mut mode = mode_with_anchor(
         Some("s2"),
-        vec![roster_entry("s1", "idle", parent_summary("s1"))],
+        vec![roster_entry("s1", "idle", &parent_summary("s1"))],
     );
     assert_eq!(mode.rows[mode.selected].summary["sessionId"], "s1");
     assert!(mode.anchor_selection_pending);
     mode.roster
-        .push(roster_entry("s2", "idle", parent_summary("s2")));
+        .push(roster_entry("s2", "idle", &parent_summary("s2")));
     mode.rebuild_rows();
     assert_eq!(mode.rows[mode.selected].summary["sessionId"], "s2");
     assert!(!mode.anchor_selection_pending);
@@ -43,14 +43,14 @@ fn anchor_wait_survives_until_the_row_arrives() {
 fn open_waits_out_the_entry_anchor() {
     let mut mode = mode_with_anchor(
         Some("s2"),
-        vec![roster_entry("s1", "idle", parent_summary("s1"))],
+        vec![roster_entry("s1", "idle", &parent_summary("s1"))],
     );
     assert!(mode.anchor_selection_pending);
     mode.handle_key("enter");
     assert!(mode.opened.is_none(), "the default row did not open");
     assert!(mode.status.is_some(), "the wait explains itself");
     mode.roster
-        .push(roster_entry("s2", "idle", parent_summary("s2")));
+        .push(roster_entry("s2", "idle", &parent_summary("s2")));
     mode.rebuild_rows();
     assert!(!mode.anchor_selection_pending);
     assert!(
@@ -81,12 +81,12 @@ fn open_waits_out_the_entry_anchor() {
 fn anchor_wait_cancels_on_the_first_user_move() {
     let mut mode = mode_with_anchor(
         Some("s2"),
-        vec![roster_entry("s1", "idle", parent_summary("s1"))],
+        vec![roster_entry("s1", "idle", &parent_summary("s1"))],
     );
     mode.handle_key("down");
     assert!(!mode.anchor_selection_pending);
     mode.roster
-        .push(roster_entry("s2", "idle", parent_summary("s2")));
+        .push(roster_entry("s2", "idle", &parent_summary("s2")));
     mode.rebuild_rows();
     assert_eq!(mode.rows[mode.selected].summary["sessionId"], "s1");
 }
@@ -106,8 +106,8 @@ fn a_click_cancels_the_anchor_wait_and_opens_the_clicked_row() {
     let mut mode = mode_with_anchor(
         Some("s2"),
         vec![
-            roster_entry("s1", "idle", parent_summary("s1")),
-            roster_entry("s3", "idle", parent_summary("s3")),
+            roster_entry("s1", "idle", &parent_summary("s1")),
+            roster_entry("s3", "idle", &parent_summary("s3")),
         ],
     );
     assert!(mode.anchor_selection_pending, "the anchor waits on its row");
@@ -155,7 +155,7 @@ fn a_click_cancels_the_anchor_wait_and_opens_the_clicked_row() {
 fn a_saved_catalog_failure_settles_the_anchor_wait() {
     let mut mode = mode_with_anchor(
         Some("s2"),
-        vec![roster_entry("s1", "idle", parent_summary("s1"))],
+        vec![roster_entry("s1", "idle", &parent_summary("s1"))],
     );
     mode.status = Some(ANCHOR_LOADING_HINT.to_string());
     mode.settle_anchor_wait_on_saved_failure();
@@ -306,8 +306,8 @@ fn nested_anchor_expands_its_ancestors() {
     let mode = mode_with_anchor(
         Some("c"),
         vec![
-            roster_entry("p", "idle", parent_summary("p")),
-            roster_entry("c", "running", child_summary("c", "p", "worker one")),
+            roster_entry("p", "idle", &parent_summary("p")),
+            roster_entry("c", "running", &child_summary("c", "p", "worker one")),
         ],
     );
     assert_eq!(mode.rows.len(), 3, "the parent's list opened");
@@ -339,8 +339,8 @@ fn carried_selection_wins_over_the_entry_anchor() {
         incident_notice_state: None,
     });
     mode.roster = vec![
-        roster_entry("s1", "idle", parent_summary("s1")),
-        roster_entry("s2", "idle", parent_summary("s2")),
+        roster_entry("s1", "idle", &parent_summary("s1")),
+        roster_entry("s2", "idle", &parent_summary("s2")),
     ];
     mode.rebuild_rows();
     assert_eq!(mode.rows[mode.selected].summary["sessionId"], "s1");

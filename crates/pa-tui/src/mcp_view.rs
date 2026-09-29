@@ -719,7 +719,7 @@ impl McpView {
                         &row.detail_text().unwrap_or_else(|| row.status_text().1),
                     );
                     let line = vec![theme.fg_span(ThemeColor::Muted, format!(" {text}"))];
-                    lines.push(crate::menu_panel::detail_row(theme, width, line));
+                    lines.push(crate::menu_panel::detail_row(theme, width, &line));
                 }
             }
         }

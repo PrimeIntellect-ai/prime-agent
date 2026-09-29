@@ -22,13 +22,13 @@ pub(crate) fn spacer() -> Line {
 
 /// A `Text(spans, 1, 0)` row set: content wrapped at `width - 2`, one margin
 /// column, padded to the full width with the default style.
-pub(crate) fn text_rows(spans: Line, width: usize) -> Vec<Line> {
+pub(crate) fn text_rows(spans: &Line, width: usize) -> Vec<Line> {
     let content_width = width.saturating_sub(2).max(1);
     let flat: String = spans.iter().map(|s| s.content.as_str()).collect();
     if flat.trim().is_empty() {
         return Vec::new();
     }
-    wrap_line(&spans, content_width)
+    wrap_line(spans, content_width)
         .into_iter()
         .map(|wrapped| {
             let mut row: Line = vec![Span::raw(" ")];
@@ -114,7 +114,7 @@ pub(crate) fn render_agent_message(
         out.push(spacer());
     }
     let header = agent_message_summary_line(row.direction, &row.counterpart, theme);
-    out.extend(text_rows(header, width));
+    out.extend(text_rows(&header, width));
     if detail.tool_output_expanded() {
         out.extend(agent_message_body(&row.message, theme, width));
     }
@@ -207,7 +207,7 @@ pub(crate) fn render_shell_completion(
             if line.trim().is_empty() {
                 out.push(vec![Span::raw(" ".repeat(width))]);
             } else {
-                out.extend(text_rows(vec![Span::raw(line.to_string())], width));
+                out.extend(text_rows(&vec![Span::raw(line.to_string())], width));
             }
         }
     }

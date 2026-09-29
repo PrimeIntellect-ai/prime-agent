@@ -1,7 +1,7 @@
 //! The id + timestamp mint (moved with its concern): the session id
 //! minters, the session file path, and the ISO-8601 timestamps.
 
-use super::*;
+use super::{HashMap, Path, PathBuf};
 
 pub(super) fn generate_id(existing: &HashMap<String, usize>) -> String {
     for _ in 0..100 {
@@ -22,10 +22,12 @@ fn create_uuid_v7() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
+#[must_use]
 pub fn get_session_file_path(session_dir: &Path, session_id: &str) -> PathBuf {
     session_dir.join(format!("{session_id}.jsonl"))
 }
 
+#[must_use]
 pub fn format_iso_now() -> String {
     // ISO-8601 with millisecond precision, like `new Date().toISOString()`.
     let now = std::time::SystemTime::now()
@@ -36,6 +38,7 @@ pub fn format_iso_now() -> String {
 }
 
 /// Format unix milliseconds as an ISO-8601 UTC timestamp.
+#[must_use]
 pub fn format_iso(millis: i64) -> String {
     let days = millis.div_euclid(86_400_000);
     let time_ms = millis.rem_euclid(86_400_000);

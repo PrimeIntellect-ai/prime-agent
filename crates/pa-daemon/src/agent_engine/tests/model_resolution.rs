@@ -119,7 +119,7 @@ fn settings_default_drives_unflagged_resolution() {
     write_custom_provider_models_json(&agent_dir, "http://127.0.0.1:9");
     let mut settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
     settings
-        .set_default_model_and_provider("battery".into(), "mock-1".into())
+        .set_default_model_and_provider("battery", "mock-1")
         .unwrap();
     let engine = AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.path().to_path_buf(),
@@ -481,7 +481,7 @@ async fn revived_session_restores_its_pinned_model_not_the_startup_default() {
     // The create-time restore: the readiness window covers the fetch,
     // the pinned model restores and every later unflagged resolution
     // runs on it.
-    engine.restore_session_model(&path).await;
+    engine.restore_session_model(&path, None).await;
     let restored = engine
         .resolve_registry_model()
         .expect("restored resolution");
@@ -509,7 +509,7 @@ async fn revived_session_fallback_is_on_the_record() {
     let engine = restore_test_engine(dir.path(), None, None);
     engine.set_session_file(path.clone());
 
-    engine.restore_session_model(&path).await;
+    engine.restore_session_model(&path, None).await;
     assert_eq!(
         engine.model_fallback_message().as_deref(),
         Some("Could not restore model prime-inference/internal/glm-5.3-fast. Using prime-inference/z-ai/glm-5.3"),
@@ -532,7 +532,7 @@ async fn create_flags_beat_the_saved_session_model() {
     let engine = restore_test_engine(dir.path(), Some("battery"), Some("mock-1"));
     engine.set_session_file(path.clone());
 
-    engine.restore_session_model(&path).await;
+    engine.restore_session_model(&path, None).await;
     let resolved = engine.resolve_registry_model().expect("flagged resolution");
     assert_eq!(resolved.provider, "battery");
     assert_eq!(resolved.id, "mock-1");
@@ -559,7 +559,7 @@ async fn fresh_session_without_a_saved_model_keeps_the_startup_chain() {
     let engine = restore_test_engine(dir.path(), None, None);
     engine.set_session_file(path.clone());
 
-    engine.restore_session_model(&path).await;
+    engine.restore_session_model(&path, None).await;
     assert!(engine.model_fallback_message().is_none());
     let resolved = engine.resolve_registry_model().expect("startup chain");
     assert_eq!(resolved.id, "z-ai/glm-5.3");
@@ -587,7 +587,7 @@ async fn a_restore_decision_is_scoped_to_its_session_file() {
     let pinned = session_file_pinning_private_model(dir.path());
     let engine = restore_test_engine(dir.path(), None, None);
     engine.set_session_file(pinned.clone());
-    engine.restore_session_model(&pinned).await;
+    engine.restore_session_model(&pinned, None).await;
     let restored = engine
         .resolve_registry_model()
         .expect("restored resolution");
@@ -636,7 +636,7 @@ async fn a_model_switch_never_leaks_into_the_replacement_session() {
     let file_a = session_file_pinning_private_model(dir.path());
     let engine = std::sync::Arc::new(restore_test_engine(dir.path(), None, None));
     engine.set_session_file(file_a.clone());
-    engine.restore_session_model(&file_a).await;
+    engine.restore_session_model(&file_a, None).await;
     let restored = engine.resolve_registry_model().expect("restored");
     assert_eq!(restored.id, "internal/glm-5.3-fast");
 
@@ -663,7 +663,7 @@ async fn a_model_switch_never_leaks_into_the_replacement_session() {
     // moved-to session restores its own pin.
     let file_b = session_file_pinning_private_model(dir.path());
     engine.set_session_file(file_b.clone());
-    engine.restore_session_model(&file_b).await;
+    engine.restore_session_model(&file_b, None).await;
     let moved = engine.resolve_registry_model().expect("moved resolution");
     assert_eq!(
         moved.id, "internal/glm-5.3-fast",
@@ -706,7 +706,9 @@ async fn an_unpersisted_session_keeps_its_live_selection() {
 
     // The in-memory fork's replacement restore: an empty path is a
     // no-op — the switch survives (never reset to the runtime config).
-    engine.restore_session_model(std::path::Path::new("")).await;
+    engine
+        .restore_session_model(std::path::Path::new(""), None)
+        .await;
     let resolved = engine.resolve_registry_model().expect("live selection");
     assert_eq!(
         (resolved.provider.as_str(), resolved.id.as_str()),
@@ -738,7 +740,7 @@ async fn a_replacement_restores_the_moved_to_sessions_saved_thinking_level() {
     file_a.append_thinking_level_change("low");
     file_a.rewrite().unwrap();
     engine.set_session_file(path_a.clone());
-    engine.restore_session_model(&path_a).await;
+    engine.restore_session_model(&path_a, None).await;
     assert_eq!(
         engine.effective_thinking_level().as_deref(),
         Some("low"),
@@ -757,7 +759,7 @@ async fn a_replacement_restores_the_moved_to_sessions_saved_thinking_level() {
     file_b.append_thinking_level_change("high");
     file_b.rewrite().unwrap();
     engine.set_session_file(path_b.clone());
-    engine.restore_session_model(&path_b).await;
+    engine.restore_session_model(&path_b, None).await;
     assert_eq!(
         engine.effective_thinking_level().as_deref(),
         Some("off"),
@@ -807,7 +809,7 @@ async fn a_compacted_session_restores_its_post_compaction_model() {
 
     let engine = restore_test_engine(dir.path(), None, None);
     engine.set_session_file(path.clone());
-    engine.restore_session_model(&path).await;
+    engine.restore_session_model(&path, None).await;
     let restored = engine
         .resolve_registry_model()
         .expect("restored resolution");
@@ -864,7 +866,7 @@ async fn create_flags_survive_a_session_replacement() {
     // pin never even runs.
     let moved = session_file_pinning_model(dir.path(), "battery", "mock-reason");
     engine.set_session_file(moved.clone());
-    engine.restore_session_model(&moved).await;
+    engine.restore_session_model(&moved, None).await;
     let resolved = engine.resolve_registry_model().expect("flagged resolution");
     assert_eq!(
         (resolved.provider.as_str(), resolved.id.as_str()),
@@ -902,7 +904,7 @@ async fn a_replacement_re_clamps_the_thinking_level_against_the_restored_model()
     // restore records the pin and the level clamps against it.
     let plain = session_file_pinning_model(dir.path(), "battery", "mock-plain");
     engine.set_session_file(plain.clone());
-    engine.restore_session_model(&plain).await;
+    engine.restore_session_model(&plain, None).await;
     assert_eq!(
         engine.effective_thinking_level().as_deref(),
         Some("off"),
@@ -913,7 +915,7 @@ async fn a_replacement_re_clamps_the_thinking_level_against_the_restored_model()
     // moved-to session re-clamps against its own restored pin.
     let reason = session_file_pinning_model(dir.path(), "battery", "mock-reason");
     engine.set_session_file(reason.clone());
-    engine.restore_session_model(&reason).await;
+    engine.restore_session_model(&reason, None).await;
     assert_eq!(
         engine.effective_thinking_level().as_deref(),
         Some("high"),
@@ -1193,4 +1195,71 @@ fn configure_model_thinking_clamps_to_the_models_supported_levels() {
         thinking: Some(pa_types::ai::ModelThinkingLevel::Low),
     });
     assert_eq!(engine.effective_thinking_level().as_deref(), Some("low"));
+}
+
+/// The create-path pre-read reuse: a restore handed the saved context the
+/// create's own `open_windowed` already built decides exactly like the
+/// file-read path — the same pinned model, the same thinking level, the
+/// same fallback record. TS `createAgentSession` reads the session's
+/// loaded entries (`sessionManager.buildSessionContext()`); the port's
+/// second windowed open of the same file was the only divergence, and
+/// this oracle pins it away.
+#[tokio::test]
+async fn a_pre_read_saved_context_restores_like_the_file_read() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_thinking_pair_models_json(&agent_dir, "http://127.0.0.1:9");
+
+    let mut session =
+        crate::session_store::SessionFile::create(dir.path().to_str().unwrap_or("/tmp"), None, 0);
+    let path = dir.path().join(crate::session_store::session_file_name(
+        session.session_id(),
+    ));
+    session.set_path(path.clone());
+    session.append_model_change("battery", "mock-reason");
+    session.append_thinking_level_change("low");
+    session.rewrite().unwrap();
+
+    // Engine A: the file-read path (no pre-read context).
+    let engine_a = restore_test_engine(dir.path(), None, None);
+    engine_a.set_session_file(path.clone());
+    engine_a.restore_session_model(&path, None).await;
+
+    // Engine B: the pre-read context off the create's own windowed open
+    // (the exact shape the resume create passes).
+    let store = crate::session_store::SessionFile::open_windowed(&path).unwrap();
+    let saved = super::super::model::saved_session_context_from_parts(
+        &store.restored_settings(),
+        store.has_thinking_level(),
+    );
+    let engine_b = restore_test_engine(dir.path(), None, None);
+    engine_b.set_session_file(path.clone());
+    engine_b.restore_session_model(&path, Some(saved)).await;
+
+    let resolved_a = engine_a
+        .resolve_registry_model()
+        .expect("file-read resolution");
+    let resolved_b = engine_b
+        .resolve_registry_model()
+        .expect("pre-read resolution");
+    assert_eq!(
+        (resolved_a.provider, resolved_a.id),
+        (resolved_b.provider, resolved_b.id),
+        "the pre-read restore pins the same model as the file read"
+    );
+    assert_eq!(
+        engine_a.effective_thinking_level(),
+        engine_b.effective_thinking_level(),
+        "the pre-read restore adopts the same thinking level"
+    );
+    assert_eq!(
+        engine_a.model_fallback_message(),
+        engine_b.model_fallback_message(),
+        "the pre-read restore records the same fallback decision"
+    );
+    assert_eq!(
+        engine_b.effective_thinking_level().as_deref(),
+        Some("low"),
+        "the pre-read path restores the saved level, not the default"
+    );
 }

@@ -40,7 +40,7 @@ struct StreamingState {
     tool_call_blocks_by_index: HashMap<u64, usize>,
     tool_call_blocks_by_id: HashMap<String, usize>,
     tool_call_partial_args: HashMap<usize, StreamingJsonAccumulator>,
-    reasoning_details_by_index: Vec<(u64, Value)>,
+    reasoning_details_by_index: Vec<(u64, Map<String, Value>)>,
     next_reasoning_details_index: u64,
     reasoning_details_block: Option<usize>,
     response_service_tier: Option<String>,
@@ -194,6 +194,8 @@ fn finish_blocks(state: &mut StreamingState, writer: &AssistantMessageEventWrite
 }
 
 /// Handle one parsed SSE chunk. Returns the chunk value for testability.
+// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+#[allow(clippy::too_many_lines)]
 fn handle_chunk(
     chunk: &Value,
     model: &Model,
@@ -351,42 +353,34 @@ fn handle_chunk(
         .and_then(|value| value.as_array())
     {
         for detail in reasoning_details {
-            if !detail.is_object() {
+            let Some(detail_object) = detail.as_object() else {
                 continue;
-            }
+            };
             let explicit_index = detail.get("index").and_then(serde_json::Value::as_u64);
             let index = explicit_index.unwrap_or(state.next_reasoning_details_index);
             state.next_reasoning_details_index = state.next_reasoning_details_index.max(index + 1);
-            let previous = state
+            if let Some((_, merged)) = state
                 .reasoning_details_by_index
-                .iter()
+                .iter_mut()
                 .find(|(existing, _)| *existing == index)
-                .map(|(_, value)| value.clone());
-            let mut merged = previous.clone().unwrap_or_else(|| json!({}));
-            if let (Some(previous), Some(merged_object)) = (previous, merged.as_object_mut()) {
-                for (key, value) in detail.as_object().expect("detail is an object") {
-                    merged_object.insert(key.clone(), value.clone());
-                }
-                for field in ["text", "summary"] {
-                    let previous_fragment = previous.get(field).and_then(|value| value.as_str());
-                    let fragment = detail.get(field).and_then(|value| value.as_str());
-                    if let (Some(previous_fragment), Some(fragment)) = (previous_fragment, fragment)
+            {
+                for (key, value) in detail_object {
+                    if let (
+                        Some(Value::String(previous)),
+                        Value::String(fragment),
+                        "text" | "summary",
+                    ) = (merged.get_mut(key), value, key.as_str())
                     {
-                        merged_object.insert(
-                            field.to_string(),
-                            json!(format!("{previous_fragment}{fragment}")),
-                        );
+                        previous.push_str(fragment);
+                    } else {
+                        merged.insert(key.clone(), value.clone());
                     }
                 }
             } else {
-                merged = detail.clone();
+                state
+                    .reasoning_details_by_index
+                    .push((index, detail_object.clone()));
             }
-            state
-                .reasoning_details_by_index
-                .retain(|(existing, _)| *existing != index);
-            state
-                .reasoning_details_by_index
-                .push((index, merged.clone()));
 
             if detail.get("type").and_then(|value| value.as_str()) == Some("reasoning.encrypted") {
                 if let (Some(id), Some(data)) = (
@@ -435,7 +429,10 @@ fn encode_reasoning_details_signature(state: &mut StreamingState) {
     };
     let mut sorted = state.reasoning_details_by_index.clone();
     sorted.sort_by_key(|(index, _)| *index);
-    let details: Vec<Value> = sorted.into_iter().map(|(_, detail)| detail).collect();
+    let details: Vec<Value> = sorted
+        .into_iter()
+        .map(|(_, detail)| Value::Object(detail))
+        .collect();
     if let Some(AssistantContent::Thinking(thinking)) = state.output.content.get_mut(block_index) {
         thinking.thinking_signature = Some(encode_reasoning_details(&details));
     }
@@ -528,6 +525,8 @@ pub fn stream_openai_completions(
     reader
 }
 
+// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+#[allow(clippy::too_many_lines)]
 async fn run_stream(
     model: &Model,
     context: &Context,

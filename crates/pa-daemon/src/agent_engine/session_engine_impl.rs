@@ -26,26 +26,34 @@ impl SessionEngine for AgentSessionEngine {
         }
     }
 
-    /// TS #2483's `_passivateSettledRlmChildRuntime` inline arm,
-    /// worker-side: the turn runner's park arm proved the parent-owned,
-    /// unattached, unqueued idle state; the remaining
-    /// `canPassivateSettledSession` gates run here. A settled child
-    /// releases its kernel with a final snapshot flush (the revivable
-    /// stop: the next kernel use boots fresh from the flushed snapshot)
-    /// while staying listable, inspectable, collectable, and deletable
-    /// — the roster and collect surfaces are untouched by design.
-    fn release_settled_child_kernel(
+    /// The engine-side gate mirror of the whole-worker idle
+    /// passivation (TS `canPassivateSession`, session-action-store
+    /// :411-419): `true` only when no non-passive descendants hold work
+    /// and no active-or-paused scheduled job is registered (the shared
+    /// store covers crons AND armed heartbeats — the wake-blind
+    /// substitution). This method only answers the gate; the caller
+    /// owns the residency decision (the kernel release and the
+    /// whole-worker stop each consume it separately).
+    fn can_passivate_settled_session(
         &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
         Box::pin(async move {
             // `hasNonPassiveDescendants`: a busy descendant keeps the
-            // child's kernel resident (the TS policy).
+            // child resident (the TS policy).
             if self.has_unsettled_rlm_work().await {
-                return;
+                return false;
             }
             // `hasRegisteredCronJob`: an active or paused scheduled job
-            // keeps the kernel resident (its next run needs it); an
-            // unwired probe stays open (a store-less embedding).
+            // keeps the worker resident — for the whole-worker idle
+            // passivation this gate covers plain cron jobs AND armed
+            // heartbeats alike (the shared scheduled-jobs store holds
+            // both): the port has no relaunch-on-fire for a stopped
+            // worker's jobs, so unlike TS's tier-2 (which evicts
+            // cron-armed workers and lets the fire relaunch) the port
+            // BLOCKS while any job is armed — the wake-blind
+            // substitution, a disclosed deliberate divergence until a
+            // relaunch-on-fire port exists. An unwired probe stays open
+            // (a store-less embedding never passes the gate).
             let probe = self
                 .registered_jobs_probe
                 .lock()
@@ -53,8 +61,19 @@ impl SessionEngine for AgentSessionEngine {
                 .clone();
             if let Some(probe) = probe {
                 if probe() {
-                    return;
+                    return false;
                 }
+            }
+            true
+        })
+    }
+
+    fn release_settled_child_kernel(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            if !self.can_passivate_settled_session().await {
+                return;
             }
             // The release itself: best-effort (a failed stop leaves
             // the kernel resident); a retired or never-built runtime
@@ -108,20 +127,33 @@ impl SessionEngine for AgentSessionEngine {
                 return None;
             }
             let mut session = handles.session.lock().await;
-            // The mint persists the `thread_goal_state` entry (TS
-            // `_setGoalState`) and consumes one continuation slot; an
-            // inactive or objective-less goal mints nothing. A failed
-            // persist ends the boundary without a continuation (TS
-            // `_maybeResumeGoalContinuationAfterRlmWork`'s catch: the
-            // hook must not reject; the unchanged count retries).
-            let message = match driver.next_continuation_message(&mut session) {
+            // TS `compact()`'s didCompact branch is the OWED delivery, not
+            // a fresh mint:
+            //   `this._goalContinuationAwaitsRlmWork ||= !this.agent.hasQueuedMessages();
+            //    this.resumeQueuedWork();`
+            // Arming then taking keeps exactly one continuation per owed
+            // boundary — the pre-fix fresh mint left an already-armed flag
+            // behind (the mint consumed a slot TS never charges) and the
+            // settle/resume sites delivered a second continuation for the
+            // same boundary. The mint persists the `thread_goal_state`
+            // entry (TS `_setGoalState`) and consumes one slot; an inactive
+            // or objective-less goal drops the deferral without minting. A
+            // failed persist ends the boundary without a continuation (TS
+            // `_maybeResumeGoalContinuationAfterRlmWork`'s catch: the hook
+            // must not reject; the unchanged count retries).
+            driver.mark_continuation_owed();
+            let message = match driver.take_owed_continuation(&mut session) {
                 Ok(message) => message,
                 Err(error) => {
                     eprintln!("pa-daemon: goal continuation mint persist failed: {error:#}");
                     None
                 }
             }?;
-            let goal_update = self.publish_goal_state(driver.state());
+            // This mint's own guard handle, captured under the driver
+            // lock: the worker's admission sink releases exactly this
+            // mint's guard, never the mutable mirror.
+            let pending_handle = Some(driver.pending_continuation_handle());
+            let goal_update = self.publish_goal_state(&driver.state_with_creation_elapsed());
             Some((
                 crate::engine::PromptRequest {
                     batch: Vec::new(),
@@ -132,13 +164,30 @@ impl SessionEngine for AgentSessionEngine {
                     custom_message: Some(crate::session_commands::custom_message_value(&message)),
                 },
                 goal_update,
+                pending_handle,
             ))
         })?;
-        let (request, goal_update) = continuation;
+        let (request, goal_update, pending_handle) = continuation;
         Some(crate::engine::GoalContinuation {
             request,
             goal_update,
+            pending_handle,
         })
+    }
+
+    fn clear_pending_goal_continuation(&self) {
+        AgentSessionEngine::clear_pending_goal_continuation(self);
+    }
+
+    fn goal_pending_handle(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        AgentSessionEngine::goal_pending_handle(self)
+    }
+
+    fn release_goal_continuation_handle(
+        &self,
+        handle: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) {
+        AgentSessionEngine::release_goal_continuation_handle(self, handle);
     }
 
     fn autonomous_status(
@@ -248,10 +297,11 @@ impl SessionEngine for AgentSessionEngine {
     fn restore_session_model(
         &self,
         session_path: &std::path::Path,
+        saved: Option<crate::engine::SavedSessionContext>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         let path = session_path.to_path_buf();
         Box::pin(async move {
-            self.restore_session_model_at(&path).await;
+            self.restore_session_model_at(&path, saved).await;
         })
     }
 
@@ -619,7 +669,7 @@ impl SessionEngine for AgentSessionEngine {
                         .as_deref()
                         .and_then(|engine| engine.telemetry.as_ref())
                     {
-                        telemetry.note_compaction();
+                        telemetry.note_compaction(Some(run.duration_ms));
                     }
                 }
                 // TS `compact()` schedules the compact-trigger auto-refine
@@ -787,7 +837,7 @@ impl SessionEngine for AgentSessionEngine {
             let session = engine.session.shared_persistence();
             let manager = session.lock().await;
             driver.reload_from_branch(&manager, goal_reload);
-            let announcement = self.publish_goal_state(driver.state());
+            let announcement = self.publish_goal_state(&driver.state_with_creation_elapsed());
             *self
                 .reloaded_goal_update
                 .lock()
@@ -1314,6 +1364,20 @@ impl SessionEngine for AgentSessionEngine {
         if request.message.starts_with("/skill:") {
             request.message = self.expand_skill_submission(&request.message);
         }
+        // The batched rows expand the same way, rewritten in place BEFORE
+        // the accepted rows emit and the turn runs: the core's batch
+        // admission re-expands each row itself (TS normalizes every
+        // submission at queue time), so the raw command must never reach
+        // it — a bare batched invocation would admit the model turn on
+        // the protocol without the floor's instruction while the emitted
+        // row already carries it (the transcript and the model would
+        // disagree). The expansion is idempotent over the block, so the
+        // admitted turn sees the same text the accepted row persists.
+        for row in &mut request.batch {
+            if row.text.starts_with("/skill:") {
+                row.text = self.expand_skill_submission(&row.text);
+            }
+        }
         // Session commands (compact/refine/goal/autonomous) never admit a
         // model turn and never record a user-message row: the durable echo
         // row replaces it. Execute before admission so the idle-wait loop
@@ -1408,16 +1472,13 @@ impl SessionEngine for AgentSessionEngine {
         // user row per batched message, in delivery order, persisted and
         // rendered like the primary. The batch only ever rides a plain user
         // turn (the injected-custom turns deliver solo — the queue never
-        // batches a row that replaces the user row). Each row expands a
-        // leading `/skill:` the same way the primary does, so the accepted
-        // row persists and renders the expanded submission (TS normalizes
-        // every submission at queue time).
+        // batches a row that replaces the user row). Each row's text was
+        // already expanded (the seam above rewrites every `/skill:` row in
+        // place), so the accepted row persists and renders exactly what the
+        // admitted turn receives (TS normalizes every submission at queue
+        // time).
         for row in &request.batch {
-            let text = if row.text.starts_with("/skill:") {
-                self.expand_skill_submission(&row.text)
-            } else {
-                row.text.clone()
-            };
+            let text = row.text.clone();
             let mut content = vec![json!({ "type": "text", "text": text })];
             for image in &row.images {
                 let mut block = match serde_json::to_value(image) {

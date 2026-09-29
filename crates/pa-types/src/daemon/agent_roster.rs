@@ -30,6 +30,7 @@ pub struct AgentStatusInput {
 }
 
 /// The one status formula (TS `classifyAgentStatus`).
+#[must_use]
 pub fn classify_agent_status(input: AgentStatusInput) -> AgentRosterStatus {
     if input.queued_child {
         return AgentRosterStatus::Running;
@@ -47,6 +48,7 @@ pub fn classify_agent_status(input: AgentStatusInput) -> AgentRosterStatus {
 /// Classify one session summary (TS `classifySessionRosterStatus`): a
 /// resident session is busy when its activity is `working` or the session
 /// reports an active turn.
+#[must_use]
 pub fn classify_session_roster_status(
     resident: bool,
     activity: &str,
@@ -81,6 +83,7 @@ pub fn classify_summary_value(summary: &Value, queued_child: bool) -> AgentRoste
 /// live parent id for no-session parents) qualifies them daemon-wide;
 /// top-level sessions key by session id. The caller passes the parent path
 /// already canonicalized.
+#[must_use]
 pub fn roster_agent_id(
     session_id: &str,
     runtime_kind: &str,
@@ -243,6 +246,7 @@ pub struct AgentRosterEntry {
 /// The slim summary a worker reports for the roster (TS
 /// `workerRosterEntryFromSummary`): the full summary minus the
 /// streaming-message, session-actions, and diagnostics fields.
+#[must_use]
 pub fn slim_roster_summary(summary: Value) -> Value {
     let mut summary = summary;
     if let Value::Object(map) = &mut summary {

@@ -44,6 +44,7 @@ impl std::error::Error for ModelAllowlistRefusal {}
 /// slashes, e.g. `internal/glm-5.3-fast`): a pattern with wildcards
 /// (`*`, `?`, `[`) globs, a plain pattern must match exactly. An empty
 /// pattern list allows nothing.
+#[must_use]
 pub fn model_allowed(selector: &str, allowlist: &[String]) -> bool {
     allowlist
         .iter()

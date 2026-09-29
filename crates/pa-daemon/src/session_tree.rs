@@ -268,10 +268,6 @@ impl SessionFile {
             forked.lease = Some(lease.acquire_target(&forked.path)?);
         }
 
-        let mut used: HashMap<String, ()> = path_without_labels
-            .iter()
-            .map(|entry| (entry.id.clone(), ()))
-            .collect();
         for entry in &path_without_labels {
             forked.adopt_entry((*entry).clone());
         }
@@ -282,7 +278,7 @@ impl SessionFile {
             if let Some(label) = labels.labels.get(*id) {
                 let entry = SessionEntry {
                     type_: "label".to_string(),
-                    id: new_entry_id(&used),
+                    id: new_entry_id(&forked.by_id),
                     parent_id: parent.clone(),
                     timestamp: labels
                         .timestamps
@@ -291,7 +287,6 @@ impl SessionFile {
                         .unwrap_or_else(crate::util::now_iso),
                     fields: json!({ "targetId": id, "label": label }),
                 };
-                used.insert(entry.id.clone(), ());
                 parent = Some(entry.id.clone());
                 forked.adopt_entry(entry);
             }
@@ -359,13 +354,11 @@ impl SessionFile {
             self.adopt_entry(entry);
         }
         let mut parent = self.leaf_id.clone();
-        let mut used: HashMap<String, ()> =
-            self.entries.iter().map(|e| (e.id.clone(), ())).collect();
         for id in &path_ids {
             if let Some(label) = labels.labels.get(id) {
                 let entry = SessionEntry {
                     type_: "label".to_string(),
-                    id: new_entry_id(&used),
+                    id: new_entry_id(&self.by_id),
                     parent_id: parent.clone(),
                     timestamp: labels
                         .timestamps
@@ -374,7 +367,6 @@ impl SessionFile {
                         .unwrap_or_else(crate::util::now_iso),
                     fields: json!({ "targetId": id, "label": label }),
                 };
-                used.insert(entry.id.clone(), ());
                 parent = Some(entry.id.clone());
                 self.adopt_entry(entry);
             }

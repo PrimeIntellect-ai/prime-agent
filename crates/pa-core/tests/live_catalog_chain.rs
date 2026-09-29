@@ -1,3 +1,19 @@
+// Test-only: the exact-float `assert_eq!`s assert parsed fixture values
+// (the byte-identity contract of JSON-written prices); an epsilon compare
+// would weaken the assertion, not fix a lint.
+#![allow(clippy::float_cmp)]
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
+// crate root: the same bounded-boundary disposition as src/lib.rs
+// (large_futures/too_many_lines/the cast family; details there).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! Verifiers for the live catalog wiring (plan pieces 2-3): the
 //! credentialed refresh lands the account's private `internal/*` models,
 //! the catalog-repo (layer A) entries, and live pricing in the served
@@ -55,7 +71,7 @@ fn file_registry(agent_dir: &Path) -> ModelRegistry {
 
 fn prime_auth(api_key: &str, team_id: &str) -> AuthStorage {
     AuthStorage::in_memory_without_env(
-        pa_core::auth::AuthStorageData(
+        &pa_core::auth::AuthStorageData(
             json!({
                 "prime-inference": {
                     "type": "api_key",
@@ -171,16 +187,16 @@ async fn refresh_lands_live_pricing_private_models_and_layer_a_entries() {
     let server = common::MockServer::start(vec![
         // Layer A (unauthenticated provider catalog).
         common::ok_json(
-            json!({ "schemaVersion": 1, "models": [
+            &json!({ "schemaVersion": 1, "models": [
                 layer_a_entry(LAYER_A_PROBE_ID, 1.25),
             ]})
             .to_string(),
             None,
         ),
         // Layer B (credentialed public Prime Inference).
-        common::ok_json(pi.clone(), None),
+        common::ok_json(&pi.clone(), None),
         // The private-authorization fetch.
-        common::ok_json(pi, None),
+        common::ok_json(&pi, None),
     ])
     .await;
     install_mock_catalog(agent_dir.path(), bundled_dir.path(), &server);
@@ -247,19 +263,19 @@ async fn startup_refresh_warms_the_process_shared_catalog() {
     write_prime_auth(agent_dir.path(), "test-key", "team-1");
     let server = common::MockServer::start(vec![
         common::ok_json(
-            json!({ "schemaVersion": 1, "models": [
+            &json!({ "schemaVersion": 1, "models": [
                 layer_a_entry(LAYER_A_PROBE_ID, 1.25),
             ]})
             .to_string(),
             None,
         ),
-        common::ok_json(pi_payload("z-ai/glm-5.3", 7.0), None),
+        common::ok_json(&pi_payload("z-ai/glm-5.3", 7.0), None),
     ])
     .await;
     install_mock_catalog(agent_dir.path(), bundled_dir.path(), &server);
 
     // Fire-and-forget: poll the served catalog until it settles.
-    startup_refresh(agent_dir.path());
+    let _ = startup_refresh(agent_dir.path());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         let mut registry = file_registry(agent_dir.path());
@@ -293,7 +309,7 @@ async fn without_credentials_the_compiled_fallback_serves_unchanged() {
     install_mock_catalog(agent_dir.path(), bundled_dir.path(), &server);
 
     let auth = AuthStorage::in_memory_without_env(
-        pa_core::auth::AuthStorageData(json!({}).as_object().cloned().unwrap_or_default()),
+        &pa_core::auth::AuthStorageData(json!({}).as_object().cloned().unwrap_or_default()),
         Arc::new(NoOAuth),
     );
     let mut registry = ModelRegistry::create(auth, agent_dir.path().join("models.json"));
@@ -330,7 +346,7 @@ async fn layer_a_fetch_adds_entries_the_compiled_fallback_lacks() {
     let agent_dir = tempfile::tempdir().unwrap();
     let bundled_dir = tempfile::tempdir().unwrap();
     let server = common::MockServer::start(vec![common::ok_json(
-        json!({ "schemaVersion": 1, "models": [
+        &json!({ "schemaVersion": 1, "models": [
             layer_a_entry(LAYER_A_PROBE_ID, 1.25),
         ]})
         .to_string(),
@@ -340,7 +356,7 @@ async fn layer_a_fetch_adds_entries_the_compiled_fallback_lacks() {
     install_mock_catalog(agent_dir.path(), bundled_dir.path(), &server);
 
     let auth = AuthStorage::in_memory_without_env(
-        pa_core::auth::AuthStorageData(json!({}).as_object().cloned().unwrap_or_default()),
+        &pa_core::auth::AuthStorageData(json!({}).as_object().cloned().unwrap_or_default()),
         Arc::new(NoOAuth),
     );
     let mut registry = ModelRegistry::create(auth, agent_dir.path().join("models.json"));
@@ -375,13 +391,13 @@ async fn the_picker_available_list_shows_a_fetched_entry_once_its_provider_auth_
         let bundled_dir = tempfile::tempdir().unwrap();
         let server = common::MockServer::start(vec![
             common::ok_json(
-                json!({ "schemaVersion": 1, "models": [
+                &json!({ "schemaVersion": 1, "models": [
                     layer_a_entry(LAYER_A_PROBE_ID, 1.25),
                 ]})
                 .to_string(),
                 None,
             ),
-            common::ok_json(pi_payload("z-ai/glm-5.3", 7.0), None),
+            common::ok_json(&pi_payload("z-ai/glm-5.3", 7.0), None),
         ])
         .await;
         install_mock_catalog(agent_dir.path(), bundled_dir.path(), &server);
@@ -452,9 +468,9 @@ async fn session_model_restore_waits_out_a_slow_catalog_fetch() {
     .to_string();
     let slow = std::time::Duration::from_millis(300);
     let server = common::MockServer::start_scripted(vec![
-        common::Scripted::Delayed(common::ok_json(layer_a, None), slow),
-        common::Scripted::Delayed(common::ok_json(pi.clone(), None), slow),
-        common::Scripted::Delayed(common::ok_json(pi, None), slow),
+        common::Scripted::Delayed(common::ok_json(&layer_a, None), slow),
+        common::Scripted::Delayed(common::ok_json(&pi.clone(), None), slow),
+        common::Scripted::Delayed(common::ok_json(&pi, None), slow),
     ])
     .await;
     install_mock_catalog(agent_dir.path(), bundled_dir.path(), &server);
@@ -519,9 +535,9 @@ async fn session_model_restore_fast_path_never_fetches() {
     ]})
     .to_string();
     let server = common::MockServer::start(vec![
-        common::ok_json(layer_a, None),
-        common::ok_json(pi.clone(), None),
-        common::ok_json(pi, None),
+        common::ok_json(&layer_a, None),
+        common::ok_json(&pi.clone(), None),
+        common::ok_json(&pi, None),
     ])
     .await;
     install_mock_catalog(agent_dir.path(), bundled_dir.path(), &server);

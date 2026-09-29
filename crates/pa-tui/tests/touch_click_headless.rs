@@ -14,6 +14,29 @@
 //! hover affordance's buttonless reports) ride the same path without
 //! disturbing the click grammar.
 #![cfg(unix)]
+// Pedantic-gate exceptions (every other pedantic warning in this crate is
+// fixed in place; each exception carries its one-line justification):
+// - the casts: terminal-layout arithmetic narrows structurally bounded
+//   values (screen coordinates, byte counts, timestamps); guarded
+//   conversions would add panic paths the bounds guarantee away.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// - the render routes are flat tables (one arm per route); splitting them
+//   would add indirection without changing the flow.
+#![allow(clippy::too_many_lines)]
+// - widget state structs carry independent flag bits; a nested struct
+//   would add indirection without changing the shape.
+#![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
+// - the futures are bounded by the surface's lifetime; boxing them would
+//   add an allocation to the steady-state loop.
+#![allow(clippy::large_futures)]
+// - the wrappers preserve a uniform Result-returning API surface; unwrap
+//   removals would ripple through the callers without changing behavior.
+#![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -427,13 +450,12 @@ fn locate(frames: &[String], needle: &str) -> Option<(usize, usize, usize)> {
 /// A click on a tool card expands the card's own output: the plain
 /// press/release pair on the card's summary row toggles the clicked
 /// card's expansion (operator directive 2026-09-26: the click lands on
-/// the card the user means, so the level jumps to `all` — where the
-/// cards render WITH their output bodies — instead of the `details`
-/// level a blind cycle reaches from `overview`, which only reveals the
-/// thinking blocks around them). The chat opens at the collapsed
-/// overview level (operator directive 2026-09-28: every activity item
-/// renders as `details` does, only the thinking hidden), so no cycling
-/// precedes the click.
+/// the card the user means — only that card's output body opens; the
+/// conversation level, the thinking blocks around it, and every other
+/// card stay untouched, exactly like TS's per-component `expanded`).
+/// The chat opens at the collapsed overview level (operator directive
+/// 2026-09-28: every activity item renders as `details` does, only the
+/// thinking hidden), so no cycling precedes the click.
 #[test]
 fn a_click_on_a_card_expands_it() {
     let frames = run_plan(
@@ -473,8 +495,7 @@ fn a_click_on_a_card_expands_it() {
     let last = frames.last().expect("a frame after the click");
     assert!(
         last.contains("\u{2570}\u{2500} print(7)"),
-        "the click expanded the card's own output (the `all` level, not the \
-         `details` level that only opens the thinking around it): {last}"
+        "the click expanded the card's own output: {last}"
     );
     assert!(
         last.contains("print(7)"),
@@ -482,9 +503,9 @@ fn a_click_on_a_card_expands_it() {
     );
 }
 
-/// The card click is a togg/// The card click is a toggle: a second click on an expanded card
-/// collapses the conversation back to the `overview` level — the cards'
-/// output bodies fold away and every card keeps its own summary row.
+/// The card click is a toggle: a second click on the expanded card
+/// collapses that card's own expansion back — its output body folds
+/// away and the card keeps its own summary row.
 #[test]
 fn a_second_click_on_a_card_collapses_back() {
     let frames = run_plan(
@@ -551,6 +572,98 @@ fn a_second_click_on_a_card_collapses_back() {
     assert!(
         !last.contains("\u{2570}\u{2500} print(7)"),
         "the expanded output folded away again: {last}"
+    );
+}
+
+/// One click toggles exactly the clicked component: the fixture holds
+/// the operator's subagent-spawn shape — a received agent-message row
+/// right beside the tool cards (and the `print(5)` card carrying its
+/// own sent-message receipt) — so clicking the agent message must
+/// expand only the notice's body (no tool card, no thinking block: the
+/// conversation level never moves, TS's per-component `expanded`
+/// behavior), and clicking a tool card must expand only that card,
+/// leaving the notice collapsed.
+#[test]
+fn a_click_toggles_only_the_clicked_component() {
+    let frames = run_plan(
+        vec![
+            HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+            HeadlessStep::WaitRender {
+                needle: "print(7)".to_string(),
+                timeout_ms: 5_000,
+            },
+        ],
+        Vec::new(),
+    );
+    let (_, agent_row, agent_col) =
+        locate(&frames, "\u{2193} fleet").expect("the agent-message header renders");
+    let (_, card_row, card_col) = locate(&frames, "print(5)").expect("the tool card renders");
+    // Run A: the click lands on the agent-message notice's header row.
+    let frames = run_plan(
+        vec![
+            HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+            HeadlessStep::WaitRender {
+                needle: "print(7)".to_string(),
+                timeout_ms: 5_000,
+            },
+            HeadlessStep::Mouse(press(agent_col + 1, agent_row + 1)),
+            HeadlessStep::Mouse(release(agent_col + 1, agent_row + 1)),
+            // The notice's own body opens (the `╰─` gutter row only
+            // renders with the notice expanded).
+            HeadlessStep::WaitRender {
+                needle: "\u{2570}\u{2500} steering note".to_string(),
+                timeout_ms: 5_000,
+            },
+        ],
+        Vec::new(),
+    );
+    let last = frames
+        .last()
+        .expect("a frame after the agent-message click");
+    assert!(
+        last.contains("\u{2570}\u{2500} steering note"),
+        "the click expanded the clicked agent message's own body: {last}"
+    );
+    assert!(
+        !last.contains("\u{2570}\u{2500} print("),
+        "no tool card expanded with the agent message: {last}"
+    );
+    assert!(
+        !last.contains("before the message"),
+        "the thinking blocks stay hidden - the level never moved: {last}"
+    );
+    // Run B: the click lands on the `print(5)` card (the card carrying
+    // its own sent-message receipt, the spawn shape inside a tool
+    // card).
+    let frames = run_plan(
+        vec![
+            HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+            HeadlessStep::WaitRender {
+                needle: "print(7)".to_string(),
+                timeout_ms: 5_000,
+            },
+            HeadlessStep::Mouse(press(card_col + 1, card_row + 1)),
+            HeadlessStep::Mouse(release(card_col + 1, card_row + 1)),
+            HeadlessStep::WaitRender {
+                needle: "\u{2570}\u{2500} print(5)".to_string(),
+                timeout_ms: 5_000,
+            },
+        ],
+        Vec::new(),
+    );
+    let last = frames.last().expect("a frame after the card click");
+    assert_eq!(
+        last.matches("\u{2570}\u{2500} print(").count(),
+        1,
+        "only the clicked card expanded: {last}"
+    );
+    assert!(
+        !last.contains("\u{2570}\u{2500} steering note"),
+        "the agent message stays collapsed: {last}"
+    );
+    assert!(
+        !last.contains("before the message"),
+        "the thinking blocks stay hidden - the level never moved: {last}"
     );
 }
 

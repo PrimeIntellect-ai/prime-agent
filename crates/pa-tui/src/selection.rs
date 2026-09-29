@@ -220,11 +220,7 @@ impl SelectionState {
 
     /// Clamp a point into a line's regions (TS `clampFrameSelectionPoint`):
     /// inside a region keeps the column, outside snaps to the nearest edge.
-    fn clamp_frame_point(
-        &self,
-        point: SelectionPoint,
-        regions: &[FrameRegion],
-    ) -> Option<SelectionPoint> {
+    fn clamp_frame_point(point: SelectionPoint, regions: &[FrameRegion]) -> Option<SelectionPoint> {
         let hits = Self::frame_regions_for_line(regions, point.line);
         let first = *hits.first()?;
         let mut closest = first.col;
@@ -254,7 +250,7 @@ impl SelectionState {
 
     /// Whether a frame point sits inside a selectable region (TS
     /// `isFrameSelectable`).
-    fn is_frame_selectable(&self, point: SelectionPoint, regions: &[FrameRegion]) -> bool {
+    fn is_frame_selectable(point: SelectionPoint, regions: &[FrameRegion]) -> bool {
         regions.iter().any(|region| {
             region.line == point.line
                 && point.col >= region.col
@@ -514,10 +510,7 @@ impl AgentView {
             line: row,
             col: screen_col,
         };
-        if !self
-            .selection
-            .is_frame_selectable(point, &self.selection.frame_regions)
-        {
+        if !SelectionState::is_frame_selectable(point, &self.selection.frame_regions) {
             self.selection.clear();
             return false;
         }
@@ -544,7 +537,7 @@ impl AgentView {
             return;
         }
         let row = screen_row.min(snapshot.rows.len() - 1);
-        let clamped = self.selection.clamp_frame_point(
+        let clamped = SelectionState::clamp_frame_point(
             SelectionPoint {
                 line: row,
                 col: screen_col,

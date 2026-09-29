@@ -2,7 +2,7 @@
 //! sidecar layout, the source-checkout fallback, and the content identity
 //! that invalidates an existing venv on any runtime change.
 
-use super::*;
+use super::{expand_home, Digest, Path, PathBuf, RUNTIME_REQUIREMENT};
 
 /// Directory of the installed `prime-agent-runtime` sources. The Rust binary
 /// ships the same sidecar layout the compiled TS executable uses; an explicit
@@ -58,6 +58,7 @@ pub(super) fn resolve_runtime_source_dir() -> Option<PathBuf> {
 ///
 /// Panics when hashing the resolved local runtime source fails (unreadable
 /// or missing runtime files).
+#[must_use]
 pub fn resolve_runtime_identity() -> String {
     let Some(source_dir) = resolve_runtime_source_dir() else {
         return RUNTIME_REQUIREMENT.to_string();

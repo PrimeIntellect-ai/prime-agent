@@ -58,10 +58,21 @@ pub struct Reconstructed {
     pub session_name: Option<String>,
     /// Session id of the persisted session file.
     pub session_id: String,
+    /// The worker generation of the attach's event cursor (the resume
+    /// protocol's generation): disambiguates event-sequence values
+    /// across worker restarts for the cross-view layout handoff's key
+    /// (`view::handoff`) — a restarted worker's sequence restarts, so the
+    /// generation must match too.
+    pub event_generation: String,
     /// The session's goal state (`state.goal`), when the snapshot reports
     /// one (TS `snapshot.ts: goal: session.goalState`).
     pub goal: Option<pa_types::goal::GoalState>,
     pub last_event_sequence: u64,
+    /// Whether the attach supplied the resume cursor (the event
+    /// sequence AND the generation): the reconstruction collapses an
+    /// absent cursor to default key values, and the layout handoff
+    /// refuses to key on those (`view::handoff`).
+    pub cursor_present: bool,
     /// The queued input parked behind the run (`state.sessionActions`) so an
     /// attach re-syncs the queue strip (TS re-reads the queue after
     /// subscribe because a `session_action_update` in the gap is lost).
@@ -358,11 +369,30 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let last_event_sequence = snapshot
-        .get("lastEventSequence")
-        .and_then(Value::as_u64)
+    let snapshot_sequence = snapshot.get("lastEventSequence").and_then(Value::as_u64);
+    let last_event_sequence = snapshot_sequence
         .or(attach.last_event_sequence)
         .unwrap_or_default();
+    let event_generation = attach
+        .last_event_cursor
+        .as_ref()
+        .map(|cursor| cursor.generation.clone())
+        .or_else(|| {
+            snapshot
+                .get("lastEventCursor")
+                .and_then(|cursor| cursor.get("generation"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    // The cursor-presence gate (`view::handoff`): the handoff's key
+    // collapses absent cursor fields to default values, which could
+    // alias across cursor-less attaches of the same entry count — the
+    // layout handoff refuses to key on a collapsed identity (the
+    // sequence supplied, a non-empty generation, a non-empty session).
+    let cursor_present = (snapshot_sequence.is_some() || attach.last_event_sequence.is_some())
+        && !event_generation.is_empty()
+        && !session_id.is_empty();
     let goal = state
         .and_then(|state| state.get("goal"))
         .and_then(|goal| serde_json::from_value::<pa_types::goal::GoalState>(goal.clone()).ok());
@@ -412,8 +442,10 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         thinking_suffix,
         session_name,
         session_id,
+        event_generation,
         goal,
         last_event_sequence,
+        cursor_present,
         queued,
         service_tier,
         last_user_prompt_ms,

@@ -28,6 +28,49 @@ impl CliInteractionTelemetry {
 }
 
 impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
+    fn feature_outcome(
+        &self,
+        feature: &'static str,
+        outcome: &'static str,
+        duration_ms: Option<u64>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let Some(client) = self.client() else {
+                return;
+            };
+            pa_telemetry::AgentFeatureOutcome {
+                feature_id: uuid::Uuid::new_v4().to_string(),
+                feature_name: feature,
+                outcome,
+                duration_ms,
+                configuration_choice: None,
+            }
+            .track(&client);
+        })
+    }
+
+    fn input_stage(
+        &self,
+        input_id: String,
+        stage: &'static str,
+        outcome: &'static str,
+        duration_ms: u64,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let Some(client) = self.client() else {
+                return;
+            };
+            pa_telemetry::AgentInputStage {
+                input_id,
+                stage,
+                outcome,
+                duration_ms: Some(duration_ms),
+                timing_origin: Some("ui_input"),
+            }
+            .track(&client);
+        })
+    }
+
     fn bash_shortcut_used(
         &self,
         excluded: bool,

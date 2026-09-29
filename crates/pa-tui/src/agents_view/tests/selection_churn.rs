@@ -13,7 +13,7 @@ fn churn_roster() -> Vec<serde_json::Value> {
             roster_entry(
                 &format!("s{n}"),
                 "idle",
-                serde_json::json!({
+                &serde_json::json!({
                     "sessionId": format!("s{n}"), "lifecycle": "live",
                     "activeSessionId": format!("s{n}-live"),
                     "sessionFile": format!("/x/s{n}.jsonl"),
@@ -52,7 +52,7 @@ fn selection_follows_the_session_through_spawn_churn() {
     churned[0] = roster_entry(
         "s1",
         "running",
-        serde_json::json!({
+        &serde_json::json!({
             "sessionId": "s1", "lifecycle": "live",
             "activeSessionId": "s1-live",
             "sessionFile": "/x/s1.jsonl",
@@ -65,7 +65,7 @@ fn selection_follows_the_session_through_spawn_churn() {
     churned.push(roster_entry(
         "/x/s1.jsonl#child-w",
         "running",
-        child_summary("w", "s1", "spawned worker"),
+        &child_summary("w", "s1", "spawned worker"),
     ));
     mode.apply_roster_update(churned.clone(), Vec::new(), false);
     // The selection follows session 4's identity, not the row index.
@@ -139,7 +139,7 @@ fn list_window_follows_the_selection_below_the_fold() {
             roster_entry(
                 &format!("s{n}"),
                 "idle",
-                serde_json::json!({
+                &serde_json::json!({
                     "sessionId": format!("s{n}"), "lifecycle": "live",
                     "activeSessionId": format!("s{n}-live"),
                     "sessionFile": format!("/x/s{n}.jsonl"),

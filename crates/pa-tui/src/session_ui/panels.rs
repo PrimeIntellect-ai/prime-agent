@@ -2,7 +2,11 @@
 //! roster-driven subagent summary, the goal and info panels, and the
 //! retry-episode collapse (TS `activityBar` composition + panel keys).
 
-use super::*;
+use super::{
+    key_event_to_id, mpsc, paused_heartbeat_count, picker_viewport_rows, tray_goal_label,
+    AgentView, BashActivityUpdate, CommandCatalogUpdate, DaemonCommand, DockFocusSource, GoalPanel,
+    HeartbeatsUpdate, InfoContent, InfoPanelAction, KeyEvent, Map, Result, SessionUi, Value,
+};
 
 pub(crate) struct ActivityUpdates {
     pub heartbeats: mpsc::UnboundedSender<HeartbeatsUpdate>,
@@ -77,32 +81,14 @@ impl SessionUi {
         );
         self.subagent_counts = crate::subagents::count_descendants(&self.roster, &identity);
         let dock = self.activity_dock_state();
-        // A scope-back reopen hands the dock back its focus exactly once,
-        // at the FIRST summary after the attach: the roster is seeded by
-        // then, so the Subagents group rides the rendered row at its
-        // first paint (the operator's 2026-09-26 panel-exit ruling:
-        // leaving the dock's Subagents panel lands on its own dock item,
-        // not the prompt bar) — and a dock that never mounts keeps the
-        // editor's focus; the one-shot means a LATE roster never yanks
-        // the keyboard back mid-composition.
-        if self.pending_dock_focus_restore {
-            self.pending_dock_focus_restore = false;
-            self.subagents_focused = dock.visible();
+        // A focused selection must stay on a rendered group: only the
+        // goal group can leave the row (its goal ended), and the
+        // selection steps back to the group that now ends the row.
+        if self.subagents_focused && !dock.groups().contains(&self.activity_group) {
+            self.activity_group =
+                dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
         }
-        // A focused selection must stay on a rendered group: the arrows
-        // visit every group an empty one included, so the selection
-        // only moves when its group leaves the row (the goal row ends
-        // with the goal) — and a dock that unmounts entirely (nothing
-        // left to show) returns the focus to the editor.
-        if self.subagents_focused {
-            if !dock.visible() {
-                self.subagents_focused = false;
-            } else if !dock.groups().contains(&self.activity_group) {
-                self.activity_group =
-                    dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
-            }
-        }
-        view.chrome.activity = dock.visible().then_some(crate::chrome::ActivityDock {
+        view.chrome.activity = Some(crate::chrome::ActivityDock {
             selected: self.activity_group,
             focused: self.subagents_focused,
             ..dock
@@ -132,8 +118,7 @@ impl SessionUi {
         // right now (operator scoping): finished runs stay as rows inside
         // the bash view, never in the indicator. The feed is the
         // current session's kernel registry — nested subagents' kernels
-        // are separate and never appear here. The total keeps the dock
-        // (and the bash view's history) mounted when no run is live.
+        // are separate and never appear here.
         let bash_rows = crate::bash_view::parse_bash_activities(&self.bash_activities);
         let bash_running = bash_rows
             .iter()
@@ -146,11 +131,9 @@ impl SessionUi {
         crate::chrome::ActivityDock {
             subagents_running_direct: self.subagent_counts.running_direct,
             subagents_running_nested: self.subagent_counts.running_nested,
-            subagents_total: self.subagent_counts.total,
             heartbeats: self.heartbeat_catalog.len(),
             heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
             bash_running,
-            bash_total: bash_rows.len(),
             goal_label,
             selected: self.activity_group,
             focused: self.subagents_focused,
@@ -160,7 +143,7 @@ impl SessionUi {
     /// The editor's Down and Alt+A hand focus to the compact dock.
     pub(super) fn focus_subagents_summary(
         &mut self,
-        source: DockFocusSource,
+        source: &DockFocusSource,
         view: &mut AgentView,
     ) -> bool {
         // The tray override label blocks the hand-off (TS
@@ -185,7 +168,7 @@ impl SessionUi {
                 }
                 self.activity_group = crate::chrome::ActivityGroup::Subagents;
             }
-            DockFocusSource::Shortcut => return self.focus_activity_dock(view),
+            DockFocusSource::Shortcut => {}
         }
         self.subagents_focused = true;
         self.update_subagent_summary(view);
@@ -223,6 +206,42 @@ impl SessionUi {
                 telemetry.activity_opened(kind).await;
             });
         }
+    }
+
+    /// The dock group a plain click opens (the dock's Enter route,
+    /// operator directive 2026-09-29): the click is an explicit user
+    /// choice, a direction key's peer — it moves the dock's selection
+    /// to the clicked group, takes the focus, and opens the group's
+    /// own view through the focused Enter's exact dispatch.
+    pub(crate) fn open_dock_group_from_click(
+        &mut self,
+        group: crate::chrome::ActivityGroup,
+        view: &mut AgentView,
+    ) {
+        self.activity_group = group;
+        self.subagents_focused = true;
+        self.update_subagent_summary(view);
+        self.open_dock_group_view(view);
+    }
+
+    /// The tray's `← manage` hint click performs the hinted action
+    /// (operator directive 2026-09-29): the left arrow's agents-back
+    /// handoff — the pane goes to the agents view (a `--no-session`
+    /// run has no daemon fleet to browse, so the click reports that
+    /// exactly like the key). The dispatch gates on the empty editor
+    /// exactly like `app.agents.back`, so the click never does more
+    /// than the hint promises.
+    pub(crate) fn open_agents_view_from_hint(&mut self, view: &mut AgentView) {
+        if self.return_to_agents_view {
+            self.open_agents_view = true;
+            self.exit_requested = true;
+        } else {
+            self.note(
+                "The agents view needs a daemon-hosted session; start normally (without --no-session) to browse sessions",
+                view,
+            );
+        }
+        self.dirty = true;
     }
 
     /// The dock's Enter hand-off (the operator's direct-navigation
@@ -297,7 +316,7 @@ impl SessionUi {
 
     /// The goal panel owns the frame while open: the close and back
     /// keys dismiss it; every other key is consumed (a read-only view).
-    pub(super) async fn handle_goal_panel_key(
+    pub(super) fn handle_goal_panel_key(
         &mut self,
         key: KeyEvent,
         view: &mut AgentView,
@@ -330,7 +349,7 @@ impl SessionUi {
     /// scroll its window, the close keys dismiss it, and every other key
     /// is consumed — the read-only document never leaks a key back to
     /// the editor, and the transcript gains nothing while it is open.
-    pub(super) async fn handle_info_panel_key(
+    pub(super) fn handle_info_panel_key(
         &mut self,
         key: KeyEvent,
         view: &mut AgentView,
@@ -390,9 +409,9 @@ mod activity_dock_counts_tests {
     use crate::heartbeats_picker::{parse_heartbeat_job, HeartbeatEntry};
     use serde_json::json;
 
-    fn entry(job_json: serde_json::Value) -> HeartbeatEntry {
+    fn entry(job_json: &serde_json::Value) -> HeartbeatEntry {
         HeartbeatEntry {
-            job: parse_heartbeat_job(&job_json).expect("job parses"),
+            job: parse_heartbeat_job(job_json).expect("job parses"),
             session_name: None,
             first_message: None,
         }
@@ -414,16 +433,16 @@ mod activity_dock_counts_tests {
     /// (the dogfood repro) count exactly like labeled ones.
     #[test]
     fn dock_counts_heartbeats_and_paused() {
-        let labeled = entry(job("labeled", "active"));
+        let labeled = entry(&job("labeled", "active"));
         let mut unlabeled = job("unlabeled", "active");
         unlabeled["label"] = serde_json::Value::Null;
-        let unlabeled = entry(unlabeled);
-        let paused = entry(job("b", "paused"));
+        let unlabeled = entry(&unlabeled);
+        let paused = entry(&job("b", "paused"));
         let catalog = vec![labeled, unlabeled, paused];
         assert_eq!(catalog.len(), 3);
         assert_eq!(paused_heartbeat_count(&catalog), 1);
         // An all-active catalog renders no paused suffix.
-        let active = vec![entry(job("a", "active")), entry(job("c", "active"))];
+        let active = vec![entry(&job("a", "active")), entry(&job("c", "active"))];
         assert_eq!(paused_heartbeat_count(&active), 0);
     }
 
@@ -433,13 +452,13 @@ mod activity_dock_counts_tests {
     /// — the divergence lives in the caller).
     #[test]
     fn dock_heartbeats_scope_to_the_current_session_only() {
-        let own = entry(job("own", "active"));
+        let own = entry(&job("own", "active"));
         // The child's durable session differs: with an empty child-id
         // list it must drop even though its active id also differs.
         let mut child = job("child", "active");
         child["activeSessionId"] = json!("child-live");
         child["sessionId"] = json!("sess-child");
-        let child = entry(child);
+        let child = entry(&child);
         let scoped = crate::heartbeats_picker::scope_heartbeats(
             vec![own, child],
             Some("live-1"),

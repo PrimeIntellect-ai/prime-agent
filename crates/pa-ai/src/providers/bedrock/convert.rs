@@ -158,6 +158,8 @@ pub fn build_system_prompt(
 }
 
 /// Port of `convertMessages`.
+// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+#[allow(clippy::too_many_lines)]
 pub fn convert_messages(
     context: &Context,
     model: &Model,
@@ -172,7 +174,7 @@ pub fn convert_messages(
     while i < transformed.len() {
         match &transformed[i] {
             Message::User(user) => {
-                let content: Vec<Value> = match &user.content {
+                let content_blocks: Vec<Value> = match &user.content {
                     UserMessageContent::Text(text) => {
                         vec![json!({ "text": sanitize_surrogates(text) })]
                     }
@@ -191,7 +193,7 @@ pub fn convert_messages(
                         })
                         .collect(),
                 };
-                result.push(json!({ "role": "user", "content": content }));
+                result.push(json!({ "role": "user", "content": content_blocks }));
                 i += 1;
             }
             Message::Assistant(assistant) => {

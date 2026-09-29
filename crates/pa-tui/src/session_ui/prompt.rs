@@ -3,7 +3,12 @@
 //! fold-back), the prompt stash's capture and restore, the side-question
 //! turns, and the pasted-image registry.
 
-use super::*;
+use super::{
+    anyhow, collect_marked_images, evict_images_to_budget, format_image_marker, image_marker_ids,
+    mpsc, AgentView, DaemonClient, DaemonCommand, DockFold, Duration, LoadedImage, Map,
+    PromptStash, RebuildKind, Result, SessionUi, SlashCommandRegistry, StatusKind, Value,
+    UI_REQUEST_TIMEOUT_MS,
+};
 /// How a submitted prompt travels to the session (TS `streamingBehavior`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SubmitBehavior {
@@ -52,6 +57,11 @@ pub(crate) struct PromptSubmitNote {
     /// The submit's generation (TS `inputSubmissionGeneration`): a newer
     /// submit supersedes an older one's draft-restore right.
     pub(crate) generation: u64,
+    /// The submission's `input_id` (#2117 `agent input stage`).
+    pub(crate) input_id: String,
+    /// When the submit was accepted (the stage durations measure from
+    /// here).
+    pub(crate) submitted_at: std::time::Instant,
     /// Whether a failure may still rebind once (the replayed request is
     /// the second and last attempt — the inline path's
     /// `rebind_available`).
@@ -83,6 +93,12 @@ pub(crate) struct PromptOrder {
     pub(crate) expected_turn_end: u64,
     pub(crate) generation: u64,
     pub(crate) rebind_available: bool,
+    /// The submission's `input_id` (#2117 `agent input stage`): a fresh
+    /// uuid per submitted prompt, pairing the stage observations.
+    pub(crate) input_id: String,
+    /// When the submit was accepted (the stage durations measure from
+    /// here).
+    pub(crate) submitted_at: std::time::Instant,
 }
 
 impl SessionUi {
@@ -495,7 +511,7 @@ impl SessionUi {
         if text.starts_with('/') {
             return self.handle_slash(text, behavior, view).await;
         }
-        self.send_prompt(text, behavior, view).await
+        self.send_prompt(text, behavior, view)
     }
 
     // ------------------------------------------------------------------
@@ -617,7 +633,7 @@ impl SessionUi {
     /// Close the side-question pane (TS `clearSideQuestion`): the active
     /// run aborts fire-and-forget (the daemon emits the cancelled event,
     /// which finds the pane already gone).
-    pub(super) async fn clear_side_question(&mut self, abort: bool, view: &mut AgentView) {
+    pub(super) fn clear_side_question(&mut self, abort: bool, view: &mut AgentView) {
         // A side-conversation bash run dies with its pane: its `bash_*`
         // events may still be in flight (even bash_start), so they are
         // swallowed until its bash_end, and a run we observed starting
@@ -711,7 +727,7 @@ impl SessionUi {
         self.dirty = true;
     }
 
-    pub(super) async fn send_prompt(
+    pub(super) fn send_prompt(
         &mut self,
         text: &str,
         behavior: SubmitBehavior,
@@ -720,7 +736,7 @@ impl SessionUi {
         // A new prompt settles the held bash cards into the transcript
         // first (TS `onSubmit` flushes `pendingBashComponents` before the
         // prompt travels).
-        self.flush_pending_bash(view);
+        Self::flush_pending_bash(view);
         if let Some(error) = self.reconnection_failed.clone() {
             // The re-attach window expired (TS terminal close): the session
             // connection is closed, so nothing dispatches. The error row
@@ -801,6 +817,8 @@ impl SessionUi {
             expected_turn_end,
             generation,
             rebind_available,
+            input_id: uuid::Uuid::new_v4().to_string(),
+            submitted_at: std::time::Instant::now(),
         });
     }
 
@@ -862,6 +880,8 @@ impl SessionUi {
                 turn_was_active: order.turn_was_active,
                 expected_turn_end: order.expected_turn_end,
                 generation: order.generation,
+                input_id: order.input_id,
+                submitted_at: order.submitted_at,
                 rebind_available: order.rebind_available,
                 result,
             });
@@ -919,6 +939,25 @@ impl SessionUi {
         }
         match note.result {
             Ok(()) => {
+                // `agent input stage` (v2, #2117): the submission's observed
+                // dispatch outcome at the submit seam - queued behind a
+                // running turn, or dispatched straight into an admitted
+                // turn. The turn's own terminal state rides the session
+                // telemetry's run events.
+                if let Some(telemetry) = self.telemetry.clone() {
+                    let (stage, outcome) = if note.turn_was_active {
+                        ("queued", "started")
+                    } else {
+                        ("dispatch", "success")
+                    };
+                    let input_id = note.input_id.clone();
+                    let duration_ms = note.submitted_at.elapsed().as_millis() as u64;
+                    tokio::spawn(async move {
+                        telemetry
+                            .input_stage(input_id, stage, outcome, duration_ms)
+                            .await;
+                    });
+                }
                 // A submission while a turn runs parks in the queue behind
                 // it: the queue strip shows the message until the session
                 // delivers it (adoption telemetry for the follow-up queue).
@@ -951,6 +990,18 @@ impl SessionUi {
                 Ok(())
             }
             Err(error) => {
+                // `agent input stage` (v2): the submission was rejected at
+                // the dispatch boundary (the stage's `rejected` stage,
+                // outcome `error`).
+                if let Some(telemetry) = self.telemetry.clone() {
+                    let input_id = note.input_id.clone();
+                    let duration_ms = note.submitted_at.elapsed().as_millis() as u64;
+                    tokio::spawn(async move {
+                        telemetry
+                            .input_stage(input_id, "rejected", "error", duration_ms)
+                            .await;
+                    });
+                }
                 let rendered = format!("{error:#}");
                 // One rebind attempt per submit (never a loop): a prompt
                 // refused with the unknown-session error - the held active
@@ -974,7 +1025,7 @@ impl SessionUi {
                         // the replayed prompt renders on top of it. The
                         // replay keeps the submit's generation and spends
                         // the rebind budget.
-                        self.rebuild_view(view, RebuildKind::Rebind);
+                        self.rebuild_view(view, &RebuildKind::Rebind);
                         self.order_prompt_request(
                             note.text.clone(),
                             note.behavior,

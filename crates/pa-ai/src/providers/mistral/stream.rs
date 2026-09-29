@@ -228,6 +228,8 @@ fn mistral_http_error(status: u16, body: &str, headers: &HashMap<String, String>
     })
 }
 
+// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+#[allow(clippy::too_many_lines)]
 async fn run_stream(
     model: &Model,
     context: &Context,
@@ -493,6 +495,8 @@ impl MistralStreamState {
     }
 
     /// Port of the `consumeChatStream` chunk loop body.
+    // Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+    #[allow(clippy::too_many_lines)]
     fn handle_chunk(
         &mut self,
         chunk: &Value,

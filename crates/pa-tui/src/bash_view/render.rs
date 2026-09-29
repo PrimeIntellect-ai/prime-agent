@@ -2,7 +2,10 @@
 //! columned table geometry and the row/line shapers the pane's render
 //! methods assemble over.
 
-use super::*;
+use super::{
+    fill_row, hug_row, plain_cell, scrub_controls, status_dot, str_width, truncate_line,
+    BashActivity, Line, Span, Theme, ThemeColor,
+};
 
 /// The table's column geometry: the command, duration, pid, and status
 /// cells sized over the rows and their header labels, with the command
@@ -120,7 +123,7 @@ impl Columns {
         // The selected row paints the ONE shared selection style (the
         // operator's 2026-09-28 consistency rule): the same purple band
         // and bold the dock's groups and the agents view's rows carry.
-        fill_row(row, selected, width, theme.selection_row_style())
+        fill_row(&row, selected, width, theme.selection_row_style())
     }
 }
 
@@ -143,7 +146,7 @@ pub(super) fn action_row(
     }
     row.push(theme.fg_span(ThemeColor::Dim, format!("  {description}")));
     hug_row(
-        row,
+        &row,
         str_width(label) + 2 + 2 + str_width(description),
         selected,
         width,

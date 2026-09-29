@@ -93,6 +93,7 @@ fn is_blank_rendered_line(line: &str) -> bool {
 
 /// Trim leading/trailing blank lines from a rendered result (the TS
 /// `trimRenderedResultLines`).
+#[must_use]
 pub fn trim_rendered_result_lines(lines: &[String]) -> &[String] {
     let mut start = 0;
     let mut end = lines.len();
@@ -118,7 +119,7 @@ pub fn pre_render_custom_tools(
     entries: &[Value],
     renderer: &dyn ToolHtmlRenderer,
 ) -> Option<Value> {
-    let mut rendered: Map<String, Value> = Map::new();
+    let mut rendered_tools: Map<String, Value> = Map::new();
     for entry in entries {
         let Some(message) = entry.get("message") else {
             continue;
@@ -151,7 +152,7 @@ pub fn pre_render_custom_tools(
                         call_html: Some(call_html),
                         ..RenderedToolHtml::default()
                     };
-                    rendered.insert(id.to_string(), serde_json::to_value(tool_html).ok()?);
+                    rendered_tools.insert(id.to_string(), serde_json::to_value(tool_html).ok()?);
                 }
             }
         }
@@ -166,7 +167,7 @@ pub fn pre_render_custom_tools(
             // TS: `existing || !TEMPLATE_RENDERED_TOOLS.has(toolName)` — a
             // template-rendered tool only renders when its call already did
             // (e.g. an extension overriding the name).
-            let existing = rendered.get(tool_call_id).cloned();
+            let existing = rendered_tools.get(tool_call_id).cloned();
             if existing.is_none() && TEMPLATE_RENDERED_TOOLS.contains(&tool_name) {
                 continue;
             }
@@ -191,14 +192,14 @@ pub fn pre_render_custom_tools(
                     .unwrap_or_default();
                 merged.result_html_collapsed = rendered_result.collapsed;
                 merged.result_html_expanded = rendered_result.expanded;
-                rendered.insert(tool_call_id.to_string(), serde_json::to_value(merged).ok()?);
+                rendered_tools.insert(tool_call_id.to_string(), serde_json::to_value(merged).ok()?);
             }
         }
     }
-    if rendered.is_empty() {
+    if rendered_tools.is_empty() {
         None
     } else {
-        Some(Value::Object(rendered))
+        Some(Value::Object(rendered_tools))
     }
 }
 

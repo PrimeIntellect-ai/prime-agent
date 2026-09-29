@@ -108,10 +108,8 @@ async fn write_command_row(state: &RpcState, message: &CustomMessage) {
             message: AgentMessage::Custom(custom),
         },
     ] {
-        if let Some(json) = agent_event_json(&event)
-            .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
-        {
-            state.session.write_connection_output(json).await;
+        if let Some(event) = agent_event_json(&event) {
+            state.session.write_connection_output(event).await;
         }
     }
 }

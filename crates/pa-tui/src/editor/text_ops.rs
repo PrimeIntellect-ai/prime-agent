@@ -1,7 +1,7 @@
 //! Editor text operations: character/word/line deletion and kill-ring yank.
 
 use super::text_utils::{char_prefix, char_suffix, split_at_char};
-use super::*;
+use super::{Editor, EditorEvent, LastAction};
 
 impl Editor {
     pub(crate) fn handle_backspace(&mut self) {

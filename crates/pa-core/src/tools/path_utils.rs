@@ -481,6 +481,7 @@ pub fn resolve_to_cwd(file_path: &str, cwd: &str) -> String {
 
 /// Resolve a path relative to cwd, retrying with macOS filename variants
 /// (narrow no-break space in " AM."/" PM.", NFD decomposition, curly apostrophes).
+#[must_use]
 pub fn resolve_read_path(file_path: &str, cwd: &str) -> String {
     let resolved = resolve_to_cwd(file_path, cwd);
 

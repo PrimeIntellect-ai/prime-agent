@@ -1,3 +1,15 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
+// crate root: the same bounded-boundary disposition as src/lib.rs
+// (large_futures/too_many_lines/the cast family; details there).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! Verifier: the turn-boundary host-request contract (`model.info`,
 //! `compact.*`, `refine.*`) over a REAL kernel, driven in-process through
 //! `create_session`.
@@ -99,12 +111,12 @@ struct EnvOverride {
 }
 
 impl EnvOverride {
-    fn apply(pairs: Vec<(&str, Option<String>)>) -> Self {
+    fn apply(pairs: &[(&str, Option<String>)]) -> Self {
         let saved = pairs
             .iter()
             .map(|(key, _)| ((*key).to_string(), std::env::var(key).ok()))
             .collect();
-        for (key, value) in &pairs {
+        for (key, value) in pairs {
             match value {
                 Some(value) => std::env::set_var(key, value),
                 None => std::env::remove_var(key),
@@ -177,7 +189,7 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
 
     // Hermeticity: the kernel runs on the installed runtime (PI_PACKAGE_DIR +
     // the ambient kernel venv), and no ambient agent state leaks in.
-    let _env = EnvOverride::apply(vec![
+    let _env = EnvOverride::apply(&[
         (
             "PRIME_AGENT_KERNEL_PYTHON",
             Some(kernel_python.display().to_string()),

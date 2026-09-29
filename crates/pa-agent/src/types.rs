@@ -157,6 +157,7 @@ pub struct Usage {
 }
 
 impl Usage {
+    #[must_use]
     pub const fn zero() -> Self {
         Usage {
             input: 0,
@@ -276,6 +277,7 @@ pub struct AssistantMessage {
 }
 
 impl AssistantMessage {
+    #[must_use]
     pub fn tool_calls(&self) -> Vec<&ToolCall> {
         self.content
             .iter()
@@ -352,6 +354,7 @@ pub enum AgentMessage {
 }
 
 impl AgentMessage {
+    #[must_use]
     pub fn role(&self) -> &str {
         match self {
             AgentMessage::Standard(Message::User(_)) => "user",
@@ -430,6 +433,7 @@ pub struct Model {
 }
 
 impl Model {
+    #[must_use]
     pub fn unknown() -> Self {
         Model {
             id: "unknown".into(),
@@ -538,10 +542,12 @@ pub enum AgentEvent {
     MessageStart {
         message: AgentMessage,
     },
-    /// Only emitted for assistant messages during streaming.
+    /// Only emitted for assistant messages during streaming. The message
+    /// and the delta event are shared snapshots: a listener clone bumps two
+    /// references instead of deep-copying the partial.
     MessageUpdate {
-        message: AgentMessage,
-        assistant_message_event: Box<crate::stream::AssistantMessageEvent>,
+        message: Arc<AgentMessage>,
+        assistant_message_event: Arc<crate::stream::AssistantMessageEvent>,
     },
     MessageEnd {
         message: AgentMessage,

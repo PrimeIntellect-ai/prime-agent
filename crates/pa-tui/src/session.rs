@@ -95,6 +95,7 @@ pub struct JsonlSessionStream {
 }
 
 impl JsonlSessionStream {
+    #[must_use]
     pub fn from_entries(entries: Vec<FileEntry>) -> Self {
         Self {
             entries: entries.into_iter(),
@@ -143,6 +144,7 @@ pub fn parse_jsonl(raw: &str) -> Result<Vec<FileEntry>> {
 
 /// Fold a session entry into the transcript (paired tool results attach to
 /// nothing here; they render as their own panel lines).
+#[must_use]
 pub fn entry_to_items(entry: &FileEntry) -> Vec<TranscriptItem> {
     match entry {
         FileEntry::Message { message, .. } => message_to_items(message),

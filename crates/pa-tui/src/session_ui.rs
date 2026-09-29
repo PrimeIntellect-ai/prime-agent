@@ -125,6 +125,30 @@ pub(crate) struct SessionUi {
     pub(crate) client: DaemonClient,
     pub(crate) active_session_id: String,
     pub(crate) session_id: String,
+    /// The worker generation of this run's attach (the resume cursor's
+    /// generation): the cross-view layout handoff's key (`view::handoff`)
+    /// pairs it with the attach's event sequence so a restarted worker
+    /// can never serve a stale handoff.
+    pub(crate) attach_event_generation: String,
+    /// The event sequence of this run's attach — the same monotonic
+    /// counter the resume cursor rides. The layout handoff's ADOPT keys
+    /// on the next attach's value here: every transcript change rides an
+    /// event, so a match means the entries the handoff's packs were
+    /// rendered from are exactly the ones the re-entry rebuilt
+    /// (`view::handoff`).
+    pub(crate) attach_event_sequence: u64,
+    /// The LATEST event sequence this run has seen — the attach's value,
+    /// then the monotonic max over every event's `meta.sequence` (the
+    /// live tracker `view::handoff` keys its STASH with, so a turn during
+    /// the run advances the stash's key to the value the next attach
+    /// reports instead of the run's own stale attach sequence).
+    pub(crate) last_event_sequence: u64,
+    /// Whether the attach supplied the resume cursor (the event
+    /// generation + sequence fields). The handoff's key collapses an
+    /// absent cursor to empty/zero defaults, which could alias across
+    /// cursor-less attaches of the same entry count — a cursor-less
+    /// attach stashes nothing (`view::handoff`).
+    pub(crate) attach_cursor_present: bool,
     session_name: Option<String>,
     /// Config carried over from the run options; `/new` sessions reuse it.
     cwd: PathBuf,
@@ -381,13 +405,6 @@ pub(crate) struct SessionUi {
     /// The subagent summary line holds keyboard focus.
     subagents_focused: bool,
     activity_group: crate::chrome::ActivityGroup,
-    /// A scope-back reopen (the agents view's parent/escape key handed
-    /// the pane back from the dock's Subagents panel) restores the dock
-    /// focus once, at the first summary after the attach: the roster is
-    /// seeded by then, so the panel's own group is actionable at the
-    /// first paint or the editor keeps the focus (a later roster must
-    /// not yank the keyboard back mid-composition).
-    pending_dock_focus_restore: bool,
     /// The last computed descendant counts (selectability reads them between
     /// roster updates).
     subagent_counts: crate::subagents::SubagentCounts,
@@ -595,14 +612,13 @@ enum DockFocusSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DockFold {
     /// Clear and fold the first `heartbeats_list` and `list_kernel_bash`
-    /// responses into the session before the attach returns: the dock
-    /// (the panel and its divider under the prompt bar) is first-frame
-    /// geometry — its visibility must be final when the first content
-    /// frame renders (open, switch, rebind), never a late layout shift.
+    /// responses into the session before the attach returns: the dock's
+    /// counts are first-frame state — the first content frame reads the
+    /// final counts (open, switch, rebind), never a late repaint.
     FirstFrame,
     /// Clear and hand the dock to the background refreshes: a brand-new
     /// session (`/new`) owns nothing, so its dock is deterministically
-    /// empty — the fold cannot change geometry, and waiting on two
+    /// empty — the fold cannot change the counts, and waiting on two
     /// registry reads would only delay the new chat's first frame.
     Fresh,
     /// Hold the dock's data and let the background refreshes update it: a
@@ -622,25 +638,11 @@ impl SessionUi {
     /// Hand the keyboard focus to the compact dock on its selected group:
     /// the `app.subagents.focus` shortcut and every dock panel's close
     /// restore (the operator's 2026-09-26 ruling: leaving a panel lands
-    /// on the panel's own dock item, never the prompt bar). The dock owns
-    /// the hand-off exactly while it renders — a session with nothing to
-    /// show keeps the dock unmounted and the focus where it was; every
-    /// group the row renders is traversable, empty ones included, so no
-    /// feed gate remains here.
-    fn focus_activity_dock(&mut self, view: &mut AgentView) -> bool {
-        let dock = self.activity_dock_state();
-        if !dock.visible() {
-            return false;
-        }
-        if !dock.groups().contains(&self.activity_group) {
-            // Only the goal group leaves with its row: the selection
-            // steps back to the group that now ends the row.
-            self.activity_group =
-                dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
-        }
+    /// on the panel's own dock item, never the prompt bar). The summary
+    /// refresh moves a selection whose group left the row.
+    fn focus_activity_dock(&mut self, view: &mut AgentView) {
         self.subagents_focused = true;
         self.update_subagent_summary(view);
-        true
     }
 
     /// Materialize parked editor autocomplete requests once the input
@@ -650,6 +652,7 @@ impl SessionUi {
     /// events dispatch here.
     pub(crate) fn materialize_editor_autocomplete(&mut self, view: &mut AgentView) {
         let was_showing = view.editor.is_showing_autocomplete();
+        let was_pending = view.editor.has_pending_autocomplete();
         view.editor.materialize_autocomplete();
         for event in view.editor.take_events() {
             if let crate::editor::EditorEvent::Changed(text) = event {
@@ -662,6 +665,12 @@ impl SessionUi {
             }
         }
         if view.editor.is_showing_autocomplete() != was_showing {
+            self.dirty = true;
+        }
+        // A background `@` search resolving repaints even when the menu
+        // was already open: its rows are replaced in place, so the
+        // showing-state check above cannot see it.
+        if was_pending && !view.editor.has_pending_autocomplete() {
             self.dirty = true;
         }
     }

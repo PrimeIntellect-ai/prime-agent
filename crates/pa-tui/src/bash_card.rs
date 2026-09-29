@@ -44,6 +44,7 @@ pub struct BashExecutionCard {
 impl BashExecutionCard {
     /// A running card for one dispatched command (TS the constructor's
     /// `Running...` loader state).
+    #[must_use]
     pub fn new_running(id: &str, command: &str, excluded: bool) -> Self {
         Self {
             id: id.to_string(),
@@ -63,6 +64,7 @@ impl BashExecutionCard {
     /// A settled card for a replayed durable `bashExecution` row (TS
     /// `addMessageToChat` constructs the component, appends the recorded
     /// output, and completes it).
+    #[must_use]
     pub fn settled(command: &str, excluded: bool) -> Self {
         let mut card = Self::new_running("", command, excluded);
         card.running = false;
@@ -122,12 +124,14 @@ impl BashExecutionCard {
     }
 
     /// The raw accumulated output (TS `getOutput`).
+    #[must_use]
     pub fn get_output(&self) -> String {
         self.output_lines.join("\n")
     }
 
     /// Whether the status row shows a failure marker (TS `setComplete`
     /// classifies `exit !== 0` as the error status).
+    #[must_use]
     pub fn failed(&self) -> bool {
         self.error_message.is_some() || self.exit_code.is_some_and(|code| code != 0)
     }
@@ -137,6 +141,7 @@ impl BashExecutionCard {
 /// the `$ command` header, the output preview, and the loader or status
 /// rows. The leading spacer and the click-to-expand affordance live with
 /// the caller (the chat entry spacing and the mouse surface own them).
+#[must_use]
 pub fn render_bash_execution(
     card: &BashExecutionCard,
     frame: usize,

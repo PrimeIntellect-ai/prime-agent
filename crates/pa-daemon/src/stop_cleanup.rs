@@ -17,9 +17,13 @@
 //! - `cancelEphemeralWorkerScheduledJobs` — a client-owned (ephemeral)
 //!   worker's schedules die with the registration.
 //! - `wakeDueScheduledSessions` / `collectPassiveScheduledJobs` — the
-//!   wake scan only wakes jobs whose session file still exists, is
+//!   TS wake scan only wakes jobs whose session file still exists, is
 //!   still `active`, and whose tree no live worker covers: a killed
 //!   session (state `archived`) or a deleted file is never revived.
+//!   (The Rust port no longer wakes at all — the takeover field fix's
+//!   no-auto-resume contract: a schedule fires only while its session
+//!   is live, and the boot reports due jobs on not-running sessions as
+//!   dormant instead of creating workers for them.)
 //! - `deleteRlmSubagentArtifacts` — a deleted RLM subagent's artifact
 //!   partition goes with the tombstone (best-effort, never fails the
 //!   deletion).
@@ -31,7 +35,6 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use pa_core::cron::store::{AgentCronJobStore, CancelJobsFilter};
-use pa_core::cron::AgentCronJob;
 
 use crate::lease::canonical_session_path;
 use crate::registry::ResidentWorker;
@@ -524,7 +527,7 @@ impl Supervisor {
     /// removal, a saved-session delete, and daemon restarts). Best effort
     /// by contract - a capture failure logs and leaves the lazy file
     /// fallback in force.
-    async fn capture_deleted_child_usage(
+    pub(crate) async fn capture_deleted_child_usage(
         self: &Arc<Self>,
         session_file: &str,
         child_id: &str,
@@ -590,37 +593,11 @@ impl Supervisor {
     }
 }
 
-/// Whether a due scheduled job's target is still revivable (TS
-/// `collectPassiveScheduledJobs`' scan gates, the wake-scan half of the
-/// stop lifecycle): the session file must still exist, still be the job's
-/// session (`readSessionInfo`'s id check of `isPersistedCronJobRunnable`),
-/// still carry the `active` state (a killed session is `archived`, a
-/// deleted session is gone), and no live worker may cover the job's file
-/// (a covered tree's scheduler owns the fire itself).
-pub(crate) fn due_job_target_alive(job: &AgentCronJob, live_files: &HashSet<String>) -> bool {
-    if job.session_file.is_empty() {
-        return false;
-    }
-    let path = canonical_session_path(Path::new(&job.session_file));
-    if !path.is_file() {
-        return false;
-    }
-    let Some(info) = read_session_info(&path) else {
-        return false;
-    };
-    if info.id != job.session_id {
-        return false;
-    }
-    if info.state.as_deref() != Some("active") {
-        return false;
-    }
-    !live_files.contains(&path.to_string_lossy().to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::session_store::{session_file_name, SessionFile};
+    use pa_core::cron::AgentCronJob;
     use std::io::Write;
 
     fn temp_dir() -> PathBuf {
@@ -751,54 +728,6 @@ mod tests {
             read_job(&root_file, &root_id).status,
             pa_core::cron::JobStatus::Active
         );
-    }
-
-    /// The wake-scan gate: a due job whose session was killed (state
-    /// archived) or whose file is gone is not revivable; an active session
-    /// with no live worker is.
-    #[test]
-    fn due_job_target_alive_checks_the_session_state() {
-        let root = temp_dir();
-        let sessions_dir = root.join("sessions");
-        std::fs::create_dir_all(&sessions_dir).unwrap();
-
-        let (session_id, session_file) = write_session(&sessions_dir, None);
-        let job = AgentCronJob {
-            session_id: session_id.clone(),
-            session_file: session_file.to_string_lossy().to_string(),
-            ..serde_json::from_value(serde_json::json!({
-                "id": "job",
-                "status": "active",
-                "activeSessionId": session_id,
-                "sessionId": session_id,
-                "sessionFile": session_file.to_string_lossy(),
-                "cwd": "/work",
-                "prompt": "ping",
-                "schedule": { "kind": "interval", "expression": "every 2m", "intervalMs": 120_000 },
-                "createdAt": "2026-01-01T00:00:00Z",
-                "updatedAt": "2026-01-01T00:00:00Z",
-                "runCount": 0,
-            }))
-            .unwrap()
-        };
-
-        // An active session with no live worker: revivable.
-        assert!(due_job_target_alive(&job, &HashSet::new()));
-        // A live worker covers it: the scan leaves the fire to its scheduler.
-        let live: HashSet<String> = [canonical_session_path(&session_file)
-            .to_string_lossy()
-            .to_string()]
-        .into_iter()
-        .collect();
-        assert!(!due_job_target_alive(&job, &live));
-        // A killed session carries the archived state.
-        let mut session = SessionFile::open(&session_file).unwrap();
-        session.append_session_state("archived");
-        session.rewrite().unwrap();
-        assert!(!due_job_target_alive(&job, &HashSet::new()));
-        // A deleted session file is gone.
-        std::fs::remove_file(&session_file).unwrap();
-        assert!(!due_job_target_alive(&job, &HashSet::new()));
     }
 
     /// A tombstoned child with a frozen transcript: the capture appends the

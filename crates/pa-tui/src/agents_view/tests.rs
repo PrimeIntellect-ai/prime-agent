@@ -15,6 +15,7 @@ mod drill_down;
 mod edge_jumps;
 mod entry_anchor;
 mod hints_render;
+mod hover_band;
 mod key_bindings;
 mod notices;
 mod render_pulse;
@@ -81,7 +82,7 @@ fn mouse_report(row: usize, press: bool, motion: bool) -> crate::mouse::MouseEve
     }
 }
 
-fn roster_entry(agent: &str, status: &str, summary: serde_json::Value) -> serde_json::Value {
+fn roster_entry(agent: &str, status: &str, summary: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({ "agentId": agent, "status": status, "summary": summary })
 }
 
@@ -151,8 +152,8 @@ fn mode_with_parent_and_child() -> AgentsViewMode {
         incident_notice_state: None,
     });
     mode.roster = vec![
-        roster_entry("p", "idle", parent_summary("p")),
-        roster_entry("c", "running", child_summary("c", "p", "worker one")),
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("c", "running", &child_summary("c", "p", "worker one")),
     ];
     mode.rebuild_rows();
     mode
@@ -209,8 +210,8 @@ fn mode_with_user_bindings(bindings: &[(&str, &str)]) -> AgentsViewMode {
         incident_notice_state: None,
     });
     mode.roster = vec![
-        roster_entry("p", "idle", parent_summary("p")),
-        roster_entry("c", "running", child_summary("c", "p", "worker one")),
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("c", "running", &child_summary("c", "p", "worker one")),
     ];
     mode.rebuild_rows();
     mode

@@ -44,7 +44,7 @@ impl AgentView {
                             // set: a tool call, agent message, bash
                             // execution, or shell completion).
                             let preceded_by_tool =
-                                idx > 0 && self.is_compact_neighbor(&self.chat[idx - 1]);
+                                idx > 0 && Self::is_compact_neighbor(&self.chat[idx - 1]);
                             if tool_separator
                                 || message.has_trailing_space(self.detail, preceded_by_tool)
                             {
@@ -58,13 +58,13 @@ impl AgentView {
                     }
                 }
                 preceding => {
-                    if tool_separator && !self.is_compact_neighbor(preceding) {
+                    if tool_separator && !Self::is_compact_neighbor(preceding) {
                         return false;
                     }
                     if expanded {
                         return true;
                     }
-                    return !self.is_compact_neighbor(preceding);
+                    return !Self::is_compact_neighbor(preceding);
                 }
             }
         }
@@ -111,7 +111,7 @@ impl AgentView {
     ) -> Vec<Line> {
         #[cfg(test)]
         layout::ENTRY_RENDERS.with(|count| count.set(count.get() + 1));
-        let detail = self.detail;
+        let detail = self.entry_detail(index);
         match entry {
             ChatEntry::Status { text, kind } => {
                 let style = match kind {

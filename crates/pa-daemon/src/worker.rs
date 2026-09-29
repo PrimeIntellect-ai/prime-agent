@@ -80,8 +80,8 @@ use tokio::sync::{broadcast, oneshot, Notify};
 use crate::agent_engine::{AgentEngineConfig, AgentSessionEngine, SupervisorLinkConfig};
 use crate::autonomous_continuation::AUTONOMOUS_QUEUE_KEY;
 use crate::engine::{
-    EngineEvent, EngineModelSelection, PromptRequest, RlmSessionIdentity, ScriptedEngine,
-    SessionEngine,
+    AssistantSnapshot, EngineEvent, EngineModelSelection, PromptRequest, RlmSessionIdentity,
+    ScriptedEngine, SessionEngine,
 };
 use crate::framing::{write_frame, write_frame_segments, DEFAULT_PRIVATE_FRAME_LIMITS};
 use crate::journal::WorkerRecoveryJournal;
@@ -123,6 +123,19 @@ pub struct Worker {
     roster_delta_sequence: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub(crate) work_notify: Arc<Notify>,
     idle_notify: Arc<Notify>,
+    /// The per-connection session-attach registry (the fresh bots'
+    /// release findings): connection tokens -> the client ids their
+    /// `attach` retained. The release is connection-scoped on EVERY
+    /// return path (the guard's Drop), and a shared client id leaves the
+    /// core only when the LAST live connection holding it goes (the
+    /// reconnect shape).
+    pub(crate) session_attachments:
+        std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
+    /// The connection tokens whose attach guard already released (the
+    /// round-8 race belt): a late registration from a detached attach
+    /// handler racing the close is rejected instead of recreating an
+    /// unowned attachment.
+    pub(crate) released_attach_tokens: std::sync::Mutex<std::collections::HashSet<String>>,
     pub(crate) events: Arc<EventPump>,
     /// The `/model` catalog background-refresh coalescing gate: at most
     /// one refresh runs per worker with one queued trailing re-arm, so a
@@ -298,6 +311,7 @@ impl Worker {
             abort_requested: false,
             suppress_aborted_row: false,
             shutdown_requested: false,
+            last_activity_ms: 0,
             compacting: false,
             auto_compaction_enabled: true,
             // TS seeds `_lastSessionActionSnapshot` with the empty
@@ -519,7 +533,23 @@ impl Worker {
                 let sink_events = events.clone();
                 let sink_notify = Arc::clone(&work_notify);
                 let sink_recovery = Arc::clone(&recovery);
+                // A weak engine reference: the engine holds this sink, so a
+                // strong reference would pin the engine forever (the same
+                // downgrade the bash-completion notice sink applies).
+                let sink_engine = std::sync::Arc::downgrade(concrete);
                 let sink: crate::engine::GoalAdmissionSink = Arc::new(move |work| {
+                    // The item's OWN pending handle (captured under the
+                    // driver lock at the mint), cloned before the admission
+                    // takes the work: the release touches exactly this
+                    // mint's guard, never the mutable mirror (a rebuilt
+                    // core re-swaps the mirror onto the replacement
+                    // session's guard, and this sink must not clear that).
+                    let pending_handle = match &work {
+                        crate::engine::GoalTurnEndWork::Continuation(item)
+                        | crate::engine::GoalTurnEndWork::BudgetLimitSteer(item) => {
+                            item.pending_handle.clone()
+                        }
+                    };
                     admit_goal_follow_up(
                         &sink_recovery,
                         &sink_core,
@@ -527,6 +557,16 @@ impl Worker {
                         &sink_notify,
                         work,
                     );
+                    let Some(engine) = sink_engine.upgrade() else {
+                        return;
+                    };
+                    // The queue admitted the minted continuation: the
+                    // guard releases at the admission (the owed flag
+                    // clears at the queue, TS `_admitSessionInput`'s
+                    // follow-up), so the next boundary may mint again —
+                    // the queued row's own wait is guarded by the
+                    // session-input probe.
+                    engine.release_goal_continuation_handle(&pending_handle);
                 });
                 // TS `_clearQueuedGoalContexts`: withdraw queued minted
                 // goal-context turns (the pause/clear/start commands and
@@ -652,7 +692,7 @@ impl Worker {
                     engine: std::sync::Arc::clone(&engine),
                     user_bash: std::sync::Arc::clone(&user_bash),
                     roster_link: Arc::clone(&roster_link),
-                    worker_token,
+                    worker_token: worker_token.clone(),
                     worker_instance_id: config.worker_instance_id.clone(),
                     roster_delta_sequence: std::sync::Arc::clone(&roster_delta_sequence),
                     roster_push_order: std::sync::Arc::clone(&roster_push_order),
@@ -669,6 +709,12 @@ impl Worker {
                 engine: std::sync::Arc::clone(&engine),
                 active_session_id,
                 roster_pushes: roster_pushes.clone(),
+                user_bash: std::sync::Arc::clone(&user_bash),
+                passivation: crate::worker::turn::PassivationContext {
+                    agent_dir: config.agent_dir.clone(),
+                    link: Arc::clone(&roster_link),
+                    worker_token,
+                },
             };
             tokio::spawn(async move {
                 runner.run().await;
@@ -725,6 +771,8 @@ impl Worker {
             roster_delta_sequence,
             work_notify,
             idle_notify,
+            session_attachments: std::sync::Mutex::new(std::collections::HashMap::new()),
+            released_attach_tokens: std::sync::Mutex::new(std::collections::HashSet::new()),
             events,
             model_catalog_refresh_gate: std::sync::Arc::new(
                 crate::model_catalog::RefreshGate::default(),
@@ -821,7 +869,7 @@ fn emit_refinement_row(
         if store.session_id() != review_session_id {
             pa_core::session_engine::compaction_trace::trace(
                 "autorefine.rows_dropped_session_moved",
-                serde_json::Value::Null,
+                &serde_json::Value::Null,
             );
             return false;
         }

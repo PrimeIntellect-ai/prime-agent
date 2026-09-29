@@ -83,9 +83,20 @@ impl Worker {
             .await;
         {
             let mut core = self.core.lock().unwrap();
+            // The shutdown admission gate closes FIRST (the round-8
+            // bots' finding): a racing execute_bash handler must see
+            // the stop before the abort runs, or the fresh claim
+            // clears the abort request and spawns a child the exit
+            // leaves running.
             core.shutdown_requested = true;
             core.abort_requested = true;
         }
+        // The running user bash goes with the stop (the orphan
+        // protection's home - the bots' finding class: the passivation
+        // stop must never leave the user's process running after the
+        // worker exits; the abort is the same kill switch the
+        // `abort_bash` command pulls).
+        self.user_bash.abort().await;
         // TS `shutdown` closes through `session.abort()` -> `requestAbort()`:
         // the in-flight turn's fetch cancels now, not at its next event.
         self.engine.abort_in_flight_turn();
@@ -451,6 +462,13 @@ impl Worker {
                     // join failure leaves the continuation un-minted
                     // (logged, never silent) — the session still resumes.
                     let engine = std::sync::Arc::clone(&self.engine);
+                    // The mint task's OWN handle, captured at the spawn
+                    // (the core the mint runs on at that moment): a join
+                    // failure releases exactly this handle — never the
+                    // mutable mirror at clear time, which a core rebuild
+                    // may have re-swapped onto a replacement session's
+                    // guard meanwhile.
+                    let mint_pending_handle = engine.goal_pending_handle();
                     let continuation = tokio::task::spawn_blocking(move || {
                         engine.mint_post_compaction_goal_continuation()
                     })
@@ -459,6 +477,12 @@ impl Worker {
                         eprintln!(
                             "pa-daemon: post-compaction goal continuation mint failed: {error}"
                         );
+                        // A join failure loses the minted continuation
+                        // (logged, never silent): the mint's own captured
+                        // handle releases so a later boundary may mint —
+                        // the goal loop never wedges on the lost turn.
+                        self.engine
+                            .release_goal_continuation_handle(&mint_pending_handle);
                         None
                     });
                     if let Some(continuation) = continuation {
@@ -515,6 +539,13 @@ impl Worker {
                         self.checkpoint_queue(QueueCheckpoint::Admitted {
                             operation: "follow_up_queued",
                         });
+                        // The queue admitted the minted continuation: the
+                        // item's OWN handle releases at the admission
+                        // (the owed flag clears at the queue) — never the
+                        // mutable mirror, which a core rebuild may have
+                        // re-swapped onto a replacement session's guard.
+                        self.engine
+                            .release_goal_continuation_handle(&continuation.pending_handle);
                     }
                 }
                 // The resume site: clears the suspension and wakes the

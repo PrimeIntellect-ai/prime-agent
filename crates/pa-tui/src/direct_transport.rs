@@ -400,9 +400,9 @@ fn iso_to_unix_ms(iso: &str) -> Option<u64> {
     let days = days_from_civil(year, month, day);
     Some(
         (days * 86_400 * 1000
-            + hour as i64 * 3_600_000
-            + minute as i64 * 60_000
-            + second as i64 * 1_000
+            + i64::from(hour) * 3_600_000
+            + i64::from(minute) * 60_000
+            + i64::from(second) * 1_000
             + millis as i64) as u64,
     )
 }
@@ -413,7 +413,7 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let yoe = y.rem_euclid(400);
     let mp = (m + 9) % 12;
     let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy as i64;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + i64::from(doy);
     era * 146_097 + doe - 719_468
 }
 
@@ -424,6 +424,7 @@ pub(crate) fn direct_attach_capabilities() -> Vec<DaemonClientCapability> {
         "attach_snapshot".to_string(),
         "event_sequence".to_string(),
         "slim_attach".to_string(),
+        "elide_snapshot_images".to_string(),
     ]
 }
 

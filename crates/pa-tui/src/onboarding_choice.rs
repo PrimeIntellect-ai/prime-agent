@@ -58,6 +58,7 @@ pub struct OnboardingChoice {
 impl OnboardingChoice {
     /// TS constructor: the cursor seeds at `selected_index` (TS
     /// `selectedIndex`), clamped into the option list.
+    #[must_use]
     pub fn new(
         options: Vec<OnboardingChoiceOption>,
         selected_seed: Option<usize>,
@@ -72,6 +73,7 @@ impl OnboardingChoice {
     }
 
     /// The row the cursor sits on.
+    #[must_use]
     pub fn selected(&self) -> usize {
         self.selected
     }
@@ -94,6 +96,7 @@ impl OnboardingChoice {
     /// The panel block (TS `OnboardingChoiceComponent.render`): the prompt,
     /// the wrapped description, the option rows (the selected one washed),
     /// and the change-anytime note, each indented one column.
+    #[must_use]
     pub fn render(&self, theme: &Theme, width: usize) -> Vec<Line> {
         let safe_width = width.max(1);
         let mut lines: Vec<Line> = vec![Vec::new()];

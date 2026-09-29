@@ -2,7 +2,15 @@
 //! (the session selection's open, the §10 reattach, the attach fold,
 //! and the transcript rebuild it feeds), the stats refresh, and the
 //! detach/exit request helpers.
-use super::*;
+use super::{
+    attach_data_from_response, create_session, mpsc, reconstruct, resume_hint_from_stats,
+    ActivityUpdates, AgentView, BTreeMap, ChatEntry, CompactionAbortNote, Context, DaemonClient,
+    DaemonCommand, DockFold, Duration, GoalView, HashSet, InteractiveOptions, LoaderTokenTracker,
+    Map, MessageBlock, ModelCatalogUpdate, PromptOrder, PromptSubmitNote, ReattachOutcome,
+    RebuildKind, RecoveryKind, ReloadNote, Result, ResyncBash, SessionSelection, SessionUi,
+    ShareNote, UpdateNote, Value, EXIT_DETACH_TIMEOUT_MS, EXIT_STATS_TIMEOUT_MS,
+    UI_REQUEST_TIMEOUT_MS,
+};
 
 impl SessionUi {
     /// Create/attach per the session selection and return the live state.
@@ -41,6 +49,10 @@ impl SessionUi {
             client,
             active_session_id: String::new(),
             session_id: String::new(),
+            attach_event_generation: String::new(),
+            attach_event_sequence: 0,
+            last_event_sequence: 0,
+            attach_cursor_present: false,
             session_name: None,
             cwd: options.cwd.clone(),
             session_dir: options.session_dir.clone(),
@@ -125,7 +137,6 @@ impl SessionUi {
             bash_updates: activity_updates.bash,
             subagents_focused: false,
             activity_group: crate::chrome::ActivityGroup::Subagents,
-            pending_dock_focus_restore: false,
             subagent_counts: crate::subagents::SubagentCounts::default(),
             session_file: None,
             pending_selection: None,
@@ -180,12 +191,10 @@ impl SessionUi {
             .attach_session(&active_session_id, DockFold::FirstFrame)
             .await
             .with_context(|| format!("attaching session {active_session_id}"))?;
-        // The scope-back reopen's restore arms AFTER the attach: every
-        // later attach's rebind reset clears an armed restore (focus
-        // returns to the editor, TS `resetSubagentSummary`), so the
-        // initial attach must carry the reopen's own restore past that
-        // reset to the first summary.
-        session.pending_dock_focus_restore = options.restore_dock_focus;
+        // The scope-back reopen's restore lands AFTER the attach: the
+        // attach's rebind reset clears the focus, so the reopen's own
+        // restore must survive it.
+        session.subagents_focused = options.restore_dock_focus;
         Ok(session)
     }
 
@@ -267,7 +276,7 @@ impl SessionUi {
         // Flush the attach snapshot BEFORE the banner lands: `rebuild_view`
         // replaces the transcript from the snapshot, so the banner must come
         // after it to survive the rebuild (§10.5's visible end state).
-        self.rebuild_view(view, RebuildKind::Resync);
+        self.rebuild_view(view, &RebuildKind::Resync);
         match kind {
             RecoveryKind::Update => match complete {
                 Some(false) => view.push_entry(crate::chat::ChatEntry::Status {
@@ -336,7 +345,16 @@ impl SessionUi {
             active_session_id: session_id.to_string(),
             supports_extension_ui: None,
             client_id: None,
-            capabilities: None,
+            // `elide_snapshot_images`: the transcript arrives without the
+            // base64 image payloads (their fallback-only metadata rows
+            // ride the marker), so an image-heavy session's attach stops
+            // transferring megabytes the rows never render.
+            capabilities: Some(vec![
+                "attach_snapshot".to_string(),
+                "event_sequence".to_string(),
+                "slim_attach".to_string(),
+                "elide_snapshot_images".to_string(),
+            ]),
             resume_cursor: None,
             telemetry_disabled: self.telemetry_disabled.filter(|disabled| *disabled),
             recovery_config: None,
@@ -409,6 +427,15 @@ impl SessionUi {
                 .await;
         }
         self.session_id = reconstructed.session_id;
+        self.attach_event_generation
+            .clone_from(&reconstructed.event_generation);
+        self.attach_event_sequence = reconstructed.last_event_sequence;
+        // The live tracker starts at the attach's value (the replayed
+        // events' sequences converge onto it by the monotonic max); the
+        // cursor-presence gate keeps a cursor-less attach from stashing
+        // a handoff under collapsed default key values.
+        self.last_event_sequence = reconstructed.last_event_sequence;
+        self.attach_cursor_present = reconstructed.cursor_present;
         // The closing notice is per-connection (TS #2458: it clears on
         // every attach): a later bare session stop must not route into a
         // stale shutdown recovery's reconnect hang.
@@ -427,22 +454,17 @@ impl SessionUi {
         // the editor (TS `resetSubagentSummary` on rebind).
         self.roster.clear();
         self.subagents_focused = false;
-        // A rebind drops an armed scope-back restore with the session it
-        // belonged to: the arriving session's focus is the editor's
-        // (TS `resetSubagentSummary`), never the left session's
-        // panel-exit state.
-        self.pending_dock_focus_restore = false;
         self.subscribe_roster().await;
         // The dock's heartbeat rows follow `dock_fold` (the enum's
         // contract): a first-content-frame attach folds the fresh fetch
-        // BEFORE the attach returns — the dock's visibility (the panel
-        // and its divider under the prompt bar) is first-frame geometry,
-        // never a late layout shift (the operator's 2026-09-26
-        // zero-shift ruling). TS guarantees the same for its dock: the
-        // counts seed from the attach snapshot (`seedSubagentSummary`)
-        // and the roster subscription is awaited before the first
-        // content render; TS's own heartbeat fetch stays fire-and-forget
-        // only because its summary line renders no heartbeat rows.
+        // BEFORE the attach returns — the first content frame reads the
+        // final counts, never a late repaint (the operator's
+        // 2026-09-26 zero-shift ruling). TS guarantees the same for its
+        // dock: the counts seed from the attach snapshot
+        // (`seedSubagentSummary`) and the roster subscription is
+        // awaited before the first content render; TS's own heartbeat
+        // fetch stays fire-and-forget only because its summary line
+        // renders no heartbeat rows.
         match dock_fold {
             DockFold::FirstFrame | DockFold::Fresh => self.heartbeat_catalog.clear(),
             // The held dock keeps its data: an already-up surface's dock
@@ -568,7 +590,7 @@ impl SessionUi {
 
     /// Fold the pending snapshot into the view (fresh transcript, footer
     /// labels). Called after attach and after every session switch.
-    pub(crate) fn rebuild_view(&mut self, view: &mut AgentView, kind: RebuildKind) {
+    pub(crate) fn rebuild_view(&mut self, view: &mut AgentView, kind: &RebuildKind) {
         let resync_bash = self.resync_bash.take();
         // The held cards' fate diverges by rebuild: a rebind drops them
         // with the old transcript (TS `resetCurrentSessionRenderState`), a
@@ -597,8 +619,10 @@ impl SessionUi {
             view.chrome.speed_text = None;
         }
         view.clear_chat();
-        // The rebuilt transcript invalidates the tracked status row.
+        // The rebuilt transcript invalidates the tracked status row and
+        // a pending click's entry index.
         self.last_status_index = None;
+        self.pressed_click = None;
         // The rebuild drops the previous run's pending-tool map (TS
         // `resetPendingToolState` at the rebuild boundary).
         self.pending_tools.clear();
@@ -688,7 +712,7 @@ impl SessionUi {
                             // TS flushes inside the active-component branch:
                             // a side run (no mounted card) never flushes.
                             if !resync.snap_streaming {
-                                self.flush_pending_bash(view);
+                                Self::flush_pending_bash(view);
                             }
                         }
                         if self.side_bash.take().is_some() {

@@ -253,7 +253,7 @@ impl AgentView {
     /// settled entry keeps its layout while another message streams — the
     /// transcript-wide "any streaming" exclusion re-rendered every
     /// settled agent message per streaming delta, the dogfood CPU spin.
-    pub(super) fn entry_cacheable(&self, entry: &ChatEntry) -> bool {
+    pub(super) fn entry_cacheable(entry: &ChatEntry) -> bool {
         match entry {
             ChatEntry::Status { .. }
             | ChatEntry::User { .. }
@@ -321,7 +321,7 @@ impl AgentView {
             | ChatEntry::SlashCommand { .. }
             | ChatEntry::CompactionSummary { .. } => !first,
             ChatEntry::AgentMessage(_) | ChatEntry::ShellCompletion(_) | ChatEntry::Tool(_) => {
-                self.conversation_leading(index, self.detail.tool_output_expanded())
+                self.conversation_leading(index, self.entry_detail(index).tool_output_expanded())
             }
             // The bash card's own mount rule (TS `Spacer(1)` unless the
             // chat's last child is an agent message, captured on the card
@@ -360,7 +360,7 @@ impl AgentView {
         let mut preceded_by_tool_activity = false;
         for (index, entry) in self.chat.iter().enumerate() {
             let spacing = self.entry_spacing(index, entry, first, preceded_by_tool_activity);
-            let cacheable = self.entry_cacheable(entry);
+            let cacheable = Self::entry_cacheable(entry);
             let cached_height = self.entry_heights[index][detail]
                 .filter(|(cached_spacing, _)| cacheable && *cached_spacing == spacing)
                 .map(|(_, height)| height);
@@ -371,7 +371,7 @@ impl AgentView {
             offsets.push(offsets.last().copied().unwrap_or(0) + count);
             // TS `precededByToolActivity` = the compact set (tool calls,
             // agent messages, bash executions, shell completions).
-            preceded_by_tool_activity = self.is_compact_neighbor(entry);
+            preceded_by_tool_activity = Self::is_compact_neighbor(entry);
             first = false;
         }
         let tail = self.render_transcript_tail(width);
@@ -414,6 +414,7 @@ impl AgentView {
             .resize_with(self.chat.len(), || [None, None, None]);
         self.entry_heights
             .resize(self.chat.len(), [None, None, None]);
+        self.seed_pending_handoff();
     }
 
     pub(super) fn render_transcript_tail(&self, width: usize) -> Vec<Line> {
@@ -576,5 +577,52 @@ impl AgentView {
             out.extend(source.range(from, to));
         }
         offset + source.len()
+    }
+    /// The cross-view layout handoff's seed (see `view::handoff`): a
+    /// held handoff whose render shape matches this preparation places
+    /// its visible-window packs into the (fresh or wiped) layout cache
+    /// so the first window build serves them instead of re-rendering —
+    /// the reuse is the byte-exact expansion of rows a fresh render of
+    /// the same entries would produce (pack storage is output-neutral,
+    /// the tui-scroll-retain2 contract). A shape mismatch (a resize, a
+    /// theme/settings change, an image-fallback flip since the handoff)
+    /// or a handoff whose entry indices fall outside this transcript
+    /// drops the affected packs — the window re-renders exactly as
+    /// before this cut.
+    fn seed_pending_handoff(&mut self) {
+        let Some(handoff) = self.pending_handoff.take() else {
+            return;
+        };
+        let (width, options) = match self.layout_options.as_ref() {
+            // The branch above leaves the view's layout state equal to
+            // this draw's shape (it either just set it or found it
+            // unchanged), so the held packs validate against the view's
+            // own current shape without re-deriving it.
+            Some(options) => (self.layout_width, options),
+            None => return,
+        };
+        if handoff.shape.0 != width || &handoff.shape.1 != options {
+            // A shape-mismatched handoff drops its packs and the window
+            // re-renders: the served-path observable must NOT count it
+            // (the counter is the verifiers' proof the reuse actually
+            // happened, so it counts only windows the packs served).
+            return;
+        }
+        let mut seeded = 0usize;
+        for (index, slots) in handoff.packs {
+            let Some(target) = self.entry_layout.get_mut(index) else {
+                continue;
+            };
+            for (detail, slot) in slots.into_iter().enumerate() {
+                if slot.is_some() {
+                    target[detail] = slot;
+                    seeded += 1;
+                    self.sparse_entries.insert(index);
+                }
+            }
+        }
+        if seeded > 0 {
+            self.handoff_seeds = self.handoff_seeds.saturating_add(1);
+        }
     }
 }

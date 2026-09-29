@@ -50,6 +50,7 @@ pub struct ScriptedProvider {
 }
 
 impl ScriptedProvider {
+    #[must_use]
     pub fn new(model: Model) -> Self {
         ScriptedProvider {
             model,
@@ -353,6 +354,7 @@ fn text_delta_steps(base: &AssistantMessage, content_index: usize, text: &str) -
 }
 
 /// A complete text response turn (`stopReason: stop`).
+#[must_use]
 pub fn text_turn_steps(model: &Model, text: &str) -> Vec<ScriptStep> {
     let base = empty_partial(model);
     let mut steps = vec![ScriptStep::Event(Box::new(AssistantMessageEvent::Start {
@@ -387,6 +389,7 @@ pub fn text_turn_steps(model: &Model, text: &str) -> Vec<ScriptStep> {
 }
 
 /// A tool-call response turn (`stopReason: toolUse`).
+#[must_use]
 pub fn tool_call_turn_steps(
     model: &Model,
     text: Option<&str>,
@@ -447,6 +450,7 @@ pub fn tool_call_turn_steps(
 
 /// A stream that delivers `partial_text` and then fails mid-turn
 /// (`stopReason: error`).
+#[must_use]
 pub fn stream_failure_steps(
     model: &Model,
     partial_text: &str,

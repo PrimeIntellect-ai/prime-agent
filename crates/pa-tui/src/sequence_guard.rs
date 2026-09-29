@@ -123,7 +123,7 @@ impl SequenceGuard {
                 // flush timeout.
                 pending.deadline = now + HOLD;
                 if is_complete_sequence(&pending.assembled) {
-                    classify(pending)
+                    classify(&pending)
                 } else {
                     self.pending = Some(pending);
                     Vec::new()
@@ -132,12 +132,13 @@ impl SequenceGuard {
         }
     }
 
-    /// The poll wait: never past a pending sequence's deadline.
-    pub(crate) fn poll_timeout(&self, default: Duration, now: Instant) -> Duration {
-        match &self.pending {
-            Some(pending) => default.min(pending.deadline.saturating_duration_since(now)),
-            None => default,
-        }
+    /// The parking wait: the remaining flush deadline while a partial
+    /// sequence is held, or `None` to park until real input — an idle
+    /// wait has no tick of its own to bound.
+    pub(crate) fn poll_deadline(&self, now: Instant) -> Option<Duration> {
+        self.pending
+            .as_ref()
+            .map(|pending| pending.deadline.saturating_duration_since(now))
     }
 
     /// Flush whatever the deadline released.
@@ -269,7 +270,7 @@ fn ends_with_terminator(after_esc: &[u8], bel: bool) -> bool {
 /// crossterm event, and everything else — OSC/DCS/APC replies, focus and
 /// cursor reports, kitty replies, paste markers, unknown forms — is
 /// consumed.
-fn classify(pending: PendingEscape) -> Vec<GuardOutput> {
+fn classify(pending: &PendingEscape) -> Vec<GuardOutput> {
     let bytes = pending.assembled.as_slice();
     // Mouse reports first: the drag stream is a dense run of them.
     if bytes.starts_with(b"\x1b[<") {
@@ -326,7 +327,7 @@ fn decode_rxvt_report(bytes: &[u8]) -> Vec<GuardOutput> {
         row,
         modifiers: report_modifiers(cb),
     };
-    match mouse::from_crossterm(&event) {
+    match mouse::from_crossterm(event) {
         Some(report) => vec![GuardOutput::Mouse(report)],
         None => Vec::new(),
     }
@@ -391,7 +392,7 @@ fn decode_report(bytes: &[u8], sgr: bool) -> Vec<GuardOutput> {
         row,
         modifiers: report_modifiers(cb),
     };
-    match mouse::from_crossterm(&event) {
+    match mouse::from_crossterm(event) {
         Some(report) => vec![GuardOutput::Mouse(report)],
         None => Vec::new(),
     }

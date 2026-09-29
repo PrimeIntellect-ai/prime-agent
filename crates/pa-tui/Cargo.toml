@@ -8,19 +8,21 @@ description = "Terminal UI for Prime Agent."
 [dependencies]
 pa-types = { path = "../pa-types" }
 ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
-crossterm = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }
 unicode-width = "0.2"
 unicode-properties = "0.1"
 unicode-segmentation = "1"
 fancy-regex = "0.14"
 url = "2"
 regex = "1"
+ignore = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net", "process"] }
+uuid = { version = "1", features = ["v4"] }
 
 [[bin]]
 name = "pa-tui-replay"

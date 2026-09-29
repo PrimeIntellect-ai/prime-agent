@@ -227,15 +227,28 @@ impl AgentView {
         // brightening whatever landed there (the review bots' finding:
         // the state is a screen coordinate, the layout moves).
         if let Some((row, col)) = self.hover_pos {
-            if matches!(
-                self.click_target_at(row, col),
-                Some(click::ClickAction::ToggleCardExpansion)
-            ) {
-                if let Some(line) = frame.get_mut(row) {
-                    apply_hover_affordance(line, &self.theme);
+            match self.click_target_at(row, col) {
+                Some(click::ClickAction::ToggleCardExpansion(_)) => {
+                    if let Some(line) = frame.get_mut(row) {
+                        apply_hover_affordance(line, &self.theme);
+                    }
                 }
-            } else {
-                self.hover_pos = None;
+                // The dock's hover affordance (operator directive
+                // 2026-09-29): the hovered group segment or tray hint
+                // carries the ONE light hover band — exactly the
+                // region's own cells, never the row around them — and
+                // the focused group's purple selection band stays
+                // under it (the paint skips cells that already carry
+                // a background, so both state styles apply where they
+                // overlap).
+                Some(click::ClickAction::OpenDockGroup(_) | click::ClickAction::OpenAgentsView) => {
+                    if let Some(region) = self.dock_region_at(row, col) {
+                        if let Some(line) = frame.get_mut(row) {
+                            self.theme.paint_hover_band(line, region.cols.clone());
+                        }
+                    }
+                }
+                _ => self.hover_pos = None,
             }
         }
         // A paused viewport carries the follow hint over the last transcript

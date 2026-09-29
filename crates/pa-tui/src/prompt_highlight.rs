@@ -4,7 +4,7 @@
 //! applies them:
 //!
 //! - the queued-message preview strip (`styleQueuedMessagePreview`): dim base, accent on the recognized command's `/name`, arg tokens colored;
-//! - the live editor's styled display text (`CustomEditor.styleDisplayText` + `ArgTokenHighlighter`): arg tokens colored on every line, the command token of the first layout line in accent (argument-taking commands only, suppressed while the cursor sits inside it).
+//! - the live editor's styled display text (`CustomEditor.styleDisplayText` + `ArgTokenHighlighter`): arg tokens colored on every line, the command token of the first layout line in accent (any recognized builtin command, aliases included — operator ruling 2026-09-29, a deliberate divergence from the TS argument-taking-only gate; suppressed while the cursor sits inside it).
 //!
 //! - the user-message transcript block (`UserMessageComponent` +
 //!   `PromptTokenMask`): the row's accent command segment and argument
@@ -424,15 +424,15 @@ pub fn command_token(line: &str) -> Option<CommandToken> {
 /// The highlight ranges of one laid-out editor chunk (TS
 /// `ArgTokenHighlighter.highlightLine` + `CustomEditor.styleCommandToken`):
 /// the source line's argument tokens clipped to the chunk, plus — when the
-/// chunk is the first layout line and opens with an argument-taking command
-/// the cursor does not sit inside — the command token in accent. Char
-/// offsets over the chunk, in order.
+/// chunk is the first layout line and opens with a recognized builtin
+/// command (aliases included; TS accents argument-taking commands only —
+/// the operator's 2026-09-29 divergence) the cursor does not sit inside —
+/// the command token in accent. Char offsets over the chunk, in order.
 pub fn editor_chunk_highlights(
     chunk: &str,
     line_spans: &[ArgTokenSpan],
     source_start: usize,
     command: Option<&CommandToken>,
-    command_takes_argument: bool,
     cursor_col: Option<usize>,
 ) -> Vec<(usize, usize, ThemeColor)> {
     let chunk_chars = chunk.chars().count();
@@ -452,7 +452,9 @@ pub fn editor_chunk_highlights(
         ));
     }
     if let Some(command) = command {
-        if command_takes_argument && cursor_col.is_none_or(|cursor| cursor >= command.end) {
+        if SlashCommandRegistry::builtin_cached().is_builtin(&command.name)
+            && cursor_col.is_none_or(|cursor| cursor >= command.end)
+        {
             out.push((command.start, command.end, ThemeColor::Accent));
         }
     }
@@ -881,6 +883,7 @@ mod tests {
             })
         );
         assert_eq!(command_token("a /new"), None);
+        assert_eq!(command_token("see a/b/c"), None);
         assert_eq!(command_token("/"), None);
         assert_eq!(command_token("  / foo"), None);
     }
@@ -892,29 +895,33 @@ mod tests {
         // A chunk starting after the @-token: only the flag token
         // intersects, at its clipped offset.
         let chunk = " --draft";
-        let highlights = editor_chunk_highlights(chunk, &spans, 18, None, false, None);
+        let highlights = editor_chunk_highlights(chunk, &spans, 18, None, None);
         assert_eq!(
             highlights,
             vec![(1, 8, ThemeColor::MdLink)],
             "the @-token ends at the chunk start and is skipped; the flag clips in"
         );
-        // The first layout line's command token highlights in accent when
-        // the command takes an argument and the cursor is past it.
-        let command = command_token("/new x").unwrap();
-        let highlights = editor_chunk_highlights("/new x", &[], 0, Some(&command), true, Some(5));
+        // The first layout line's command token highlights in accent for any
+        // recognized builtin while the cursor is past it; its argument tokens
+        // keep their colors.
+        let source = "/model @a.rs --flag";
+        let command = command_token(source).unwrap();
+        let spans = find_arg_tokens(source, 0, false);
+        let highlights = editor_chunk_highlights(source, &spans, 0, Some(&command), Some(7));
         assert_eq!(
             highlights,
-            vec![(0, 4, ThemeColor::Accent)],
-            "cursor past the token keeps the accent"
+            vec![
+                (7, 12, ThemeColor::Success),
+                (13, 19, ThemeColor::MdLink),
+                (0, 6, ThemeColor::Accent)
+            ]
         );
         // The cursor inside the token suppresses it entirely.
-        let highlights = editor_chunk_highlights("/new x", &[], 0, Some(&command), true, Some(3));
+        let highlights = editor_chunk_highlights("/model", &[], 0, Some(&command), Some(3));
         assert!(highlights.is_empty());
-        // A no-argument command never highlights.
-        let command = command_token("/hotkeys").unwrap();
-        let highlights =
-            editor_chunk_highlights("/hotkeys", &[], 0, Some(&command), false, Some(8));
-        assert!(highlights.is_empty());
+        // An unknown command never highlights.
+        let command = command_token("/nope").unwrap();
+        assert!(editor_chunk_highlights("/nope", &[], 0, Some(&command), None).is_empty());
     }
 
     /// A selection range renders reversed-video, clipped to the chunk, and

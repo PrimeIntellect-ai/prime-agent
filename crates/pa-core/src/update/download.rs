@@ -246,7 +246,7 @@ pub fn stage_archive(
 fn file_digest(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut digest = Sha256::new();
-    let mut buffer = [0u8; 128 * 1024];
+    let mut buffer = vec![0u8; 128 * 1024];
     loop {
         let read = std::io::Read::read(&mut file, &mut buffer)?;
         if read == 0 {

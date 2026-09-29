@@ -11,6 +11,7 @@ use crate::Line;
 
 /// The reasoning-level descriptions the TS selector lists under each level
 /// (TS `LEVEL_DESCRIPTIONS`).
+#[must_use]
 pub fn level_description(level: &str) -> &'static str {
     match level {
         "off" => "No reasoning",
@@ -88,6 +89,7 @@ impl EffortPicker {
     /// Build the picker: one item row per level (label = level,
     /// description as the secondary filter field), the current level
     /// checked.
+    #[must_use]
     pub fn new(levels: &[String], current: Option<&str>) -> Self {
         let rows = levels
             .iter()
@@ -106,11 +108,13 @@ impl EffortPicker {
     }
 
     /// The session's levels the picker was built over.
+    #[must_use]
     pub fn levels(&self) -> &[String] {
         &self.levels
     }
 
     /// The checked state of one level's row.
+    #[must_use]
     pub fn checked(&self, level: &str) -> Option<bool> {
         self.selector.checked(level)
     }
@@ -135,12 +139,14 @@ impl EffortPicker {
     }
 
     /// The picker's rendered frame (the shared menu-panel grammar).
+    #[must_use]
     pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         self.selector.render(theme, width, kb)
     }
 
     /// The level rows the picker's list window renders (the click
     /// surface's item-row span).
+    #[must_use]
     pub fn visible_window(&self) -> (usize, usize) {
         self.selector.visible_window()
     }

@@ -35,6 +35,7 @@ const BLOCK_OPEN: &str = "<skill name=\"";
 /// tail can still satisfy the match (empty, or `\n\n` plus trailing text);
 /// a body containing earlier close tags keeps them. Returns `None` when
 /// the text is not a skill block.
+#[must_use]
 pub fn parse_skill_block(text: &str) -> Option<ParsedSkillBlock> {
     let rest = text.strip_prefix(BLOCK_OPEN)?;
     let (name, rest) = rest.split_once('"')?;

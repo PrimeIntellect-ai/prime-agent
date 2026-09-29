@@ -18,6 +18,7 @@ pub struct SessionIdentity {
 }
 
 impl SessionIdentity {
+    #[must_use]
     pub fn new(
         active_session_id: Option<String>,
         session_id: Option<String>,
@@ -90,6 +91,7 @@ pub(crate) fn summary_identity_keys(summary: &Value) -> Vec<String> {
 /// parent keys, and each linked row extends the walk with its own
 /// identity keys so deeper descendants stay reachable. The depth pairs
 /// the direct/nested running counts (depth 1 = a direct child).
+#[must_use]
 pub fn descendant_positions_with_depth(
     summaries: &[&Value],
     parent: &SessionIdentity,
@@ -138,6 +140,7 @@ pub fn descendant_positions_with_depth(
 
 /// The descendant positions of `parent`, depth-free (the flat consumers:
 /// row and entry collection).
+#[must_use]
 pub fn descendant_positions(summaries: &[&Value], parent: &SessionIdentity) -> Vec<usize> {
     descendant_positions_with_depth(summaries, parent)
         .into_iter()
@@ -146,6 +149,7 @@ pub fn descendant_positions(summaries: &[&Value], parent: &SessionIdentity) -> V
 }
 
 /// The summaries that descend from `parent`.
+#[must_use]
 pub fn descendant_rows<'a>(summaries: &[&'a Value], parent: &SessionIdentity) -> Vec<&'a Value> {
     descendant_positions(summaries, parent)
         .into_iter()
@@ -160,6 +164,7 @@ pub fn descendant_rows<'a>(summaries: &[&'a Value], parent: &SessionIdentity) ->
 ///
 /// Cannot panic: the `expect` re-reads the same `"summary"` key the
 /// filter kept, so it always resolves on the collected entries.
+#[must_use]
 pub fn descendant_entries_with_depth<'a>(
     roster: &'a [Value],
     parent: &SessionIdentity,
@@ -179,6 +184,7 @@ pub fn descendant_entries_with_depth<'a>(
 }
 
 /// The roster entries that descend from `parent`.
+#[must_use]
 pub fn descendant_entries<'a>(roster: &'a [Value], parent: &SessionIdentity) -> Vec<&'a Value> {
     descendant_entries_with_depth(roster, parent)
         .into_iter()
@@ -189,6 +195,7 @@ pub fn descendant_entries<'a>(roster: &'a [Value], parent: &SessionIdentity) -> 
 /// The roster status of one entry (the supervisor's classification, with
 /// the shared formula as the fallback: TS `rosterStatus ??
 /// classifySessionRosterStatus`).
+#[must_use]
 pub fn entry_status(entry: &Value) -> AgentRosterStatus {
     match get_str(entry, "status") {
         Some("running") => AgentRosterStatus::Running,
@@ -214,6 +221,7 @@ pub fn entry_status(entry: &Value) -> AgentRosterStatus {
 /// running split rides the descendant depths: depth 1 counts direct,
 /// deeper counts nested — the two addends the dock's single running
 /// total sums (the operator's 2026-09-28 one-number readout).
+#[must_use]
 pub fn count_descendants(roster: &[Value], parent: &SessionIdentity) -> SubagentCounts {
     let mut counts = SubagentCounts::default();
     for (entry, depth) in descendant_entries_with_depth(roster, parent) {
@@ -239,7 +247,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn entry(agent_id: &str, summary: Value, status: &str) -> Value {
+    fn entry(agent_id: &str, summary: &Value, status: &str) -> Value {
         json!({ "agentId": agent_id, "summary": summary, "status": status })
     }
 
@@ -266,22 +274,16 @@ mod tests {
 
     #[test]
     fn direct_and_deep_descendants_count() {
+        let mut gc1_summary = child_summary("gc1", "c1", "subagent");
+        gc1_summary["parentActiveSessionId"] = json!("c1-live");
+        gc1_summary["parentSessionId"] = json!("c1");
+        gc1_summary["parentSessionPath"] = json!("/sessions/c1.jsonl");
         let roster = vec![
-            entry("parent", parent_summary("p1"), "idle"),
-            entry("c1", child_summary("c1", "p1", "subagent"), "running"),
-            entry("c2", child_summary("c2", "p1", "subagent"), "idle"),
-            entry(
-                "gc1",
-                {
-                    let mut summary = child_summary("gc1", "c1", "subagent");
-                    summary["parentActiveSessionId"] = json!("c1-live");
-                    summary["parentSessionId"] = json!("c1");
-                    summary["parentSessionPath"] = json!("/sessions/c1.jsonl");
-                    summary
-                },
-                "inactive",
-            ),
-            entry("other", parent_summary("p2"), "running"),
+            entry("parent", &parent_summary("p1"), "idle"),
+            entry("c1", &child_summary("c1", "p1", "subagent"), "running"),
+            entry("c2", &child_summary("c2", "p1", "subagent"), "idle"),
+            entry("gc1", &gc1_summary, "inactive"),
+            entry("other", &parent_summary("p2"), "running"),
         ];
         let counts = count_descendants(
             &roster,
@@ -305,13 +307,13 @@ mod tests {
     #[test]
     fn running_split_counts_direct_and_nested() {
         let mut roster = vec![
-            entry("parent", parent_summary("p1"), "idle"),
-            entry("c1", child_summary("c1", "p1", "subagent"), "running"),
-            entry("c2", child_summary("c2", "p1", "subagent"), "idle"),
+            entry("parent", &parent_summary("p1"), "idle"),
+            entry("c1", &child_summary("c1", "p1", "subagent"), "running"),
+            entry("c2", &child_summary("c2", "p1", "subagent"), "idle"),
         ];
         for name in ["gc1", "gc2"] {
             let grandchild = child_summary(name, "c1", "subagent");
-            roster.push(entry(name, grandchild, "running"));
+            roster.push(entry(name, &grandchild, "running"));
         }
         let counts = count_descendants(
             &roster,
@@ -336,8 +338,8 @@ mod tests {
     #[test]
     fn non_subagent_rows_never_link() {
         let roster = vec![
-            entry("p1", parent_summary("p1"), "idle"),
-            entry("fork", child_summary("f1", "p1", "top-level"), "running"),
+            entry("p1", &parent_summary("p1"), "idle"),
+            entry("fork", &child_summary("f1", "p1", "top-level"), "running"),
         ];
         let counts = count_descendants(
             &roster,

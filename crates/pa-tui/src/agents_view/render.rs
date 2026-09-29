@@ -2,7 +2,11 @@
 //! sectioned list, hints), the row builders, the notice/list/row
 //! renderers, the cell/truncate helpers, and the terminal/
 //! headless renderer (moved with their concern).
-use super::*;
+use super::{
+    build_layout, mpsc, pad_line, section_title, str_width, truncate_text, AgentsStep,
+    AgentsViewMode, AgentsViewRow, AgentsViewUiMode, Duration, Line, Result, RowKind, RowLayout,
+    Section, Theme, ThemeColor, UiInput,
+};
 
 impl AgentsViewMode {
     /// Compose one frame (splash, search prompt, sectioned list, hints).
@@ -316,13 +320,17 @@ impl AgentsViewMode {
         let start = anchor.min(upper).max(0) as usize;
         let show_leading = start > 0 && visible_rows > 1;
         let show_trailing = start + visible_rows < display.len() && visible_rows > 2;
-        let content_rows = visible_rows - show_leading as usize - show_trailing as usize;
+        let content_rows = visible_rows - usize::from(show_leading) - usize::from(show_trailing);
         let slice_start = if selected_display_index >= start as isize + content_rows as isize {
             (selected_display_index + 1 - content_rows as isize) as usize
         } else {
             start
         };
         let slice_end = (slice_start + content_rows).min(display.len());
+        // The viewport's front rows (the leading ellipsis and the
+        // column legend block) shift the session rows down — the click
+        // rows and the hover band carry the shift with them.
+        let shift = header_rows + usize::from(show_leading);
         let mut lines: Vec<Line> = Vec::with_capacity(content_rows);
         let mut click_rows: Vec<(usize, usize)> = Vec::new();
         for item in &display[slice_start..slice_end] {
@@ -340,7 +348,13 @@ impl AgentsViewMode {
                     )]);
                 }
                 DisplayItem::Row(index, row) => {
-                    lines.push(self.render_row(row, &layout, width));
+                    // The row's frame position carries the hover
+                    // (operator directive 2026-09-29): the light band
+                    // rides the row the mouse rests on, exactly the
+                    // rows the click grammar covers.
+                    let frame_position = frame_row + local + shift;
+                    let hovered = self.hover_row == Some(frame_position);
+                    lines.push(self.render_row(row, &layout, width, hovered));
                     click_rows.push((local, *index));
                 }
             }
@@ -365,22 +379,43 @@ impl AgentsViewMode {
                 )],
             );
         }
-        // The viewport's front rows (the leading ellipsis and the column
-        // legend block) shift the session rows down; the recorded click
-        // rows carry the shift with them.
-        let shift = header_rows + show_leading as usize;
         self.click_rows = click_rows
             .into_iter()
             .map(|(local, index)| (frame_row + local + shift, index))
             .collect();
+        // The hover revalidates against THIS frame's rows (the session
+        // surface's hover contract): a roster rebuild that moved the
+        // rows re-aims the band at the row that took the hovered
+        // position's place, and a row that scrolled out of the window
+        // clears it — the band can never brighten a row the mouse is
+        // no longer on.
+        if self.hover_row.is_some_and(|row| {
+            !self
+                .click_rows
+                .iter()
+                .any(|(click_row, _)| *click_row == row)
+        }) {
+            self.hover_row = None;
+        }
         lines
     }
 
     /// One session row (TS `renderRow`): the summary rows render their
     /// `▸/▾ title` cell over the full width; agent rows render icon, title
     /// (nested rows indented), model, cost/age. The selected row
-    /// carries the selection background.
-    pub(super) fn render_row(&self, row: &AgentsViewRow, layout: &RowLayout, width: usize) -> Line {
+    /// carries the selection background; a hovered unselected row
+    /// carries the light hover band (operator directive 2026-09-29: the
+    /// row is clickable — every row, the summaries and the nested
+    /// children included, opens on a click), and a hovered selected row
+    /// keeps the purple selection band (both state styles apply where
+    /// they overlap; the focused state is never demoted).
+    pub(super) fn render_row(
+        &self,
+        row: &AgentsViewRow,
+        layout: &RowLayout,
+        width: usize,
+        hovered: bool,
+    ) -> Line {
         let theme = &self.theme;
         let selected = Some(row.identity.as_str())
             == self.rows.get(self.selected).map(|r| r.identity.as_str());
@@ -402,7 +437,7 @@ impl AgentsViewMode {
                 let zone = layout.name_width + 2 + layout.model_width;
                 let title = crate::agents_view_state::truncate_text(&text, zone);
                 let pad = zone.saturating_sub(str_width(&title));
-                let mut line: Line = vec![
+                let line: Line = vec![
                     crate::Span::raw(title),
                     crate::Span::raw(" ".repeat(pad)),
                     crate::Span::styled("  ".to_string(), ratatui::style::Style::default()),
@@ -415,20 +450,16 @@ impl AgentsViewMode {
                             .unwrap_or_default(),
                     ),
                 ];
-                line = pad_line(line, width);
-                if selected {
-                    return theme.selection_paint(line);
-                }
-                return line;
+                // The summary rows always pad to the full width (their
+                // original shape); the finish adds the affordance bands.
+                let line = pad_line(line, width);
+                return finish_session_row(theme, line, selected, hovered, width);
             }
-            let mut line: Line = vec![crate::Span::raw(crate::agents_view_state::truncate_text(
+            let line: Line = vec![crate::Span::raw(crate::agents_view_state::truncate_text(
                 &text, width,
             ))];
-            line = pad_line(line, width);
-            if selected {
-                return theme.selection_paint(line);
-            }
-            return line;
+            let line = pad_line(line, width);
+            return finish_session_row(theme, line, selected, hovered, width);
         }
         let icon = match row.section {
             Section::Running => ["\u{25c7}", "\u{25c8}", "\u{25c6}", "\u{25c8}"][self.pulse % 4],
@@ -494,11 +525,7 @@ impl AgentsViewMode {
             .cloned()
             .unwrap_or_default();
         line.push(theme.fg(ThemeColor::Dim, details));
-        if selected {
-            line = pad_line(line, width);
-            return theme.selection_paint(line);
-        }
-        line
+        finish_session_row(theme, line, selected, hovered, width)
     }
 
     /// The bottom hint/status line. `status_override` carries the
@@ -516,7 +543,7 @@ impl AgentsViewMode {
                 ),
                 None => "Press again to exit".to_string(),
             };
-            return truncate_line(vec![theme.fg(ThemeColor::Muted, hint)], width);
+            return truncate_line(&vec![theme.fg(ThemeColor::Muted, hint)], width);
         }
         // The armed stop-or-delete confirm: "Press ctrl+x again to
         // stop|delete" (TS `renderHints`'s delete hint, keyed by the
@@ -527,7 +554,7 @@ impl AgentsViewMode {
                 .rows
                 .iter()
                 .find(|row| row.identity == pending.identity)
-                .map_or(pending.stop, |row| self.delete_arm_word(row));
+                .map_or(pending.stop, Self::delete_arm_word);
             let word = if stop { "stop" } else { "delete" };
             let hint = match self.keybindings.first_key("app.agents.delete") {
                 Some(key) => format!(
@@ -536,10 +563,13 @@ impl AgentsViewMode {
                 ),
                 None => format!("Press again to {word}"),
             };
-            return truncate_line(vec![theme.fg(ThemeColor::Muted, hint)], width);
+            return truncate_line(&vec![theme.fg(ThemeColor::Muted, hint)], width);
         }
         if let Some(status) = status_override.or(self.status.as_deref()) {
-            return truncate_line(vec![theme.fg(ThemeColor::Error, status.to_string())], width);
+            return truncate_line(
+                &vec![theme.fg(ThemeColor::Error, status.to_string())],
+                width,
+            );
         }
         // TS `renderHints`: every hint slot renders the effective binding
         // (`keyText`, arrows for up/down/left/right), so a user override
@@ -624,8 +654,32 @@ impl AgentsViewMode {
             segments.push(format!("{new} new"));
         }
         let hints = segments.join("   ");
-        truncate_line(vec![theme.fg(ThemeColor::Muted, hints)], width)
+        truncate_line(&vec![theme.fg(ThemeColor::Muted, hints)], width)
     }
+}
+
+/// One session row's affordance finish (operator directive
+/// 2026-09-29): the selected row pads to the full width and keeps the
+/// ONE purple selection band — a hovered selected row keeps it too
+/// (both state styles apply where they overlap; the focused state is
+/// never demoted) — while a hovered unselected row pads and gains the
+/// ONE light hover band, the same "clickable" affordance the dock's
+/// groups carry, and every other row renders exactly as before.
+pub(super) fn finish_session_row(
+    theme: &Theme,
+    mut line: Line,
+    selected: bool,
+    hovered: bool,
+    width: usize,
+) -> Line {
+    if selected {
+        return theme.selection_paint(pad_line(line, width));
+    }
+    if hovered {
+        line = pad_line(line, width);
+        theme.paint_hover_band(&mut line, 0..width);
+    }
+    line
 }
 
 pub(super) fn cell(value: &str, width: usize) -> String {
@@ -636,7 +690,7 @@ pub(super) fn cell(value: &str, width: usize) -> String {
     )
 }
 
-pub(super) fn truncate_line(line: Line, width: usize) -> Line {
+pub(super) fn truncate_line(line: &Line, width: usize) -> Line {
     let text = line.iter().map(|s| s.content.as_str()).collect::<String>();
     crate::width::wrap_text(&text, width.max(1))
         .into_iter()
@@ -669,6 +723,9 @@ impl Renderer {
     ) -> Result<Renderer> {
         match ui {
             AgentsViewUiMode::Terminal => {
+                // The raw-mode bracket's `cfmakeraw` write clears IXON,
+                // which is the kernel's one trigger for lifting a pending
+                // Ctrl+S stop (see the flow e2e's launch route).
                 crossterm::terminal::enable_raw_mode()?;
                 // The terminal state changed: every later setup step is
                 // fallible and an error from any of them still owns the
@@ -714,7 +771,7 @@ impl Renderer {
                         // off (terminal noise downstream); an active surface
                         // decodes and dispatches them.
                         let report = crate::mouse_tracking::active()
-                            .then(|| crate::mouse::from_crossterm(&mouse))
+                            .then(|| crate::mouse::from_crossterm(mouse))
                             .flatten();
                         match report {
                             Some(event) => ui_tx.send(UiInput::Mouse(event)).is_ok(),
@@ -915,6 +972,14 @@ impl Renderer {
                 // hidden for the surface taking the screen over. The
                 // real-exit arm ends shown for the shell either way.
                 drop(term);
+                // The view's input reader stands down before the pane is
+                // handed on (TS tears its listener down with the view):
+                // the adopting session's mount joins this reader through
+                // the registry, and a parked reader would hold crossterm's
+                // global event-reader lock indefinitely — the wake makes
+                // the flagged reader exit now instead of parking the
+                // switch on the join.
+                crate::input::request_reader_stop();
                 if preserve_alt_screen {
                     // The enhanced-key modes release with the raw-mode
                     // bracket (TS `stop` on every exit, handoffs included).

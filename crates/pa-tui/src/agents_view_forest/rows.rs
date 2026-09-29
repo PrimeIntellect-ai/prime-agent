@@ -39,11 +39,11 @@ struct BaseRow {
 /// identities whose lines are open; `rollups` carries the unfiltered
 /// hierarchy totals; a scope excludes its root and lifts its direct
 /// children to top-level rows.
-pub fn build_rows(
+pub fn build_rows<S: std::hash::BuildHasher + Default>(
     records: &[UnifiedRecord],
     scope: Option<&AgentsViewScope>,
-    expanded: &HashSet<String>,
-    rollups: &HashMap<String, Rollup>,
+    expanded: &HashSet<String, S>,
+    rollups: &HashMap<String, Rollup, S>,
     anchor: Option<&str>,
 ) -> Vec<AgentsViewRow> {
     let now = now_ms();
@@ -188,7 +188,7 @@ pub fn build_rows(
         let mut descendants = 0;
         let mut descendants_cost = 0.0;
         for child in children_by_parent.get(index).into_iter().flatten() {
-            running += (base[*child].section == Section::Running) as usize
+            running += usize::from(base[*child].section == Section::Running)
                 + base[*child].running_subagent_count;
             descendants += 1 + base[*child].descendant_count;
             descendants_cost += base[*child].recursive_cost;
@@ -249,14 +249,14 @@ pub fn build_rows(
 }
 
 /// The assembled forest one emit pass walks.
-struct RowForest<'a> {
+struct RowForest<'a, S: std::hash::BuildHasher + Default> {
     base: &'a [BaseRow],
     children_by_parent: &'a HashMap<usize, Vec<usize>>,
-    expanded: &'a HashSet<String>,
+    expanded: &'a HashSet<String, S>,
     anchor: Option<&'a str>,
 }
 
-impl RowForest<'_> {
+impl<S: std::hash::BuildHasher + Default> RowForest<'_, S> {
     /// Emit one row, then its ONE summary line, then its expanded
     /// children (TS `emit`): depth and parent identity come from the
     /// walk. The line expands to the FULL roster in one group — the
@@ -413,8 +413,8 @@ fn compare_base(a: &BaseRow, b: &BaseRow, anchor: Option<&str>) -> std::cmp::Ord
         return empty_rank;
     }
     if a.section != Section::Running {
-        let busy = (b.running_subagent_count > 0) as u8;
-        let busy_a = (a.running_subagent_count > 0) as u8;
+        let busy = u8::from(b.running_subagent_count > 0);
+        let busy_a = u8::from(a.running_subagent_count > 0);
         let busy_diff = busy.cmp(&busy_a);
         if busy_diff != Ordering::Equal {
             return busy_diff;

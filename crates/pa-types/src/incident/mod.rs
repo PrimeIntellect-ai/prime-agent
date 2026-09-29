@@ -50,6 +50,7 @@ pub enum IncidentSeverity {
 
 impl IncidentSeverity {
     /// The lowercase wire word the TS type unions over.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             IncidentSeverity::Critical => "critical",
@@ -63,6 +64,7 @@ impl IncidentSeverity {
 impl IncidentSeverity {
     /// The severity ordering (TS `SEVERITY_RANK`: critical 3 > error 2 >
     /// warn 1 > info 0).
+    #[must_use]
     pub fn rank(self) -> u8 {
         match self {
             IncidentSeverity::Critical => 3,
@@ -91,6 +93,7 @@ pub enum IncidentCategory {
 
 impl IncidentCategory {
     /// The lowercase wire word the TS type unions over.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             IncidentCategory::Supervisor => "supervisor",

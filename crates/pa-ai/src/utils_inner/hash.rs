@@ -7,8 +7,8 @@ pub fn short_hash(input: &str) -> String {
     let mut h2: u32 = 0x41c6_ce57;
     for ch in input.encode_utf16() {
         // Math.imul semantics: wrapping 32-bit multiply.
-        h1 = (h1 ^ ch as u32).wrapping_mul(2_654_435_761);
-        h2 = (h2 ^ ch as u32).wrapping_mul(1_597_334_677);
+        h1 = (h1 ^ u32::from(ch)).wrapping_mul(2_654_435_761);
+        h2 = (h2 ^ u32::from(ch)).wrapping_mul(1_597_334_677);
     }
     h1 = ((h1 ^ (h1 >> 16)).wrapping_mul(2_246_822_507))
         ^ ((h2 ^ (h2 >> 13)).wrapping_mul(3_266_489_909));

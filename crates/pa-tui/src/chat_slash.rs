@@ -42,6 +42,7 @@ fn block_row(spans: Line, bg: Style, width: usize) -> Line {
 /// and `mdLink`, a bare `--` separator only for argument-taking commands;
 /// the styled text then wraps, so a token split by a line break keeps its
 /// color on both halves.
+#[must_use]
 pub fn render_slash_command(text: &str, theme: &Theme, width: usize) -> Vec<Line> {
     let bg = theme.bg_style(ThemeBg::UserMessageBg);
     let paragraphs = source_paragraphs(text, theme);

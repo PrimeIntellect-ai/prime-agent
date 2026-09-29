@@ -37,6 +37,7 @@ impl Default for AppOptions {
     }
 }
 
+#[must_use]
 pub fn load_theme(name: &str) -> Theme {
     let mode = crate::theme::detect_color_mode();
     // The default brand theme when the caller passes none (empty) or an
@@ -61,7 +62,7 @@ pub fn load_theme(name: &str) -> Theme {
 /// TUI-state terminal.
 pub fn run_app(
     stream: Box<dyn SessionStream>,
-    options: AppOptions,
+    options: &AppOptions,
     on_submit: Box<dyn FnMut(&str) + Send>,
 ) -> Result<()> {
     match run_app_surface(stream, options, on_submit) {
@@ -75,7 +76,7 @@ pub fn run_app(
 
 fn run_app_surface(
     mut stream: Box<dyn SessionStream>,
-    options: AppOptions,
+    options: &AppOptions,
     mut on_submit: Box<dyn FnMut(&str) + Send>,
 ) -> Result<()> {
     // The TS theme emits raw ANSI color codes regardless of NO_COLOR; match
@@ -85,6 +86,9 @@ fn run_app_surface(
     // teardown must still hand the terminal back whole (the same
     // unwind-guard contract the session surface arms).
     let _surface_restore = crate::exit_restore::SurfaceRestore::armed();
+    // The raw-mode bracket's `cfmakeraw` write clears IXON, which is the
+    // kernel's one trigger for lifting a pending Ctrl+S stop (see the
+    // flow e2e's launch route).
     terminal::enable_raw_mode()?;
     // The alternate screen mounts through the ownership module (the same
     // `pendingAltScreenHandoff` semantics the session surface uses), so
@@ -137,12 +141,6 @@ fn run_app_surface(
             match crossterm::event::read()? {
                 Event::Key(key) => {
                     handle_key(&mut view, key, &mut running, &mut *on_submit);
-                    // The replay surface handles one key per loop turn, so
-                    // a parked suggestion request materializes right after
-                    // its key (the interactive loop batches; see
-                    // `Editor::materialize_autocomplete`).
-                    view.editor.materialize_autocomplete();
-                    let _ = view.editor.take_events();
                 }
                 Event::Paste(text) => {
                     view.editor.handle_paste(&text);
@@ -150,6 +148,12 @@ fn run_app_surface(
                 _ => {}
             }
         }
+        // Materialize once per loop turn: a parked request resolves
+        // right after its key, and a background `@` search lands on a
+        // quiet turn the same way the interactive loop's input-idle
+        // tick resolves it (`Editor::materialize_autocomplete`).
+        view.editor.materialize_autocomplete();
+        let _ = view.editor.take_events();
 
         if let Some(ms) = options.auto_exit_ms {
             if start.elapsed() >= Duration::from_millis(ms) {
@@ -198,7 +202,7 @@ fn handle_key(
     if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
         // Ctrl+O cycles conversation detail (TS `app.tools.expand`):
         // overview -> details -> all -> overview.
-        view.detail = view.detail.next();
+        view.cycle_detail();
         return;
     }
     let Some(id) = key_event_to_id(&key) else {

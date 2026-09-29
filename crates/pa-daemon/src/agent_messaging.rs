@@ -44,6 +44,10 @@ pub(crate) struct FamilyIdentity {
     pub parent_session_id: Option<String>,
     /// The parent's session-file path (subagent sessions and seeded rows).
     pub parent_session_path: Option<String>,
+    /// This session's RLM depth (roots at 0): the family depth rule reads
+    /// it — a child sits exactly one level down, a sibling at the same
+    /// depth (TS `selectAgentFamily`).
+    pub rlm_depth: u64,
 }
 
 impl FamilyIdentity {
@@ -64,7 +68,8 @@ impl FamilyIdentity {
             session_file: non_empty(summary_ref, "sessionFile"),
             parent_active_session_id: non_empty(summary_ref, "parentActiveSessionId"),
             parent_session_id: non_empty(summary_ref, "parentSessionId"),
-            parent_session_path: non_empty(summary_ref, "parentSessionPath"),
+            parent_session_path: summary_ref.and_then(parent_binding).map(str::to_string),
+            rlm_depth: summary_ref.map_or(0, row_depth),
         }
     }
 
@@ -81,6 +86,19 @@ fn row_str<'a>(row: &'a Value, key: &str) -> Option<&'a str> {
     row.get(key)
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
+}
+
+/// The row's RLM depth (TS `agent.rlmDepth ?? 0`): a row without the
+/// field sits at the root depth.
+fn row_depth(row: &Value) -> u64 {
+    row.get("rlmDepth").and_then(Value::as_u64).unwrap_or(0)
+}
+
+/// A summary's session-file parent edge (TS `familyCatalogEntry`:
+/// `depth > 0 && parentSessionPath`): a depth-0 binding is a root
+/// fork's source, never a parent — the fork stays a root.
+fn parent_binding(summary: &Value) -> Option<&str> {
+    row_str(summary, "parentSessionPath").filter(|_| row_depth(summary) > 0)
 }
 
 /// Whether two session-file paths name the same session: canonical-path
@@ -137,7 +155,11 @@ fn row_is_parent(row: &Value, identity: &FamilyIdentity) -> bool {
 
 /// Whether `row` is a child of the session `identity` describes: the row's
 /// durable parent edge points back at this session by its persisted id,
-/// its live id, or its session file.
+/// its live id, or its session file. The spawn-id edges decide on their
+/// own (only spawned children carry them, and a spawn always sits one
+/// level below its parent); a file-bound row must sit exactly one level
+/// down as well — a same-depth binding is a fork of this session, never
+/// its child (TS `selectAgentFamily`).
 fn row_is_child(row: &Value, identity: &FamilyIdentity) -> bool {
     if identity
         .session_id
@@ -152,7 +174,8 @@ fn row_is_child(row: &Value, identity: &FamilyIdentity) -> bool {
         return true;
     }
     if identity.session_file.as_deref().is_some_and(|file| {
-        row_str(row, "parentSessionPath").is_some_and(|parent| same_session_file(parent, file))
+        parent_binding(row).is_some_and(|parent| same_session_file(parent, file))
+            && row_depth(row) == identity.rlm_depth + 1
     }) {
         return true;
     }
@@ -161,22 +184,25 @@ fn row_is_child(row: &Value, identity: &FamilyIdentity) -> bool {
 
 /// Whether `row` is a sibling of the session `identity` describes: for a
 /// subagent, the row's durable parent edge points at the same parent
-/// (persisted id, live id, or session-file alias); for a top-level
-/// session, the row is another parentless top-level session (root
-/// sessions are each other's family). A resumed subagent file re-opened
-/// as a top-level runtime keeps its parent edge and is not a root sibling.
+/// (persisted id, live id, or session-file alias ([`parent_binding`]);
+/// a file-bound row must also sit at this session's depth (TS
+/// `selectAgentFamily`)); for a top-level session, the row is another
+/// parentless top-level session (root sessions are each other's
+/// family). A resumed subagent file re-opened as a top-level runtime
+/// keeps its parent edge and is not a root sibling.
 fn row_is_sibling(row: &Value, identity: &FamilyIdentity) -> bool {
     if identity.is_top_level() {
         // A root session's siblings are the other root sessions: no
         // recorded parent edge in any form, and not a subagent runtime
         // (an orphaned subagent row has no durable family at all; a
         // resumed subagent file re-opened top-level keeps its parent
-        // path and is not a root either).
+        // path and is not a root either). A root fork's depth-0
+        // binding is no parent edge, so it is a root too.
         let subagent_runtime = row_str(row, "runtimeKind").is_some_and(|kind| kind == "subagent");
         return !subagent_runtime
             && row_str(row, "parentSessionId").is_none()
             && row_str(row, "parentActiveSessionId").is_none()
-            && row_str(row, "parentSessionPath").is_none();
+            && parent_binding(row).is_none();
     }
     if let Some(parent_id) = identity.parent_session_id.as_deref() {
         if row_str(row, "parentSessionId") == Some(parent_id) {
@@ -189,8 +215,8 @@ fn row_is_sibling(row: &Value, identity: &FamilyIdentity) -> bool {
         }
     }
     if let Some(parent_path) = identity.parent_session_path.as_deref() {
-        if row_str(row, "parentSessionPath")
-            .is_some_and(|path| same_session_file(path, parent_path))
+        if parent_binding(row).is_some_and(|path| same_session_file(path, parent_path))
+            && row_depth(row) == identity.rlm_depth
         {
             return true;
         }
@@ -1128,6 +1154,18 @@ mod controller_tests {
         }))
     }
 
+    /// The observe roster reduced to what the family classifiers decide:
+    /// each listed row's live id and relationship, in roster order.
+    fn labeled(
+        sessions: Vec<Value>,
+        identity: &FamilyIdentity,
+    ) -> Vec<(Option<String>, Option<AgentFamilyRelationship>)> {
+        summaries_from_roster(sessions, identity, &[])
+            .into_iter()
+            .map(|summary| (summary.active_session_id, summary.relationship))
+            .collect()
+    }
+
     fn input() -> AgentMessageSendInput {
         AgentMessageSendInput {
             target: "bbb222".to_string(),
@@ -1497,6 +1535,7 @@ mod controller_tests {
             parent_active_session_id: Some("ppp000".to_string()),
             parent_session_id: Some("sess-p".to_string()),
             parent_session_path: Some("/agent/sessions/sess-p.jsonl".to_string()),
+            rlm_depth: 1,
         };
         let sessions = vec![
             json!({
@@ -1557,6 +1596,179 @@ mod controller_tests {
             .any(|s| s.active_session_id.as_deref() == Some("root555")));
     }
 
+    /// A file binding one level down is a Child (a session a user created
+    /// under a parent, no spawn ids, exactly like a spawned one); a
+    /// same-depth binding — a fork of a non-root session — is neither
+    /// the source's child nor a sibling of its children (TS
+    /// `selectAgentFamily`).
+    #[test]
+    fn summaries_bind_a_child_one_level_down_and_leave_a_same_depth_fork_out() {
+        let parent = FamilyIdentity {
+            active_session_id: "ppp000".to_string(),
+            session_id: Some("sess-p".to_string()),
+            session_file: Some("/agent/sessions/sess-p.jsonl".to_string()),
+            parent_session_path: Some("/agent/sessions/sess-r.jsonl".to_string()),
+            rlm_depth: 1,
+            ..Default::default()
+        };
+        let sessions = vec![
+            json!({
+                "activeSessionId": "ppp000", "sessionId": "sess-p",
+                "runtimeKind": "top-level", "activity": "idle",
+                "parentSessionPath": "/agent/sessions/sess-r.jsonl", "rlmDepth": 1,
+            }),
+            json!({
+                "activeSessionId": "usr111", "sessionId": "sess-usr",
+                "runtimeKind": "top-level", "activity": "working",
+                "parentSessionPath": "/agent/sessions/sess-p.jsonl", "rlmDepth": 2,
+            }),
+            json!({
+                "activeSessionId": "frk222", "sessionId": "sess-frk",
+                "runtimeKind": "top-level", "activity": "working",
+                "parentSessionPath": "/agent/sessions/sess-p.jsonl", "rlmDepth": 1,
+            }),
+        ];
+        assert_eq!(
+            labeled(sessions, &parent),
+            vec![
+                (Some("ppp000".to_string()), None),
+                (
+                    Some("usr111".to_string()),
+                    Some(AgentFamilyRelationship::Child)
+                ),
+            ]
+        );
+
+        // From the user child's own view: a binding-only subagent of the
+        // same parent at the same depth is a Sibling; the fork — the
+        // same parent file one level up — is outside the family.
+        let user_child = FamilyIdentity {
+            active_session_id: "usr111".to_string(),
+            session_id: Some("sess-usr".to_string()),
+            session_file: Some("/agent/sessions/sess-usr.jsonl".to_string()),
+            parent_session_path: Some("/agent/sessions/sess-p.jsonl".to_string()),
+            rlm_depth: 2,
+            ..Default::default()
+        };
+        let sessions = vec![
+            json!({
+                "activeSessionId": "usr111", "sessionId": "sess-usr",
+                "runtimeKind": "top-level", "activity": "working",
+                "parentSessionPath": "/agent/sessions/sess-p.jsonl", "rlmDepth": 2,
+            }),
+            json!({
+                "activeSessionId": "sub333", "sessionId": "sess-sub",
+                "runtimeKind": "subagent", "activity": "idle",
+                "parentSessionPath": "/agent/sessions/sess-p.jsonl", "rlmDepth": 2,
+            }),
+            json!({
+                "activeSessionId": "frk222", "sessionId": "sess-frk",
+                "runtimeKind": "top-level", "activity": "working",
+                "parentSessionPath": "/agent/sessions/sess-p.jsonl", "rlmDepth": 1,
+            }),
+        ];
+        assert_eq!(
+            labeled(sessions, &user_child),
+            vec![
+                (Some("usr111".to_string()), None),
+                (
+                    Some("sub333".to_string()),
+                    Some(AgentFamilyRelationship::Sibling)
+                ),
+            ]
+        );
+    }
+
+    /// A depth-0 binding is no parent edge (TS `familyCatalogEntry`): a
+    /// root fork names its source at depth 0 yet stays a root — its
+    /// source's Sibling, never its Child, and from its own view (built
+    /// through `from_summary`, the production path) its source and every
+    /// other root are Siblings, never a Parent. A root's user-created
+    /// child is still its Child.
+    #[test]
+    fn summaries_treat_a_root_fork_as_a_root() {
+        let parent = FamilyIdentity {
+            active_session_id: "ppp000".to_string(),
+            session_id: Some("sess-p".to_string()),
+            session_file: Some("/agent/sessions/sess-p.jsonl".to_string()),
+            ..Default::default()
+        };
+        let sessions = vec![
+            json!({
+                "activeSessionId": "ppp000", "sessionId": "sess-p",
+                "sessionName": "papa", "runtimeKind": "top-level", "activity": "idle",
+            }),
+            json!({
+                "activeSessionId": "usr111", "sessionId": "sess-usr",
+                "sessionName": "user-child", "runtimeKind": "top-level",
+                "activity": "working",
+                "parentSessionPath": "/agent/sessions/sess-p.jsonl", "rlmDepth": 1,
+            }),
+            json!({
+                "activeSessionId": "frk222", "sessionId": "sess-frk",
+                "sessionName": "fork", "runtimeKind": "top-level",
+                "activity": "working",
+                "parentSessionPath": "/agent/sessions/sess-p.jsonl", "rlmDepth": 0,
+            }),
+        ];
+        assert_eq!(
+            labeled(sessions, &parent),
+            vec![
+                (Some("ppp000".to_string()), None),
+                (
+                    Some("usr111".to_string()),
+                    Some(AgentFamilyRelationship::Child)
+                ),
+                (
+                    Some("frk222".to_string()),
+                    Some(AgentFamilyRelationship::Sibling)
+                ),
+            ]
+        );
+
+        // From the root fork's own view: its source and every other root
+        // are Siblings, never a Parent.
+        let fork = FamilyIdentity::from_summary(
+            Some(&json!({
+                "sessionId": "sess-frk",
+                "sessionFile": "/agent/sessions/sess-frk.jsonl",
+                "parentSessionPath": "/agent/sessions/sess-p.jsonl",
+                "rlmDepth": 0,
+            })),
+            "frk222",
+        );
+        let sessions = vec![
+            json!({
+                "activeSessionId": "frk222", "sessionId": "sess-frk",
+                "runtimeKind": "top-level", "activity": "idle",
+                "parentSessionPath": "/agent/sessions/sess-p.jsonl", "rlmDepth": 0,
+            }),
+            json!({
+                "activeSessionId": "ppp000", "sessionId": "sess-p",
+                "sessionName": "papa", "runtimeKind": "top-level", "activity": "idle",
+                "sessionFile": "/agent/sessions/sess-p.jsonl", "rlmDepth": 0,
+            }),
+            json!({
+                "activeSessionId": "oth444", "sessionId": "sess-oth",
+                "runtimeKind": "top-level", "activity": "idle", "rlmDepth": 0,
+            }),
+        ];
+        assert_eq!(
+            labeled(sessions, &fork),
+            vec![
+                (Some("frk222".to_string()), None),
+                (
+                    Some("ppp000".to_string()),
+                    Some(AgentFamilyRelationship::Sibling)
+                ),
+                (
+                    Some("oth444".to_string()),
+                    Some(AgentFamilyRelationship::Sibling)
+                ),
+            ]
+        );
+    }
+
     /// A root caller's observe roster lists the other root sessions as
     /// siblings, never another family's subagents, and marks its own row.
     /// TS #2493: observe rows carry the typed family status (the busy
@@ -1573,6 +1785,7 @@ mod controller_tests {
             parent_active_session_id: Some("ppp00".to_string()),
             parent_session_id: Some("sess-p".to_string()),
             parent_session_path: Some("/agent/sessions/sess-p.jsonl".to_string()),
+            rlm_depth: 1,
         };
         let sessions = vec![
             // The current session streams a tool call: running, tool work.
@@ -1699,6 +1912,7 @@ mod controller_tests {
             "sessionId": "sess-a",
             "parentActiveSessionId": "stale-parent",
             "parentSessionPath": "/old-agent-root/sessions/01a0d0a5-e954-71b7-8479-8dc7980768a1.jsonl",
+            "rlmDepth": 1,
         }));
         let controller = controller(socket, own_summary);
         let family = controller.family().await.unwrap();
@@ -1771,6 +1985,7 @@ mod controller_tests {
             "sessionId": "sess-a",
             "parentActiveSessionId": "stale-parent",
             "parentSessionPath": "/old-agent-root/sessions/01a0d0a5-e954-71b7-8479-8dc7980768a1.jsonl",
+            "rlmDepth": 1,
         }));
         let controller = controller(socket, own_summary);
         let family = controller.family().await.unwrap();

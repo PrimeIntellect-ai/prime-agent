@@ -1,6 +1,9 @@
 //! Teardown: graceful shutdown, resource cleanup, and process killing.
 
-use super::*;
+use super::{
+    json, live_kernels, lock, oneshot, orphan_journal, Arc, Duration, Inner, KernelShutdownOptions,
+    KernelState, MemoSlot, Signal, HOST_REQUEST_SHUTDOWN_TIMEOUT_MS, KERNEL_SHUTDOWN_TIMEOUT_MS,
+};
 
 // ---------------------------------------------------------------------------
 // Teardown

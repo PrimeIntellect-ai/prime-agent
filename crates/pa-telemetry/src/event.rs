@@ -29,8 +29,15 @@ impl TelemetryEvent {
     }
 
     /// ISO-8601 UTC rendering of the timestamp, e.g. `2026-09-29T16:51:45.951Z`.
+    #[must_use]
     pub fn timestamp_iso8601(&self) -> String {
         EpochMs(self.timestamp_ms).iso8601()
+    }
+
+    /// The serialized size of the sink-facing object form; batches cap
+    /// at a byte budget.
+    pub(crate) fn wire_size_estimate(&self) -> usize {
+        serde_json::to_string(&self.to_value()).map_or(0, |text| text.len())
     }
 
     /// The sink-facing object form: `{"name", "timestamp" (ISO-8601),

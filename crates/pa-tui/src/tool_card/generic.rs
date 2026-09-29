@@ -6,6 +6,7 @@ use crate::chat::Detail;
 use crate::theme::{Theme, ThemeColor};
 use crate::{Line, Span};
 
+#[must_use]
 pub fn render(
     card: &ToolCallCard,
     frame: usize,
@@ -66,7 +67,7 @@ fn traverse(
             out,
         );
     }
-    out.images(&card.result, show_images, theme);
+    out.images(card.result.as_ref(), show_images, theme);
 }
 
 /// Preview the first three source lines, not the first three wrapped rows.
@@ -199,9 +200,10 @@ mod tests {
         let card = image_card();
         let rows = render(&card, 0, Detail::All, &theme(), 120, false);
         let flat: Vec<String> = rows.iter().map(text_of).collect();
+        // TS renders the hidden-image text without dimensions
+        // (includeImageDimensions: false in the interactive transcript).
         assert!(
-            flat.iter()
-                .any(|r| r.contains("[Image: [image/png] 64x32]")),
+            flat.iter().any(|r| r.contains("[Image: [image/png]]")),
             "got: {flat:?}"
         );
         assert!(!flat.iter().any(|r| r.contains("\u{2570}\u{2500}")));

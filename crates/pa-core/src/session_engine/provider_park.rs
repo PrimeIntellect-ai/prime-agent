@@ -127,6 +127,7 @@ pub type ParkDecisionCallback<'a> = &'a mut dyn FnMut(AssistantMessage, &str) ->
 /// Park decision after a quota failure whose provider-reported reset
 /// exceeds the bounded wait (TS `providerParkDecision`): pure and
 /// clock-free — the caller owns the clock at the seam.
+#[must_use]
 pub fn provider_park_decision(
     parks_used: u32,
     reset_ms: Option<u64>,
@@ -158,6 +159,7 @@ pub fn provider_park_decision(
 /// Whether a failed assistant message is quota-classified (the TS wait
 /// class `usage`: 429 / usage-limit rejections). This port's classifier
 /// surface is the `provider_stream_failure` diagnostic's `rate_limit` kind.
+#[must_use]
 pub fn is_quota_block_failure(message: &AssistantMessage) -> bool {
     provider_stream_failure_kind(message).as_deref() == Some("rate_limit")
 }
@@ -233,6 +235,7 @@ pub fn scan_quota_park_entries(entries: &[pa_types::session::FileEntry]) -> Bran
 /// The provider-reported reset of a quota failure, in milliseconds
 /// (`retryAfterMs` on the stream-failure diagnostic — the codex usage
 /// limit parse and the Retry-After header both land there).
+#[must_use]
 pub fn quota_failure_reset_ms(message: &AssistantMessage) -> Option<u64> {
     provider_stream_failure_retry_after_ms(message)
 }
@@ -242,6 +245,7 @@ pub fn quota_failure_reset_ms(message: &AssistantMessage) -> Option<u64> {
 /// will resume automatically (…): <error>"`): the give-up sentence stays
 /// this port's own (the TS abort names the wait loop this port lacks),
 /// the parked sentence is the TS wording.
+#[must_use]
 pub fn quota_parked_final_error(abort: &str, resume_at_ms: u64, error: &str) -> String {
     format!(
         "{abort}. Session parked until {} and will resume automatically (retry.provider.waitForUsage.pauseUntilReset): {error}",

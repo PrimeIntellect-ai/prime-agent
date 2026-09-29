@@ -51,6 +51,7 @@ impl<W> ExtensionTool<W> {
 
     /// The registration this tool was bridged from (snippets/guidelines for
     /// prompt assembly, schema provenance).
+    #[must_use]
     pub fn registration(&self) -> &ToolRegistration {
         &self.registration
     }

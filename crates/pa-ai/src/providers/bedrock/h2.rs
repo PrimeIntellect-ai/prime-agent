@@ -101,7 +101,7 @@ impl H2Response {
                 let _ = self.body.flow_control().release_capacity(bytes.len());
                 Ok(Some(bytes.to_vec()))
             }
-            Some(Err(error)) => Err(self.body_error(error)),
+            Some(Err(error)) => Err(self.body_error(&error)),
             None => Ok(None),
         }
     }
@@ -116,13 +116,13 @@ impl H2Response {
     }
 
     /// Classify a mid-body h2 failure into the TS transport's failure texts.
-    fn body_error(&self, error: h2::Error) -> ProviderError {
+    fn body_error(&self, error: &h2::Error) -> ProviderError {
         // A peer GOAWAY does not fail streams at or below its last-stream-id;
         // the stream only dies when the socket then closes — and a reset can
         // clobber the h2 crate's pending GOAWAY error before it is observed.
         // The wire observer (see `goaway`) keeps the session error the TS
         // transport reports.
-        let failure = self.observer.classify_mid_body(&error);
+        let failure = self.observer.classify_mid_body(error);
         ProviderError::Connection(ProviderConnectionError {
             kind: ConnectionErrorKind::H2MidStream(failure),
             profile: self.connection.clone(),
@@ -149,9 +149,9 @@ async fn select_cancel(
 
 /// A pre-response transport failure: the h2 failure detail, no
 /// deserialization hint (the AWS SDK has no response to deserialize yet).
-fn h2_request_error(error: h2::Error, connection: &ConnectionErrorProfile) -> ProviderError {
+fn h2_request_error(error: &h2::Error, connection: &ConnectionErrorProfile) -> ProviderError {
     ProviderError::Connection(ProviderConnectionError {
-        kind: ConnectionErrorKind::H2Request(classify_h2_error(&error)),
+        kind: ConnectionErrorKind::H2Request(classify_h2_error(error)),
         profile: connection.clone(),
         cause: error.to_string(),
     })
@@ -160,7 +160,7 @@ fn h2_request_error(error: h2::Error, connection: &ConnectionErrorProfile) -> Pr
 /// A TCP connect failure: refused connects surface the TS stream-cancel
 /// text with the node-style cause embedded; other connect failures surface
 /// the bare stream-cancel text.
-fn connect_error(error: std::io::Error, connection: &ConnectionErrorProfile) -> ProviderError {
+fn connect_error(error: &std::io::Error, connection: &ConnectionErrorProfile) -> ProviderError {
     let kind = if error.kind() == std::io::ErrorKind::ConnectionRefused {
         ConnectionErrorKind::Connect
     } else {
@@ -185,6 +185,8 @@ fn timeout_error(connection: &ConnectionErrorProfile, timeout_ms: u64) -> Provid
 /// Issue one h2c prior-knowledge request: connect, handshake, send the
 /// request, and resolve once the response HEADERS arrive. The body is read
 /// through the returned [`H2Response`].
+// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn send_h2(options: H2RequestOptions) -> Result<H2Response, ProviderError> {
     let H2RequestOptions {
         url,
@@ -224,7 +226,7 @@ pub(crate) async fn send_h2(options: H2RequestOptions) -> Result<H2Response, Pro
         // event-stream sessions.
         let tcp = tokio::net::TcpStream::connect(&authority)
             .await
-            .map_err(|error| connect_error(error, &connection))?;
+            .map_err(|error| connect_error(&error, &connection))?;
         let _ = tcp.set_nodelay(true);
         let (read_half, write_half) = tcp.into_split();
         let (tracked_read, observer) =
@@ -236,7 +238,7 @@ pub(crate) async fn send_h2(options: H2RequestOptions) -> Result<H2Response, Pro
         // fails the first frame decode).
         let (mut send_request, connection_drive) = h2::client::handshake(io)
             .await
-            .map_err(|error| h2_request_error(error, &connection))?;
+            .map_err(|error| h2_request_error(&error, &connection))?;
         // Drive the protocol: nothing progresses unless the connection task
         // is polled; it ends when both request handles drop (the abort and
         // error paths reset the stream on release).
@@ -246,7 +248,7 @@ pub(crate) async fn send_h2(options: H2RequestOptions) -> Result<H2Response, Pro
 
         futures::future::poll_fn(|cx| send_request.poll_ready(cx))
             .await
-            .map_err(|error| h2_request_error(error, &connection))?;
+            .map_err(|error| h2_request_error(&error, &connection))?;
 
         let request = http::Request::builder()
             .method(http::Method::POST)
@@ -269,13 +271,13 @@ pub(crate) async fn send_h2(options: H2RequestOptions) -> Result<H2Response, Pro
 
         let (response, mut send_stream) = send_request
             .send_request(request, false)
-            .map_err(|error| h2_request_error(error, &connection))?;
+            .map_err(|error| h2_request_error(&error, &connection))?;
         send_stream
             .send_data(Bytes::from(body), true)
-            .map_err(|error| h2_request_error(error, &connection))?;
+            .map_err(|error| h2_request_error(&error, &connection))?;
         let response = response
             .await
-            .map_err(|error| h2_request_error(error, &connection))?;
+            .map_err(|error| h2_request_error(&error, &connection))?;
 
         let status = response.status().as_u16();
         let mut response_headers = std::collections::HashMap::new();
@@ -344,7 +346,7 @@ mod tests {
     #[test]
     fn connect_error_text() {
         let refused = connect_error(
-            std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
+            &std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
             &aws_http2_profile(),
         );
         assert_eq!(
@@ -354,7 +356,7 @@ mod tests {
         // Other connect failures (unreachable, DNS) surface the bare
         // stream-cancel text.
         let other = connect_error(
-            std::io::Error::from(std::io::ErrorKind::HostUnreachable),
+            &std::io::Error::from(std::io::ErrorKind::HostUnreachable),
             &aws_http2_profile(),
         );
         assert_eq!(other.to_string(), "The pending stream has been canceled");
@@ -379,6 +381,8 @@ mod h2_wire_tests {
 
     fn frame(ftype: u8, flags: u8, stream_id: u32, payload: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(9 + payload.len());
+        // Test frames are tiny; the HTTP/2 length prefix is 24 bits (u32 wire with the top byte dropped).
+        #[allow(clippy::cast_possible_truncation)]
         out.extend_from_slice(&(payload.len() as u32).to_be_bytes()[1..]);
         out.push(ftype);
         out.push(flags);
@@ -390,6 +394,8 @@ mod h2_wire_tests {
     /// HPACK: indexed `:status` 200 (0x88) + literal content-type (name 31).
     fn response_headers() -> Vec<u8> {
         let content_type = b"application/vnd.amazon.eventstream";
+        // HPACK literal lengths are u8; the fixed test content-type is 33 bytes.
+        #[allow(clippy::cast_possible_truncation)]
         let mut block = vec![0x88, 0x0f, 0x10, content_type.len() as u8];
         block.extend_from_slice(content_type);
         block
@@ -539,12 +545,35 @@ mod h2_wire_tests {
         let addr_http1 = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buf = vec![0u8; 24];
-            socket.read_exact(&mut buf).await.unwrap();
+            // Drain the client's frames (settings, request headers, the
+            // end-of-stream data) before answering: a close over unread
+            // data turns into a reset, and Windows discards the queued
+            // answer bytes on the reset - the login would then see the
+            // canceled-stream text instead of the protocol error.
+            let mut preface = vec![0u8; PREFACE.len()];
+            socket.read_exact(&mut preface).await.unwrap();
+            loop {
+                let mut header = [0u8; 9];
+                socket.read_exact(&mut header).await.unwrap();
+                let length = (u32::from_be_bytes([0, header[0], header[1], header[2]])) as usize;
+                let flags = header[4];
+                let mut payload = vec![0u8; length];
+                if length > 0 {
+                    socket.read_exact(&mut payload).await.unwrap();
+                }
+                if flags & 0x1 != 0 {
+                    break;
+                }
+            }
             socket
                 .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\n\r\n{}")
                 .await
                 .unwrap();
+            socket.shutdown().await.ok();
+            socket.shutdown().await.ok();
+            let _ = socket.flush().await;
+            // hold the socket so the answer reaches the client before the drop
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         });
         let url = format!("http://{addr_http1}/model/m/converse-stream");
         let error = match send_h2(options(url.clone())).await {

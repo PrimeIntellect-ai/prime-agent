@@ -976,6 +976,43 @@ fn entry_chain_links_parents() {
     assert_eq!(session.leaf_id(), Some(b.as_str()));
 }
 
+/// Appending costs the same whatever the store's size: the id mint checks
+/// collisions against the maintained `by_id` index instead of rebuilding an
+/// id map from every entry on each append.
+#[test]
+fn append_cost_does_not_grow_with_the_store() {
+    let mut small = SessionFile::create("/tmp", None, 0);
+    let mut large = SessionFile::create("/tmp", None, 0);
+    for index in 0..30_000 {
+        large.push_index(SessionEntry {
+            type_: "custom".to_string(),
+            id: format!("{index:08x}"),
+            parent_id: None,
+            timestamp: "2026-09-28T00:00:00.000Z".to_string(),
+            fields: json!({}),
+        });
+    }
+    // The fastest iteration per store, so a scheduler stall on one leg
+    // cannot flip the comparison.
+    let mut small_fastest = std::time::Duration::MAX;
+    let mut large_fastest = std::time::Duration::MAX;
+    for _ in 0..500 {
+        for (store, fastest) in [
+            (&mut small, &mut small_fastest),
+            (&mut large, &mut large_fastest),
+        ] {
+            let start = std::time::Instant::now();
+            store.append_entry("custom", json!({}));
+            store.persist_entry("custom", json!({})).unwrap();
+            *fastest = (*fastest).min(start.elapsed());
+        }
+    }
+    assert!(
+        large_fastest < small_fastest * 10,
+        "the fastest append on a 30k-entry store took {large_fastest:?}, on an empty store {small_fastest:?}"
+    );
+}
+
 #[test]
 fn skips_malformed_lines() {
     let dir = temp_dir();

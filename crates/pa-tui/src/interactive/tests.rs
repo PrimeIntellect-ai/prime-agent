@@ -288,3 +288,30 @@ fn the_headless_settle_names_every_stuck_member() {
         "the joined failure keeps the member names readable"
     );
 }
+
+/// The pre-attach placeholder (painted for a NEW chat before the attach
+/// lands) carries the zero dock the fresh session mounts: the landed
+/// frame keeps the placeholder's geometry, so the splash never reflows
+/// two rows when the session attaches.
+#[test]
+fn the_startup_placeholder_carries_the_dock_a_fresh_session_mounts() {
+    let mut view = AgentView::new(crate::theme::Theme::builtin(
+        "prime",
+        crate::theme::ColorMode::TrueColor,
+    ));
+    apply_startup_chrome(&mut view, &options(ModelSelection::default()));
+    let rows: Vec<String> = view
+        .render_dock(100)
+        .iter()
+        .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+        .collect();
+    assert_eq!(
+        rows[rows.len() - 2..],
+        [
+            "\u{2500}".repeat(100),
+            " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells"
+                .to_string(),
+        ],
+        "the placeholder's last two rows are the dock's rule and zero row"
+    );
+}

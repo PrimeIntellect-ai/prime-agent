@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# Entry point for the perf wave (the local mirror is `make perf-wave`;
-# the wave runs only from the command line — a hosted run would need
-# self-hosted `prime-sandbox` runner labels no registered runner
-# carries).
+# CI entry for the perf wave (driven by the benchmark workflow on main's tree).
 #
 # Creates an ephemeral Prime sandbox (4 CPU / 16 GB, the same spec class the
 # baseline was recorded on), installs the deployed TS binary plus a fresh

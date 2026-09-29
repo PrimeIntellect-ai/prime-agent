@@ -169,7 +169,7 @@ fn windows_match_uncached_reference_with_variable_height_and_hidden_entries() {
                     entry,
                     width,
                     index == 0,
-                    index > 0 && view.is_compact_neighbor(&view.chat[index - 1]),
+                    index > 0 && AgentView::is_compact_neighbor(&view.chat[index - 1]),
                 ));
             }
             assert_eq!(layout.total, reference.len());
@@ -579,7 +579,7 @@ fn height_cache_tracks_mutations_and_spacing_in_all_details() {
                     entry,
                     width,
                     index == 0,
-                    index > 0 && view.is_compact_neighbor(&view.chat[index - 1]),
+                    index > 0 && AgentView::is_compact_neighbor(&view.chat[index - 1]),
                 ));
             }
             assert_eq!(layout.total, reference.len());
@@ -994,12 +994,12 @@ fn a_background_shell_card_stays_uncached() {
     view.push_entry(card("c4", true));
     let shell_entry = view.chat.last().expect("the shell card").clone();
     assert!(
-        !view.entry_cacheable(&shell_entry),
+        !AgentView::entry_cacheable(&shell_entry),
         "the live card never caches while the background shell runs"
     );
     let settled = card("c5", false);
     assert!(
-        view.entry_cacheable(&settled),
+        AgentView::entry_cacheable(&settled),
         "a settled cell without a background shell caches"
     );
 }

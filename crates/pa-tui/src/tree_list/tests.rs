@@ -96,7 +96,7 @@ fn settings_node(id: &str, parent: Option<&str>, timestamp: &str) -> TreeNodeDat
 
 fn list(flat: Vec<TreeNodeData>, leaf: Option<&str>) -> TreeList {
     TreeList::new(
-        build_tree(flat),
+        &build_tree(flat),
         leaf.map(str::to_string),
         40,
         None,

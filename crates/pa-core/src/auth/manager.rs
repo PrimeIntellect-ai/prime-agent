@@ -321,7 +321,7 @@ impl AuthStorage {
         Self::from_storage(backend, oauth)
     }
 
-    pub fn in_memory(data: AuthStorageData, oauth: Arc<dyn OAuthIntegration>) -> Self {
+    pub fn in_memory(data: &AuthStorageData, oauth: Arc<dyn OAuthIntegration>) -> Self {
         Self::in_memory_with_env_source(data, oauth, Arc::new(ProcessEnvCredentials))
     }
 
@@ -330,7 +330,7 @@ impl AuthStorage {
     /// model catalog scope (an ambient provider credential variable such
     /// as `PRIME_API_KEY` cannot make models available through this
     /// storage). Otherwise behaves like [`AuthStorage::in_memory`].
-    pub fn in_memory_without_env(data: AuthStorageData, oauth: Arc<dyn OAuthIntegration>) -> Self {
+    pub fn in_memory_without_env(data: &AuthStorageData, oauth: Arc<dyn OAuthIntegration>) -> Self {
         Self::in_memory_with_env_source(data, oauth, Arc::new(NoEnvCredentials))
     }
 
@@ -338,7 +338,7 @@ impl AuthStorage {
     /// resolution for tests and embedded hosts (no ambient env reads).
     #[cfg(test)]
     pub(crate) fn in_memory_with_env(
-        data: AuthStorageData,
+        data: &AuthStorageData,
         oauth: Arc<dyn OAuthIntegration>,
         env_credentials: Arc<dyn EnvCredentialSource>,
     ) -> Self {
@@ -346,7 +346,7 @@ impl AuthStorage {
     }
 
     fn in_memory_with_env_source(
-        data: AuthStorageData,
+        data: &AuthStorageData,
         oauth: Arc<dyn OAuthIntegration>,
         env_credentials: Arc<dyn EnvCredentialSource>,
     ) -> Self {
@@ -662,11 +662,7 @@ impl AuthStorage {
             .find(|candidate| !self.is_stale(provider, candidate))
     }
 
-    fn token_for(
-        &self,
-        provider: &str,
-        candidate: &AuthSourceCandidate,
-    ) -> Option<AuthSourceToken> {
+    fn token_for(provider: &str, candidate: &AuthSourceCandidate) -> Option<AuthSourceToken> {
         Some(AuthSourceToken {
             provider: provider.to_string(),
             source: candidate.source,
@@ -725,7 +721,7 @@ impl AuthStorage {
         let Some(candidate) = self.available_candidate(provider, true) else {
             return false;
         };
-        let Some(token) = self.token_for(provider, &candidate) else {
+        let Some(token) = Self::token_for(provider, &candidate) else {
             return false;
         };
         self.mark_auth_source_stale(token)

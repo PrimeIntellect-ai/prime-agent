@@ -8,10 +8,33 @@
 //!
 //! The mock supervisor serves the attach snapshot immediately but
 //! delays the `heartbeats_list` and `list_kernel_bash` responses (the
-//! loaded-daemon repro from the report): the dock's visibility data
-//! must fold synchronously with the attach, so no captured frame ever
+//! loaded-daemon repro from the report): the dock's count data must
+//! fold synchronously with the attach, so no captured frame ever
 //! repaints the dock in late.
 #![cfg(unix)]
+// Pedantic-gate exceptions (every other pedantic warning in this crate is
+// fixed in place; each exception carries its one-line justification):
+// - the casts: terminal-layout arithmetic narrows structurally bounded
+//   values (screen coordinates, byte counts, timestamps); guarded
+//   conversions would add panic paths the bounds guarantee away.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// - the render routes are flat tables (one arm per route); splitting them
+//   would add indirection without changing the flow.
+#![allow(clippy::too_many_lines)]
+// - widget state structs carry independent flag bits; a nested struct
+//   would add indirection without changing the shape.
+#![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
+// - the futures are bounded by the surface's lifetime; boxing them would
+//   add an allocation to the steady-state loop.
+#![allow(clippy::large_futures)]
+// - the wrappers preserve a uniform Result-returning API surface; unwrap
+//   removals would ripple through the callers without changing behavior.
+#![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -257,7 +280,7 @@ enum OpeningTranscript {
 
 /// Run one headless open against a fresh mock supervisor and return the
 /// captured frames.
-fn run_open(transcript: OpeningTranscript) -> Vec<String> {
+fn run_open(transcript: &OpeningTranscript) -> Vec<String> {
     let with_content = matches!(transcript, OpeningTranscript::Content);
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -290,14 +313,14 @@ fn is_divider_row(line: &str, width: usize) -> bool {
     !line.is_empty() && line.chars().count() == width && line.chars().all(|c| c == '\u{2500}')
 }
 
-/// The dock (the muted divider plus the activity panel row under the
-/// prompt bar) is first-frame geometry: every captured frame carries
-/// both rows, so the delayed dock data never repaints the layout in
+/// The dock's counts (the activity panel row under the prompt bar) are
+/// first-frame state: every captured frame carries both rows with the
+/// final count, so the delayed dock data never repaints the row in
 /// late — the first frame is the final geometry (the operator's
 /// zero-layout-shift report).
 #[test]
 fn the_activity_dock_is_in_every_frame_from_the_first() {
-    let frames = run_open(OpeningTranscript::Empty);
+    let frames = run_open(&OpeningTranscript::Empty);
     assert!(!frames.is_empty(), "frames were captured");
     let offenders: Vec<usize> = frames
         .iter()
@@ -323,7 +346,7 @@ fn the_activity_dock_is_in_every_frame_from_the_first() {
 /// never renders — no splash flash above the title, no one-row shift.
 #[test]
 fn a_direct_open_into_content_never_renders_the_splash() {
-    let frames = run_open(OpeningTranscript::Content);
+    let frames = run_open(&OpeningTranscript::Content);
     assert!(!frames.is_empty(), "frames were captured");
     let first = &frames[0];
     assert!(
@@ -346,7 +369,7 @@ fn a_direct_open_into_content_never_renders_the_splash() {
 /// scoped to opens into content.
 #[test]
 fn an_empty_open_keeps_the_brand_splash() {
-    let frames = run_open(OpeningTranscript::Empty);
+    let frames = run_open(&OpeningTranscript::Empty);
     assert!(!frames.is_empty(), "frames were captured");
     assert!(
         frames.iter().any(|frame| frame.contains("prime agent")),

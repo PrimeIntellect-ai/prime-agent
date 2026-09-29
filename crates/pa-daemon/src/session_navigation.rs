@@ -92,7 +92,11 @@ impl SessionNavigation {
         // recreation (`createRuntime` -> `createAgentSession`): the
         // replacement session resolves to the model its own file pins,
         // not the previous session's (an explicit flag still wins inside).
-        self.engine.restore_session_model(&new_path).await;
+        // No pre-read context here: the replacement's target store is
+        // already installed in the core above, so the restore reads the
+        // file itself (the navigation path's shape is unchanged by the
+        // create-path reuse).
+        self.engine.restore_session_model(&new_path, None).await;
         // The replacement retired the runtime, so the rebuild parks on the
         // fresh, unbuilt session: its first build seeds the goal state
         // from the moved branch's own rows (the TS constructor's

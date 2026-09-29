@@ -783,7 +783,11 @@ fn flush_streams_append_then_repaints_the_changed_tail() {
     let repaint = flush_bytes(&mut long, 80, 10);
     assert!(repaint.starts_with(b"\x1b[2J\x1b[H"));
     // One screenful of rows: at most `screen_height` CRLFs.
-    assert!(repaint.iter().filter(|b| **b == b'\n').count() <= 10);
+    // The count is a bounded test assertion over one screen buffer;
+    // the SIMD bytecount dependency would be pointless here.
+    #[allow(clippy::naive_bytecount)]
+    let newline_rows = repaint.iter().filter(|b| **b == b'\n').count();
+    assert!(newline_rows <= 10);
     let joined = String::from_utf8_lossy(&repaint);
     assert!(joined.contains("late turn"));
     assert!(!joined.contains("reply 0"));
@@ -1635,7 +1639,8 @@ fn entry_geometry_matches_the_render() {
                 view.detail = detail;
                 for index in 0..view.chat.len() {
                     let entry = &view.chat[index];
-                    let preceded = index > 0 && view.is_compact_neighbor(&view.chat[index - 1]);
+                    let preceded =
+                        index > 0 && AgentView::is_compact_neighbor(&view.chat[index - 1]);
                     assert_eq!(
                         view.count_entry_rows(index, width),
                         view.render_entry(index, entry, width, index == 0, preceded)
@@ -1668,7 +1673,7 @@ fn entry_geometry_matches_the_render() {
             view.detail = detail;
             for index in 0..view.chat.len() {
                 let entry = &view.chat[index];
-                let preceded = index > 0 && view.is_compact_neighbor(&view.chat[index - 1]);
+                let preceded = index > 0 && AgentView::is_compact_neighbor(&view.chat[index - 1]);
                 assert_eq!(
                     view.count_entry_rows(index, width),
                     view.render_entry(index, entry, width, index == 0, preceded)

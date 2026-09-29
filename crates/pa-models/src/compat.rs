@@ -57,6 +57,7 @@ const THINKING_FORMATS: &[&str] = &[
 ///
 /// Never panics: the key-table `expect` is unreachable because the preceding
 /// `keys.is_none()` guard returns `false` before reaching it.
+#[must_use]
 pub fn is_model_compat(api: &str, compat: Option<&serde_json::Map<String, Value>>) -> bool {
     let Some(compat) = compat else {
         return true;

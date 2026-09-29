@@ -132,6 +132,7 @@ impl ModelThinkingLevel {
     /// The wire name shared by the `thinkingLevelMap` keys, the CLI
     /// `--thinking` values, and the daemon `create` config (`"off"`,
     /// `"minimal"`, ...).
+    #[must_use]
     pub fn wire_name(self) -> &'static str {
         match self {
             ModelThinkingLevel::Off => "off",
@@ -426,6 +427,7 @@ impl UserContent {
     /// Tag-strict like the TS text extraction (`block.type === "text"`):
     /// un-modeled [`UserContentBlock::Raw`] blocks contribute nothing here
     /// even when they carry a bare `text` field.
+    #[must_use]
     pub fn text(&self) -> String {
         match self {
             UserContent::Text(text) => text.clone(),
@@ -846,6 +848,10 @@ impl ModelCompat {
     /// Panics if serializing `kind` to a JSON value fails or if that value
     /// is not a JSON object. Both are unreachable for the current compat
     /// structs, which serialize to plain JSON objects.
+    // Workspace API consumed across crates (pa-ai, pa-models, pa-core); the
+    // by-value `CompatKind` signature is fleet-wide, out of this lane's scope.
+    #[allow(clippy::needless_pass_by_value)]
+    #[must_use]
     pub fn from_kind(kind: CompatKind) -> Self {
         let value = match &kind {
             CompatKind::AnthropicMessages(c) => serde_json::to_value(c),
@@ -1024,6 +1030,7 @@ pub struct Model {
 /// Model-typed [`supports_service_tier`] delegates here so the surfaces
 /// that only hold the connection-state model metadata (provider, api, id)
 /// share one predicate.
+#[must_use]
 pub fn supports_service_tier_fields(
     provider: &str,
     api: &str,
@@ -1068,6 +1075,7 @@ pub fn supports_service_tier_fields(
 /// honors) a requested service tier. The single eligibility predicate
 /// behind the `/tier` command, the settings row, and the `/fast` toggle
 /// (the TS product keeps the same function in the shared AI package).
+#[must_use]
 pub fn supports_service_tier(model: &Model, tier: ServiceTier) -> bool {
     supports_service_tier_fields(&model.provider, &model.api, &model.id, tier)
 }
@@ -1076,6 +1084,7 @@ pub fn supports_service_tier(model: &Model, tier: ServiceTier) -> bool {
 /// model does not support it. An absent model (a session with no resolved
 /// model) clamps every non-default tier, exactly like the TS
 /// `model == null` arm; an unset (`null`) preference passes through.
+#[must_use]
 pub fn clamp_service_tier(model: Option<&Model>, tier: Option<ServiceTier>) -> Option<ServiceTier> {
     match tier {
         None | Some(ServiceTier::Default) => tier,
@@ -1090,6 +1099,7 @@ pub fn clamp_service_tier(model: Option<&Model>, tier: Option<ServiceTier>) -> O
 /// the fast-mode (priority) tier exists on the eligible ids served over
 /// the `OpenAI` Responses APIs. Shared by the surfaces that gate the
 /// `/fast` command on model eligibility.
+#[must_use]
 pub fn supports_fast_mode(model: &Model) -> bool {
     supports_service_tier(model, ServiceTier::Priority)
 }

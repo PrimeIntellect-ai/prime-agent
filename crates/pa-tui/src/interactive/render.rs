@@ -2,7 +2,10 @@
 //! renderer, the startup chrome seeding, the tmux keyboard check, the
 //! suspend-cycle terminal handoff, and the exit flush rows.
 
-use super::*;
+use super::{
+    mpsc, terminal, AgentView, Duration, ExitGuard, HeadlessStep, InteractiveOptions, KeyEvent,
+    Result, SessionUi, Terminal, UiInput, UiMode,
+};
 
 /// One typed string as key events: characters become `Char` presses, `\n`
 /// becomes Enter, and `\t` becomes Tab (the keys autocomplete reacts to).
@@ -26,13 +29,16 @@ fn typed_keys(text: &str) -> Vec<KeyEvent> {
 }
 
 /// Seed the static chrome state for a fresh interactive run: splash
-/// version/cwd, top-bar name, and the `manage` hint for persisted sessions.
+/// version/cwd, top-bar name, the `manage` hint for persisted sessions,
+/// and the zero dock a fresh session mounts — the placeholder frame
+/// keeps the landed frame's geometry.
 pub(super) fn apply_startup_chrome(view: &mut AgentView, options: &InteractiveOptions) {
     view.chrome.version.clone_from(&options.version);
     view.chrome.cwd = options.cwd.to_string_lossy().to_string();
     view.chrome.chat_name = crate::chrome::display_name(&view.chrome.cwd);
     view.chrome.show_manage = !options.no_session;
     view.chrome.tray_depth = options.session_rlm_depth;
+    view.chrome.activity = Some(crate::chrome::ActivityDock::default());
 }
 
 /// The tmux keyboard notice (TS `checkTmuxKeyboardSetup`): warn once per
@@ -48,6 +54,10 @@ pub(super) async fn check_tmux_keyboard_setup() -> Option<String> {
             tokio::task::spawn_blocking(move || {
                 std::process::Command::new("tmux")
                     .args(["show", "-gv", option])
+                    // No inherited fds: a probe must never hold the
+                    // terminal the TUI owns (the fd-set audit's rule —
+                    // no TUI child ever holds /dev/tty).
+                    .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::null())
                     .output()
@@ -118,6 +128,10 @@ impl Renderer {
     ) -> Result<Renderer> {
         match ui {
             UiMode::Terminal => {
+                // The raw-mode bracket's own `cfmakeraw` write clears IXON,
+                // which is the kernel's one trigger for lifting a pending
+                // Ctrl+S stop: a tty stopped at the shell prompt self-heals
+                // here (verified by the flow e2e's launch route).
                 terminal::enable_raw_mode()?;
                 // The terminal state changed: every later setup step is
                 // fallible (the alt-screen enter, the mode enables, the
@@ -193,7 +207,7 @@ impl Renderer {
                         crossterm::event::Event::Mouse(mouse) => {
                             if !crate::mouse_tracking::active() {
                                 true
-                            } else if let Some(event) = crate::mouse::from_crossterm(&mouse) {
+                            } else if let Some(event) = crate::mouse::from_crossterm(mouse) {
                                 ui_tx.send(UiInput::Mouse(event)).is_ok()
                             } else {
                                 true
@@ -348,6 +362,11 @@ impl Renderer {
     pub(super) fn resume(&mut self) -> Result<()> {
         match self {
             Renderer::Terminal { term, mouse } => {
+                // The raw re-arm's `cfmakeraw` write clears IXON - the
+                // kernel's one trigger for lifting a pending Ctrl+S stop -
+                // so a stop armed at the shell while the process sat
+                // suspended never holds the resume's repaint (verified by
+                // the flow e2e's suspend route).
                 terminal::enable_raw_mode()?;
                 // The suspension released the alternate screen (the client
                 // command prompted on the primary one); re-enter it.
@@ -502,6 +521,13 @@ impl Renderer {
         if !preserve_alt_screen && self.is_terminal() {
             crate::enhanced_keys::release_for_exit();
         }
+        // The surface's input reader stands down FIRST (TS tears its
+        // listener down with the chat): the drain below reads the tty
+        // through crossterm's global event-reader lock, and a parked
+        // reader would hold it — the wake makes the flagged reader exit
+        // now, the drain owns the reader, and the next surface's mount
+        // joins an already-exited thread instead of waiting out a poll.
+        crate::input::request_reader_stop();
         // In-flight kitty key releases are consumed before the terminal is
         // restored (TS `drainInput` before `stop`): a release that lands
         // after raw mode is off would leak its escape sequence into the
@@ -538,12 +564,6 @@ impl Renderer {
                     };
                     drop(term);
                     let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Hide);
-                    // Flag this surface's input reader for the background
-                    // stop now (TS tears its listener down with the chat):
-                    // the next surface joins it at mount, and the already
-                    // flagged reader exits at its next poll tick instead
-                    // of making the switch wait a full timeout.
-                    crate::input::request_reader_stop();
                 } else {
                     let _ = self.flush_to_main_screen(view);
                     // The shared exit tail ends the parity teardown: the

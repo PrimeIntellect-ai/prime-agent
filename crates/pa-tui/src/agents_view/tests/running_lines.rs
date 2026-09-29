@@ -30,8 +30,8 @@ fn scoped_view_keeps_the_first_row_default() {
         incident_notice_state: None,
     });
     mode.roster = vec![
-        roster_entry("p", "idle", parent_summary("p")),
-        roster_entry("c", "running", child_summary("c", "p", "worker one")),
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("c", "running", &child_summary("c", "p", "worker one")),
     ];
     mode.rebuild_rows();
     assert_eq!(mode.rows.len(), 1, "the scope root is excluded");
@@ -48,6 +48,83 @@ fn scoped_view_keeps_the_first_row_default() {
         opened.selection,
         SessionSelection::Attach("c-live".to_string())
     );
+}
+
+/// A scoped view whose scope root has no children (the all-zero dock's
+/// Subagents destination): the roster carries the root alone.
+fn childless_scope() -> AgentsViewMode {
+    let mut mode = AgentsViewMode::new(AgentsViewOptions {
+        socket_path: PathBuf::from("/tmp/agents-view-test.sock"),
+        cwd: PathBuf::from("/tmp"),
+        session_dir: None,
+        theme: "prime".to_string(),
+        version: "0.0.0".to_string(),
+        anchor_session_id: Some("p".to_string()),
+        scope: Some(AgentsViewScope {
+            session_id: Some("p".to_string()),
+            active_session_id: Some("p-live".to_string()),
+            session_name: Some("p name".to_string()),
+        }),
+        query: None,
+        expanded_ancestors: Vec::new(),
+        selected_row_identity: None,
+        selected_key: None,
+        status_message: None,
+        keybindings: crate::keybindings::KeybindingsManager::new(),
+        show_hardware_cursor: false,
+        incident_notice_state: None,
+    });
+    mode.roster = vec![roster_entry("p", "idle", &parent_summary("p"))];
+    mode.rebuild_rows();
+    mode
+}
+
+/// A childless scope is an empty view that keeps its keys: the
+/// TS-identical empty-state row renders, search drives the no-match
+/// row, Enter on the empty list is a no-op, escape steps back (the
+/// query first, then the scope root's chat), ctrl+d quits, and ctrl+n
+/// dispatches the new-session action.
+#[test]
+fn a_childless_scope_is_an_empty_view_that_keeps_its_keys() {
+    let mut mode = childless_scope();
+    assert!(mode.scope_active && !mode.scope_dropped);
+    assert_eq!(mode.rows, Vec::<AgentsViewRow>::new());
+    let (lines, _) = mode.render_frame(120, 36);
+    let frame = lines.iter().map(flat).collect::<Vec<_>>().join("\n");
+    assert!(frame.contains("No sessions yet."), "frame: {frame}");
+    // Search still filters the empty roster into the no-match row.
+    mode.handle_key("z");
+    assert_eq!(mode.query, "z");
+    let (lines, _) = mode.render_frame(120, 36);
+    let frame = lines.iter().map(flat).collect::<Vec<_>>().join("\n");
+    assert!(
+        frame.contains("No sessions match your search."),
+        "frame: {frame}"
+    );
+    // Enter on the empty list opens nothing and leaves the view running.
+    mode.handle_key("enter");
+    assert!(mode.opened.is_none() && mode.running);
+    // Escape clears the query; a second escape reopens the scope root.
+    mode.handle_key("escape");
+    assert_eq!(mode.query, "");
+    mode.handle_key("escape");
+    let opened = mode
+        .opened
+        .as_ref()
+        .expect("escape reopened the scope root");
+    assert_eq!(
+        opened.selection,
+        SessionSelection::Attach("p-live".to_string())
+    );
+    assert!(mode.scope_back && !mode.scope_popped && !mode.running);
+    // ctrl+d quits the empty view without opening anything.
+    let mut mode = childless_scope();
+    mode.handle_key("ctrl+d");
+    assert!(!mode.running && mode.opened.is_none() && !mode.new_session);
+    // ctrl+n dispatches the new-session action.
+    let mut mode = childless_scope();
+    mode.handle_key("ctrl+n");
+    assert!(mode.new_session && !mode.running);
 }
 
 /// TS `countRowsBySection` (the splash header counts) counts agent-kind
@@ -112,11 +189,11 @@ fn mode_with_mixed_children() -> AgentsViewMode {
         incident_notice_state: None,
     });
     mode.roster = vec![
-        roster_entry("p", "idle", parent_summary("p")),
-        roster_entry("r1", "running", child_summary("r1", "p", "runner one")),
-        roster_entry("r2", "running", child_summary("r2", "p", "runner two")),
-        roster_entry("i1", "idle", child_summary("i1", "p", "old worker one")),
-        roster_entry("i2", "idle", child_summary("i2", "p", "old worker two")),
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("r1", "running", &child_summary("r1", "p", "runner one")),
+        roster_entry("r2", "running", &child_summary("r2", "p", "runner two")),
+        roster_entry("i1", "idle", &child_summary("i1", "p", "old worker one")),
+        roster_entry("i2", "idle", &child_summary("i2", "p", "old worker two")),
     ];
     mode.rebuild_rows();
     mode
@@ -178,7 +255,7 @@ fn live_transitions_update_the_one_line_and_keep_the_selection() {
     assert_eq!(mode.rows[mode.selected].title, "runner one");
     let selected_identity = mode.rows[mode.selected].identity.clone();
     // The runner finishes: its roster row flips to idle.
-    let idle_flip = roster_entry("r1", "idle", child_summary("r1", "p", "runner one"));
+    let idle_flip = roster_entry("r1", "idle", &child_summary("r1", "p", "runner one"));
     mode.apply_roster_update(vec![idle_flip], Vec::new(), false);
     // The counts updated in the same rebuild: one runner left, and
     // the finished child stays a row in the group.
@@ -202,7 +279,7 @@ fn live_transitions_update_the_one_line_and_keep_the_selection() {
         "the selection stays on the session it followed"
     );
     // The runner restarts: the counts flip back.
-    let running_flip = roster_entry("r1", "running", child_summary("r1", "p", "runner one"));
+    let running_flip = roster_entry("r1", "running", &child_summary("r1", "p", "runner one"));
     mode.apply_roster_update(vec![running_flip], Vec::new(), false);
     let line = mode
         .rows
@@ -226,11 +303,11 @@ fn frame_renders_the_one_line() {
     let mut grandchild = child_summary("gc", "c", "grandkid");
     grandchild["rlmChildId"] = serde_json::json!("child-gc");
     let mut mode = mode_with_parent_and_child();
-    mode.roster.push(roster_entry("gc", "running", grandchild));
+    mode.roster.push(roster_entry("gc", "running", &grandchild));
     mode.roster.push(roster_entry(
         "i1",
         "idle",
-        child_summary("i1", "p", "old worker"),
+        &child_summary("i1", "p", "old worker"),
     ));
     mode.rebuild_rows();
     assert_eq!(mode.rows.len(), 2, "the parent and its ONE line");

@@ -3,7 +3,9 @@
 //! field over the personal-first rows) and its drive (the fuzzy filter,
 //! the row parts, and the pick).
 
-use super::*;
+use super::{
+    fuzzy_filter, scrub_controls, Line, PrimeTeamOption, PrimeTeamPick, SearchInput, Span,
+};
 
 /// The mounted team picker (TS `PrimeTeamSelectorComponent`): the search
 /// field over the personal-first rows.

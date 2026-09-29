@@ -17,6 +17,7 @@ use ratatui::crossterm::event as ct;
 
 pub type KeyId = String;
 
+#[must_use]
 pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
     if key.kind == ct::KeyEventKind::Release || key.kind == ct::KeyEventKind::Repeat {
         // Release events are filtered (TS wantsKeyRelease opt-in); repeats behave as presses.
@@ -305,6 +306,7 @@ fn modified_name(name: &str, ctrl: bool, alt: bool, shift: bool, super_key: bool
 
 /// Repeated escape presses arrive as separate events; TS splits combined data.
 /// Kept for API parity with CustomEditor.splitRepeatedKeybinding.
+#[must_use]
 pub fn split_repeated(data: &[KeyId], keybinding_id: &str) -> Option<Vec<KeyId>> {
     let hits: Vec<KeyId> = data
         .iter()

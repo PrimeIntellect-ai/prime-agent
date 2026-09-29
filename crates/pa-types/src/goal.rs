@@ -22,6 +22,7 @@ pub enum GoalStatus {
 impl GoalStatus {
     /// The wire/persisted slug (`"active"`, `"budget_limited"`, ...), the
     /// same string the TS `GoalStatus` union uses in status lines.
+    #[must_use]
     pub fn slug(self) -> &'static str {
         match self {
             GoalStatus::Idle => "idle",
@@ -67,6 +68,7 @@ impl Default for GoalState {
 }
 
 /// The state with no goal (TS `emptyGoalState`).
+#[must_use]
 pub fn empty_goal_state() -> GoalState {
     GoalState {
         active: false,

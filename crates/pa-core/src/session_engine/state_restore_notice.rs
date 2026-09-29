@@ -40,6 +40,7 @@ fn now_millis() -> u64 {
 /// The notice text (TS `_onIpythonStateRestored`'s builder): the
 /// `[python-state-restored]` header, the revived-or-fresh line, and the
 /// failed-names disclosure.
+#[must_use]
 pub fn notice_content(result: &RestoreResult) -> String {
     let mut lines = vec!["[python-state-restored]".to_string(), String::new()];
     if result.restored.is_empty() {
@@ -70,6 +71,7 @@ pub fn notice_content(result: &RestoreResult) -> String {
 /// whether anything revived (TS `sendCustomMessage` with
 /// `deliverAs: "nextTurn"` — the row rides the next admitted turn ahead of
 /// its prompt).
+#[must_use]
 pub fn notice_message(result: &RestoreResult) -> CustomMessage {
     CustomMessage {
         custom_type: IPYTHON_STATE_RESTORED_CUSTOM_TYPE.to_string(),

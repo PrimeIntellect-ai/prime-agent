@@ -1,3 +1,15 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
+// crate root: the same bounded-boundary disposition as src/lib.rs
+// (large_futures/too_many_lines/the cast family; details there).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! Verifier integration test: an oversized protocol line poisons the child
 //! and lands in protocol repair instead of buffering until OOM (TS #2423
 //! `MAX_PROTOCOL_LINE_CHARS` + the `oversized protocol line` repair test).
@@ -11,15 +23,16 @@
 
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use pa_core::kernel::manager::{KernelStartOptions, ReplKernelManager};
 use pa_core::kernel::shared::{
     ExecuteOptions, ExecuteStatus, HostRequestHandlers, KernelManagerOptions, KernelShutdownOptions,
 };
 
-/// Speaks protocol v3: ready, then per request either the oversized
-/// unterminated line (the corruption under test) or a plain done frame.
+/// Speaks protocol v3: ready, then per request the oversized unterminated
+/// line (the corruption under test), a multi-MiB blank line followed by a
+/// plain stdout frame (the linear-scan test), or a plain done frame.
 const FAKE_RUNTIME: &str = r#"#!/usr/bin/env python3
 import json
 import sys
@@ -36,6 +49,9 @@ for line in sys.stdin:
         sys.stdout.flush()
         time.sleep(30)
         break
+    if req.get("code") == "big-frame":
+        sys.stdout.write(" " * (31 * 1024 * 1024) + "\n")
+        sys.stdout.write(json.dumps({"event": "stdout", "id": req.get("id"), "text": "big"}) + "\n")
     sys.stdout.write(json.dumps({"event": "done", "id": req.get("id"), "status": "ok"}) + "\n")
     sys.stdout.flush()
 "#;
@@ -116,4 +132,34 @@ async fn normal_protocol_lines_still_stream_through_the_bounded_reader() {
         manager.shutdown(KernelShutdownOptions::default()),
     )
     .await;
+}
+
+#[tokio::test]
+async fn multi_mib_blank_protocol_line_is_read_in_linear_time() {
+    // A 31 MiB blank line arrives in pipe reads of at most 64 KiB; rescanning
+    // the buffered prefix per read would scan >= 8 GB. Blank lines skip
+    // parse_event, so the fixed path pays only the one-pass scan.
+    let manager = manager(fake_runtime_path());
+    manager
+        .start(KernelStartOptions::default())
+        .await
+        .expect("fake kernel must start");
+    let started = Instant::now();
+    let result = manager
+        .execute("big-frame", ExecuteOptions::default())
+        .await
+        .expect("execute must not fail");
+    let elapsed = started.elapsed();
+    assert_eq!(
+        (result.status, result.stdout.as_str()),
+        (ExecuteStatus::Ok, "big")
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "31 MiB blank line took {elapsed:?}"
+    );
+    assert!(manager
+        .shutdown(KernelShutdownOptions::default())
+        .await
+        .is_ok());
 }

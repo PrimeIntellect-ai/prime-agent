@@ -573,6 +573,7 @@ impl<'de> Deserialize<'de> for FileEntry {
 }
 
 impl FileEntry {
+    #[must_use]
     pub fn id(&self) -> Option<&str> {
         let base = match self {
             FileEntry::Header { header } => return Some(&header.id),
@@ -597,6 +598,7 @@ impl FileEntry {
     }
 
     /// Parent entry id (None for the header / roots with no parent).
+    #[must_use]
     pub fn parent_id(&self) -> Option<&str> {
         let base = match self {
             FileEntry::Header { .. } => return None,
@@ -621,6 +623,7 @@ impl FileEntry {
     }
 
     /// ISO-8601 entry timestamp; empty string when absent (older v1 lines).
+    #[must_use]
     pub fn timestamp(&self) -> &str {
         let base = match self {
             FileEntry::Header { header } => return header.timestamp.as_str(),

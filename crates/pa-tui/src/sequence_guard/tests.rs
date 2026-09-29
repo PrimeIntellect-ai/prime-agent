@@ -63,7 +63,7 @@ fn reports(outputs: &[GuardOutput]) -> Vec<Report> {
         .iter()
         .filter_map(|out| match out {
             GuardOutput::Mouse(report) => Some(*report),
-            GuardOutput::Event(Event::Mouse(mouse)) => mouse::from_crossterm(mouse),
+            GuardOutput::Event(Event::Mouse(mouse)) => mouse::from_crossterm(*mouse),
             GuardOutput::Event(_) => None,
         })
         .collect()
@@ -586,7 +586,7 @@ fn esc_then_a_mouse_report_flushes_the_esc_and_passes_the_report() {
     assert_eq!(
         reports(&outputs),
         vec![mouse::from_crossterm(match &wheel {
-            Event::Mouse(mouse) => mouse,
+            Event::Mouse(mouse) => *mouse,
             _ => unreachable!("the fixture is a mouse event"),
         })
         .expect("wheel decodes")]
@@ -625,18 +625,21 @@ fn a_non_keyboard_event_flushes_the_held_esc_first() {
 }
 
 #[test]
-fn poll_timeout_never_waits_past_the_deadline() {
+fn poll_deadline_parks_when_nothing_is_held() {
     let guard = SequenceGuard::default();
-    let now = Instant::now();
-    assert_eq!(guard.poll_timeout(HOLD, now), HOLD);
+    assert_eq!(guard.poll_deadline(Instant::now()), None);
+}
 
+#[test]
+fn poll_deadline_is_the_remaining_hold() {
     let mut guard = SequenceGuard::default();
+    let now = Instant::now();
     assert!(guard.feed(esc_press(), now).is_empty());
     assert_eq!(
-        guard.poll_timeout(HOLD, now + Duration::from_millis(6)),
-        Duration::from_millis(4)
+        guard.poll_deadline(now + Duration::from_millis(6)),
+        Some(Duration::from_millis(4))
     );
-    assert_eq!(guard.poll_timeout(HOLD, now + HOLD), Duration::ZERO);
+    assert_eq!(guard.poll_deadline(now + HOLD), Some(Duration::ZERO));
 }
 
 // -- reassembled key sequences --------------------------------------

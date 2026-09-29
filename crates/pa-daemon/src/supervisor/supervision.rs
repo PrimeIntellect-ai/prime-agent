@@ -759,7 +759,22 @@ impl Supervisor {
                 }
             });
         }
-        *resident.cmd_tx.lock().await = Some(cmd_tx);
+        // The handshake owns the channel privately (TS `pendingClient`):
+        // the channel is NOT installed for routing until the auth answer
+        // proves the connection — the worker answers any command other
+        // than `worker_auth` as the unauthenticated FIRST command with the
+        // authentication refusal and closes the connection, so a route
+        // that wins the enqueue race against the handshake (the
+        // registration path's roster refresh under a concurrent-launch
+        // storm) would kill the connection and strand the handshake for
+        // the whole connect budget — a fully-healthy worker failing its
+        // launch "did not come up in time". A pre-auth route finds no
+        // installed channel (`route_command` fails fast with the
+        // retryable not-connected error) and the callers that tolerate it
+        // (the roster refresh) skip; the install below is the
+        // `worker.client = client` boundary, epoch-guarded against a
+        // superseded connect installing over a live one.
+        let auth_tx = cmd_tx.clone();
 
         // Authenticate against the worker within the remaining connect
         // budget (TS `handshakeBudgetMs`: probes, connect, and auth share one
@@ -775,8 +790,9 @@ impl Supervisor {
             .as_millis()
             .max(WORKER_AUTH_FLOOR_MS.into()) as u64;
         let response = self
-            .route_command_typed(
+            .route_command_on_typed(
                 resident,
+                auth_tx,
                 "worker_auth",
                 json!({
                     "token": token,
@@ -817,6 +833,13 @@ impl Supervisor {
                 response.error.unwrap_or_default()
             ));
         }
+        // The handshake answered: install the channel for routing (TS
+        // `worker.client = client`, after `authenticateWorker`). A
+        // superseded connect (a replacement already owns a newer
+        // connection) never installs over it.
+        resident
+            .install_command_channel(connection_epoch, cmd_tx)
+            .await;
         // Peer-transport capability rides on the worker instance id (the TS
         // worker only advertises `direct_peer_transport` with one).
         let peer_transport_capable = response

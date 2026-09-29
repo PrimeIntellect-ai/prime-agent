@@ -279,7 +279,7 @@ pub(crate) fn kernel_ready(
     python_skills: &[BootstrapPythonSkill],
 ) -> bool {
     let (version, raw) = read_bootstrap_version_raw(venv);
-    bootstrap_version_current(version, runtime_identity, python_skills)
+    bootstrap_version_current(version.as_ref(), runtime_identity, python_skills)
         && has_prime_agent_runtime_memoized(
             python,
             runtime_identity,

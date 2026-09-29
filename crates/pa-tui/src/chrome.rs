@@ -87,7 +87,9 @@ pub struct ChromeState {
     /// Tray override label (TS `getTrayOverrideLabel`): while the Ctrl+C
     /// exit hint is armed, it replaces the tray's location label.
     pub tray_override: Option<String>,
-    /// Compact, borderless activity dock under the editor.
+    /// The compact, borderless activity dock under the editor: a live
+    /// session always mounts it; `None` means no session owns this
+    /// view (the replay and app surfaces).
     pub activity: Option<ActivityDock>,
     /// The footer's tok/sec readout (TS `FooterComponent` under `/speed`):
     /// the dim bottom row's text; `None` renders no row. The client keeps
@@ -125,6 +127,10 @@ pub enum ActivityDirection {
     Next,
 }
 
+/// The bottom activity dock: it renders in every session, the all-zero
+/// row included (the operator's 2026-09-28 directive; TS
+/// `SubagentSummaryLine` renders nothing at zero, a sanctioned
+/// divergence).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActivityDock {
     /// The directly-running children right now (one addend of the
@@ -134,11 +140,6 @@ pub struct ActivityDock {
     /// subagents): the total's other addend. Idle and dead registry
     /// rows never count — they render in the scoped agents view.
     pub subagents_running_nested: usize,
-    /// Every descendant, finished ones included: this keeps the dock
-    /// mounted while any subagent history remains browsable (the
-    /// rendered count stays live-only; the group stays traversable at
-    /// zero).
-    pub subagents_total: usize,
     /// The CURRENT session's heartbeats (nested sessions' jobs do not
     /// surface here, operator scoping).
     pub heartbeats: usize,
@@ -148,10 +149,6 @@ pub struct ActivityDock {
     /// kernel registry only): finished runs never inflate the indicator
     /// — they stay as rows inside the bash view.
     pub bash_running: usize,
-    /// Every catalogued kernel-bash run, finished ones included: this
-    /// keeps the dock (and so the bash view's history) reachable when no
-    /// run is live; the rendered indicator count stays `bash_running`.
-    pub bash_total: usize,
     /// The active goal's dock label — `Pursuing goal (12m 05s)`-style,
     /// the elapsed-time form (the operator's 2026-09-24 directive: the
     /// row reads the time, the token budget lives inside the goal
@@ -163,18 +160,12 @@ pub struct ActivityDock {
 }
 
 impl ActivityDock {
-    pub fn visible(&self) -> bool {
-        self.subagents_total > 0
-            || self.heartbeats > 0
-            || self.bash_total > 0
-            || self.goal_label.is_some()
-    }
-
     /// The groups this dock renders, left to right — the arrow
     /// traversal order. The subagents, heartbeats, and shells groups
     /// always render (an empty one reads its zero count and stays
     /// traversable); the goal group renders exactly while a live goal
     /// keeps its row mounted.
+    #[must_use]
     pub fn groups(&self) -> Vec<ActivityGroup> {
         let mut groups = vec![
             ActivityGroup::Subagents,
@@ -193,6 +184,7 @@ impl ActivityDock {
     /// groups take N presses to return to the start. A `current` that
     /// no longer renders (a goal group whose row unmounted) steps
     /// from the row's start.
+    #[must_use]
     pub fn step(&self, current: ActivityGroup, direction: ActivityDirection) -> ActivityGroup {
         let groups = self.groups();
         let len = groups.len();
@@ -216,6 +208,7 @@ pub struct ContextUsage {
 }
 
 impl ContextUsage {
+    #[must_use]
     pub fn percent(&self) -> f64 {
         if self.context_window == 0 {
             0.0
@@ -226,6 +219,7 @@ impl ContextUsage {
 }
 
 /// `formatTokenCount` (agent-activity.ts): 999, 1.0k-9.9k, 10k, 1.2M.
+#[must_use]
 pub fn format_token_count(count: u64) -> String {
     if count < 1_000 {
         return count.to_string();
@@ -244,6 +238,7 @@ pub fn format_token_count(count: u64) -> String {
 
 /// The top-bar chat name for an unnamed session: the cwd basename
 /// (TS `path.basename(getCurrentCwd())`).
+#[must_use]
 pub fn display_name(cwd: &str) -> String {
     std::path::Path::new(cwd).file_name().map_or_else(
         || cwd.to_string(),
@@ -252,6 +247,7 @@ pub fn display_name(cwd: &str) -> String {
 }
 
 /// The `~`-compressed cwd for the splash line (TS `formatSplashCwd`).
+#[must_use]
 pub fn format_splash_cwd(cwd: &str, home: Option<&str>) -> String {
     let Some(home) = home else {
         return cwd.replace('\\', "/");
@@ -341,6 +337,7 @@ pub fn render_top_bar(state: &ChromeState, theme: &Theme, width: usize) -> Line 
 
 /// The brand splash: butterfly logo beside the version/model/cwd metadata
 /// (TS `BrandSplashHeader`; `topPadding` is always on in the chat header).
+#[must_use]
 pub fn render_splash(state: &ChromeState, theme: &Theme, width: usize) -> Vec<Line> {
     let safe_width = width.max(1);
     let padding_x = usize::from(safe_width > 1);
@@ -448,6 +445,7 @@ pub fn render_splash(state: &ChromeState, theme: &Theme, width: usize) -> Vec<Li
 
 /// The plain row above the prompt: the detail status right (TS
 /// `PromptContextLine`, always `["", row]`).
+#[must_use]
 pub fn render_prompt_context(detail_label: &str, theme: &Theme, width: usize) -> Vec<Line> {
     if width < 1 {
         return Vec::new();
@@ -474,6 +472,7 @@ pub fn render_prompt_context(detail_label: &str, theme: &Theme, width: usize) ->
 /// The conversation-detail status label (TS `formatConversationDetailStatus`):
 /// "Expanded" (all output), "Details" (thinking + diffs, output collapsed), or
 /// "Collapsed"; only Expanded flips the key hint to "collapse".
+#[must_use]
 pub fn conversation_detail_status(all_output: bool, details: bool, key_display: &str) -> String {
     let label = if all_output {
         "Expanded"
@@ -488,9 +487,25 @@ pub fn conversation_detail_status(all_output: bool, details: bool, key_display: 
 
 /// The tray row under the editor (TS `SubagentSummaryLine.renderInfoLine`):
 /// location label left, context label right, over the full width.
+#[must_use]
 pub fn render_tray(state: &ChromeState, theme: &Theme, width: usize) -> Line {
+    render_tray_with_hint(state, theme, width).0
+}
+
+/// The tray row plus the `← manage` hint's column span (the click
+/// surface's region: a plain click on the hint's own cells performs
+/// the hinted action — the left arrow's agents-back handoff, operator
+/// directive 2026-09-29). `None` when the left label is the override
+/// or the hint is hidden: the tray keeps no region then.
+#[must_use]
+pub fn render_tray_with_hint(
+    state: &ChromeState,
+    theme: &Theme,
+    width: usize,
+) -> (Line, Option<std::ops::Range<usize>>) {
     let dim = theme.fg_style(ThemeColor::Dim);
     let muted = theme.fg_style(ThemeColor::Muted);
+    let mut hint: Option<std::ops::Range<usize>> = None;
     let mut left: Line = Vec::new();
     if let Some(override_label) = &state.tray_override {
         // TS `renderInfoLine`: the override label replaces the location
@@ -499,6 +514,10 @@ pub fn render_tray(state: &ChromeState, theme: &Theme, width: usize) -> Line {
     } else if state.show_manage {
         left.push(Span::styled("\u{2190}".to_string(), dim));
         left.push(Span::styled(" manage".to_string(), muted));
+        // The hint's own cells — the two spans just pushed — are the
+        // clickable region; the depth label that may follow is the
+        // session's metadata, not part of the hinted action.
+        hint = Some(0..left.iter().map(|s| str_width(&s.content)).sum());
         // TS `getTrayLocationLabel`: a subagent session joins its
         // `depth N` label onto the manage hint (a root session
         // renders none).
@@ -552,7 +571,7 @@ pub fn render_tray(state: &ChromeState, theme: &Theme, width: usize) -> Line {
     line.extend(left);
     line.push(Span::styled(" ".repeat(gap), Style::default()));
     line.extend(right);
-    line
+    (line, hint)
 }
 
 /// The tray model label's thinking-effort suffix (TS `getModelContextLabel`:
@@ -678,7 +697,8 @@ fn land_marker(out: &mut Vec<crate::Span>, width: usize) {
 }
 
 /// The framed activity dock: a muted separator rule above one row of
-/// the actionable groups. The TS summary line wraps its content in an
+/// the actionable groups — the row renders in every session, all-zero
+/// included. The TS summary line wraps its content in an
 /// accent-colored box (`╭─ subagents ─╮`); the inline design language
 /// keeps the separation with the same muted `─` rule that frames the
 /// pickers' search fields, not an accent box.
@@ -689,10 +709,33 @@ fn land_marker(out: &mut Vec<crate::Span>, width: usize) {
 /// stays neutral at zero. The subagents segment is one consolidated
 /// item — `◆ x subagents` (the operator's 2026-09-25 consolidation:
 /// the separate running cluster was redundant).
-pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) -> Option<Vec<Line>> {
-    if !dock.visible() || width == 0 {
-        return None;
-    }
+#[must_use]
+pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) -> Vec<Line> {
+    render_activity_dock_segments(dock, theme, width).0
+}
+
+/// One rendered group segment's column span on the dock's row (the
+/// click surface's region: a plain click on the group's own cells
+/// opens that group's view, the dock's Enter route — operator
+/// directive 2026-09-29, the hover + click affordance pass).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityDockSegment {
+    pub group: ActivityGroup,
+    /// The row columns the group's spans occupy, start inclusive, end
+    /// exclusive.
+    pub cols: std::ops::Range<usize>,
+}
+
+/// The framed activity dock plus its groups' column segments (see
+/// [`render_activity_dock`] for the row itself): the segments cover
+/// exactly the cells each group renders — separators between groups
+/// stay inert — clamped to the row the truncation actually kept.
+#[must_use]
+pub fn render_activity_dock_segments(
+    dock: &ActivityDock,
+    theme: &Theme,
+    width: usize,
+) -> (Vec<Line>, Vec<ActivityDockSegment>) {
     // The status-dot vocabulary rides the remaining count cluster (TS
     // `subagent-summary-line`'s `● running / ◐ idle / ○ inactive`): the
     // half circle marks waiting work. Only the heartbeat pause keeps a
@@ -726,10 +769,15 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
     // skipped by its emptiness.
     let groups = dock.groups();
     let mut line = vec![Span::raw(" ")];
+    let mut segments: Vec<ActivityDockSegment> = Vec::new();
     for (index, group) in groups.iter().copied().enumerate() {
         if index > 0 {
             line.push(theme.fg_span(ThemeColor::Dim, "  ·  "));
         }
+        // The group's cells start where the row now stands: the
+        // segment's column span is what the terminal will paint (the
+        // truncation below clamps its end).
+        let start = line.iter().map(|s| str_width(&s.content)).sum();
         let spans = match group {
             ActivityGroup::Subagents => {
                 vec![theme.fg_span(running_color(running), format!("◆ {running} subagents"))]
@@ -795,17 +843,42 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
                 line.push(span);
             }
         }
+        let end = line.iter().map(|s| str_width(&s.content)).sum();
+        segments.push(ActivityDockSegment {
+            group,
+            cols: start..end,
+        });
     }
-    let frame = vec![
-        vec![theme.fg_span(ThemeColor::BorderMuted, "─".repeat(width))],
-        truncate_spans_to_width(&line, width),
-    ];
-    Some(frame)
+    let row = truncate_spans_to_width(&line, width);
+    let rendered = row
+        .iter()
+        .map(|s| str_width(&s.content))
+        .sum::<usize>()
+        .min(width);
+    // The truncation may cut a trailing group's tail or drop it whole:
+    // a segment that no longer renders stays out of the click surface,
+    // and a partially kept one ends at the row's last painted column.
+    let segments = segments
+        .into_iter()
+        .filter(|segment| segment.cols.start < rendered)
+        .map(|mut segment| {
+            segment.cols.end = segment.cols.end.min(rendered);
+            segment
+        })
+        .collect();
+    (
+        vec![
+            vec![theme.fg_span(ThemeColor::BorderMuted, "─".repeat(width))],
+            row,
+        ],
+        segments,
+    )
 }
 
 /// The footer's tok/sec row (TS `FooterComponent::render` under `/speed`):
 /// one dim line — the dock's last row — truncated with no ellipsis when it
 /// overflows the width.
+#[must_use]
 pub fn render_speed_footer(text: &str, theme: &Theme, width: usize) -> Line {
     let dim = theme.fg_style(ThemeColor::Dim);
     let text = truncate_to_width(text, width, "");
@@ -813,6 +886,7 @@ pub fn render_speed_footer(text: &str, theme: &Theme, width: usize) -> Line {
 }
 
 /// The editor surface background: `userMessageBg` (TS `getEditorTheme`).
+#[must_use]
 pub fn editor_background(theme: &Theme) -> ratatui::style::Style {
     theme.bg_style(ThemeBg::UserMessageBg)
 }

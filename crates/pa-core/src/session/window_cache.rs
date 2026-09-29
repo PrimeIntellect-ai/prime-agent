@@ -65,6 +65,9 @@ pub(super) const SNAPSHOT_VERSION: u32 = 7;
 // stay servable (a version bump would force a full re-walk instead).
 
 #[derive(Clone, Serialize, Deserialize)]
+// The mirrored TS API shape is deliberate (the booleans are the
+// product's own surface, not a refactor target).
+#[allow(clippy::struct_excessive_bools)]
 pub(super) struct Snapshot {
     pub version: u32,
     pub generation: Generation,
@@ -241,6 +244,9 @@ pub fn append_cached(path: &Path, bytes: &[u8], ownership: AppendOwnership) -> i
 // retain its bits so continuing chronological additions matches the full reader.
 pub(super) mod float_bits {
     use serde::{Deserialize, Deserializer, Serializer};
+    // serde's `serialize_with` contract pins `&T` - the lint's by-value
+    // form would not be callable as a serde attribute helper.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
     pub fn serialize<S: Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_u64(value.to_bits())
     }

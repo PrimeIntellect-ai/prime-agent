@@ -3,7 +3,7 @@
 //! shutdown's bounded recovery - the loop drivers, the session-plane
 //! re-attach, and the arming seam.
 
-use super::*;
+use super::{mpsc, AgentView, DaemonClient, DaemonClientEvent, Duration, RecoveryKind, SessionUi};
 
 /// The in-flight reconnect attempt's connect leg: a spawned task's
 /// bounded `DaemonClient::connect_with_retry` result (fresh client plus

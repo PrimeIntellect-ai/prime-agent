@@ -6,8 +6,11 @@
 //! used by the integration harness and headless checks; the agent-loop crate
 //! plugs into the same trait without touching any daemon mechanics.
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use pa_agent::abort::AbortSignal;
+use pa_core::session_engine::provider_adapter::json_round_trip;
 use pa_core::session_engine::provider_retry::{ProviderRetryPolicy, UNBOUNDED_BACKOFF_MS};
 use pa_core::session_engine::side_question::{SideQuestionSink, SideQuestionTurn};
 use serde_json::{json, Value};
@@ -41,6 +44,21 @@ pub struct PromptBatchRow {
     pub images: Vec<pa_agent::types::ImageContent>,
 }
 
+/// The saved session context TS `createAgentSession` reads off the session's
+/// already-loaded entries (`sessionManager.buildSessionContext()` plus
+/// `getBranch().some(...)` — sdk.ts): the `(provider, model)` the file pins
+/// and the thinking level present only when the file carries a
+/// `thinking_level_change` row (TS `hasThinkingEntry`). A caller that already
+/// holds the opened store passes the pre-read context to
+/// [`SessionEngine::restore_session_model`] so the restore never re-opens the
+/// session file; `None` reads the file (the port's windowed fallback for
+/// callers without an open store).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedSessionContext {
+    pub(crate) model: Option<(String, String)>,
+    pub(crate) thinking: Option<pa_types::ai::ModelThinkingLevel>,
+}
+
 /// Explicit model selection from a session's create config (the wire
 /// `provider`/`model`/`apiKey`/`thinking` fields). `None` fields keep the
 /// engine's current selection, mirroring the TS runtime-config merge
@@ -62,11 +80,12 @@ pub struct EngineModelSelection {
 pub enum EngineEvent {
     /// The user message that was accepted (recorded into the session store).
     UserMessage(Value),
-    /// An assistant message update (streaming); the payload is the full
-    /// message, plus the provider stream event that produced it (the TS wire
+    /// An assistant message update (streaming); the message is the loop's
+    /// shared snapshot ([`AssistantSnapshot`]: wire form at frame build),
+    /// plus the provider stream event that produced it (the TS wire
     /// carries `assistantMessageEvent` so clients can track activity).
     AssistantUpdate {
-        message: Value,
+        message: AssistantSnapshot,
         stream_event: Option<Value>,
     },
     /// The final assistant message (recorded into the session store).
@@ -173,6 +192,52 @@ pub enum EngineEvent {
     },
 }
 
+/// A streamed assistant message: already in wire form, or the loop's typed
+/// partial, converted only when a frame is built.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AssistantSnapshot {
+    Wire(Value),
+    Loop(Arc<pa_agent::types::AgentMessage>),
+}
+
+impl AssistantSnapshot {
+    pub(crate) fn into_wire(self) -> Option<Value> {
+        match self {
+            Self::Wire(value) => Some(value),
+            Self::Loop(message) => session_wire_value(&message),
+        }
+    }
+}
+
+/// Serialize a pa-agent message through the session wire shape (adds `role`).
+pub(crate) fn session_wire_value(agent_message: &pa_agent::types::AgentMessage) -> Option<Value> {
+    use pa_agent::types::Message as LoopMessage;
+    let session_message = match agent_message {
+        pa_agent::types::AgentMessage::Standard(LoopMessage::User(user)) => {
+            pa_types::session::AgentMessage::User(json_round_trip(user)?)
+        }
+        pa_agent::types::AgentMessage::Standard(LoopMessage::Assistant(assistant)) => {
+            pa_types::session::AgentMessage::Assistant(json_round_trip(assistant)?)
+        }
+        pa_agent::types::AgentMessage::Standard(LoopMessage::ToolResult(tool_result)) => {
+            pa_types::session::AgentMessage::ToolResult(json_round_trip(tool_result)?)
+        }
+        // A custom row (the harness digest, a goal-context row): the
+        // payload is the session-shape custom message and the wire form is
+        // the tagged session message — the payload plus the row's role
+        // (TS `agent_end.messages` carries custom rows in this shape).
+        pa_agent::types::AgentMessage::Custom(custom) => {
+            let mut value = custom.payload.clone();
+            let object = value.as_object_mut()?;
+            object
+                .entry("role".to_string())
+                .or_insert_with(|| Value::String(custom.role.clone()));
+            return Some(value);
+        }
+    };
+    serde_json::to_value(&session_message).ok()
+}
+
 /// The post-compaction goal continuation (TS `compact()`'s `didCompact` +
 /// active-goal branch: `resumeQueuedWork()` ->
 /// `_maybeResumeGoalContinuationAfterRlmWork` mints the owed
@@ -190,6 +255,14 @@ pub struct GoalContinuation {
     /// The `goal_update` event's `goal` payload, `None` when an
     /// unchanged state stays silent.
     pub goal_update: Option<Value>,
+    /// This mint's own pending-continuation guard handle, captured under
+    /// the driver lock at the mint: the admission and drop surfaces
+    /// release exactly the mint's guard, never whichever handle the
+    /// engine's mutable mirror currently holds (a stale task from before
+    /// a core rebuild must not clear a replacement session's guard).
+    /// `None` when the item armed no guard (the budget steer mints no
+    /// continuation slot).
+    pub pending_handle: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// The goal-driven work a settled run boundary owes: TS
@@ -311,6 +384,20 @@ pub trait SessionEngine: Send + Sync {
         Box::pin(std::future::ready(()))
     }
 
+    /// Whether the settled-child passivation gates pass (TS #2483's
+    /// `canPassivateSettledSession` minus the release itself): no
+    /// unsettled RLM descendants and no registered active-or-paused
+    /// scheduled job. The whole-worker idle passivation (the
+    /// `idleEvictionMinutes` consumer) re-checks these engine-side gates
+    /// before asking the supervisor for the graceful stop. The default
+    /// `false` keeps scripted harness engines and kernel-less embeddings
+    /// resident — the same conservative arm as the release default.
+    fn can_passivate_settled_session(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+        Box::pin(std::future::ready(false))
+    }
+
     /// Mint the owed post-compaction goal continuation (TS `compact()`'s
     /// `didCompact` + active-goal branch: `resumeQueuedWork()`'s
     /// `_maybeResumeGoalContinuationAfterRlmWork` — `continuationsUsed`
@@ -322,6 +409,31 @@ pub trait SessionEngine: Send + Sync {
     /// the turn; the resume site admits it.
     fn mint_post_compaction_goal_continuation(&self) -> Option<GoalContinuation> {
         None
+    }
+
+    /// Release the engine's pending-continuation guard: the caller
+    /// admitted (or withdrew) a minted goal continuation, so the next
+    /// boundary may mint again (the pending-never-re-arms contract —
+    /// the owed flag clears at the queue). Engines without thread goals
+    /// do nothing.
+    fn clear_pending_goal_continuation(&self) {}
+
+    /// The engine's current pending-continuation handle, READ without
+    /// clearing (the mirror read — the core a mint about to spawn will
+    /// use). Engines without thread goals have none.
+    fn goal_pending_handle(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        None
+    }
+
+    /// Release one mint's OWN pending-continuation handle (the item's
+    /// captured handle, or the spawn-captured handle for a lost task):
+    /// an admission or drop names the specific mint, never the mutable
+    /// mirror. An item that armed no guard releases nothing. Engines
+    /// without thread goals release nothing.
+    fn release_goal_continuation_handle(
+        &self,
+        _handle: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) {
     }
 
     /// Run one prompt. `prompt_index` counts accepted prompts for this
@@ -525,10 +637,16 @@ pub trait SessionEngine: Send + Sync {
     /// startup-chain default instead of the model it was running on. The
     /// worker calls this at create, before the create-config selection;
     /// explicit flags win, a miss records the fallback (never silent).
-    /// Engines without a persisted model context do nothing.
+    ///
+    /// `saved` is the [`SavedSessionContext`] the caller already read off an
+    /// open store (TS reads its loaded entries; the create path holds the
+    /// store its own `open_windowed` built) — passing it skips the restore's
+    /// second windowed open of the same file. `None` reads the file. Engines
+    /// without a persisted model context do nothing.
     fn restore_session_model(
         &self,
         _session_path: &std::path::Path,
+        _saved: Option<SavedSessionContext>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         Box::pin(std::future::ready(()))
     }
@@ -1263,6 +1381,8 @@ impl SessionEngine for ScriptedEngine {
                 })),
             },
             goal_update: Some(goal.state.clone()),
+            // The scripted faux mints through no real driver: no guard.
+            pending_handle: None,
         })
     }
 
@@ -1346,7 +1466,9 @@ impl SessionEngine for ScriptedEngine {
         }
         let usage = scripted_usage();
         if !emit(EngineEvent::AssistantUpdate {
-            message: json!({"role": "assistant", "content": "", "provider": "scripted", "model": "faux-1", "usage": usage, "timestamp": crate::util::now_ms()}),
+            message: AssistantSnapshot::Wire(
+                json!({"role": "assistant", "content": "", "provider": "scripted", "model": "faux-1", "usage": usage, "timestamp": crate::util::now_ms()}),
+            ),
             stream_event: None,
         }) {
             emit(cancelled());

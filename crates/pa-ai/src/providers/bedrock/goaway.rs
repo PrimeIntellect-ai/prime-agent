@@ -208,6 +208,8 @@ mod tests {
 
     fn frame(ftype: u8, flags: u8, stream_id: u32, payload: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
+        // Test frames are tiny; the HTTP/2 length prefix is 24 bits (u32 wire with the top byte dropped).
+        #[allow(clippy::cast_possible_truncation)]
         out.extend_from_slice(&(payload.len() as u32).to_be_bytes()[1..]);
         out.push(ftype);
         out.push(flags);

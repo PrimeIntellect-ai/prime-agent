@@ -3,7 +3,7 @@ use crate::agents_view_state::reconcile_unified_sessions;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
-fn roster_entry(agent: &str, status: &str, summary: serde_json::Value) -> serde_json::Value {
+fn roster_entry(agent: &str, status: &str, summary: &serde_json::Value) -> serde_json::Value {
     json!({ "agentId": agent, "status": status, "summary": summary })
 }
 
@@ -62,8 +62,8 @@ fn an_opened_child_nests_under_its_parent() {
     let mut parent = parent_summary("parent");
     parent["rlmDepth"] = json!(0);
     let roster = vec![
-        roster_entry("parent", "idle", parent),
-        roster_entry("opened", "idle", opened),
+        roster_entry("parent", "idle", &parent),
+        roster_entry("opened", "idle", &opened),
     ];
     let rows = rows_for(&roster, None, &[]);
     assert_eq!(
@@ -109,8 +109,8 @@ fn a_fork_of_a_child_stays_a_sibling_row() {
     fork["parentSessionPath"] = json!("/x/source.jsonl");
     fork["sessionName"] = json!("forked chat");
     let roster = vec![
-        roster_entry("source", "idle", source),
-        roster_entry("fork", "idle", fork),
+        roster_entry("source", "idle", &source),
+        roster_entry("fork", "idle", &fork),
     ];
     let rows = rows_for(&roster, None, &[]);
     assert_eq!(
@@ -165,8 +165,8 @@ fn session_model_reads_every_wire_shape() {
 #[test]
 fn parent_with_child_renders_the_summary_row_and_nested_child() {
     let roster = vec![
-        roster_entry("p", "idle", parent_summary("p")),
-        roster_entry("c", "running", child_summary("c", "p", "worker one")),
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("c", "running", &child_summary("c", "p", "worker one")),
     ];
     // Collapsed: the parent, its ONE summary row, nothing else.
     let rows = rows_for(&roster, None, &[]);
@@ -198,9 +198,9 @@ fn deeper_descendants_roll_up_and_nest_recursively() {
     let mut grandchild = child_summary("gc", "c", "grandchild");
     grandchild["rlmChildId"] = json!("child-gc");
     let roster = vec![
-        roster_entry("p", "idle", parent_summary("p")),
-        roster_entry("c", "idle", child_summary("c", "p", "worker one")),
-        roster_entry("gc", "running", grandchild),
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("c", "idle", &child_summary("c", "p", "worker one")),
+        roster_entry("gc", "running", &grandchild),
     ];
     // Collapsed: the parent's ONE line carries the whole subtree —
     // total 2 (the child and the grandchild), running 1 (the
@@ -265,11 +265,11 @@ fn summary_rows_stay_count_only() {
     grandchild["rlmChildId"] = json!("child-gc");
     grandchild["model"] = json!("anthropic/claude-opus-4-6");
     let roster = vec![
-        roster_entry("p", "idle", parent_summary("p")),
-        roster_entry("c1", "idle", glm_one),
-        roster_entry("c2", "idle", child_summary("c2", "p", "worker two")),
-        roster_entry("c3", "idle", opus),
-        roster_entry("gc", "idle", grandchild),
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("c1", "idle", &glm_one),
+        roster_entry("c2", "idle", &child_summary("c2", "p", "worker two")),
+        roster_entry("c3", "idle", &opus),
+        roster_entry("gc", "idle", &grandchild),
     ];
     let rows = rows_for(&roster, None, &[]);
     let summary = rows
@@ -303,10 +303,10 @@ fn summary_rows_stay_count_only() {
     ggc["rlmChildId"] = json!("child-ggc");
     ggc["model"] = json!("openai/gpt-5.6-sol");
     let roster = vec![
-        roster_entry("p", "idle", parent_summary("p")),
-        roster_entry("c", "idle", child_summary("c", "p", "worker one")),
-        roster_entry("gc", "idle", gc),
-        roster_entry("ggc", "idle", ggc),
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("c", "idle", &child_summary("c", "p", "worker one")),
+        roster_entry("gc", "idle", &gc),
+        roster_entry("ggc", "idle", &ggc),
     ];
     let rows = rows_for(&roster, None, &[]);
     let summary = rows
@@ -325,9 +325,9 @@ fn idle_descendants_aggregate_into_the_summary_row() {
     let mut grandchild = child_summary("gc", "c", "grandchild");
     grandchild["rlmChildId"] = json!("child-gc");
     let roster = vec![
-        roster_entry("p", "idle", parent_summary("p")),
-        roster_entry("c", "idle", child_summary("c", "p", "worker one")),
-        roster_entry("gc", "idle", grandchild),
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("c", "idle", &child_summary("c", "p", "worker one")),
+        roster_entry("gc", "idle", &grandchild),
     ];
     let rows = rows_for(&roster, None, &[]);
     assert_eq!(rows[1].title, "2 subagents (0 running)");
@@ -349,9 +349,9 @@ fn running_descendants_aggregate_into_the_summary_row() {
     let mut grandchild = child_summary("gc", "c", "grandchild");
     grandchild["rlmChildId"] = json!("child-gc");
     let roster = vec![
-        roster_entry("p", "idle", parent_summary("p")),
-        roster_entry("c", "running", child_summary("c", "p", "worker one")),
-        roster_entry("gc", "running", grandchild),
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("c", "running", &child_summary("c", "p", "worker one")),
+        roster_entry("gc", "running", &grandchild),
     ];
     let rows = rows_for(&roster, None, &[]);
     assert_eq!(rows.len(), 2, "ONE line, never a second per-status line");
@@ -365,19 +365,19 @@ fn running_descendants_aggregate_into_the_summary_row() {
 /// FIRST (with their running state), the historical workers after.
 #[test]
 fn the_merged_line_expands_to_the_full_roster_running_first() {
-    let mut roster = vec![roster_entry("p", "idle", parent_summary("p"))];
+    let mut roster = vec![roster_entry("p", "idle", &parent_summary("p"))];
     for n in 1..=6 {
         roster.push(roster_entry(
             &format!("r{n}"),
             "running",
-            child_summary(&format!("r{n}"), "p", &format!("runner {n}")),
+            &child_summary(&format!("r{n}"), "p", &format!("runner {n}")),
         ));
     }
     for n in 1..=40 {
         roster.push(roster_entry(
             &format!("i{n}"),
             "inactive",
-            child_summary(&format!("i{n}"), "p", &format!("old worker {n}")),
+            &child_summary(&format!("i{n}"), "p", &format!("old worker {n}")),
         ));
     }
     // Collapsed: the parent and its ONE line, both statuses inside.
@@ -421,10 +421,10 @@ fn the_expanded_group_renders_each_agent_once() {
     let mut grandchild = child_summary("gc", "c2", "grandkid");
     grandchild["rlmChildId"] = json!("child-gc");
     let roster = vec![
-        roster_entry("p", "idle", parent_summary("p")),
-        roster_entry("c", "running", child_summary("c", "p", "worker one")),
-        roster_entry("c2", "idle", child_summary("c2", "p", "worker two")),
-        roster_entry("gc", "running", grandchild),
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("c", "running", &child_summary("c", "p", "worker one")),
+        roster_entry("c2", "idle", &child_summary("c2", "p", "worker two")),
+        roster_entry("gc", "running", &grandchild),
     ];
     // A subagent row's identity is its parent-qualified `agent:`
     // alias, so the second level's expansion key comes off the
@@ -461,9 +461,9 @@ fn the_expanded_group_renders_each_agent_once() {
 #[test]
 fn selection_pins_the_one_summary_line_identity() {
     let roster = vec![
-        roster_entry("p", "idle", parent_summary("p")),
-        roster_entry("c", "running", child_summary("c", "p", "worker one")),
-        roster_entry("i", "idle", child_summary("i", "p", "old worker")),
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("c", "running", &child_summary("c", "p", "worker one")),
+        roster_entry("i", "idle", &child_summary("i", "p", "old worker")),
     ];
     let collapsed = rows_for(&roster, None, &[]);
     let key = SelectionKey {
@@ -491,9 +491,9 @@ fn selection_pins_the_one_summary_line_identity() {
 #[test]
 fn the_selection_restores_onto_the_merged_group() {
     let roster = vec![
-        roster_entry("p", "idle", parent_summary("p")),
-        roster_entry("c", "running", child_summary("c", "p", "worker one")),
-        roster_entry("i", "idle", child_summary("i", "p", "old worker")),
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("c", "running", &child_summary("c", "p", "worker one")),
+        roster_entry("i", "idle", &child_summary("i", "p", "old worker")),
     ];
     // The user selects the ONE line while it is collapsed.
     let collapsed = rows_for(&roster, None, &[]);
@@ -542,8 +542,8 @@ fn the_selection_restores_onto_the_merged_group() {
 #[test]
 fn scoped_rows_lift_direct_children_and_exclude_the_root() {
     let roster = vec![
-        roster_entry("p", "idle", parent_summary("p")),
-        roster_entry("c", "running", child_summary("c", "p", "worker one")),
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("c", "running", &child_summary("c", "p", "worker one")),
     ];
     let scope = AgentsViewScope {
         session_id: Some("p".to_string()),
@@ -616,8 +616,8 @@ fn forked_sessions_stay_top_level() {
     let mut fork = child_summary("f", "p", "forked chat");
     fork["runtimeKind"] = json!("top-level");
     let roster = vec![
-        roster_entry("p", "idle", parent_summary("p")),
-        roster_entry("f", "idle", fork),
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("f", "idle", &fork),
     ];
     let rows = rows_for(&roster, None, &[]);
     // The fork links to its source but never nests nor counts in the
@@ -630,8 +630,8 @@ fn forked_sessions_stay_top_level() {
 #[test]
 fn ancestor_ids_walk_the_row_chain_root_most_first() {
     let roster = vec![
-        roster_entry("p", "idle", parent_summary("p")),
-        roster_entry("c", "idle", child_summary("c", "p", "worker one")),
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("c", "idle", &child_summary("c", "p", "worker one")),
     ];
     let rows = rows_for(&roster, None, &["file:/x/p.jsonl"]);
     assert_eq!(
@@ -645,8 +645,8 @@ fn ancestor_ids_walk_the_row_chain_root_most_first() {
 #[test]
 fn selection_resolves_identity_then_keys_and_pins_summary_rows() {
     let roster = vec![
-        roster_entry("p", "idle", parent_summary("p")),
-        roster_entry("c", "running", child_summary("c", "p", "worker one")),
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("c", "running", &child_summary("c", "p", "worker one")),
     ];
     // Identity wins (the parent's identity is its file alias).
     let collapsed = rows_for(&roster, None, &[]);
@@ -688,7 +688,7 @@ fn rollups_sum_costs_over_descendants_only() {
         roster_entry(
             "p",
             "idle",
-            json!({
+            &json!({
                 "sessionId": "p", "lifecycle": "live", "activeSessionId": "p-live",
                 "sessionFile": "/x/p.jsonl", "runtimeKind": "top-level",
                 "messageCount": 1, "usage": { "cost": 0.5 },
@@ -697,7 +697,7 @@ fn rollups_sum_costs_over_descendants_only() {
         roster_entry(
             "c",
             "idle",
-            json!({
+            &json!({
                 "sessionId": "c", "lifecycle": "live", "activeSessionId": "c-live",
                 "sessionFile": "/x/c.jsonl", "runtimeKind": "subagent",
                 "rlmChildId": "child-c",
@@ -710,7 +710,7 @@ fn rollups_sum_costs_over_descendants_only() {
     let records = reconcile_unified_sessions(&roster, &[]);
     let rollups = compute_rollups(&records);
     let parent = rollups.get("file:/x/p.jsonl").expect("parent rollup");
-    assert_eq!(parent.cost, 0.75);
+    assert!((parent.cost - 0.75).abs() < f64::EPSILON);
     assert_eq!(parent.descendant_count, 1);
 
     // The numeric fixture (TS #2506): own $0 + deleted child $0.40 +
@@ -733,7 +733,7 @@ fn rollups_sum_costs_over_descendants_only() {
         roster_entry(
             "p",
             "idle",
-            json!({
+            &json!({
                 "sessionId": "p", "lifecycle": "live", "activeSessionId": "p-live",
                 "sessionFile": "/x/p.jsonl", "runtimeKind": "top-level",
                 "messageCount": 1, "usage": { "cost": 0.0 },
@@ -742,7 +742,7 @@ fn rollups_sum_costs_over_descendants_only() {
         roster_entry(
             "c2",
             "idle",
-            json!({
+            &json!({
                 "sessionId": "c2", "lifecycle": "live", "activeSessionId": "c2-live",
                 "sessionFile": "/x/c2.jsonl", "runtimeKind": "subagent",
                 "rlmChildId": "child-c2",
@@ -754,7 +754,7 @@ fn rollups_sum_costs_over_descendants_only() {
         roster_entry(
             "gc2",
             "idle",
-            json!({
+            &json!({
                 "sessionId": "gc2", "lifecycle": "live", "activeSessionId": "gc2-live",
                 "sessionFile": "/x/gc2.jsonl", "runtimeKind": "subagent",
                 "rlmChildId": "child-gc2",
@@ -791,7 +791,7 @@ fn rollups_sum_costs_over_descendants_only() {
     let rows = rows_for(&roster, None, &[]);
     // The parent's Cost column shows the recursive total (TS
     // `recursiveCost`), and the details layout carries it.
-    assert_eq!(rows[0].cost, 0.75);
+    assert!((rows[0].cost - 0.75).abs() < f64::EPSILON);
     let empty: HashMap<String, Rollup> = HashMap::new();
     let rows = build_rows(
         &records,
@@ -801,7 +801,7 @@ fn rollups_sum_costs_over_descendants_only() {
         None,
     );
     // Without rollups the per-pass walk fills the same totals.
-    assert_eq!(rows[0].cost, 0.75);
+    assert!((rows[0].cost - 0.75).abs() < f64::EPSILON);
     assert_eq!(rows[0].descendant_count, 1);
 }
 
@@ -813,21 +813,19 @@ fn an_active_query_ranks_hits_globally_ancestors_sink_last() {
     // ancestor's summary — the unscored ancestor sinks below every
     // scored row, and the child keeps its parent linkage for the
     // drill-in open.
+    let mut orch_summary = parent_summary("orch");
+    orch_summary["sessionName"] = json!("zebra worker");
     let roster = vec![
-        roster_entry("orch", "running", {
-            let mut summary = parent_summary("orch");
-            summary["sessionName"] = json!("zebra worker");
-            summary
-        }),
+        roster_entry("orch", "running", &orch_summary),
         roster_entry(
             "kid",
             "running",
-            child_summary("kid", "orch", "policy sweep"),
+            &child_summary("kid", "orch", "policy sweep"),
         ),
         roster_entry(
             "cache",
             "idle",
-            json!({
+            &json!({
                 "sessionId": "cache",
                 "lifecycle": "live",
                 "sessionName": "sweep cache",
@@ -837,7 +835,7 @@ fn an_active_query_ranks_hits_globally_ancestors_sink_last() {
         roster_entry(
             "weep",
             "idle",
-            json!({
+            &json!({
                 "sessionId": "weep",
                 "lifecycle": "live",
                 "sessionName": "siberian weeping pine",
@@ -906,7 +904,7 @@ fn equal_scores_break_ties_by_recency_not_section() {
         roster_entry(
             "old",
             "running",
-            json!({
+            &json!({
                 "sessionId": "old",
                 "lifecycle": "live",
                 "sessionName": "sweep alpha",
@@ -918,7 +916,7 @@ fn equal_scores_break_ties_by_recency_not_section() {
         roster_entry(
             "new",
             "idle",
-            json!({
+            &json!({
                 "sessionId": "new",
                 "lifecycle": "live",
                 "sessionName": "sweep beta",
@@ -969,15 +967,15 @@ fn the_summary_line_bills_every_descendant_status() {
     let mut inactive_child = child_summary("x1", "p", "old worker");
     inactive_child["usage"] = json!({ "cost": 0.75 });
     let roster = vec![
-        roster_entry("p", "idle", parent),
-        roster_entry("r1", "running", runner),
-        roster_entry("gc", "running", grandchild),
-        roster_entry("i1", "idle", idle_child),
-        roster_entry("x1", "inactive", inactive_child),
+        roster_entry("p", "idle", &parent),
+        roster_entry("r1", "running", &runner),
+        roster_entry("gc", "running", &grandchild),
+        roster_entry("i1", "idle", &idle_child),
+        roster_entry("x1", "inactive", &inactive_child),
     ];
     let rows = rows_for(&roster, None, &[]);
-    assert_eq!(
-        rows[0].cost, 5.0,
+    assert!(
+        (rows[0].cost - 5.0).abs() < f64::EPSILON,
         "the parent row keeps own 0.25 + descendants 4.75"
     );
     let summary = rows
@@ -985,8 +983,8 @@ fn the_summary_line_bills_every_descendant_status() {
         .find(|row| row.identity == "subagents:file:/x/p.jsonl")
         .expect("the ONE line");
     assert_eq!(summary.title, "4 subagents (2 running)");
-    assert_eq!(
-        summary.cost, 4.75,
+    assert!(
+        (summary.cost - 4.75).abs() < f64::EPSILON,
         "runner subtree 1.50 + idle 2.50 + inactive 0.75 — every status bills"
     );
 }
@@ -1009,17 +1007,19 @@ fn the_summary_line_bills_the_deleted_descendant_bucket() {
     let mut runner = child_summary("r1", "p", "runner");
     runner["usage"] = json!({ "cost": 0.25 });
     let roster = vec![
-        roster_entry("p", "idle", parent),
-        roster_entry("r1", "running", runner),
+        roster_entry("p", "idle", &parent),
+        roster_entry("r1", "running", &runner),
     ];
     let records = reconcile_unified_sessions(&roster, std::slice::from_ref(&saved_parent));
     let rollups = compute_rollups(&records);
-    assert_eq!(
-        rollups
+    assert!(
+        (rollups
             .get("file:/x/p.jsonl")
             .expect("parent rollup")
-            .descendants,
-        0.75,
+            .descendants
+            - 0.75)
+            .abs()
+            < f64::EPSILON,
         "live child 0.25 + deleted bucket 0.50"
     );
     let rows = build_rows(&records, None, &HashSet::new(), &rollups, None);
@@ -1027,8 +1027,11 @@ fn the_summary_line_bills_the_deleted_descendant_bucket() {
         .iter()
         .find(|row| row.identity == "subagents:file:/x/p.jsonl")
         .expect("the ONE line");
-    assert_eq!(summary.cost, 0.75);
-    assert_eq!(rows[0].cost, 1.0, "own 0.25 + aggregate 0.75");
+    assert!((summary.cost - 0.75).abs() < f64::EPSILON);
+    assert!(
+        (rows[0].cost - 1.0).abs() < f64::EPSILON,
+        "own 0.25 + aggregate 0.75"
+    );
 }
 
 /// A tree that spends nothing bills its `$0.00` cell — the cost cell
@@ -1039,9 +1042,9 @@ fn the_summary_line_cost_is_zero_when_nothing_bills() {
     let mut grandchild = child_summary("gc", "r1", "grandkid");
     grandchild["rlmChildId"] = json!("child-gc");
     let roster = vec![
-        roster_entry("p", "idle", parent_summary("p")),
-        roster_entry("r1", "running", child_summary("r1", "p", "runner")),
-        roster_entry("gc", "running", grandchild),
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("r1", "running", &child_summary("r1", "p", "runner")),
+        roster_entry("gc", "running", &grandchild),
     ];
     let rows = rows_for(&roster, None, &[]);
     let summary = rows
@@ -1049,10 +1052,14 @@ fn the_summary_line_cost_is_zero_when_nothing_bills() {
         .find(|row| row.identity == "subagents:file:/x/p.jsonl")
         .expect("the ONE line");
     assert_eq!(summary.title, "2 subagents (2 running)");
-    assert_eq!(summary.cost, 0.0);
+    assert!((summary.cost - 0.0).abs() < f64::EPSILON);
     // No subagents: no summary row renders — there is no collapsed
     // row to bill.
-    let lone = rows_for(&[roster_entry("p", "idle", parent_summary("p"))], None, &[]);
+    let lone = rows_for(
+        &[roster_entry("p", "idle", &parent_summary("p"))],
+        None,
+        &[],
+    );
     assert_eq!(lone.len(), 1);
     assert_eq!(lone[0].kind, RowKind::Agent);
 }
@@ -1070,10 +1077,10 @@ fn a_nested_line_bills_its_own_subtree() {
     let mut idle_child = child_summary("i1", "p", "idle worker");
     idle_child["usage"] = json!({ "cost": 2.5 });
     let roster = vec![
-        roster_entry("p", "idle", parent_summary("p")),
-        roster_entry("r1", "running", runner),
-        roster_entry("gc", "running", grandchild),
-        roster_entry("i1", "idle", idle_child),
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("r1", "running", &runner),
+        roster_entry("gc", "running", &grandchild),
+        roster_entry("i1", "idle", &idle_child),
     ];
     let rows = rows_for(&roster, None, &["file:/x/p.jsonl"]);
     // A subagent row's identity is its first alias (the parent-qualified
@@ -1090,13 +1097,19 @@ fn a_nested_line_bills_its_own_subtree() {
         .find(|row| row.identity == format!("{SUMMARY_ROW_PREFIX}{child_identity}"))
         .expect("the child's own line");
     assert_eq!(nested.title, "1 subagents (1 running)");
-    assert_eq!(nested.cost, 0.25, "only the grandchild's spend");
+    assert!(
+        (nested.cost - 0.25).abs() < f64::EPSILON,
+        "only the grandchild's spend"
+    );
     let root = rows
         .iter()
         .find(|row| row.identity == "subagents:file:/x/p.jsonl")
         .expect("the root's line");
     assert_eq!(root.title, "3 subagents (2 running)");
-    assert_eq!(root.cost, 4.0, "runner subtree 1.50 + idle 2.50");
+    assert!(
+        (root.cost - 4.0).abs() < f64::EPSILON,
+        "runner subtree 1.50 + idle 2.50"
+    );
 }
 
 /// The operator's acceptance line: a fleet-scale roster — 331
@@ -1106,22 +1119,22 @@ fn a_nested_line_bills_its_own_subtree() {
 /// their running state, the 331 historical workers after.
 #[test]
 fn one_dropdown_renders_the_full_fleet_roster() {
-    let mut roster = vec![roster_entry("p", "idle", parent_summary("p"))];
+    let mut roster = vec![roster_entry("p", "idle", &parent_summary("p"))];
     roster.push(roster_entry(
         "r1",
         "running",
-        child_summary("r1", "p", "runner one"),
+        &child_summary("r1", "p", "runner one"),
     ));
     roster.push(roster_entry(
         "r2",
         "running",
-        child_summary("r2", "p", "runner two"),
+        &child_summary("r2", "p", "runner two"),
     ));
     for n in 1..=331 {
         roster.push(roster_entry(
             &format!("i{n}"),
             "inactive",
-            child_summary(&format!("i{n}"), "p", &format!("old worker {n}")),
+            &child_summary(&format!("i{n}"), "p", &format!("old worker {n}")),
         ));
     }
     // Collapsed: the parent and its ONE line — one number pair, no

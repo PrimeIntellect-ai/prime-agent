@@ -207,6 +207,20 @@ impl Worker {
                 None,
             ));
         }
+        // The shutdown admission gate (the round-8 bots' finding): a
+        // command dispatched while the graceful stop is closing must not
+        // start new work the exit would orphan - an execute_bash racing
+        // the shutdown's user-bash abort would otherwise clear the
+        // abort request and spawn a child the worker's exit leaves
+        // running.
+        if core.shutdown_requested {
+            return Err(response_failure(
+                None,
+                command_type,
+                "Session is shutting down",
+                None,
+            ));
+        }
         Ok(())
     }
 
@@ -420,7 +434,16 @@ impl Worker {
             };
             cancel(&mut core.steering);
             cancel(&mut core.follow_up);
-        };
+        }
+        // A withdrawn minted goal continuation never reaches a turn (TS
+        // `_cancelSessionActions` drops the queued continuation; the goal
+        // keeps its consumed slot and resumes at the next boundary). Its
+        // pending guard already released at ITS admission (the worker
+        // sink), so the withdraw clears nothing: a mirror clear here could
+        // drop an unrelated in-flight mint's armed guard (a second
+        // continuation for the same boundary) or — after a core rebuild —
+        // a replacement session's guard. A withdrawn item holds no guard
+        // to release.
         // TS `requestAbort()` also aborts the compaction in flight (manual
         // and automatic): the interrupt key cancels a compacting session.
         self.compaction.abort();

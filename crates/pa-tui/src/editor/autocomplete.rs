@@ -1,8 +1,10 @@
 //! Editor autocomplete integration: slash-command and file/path completion via
 //! the configured provider.
 
+use std::sync::mpsc::TryRecvError;
+
 use super::text_utils::{char_at, char_prefix, ends_with_symbol_token};
-use super::*;
+use super::{AutocompleteSearch, Editor, EditorEvent, PendingAutocomplete};
 
 impl Editor {
     // ---- autocomplete ------------------------------------------------------
@@ -21,6 +23,7 @@ impl Editor {
     /// the cursor sits in the argument text of a recognized command token:
     /// the command name plus the typed partial. Tab interception uses this
     /// to open a picker-command's menu filtered to the partial.
+    #[must_use]
     pub fn picker_argument_context(&self) -> Option<(String, String)> {
         let context = self.current_slash_command_context()?;
         if context.kind != crate::autocomplete::SlashKind::Argument || !context.at_prompt_start {
@@ -144,6 +147,10 @@ impl Editor {
                 return;
             }
         }
+        // A new request aborts the in-flight search (TS cancels the
+        // previous lookup at request time): dropping the handle sets
+        // its cancel flag and the walk quits.
+        self.autocomplete_search = None;
         // TS resolves suggestions asynchronously (a `getSuggestions`
         // promise): the dropdown only materializes after the current
         // keystroke batch, so the request parks here and the host loop
@@ -157,21 +164,74 @@ impl Editor {
     /// Materialize the parked suggestion request (TS
     /// `runAutocompleteRequest` after the promise resolves). The host loop
     /// calls this once the input queue drains, so a burst of keystrokes
-    /// never sees a dropdown open mid-batch.
+    /// never sees a dropdown open mid-batch; a background `@` search is
+    /// polled here too.
     pub fn materialize_autocomplete(&mut self) {
-        let Some(pending) = self.pending_autocomplete.take() else {
+        if let Some(pending) = self.pending_autocomplete.take() {
+            self.run_autocomplete_request(pending);
+            return;
+        }
+        let Some(active) = self.autocomplete_search.take() else {
             return;
         };
-        self.run_autocomplete_request(pending.force, pending.explicit_tab);
+        // TS `isAutocompleteRequestCurrent`: the editor moved past the
+        // snapshot the search answers, so the result would land stale —
+        // drop the handle (cancelling the walk) without touching the UI.
+        if self.lines != active.lines
+            || self.cursor_line != active.cursor_line
+            || self.cursor_col != active.cursor_col
+        {
+            return;
+        }
+        // An empty channel keeps the search running for the next tick; a
+        // closed one (a panicked walk thread) reads as no suggestions.
+        let result = match active.search.results.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => {
+                self.autocomplete_search = Some(active);
+                return;
+            }
+            Err(TryRecvError::Disconnected) => None,
+        };
+        self.apply_suggestions(result, active.request);
     }
 
-    fn run_autocomplete_request(&mut self, force: bool, explicit_tab: bool) {
+    fn run_autocomplete_request(&mut self, request: PendingAutocomplete) {
         let Some(provider) = self.autocomplete_provider.as_ref() else {
             return;
         };
-        let Some(suggestions) =
-            provider.get_suggestions(&self.lines, self.cursor_line, self.cursor_col, force)
-        else {
+        match provider.get_suggestions(
+            &self.lines,
+            self.cursor_line,
+            self.cursor_col,
+            request.force,
+        ) {
+            Some(crate::autocomplete::SuggestionLookup::Searching(search)) => {
+                self.autocomplete_search = Some(AutocompleteSearch {
+                    search,
+                    request,
+                    lines: self.lines.clone(),
+                    cursor_line: self.cursor_line,
+                    cursor_col: self.cursor_col,
+                });
+            }
+            Some(crate::autocomplete::SuggestionLookup::Ready(suggestions)) => {
+                self.apply_suggestions(Some(suggestions), request);
+            }
+            None => self.apply_suggestions(None, request),
+        }
+    }
+
+    /// Apply a resolved lookup (TS `runAutocompleteRequest` once the
+    /// promise settles): no items cancels the open menu, a forced Tab
+    /// with a single item applies it inline, and otherwise the dropdown
+    /// opens with the best match selected.
+    fn apply_suggestions(
+        &mut self,
+        suggestions: Option<crate::autocomplete::Suggestions>,
+        request: PendingAutocomplete,
+    ) {
+        let Some(suggestions) = suggestions else {
             self.cancel_autocomplete();
             return;
         };
@@ -179,7 +239,7 @@ impl Editor {
             self.cancel_autocomplete();
             return;
         }
-        if force && explicit_tab && suggestions.items.len() == 1 {
+        if request.force && request.explicit_tab && suggestions.items.len() == 1 {
             let item = suggestions.items[0].clone();
             self.push_undo_snapshot();
             self.last_action = None;
@@ -247,6 +307,7 @@ impl Editor {
         let was = self.autocomplete.is_some();
         self.autocomplete = None;
         self.pending_autocomplete = None;
+        self.autocomplete_search = None;
         if was {
             self.emit(EditorEvent::AutocompleteToggled(false));
         }

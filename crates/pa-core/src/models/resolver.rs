@@ -57,6 +57,7 @@ fn is_alias(id: &str) -> bool {
 
 /// Exact reference match: canonical provider/id, provider/id split, or an
 /// unambiguous bare id.
+#[must_use]
 pub fn find_exact_model_reference_match<'a>(
     model_reference: &str,
     available_models: &'a [Model],
@@ -125,6 +126,7 @@ fn fuzzy_match_model<'a>(pattern: &str, available_models: &'a [Model]) -> Option
 }
 
 /// Rebuild an unknown id on a provider template (custom/unlisted models).
+#[must_use]
 pub fn build_fallback_model(
     provider: &str,
     model_id: &str,
@@ -176,6 +178,7 @@ fn wire_skeleton() -> Model {
 }
 
 /// Preferred default: prime-inference glm-5.3 first, then per-provider defaults.
+#[must_use]
 pub fn find_preferred_default_model(available_models: &[Model]) -> Option<&Model> {
     if let Some(model) = available_models.iter().find(|model| {
         model.provider == "prime-inference" && model.id == PRIME_INFERENCE_DEFAULT_MODEL_ID
@@ -287,6 +290,7 @@ fn glob_matches(pattern: &str, model: &Model) -> bool {
 
 /// Resolve model patterns to scoped models: exact/fuzzy for plain patterns,
 /// glob expansion for wildcard patterns; `pattern:level` applies a level.
+#[must_use]
 pub fn resolve_model_scope_from_models(
     patterns: &[String],
     available_models: &[Model],
@@ -354,6 +358,7 @@ pub struct ResolveCliModelResult {
 
 /// Resolve one model from `--provider`/`--model` flags against the full
 /// catalog (not just auth-configured models).
+#[must_use]
 pub fn resolve_cli_model(
     cli_provider: Option<&str>,
     cli_model: &str,
@@ -507,6 +512,7 @@ pub fn resolve_cli_model(
 /// surprise the user with a switch. Rotation keeps the chain stable for
 /// every starting provider: with catalog order A, B, C the candidates for
 /// B are C then A.
+#[must_use]
 pub fn failover_candidates(current: &Model, available: &[Model]) -> Vec<Model> {
     // Same model id, other providers: first catalog entry wins per provider.
     let mut candidates: Vec<&Model> = Vec::new();
@@ -575,6 +581,7 @@ pub struct InitialModelOptions<'a> {
 ///    saved id is missing from the catalog
 /// 4. The featured default (prime-inference glm-5.3, then per-provider ids)
 /// 5. The first available model.
+#[must_use]
 pub fn find_initial_model(options: &InitialModelOptions<'_>) -> Option<Model> {
     if let (Some(provider), Some(pattern)) = (options.cli_provider, options.cli_model) {
         let resolved = resolve_cli_model(Some(provider), pattern, options.all_models);

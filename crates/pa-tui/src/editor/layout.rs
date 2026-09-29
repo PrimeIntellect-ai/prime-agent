@@ -1,11 +1,12 @@
 //! Editor layout for rendering: layout lines, scroll window, cursor position.
 
 use super::text_utils::char_suffix;
-use super::*;
+use super::{word_wrap_line, Editor, LayoutLine};
 use crate::width::str_width;
 
 impl Editor {
     /// Build layout lines for a given content width (port of layoutText).
+    #[must_use]
     pub fn layout_text(&self, content_width: usize) -> Vec<LayoutLine> {
         let mut layout_lines = Vec::new();
         if self.lines.is_empty() || (self.lines.len() == 1 && self.lines[0].is_empty()) {
@@ -99,7 +100,7 @@ impl Editor {
         self.last_width = width.max(1);
         self.terminal_rows = terminal_rows;
         let layout_lines = self.layout_text(self.last_width);
-        let max_visible = (terminal_rows as f32 * 0.3).floor().max(5.0) as usize;
+        let max_visible = (f32::from(terminal_rows) * 0.3).floor().max(5.0) as usize;
         let cursor_line_index = layout_lines.iter().position(|l| l.has_cursor).unwrap_or(0);
         if cursor_line_index < self.scroll_offset {
             self.scroll_offset = cursor_line_index;
@@ -114,6 +115,7 @@ impl Editor {
         (visible, self.scroll_offset, self.scroll_offset, below)
     }
 
+    #[must_use]
     pub fn cursor_visual(&self, visible: &[LayoutLine]) -> Option<(usize, usize)> {
         visible
             .iter()

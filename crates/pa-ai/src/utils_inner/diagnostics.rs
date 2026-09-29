@@ -5,12 +5,16 @@
 
 pub use crate::types::{AssistantMessage, AssistantMessageDiagnostic, DiagnosticErrorInfo};
 
+#[must_use]
+// Epoch millis fit u64 for ~584 million years; the u128 duration's millis are the timestamp's convention.
+#[allow(clippy::cast_possible_truncation)]
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
 }
 
+#[must_use]
 pub fn create_assistant_message_diagnostic(
     diagnostic_type: &str,
     error: Option<DiagnosticErrorInfo>,

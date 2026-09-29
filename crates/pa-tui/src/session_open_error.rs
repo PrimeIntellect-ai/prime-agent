@@ -28,6 +28,7 @@ pub struct SessionHolder {
 /// Find the roster row currently hosting `session_path`: the first row
 /// whose `sessionFile` canonicalizes to the same file. Rows without a
 /// matching file are skipped, so unrelated sessions never answer.
+#[must_use]
 pub fn holder_from_roster(rows: &[Value], session_path: &Path) -> Option<SessionHolder> {
     let target = canonical_form(session_path);
     rows.iter().find_map(|row| {
@@ -91,6 +92,7 @@ fn model_label(model: &Value) -> Option<String> {
 /// names it): a live row whose active session id matches. The
 /// path-keyed lookup alone can miss when the caller's resume path does
 /// not canonicalize against the process cwd (a relative path).
+#[must_use]
 pub fn holder_by_id(rows: &[Value], holder_id: &str) -> Option<SessionHolder> {
     rows.iter().find_map(|row| {
         let id = row
@@ -175,6 +177,7 @@ pub(crate) fn quoted_resume_arg(id: &str) -> String {
 /// The descriptive refusal for a holder the live roster identifies: the
 /// TS first line, then the holder's identity and the next steps (attach
 /// to the live session instead of reopening the file).
+#[must_use]
 pub fn already_active_error(holder: &SessionHolder, session_path: &Path) -> String {
     let mut lines = vec![already_active_line(&holder.id, session_path)];
     let mut identity = format!("Holder: session {}", holder.id);
@@ -202,6 +205,7 @@ pub fn already_active_error(holder: &SessionHolder, session_path: &Path) -> Stri
 /// line — the agents-view handoff renders the refusal on a single status
 /// line, so a multiline decoration would hide the holder and the next
 /// steps behind the first paragraph.
+#[must_use]
 pub fn decorate_interactive_refusal(
     original: &str,
     holder: Option<SessionHolder>,
@@ -389,6 +393,7 @@ mod tests {
 
 /// The owner id named in a "Session is already active in {owner}: ..."
 /// refusal (the lease error's first line). `None` for any other text.
+#[must_use]
 pub fn owner_from_refusal(message: &str) -> Option<String> {
     const PREFIX: &str = "Session is already active in ";
     const SUFFIX: &str = ": ";

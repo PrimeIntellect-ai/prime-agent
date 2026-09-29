@@ -27,6 +27,7 @@ pub const SUPPORTED_THINKING_LEVELS: [ModelThinkingLevel; 7] = EXTENDED_THINKING
 ///
 /// Panics if `level` is not one of the variants listed in
 /// [`EXTENDED_THINKING_LEVELS`].
+#[must_use]
 pub fn thinking_level_index(level: ModelThinkingLevel) -> usize {
     EXTENDED_THINKING_LEVELS
         .iter()
@@ -42,6 +43,7 @@ pub fn thinking_level_index(level: ModelThinkingLevel) -> usize {
 /// `reasoning: false` with an addressable `xhigh`); an all-null map is the
 /// "keep reasoning output, send no unverified controls" encoding, not a
 /// capability claim of its own.
+#[must_use]
 pub fn supports_thinking(model: &Model) -> bool {
     model.reasoning
         || model
@@ -53,6 +55,7 @@ pub fn supports_thinking(model: &Model) -> bool {
 /// Thinking levels the model supports: "off" only for a model without a
 /// thinking surface; otherwise every level that is not explicitly mapped to
 /// null. `xhigh`/`max` additionally require an explicit mapping.
+#[must_use]
 pub fn get_supported_thinking_levels(model: &Model) -> Vec<ModelThinkingLevel> {
     if !supports_thinking(model) {
         return vec![ModelThinkingLevel::Off];
@@ -76,6 +79,7 @@ pub fn get_supported_thinking_levels(model: &Model) -> Vec<ModelThinkingLevel> {
 
 /// Clamp a requested thinking level to what the model supports, preferring the
 /// nearest higher level then the nearest lower one.
+#[must_use]
 pub fn clamp_thinking_level(model: &Model, level: ModelThinkingLevel) -> ModelThinkingLevel {
     let available = get_supported_thinking_levels(model);
     if available.contains(&level) {
@@ -99,6 +103,7 @@ pub fn clamp_thinking_level(model: &Model, level: ModelThinkingLevel) -> ModelTh
 }
 
 /// Identity compare (`modelsAreEqual`): provider plus id.
+#[must_use]
 pub fn models_are_equal(a: Option<&Model>, b: Option<&Model>) -> bool {
     match (a, b) {
         (Some(a), Some(b)) => a.id == b.id && a.provider == b.provider,
@@ -107,6 +112,7 @@ pub fn models_are_equal(a: Option<&Model>, b: Option<&Model>) -> bool {
 }
 
 /// Parse a thinking level from its wire name ("off", "minimal", ...).
+#[must_use]
 pub fn thinking_level_from_str(name: &str) -> Option<ModelThinkingLevel> {
     EXTENDED_THINKING_LEVELS
         .iter()
@@ -115,6 +121,7 @@ pub fn thinking_level_from_str(name: &str) -> Option<ModelThinkingLevel> {
 }
 
 /// Build a thinking level map from pairs (helper for tests and catalogs).
+#[must_use]
 pub fn thinking_level_map(
     pairs: &[(ModelThinkingLevel, Option<&str>)],
 ) -> std::collections::BTreeMap<ModelThinkingLevel, Option<String>> {

@@ -1,3 +1,131 @@
+/// The dock segments' column spans (the click regions, operator
+/// directive 2026-09-29): each group's segment covers exactly its own
+/// rendered cells — the separators between groups stay inert — in the
+/// group order the row renders, and a truncated row keeps no region
+/// for groups the truncation dropped.
+#[test]
+fn the_dock_segments_cover_each_groups_own_cells() {
+    let theme = Theme::builtin("prime", ColorMode::TrueColor);
+    let dock = ActivityDock {
+        subagents_running_direct: 2,
+        heartbeats: 3,
+        heartbeats_paused: 1,
+        bash_running: 1,
+        ..ActivityDock::default()
+    };
+    let (frame, segments) = render_activity_dock_segments(&dock, &theme, 120);
+    let text = frame[1]
+        .iter()
+        .map(|span| span.content.as_str())
+        .collect::<String>();
+    assert_eq!(
+        text,
+        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell"
+    );
+    let ordered: Vec<ActivityGroup> = segments.iter().map(|segment| segment.group).collect();
+    assert_eq!(
+        ordered,
+        vec![
+            ActivityGroup::Subagents,
+            ActivityGroup::Heartbeats,
+            ActivityGroup::Bash
+        ],
+        "the segments follow the row's group order"
+    );
+    // Each segment covers exactly its own cells: the subagents segment
+    // starts at the row's leading space end and ends before the
+    // separator; the heartbeat segment covers the paused cluster too
+    // (the cluster is the heartbeats group's own readout).
+    let of = |text: &str| text.find(text).map(|_| 0);
+    let _ = of;
+    let subagents = &segments[0].cols;
+    let heartbeats = &segments[1].cols;
+    let bash = &segments[2].cols;
+    // The recorded columns are display cells, and the row's glyphs are
+    // one cell wide: slice the text by char, never by byte.
+    let cells = |cols: &std::ops::Range<usize>| -> String {
+        text.chars()
+            .skip(cols.start)
+            .take(cols.end - cols.start)
+            .collect()
+    };
+    assert_eq!(cells(subagents), "◆ 2 subagents");
+    assert_eq!(cells(heartbeats), "◷ 3 heartbeats · ◐ 1 paused");
+    assert_eq!(cells(bash), "▸ 1 shell");
+    // The separators between the segments stay inert.
+    let between = |a: &std::ops::Range<usize>, b: &std::ops::Range<usize>| -> String {
+        text.chars().skip(a.end).take(b.start - a.end).collect()
+    };
+    assert_eq!(between(subagents, heartbeats), "  ·  ");
+    assert_eq!(between(heartbeats, bash), "  ·  ");
+    // A truncation that drops the trailing group keeps no region for
+    // it: the segments clamp to the row the terminal kept.
+    let (frame, segments) = render_activity_dock_segments(&dock, &theme, 20);
+    let used = crate::width::spans_width(&frame[1]);
+    assert!(used <= 20, "the row truncates inside the width");
+    for segment in &segments {
+        assert!(
+            segment.cols.start < used,
+            "a dropped segment records no span"
+        );
+        assert!(segment.cols.end <= used);
+    }
+    // The goal group rides the segments when its row mounts.
+    let dock = ActivityDock {
+        goal_label: Some("Pursuing goal (0s)".to_string()),
+        ..ActivityDock::default()
+    };
+    let (_, segments) = render_activity_dock_segments(&dock, &theme, 120);
+    assert_eq!(
+        segments.last().map(|segment| segment.group),
+        Some(ActivityGroup::Goal)
+    );
+}
+
+/// The tray's `← manage` hint reports its own cells (the click region,
+/// operator directive 2026-09-29): the hint spans exactly the arrow and
+/// the label — never the depth metadata beside them — and a tray whose
+/// left label is an override or hidden reports none.
+#[test]
+fn the_tray_reports_the_manage_hints_own_cells() {
+    let theme = Theme::builtin("prime", ColorMode::TrueColor);
+    let state = ChromeState {
+        show_manage: true,
+        tray_depth: Some(2),
+        ..Default::default()
+    };
+    let (line, hint) = render_tray_with_hint(&state, &theme, 120);
+    let hint = hint.expect("the manage hint reports its cells");
+    let text = line
+        .iter()
+        .map(|span| span.content.as_str())
+        .collect::<String>();
+    assert_eq!(
+        text.chars()
+            .skip(hint.start)
+            .take(hint.end - hint.start)
+            .collect::<String>(),
+        "\u{2190} manage"
+    );
+    assert_eq!(
+        text.chars().skip(hint.end).take(2).collect::<String>(),
+        "  ",
+        "the depth label stays outside the hint's span"
+    );
+    // The override label replaces the hint: no region.
+    let state = ChromeState {
+        show_manage: true,
+        tray_override: Some("Press ctrl+c again to exit".to_string()),
+        ..Default::default()
+    };
+    let (_, hint) = render_tray_with_hint(&state, &theme, 120);
+    assert_eq!(hint, None, "an override label carries no hint region");
+    // A hidden hint (a non-attachable run) carries none either.
+    let state = ChromeState::default();
+    let (_, hint) = render_tray_with_hint(&state, &theme, 120);
+    assert_eq!(hint, None, "a hidden manage hint carries no region");
+}
+
 #[test]
 fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
     let theme = Theme::builtin("prime", ColorMode::TrueColor);
@@ -7,13 +135,12 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         heartbeats: 3,
         heartbeats_paused: 1,
         bash_running: 1,
-        bash_total: 2,
         goal_label: Some("Pursuing goal (0s)".to_string()),
         ..ActivityDock::default()
     };
     // The heartbeat cluster and the goal label widen the row: the
     // fixture renders at 120 so the full line stays untruncated.
-    let frame = render_activity_dock(&dock, &theme, 120).unwrap();
+    let frame = render_activity_dock(&dock, &theme, 120);
     assert_eq!(frame.len(), 2, "a muted separator rule plus the row");
     let rule = frame[0]
         .iter()
@@ -44,11 +171,10 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
     // A paused goal stays on the dock (the tray cluster is gone) in
     // the warning color — every live goal state keeps a surface.
     let dock = ActivityDock {
-        subagents_total: 1,
         goal_label: Some("Goal paused (0s)".to_string()),
         ..ActivityDock::default()
     };
-    let frame = render_activity_dock(&dock, &theme, 100).unwrap();
+    let frame = render_activity_dock(&dock, &theme, 100);
     let text = frame[1]
         .iter()
         .map(|span| span.content.as_str())
@@ -68,25 +194,18 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
     // read as quiet, not as uniformly busy — and the count segments
     // go neutral at zero.
     let dock = ActivityDock {
-        subagents_total: 2,
         heartbeats: 1,
-        bash_total: 3,
         ..ActivityDock::default()
     };
-    let frame = render_activity_dock(&dock, &theme, 100).unwrap();
+    let frame = render_activity_dock(&dock, &theme, 100);
     let text = frame[1]
         .iter()
         .map(|span| span.content.as_str())
         .collect::<String>();
     assert_eq!(text, " ◆ 0 subagents  ·  ◷ 1 heartbeat  ·  ▸ 0 shells");
-    // A dead-only roster keeps the dock mounted and its Subagents
-    // group selectable (finished subagents are browsable history):
-    // the rendered count stays running-only and reads zero.
-    let dock = ActivityDock {
-        subagents_total: 154,
-        ..ActivityDock::default()
-    };
-    let frame = render_activity_dock(&dock, &theme, 100).unwrap();
+    // The all-zero dock renders its own empty state — the zero
+    // readout — and the zero segments stay neutral, never green.
+    let frame = render_activity_dock(&ActivityDock::default(), &theme, 100);
     let text = frame[1]
         .iter()
         .map(|span| span.content.as_str())
@@ -95,24 +214,9 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         text,
         " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells"
     );
-    // The zero segments stay neutral, never green.
     assert!(frame[1]
         .iter()
         .all(|span| span.style.fg != theme.fg_style(ThemeColor::Success).fg));
-    // Finished-only bash rows keep the dock mounted (the bash view's
-    // history stays reachable) while the indicator reads zero live
-    // runs.
-    let dock = ActivityDock {
-        bash_total: 2,
-        ..ActivityDock::default()
-    };
-    let frame = render_activity_dock(&dock, &theme, 100).unwrap();
-    let text = frame[1]
-        .iter()
-        .map(|span| span.content.as_str())
-        .collect::<String>();
-    assert!(text.contains("▸ 0 shells"));
-    assert!(render_activity_dock(&ActivityDock::default(), &theme, 100).is_none());
     // An overflowing row (every group plus the goal) truncates INSIDE
     // the width: the ellipsis reserves its own column, so the row
     // never renders past the terminal frame (the bot-round fix).
@@ -126,7 +230,7 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         ..ActivityDock::default()
     };
     for width in 20..=45 {
-        let frame = render_activity_dock(&dock, &theme, width).unwrap();
+        let frame = render_activity_dock(&dock, &theme, width);
         let row = &frame[1];
         let used = crate::width::spans_width(row);
         assert!(
@@ -144,7 +248,7 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
     }
     // A row that fits whole keeps every character — the ellipsis
     // column is only borrowed when truncation actually happens.
-    let frame = render_activity_dock(&dock, &theme, 120).unwrap();
+    let frame = render_activity_dock(&dock, &theme, 120);
     let text = frame[1]
         .iter()
         .map(|span| span.content.as_str())
@@ -170,10 +274,9 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
     let dock = ActivityDock {
         subagents_running_direct: 2,
         subagents_running_nested: 0,
-        subagents_total: 40,
         ..ActivityDock::default()
     };
-    let frame = render_activity_dock(&dock, &theme, 80).unwrap();
+    let frame = render_activity_dock(&dock, &theme, 80);
     let text = frame[1]
         .iter()
         .map(|span| span.content.as_str())
@@ -185,10 +288,9 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
     let dock = ActivityDock {
         subagents_running_direct: 2,
         subagents_running_nested: 7,
-        subagents_total: 50,
         ..ActivityDock::default()
     };
-    let frame = render_activity_dock(&dock, &theme, 80).unwrap();
+    let frame = render_activity_dock(&dock, &theme, 80);
     let text = frame[1]
         .iter()
         .map(|span| span.content.as_str())
@@ -204,28 +306,14 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
     let dock = ActivityDock {
         subagents_running_direct: 0,
         subagents_running_nested: 1,
-        subagents_total: 1,
         ..ActivityDock::default()
     };
-    let frame = render_activity_dock(&dock, &theme, 80).unwrap();
+    let frame = render_activity_dock(&dock, &theme, 80);
     let text = frame[1]
         .iter()
         .map(|span| span.content.as_str())
         .collect::<String>();
     assert_eq!(text, " ◆ 1 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
-    // A quiet roster (history but nothing running) keeps the plain
-    // zero readout — the running count only renders while work
-    // runs.
-    let dock = ActivityDock {
-        subagents_total: 5,
-        ..ActivityDock::default()
-    };
-    let frame = render_activity_dock(&dock, &theme, 80).unwrap();
-    let text = frame[1]
-        .iter()
-        .map(|span| span.content.as_str())
-        .collect::<String>();
-    assert_eq!(text, " ◆ 0 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
 }
 
 /// The focused dock's selection reads as the ONE shared selection
@@ -241,16 +329,14 @@ fn activity_dock_selection_is_the_purple_opaque_bold_band() {
     let dock = ActivityDock {
         subagents_running_direct: 1,
         subagents_running_nested: 1,
-        subagents_total: 2,
         heartbeats: 3,
         heartbeats_paused: 1,
         bash_running: 1,
-        bash_total: 2,
         goal_label: Some("Pursuing goal (0s)".to_string()),
         selected: ActivityGroup::Heartbeats,
         focused: true,
     };
-    let frame = render_activity_dock(&dock, &theme, 120).unwrap();
+    let frame = render_activity_dock(&dock, &theme, 120);
     let row = &frame[1];
     // The band is the theme's accent purple (prime #7c6faf — the
     // original selection shade) at FULL opacity, with bold text:
@@ -303,7 +389,7 @@ fn activity_dock_selection_is_the_purple_opaque_bold_band() {
         focused: false,
         ..dock
     };
-    let frame = render_activity_dock(&unfocused, &theme, 120).unwrap();
+    let frame = render_activity_dock(&unfocused, &theme, 120);
     assert!(frame[1].iter().all(|span| span.style.bg.is_none()));
 }
 
@@ -313,12 +399,9 @@ fn activity_dock_selection_is_the_purple_opaque_bold_band() {
 /// in both directions and N groups take exactly N presses to cycle.
 #[test]
 fn dock_arrows_visit_every_group_even_when_empty() {
-    // A dock mounted by subagent history alone: the heartbeats and
-    // shells groups are empty and stay in the cycle.
-    let dock = ActivityDock {
-        subagents_total: 1,
-        ..ActivityDock::default()
-    };
+    // The all-zero dock: the heartbeats and shells groups are empty
+    // and stay in the cycle.
+    let dock = ActivityDock::default();
     assert_eq!(
         dock.groups(),
         vec![
@@ -381,11 +464,9 @@ fn dock_arrows_visit_the_same_groups_with_items() {
     let dock = ActivityDock {
         subagents_running_direct: 1,
         subagents_running_nested: 2,
-        subagents_total: 3,
         heartbeats: 2,
         heartbeats_paused: 1,
         bash_running: 1,
-        bash_total: 2,
         goal_label: Some("Pursuing goal (0s)".to_string()),
         ..ActivityDock::default()
     };
@@ -459,12 +540,11 @@ fn dock_goal_group_unmounts_with_its_row() {
 fn dock_renders_the_focused_empty_group() {
     let theme = Theme::builtin("prime", ColorMode::TrueColor);
     let dock = ActivityDock {
-        subagents_total: 2,
         selected: ActivityGroup::Heartbeats,
         focused: true,
         ..ActivityDock::default()
     };
-    let frame = render_activity_dock(&dock, &theme, 100).unwrap();
+    let frame = render_activity_dock(&dock, &theme, 100);
     let text = frame[1]
         .iter()
         .map(|span| span.content.as_str())

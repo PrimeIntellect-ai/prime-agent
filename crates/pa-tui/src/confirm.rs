@@ -73,6 +73,7 @@ impl ConfirmPanel {
     }
 
     /// The pane's rendered rows.
+    #[must_use]
     pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         let mut lines: Vec<Line> = Vec::new();
         lines.push(Vec::new());

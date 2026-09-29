@@ -31,9 +31,11 @@ impl KillRing {
             self.ring.insert(0, last);
         }
     }
+    #[must_use]
     pub fn len(&self) -> usize {
         self.ring.len()
     }
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.ring.is_empty()
     }

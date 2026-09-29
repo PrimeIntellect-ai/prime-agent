@@ -1,25 +1,52 @@
 //! Headless e2e for the activity dock's arrow traversal (the operator's
-//! 2026-09-26 muscle-memory directive): a mock supervisor mounts the dock
-//! with a live goal row and scripted heartbeat rows, and the plan drives
-//! the dock with the same key path a user's arrows take (alt+a to focus,
-//! left/right to step, enter to open the focused section's view).
+//! 2026-09-26 muscle-memory directive): a mock supervisor mounts the
+//! dock's live goal row and scripted heartbeat rows when the plan asks
+//! for them, and the plan drives the dock with the same key path a
+//! user's arrows take (alt+a to focus, left/right to step, enter to open
+//! the focused section's view).
 //!
 //! Verifies the contract: every rendered section is exactly one press
 //! away in both directions — an empty section (0 subagents, 0 heartbeats,
 //! 0 shells) is still visited, never skipped, and the cycle wraps — and
 //! entering a section opens its view, whose existing empty state reads
 //! the pane grammar ("No running or paused heartbeats" for heartbeats,
-//! "No background commands" for shells). The TS dock has no section
-//! traversal at all (`subagent-summary-line.ts` handles confirm/cancel
-//! only and renders nothing when its counts are zero), so this surface
-//! is the documented Rust divergence.
+//! "No background commands" for shells). With nothing mounted at all,
+//! the all-zero dock still renders (the operator's 2026-09-28 directive)
+//! and its Subagents group opens the scoped agents view's empty state.
+//! The TS dock has no section traversal at all (`subagent-summary-line.ts`
+//! handles confirm/cancel only and renders nothing when its counts are
+//! zero), so this surface is the documented Rust divergence.
 #![cfg(unix)]
+// Pedantic-gate exceptions (every other pedantic warning in this crate is
+// fixed in place; each exception carries its one-line justification):
+// - the casts: terminal-layout arithmetic narrows structurally bounded
+//   values (screen coordinates, byte counts, timestamps); guarded
+//   conversions would add panic paths the bounds guarantee away.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// - the render routes are flat tables (one arm per route); splitting them
+//   would add indirection without changing the flow.
+#![allow(clippy::too_many_lines)]
+// - widget state structs carry independent flag bits; a nested struct
+//   would add indirection without changing the shape.
+#![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
+// - the futures are bounded by the surface's lifetime; boxing them would
+//   add an allocation to the steady-state loop.
+#![allow(clippy::large_futures)]
+// - the wrappers preserve a uniform Result-returning API surface; unwrap
+//   removals would ripple through the callers without changing behavior.
+#![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use pa_tui::agents_view::AgentsViewScope;
 use pa_tui::interactive::{
     run_interactive, HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection,
     SessionSelection, UiMode,
@@ -31,13 +58,17 @@ struct MockSupervisor {
     /// The `heartbeats_list` catalog to answer with (`None` serves the
     /// empty catalog — the 0-heartbeats dock).
     heartbeats: Option<Value>,
+    /// The live `goal_update` event to serve on attach (`None` mounts
+    /// no goal row — the all-zero dock).
+    goal: Option<Value>,
 }
 
 impl MockSupervisor {
-    fn bind(socket: &std::path::Path, heartbeats: Option<Value>) -> Self {
+    fn bind(socket: &std::path::Path, heartbeats: Option<Value>, goal: Option<Value>) -> Self {
         MockSupervisor {
             listener: UnixListener::bind(socket).expect("bind mock socket"),
             heartbeats,
+            goal,
         }
     }
 
@@ -109,25 +140,9 @@ impl MockSupervisor {
                 }
                 "attach" => {
                     write_json(&mut writer, &attach_data(id));
-                    // The dock's mount for this run: a live goal row. The
-                    // session has no subagents, heartbeats, or shells —
-                    // every other section renders empty, so the arrows
-                    // must still visit them.
-                    write_session_event(
-                        &mut writer,
-                        &json!({
-                            "type": "goal_update",
-                            "goal": {
-                                "active": true,
-                                "status": "active",
-                                "goalId": "g-dock",
-                                "objective": "ship the dock arrows",
-                                "tokensUsed": 0,
-                                "timeUsedSeconds": 0,
-                                "continuationsUsed": 0,
-                            },
-                        }),
-                    );
+                    if let Some(goal) = &self.goal {
+                        write_session_event(&mut writer, goal);
+                    }
                 }
                 "heartbeats_list" => {
                     write_json(
@@ -206,6 +221,24 @@ fn attach_data(id: &str) -> Value {
             "client": { "id": "mock", "capabilities": [] },
             "lastEventSequence": 0,
             "lastEventCursor": null,
+        },
+    })
+}
+
+/// The dock's live goal row: the session has no subagents, heartbeats,
+/// or shells, so every other section renders empty and the arrows must
+/// still visit them.
+fn live_goal() -> Value {
+    json!({
+        "type": "goal_update",
+        "goal": {
+            "active": true,
+            "status": "active",
+            "goalId": "g-dock",
+            "objective": "ship the dock arrows",
+            "tokensUsed": 0,
+            "timeUsedSeconds": 0,
+            "continuationsUsed": 0,
         },
     })
 }
@@ -298,13 +331,14 @@ fn escape() -> KeyEvent {
 fn run_plan(
     steps: Vec<HeadlessStep>,
     heartbeats: Option<Value>,
+    goal: Option<Value>,
 ) -> pa_tui::interactive::InteractiveOutcome {
     // The ambient TMUX variable adds a startup notice to the transcript;
     // scrub it so the run is the same inside tmux and out.
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
-    let supervisor = MockSupervisor::bind(&socket, heartbeats);
+    let supervisor = MockSupervisor::bind(&socket, heartbeats, goal);
     let handle = std::thread::spawn(move || supervisor.serve());
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -324,8 +358,9 @@ fn run_plan(
 }
 
 /// The dock's arrow traversal with every section empty: the goal row
-/// mounts the dock (0 subagents, 0 heartbeats, 0 shells) and the arrows
-/// still visit each section in order — right through the empty
+/// adds the goal section beside the zero-count ones (0 subagents,
+/// 0 heartbeats, 0 shells) and the arrows still visit each section in
+/// order — right through the empty
 /// heartbeats and shells sections to the goal section, then left back
 /// through them to the subagents section. Each visited section opens
 /// its own view, whose existing empty state reads the pane grammar.
@@ -338,8 +373,8 @@ fn run_plan(
 #[test]
 fn dock_arrows_visit_each_empty_section_in_order_both_directions() {
     let steps = vec![
-        // The goal row mounts the dock; the other three sections render
-        // their zero counts.
+        // The goal row adds the goal section; the other three sections
+        // render their zero counts.
         HeadlessStep::WaitRender {
             needle: "Pursuing goal (0s)".to_string(),
             timeout_ms: 5_000,
@@ -403,7 +438,7 @@ fn dock_arrows_visit_each_empty_section_in_order_both_directions() {
         HeadlessStep::Key(left()),
         HeadlessStep::WaitMs(300),
     ];
-    let outcome = run_plan(steps, None);
+    let outcome = run_plan(steps, None, Some(live_goal()));
     let all = outcome.frames.join("\n");
     // The dock row itself: every section renders, empty ones included,
     // with its live count.
@@ -493,7 +528,7 @@ fn dock_arrows_visit_the_same_sections_when_one_has_rows() {
         HeadlessStep::Key(escape()),
         HeadlessStep::WaitMs(100),
     ];
-    let outcome = run_plan(steps, Some(canary_heartbeats()));
+    let outcome = run_plan(steps, Some(canary_heartbeats()), Some(live_goal()));
     let all = outcome.frames.join("\n");
     assert!(
         all.contains(
@@ -521,8 +556,8 @@ fn dock_arrows_visit_the_same_sections_when_one_has_rows() {
 #[test]
 fn left_from_the_subagents_selection_opens_the_agents_view() {
     let steps = vec![
-        // The goal row mounts the dock; the sections render their zero
-        // counts.
+        // The goal row adds the goal section; the other three sections
+        // render their zero counts.
         HeadlessStep::WaitRender {
             needle: "Pursuing goal (0s)".to_string(),
             timeout_ms: 5_000,
@@ -535,7 +570,7 @@ fn left_from_the_subagents_selection_opens_the_agents_view() {
         HeadlessStep::Key(left()),
         HeadlessStep::WaitMs(300),
     ];
-    let outcome = run_plan(steps, None);
+    let outcome = run_plan(steps, None, Some(live_goal()));
     assert!(
         outcome.return_to_agents_view,
         "left from the subagents selection hands the pane to the agents view"
@@ -544,5 +579,44 @@ fn left_from_the_subagents_selection_opens_the_agents_view() {
     assert!(
         all.contains("\u{25c6} 0 subagents"),
         "the dock row mounted before the handoff:\n{all}"
+    );
+}
+
+/// The all-zero dock (the operator's 2026-09-28 directive): with no
+/// subagents, heartbeats, shells, or goal, the dock row still renders
+/// its zero counts, alt+a takes the focus, and Enter on the Subagents
+/// group opens the scoped agents view — whose empty roster is the
+/// view's own `No sessions yet.` state.
+#[test]
+fn an_all_zero_dock_renders_and_opens_the_empty_scoped_agents_view() {
+    let steps = vec![
+        HeadlessStep::WaitRender {
+            needle:
+                " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells"
+                    .to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::Key(alt_a()),
+        HeadlessStep::Key(enter()),
+    ];
+    let outcome = run_plan(steps, None, None);
+    let all = outcome.frames.join("\n");
+    assert!(
+        all.contains(
+            " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells"
+        ),
+        "the all-zero dock renders:\n{all}"
+    );
+    assert!(
+        outcome.return_to_agents_view,
+        "Enter opened the scoped agents view"
+    );
+    assert_eq!(
+        outcome.agents_view_scope,
+        Some(AgentsViewScope {
+            session_id: Some("sess-1".to_string()),
+            active_session_id: Some("s1".to_string()),
+            session_name: Some("dock arrows session".to_string()),
+        })
     );
 }

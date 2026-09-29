@@ -1,6 +1,9 @@
 //! The keys concern: the terminal input grammar — key dispatch, mouse
 //! reports, paste, selection/auto-scroll, and the input-state seams.
-use super::*;
+use super::{
+    key_event_to_id, AgentView, DaemonCommand, DockFocusSource, Duration, EffortPickerAction,
+    Instant, KeyEvent, Map, QueueBrowseDirection, QueueLane, Result, SessionUi, SubmitBehavior,
+};
 
 /// How long the Ctrl+C exit hint arms the second-press exit (TS
 /// `EXIT_HINT_DURATION_MS`).
@@ -309,6 +312,13 @@ impl SessionUi {
         self.selection_auto_scroll = None;
     }
 
+    /// Whether the selection auto-scroll driver is armed: the run loop's
+    /// quiet tick keys on it (an idle surface parks the tick, so this is
+    /// what tells it a drag is actually holding the edge).
+    pub(crate) fn selection_auto_scroll_armed(&self) -> bool {
+        self.selection_auto_scroll.is_some()
+    }
+
     /// One idle tick of the selection auto-scroll (the run loop's 50 ms arm
     /// stands in for TS's timer): after the 150 ms hold window, each tick
     /// scrolls one line set and re-aims the head onto the edge row; the
@@ -407,7 +417,7 @@ impl SessionUi {
         }
         // The `/mcp` connections view owns the frame the same way.
         if view.mcp_view.is_some() {
-            return self.handle_mcp_view_key(key, view).await;
+            return self.handle_mcp_view_key(key, view);
         }
         // The `/heartbeats` view owns the frame the same way.
         if view.heartbeats_picker.is_some() {
@@ -415,15 +425,15 @@ impl SessionUi {
         }
         // The bash view owns the frame the same way.
         if view.bash_view.is_some() {
-            return self.handle_bash_view_key(key, view).await;
+            return self.handle_bash_view_key(key, view);
         }
         // The read-only goal panel owns the frame the same way.
         if view.goal_panel.is_some() {
-            return self.handle_goal_panel_key(key, view).await;
+            return self.handle_goal_panel_key(key, view);
         }
         // The read-only info panel owns the frame the same way.
         if view.info_panel.is_some() {
-            return self.handle_info_panel_key(key, view).await;
+            return self.handle_info_panel_key(key, view);
         }
         // The `/tree` and `/fork` selectors own the frame the same way.
         if view.tree_selector.is_some() {
@@ -445,7 +455,7 @@ impl SessionUi {
         // The inline auth panel owns the frame the same way (TS the login
         // dialog / team selector mounts over the prompt).
         if view.auth_panel.is_some() {
-            return self.handle_auth_panel_key(key, view).await;
+            return self.handle_auth_panel_key(key, view);
         }
         // The `/settings` menu owns the frame the same way (TS
         // `showSelector`).
@@ -456,7 +466,7 @@ impl SessionUi {
         // loader takes focus): the cancel binding aborts, other keys are
         // the loader's.
         if view.share_loader.is_some() {
-            return self.handle_share_loader_key(key, view).await;
+            return self.handle_share_loader_key(key, view);
         }
         let Some(id) = key_event_to_id(&key) else {
             return Ok(());
@@ -571,9 +581,7 @@ impl SessionUi {
                 return Ok(());
             }
             if kb.matches(&id, "app.tools.expand") {
-                view.detail = view.detail.next();
-                self.save_chat_detail(view);
-                self.dirty = true;
+                self.cycle_detail(view);
                 return Ok(());
             }
             self.subagents_focused = false;
@@ -624,7 +632,7 @@ impl SessionUi {
             if view.side_pane.is_some() {
                 self.escape_repeat_action = None;
                 self.escape_repeat_until = None;
-                self.clear_side_question(true, view).await;
+                self.clear_side_question(true, view);
                 return Ok(());
             }
             // Leaving browse mode restores the stashed draft instead of
@@ -739,13 +747,13 @@ impl SessionUi {
             return Ok(());
         }
         // TS `app.subagents.focus` (default alt+a): the dock takes focus
-        // while it renders (an unmounted dock keeps the editor's focus).
+        // (it renders in every session).
         if view
             .editor
             .keybindings()
             .matches(&id, "app.subagents.focus")
         {
-            self.focus_subagents_summary(DockFocusSource::Shortcut, view);
+            self.focus_subagents_summary(&DockFocusSource::Shortcut, view);
             self.dirty = true;
             return Ok(());
         }
@@ -977,7 +985,7 @@ impl SessionUi {
             && !view.editor.is_showing_autocomplete()
             && !view.editor.is_history_navigation_active()
             && view.editor.is_cursor_at_end()
-            && self.focus_subagents_summary(DockFocusSource::PromptDown, view)
+            && self.focus_subagents_summary(&DockFocusSource::PromptDown, view)
         {
             // The focus leaves the editor with the selection active: a
             // later keystroke would fall back through to the editor and

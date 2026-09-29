@@ -189,7 +189,7 @@ impl Supervisor {
     /// `Unknown` keeps the caller's unknown-session error; `Failed` carries
     /// the wake's own error (a catalog ambiguity outranks the miss, like
     /// the TS `Ambiguous session selector` propagation).
-    async fn wake_saved_target(
+    pub(crate) async fn wake_saved_target(
         self: &Arc<Self>,
         resolve_error: &anyhow::Error,
         selector: &str,
@@ -260,14 +260,18 @@ impl Supervisor {
             return WakeOutcome::Woken(resident);
         }
         // The wake create: one worker over the saved file (the headless
-        // resume path), carrying the session's own cwd.
+        // resume path), carrying the session's own cwd. The persisted
+        // header depth rides `config.rlmDepth` - the key launch_worker
+        // copies into the DURABLE create command's rest, where the
+        // supervisor's parent-owned passivation fence reads it (a root's
+        // header depth of 0 restates its rootness).
         let create = DaemonCommand::Create {
             id: None,
-            session_path: Some(session_path),
+            session_path: Some(session_path.clone()),
             continue_recent: Some(false),
             no_session: None,
             name: None,
-            config: Some(json!({ "cwd": info.cwd })),
+            config: Some(json!({ "cwd": info.cwd, "rlmDepth": info.rlm_depth })),
             // Telemetry opt-out only ever rides an explicit user create;
             // the wake create inherits the daemon default (absent).
             telemetry_disabled: None,
@@ -277,12 +281,47 @@ impl Supervisor {
             launch_env: None,
             rest: Map::default(),
         };
-        match self.launch_worker(&create, None).await {
-            Ok((resident, _create_summary)) => {
+        // The caller's route budget bounds the WAIT, not the launch (the
+        // round-7 bots' finding: dropping the future skipped the launch's
+        // own cleanup): the launch detaches and runs to completion; a
+        // timeout tries the join lookup first and answers with the
+        // retryable budget note otherwise.
+        let launch = tokio::spawn({
+            let supervisor = Arc::clone(self);
+            let create = create;
+            async move { supervisor.launch_worker(&create, None).await }
+        });
+        let launched = tokio::time::timeout(
+            std::time::Duration::from_millis(crate::supervisor::ROUTE_TIMEOUT_MS),
+            launch,
+        )
+        .await;
+        match launched {
+            Ok(Ok(Ok((resident, _create_summary)))) => {
                 self.refresh_roster_entry(&resident).await;
                 WakeOutcome::Woken(resident)
             }
-            Err(error) => WakeOutcome::Failed(format!("{error:#}")),
+            Ok(Ok(Err(error))) => {
+                // The check-and-launch race (two concurrent wakes for the
+                // same saved file): the rival wins the session lease while
+                // this launch runs — join its resident instead of failing
+                // the command (TS's in-flight-join revival semantics).
+                if let Some(resident) = self.registry.find_by_session_file(&session_path).await {
+                    return WakeOutcome::Woken(resident);
+                }
+                WakeOutcome::Failed(format!("{error:#}"))
+            }
+            Ok(Err(join_error)) => {
+                WakeOutcome::Failed(format!("the revival launch task: {join_error}"))
+            }
+            Err(_budget) => {
+                if let Some(resident) = self.registry.find_by_session_file(&session_path).await {
+                    return WakeOutcome::Woken(resident);
+                }
+                WakeOutcome::Failed(
+                    "the revival launch exceeded the route budget; retry the command".to_string(),
+                )
+            }
         }
     }
 }
@@ -320,10 +359,16 @@ impl Supervisor {
             1 => {
                 let edge = matches.pop().expect("one match");
                 let session_file = edge.child.clone();
-                let cwd =
+                let (cwd, depth) =
                     crate::session_store::read_session_info(std::path::Path::new(&session_file))
-                        .map_or_else(|| "/".to_string(), |info| info.cwd);
-                Some(self.launch_ledger_child_wake(&session_file, cwd).await)
+                        .map_or_else(
+                            || ("/".to_string(), edge.depth),
+                            |info| (info.cwd, info.rlm_depth),
+                        );
+                Some(
+                    self.launch_ledger_child_wake(&session_file, cwd, &edge.child_id, depth)
+                        .await,
+                )
             }
             _ => Some(WakeOutcome::Failed(format!(
                 "Ambiguous session selector \"{selector}\""
@@ -332,32 +377,88 @@ impl Supervisor {
     }
 
     /// Spawn one worker over a ledger child's session file (the same
-    /// create the saved-session wake uses).
+    /// create the saved-session wake uses), with the same concurrent-wake
+    /// protections the roster wake carries: reuse before launch, and a
+    /// launch refusal joins the rival's registered resident instead of
+    /// failing the command (the second bot round's finding: the durable-id
+    /// path is the revival children actually take).
     async fn launch_ledger_child_wake(
         self: &Arc<Self>,
         session_file: &str,
         cwd: String,
+        child_id: &str,
+        depth: u32,
     ) -> WakeOutcome {
+        // Reuse before spawning (TS `createOrReuseWorker`): a concurrent
+        // revival may already host the file.
+        if let Some(resident) = self.registry.find_by_session_file(session_file).await {
+            return WakeOutcome::Woken(resident);
+        }
         let create = DaemonCommand::Create {
             id: None,
             session_path: Some(session_file.to_string()),
             continue_recent: Some(false),
             no_session: None,
             name: None,
-            config: Some(json!({ "cwd": cwd })),
+            // The child identity rides the fields the launch path reads:
+            // `config.rlmDepth` + `runtime_metadata.rlmChildId` are the
+            // keys launch_worker copies into the DURABLE create command's
+            // rest (the supervisor's parent-owned passivation fence reads
+            // `create_command.rest.rlmDepth`); a bare create `rest` is
+            // never read there. Without the identity the revived child's
+            // fence sees a root and never re-passivates.
+            config: Some(json!({ "cwd": cwd, "rlmDepth": depth })),
             telemetry_disabled: None,
-            runtime_metadata: None,
+            runtime_metadata: Some(json!({ "rlmChildId": child_id })),
             lifecycle: None,
             env: None,
             launch_env: None,
             rest: Map::default(),
         };
-        match self.launch_worker(&create, None).await {
-            Ok((resident, _create_summary)) => {
+        // The launch bounded by the caller's route budget, DETACHED (the
+        // round-7 bots' finding: dropping the launch future at the
+        // budget skipped launch_worker's own cleanup and left a
+        // half-registered resident): the launch runs to completion on
+        // its own task - its registry/descriptor/monitor bookkeeping
+        // all land - and only THIS caller's wait is bounded. A timeout
+        // is not an error: the join lookup runs (the background launch
+        // may have registered by then) and the caller answers with the
+        // retryable budget note.
+        let launch = tokio::spawn({
+            let supervisor = Arc::clone(self);
+            let create = create;
+            async move { supervisor.launch_worker(&create, None).await }
+        });
+        let launched = tokio::time::timeout(
+            std::time::Duration::from_millis(crate::supervisor::ROUTE_TIMEOUT_MS),
+            launch,
+        )
+        .await;
+        match launched {
+            Ok(Ok(Ok((resident, _create_summary)))) => {
                 self.refresh_roster_entry(&resident).await;
                 WakeOutcome::Woken(resident)
             }
-            Err(error) => WakeOutcome::Failed(format!("{error:#}")),
+            Ok(Ok(Err(error))) => {
+                // The check-and-launch race: the rival wins the session
+                // lease while this launch runs — join its resident (TS's
+                // in-flight-join revival semantics).
+                if let Some(resident) = self.registry.find_by_session_file(session_file).await {
+                    return WakeOutcome::Woken(resident);
+                }
+                WakeOutcome::Failed(format!("{error:#}"))
+            }
+            Ok(Err(join_error)) => {
+                WakeOutcome::Failed(format!("the revival launch task: {join_error}"))
+            }
+            Err(_budget) => {
+                if let Some(resident) = self.registry.find_by_session_file(session_file).await {
+                    return WakeOutcome::Woken(resident);
+                }
+                WakeOutcome::Failed(
+                    "the revival launch exceeded the route budget; retry the command".to_string(),
+                )
+            }
         }
     }
 }
@@ -415,7 +516,7 @@ fn sender_endpoint_from_summary(summary: &Value, client_id: &str) -> Value {
 }
 
 /// The wake outcome for an unknown `send_message` target.
-enum WakeOutcome {
+pub(crate) enum WakeOutcome {
     /// The saved session was woken (or reused); the resident serves it.
     Woken(Arc<ResidentWorker>),
     /// No saved session matched: the caller answers with the TS

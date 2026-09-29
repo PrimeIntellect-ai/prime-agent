@@ -4,11 +4,11 @@
 //! loader and reload-box panels that replace the editor in flight.
 
 use super::chunk_selection;
-use super::click::EditorClickSurface;
+use super::click::{ClickAction, DockClickRegion, EditorClickSurface};
 use super::flush::split_at_chars;
 use super::frame::{indicator_row, pad_row};
 use super::{AgentView, ShareLoader};
-use crate::chrome::{render_prompt_context, render_tray};
+use crate::chrome::{render_prompt_context, render_tray_with_hint};
 use crate::prompt_highlight::{
     command_token, editor_chunk_highlights, editor_text_spans, find_arg_tokens, ArgTokenSpan,
 };
@@ -43,11 +43,32 @@ impl AgentView {
         let (editor_rows, cursor) = self.render_editor_surface(width, context_rows + overlay_count);
         self.dock_cursor = cursor.map(|(row, col)| (context_rows + overlay_count + row, col));
         lines.extend(editor_rows);
-        lines.push(render_tray(&self.chrome, &self.theme, width));
+        // The tray's `← manage` hint is a click region (operator
+        // directive 2026-09-29): its own cells — never the depth label
+        // beside them — perform the hinted agents-back handoff.
+        let tray_row = lines.len();
+        let (tray, tray_hint) = render_tray_with_hint(&self.chrome, &self.theme, width);
+        lines.push(tray);
+        if let Some(hint) = tray_hint.filter(|hint| hint.start < width) {
+            self.click.record_dock_region(DockClickRegion {
+                dock_row: tray_row,
+                cols: hint.start..hint.end.min(width),
+                action: ClickAction::OpenAgentsView,
+            });
+        }
+        // The activity dock's group segments are click regions too:
+        // the groups sit on the frame's second row, under the rule.
         if let Some(dock) = &self.chrome.activity {
-            if let Some(frame) = crate::chrome::render_activity_dock(dock, &self.theme, width) {
-                lines.extend(frame);
+            let (frame, segments) =
+                crate::chrome::render_activity_dock_segments(dock, &self.theme, width);
+            for segment in segments {
+                self.click.record_dock_region(DockClickRegion {
+                    dock_row: tray_row + 2,
+                    cols: segment.cols,
+                    action: ClickAction::OpenDockGroup(segment.group),
+                });
             }
+            lines.extend(frame);
         }
         // The `/speed` footer (TS `footerSlot`, the main container's last
         // child): a dim row only while the display is on with a sample.
@@ -227,9 +248,6 @@ impl AgentView {
             let command = (scroll_offset + index == 0)
                 .then(|| command_token(text))
                 .flatten();
-            let command_takes_argument = command
-                .as_ref()
-                .is_some_and(|token| registry.takes_argument(&token.name));
             let highlights = editor_chunk_highlights(
                 text,
                 arg_token_spans
@@ -237,7 +255,6 @@ impl AgentView {
                     .map_or(&[][..], |spans| spans),
                 line.source_start,
                 command.as_ref(),
-                command_takes_argument,
                 cursor_pos,
             );
             row.extend(editor_text_spans(

@@ -32,9 +32,9 @@ use pa_types::ai::Model;
 
 use crate::auto_compaction::AutoCompactionRun;
 use crate::engine::{
-    BranchSummaryOutcome, BranchSummaryRequest, BranchSummaryRun, CompactionOutcome,
-    CompactionRequest, CompactionRun, EngineEvent, EngineModelSelection, PromptRequest,
-    SessionEngine, SideQuestionOutcome, SideQuestionRequest,
+    session_wire_value, AssistantSnapshot, BranchSummaryOutcome, BranchSummaryRequest,
+    BranchSummaryRun, CompactionOutcome, CompactionRequest, CompactionRun, EngineEvent,
+    EngineModelSelection, PromptRequest, SessionEngine, SideQuestionOutcome, SideQuestionRequest,
 };
 use crate::goal_continuation::GoalBoundary;
 use crate::image_route::ImageRoute;
@@ -67,6 +67,7 @@ use turn_types::{
 mod model;
 
 use model::persisted_rlm_max_depth;
+pub(crate) use model::saved_session_context_from_parts;
 
 // The header config types (the create-command contract, the supervisor
 // link, the autonomous admission sink, and the private goal/restore/usage
@@ -87,6 +88,7 @@ pub(crate) use artifacts::{artifact_reference, now_millis};
 
 pub use config::AgentEngineConfig;
 pub(crate) use config::AutonomousAdmission;
+pub(crate) use config::CreateSessionResources;
 pub use config::SupervisorLinkConfig;
 use config::{GoalRuntimeHandles, ProducerUsageSink, RestoredSessionModel};
 
@@ -156,6 +158,14 @@ pub struct AgentSessionEngine {
     /// across a turn's admission, so goal checks inside emit callbacks
     /// (which may run in async context) must not lock it.
     pub(crate) goal_runtime: std::sync::Mutex<Option<GoalRuntimeHandles>>,
+    /// The goal driver's pending-continuation guard, mirrored lock-free at
+    /// build time: the admission surfaces (the worker's queue sink, the
+    /// post-compaction queue path, the abort-cancel withdraw) release it
+    /// from contexts that cannot take the async driver lock (a spawned
+    /// settle task, a nested `block_on`), so the guard reads through this
+    /// atomic handle instead.
+    pub(crate) pending_goal_continuation:
+        std::sync::Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
     /// Whether this run's usage accounting crossed the goal's token budget
     /// (TS `_accountGoalUsageForAssistantMessage` returning `true` at the
     /// `message_end` hook): the natural boundary mints the budget-limit
@@ -332,6 +342,9 @@ pub struct AgentSessionEngine {
     /// This worker's own session summary (worker-pushed at create/rename),
     /// read by the kernel messaging controller to render sender identity.
     own_summary: std::sync::Arc<std::sync::Mutex<Option<Value>>>,
+    /// The create command's session flags (TS `sessionConfig`): set once at
+    /// create, read by every session build, so a replacement session keeps them.
+    pub(crate) create_resources: std::sync::RwLock<CreateSessionResources>,
     /// The session's autonomous runtime state (limits, usage accounting).
     /// Shared with the agent-loop subscription so per-message accounting can
     /// run on every settled assistant message.
