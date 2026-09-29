@@ -386,6 +386,10 @@ impl Worker {
             });
         }
 
+        // The attach this connection takes (released at the peer close,
+        // alongside the fan-out wake): the idle passivation's unattached
+        // gate must see a departed client's hold go.
+        let mut attached_client: Option<String> = None;
         let mut reader =
             crate::framing::PrivateFrameReader::new(reader, DEFAULT_PRIVATE_FRAME_LIMITS);
         loop {
@@ -393,6 +397,20 @@ impl Worker {
             let Some(frame) = frame else {
                 // Peer closed: wake the fan-out so it drops the write half.
                 let _ = closed_tx.send(true);
+                // The connection's session attach goes with it (TS tracks
+                // `attachedClients` per live connection; a socket close
+                // releases the hold exactly like the detach command). A
+                // stale attach would hold the idle passivation's
+                // unattached gate closed forever, and the runner's park
+                // computed its window while the client was still here -
+                // the notify re-arms it (the fresh window sees the
+                // released hold, so a now-detached child can passivate).
+                if let Some(client_id) = attached_client.take() {
+                    let mut core = self.core.lock().unwrap();
+                    core.attached_client_ids.retain(|id| id != &client_id);
+                    drop(core);
+                    self.work_notify.notify_one();
+                }
                 break;
             };
             let command_type = frame
@@ -466,6 +484,15 @@ impl Worker {
                     });
                 }
                 ConnectionRole::SessionClient { ref session } => {
+                    // The attach's client id rides the connection for the
+                    // peer-close release (a failed attach's release is the
+                    // idempotent retain no-op).
+                    if command_type == "attach" {
+                        attached_client = payload
+                            .get("clientId")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                    }
                     // A direct peer may only run session-plane commands for
                     // the grant's session (TS `peerClaims` gate).
                     if !peer_command_allowed(&command_type, &payload, &session.grant) {
@@ -863,6 +890,11 @@ impl Worker {
         self.release_input_pauses_for_detach(&client_id);
         let mut core = self.core.lock().unwrap();
         core.attached_client_ids.retain(|id| id != &client_id);
+        drop(core);
+        // The detach wake: the runner's park computed its idle-passivation
+        // window while this client held the attach; the notify re-arms it
+        // (a now-detached child's window opens for the threshold).
+        self.work_notify.notify_one();
         response_success(None, "detach", None)
     }
 }
