@@ -102,10 +102,7 @@ impl PackageManager {
 
     /// All files a package offers for one kind: manifest entries (filtered by
     /// the manifest's own override patterns) or the convention directory.
-    fn collect_manifest_files(
-        package_root: &Path,
-        resource_type: ResourceType,
-    ) -> Vec<PathBuf> {
+    fn collect_manifest_files(package_root: &Path, resource_type: ResourceType) -> Vec<PathBuf> {
         let manifest = read_pi_manifest(package_root);
         let entries = manifest
             .as_ref()

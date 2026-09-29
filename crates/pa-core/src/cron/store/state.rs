@@ -114,10 +114,7 @@ pub(crate) fn resolve_path(path: &str) -> String {
     resolved.to_string_lossy().to_string()
 }
 
-pub(crate) fn compare_optional_iso(
-    left: Option<&str>,
-    right: Option<&str>,
-) -> std::cmp::Ordering {
+pub(crate) fn compare_optional_iso(left: Option<&str>, right: Option<&str>) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (left, right) {
         (left, right) if left == right => Ordering::Equal,

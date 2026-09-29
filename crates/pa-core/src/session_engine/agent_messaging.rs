@@ -1145,7 +1145,9 @@ mod tests {
     struct RecordingMessageController;
 
     impl AgentMessageController for RecordingMessageController {
-        fn family(&self) -> impl std::future::Future<Output = anyhow::Result<Vec<AgentFamilyMember>>> {
+        fn family(
+            &self,
+        ) -> impl std::future::Future<Output = anyhow::Result<Vec<AgentFamilyMember>>> {
             std::future::ready(Ok(family()))
         }
 
@@ -1305,19 +1307,26 @@ mod tests {
     async fn broadcast_without_family_is_empty_and_failures_settle() {
         struct NoFamilyController;
         impl AgentMessageController for NoFamilyController {
-            fn family(&self) -> impl std::future::Future<Output = anyhow::Result<Vec<AgentFamilyMember>>> {
+            fn family(
+                &self,
+            ) -> impl std::future::Future<Output = anyhow::Result<Vec<AgentFamilyMember>>>
+            {
                 std::future::ready(Ok(Vec::new()))
             }
             fn send_agent_message(
                 &self,
                 _input: AgentMessageSendInput,
-            ) -> impl std::future::Future<Output = anyhow::Result<AgentMessageReceipt>> {
+            ) -> impl std::future::Future<Output = anyhow::Result<AgentMessageReceipt>>
+            {
                 std::future::ready(Err(anyhow::anyhow!("no route")))
             }
         }
         struct LoneFamilyController;
         impl AgentMessageController for LoneFamilyController {
-            fn family(&self) -> impl std::future::Future<Output = anyhow::Result<Vec<AgentFamilyMember>>> {
+            fn family(
+                &self,
+            ) -> impl std::future::Future<Output = anyhow::Result<Vec<AgentFamilyMember>>>
+            {
                 std::future::ready(Ok(vec![AgentFamilyMember {
                     relationship: AgentFamilyRelationship::Sibling,
                     id: "sib-1".to_string(),
@@ -1328,7 +1337,8 @@ mod tests {
             fn send_agent_message(
                 &self,
                 _input: AgentMessageSendInput,
-            ) -> impl std::future::Future<Output = anyhow::Result<AgentMessageReceipt>> {
+            ) -> impl std::future::Future<Output = anyhow::Result<AgentMessageReceipt>>
+            {
                 std::future::ready(Err(anyhow::anyhow!("peer unreachable")))
             }
         }

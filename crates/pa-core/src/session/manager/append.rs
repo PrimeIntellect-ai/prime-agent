@@ -2,7 +2,10 @@
 //! messages, retained variants, changes, compactions, customs,
 //! attributions, session info/state - and the leaf/label mutators.
 
-use super::{SessionManager, FileEntry, AgentMessage, EntryBase, generate_id, format_iso_now, ChildUsageOrigin, SessionStateStatus, SessionState};
+use super::{
+    format_iso_now, generate_id, AgentMessage, ChildUsageOrigin, EntryBase, FileEntry,
+    SessionManager, SessionState, SessionStateStatus,
+};
 
 impl SessionManager {
     pub(crate) fn append_entry(&mut self, entry: FileEntry) -> std::io::Result<()> {

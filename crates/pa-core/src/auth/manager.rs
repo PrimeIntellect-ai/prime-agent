@@ -632,10 +632,7 @@ impl AuthStorage {
             .find(|candidate| !self.is_stale(provider, candidate))
     }
 
-    fn token_for(
-        provider: &str,
-        candidate: &AuthSourceCandidate,
-    ) -> Option<AuthSourceToken> {
+    fn token_for(provider: &str, candidate: &AuthSourceCandidate) -> Option<AuthSourceToken> {
         Some(AuthSourceToken {
             provider: provider.to_string(),
             source: candidate.source,

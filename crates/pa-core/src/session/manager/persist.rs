@@ -2,7 +2,10 @@
 //! rewrite/flush/notify plumbing, the durable append arm, and the atomic
 //! session-file write (TS writeFileAtomicSync).
 
-use super::{SessionManager, FileEntry, AgentMessage, serialize_entry, SessionPersistListener, Path, PathBuf, Write};
+use super::{
+    serialize_entry, AgentMessage, FileEntry, Path, PathBuf, SessionManager,
+    SessionPersistListener, Write,
+};
 
 impl SessionManager {
     pub(super) fn refresh_has_assistant_entry(&mut self, entries: &[FileEntry]) {

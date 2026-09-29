@@ -1772,7 +1772,8 @@ mod tests {
         std::env::set_var("PRIME_AGENT_TRACES_API_KEY", "trace-key");
         let fixture = Fixture::new();
         let session = fixture.write_session("s.jsonl", "sid");
-        let http = ScriptedTraceHttp::new(vec![Ok(response(404, r#"{"error":{"message":"nope"}}"#))]);
+        let http =
+            ScriptedTraceHttp::new(vec![Ok(response(404, r#"{"error":{"message":"nope"}}"#))]);
         let result = upload_trace_file(&fixture.options(&http, Some(&session))).await;
         assert_eq!(
             result,

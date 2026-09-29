@@ -1,7 +1,13 @@
 //! Snapshot / restore: capture state snapshots from the kernel, restore them,
 //! and flush on dispose.
 
-use super::{Inner, Arc, SnapshotResult, Request, DEFAULT_SNAPSHOT_MAX_BYTES, DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES, ExecuteOptions, ExecuteStatus, Value, describe_failure, lock, KernelState, RestoreResult, REPAIR_STEP_TIMEOUT_MS, RESTORE_EXECUTION_TIMEOUT_MS, RestoredNamespaceSkip, DEFAULT_SNAPSHOT_DEBOUNCE_MS, Duration, SNAPSHOT_EXECUTION_TIMEOUT_MS, MemoSlot, Instant, ManifestStat, SnapshotSkip};
+use super::{
+    describe_failure, lock, Arc, Duration, ExecuteOptions, ExecuteStatus, Inner, Instant,
+    KernelState, ManifestStat, MemoSlot, Request, RestoreResult, RestoredNamespaceSkip,
+    SnapshotResult, SnapshotSkip, Value, DEFAULT_SNAPSHOT_DEBOUNCE_MS, DEFAULT_SNAPSHOT_MAX_BYTES,
+    DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES, REPAIR_STEP_TIMEOUT_MS, RESTORE_EXECUTION_TIMEOUT_MS,
+    SNAPSHOT_EXECUTION_TIMEOUT_MS,
+};
 
 // ---------------------------------------------------------------------------
 // Snapshot / restore

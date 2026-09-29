@@ -119,9 +119,9 @@ pub fn switchable_stream_fn(target: Arc<std::sync::RwLock<Option<ProviderTarget>
                 .expect("provider target lock")
                 .clone()
                 .expect("provider target set before the first stream");
-            Box::pin(
-                async move { stream_once(&model, api_key, service_tier, headers, context, options) },
-            )
+            Box::pin(async move {
+                stream_once(&model, api_key, service_tier, headers, context, options)
+            })
         },
     )
 }

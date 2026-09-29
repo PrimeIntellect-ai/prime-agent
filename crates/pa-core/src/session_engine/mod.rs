@@ -1103,13 +1103,17 @@ impl AgentSession {
     /// Drain the queued next-turn rows (TS `_takePendingNextTurnMessages`):
     /// the admitting turn owns them; an empty take leaves nothing for later
     /// turns.
-    pub fn take_next_turn_rows(&self) -> impl std::future::Future<Output = Vec<pa_agent::types::AgentMessage>> {
-        std::future::ready(self.pending_next_turn_rows
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .drain(..)
-            .filter_map(|row| session_message_to_loop(&SessionAgentMessage::Custom(row)))
-            .collect())
+    pub fn take_next_turn_rows(
+        &self,
+    ) -> impl std::future::Future<Output = Vec<pa_agent::types::AgentMessage>> {
+        std::future::ready(
+            self.pending_next_turn_rows
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .drain(..)
+                .filter_map(|row| session_message_to_loop(&SessionAgentMessage::Custom(row)))
+                .collect(),
+        )
     }
 
     /// Session id (persistence identity).

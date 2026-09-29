@@ -1,7 +1,13 @@
 //! Startup and child wiring: kernel process spawn, python resolution, stderr
 //! capture, and readiness handshake.
 
-use super::{anyhow, Inner, lock, MAX_KERNEL_STDERR_CHARS, Arc, Mutex, StderrLog, MAX_KERNEL_STDERR_LOG_BYTES, KernelStartOptions, KernelState, live_kernels, HashMap, AsyncReadExt, Signal, orphan_journal, oneshot, KernelShutdownOptions, REPL_PROTOCOL_VERSION, ExitInfo, ChildHandle, BufReader, MAX_PROTOCOL_LINE_BYTES, parse_event, Write, KERNEL_STDERR_LOG_BUDGET_MARKER, Ordering, Duration, READY_TIMEOUT_MS};
+use super::{
+    anyhow, live_kernels, lock, oneshot, orphan_journal, parse_event, Arc, AsyncReadExt, BufReader,
+    ChildHandle, Duration, ExitInfo, HashMap, Inner, KernelShutdownOptions, KernelStartOptions,
+    KernelState, Mutex, Ordering, Signal, StderrLog, Write, KERNEL_STDERR_LOG_BUDGET_MARKER,
+    MAX_KERNEL_STDERR_CHARS, MAX_KERNEL_STDERR_LOG_BYTES, MAX_PROTOCOL_LINE_BYTES,
+    READY_TIMEOUT_MS, REPL_PROTOCOL_VERSION,
+};
 
 // ---------------------------------------------------------------------------
 // Startup and child wiring

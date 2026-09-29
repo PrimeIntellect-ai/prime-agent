@@ -1,7 +1,7 @@
 //! The git-context concern (moved with its concern): the quiet git
 //! probes and the header's git-context capture (TS captureGitContext).
 
-use super::{Path, GitContext};
+use super::{GitContext, Path};
 
 /// One quiet git probe: `--no-optional-locks`, stdio ignore/pipe/ignore,
 /// `None` on any failure or empty output (TS `runGit` in utils/git.ts).

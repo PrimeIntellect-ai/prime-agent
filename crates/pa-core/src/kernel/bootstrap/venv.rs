@@ -493,10 +493,7 @@ fn bootstrap_version_current(
 ) -> bool {
     version.is_some_and(|version| {
         bootstrap_base_version_current(Some(version.clone()), runtime_identity)
-            && recorded_skills_cover(
-                version.python_skills.as_deref(),
-                python_skills,
-            )
+            && recorded_skills_cover(version.python_skills.as_deref(), python_skills)
     })
 }
 

@@ -15,7 +15,6 @@
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-
 // Test-only: the exact-float `assert_eq!`s assert parsed fixture values
 // (the byte-identity contract - values written as JSON literals); an
 // epsilon compare would weaken the assertions, not fix a lint.

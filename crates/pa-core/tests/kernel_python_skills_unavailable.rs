@@ -207,9 +207,7 @@ async fn notice_rides_the_next_turn_as_model_context() {
         ),
         ("edit".to_string(), "boom".to_string()),
     ];
-    engine
-        .session
-        .queue_next_turn_row(notice_message(&errors));
+    engine.session.queue_next_turn_row(notice_message(&errors));
 
     let outcome = engine
         .prompt("go", PromptOptions::default())

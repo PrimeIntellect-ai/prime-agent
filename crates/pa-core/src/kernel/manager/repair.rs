@@ -1,7 +1,11 @@
 //! Protocol repair: fail-frame handling, child repair/rebootstrap, and repair
 //! supersession/awaiting.
 
-use super::{anyhow, Inner, Arc, lock, KernelState, Ordering, RepairOwner, AtomicBool, RepairHandle, MemoSlot, KernelStartOptions, Request, ExecuteOptions, REPAIR_STEP_TIMEOUT_MS, ExecuteStatus, AbortSignal, live_kernels, Signal};
+use super::{
+    anyhow, live_kernels, lock, AbortSignal, Arc, AtomicBool, ExecuteOptions, ExecuteStatus, Inner,
+    KernelStartOptions, KernelState, MemoSlot, Ordering, RepairHandle, RepairOwner, Request,
+    Signal, REPAIR_STEP_TIMEOUT_MS,
+};
 
 // ---------------------------------------------------------------------------
 // Protocol repair

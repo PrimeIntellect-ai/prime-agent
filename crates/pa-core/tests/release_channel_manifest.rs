@@ -9,7 +9,6 @@
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-
 #![cfg(unix)]
 //! The release pipeline's channel-manifest producer, gated against the
 //! update reader it feeds.

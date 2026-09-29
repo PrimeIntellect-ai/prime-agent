@@ -458,7 +458,11 @@ mod tests {
             panic_first: AtomicBool,
         }
         impl AgentCronSchedulerHooks for PanickingHooks {
-            fn run_job(&self, _job: &AgentCronJob) -> impl std::future::Future<Output = anyhow::Result<Option<&'static str>>> {
+            fn run_job(
+                &self,
+                _job: &AgentCronJob,
+            ) -> impl std::future::Future<Output = anyhow::Result<Option<&'static str>>>
+            {
                 self.runs.fetch_add(1, Ordering::SeqCst);
                 assert!(
                     !self.panic_first.swap(false, Ordering::SeqCst),
@@ -818,7 +822,10 @@ mod tests {
     }
 
     impl AgentCronSchedulerHooks for FailingHooks {
-        fn run_job(&self, _job: &AgentCronJob) -> impl std::future::Future<Output = anyhow::Result<Option<&'static str>>> {
+        fn run_job(
+            &self,
+            _job: &AgentCronJob,
+        ) -> impl std::future::Future<Output = anyhow::Result<Option<&'static str>>> {
             self.runs.fetch_add(1, Ordering::SeqCst);
             let error = self.error.lock().unwrap().clone();
             std::future::ready(match error {

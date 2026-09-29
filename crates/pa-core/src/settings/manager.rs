@@ -200,11 +200,7 @@ impl SettingsManager {
     /// # Errors
     ///
     /// Returns an error when the global settings file cannot be written.
-    pub fn set_default_model_and_provider(
-        &mut self,
-        provider: &str,
-        model: &str,
-    ) -> Result<()> {
+    pub fn set_default_model_and_provider(&mut self, provider: &str, model: &str) -> Result<()> {
         self.global.default_provider = Some(provider.to_string());
         self.global.default_model = Some(model.to_string());
         self.record_model_use(provider, model);
@@ -569,7 +565,12 @@ impl SettingsManager {
     /// Write one field into a scope's file, merging with the current on-disk
     /// document so concurrently-added fields survive. Settings failures are
     /// recorded as warnings, never thrown (the TS save contract).
-    fn persist_scope_field(&mut self, scope: SettingsScope, field: &str, value: &serde_json::Value) {
+    fn persist_scope_field(
+        &mut self,
+        scope: SettingsScope,
+        field: &str,
+        value: &serde_json::Value,
+    ) {
         let load_error = match scope {
             SettingsScope::Global => self.global_load_error.clone(),
             SettingsScope::Project => self.project_load_error.clone(),

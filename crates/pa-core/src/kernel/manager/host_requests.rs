@@ -1,7 +1,10 @@
 //! Host request handling: execute-side requests answered by the host
 //! (harness/goal/etc.) and their settle/exit waits.
 
-use super::{json, anyhow, Inner, Arc, Value, lock, MAX_HANDLED_HOST_REQUEST_IDS, HostRequestPayload, Duration};
+use super::{
+    anyhow, json, lock, Arc, Duration, HostRequestPayload, Inner, Value,
+    MAX_HANDLED_HOST_REQUEST_IDS,
+};
 
 /// The cell source attached to a host request is capped at this many
 /// characters (TS #2475: `MAX_CELL_SOURCE_CHARS`, repl-manager.ts:81-82):

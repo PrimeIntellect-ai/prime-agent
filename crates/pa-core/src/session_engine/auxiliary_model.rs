@@ -79,8 +79,9 @@ pub fn resolve_auxiliary_model(
     session_api_key: Option<&str>,
     required_context_tokens: Option<u64>,
 ) -> ResolvedAuxiliaryModel {
-    let fallback =
-        || session_fallback_with_headers(context, session_model, session_api_key.map(str::to_string));
+    let fallback = || {
+        session_fallback_with_headers(context, session_model, session_api_key.map(str::to_string))
+    };
     let settings = crate::settings::SettingsManager::create(&context.cwd, &context.agent_dir);
     // A malformed or whitespace value behaves as unset (TS
     // `getAuxiliaryModel`): the pass falls back to the session model.
