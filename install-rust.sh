@@ -13,12 +13,12 @@
 # the filename is invisible to users; the command they type is what
 # changed.
 #
-# SOURCE: the `continuous` workflow's build artifacts (every push to the
-# `rust` branch builds the matrix; this script installs the latest
-# successful run's platform tarball). No tags, no GitHub releases: the
-# repo's release history belongs to the TypeScript product, and the Rust
-# port's versioned releases come when it graduates
-# (prime-agent-design/RELEASE_SECURITY.md).
+# SOURCE: the R2-backed release channel (this repo file is the source the
+# release workflow uploads to the bucket as install.sh / install-beta.sh;
+# the channel pointers and manifests it reads - latest.json / beta.json,
+# the tarballs, SHA256SUMS - all come from the same download base). The
+# workflow-artifact bootstrap channel is retired; the user path never
+# touches GitHub.
 #
 # THE TYPESCRIPT TAKEOVER (this script is also the uninstall path for the
 # TS product — one installer owns the keyword's lifecycle):
