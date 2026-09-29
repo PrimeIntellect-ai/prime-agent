@@ -47,6 +47,7 @@ impl Eq for SessionUsageSummary {}
 
 /// TS `sessionUsageSummaryFrom`: `None` — an absent wire field — when the
 /// session recorded no billable work at all.
+#[must_use]
 pub fn session_usage_summary_from(usage: &Usage) -> Option<SessionUsageSummary> {
     let input_tokens = usage
         .input
@@ -224,6 +225,7 @@ impl UsageScan {
     /// The totals behind [`summary`](Self::summary): `own` subtracts the
     /// attributed child spend, `total` keeps it (the deletion capture reads
     /// both from the child's frozen file).
+    #[must_use]
     pub fn totals(&self) -> SessionUsageTotals {
         let mut total = Usage::default();
         for (_, usage) in &self.assistant_usage_by_id.entries {
@@ -238,6 +240,7 @@ impl UsageScan {
     /// TS `snapshotSessionInfo`'s total: the assistant aggregates plus the
     /// summarization calls, minus every attributed child block (clamped
     /// at zero to absorb attribution drift).
+    #[must_use]
     pub fn summary(&self) -> Option<SessionUsageSummary> {
         session_usage_summary_from(&self.totals().own)
     }
@@ -324,6 +327,7 @@ fn scan_file(path: &Path) -> Option<UsageScan> {
 /// Whole-file own usage (the saved-row summary): the worker's live
 /// own-usage summary reads this, so live rows and saved rows never
 /// disagree.
+#[must_use]
 pub fn read_own_usage_summary(path: &Path) -> Option<SessionUsageSummary> {
     scan_file(path).and_then(|scan| scan.summary())
 }
@@ -331,6 +335,7 @@ pub fn read_own_usage_summary(path: &Path) -> Option<SessionUsageSummary> {
 /// Whole-file own + total usage (the deletion capture reads both from the
 /// child's frozen file: `own` for the child's own row, `total` for the
 /// spend the parent's attribution carries).
+#[must_use]
 pub fn read_session_usage(path: &Path) -> Option<SessionUsageTotals> {
     scan_file(path).map(|scan| scan.totals())
 }
@@ -358,7 +363,7 @@ mod tests {
         scan.summary()
     }
 
-    fn message(id: &str, role: &str, usage: Value) -> Value {
+    fn message(id: &str, role: &str, usage: &Value) -> Value {
         json!({ "type": "message", "id": id, "message": { "role": role, "usage": usage } })
     }
 
@@ -379,7 +384,7 @@ mod tests {
             message(
                 "a",
                 "assistant",
-                json!({
+                &json!({
                     "input": 100, "output": 10, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 110,
                     "cost": { "input": 0.0, "output": 1.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 1.0 }
                 }),
@@ -389,7 +394,7 @@ mod tests {
             message(
                 "b",
                 "assistant",
-                json!({
+                &json!({
                     "input": 50, "output": 5, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 55,
                     "cost": { "input": 0.0, "output": 0.5, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.5 }
                 }),
@@ -413,7 +418,7 @@ mod tests {
         let assistant = message(
             "a",
             "assistant",
-            json!({
+            &json!({
                 "input": 40, "output": 4, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 44,
                 "cost": { "input": 0.0, "output": 0.4, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.4 }
             }),
@@ -453,7 +458,7 @@ mod tests {
             message(
                 "a",
                 "assistant",
-                json!({
+                &json!({
                     "input": 100, "output": 10, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 110,
                     "cost": { "input": 0.0, "output": 1.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 1.0 }
                 }),
@@ -494,12 +499,12 @@ mod tests {
                 message(
                     "u",
                     "user",
-                    json!({ "input": 10, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 10, "cost": { "input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.0 } })
+                    &json!({ "input": 10, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 10, "cost": { "input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.0 } })
                 ),
                 message(
                     "a",
                     "assistant",
-                    json!({ "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cost": { "input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.0 } })
+                    &json!({ "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0, "cost": { "input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.0 } })
                 ),
             ]),
             None
@@ -514,7 +519,7 @@ mod tests {
             message(
                 "a",
                 "assistant",
-                json!({
+                &json!({
                     "input": 10, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 11,
                     "cost": { "input": 0.0, "output": 0.1, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.1 }
                 }),
@@ -535,7 +540,7 @@ mod tests {
             message(
                 id,
                 "assistant",
-                json!({
+                &json!({
                     "input": 10, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 11,
                     "cost": { "input": 0.0, "output": cost, "cacheRead": 0.0, "cacheWrite": 0.0, "total": cost }
                 }),
@@ -554,11 +559,11 @@ mod tests {
     #[test]
     fn partial_usage_objects_keep_the_row() {
         let summary = scan_summary(&[
-            message("u", "user", json!(null)),
+            message("u", "user", &json!(null)),
             message(
                 "a",
                 "assistant",
-                json!({ "input": 5, "output": 1, "totalTokens": 6 }),
+                &json!({ "input": 5, "output": 1, "totalTokens": 6 }),
             ),
         ]);
         assert_eq!(
@@ -579,7 +584,7 @@ mod tests {
             message(
                 id,
                 "assistant",
-                json!({
+                &json!({
                     "input": u64::MAX, "output": 1, "cacheRead": 0, "cacheWrite": 0,
                     "totalTokens": u64::MAX,
                     "cost": { "input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.0 }

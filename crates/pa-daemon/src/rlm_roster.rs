@@ -380,7 +380,7 @@ mod tests {
 
         let ledger = RlmSpawnLedger::new(&dir, &sessions, |_| {});
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "sub-1".into(),
                 parent: parent.to_string_lossy().into(),
                 child: child.to_string_lossy().into(),
@@ -389,7 +389,7 @@ mod tests {
             })
             .unwrap();
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "sub-2".into(),
                 parent: child.to_string_lossy().into(),
                 child: grandchild.to_string_lossy().into(),
@@ -398,7 +398,7 @@ mod tests {
             })
             .unwrap();
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "sub-3".into(),
                 parent: parent.to_string_lossy().into(),
                 child: dead.to_string_lossy().into(),
@@ -472,7 +472,7 @@ mod tests {
         write_session(&child, "c", 2);
         let ledger = RlmSpawnLedger::new(&dir, &sessions, |_| {});
         ledger
-            .append_spawn(RlmSpawnInput {
+            .append_spawn(&RlmSpawnInput {
                 child_id: "sub-7".into(),
                 parent: parent.to_string_lossy().into(),
                 child: child.to_string_lossy().into(),

@@ -166,7 +166,7 @@ impl UpdateProducer {
             .as_object_mut()
             .expect("session updates are objects")
             .entry("_meta")
-            .or_insert_with(|| prime_agent_meta(PrimeAgentSessionMeta::default()));
+            .or_insert_with(|| prime_agent_meta(&PrimeAgentSessionMeta::default()));
         let namespace = meta
             .as_object_mut()
             .expect("_meta is a namespaced object")
@@ -181,7 +181,7 @@ impl UpdateProducer {
         *namespace = serde_json::to_value(&payload).expect("meta payload serializes");
         jsonrpc::notification(
             "session/update",
-            json!({ "sessionId": self.session_id, "update": value }),
+            &json!({ "sessionId": self.session_id, "update": value }),
         )
     }
 

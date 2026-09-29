@@ -1,3 +1,17 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures by
+// design on hot paths; 64-bit targets - the narrowing sits at OS/protocol
+// boundaries where the values are bounded (pid syscalls, epoch/elapsed
+// milliseconds), and checked conversions would add panic paths where silent
+// wrap was deliberate.
+#![allow(
+    clippy::large_futures,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    clippy::too_many_lines
+)]
+
 //! The mode ledger: the recording mock terminal's state machine over
 //! the child's whole byte stream. One `scan` walks the stream and one
 //! `leaks` answers the differential — nothing the child armed may still
@@ -99,7 +113,7 @@ impl ModeLedger {
                     );
                     at += 2;
                 }
-                b'_' => at += self.skip_dcs(&bytes[at..]),
+                b'_' => at += Self::skip_dcs(&bytes[at..]),
                 b'(' | b')' => {
                     // A charset designation to US ASCII (`ESC(B`/`ESC)B`) is
                     // the terminal's DEFAULT state — benign (a test runner's
@@ -396,7 +410,7 @@ impl ModeLedger {
 
     /// A DCS sequence (kitty graphics, `ESC_G ... ESC\`): image payload,
     /// no mode state. Returns the bytes consumed.
-    pub(crate) fn skip_dcs(&mut self, bytes: &[u8]) -> usize {
+    pub(crate) fn skip_dcs(bytes: &[u8]) -> usize {
         let mut at = 2;
         while at < bytes.len() {
             if bytes[at] == 0x1b && bytes.get(at + 1) == Some(&0x5c) {

@@ -1,7 +1,12 @@
 //! The worker's client-visible surface: summaries, snapshots, the
 //! roster push, and the event emission family.
 use super::lifecycle::active_lifecycle;
-use super::*;
+use super::{
+    checkpoint_queue_recovery, create_daemon_event_meta, is_injected_prompt_item,
+    is_rlm_child_status_item, json, AgentConnectionState, Arc, DaemonOutbound,
+    DaemonSessionClosedReason, EventPump, Map, Mutex, OutboundFrame, QueueCheckpoint, QueueLanes,
+    QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine, Value, Worker,
+};
 
 use crate::types::SessionSummary;
 
@@ -47,7 +52,7 @@ impl Worker {
         summary
     }
 
-    pub(crate) fn snapshot_locked(&self, core: &SessionCore) -> SessionActionSnapshot {
+    pub(crate) fn snapshot_locked(core: &SessionCore) -> SessionActionSnapshot {
         session_snapshot(core)
     }
 
@@ -161,7 +166,7 @@ impl Worker {
     /// `message_start`/`message_end` pair (the TS `_emit` for rows the
     /// session appends outside a turn: `append_custom_message`, the
     /// `refine` outcome and notice, restored prefix rows).
-    pub(crate) fn emit_custom_row(&self, message: Value) {
+    pub(crate) fn emit_custom_row(&self, message: &Value) {
         {
             let mut core = self.core.lock().unwrap();
             if let Some(store) = core.store.as_mut() {

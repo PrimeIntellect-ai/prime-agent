@@ -571,7 +571,7 @@ async fn get_session_stats(state: &Arc<RpcState>) -> Result<ResponseData, String
             _ => {}
         }
     }
-    let mut stats = json!({
+    let mut session_stats = json!({
         "sessionFile": manager
             .get_session_file()
             .map(|file| file.display().to_string()),
@@ -615,13 +615,13 @@ async fn get_session_stats(state: &Arc<RpcState>) -> Result<ResponseData, String
             }
             None => messages.iter().map(estimate_tokens).sum(),
         };
-        stats["contextUsage"] = json!({
+        session_stats["contextUsage"] = json!({
             "tokens": tokens,
             "contextWindow": context_window,
             "percent": tokens as f64 / context_window as f64 * 100.0,
         });
     }
-    Ok(ResponseData::Present(stats))
+    Ok(ResponseData::Present(session_stats))
 }
 
 /// `get_commands` (TS `createAgentConnectionCommands`): extension

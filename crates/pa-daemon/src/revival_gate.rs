@@ -199,7 +199,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pa-revival-gate-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut session = crate::session_store::SessionFile::create("/work", None, 0);
-        session.append_message(serde_json::json!({
+        session.append_message(&serde_json::json!({
             "role": "user", "content": "hi", "timestamp": 1u64
         }));
         if let Some(state) = state {

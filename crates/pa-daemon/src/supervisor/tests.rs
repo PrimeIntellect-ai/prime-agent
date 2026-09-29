@@ -90,7 +90,7 @@ fn saved_session_rows_carry_the_persisted_thinking_level() {
     session.set_path(path.clone());
     session.append_model_change("p", "m");
     session.append_thinking_level_change("high");
-    session.append_message(json!({"role": "user", "content": "hi", "timestamp": 1u64}));
+    session.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
     session.rewrite().unwrap();
     let info = crate::session_store::read_session_info(&path).unwrap();
     assert_eq!(info.thinking_level.as_deref(), Some("high"));
@@ -129,7 +129,7 @@ fn saved_session_rows_publish_the_own_usage_summary() {
     let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
     let path = dir.join(format!("{}.jsonl", session.session_id()));
     session.set_path(path.clone());
-    session.append_message(json!({
+    session.append_message(&json!({
         "role": "assistant", "content": "done", "provider": "p", "model": "m",
         "timestamp": 1u64,
         "usage": {
@@ -223,7 +223,7 @@ async fn adoption_settles_then_seeds_the_roster_once() {
     );
     let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
     ledger
-        .append_spawn(crate::rlm_ledger::RlmSpawnInput {
+        .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
             child_id: "sub-9".to_string(),
             parent: root_file.to_string_lossy().to_string(),
             child: child_file.to_string_lossy().to_string(),
@@ -531,6 +531,7 @@ async fn an_existing_tombstone_carries_the_stop_past_its_failed_re_write() {
 /// lingering) and lets the accept loop exit. The fake worker holds
 /// its `shutdown` reply on a test-controlled settle, so a pass that
 /// does not wait for the flush barrier fails the assertions below.
+#[cfg(unix)] // the signal-drain state machine: unix signal source
 #[tokio::test]
 async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -683,6 +684,7 @@ async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
 /// shutdown command's gate, and a signal racing an update exit - the
 /// last without flipping the gate, so the update's
 /// descriptor-preserving exit never becomes a terminal stop pass.
+#[cfg(unix)] // the signal-drain state machine: unix signal source
 #[tokio::test]
 async fn a_signal_during_an_in_flight_shutdown_forces() {
     let dir = tempfile::TempDir::new().unwrap();

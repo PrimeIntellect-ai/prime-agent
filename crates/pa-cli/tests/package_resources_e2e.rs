@@ -1,3 +1,22 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
+// by design on hot paths (boxing 130 fns is allocation-churn with zero
+// correctness gain); the fn-length threshold is a style gate, not
+// correctness (the harness fns are intentionally linear); 64-bit targets -
+// the narrowing sits at OS/protocol boundaries where the values are
+// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
+// guarded parses), and checked conversions would add panic paths where
+// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
+// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
+// dossier for the conductor).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! Binary-level e2e: a settings-configured package provides a skill that
 //! appears in a created session's skill list. The scripted faux provider
 //! answers with the request's system prompt (the `<available_skills>`
@@ -32,7 +51,7 @@ fn fixture_package(cwd: &Path) -> PathBuf {
     pkg
 }
 
-fn sandbox(settings: serde_json::Value) -> Sandbox {
+fn sandbox(settings: &serde_json::Value) -> Sandbox {
     let home = tempfile::TempDir::new().unwrap();
     let cwd = home.path().join("work");
     let agent_dir = home.path().join("agent");
@@ -86,14 +105,14 @@ fn package_provided_skill_appears_in_created_session_skill_list() {
     let script = serde_json::json!({ "responses": [{"systemPrompt": true}] });
 
     // No package configured: the skill stays absent.
-    let bare = sandbox(serde_json::json!({}));
+    let bare = sandbox(&serde_json::json!({}));
     let (stdout, stderr, code) = run(&bare, &script);
     assert_eq!(code, 0, "stderr: {stderr}");
     let text = assistant_text(&stdout);
     assert!(!text.contains("e-greeting"), "no skill without the package");
 
     // The configured package contributes its skill to the session.
-    let configured = sandbox(serde_json::json!({"packages": ["../work/fixture-pkg"]}));
+    let configured = sandbox(&serde_json::json!({"packages": ["../work/fixture-pkg"]}));
     let (stdout, stderr, code) = run(&configured, &script);
     assert_eq!(code, 0, "stderr: {stderr}");
     let text = assistant_text(&stdout);
@@ -108,7 +127,7 @@ fn package_provided_skill_appears_in_created_session_skill_list() {
     );
 
     // An explicit empty skills filter disables the package's skills.
-    let filtered = sandbox(serde_json::json!({"packages": [{
+    let filtered = sandbox(&serde_json::json!({"packages": [{
         "source": "../work/fixture-pkg",
         "skills": [],
         "prompts": [],
