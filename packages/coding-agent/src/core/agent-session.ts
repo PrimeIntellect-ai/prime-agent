@@ -215,6 +215,7 @@ import {
 	RLM_CHILD_FAILURE_CUSTOM_TYPE,
 	RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
 } from "./messages.js";
+import { estimateMessagingTokens, MessagingStats, type MessagingStatsSnapshot } from "./messaging-stats.js";
 import type { ModelRegistry } from "./model-registry.js";
 import { findExactModelReferenceMatch } from "./model-resolver.js";
 import { throwIfPromptAdmissionCancelled } from "./prompt-admission.js";
@@ -1738,6 +1739,9 @@ export class AgentSession {
 	// Kept alive for retained children so nested updates (e.g. a grandchild cancel)
 	// still forward to root; torn down when the retained child is disposed.
 	private _rlmChildUnsubscribes = new Map<string, () => void>();
+	private readonly _messagingStats = new MessagingStats();
+	/** True while the current model run was triggered by an agent message. */
+	private _currentRunAgentTriggered = false;
 	/** Latest recap for this session, written by the daemon summarizer; read by a parent to label its child snapshots. */
 	private _currentRecap?: string;
 
@@ -4221,10 +4225,21 @@ export class AgentSession {
 				if (typeof payload.message !== "string") {
 					throw new Error("agent_message.send message must be a string");
 				}
-				return this._agentMessageController.sendAgentMessage({
-					target: assertDirectAgentMessageTarget(payload.target),
-					message: normalizeAgentSessionMessage(payload.message),
-				});
+				return this._agentMessageController
+					.sendAgentMessage({
+						target: assertDirectAgentMessageTarget(payload.target),
+						message: normalizeAgentSessionMessage(payload.message),
+					})
+					.then(
+						(receipt) => {
+							this._messagingStats.recordSendAttempt(false);
+							return receipt;
+						},
+						(error: unknown) => {
+							this._messagingStats.recordSendAttempt(true);
+							throw error;
+						},
+					);
 			}
 			default:
 				throw new Error(`unknown agent message request type "${type}"`);
@@ -4514,6 +4529,9 @@ export class AgentSession {
 						state: "running",
 						execution: "agent_turn",
 					});
+					// Runs whose primary input is an agent message count as
+					// ingestion for the messaging starvation stats.
+					this._currentRunAgentTriggered = isAgentSessionMessage(record.message);
 					this._notifySessionInputCheckpointChange();
 					this._emitQueueUpdate();
 				}
@@ -4654,6 +4672,7 @@ export class AgentSession {
 				const assistantMsg = event.message as AssistantMessage;
 				if (assistantMsg.stopReason !== "error") {
 					addAutonomousUsage(this._autonomousState, assistantMsg.usage);
+					this._messagingStats.recordModelStep(assistantMsg.usage.totalTokens, this._currentRunAgentTriggered);
 				}
 				if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "aborted") {
 					this._assistantTurnsSinceAutoRefine++;
@@ -4708,6 +4727,7 @@ export class AgentSession {
 		}
 
 		if (event.type === "agent_end") {
+			this._currentRunAgentTriggered = false;
 			const msg =
 				this._lastAssistantMessage ??
 				(this._retryPromise ? this._findLastAssistantInMessages(event.messages) : undefined);
@@ -5678,6 +5698,7 @@ export class AgentSession {
 		) {
 			admissionCommitted();
 			const queued = await this.queueAgentMessagePrompt(text, options.streamingBehavior, customMessage);
+			if (queued) this._messagingStats.recordArrival();
 			options.preflightResult?.(queued, queued);
 			return;
 		}
@@ -5692,6 +5713,7 @@ export class AgentSession {
 			customMessage,
 			admissionCommitted,
 		});
+		this._messagingStats.recordArrival();
 		if (customMessage?.details.fromRelationship === "parent") this._repliedToParentSinceTask = false;
 	}
 
@@ -10979,6 +11001,7 @@ export class AgentSession {
 			"rlm.collect": createRlmCollectHostHandler((targets, timeoutMs) =>
 				this.collectRlmChildren(targets, timeoutMs),
 			),
+			"rlm.messaging_stats": async () => this.messagingStats() as unknown as Record<string, unknown>,
 			"rlm.progress.note": createRlmProgressNoteHostHandler((message) => this.noteRlmProgress(message)),
 			"rlm.delete_subagent": createRlmDeleteSubagentHostHandler((target) => this.deleteRlmSubagent(target)),
 			"model.info": async () => ({
@@ -11201,6 +11224,23 @@ export class AgentSession {
 	_contextTokensForCurrentMessages(): number | undefined {
 		const last = this._findLastAssistantMessage();
 		return last ? calculateContextTokens(last.usage) : undefined;
+	}
+
+	/**
+	 * Swarm starvation counters for this session: arrivals, agent-triggered model
+	 * steps vs. all steps, heuristic agent-message context share, and send
+	 * attempts. Instrumentation only; no delivery behavior reads this.
+	 */
+	messagingStats(): MessagingStatsSnapshot {
+		let agentMessageChars = 0;
+		for (const message of this.agent.state.messages) {
+			if (message.role !== "custom" || !isAgentSessionMessage(message)) continue;
+			if (typeof message.content === "string") agentMessageChars += message.content.length;
+		}
+		return this._messagingStats.snapshot({
+			contextTokens: this._contextTokensForCurrentMessages(),
+			estimatedAgentMessageTokens: estimateMessagingTokens(agentMessageChars),
+		});
 	}
 
 	setCurrentRecap(recap: string | undefined): void {

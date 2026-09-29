@@ -1,0 +1,1 @@
+- Added swarm messaging instrumentation with an rlm.messaging_stats() call that reports per-session message, delivery, and queue counters.
