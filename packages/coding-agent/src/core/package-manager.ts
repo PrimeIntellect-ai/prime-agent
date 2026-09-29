@@ -63,6 +63,7 @@ export interface ResolvedPaths {
 	skills: ResolvedResource[];
 	prompts: ResolvedResource[];
 	themes: ResolvedResource[];
+	harness: ResolvedResource[];
 	diagnostics: ResourceDiagnostic[];
 }
 
@@ -155,6 +156,7 @@ interface PiManifest {
 	skills?: string[];
 	prompts?: string[];
 	themes?: string[];
+	harness?: string[];
 }
 
 interface ResourceAccumulator {
@@ -162,6 +164,7 @@ interface ResourceAccumulator {
 	skills: Map<string, { metadata: PathMetadata; enabled: boolean }>;
 	prompts: Map<string, { metadata: PathMetadata; enabled: boolean }>;
 	themes: Map<string, { metadata: PathMetadata; enabled: boolean }>;
+	harness: Map<string, { metadata: PathMetadata; enabled: boolean }>;
 	diagnostics: ResourceDiagnostic[];
 }
 
@@ -190,17 +193,23 @@ interface PackageFilter {
 	skills?: string[];
 	prompts?: string[];
 	themes?: string[];
+	harness?: string[];
 }
 
-type ResourceType = "extensions" | "skills" | "prompts" | "themes";
+type ResourceType = "extensions" | "skills" | "prompts" | "themes" | "harness";
+/** Resource types that can also come from user/project settings and auto-discovery. Harness entries are package-only. */
+type LocalResourceType = Exclude<ResourceType, "harness">;
 
-const RESOURCE_TYPES: ResourceType[] = ["extensions", "skills", "prompts", "themes"];
+/** All resource types a package manifest, filter, or conventional directory can provide. */
+const PACKAGE_RESOURCE_TYPES: ResourceType[] = ["extensions", "skills", "prompts", "themes", "harness"];
+const LOCAL_RESOURCE_TYPES: LocalResourceType[] = ["extensions", "skills", "prompts", "themes"];
 
 const FILE_PATTERNS: Record<ResourceType, RegExp> = {
 	extensions: /\.(ts|js)$/,
 	skills: /\.md$/,
 	prompts: /\.md$/,
 	themes: /\.json$/,
+	harness: /\.json$/,
 };
 
 function getHomeDir(): string {
@@ -733,7 +742,7 @@ export class DefaultPackageManager implements PackageManager {
 		const globalBaseDir = this.agentDir;
 		const projectBaseDir = join(this.cwd, CONFIG_DIR_NAME);
 
-		for (const resourceType of RESOURCE_TYPES) {
+		for (const resourceType of LOCAL_RESOURCE_TYPES) {
 			const target = this.getTargetMap(accumulator, resourceType);
 			const globalEntries = (globalSettings[resourceType] ?? []) as string[];
 			const projectEntries = (projectSettings[resourceType] ?? []) as string[];
@@ -1784,7 +1793,7 @@ export class DefaultPackageManager implements PackageManager {
 		metadata: PathMetadata,
 	): boolean {
 		if (filter) {
-			for (const resourceType of RESOURCE_TYPES) {
+			for (const resourceType of PACKAGE_RESOURCE_TYPES) {
 				const patterns = filter[resourceType as keyof PackageFilter];
 				const target = this.getTargetMap(accumulator, resourceType);
 				if (patterns !== undefined) {
@@ -1798,7 +1807,7 @@ export class DefaultPackageManager implements PackageManager {
 
 		const manifest = this.readPiManifest(packageRoot);
 		if (manifest) {
-			for (const resourceType of RESOURCE_TYPES) {
+			for (const resourceType of PACKAGE_RESOURCE_TYPES) {
 				const entries = manifest[resourceType as keyof PiManifest];
 				this.addManifestEntries(
 					entries,
@@ -1812,7 +1821,7 @@ export class DefaultPackageManager implements PackageManager {
 		}
 
 		let hasAnyDir = false;
-		for (const resourceType of RESOURCE_TYPES) {
+		for (const resourceType of PACKAGE_RESOURCE_TYPES) {
 			const dir = join(packageRoot, resourceType);
 			if (existsSync(dir)) {
 				const files = collectResourceFiles(dir, resourceType);
@@ -1919,7 +1928,9 @@ export class DefaultPackageManager implements PackageManager {
 		target: Map<string, { metadata: PathMetadata; enabled: boolean }>,
 		metadata: PathMetadata,
 	): void {
-		if (!entries) return;
+		// A non-array manifest declaration is ignored, not fatal: for npm/git
+		// packages the throw would otherwise abort the whole resolve().
+		if (!Array.isArray(entries)) return;
 
 		const allFiles = this.collectFilesFromManifestEntries(entries, root, resourceType);
 		const patterns = entries.filter(isOverridePattern);
@@ -2152,6 +2163,8 @@ export class DefaultPackageManager implements PackageManager {
 				return accumulator.prompts;
 			case "themes":
 				return accumulator.themes;
+			case "harness":
+				return accumulator.harness;
 			default:
 				throw new Error(`Unknown resource type: ${resourceType}`);
 		}
@@ -2175,6 +2188,7 @@ export class DefaultPackageManager implements PackageManager {
 			skills: new Map(),
 			prompts: new Map(),
 			themes: new Map(),
+			harness: new Map(),
 			diagnostics: [],
 		};
 	}
@@ -2204,6 +2218,7 @@ export class DefaultPackageManager implements PackageManager {
 			skills: mapToResolved(accumulator.skills),
 			prompts: mapToResolved(accumulator.prompts),
 			themes: mapToResolved(accumulator.themes),
+			harness: mapToResolved(accumulator.harness),
 			diagnostics: accumulator.diagnostics,
 		};
 	}
