@@ -1292,7 +1292,7 @@ class ReplTest(unittest.TestCase):
                 "        globals()['unscheduled_notice'] = coro",
                 "        globals()['interrupted_handle'] = coro.cr_frame.f_locals['self']",
                 "        bridge.emit({'application/json': {'at_notice_create_task': True}})",
-                "        threading.Event().wait(10)",
+                "        threading.Event().wait(1.5)",
                 "    return stop_at_notice_construction",
                 "sys.settrace(stop_at_notice_construction)",
                 "handle = bash('sleep 30')",
@@ -1310,7 +1310,18 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(one(events, "done")["status"], "error")
         self.assertEqual(one(events, "error")["ename"], "KeyboardInterrupt")
         mime = "application/vnd.prime-agent.bash-activity+json"
+        # The auto-bg guard runs sync cells in a worker thread, and the
+        # interrupt's stop request lands at the worker's next bytecode - when
+        # the trap's bounded block returns. The rollback must still arrive.
+        deadline = time.monotonic() + 10
         activity = [event["data"][mime] for event in events if mime in event.get("data", {})]
+        while time.monotonic() < deadline:
+            if len(activity) >= 2 and [item["active"] for item in activity] == [True, False]:
+                break
+            event = self.repl.read_event()
+            events.append(event)
+            if mime in event.get("data", {}):
+                activity.append(event["data"][mime])
         self.assertEqual([item["active"] for item in activity], [True, False])
         self.assertEqual(activity[0]["id"], activity[1]["id"])
         checked = self.repl.execute(
