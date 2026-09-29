@@ -31,6 +31,8 @@ use signals_shutdown::daemon_closing_shutdown_event;
 mod supervision;
 
 #[cfg(test)]
+mod handshake_tests;
+#[cfg(test)]
 mod tests;
 
 // STABLE_LIFETIME_MS is read only by this facade's in-file test modules (via the module's
