@@ -1,7 +1,7 @@
 //! The model-compat family: the OpenAI-completions compat block, the
 //! format enums, the OpenAI-responses and Anthropic compat blocks, and
 //! the `ModelCompat`/`CompatKind` descriptor.
-use super::{Deserialize, JsonMap, Serialize, Value};
+use super::{Deserialize, JsonMap, OpenRouterRouting, Serialize, Value, VercelGatewayRouting};
 
 /// Compatibility settings for OpenAI-compatible completions APIs.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
