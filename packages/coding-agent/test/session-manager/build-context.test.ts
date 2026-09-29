@@ -196,6 +196,27 @@ describe("buildSessionContext", () => {
 		expect(buildSessionContext(entries, "2").messages).toHaveLength(1);
 	});
 
+	it("stops the walk when a repeated id loops the parent chain", () => {
+		// Ids decide the chain: byId keeps the last entry of a repeated id, so the
+		// child of the earlier one walks back into the later one. The walk has to end
+		// at the repeat instead of growing `path` until the array length is refused.
+		const entries: SessionEntry[] = [
+			msg("dup", null, "user", "root"),
+			msg("child", "dup", "assistant", "reply"),
+			msg("dup", "child", "user", "repeated id"),
+			msg("leaf", "dup", "user", "after the repeat"),
+		];
+		const ctx = buildSessionContext(entries, "leaf");
+		expect(ctx.messages.map(textOf)).toEqual(["reply", "repeated id", "after the repeat"]);
+		expect(ctx.model).toMatchObject({ provider: "anthropic", modelId: "claude-test" });
+	});
+
+	it("stops the walk at an entry that is its own parent", () => {
+		expect(buildSessionContext([msg("self", "self", "user", "only entry")], "self").messages.map(textOf)).toEqual([
+			"only entry",
+		]);
+	});
+
 	describe("harness digest dedupe", () => {
 		it("keeps only the newest digest custom message", () => {
 			const ctx = buildSessionContext(chain("u hello", "d digest-a", "a first reply", "d digest-b"));
