@@ -1,6 +1,6 @@
 //! The interaction-telemetry concern (moved with its concern): the
 //! one-shot client wrapper and the adoption events the pa-tui
-//! interactive loop reports through the InteractionTelemetry trait.
+//! interactive loop reports through the `InteractionTelemetry` trait.
 
 use super::*;
 
