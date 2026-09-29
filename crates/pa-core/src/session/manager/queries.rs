@@ -2,7 +2,7 @@
 //! accessor arm - the active context and history snapshot, the branch
 //! scans, the window-backed reads, and the getters.
 
-use super::*;
+use super::{SessionManager, FileEntry, RefineTranscriptParts, Path, SessionHeader, SessionTree};
 
 impl SessionManager {
     /// The active compacted context without hydrating old message bodies.

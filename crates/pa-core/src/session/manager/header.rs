@@ -2,7 +2,7 @@
 //! first-line header read, the depth validation, and the root depth
 //! from the environment.
 
-use super::*;
+use super::{Path, SessionHeader};
 
 /// Read just the header of a session file (first line).
 #[must_use]

@@ -2,7 +2,7 @@
 //! serialized-entry wire, the bounded damage scan, the torn-tail
 //! repair, and the header-validating load.
 
-use super::*;
+use super::{FileEntry, Path, atomic_write, parse_session_entries};
 
 pub(super) fn serialize_entry(entry: &FileEntry) -> String {
     serde_json::to_string(entry).unwrap_or_default()

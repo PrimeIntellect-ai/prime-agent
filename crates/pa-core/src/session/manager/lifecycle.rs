@@ -2,7 +2,9 @@
 //! the open/fork/new/materialize/adopt arm, and the fork's branch-copy
 //! helpers (TS SessionManager.forkFrom).
 
-use super::*;
+use super::{FileEntry, HashMap, SessionManager, PathBuf, NewSessionOptions, Path, load_entries_from_file, migrate_to_current_version, resolve_session_rlm_depth, create_session_id, is_valid_rlm_depth, get_session_file_path, format_iso_now, capture_git_context, root_rlm_depth_from_env, SessionHeader, CURRENT_SESSION_VERSION, AgentMessage};
+#[cfg(test)]
+use super::repair::repair_jsonl_damage;
 
 /// The fork's branch copy (TS `forkFrom`'s entry loop): drop the source
 /// header and its `git_state` rows, re-linking any child whose parent was a

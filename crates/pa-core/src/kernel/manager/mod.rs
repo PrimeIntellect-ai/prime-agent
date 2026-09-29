@@ -21,7 +21,7 @@ use crate::kernel::cancellation::{merge_signals, AbortSignal};
 use crate::kernel::live_kernels;
 use crate::kernel::orphan_journal;
 use crate::kernel::protocol::{parse_event, Event, Request, REPL_PROTOCOL_VERSION};
-use crate::kernel::shared::*;
+use crate::kernel::shared::{KernelDiffDisplay, KernelAttachment, KernelSentAgentMessage, KernelError, ExecuteStatus, ExecuteOptions, ExecuteResult, LateSentAgentMessageCallback, KernelManagerOptions, BASH_ACTIVITY_DISPLAY_MIME, StreamName, DIFF_DISPLAY_MIME, parse_diff_display, ATTACHMENT_DISPLAY_MIME, parse_attachment_display, MAX_ATTACHMENT_DATA_CHARS, AGENT_MESSAGE_DISPLAY_MIME, parse_sent_agent_message, MAX_BACKGROUND_OUTPUT_CHARS, KERNEL_BUSY_REUSE_WAIT_MS, KERNEL_BUSY_INTERRUPT_INTERVAL_MS, KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE, MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS, HostRequestPayload, DEFAULT_MAX_OUTPUT_CHARS, KERNEL_ABORT_GRACE_MS, RESTORE_EXECUTION_TIMEOUT_MS, DEFAULT_SNAPSHOT_DEBOUNCE_MS, SNAPSHOT_EXECUTION_TIMEOUT_MS, MAX_KERNEL_STDERR_CHARS, MAX_KERNEL_STDERR_LOG_BYTES, KernelShutdownOptions, KERNEL_STDERR_LOG_BUDGET_MARKER, HOST_REQUEST_SHUTDOWN_TIMEOUT_MS, KERNEL_SHUTDOWN_TIMEOUT_MS};
 use crate::kernel::state_snapshot::{
     RestoreResult, SnapshotResult, SnapshotSkip, DEFAULT_SNAPSHOT_MAX_BYTES,
     DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,

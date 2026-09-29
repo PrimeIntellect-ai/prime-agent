@@ -2,7 +2,7 @@
 //! the prior-compaction boundary and previous-summary anchors, the cut
 //! resolution, and the session-cut test seam.
 use super::recent_state_anchor::extract_recent_state_anchor;
-use super::*;
+use super::{CutPointResult, FileEntry, find_cut_point, AgentMessage, message_from_entry, SessionManager, context_tokens};
 
 /// Why a compaction cannot prepare (TS `prepareCompaction` returning
 /// `undefined`). The two surfaces spell it differently: `/compact` raises

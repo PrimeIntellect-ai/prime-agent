@@ -1,7 +1,7 @@
 //! The id + timestamp mint (moved with its concern): the session id
 //! minters, the session file path, and the ISO-8601 timestamps.
 
-use super::*;
+use super::{HashMap, Path, PathBuf};
 
 pub(super) fn generate_id(existing: &HashMap<String, usize>) -> String {
     for _ in 0..100 {

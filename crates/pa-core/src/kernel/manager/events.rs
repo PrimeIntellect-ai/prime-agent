@@ -1,7 +1,7 @@
 //! Event dispatch: kernel protocol events routed to streams, display updates,
 //! and background output buffers.
 
-use super::*;
+use super::{Inner, Arc, Event, BASH_ACTIVITY_DISPLAY_MIME, Value, lock, StreamName, KernelError, ExecuteStatus, ExecBuffers, append_truncated, DIFF_DISPLAY_MIME, parse_diff_display, ATTACHMENT_DISPLAY_MIME, parse_attachment_display, MAX_ATTACHMENT_DATA_CHARS, AGENT_MESSAGE_DISPLAY_MIME, parse_sent_agent_message, MAX_BACKGROUND_OUTPUT_CHARS, Guarded};
 use std::fmt::Write as _;
 
 // ---------------------------------------------------------------------------
@@ -280,6 +280,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use serde_json::json;
+    use crate::kernel::manager::ReplKernelManager;
+    use crate::kernel::shared::{BackgroundWorkSettledCallback, KernelManagerOptions};
+    use crate::platform::process::Signal;
 
     #[test]
     fn teardown_resets_pending_background_count() {

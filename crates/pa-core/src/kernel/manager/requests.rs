@@ -1,7 +1,7 @@
 //! Request plumbing: enqueue/execute state machine, signal enum, and failure
 //! description helpers.
 
-use super::*;
+use super::{anyhow, json, ExecuteResult, ReplKernelManager, Request, ExecuteOptions, InternalExecuteResult, Instant, KernelStartOptions, KernelState, lock, AbortSignal, Duration, merge_signals, DEFAULT_MAX_OUTPUT_CHARS, oneshot, ExecBuffers, ExecuteStatus, Arc, ActiveExecution, Mutex, KERNEL_ABORT_GRACE_MS, AsyncWriteExt,};
 
 // ---------------------------------------------------------------------------
 // Request plumbing
