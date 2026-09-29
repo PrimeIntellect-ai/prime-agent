@@ -81,12 +81,12 @@ struct EnvOverride {
 }
 
 impl EnvOverride {
-    fn apply(pairs: Vec<(&str, Option<String>)>) -> Self {
+    fn apply(pairs: &[(&str, Option<String>)]) -> Self {
         let saved = pairs
             .iter()
             .map(|(key, _)| ((*key).to_string(), std::env::var(key).ok()))
             .collect();
-        for (key, value) in &pairs {
+        for (key, value) in pairs {
             match value {
                 Some(value) => std::env::set_var(key, value),
                 None => std::env::remove_var(key),
@@ -149,7 +149,7 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
     let started = dir.path().join("cell-started");
     let finished = dir.path().join("cell-finished");
 
-    let _env = EnvOverride::apply(vec![
+    let _env = EnvOverride::apply(&[
         (
             "PRIME_AGENT_KERNEL_PYTHON",
             Some(kernel_python.display().to_string()),

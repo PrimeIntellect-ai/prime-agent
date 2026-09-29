@@ -195,9 +195,9 @@ impl PackageManager {
         self.progress = Some(callback);
     }
 
-    fn emit_progress(&self, event: ProgressEvent) {
+    fn emit_progress(&self, event: &ProgressEvent) {
         if let Some(callback) = &self.progress {
-            callback(&event);
+            callback(event);
         }
     }
 
@@ -208,7 +208,7 @@ impl PackageManager {
         message: &str,
         operation: impl FnOnce(&mut Self) -> Result<()>,
     ) -> Result<()> {
-        self.emit_progress(ProgressEvent {
+        self.emit_progress(&ProgressEvent {
             kind: ProgressEventKind::Start,
             action,
             source: source.to_string(),
@@ -216,7 +216,7 @@ impl PackageManager {
         });
         match operation(self) {
             Ok(()) => {
-                self.emit_progress(ProgressEvent {
+                self.emit_progress(&ProgressEvent {
                     kind: ProgressEventKind::Complete,
                     action,
                     source: source.to_string(),
@@ -225,7 +225,7 @@ impl PackageManager {
                 Ok(())
             }
             Err(error) => {
-                self.emit_progress(ProgressEvent {
+                self.emit_progress(&ProgressEvent {
                     kind: ProgressEventKind::Error,
                     action,
                     source: source.to_string(),

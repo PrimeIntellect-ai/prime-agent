@@ -531,7 +531,7 @@ pub async fn install_static_token(
     );
     let mut store = inputs.store.lock().unwrap();
     let committed = store
-        .apply_verify_result(record, still_current)
+        .apply_verify_result(&record, still_current)
         .map_err(|error| format!("connection record write failed: {error}"))?;
     let committed_record = store.get(&inputs.server).cloned();
     drop(store);
@@ -812,7 +812,7 @@ mod tests {
         );
         let mut store = manager.connection_store.lock().unwrap();
         store
-            .upsert(new_pending_record(
+            .upsert(&new_pending_record(
                 "pinned-service",
                 "pinned-service",
                 "pinned-service",
@@ -826,7 +826,7 @@ mod tests {
             let mut record = store.get("pinned-service").cloned().unwrap();
             record.status = RecordStatus::Connected;
             record.verified_at = Some(now_ms());
-            store.upsert(record).map_err(|_| ()).unwrap();
+            store.upsert(&record).map_err(|_| ()).unwrap();
         }
         drop(store);
         {
@@ -891,7 +891,7 @@ mod tests {
         );
         let mut store = manager.connection_store.lock().unwrap();
         store
-            .upsert(new_pending_record(
+            .upsert(&new_pending_record(
                 "vanished-service",
                 "vanished-service",
                 "Vanished",
@@ -938,7 +938,7 @@ mod tests {
         {
             let mut store = manager.connection_store.lock().unwrap();
             store
-                .upsert(new_pending_record(
+                .upsert(&new_pending_record(
                     "vanished-service",
                     "vanished-service",
                     "Vanished",
@@ -980,7 +980,7 @@ mod tests {
         {
             let mut store = manager.connection_store.lock().unwrap();
             store
-                .upsert(new_pending_record(
+                .upsert(&new_pending_record(
                     "vanished-service",
                     "vanished-service",
                     "Vanished",
@@ -1016,7 +1016,7 @@ mod tests {
         {
             let mut store = manager.connection_store.lock().unwrap();
             store
-                .upsert(new_pending_record(
+                .upsert(&new_pending_record(
                     "lives-on", "lives-on", "Lives On", endpoint,
                 ))
                 .map_err(|_| ())
@@ -1078,7 +1078,7 @@ mod tests {
         let manager =
             std::sync::Arc::new(std::sync::Mutex::new(McpManager::new(McpManagerOptions {
                 auth_storage: crate::auth::AuthStorage::in_memory(
-                    crate::auth::types::AuthStorageData::default(),
+                    &crate::auth::types::AuthStorageData::default(),
                     std::sync::Arc::new(crate::auth::manager::NoOAuth),
                 ),
                 get_user_servers: no_user_servers(),

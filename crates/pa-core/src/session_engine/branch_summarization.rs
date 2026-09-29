@@ -377,7 +377,7 @@ pub async fn generate_branch_summary(
                         &context,
                         "branch summary",
                         &session_model,
-                        session_api_key,
+                        session_api_key.as_deref(),
                         Some(required),
                     )
                 })

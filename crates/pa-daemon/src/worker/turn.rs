@@ -430,7 +430,7 @@ impl TurnRunner {
                         }
                         pa_core::session_engine::compaction_trace::trace(
                             "emit.compaction_repin",
-                            serde_json::json!({
+                            &serde_json::json!({
                                 "durableEntries": durable_entries,
                                 "micros": repin_started.elapsed().as_micros(),
                             }),
@@ -485,7 +485,7 @@ impl TurnRunner {
                             let _ = store.persist_entry("compaction", entry.clone());
                             pa_core::session_engine::compaction_trace::trace(
                                 "emit.compaction_persist",
-                                serde_json::json!({
+                                &serde_json::json!({
                                     "micros": persist_started.elapsed().as_micros(),
                                 }),
                             );
@@ -548,7 +548,7 @@ impl TurnRunner {
                         engine.on_turn_done();
                         pa_core::session_engine::compaction_trace::trace(
                             "turn.done_emitted",
-                            serde_json::json!({
+                            &serde_json::json!({
                                 "ok": matches!(result, Ok(())),
                             }),
                         );
@@ -974,12 +974,12 @@ impl TurnRunner {
                 let refined = tokio::task::spawn_blocking(move || {
                     pa_core::session_engine::compaction_trace::trace(
                         "autorefine.review_started",
-                        serde_json::Value::Null,
+                        &serde_json::Value::Null,
                     );
                     let outcome = engine.consume_compact_auto_refine();
                     pa_core::session_engine::compaction_trace::trace(
                         "autorefine.review_done",
-                        serde_json::json!({ "ran": outcome.is_ok() }),
+                        &serde_json::json!({ "ran": outcome.is_ok() }),
                     );
                     outcome
                 })

@@ -1699,7 +1699,7 @@ async fn tui_model_picker_applies_and_effort_reports() {
     // intent. `spawn_supervisor` strips the same variables from the daemon
     // side.
     let auth = pa_core::auth::AuthStorage::in_memory_without_env(
-        pa_core::auth::AuthStorageData::default(),
+        &pa_core::auth::AuthStorageData::default(),
         std::sync::Arc::new(pa_core::auth::NoOAuth),
     );
     let mut registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
@@ -1832,7 +1832,7 @@ async fn tui_effort_applies_on_a_map_addressable_model_without_the_reasoning_fla
     .expect("write models.json");
     let supervisor = spawn_supervisor(dir.path());
     let auth = pa_core::auth::AuthStorage::in_memory_without_env(
-        pa_core::auth::AuthStorageData::default(),
+        &pa_core::auth::AuthStorageData::default(),
         std::sync::Arc::new(pa_core::auth::NoOAuth),
     );
     let mut registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
@@ -3046,7 +3046,7 @@ async fn tui_model_pick_refreshes_the_label_and_the_next_turn_resolves() {
     // daemon's (hermetic auth; the models.json key is the only configured
     // credential).
     let auth = pa_core::auth::AuthStorage::in_memory_without_env(
-        pa_core::auth::AuthStorageData::default(),
+        &pa_core::auth::AuthStorageData::default(),
         std::sync::Arc::new(pa_core::auth::NoOAuth),
     );
     let mut registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));

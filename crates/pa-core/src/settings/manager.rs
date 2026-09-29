@@ -81,7 +81,7 @@ impl SettingsManager {
 
     /// In-memory manager (tests, embedded hosts).
     #[must_use]
-    pub fn in_memory(initial: Settings) -> Self {
+    pub fn in_memory(initial: &Settings) -> Self {
         let storage: Arc<dyn SettingsStorage> =
             Arc::new(super::storage::InMemorySettingsStorage::default());
         let content = serde_json::to_string_pretty(&initial).unwrap_or_default();
@@ -202,12 +202,12 @@ impl SettingsManager {
     /// Returns an error when the global settings file cannot be written.
     pub fn set_default_model_and_provider(
         &mut self,
-        provider: String,
-        model: String,
+        provider: &str,
+        model: &str,
     ) -> Result<()> {
-        self.global.default_provider = Some(provider.clone());
-        self.global.default_model = Some(model.clone());
-        self.record_model_use(&provider, &model);
+        self.global.default_provider = Some(provider.to_string());
+        self.global.default_model = Some(model.to_string());
+        self.record_model_use(provider, model);
         self.save_global()
     }
 
@@ -510,7 +510,7 @@ impl SettingsManager {
         self.persist_scope_field(
             SettingsScope::Global,
             "packages",
-            serde_json::Value::Array(packages),
+            &serde_json::Value::Array(packages),
         );
         self.merged = deep_merge(&self.global, &self.project);
     }
@@ -521,7 +521,7 @@ impl SettingsManager {
         self.persist_scope_field(
             SettingsScope::Project,
             "packages",
-            serde_json::Value::Array(packages),
+            &serde_json::Value::Array(packages),
         );
         self.merged = deep_merge(&self.global, &self.project);
     }
@@ -541,7 +541,7 @@ impl SettingsManager {
         self.persist_scope_field(
             SettingsScope::Global,
             field,
-            serde_json::Value::Array(array),
+            &serde_json::Value::Array(array),
         );
         self.merged = deep_merge(&self.global, &self.project);
     }
@@ -561,7 +561,7 @@ impl SettingsManager {
         self.persist_scope_field(
             SettingsScope::Project,
             field,
-            serde_json::Value::Array(array),
+            &serde_json::Value::Array(array),
         );
         self.merged = deep_merge(&self.global, &self.project);
     }
@@ -569,7 +569,7 @@ impl SettingsManager {
     /// Write one field into a scope's file, merging with the current on-disk
     /// document so concurrently-added fields survive. Settings failures are
     /// recorded as warnings, never thrown (the TS save contract).
-    fn persist_scope_field(&mut self, scope: SettingsScope, field: &str, value: serde_json::Value) {
+    fn persist_scope_field(&mut self, scope: SettingsScope, field: &str, value: &serde_json::Value) {
         let load_error = match scope {
             SettingsScope::Global => self.global_load_error.clone(),
             SettingsScope::Project => self.project_load_error.clone(),
@@ -1055,9 +1055,9 @@ mod tests {
 
     #[test]
     fn in_memory_loads_merges_and_saves() {
-        let mut manager = SettingsManager::in_memory(Settings::default());
+        let mut manager = SettingsManager::in_memory(&Settings::default());
         manager
-            .set_default_model_and_provider("prime-inference".into(), "z-ai/glm-5.3".into())
+            .set_default_model_and_provider("prime-inference", "z-ai/glm-5.3")
             .unwrap();
         assert_eq!(manager.get_default_provider(), Some("prime-inference"));
         assert_eq!(manager.get_default_model(), Some("z-ai/glm-5.3"));
@@ -1073,7 +1073,7 @@ mod tests {
     fn code_block_indent_reads_markdown_settings_with_ts_default() {
         // `markdown.codeBlockIndent` (TS getCodeBlockIndent): absent -> the
         // TS default two spaces; set -> the configured string.
-        let manager = SettingsManager::in_memory(Settings::default());
+        let manager = SettingsManager::in_memory(&Settings::default());
         assert_eq!(manager.get_code_block_indent(), "  ");
 
         let settings = Settings {
@@ -1083,7 +1083,7 @@ mod tests {
             }),
             ..Settings::default()
         };
-        let manager = SettingsManager::in_memory(settings);
+        let manager = SettingsManager::in_memory(&settings);
         assert_eq!(manager.get_code_block_indent(), "    ");
     }
 
@@ -1093,7 +1093,7 @@ mod tests {
     /// mode; operator directive 2026-09-28).
     #[test]
     fn chat_detail_persists_the_chosen_level_with_the_startup_fallback() {
-        let mut manager = SettingsManager::in_memory(Settings::default());
+        let mut manager = SettingsManager::in_memory(&Settings::default());
         assert_eq!(manager.get_chat_detail(), "overview");
         manager.set_chat_detail("all").unwrap();
         assert_eq!(manager.get_chat_detail(), "all");
@@ -1122,7 +1122,7 @@ mod tests {
     /// selectable; the follow-up default stays "one-at-a-time".
     #[test]
     fn steering_mode_defaults_to_all_follow_ups_stay_one_at_a_time() {
-        let mut manager = SettingsManager::in_memory(Settings::default());
+        let mut manager = SettingsManager::in_memory(&Settings::default());
         assert_eq!(manager.get_steering_mode(), QueueModeSetting::All);
         assert_eq!(manager.get_follow_up_mode(), QueueModeSetting::OneAtATime);
         manager
@@ -1165,7 +1165,7 @@ mod tests {
 
     #[test]
     fn idle_eviction_semantics() {
-        let mut manager = SettingsManager::in_memory(Settings::default());
+        let mut manager = SettingsManager::in_memory(&Settings::default());
         assert_eq!(
             manager.get_idle_eviction(),
             IdleEviction::Minutes(DEFAULT_IDLE_EVICTION_MINUTES)
@@ -1186,7 +1186,7 @@ mod tests {
         // Unset means OFF (sharing is opt-in): the first-run onboarding
         // question is the opt-in moment, and the answer writes the
         // global scope and survives a reload.
-        let mut manager = SettingsManager::in_memory(Settings::default());
+        let mut manager = SettingsManager::in_memory(&Settings::default());
         assert!(!manager.get_agent_traces_enabled());
         manager.set_agent_traces_enabled(true).unwrap();
         assert!(manager.get_agent_traces_enabled());
@@ -1203,7 +1203,7 @@ mod tests {
         // copied-config home (any standing choice — the flow completes
         // silently). Both answer values count: the predicate is about the
         // choice being made, not its direction.
-        let mut manager = SettingsManager::in_memory(Settings::default());
+        let mut manager = SettingsManager::in_memory(&Settings::default());
         assert!(!manager.agent_traces_choice_written());
         manager.set_agent_traces_enabled(false).unwrap();
         assert!(manager.agent_traces_choice_written());
@@ -1219,7 +1219,7 @@ mod tests {
         // until the user opts out); setCompactionEnabled writes the global
         // scope, so the value survives a reload (a restarted session
         // re-seeds its flag from it).
-        let mut manager = SettingsManager::in_memory(Settings::default());
+        let mut manager = SettingsManager::in_memory(&Settings::default());
         assert!(manager.get_compaction_enabled());
         manager.set_compaction_enabled(false).unwrap();
         assert!(!manager.get_compaction_enabled());
@@ -1230,7 +1230,7 @@ mod tests {
     #[test]
     fn session_archive_policy_semantics() {
         // Absent keys: both rules on with their defaults.
-        let mut manager = SettingsManager::in_memory(Settings::default());
+        let mut manager = SettingsManager::in_memory(&Settings::default());
         assert_eq!(
             manager.get_session_archive_policy(),
             SessionArchivePolicy {
@@ -1261,7 +1261,7 @@ mod tests {
     /// malformed values (empty/whitespace) behave as unset.
     #[test]
     fn image_model_reads_trimmed_or_unset() {
-        let manager = SettingsManager::in_memory(Settings {
+        let manager = SettingsManager::in_memory(&Settings {
             image_model: Some("  battery/mock-vision  ".to_string()),
             ..Settings::default()
         });
@@ -1269,12 +1269,12 @@ mod tests {
             manager.get_image_model().as_deref(),
             Some("battery/mock-vision")
         );
-        let manager = SettingsManager::in_memory(Settings {
+        let manager = SettingsManager::in_memory(&Settings {
             image_model: Some("   ".to_string()),
             ..Settings::default()
         });
         assert_eq!(manager.get_image_model(), None);
-        let manager = SettingsManager::in_memory(Settings::default());
+        let manager = SettingsManager::in_memory(&Settings::default());
         assert_eq!(manager.get_image_model(), None);
     }
 }

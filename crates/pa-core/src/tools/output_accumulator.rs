@@ -269,7 +269,7 @@ pub struct OutputAccumulator {
 }
 
 impl OutputAccumulator {
-    pub fn new(options: OutputAccumulatorOptions) -> Self {
+    pub fn new(options: &OutputAccumulatorOptions) -> Self {
         let max_rolling_bytes = (options.max_bytes * 2).max(1);
         let spill = OutputSpill::new(&options.temp_file_prefix);
         Self {

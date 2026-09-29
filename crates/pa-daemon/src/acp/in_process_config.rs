@@ -355,7 +355,7 @@ async fn apply_in_process_model_switch(
         tokio::task::spawn_blocking(move || {
             let mut settings =
                 pa_core::settings::SettingsManager::create(cwd.as_path(), agent_dir.as_path());
-            settings.set_default_model_and_provider(provider, id)
+            settings.set_default_model_and_provider(&provider, &id)
         })
         .await
         .map_err(|error| anyhow::anyhow!("the settings persist task failed: {error}"))?

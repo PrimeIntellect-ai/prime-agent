@@ -40,7 +40,7 @@ pub struct RlmModelMatch {
     pub selector: String,
 }
 
-fn error(operation: &str, message: String) -> anyhow::Error {
+fn error(operation: &str, message: &str) -> anyhow::Error {
     anyhow::anyhow!("{operation} {message}")
 }
 
@@ -57,12 +57,12 @@ pub fn normalize_requested_rlm_subagent_session_name(
     let Some(value) = value else { return Ok(None) };
     let name = value.trim();
     if name.is_empty() {
-        return Err(error(operation, "name must not be empty".into()));
+        return Err(error(operation, "name must not be empty"));
     }
     if name.chars().count() > RLM_SUBAGENT_SESSION_NAME_MAX_LENGTH {
         return Err(error(
             operation,
-            format!("name must be at most {RLM_SUBAGENT_SESSION_NAME_MAX_LENGTH} characters"),
+            &format!("name must be at most {RLM_SUBAGENT_SESSION_NAME_MAX_LENGTH} characters"),
         ));
     }
     Ok(Some(name.to_string()))
@@ -86,7 +86,7 @@ pub fn normalize_requested_rlm_subagent_thinking_level(
     else {
         return Err(error(
             operation,
-            format!("thinking must be one of: {}", THINKING_LEVELS.join(", ")),
+            &format!("thinking must be one of: {}", THINKING_LEVELS.join(", ")),
         ));
     };
     Ok(Some(matched))
@@ -105,7 +105,7 @@ pub fn normalize_requested_rlm_subagent_model(
     let Some(value) = value else { return Ok(None) };
     let model = value.trim();
     if model.is_empty() {
-        return Err(error(operation, "model must not be empty".into()));
+        return Err(error(operation, "model must not be empty"));
     }
     Ok(Some(model.to_string()))
 }

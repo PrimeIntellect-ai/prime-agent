@@ -170,14 +170,14 @@ impl PackageManager {
                 &project_entries,
                 resource_type,
                 &mut accumulator,
-                top_level_metadata(MetadataSource::Local, SourceScope::Project),
+                &top_level_metadata(MetadataSource::Local, SourceScope::Project),
                 &project_base_dir,
             );
             self.resolve_local_entries(
                 &global_entries,
                 resource_type,
                 &mut accumulator,
-                top_level_metadata(MetadataSource::Local, SourceScope::User),
+                &top_level_metadata(MetadataSource::Local, SourceScope::User),
                 &global_base_dir,
             );
         }
@@ -384,7 +384,7 @@ impl PackageManager {
         entries: &[String],
         resource_type: ResourceType,
         accumulator: &mut ResourceAccumulator,
-        metadata: PathMetadata,
+        metadata: &PathMetadata,
         base_dir: &Path,
     ) {
         if entries.is_empty() {

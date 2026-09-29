@@ -925,17 +925,17 @@ mod tests {
     use crate::auth::types::AuthStorageData;
     use std::sync::Arc;
 
-    fn auth_with(data: serde_json::Value) -> AuthStorage {
+    fn auth_with(data: &serde_json::Value) -> AuthStorage {
         let data = AuthStorageData(data.as_object().cloned().unwrap_or_default());
-        AuthStorage::in_memory(data, Arc::new(NoOAuth))
+        AuthStorage::in_memory(&data, Arc::new(NoOAuth))
     }
 
     /// Like [`auth_with`] but with ambient `PRIME_API_KEY`/`PRIME_TEAM_ID`
     /// ignored: the stored credential is the only source, so credential
     /// tests are hermetic on boxes that carry Prime Inference env vars.
-    fn auth_without_env(data: serde_json::Value) -> AuthStorage {
+    fn auth_without_env(data: &serde_json::Value) -> AuthStorage {
         let data = AuthStorageData(data.as_object().cloned().unwrap_or_default());
-        AuthStorage::in_memory_without_env(data, Arc::new(NoOAuth))
+        AuthStorage::in_memory_without_env(&data, Arc::new(NoOAuth))
     }
 
     fn model(id: &str, provider: &str) -> Model {
@@ -950,7 +950,7 @@ mod tests {
 
     #[test]
     fn in_memory_loads_built_in_catalog() {
-        let registry = ModelRegistry::in_memory(auth_with(serde_json::json!({})));
+        let registry = ModelRegistry::in_memory(auth_with(&serde_json::json!({})));
         assert!(registry.get_error().is_none());
         assert!(!registry.get_all().is_empty());
         // Bundled private model is present in the unfiltered catalog.
@@ -962,7 +962,7 @@ mod tests {
 
     #[test]
     fn available_filters_by_configured_auth() {
-        let auth = auth_with(serde_json::json!({
+        let auth = auth_with(&serde_json::json!({
             "anthropic": { "type": "api_key", "key": "sk-ant" }
         }));
         let registry = ModelRegistry::in_memory(auth);
@@ -988,7 +988,7 @@ mod tests {
         // provider with the same probe result: a stale provider's whole
         // model list stays gated while a second authed provider keeps its
         // models searchable.
-        let mut auth = auth_without_env(serde_json::json!({
+        let mut auth = auth_without_env(&serde_json::json!({
             "anthropic": { "type": "api_key", "key": "sk-ant" },
             "openai": { "type": "api_key", "key": "sk-oai" }
         }));
@@ -1021,7 +1021,7 @@ mod tests {
             } } }"#,
         )
         .unwrap();
-        let auth = auth_with(serde_json::json!({}));
+        let auth = auth_with(&serde_json::json!({}));
         let mut registry = ModelRegistry::create(auth, &models_path);
         assert!(registry.get_error().is_none());
         let custom = registry
@@ -1047,14 +1047,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let models_path = dir.path().join("models.json");
         std::fs::write(&models_path, "{ not json").unwrap();
-        let registry = ModelRegistry::create(auth_with(serde_json::json!({})), &models_path);
+        let registry = ModelRegistry::create(auth_with(&serde_json::json!({})), &models_path);
         assert!(registry.get_error().is_some());
         assert!(!registry.get_all().is_empty());
     }
 
     #[test]
     fn header_precedence_model_over_provider() {
-        let mut registry = ModelRegistry::in_memory(auth_with(serde_json::json!({
+        let mut registry = ModelRegistry::in_memory(auth_with(&serde_json::json!({
             "anthropic": { "type": "api_key", "key": "sk-ant" }
         })));
         let mut m = model("m", "anthropic");
@@ -1094,7 +1094,7 @@ mod tests {
         // model repriced, one new entry, well past the coverage floor so
         // the build accepts it. The scope-keyed cache serves this scope's
         // snapshot only; another credential never sees it.
-        let auth = auth_without_env(serde_json::json!({
+        let auth = auth_without_env(&serde_json::json!({
             "prime-inference": { "type": "api_key", "key": "live-key",
                 "primeTeam": { "teamId": "team-1", "name": "Team 1" } }
         }));
@@ -1164,7 +1164,7 @@ mod tests {
             .iter()
             .any(|model| model.provider == "anthropic" && model.id != repriced.id));
         // A different credential's scope never sees this snapshot.
-        let other_auth = auth_without_env(serde_json::json!({
+        let other_auth = auth_without_env(&serde_json::json!({
             "prime-inference": { "type": "api_key", "key": "other-key",
                 "primeTeam": { "teamId": "team-2", "name": "Team 2" } }
         }));
@@ -1198,7 +1198,7 @@ mod tests {
             "{ not json",
         )
         .unwrap();
-        let registry = ModelRegistry::create(auth_with(serde_json::json!({})), &models_path);
+        let registry = ModelRegistry::create(auth_with(&serde_json::json!({})), &models_path);
         // The bundled public prime-inference models serve the catalog.
         assert!(registry
             .get_all()
@@ -1209,7 +1209,7 @@ mod tests {
 
     #[test]
     fn explicit_private_ids_are_authorized() {
-        let registry = ModelRegistry::in_memory(auth_with(serde_json::json!({})));
+        let registry = ModelRegistry::in_memory(auth_with(&serde_json::json!({})));
         let private_model = model("internal/custom-private", "prime-inference");
         assert!(!registry.is_authorized_private_model(&private_model));
     }
@@ -1218,7 +1218,7 @@ mod tests {
     fn a_stored_copilot_credential_rewrites_its_models_base_url() {
         // TS `githubCopilotOAuthProvider.modifyModels`: the token's
         // proxy endpoint wins.
-        let auth = auth_without_env(serde_json::json!({
+        let auth = auth_without_env(&serde_json::json!({
             "github-copilot": {
                 "type": "oauth",
                 "access": "tid=1;exp=2;proxy-ep=proxy.enterprise.githubcopilot.com",
@@ -1234,7 +1234,7 @@ mod tests {
         assert_eq!(grok.base_url, "https://api.enterprise.githubcopilot.com");
         // An enterprise credential without a proxy endpoint routes onto
         // the enterprise API.
-        let auth = auth_without_env(serde_json::json!({
+        let auth = auth_without_env(&serde_json::json!({
             "github-copilot": {
                 "type": "oauth",
                 "access": "plain-token", "refresh": "gh", "expires": 4_102_444_800_000i64,
@@ -1252,7 +1252,7 @@ mod tests {
 
     #[test]
     fn a_stored_xai_subscription_switches_its_models_onto_responses() {
-        let auth = auth_without_env(serde_json::json!({
+        let auth = auth_without_env(&serde_json::json!({
             "xai": {
                 "type": "oauth",
                 "access": "grok",
@@ -1321,7 +1321,7 @@ mod tests {
 
     #[test]
     fn without_a_stored_xai_subscription_the_models_stay_on_completions() {
-        let registry = ModelRegistry::in_memory(auth_without_env(serde_json::json!({})));
+        let registry = ModelRegistry::in_memory(auth_without_env(&serde_json::json!({})));
         let grok = registry
             .get_all()
             .iter()

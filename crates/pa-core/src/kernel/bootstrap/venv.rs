@@ -432,7 +432,7 @@ fn read_bootstrap_version(venv: &Path) -> Option<BootstrapVersion> {
     (parsed.schema > 0).then_some(parsed)
 }
 
-fn extra_uv_args_match(a: &Option<Vec<String>>, b: &[&str]) -> bool {
+fn extra_uv_args_match(a: Option<&[String]>, b: &[&str]) -> bool {
     match a {
         None => false,
         Some(a) => a.iter().map(String::as_str).eq(b.iter().copied()),
@@ -450,7 +450,7 @@ fn bootstrap_skill_key(skill: &BootstrapPythonSkill) -> String {
 /// sessions are fine: the venv is a shared cache, not a per-session manifest,
 /// so a session whose skill set differs must not force reinstalls.
 fn recorded_skills_cover(
-    recorded: &Option<Vec<BootstrapPythonSkill>>,
+    recorded: Option<&[BootstrapPythonSkill]>,
     current: &[BootstrapPythonSkill],
 ) -> bool {
     if current.is_empty() {
@@ -477,22 +477,27 @@ fn bootstrap_base_version_current(
             version.schema == BOOTSTRAP_SCHEMA
                 && version.runtime.as_deref() == Some(runtime_identity)
                 && version.snapshot.as_deref() == Some(STATE_SNAPSHOT_REQUIREMENT)
-                && extra_uv_args_match(&version.extra_uv_args, &default_rlm_extra_uv_args())
+                && extra_uv_args_match(
+                    version.extra_uv_args.as_deref(),
+                    &default_rlm_extra_uv_args(),
+                )
         }
         None => false,
     }
 }
 
 fn bootstrap_version_current(
-    version: Option<BootstrapVersion>,
+    version: Option<&BootstrapVersion>,
     runtime_identity: &str,
     python_skills: &[BootstrapPythonSkill],
 ) -> bool {
-    bootstrap_base_version_current(version.clone(), runtime_identity)
-        && recorded_skills_cover(
-            &version.as_ref().and_then(|v| v.python_skills.clone()),
-            python_skills,
-        )
+    version.is_some_and(|version| {
+        bootstrap_base_version_current(Some(version.clone()), runtime_identity)
+            && recorded_skills_cover(
+                version.python_skills.as_deref(),
+                python_skills,
+            )
+    })
 }
 
 pub(crate) fn write_bootstrap_version(
@@ -1006,7 +1011,7 @@ pub(crate) fn kernel_ready(
     python_skills: &[BootstrapPythonSkill],
 ) -> bool {
     let (version, raw) = read_bootstrap_version_raw(venv);
-    bootstrap_version_current(version, runtime_identity, python_skills)
+    bootstrap_version_current(version.as_ref(), runtime_identity, python_skills)
         && has_prime_agent_runtime_memoized(
             python,
             runtime_identity,
@@ -1136,7 +1141,7 @@ mod tests {
         let version = read_bootstrap_version(dir.path()).expect("version written");
         assert_eq!(version.schema, BOOTSTRAP_SCHEMA);
         assert_eq!(version.runtime.as_deref(), Some("sha256:abc"));
-        assert!(bootstrap_version_current(Some(version), "sha256:abc", &[]));
+        assert!(bootstrap_version_current(Some(&version), "sha256:abc", &[]));
         assert!(!bootstrap_base_version_current(
             read_bootstrap_version(dir.path()),
             "sha256:other"
@@ -1995,10 +2000,10 @@ print(json.dumps({"closure": sorted(closure), "violations": violations}))
             skill("websearch", "/skills/websearch", "h2"),
         ]);
         let current = [skill("edit", "/skills/edit", "h1")];
-        assert!(recorded_skills_cover(&recorded, &current));
+        assert!(recorded_skills_cover(recorded.as_deref(), &current));
         // A missing record (new session skill) does force a sync.
         assert!(!recorded_skills_cover(
-            &recorded,
+            recorded.as_deref(),
             &[
                 skill("edit", "/skills/edit", "h1"),
                 skill("goal", "/skills/goal", "h3")
@@ -2006,12 +2011,12 @@ print(json.dumps({"closure": sorted(closure), "violations": violations}))
         ));
         // A changed pyproject hash does force a sync.
         assert!(!recorded_skills_cover(
-            &recorded,
+            recorded.as_deref(),
             &[skill("edit", "/skills/edit", "changed")],
         ));
         // No records at all: nothing is covered.
-        assert!(!recorded_skills_cover(&None, &current));
-        assert!(recorded_skills_cover(&None, &[]));
+        assert!(!recorded_skills_cover(None, &current));
+        assert!(recorded_skills_cover(None, &[]));
     }
 
     #[cfg(unix)]

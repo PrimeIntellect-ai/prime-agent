@@ -189,7 +189,7 @@ pub async fn capture_notice_content(probe: &dyn CompactionKernelProbe) -> Option
     let pruned = probe.prune_oversized_variables().await;
     super::compaction_trace::trace(
         "compact.kernel_pruned",
-        serde_json::json!({
+        &serde_json::json!({
             "pruned": pruned.as_ref().map(std::vec::Vec::len),
         }),
     );
@@ -208,7 +208,7 @@ pub async fn capture_notice_content(probe: &dyn CompactionKernelProbe) -> Option
     timer.abort();
     super::compaction_trace::trace(
         "compact.kernel_listed",
-        serde_json::json!({
+        &serde_json::json!({
             "names": names.as_ref().map(std::vec::Vec::len),
         }),
     );

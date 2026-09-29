@@ -291,7 +291,7 @@ impl AuthStorage {
         Self::from_storage(backend, oauth)
     }
 
-    pub fn in_memory(data: AuthStorageData, oauth: Arc<dyn OAuthIntegration>) -> Self {
+    pub fn in_memory(data: &AuthStorageData, oauth: Arc<dyn OAuthIntegration>) -> Self {
         Self::in_memory_with_env_source(data, oauth, Arc::new(ProcessEnvCredentials))
     }
 
@@ -300,7 +300,7 @@ impl AuthStorage {
     /// model catalog scope (an ambient provider credential variable such
     /// as `PRIME_API_KEY` cannot make models available through this
     /// storage). Otherwise behaves like [`AuthStorage::in_memory`].
-    pub fn in_memory_without_env(data: AuthStorageData, oauth: Arc<dyn OAuthIntegration>) -> Self {
+    pub fn in_memory_without_env(data: &AuthStorageData, oauth: Arc<dyn OAuthIntegration>) -> Self {
         Self::in_memory_with_env_source(data, oauth, Arc::new(NoEnvCredentials))
     }
 
@@ -308,7 +308,7 @@ impl AuthStorage {
     /// resolution for tests and embedded hosts (no ambient env reads).
     #[cfg(test)]
     pub(crate) fn in_memory_with_env(
-        data: AuthStorageData,
+        data: &AuthStorageData,
         oauth: Arc<dyn OAuthIntegration>,
         env_credentials: Arc<dyn EnvCredentialSource>,
     ) -> Self {
@@ -316,7 +316,7 @@ impl AuthStorage {
     }
 
     fn in_memory_with_env_source(
-        data: AuthStorageData,
+        data: &AuthStorageData,
         oauth: Arc<dyn OAuthIntegration>,
         env_credentials: Arc<dyn EnvCredentialSource>,
     ) -> Self {
@@ -1216,20 +1216,20 @@ mod tests {
         }
     }
 
-    fn storage_with(data: serde_json::Value) -> AuthStorage {
+    fn storage_with(data: &serde_json::Value) -> AuthStorage {
         storage_with_env(data, ScriptedEnv(HashMap::new()))
     }
 
-    fn storage_with_env(data: serde_json::Value, env: ScriptedEnv) -> AuthStorage {
+    fn storage_with_env(data: &serde_json::Value, env: ScriptedEnv) -> AuthStorage {
         let data = AuthStorageData(data.as_object().cloned().unwrap_or_default());
-        AuthStorage::in_memory_with_env(data, Arc::new(NoOAuth), Arc::new(env))
+        AuthStorage::in_memory_with_env(&data, Arc::new(NoOAuth), Arc::new(env))
     }
 
     #[test]
     fn runtime_override_wins() {
         // Non-prime provider: runtime beats stored; ambient env of the test
         // process cannot interfere (stored outranks env for these).
-        let mut auth = storage_with(serde_json::json!({
+        let mut auth = storage_with(&serde_json::json!({
             "anthropic": { "type": "api_key", "key": "stored-key" }
         }));
         assert_eq!(auth.get_api_key("anthropic").as_deref(), Some("stored-key"));
@@ -1244,7 +1244,7 @@ mod tests {
 
     #[test]
     fn stale_marking_skips_source_and_clears() {
-        let mut auth = storage_with(serde_json::json!({
+        let mut auth = storage_with(&serde_json::json!({
             "prime-inference": { "type": "api_key", "key": "sk-stale" }
         }));
         assert!(auth.mark_auth_stale("prime-inference"));
@@ -1268,7 +1268,7 @@ mod tests {
         // the new one, and the same value keeps serving the same
         // resolution.
         let mut auth = storage_with_env(
-            serde_json::json!({}),
+            &serde_json::json!({}),
             ScriptedEnv(HashMap::from([(
                 "ANTHROPIC_API_KEY".to_string(),
                 "sk-one".to_string(),
@@ -1304,7 +1304,7 @@ mod tests {
         // The stored arm: replacing the credential changes the hashed
         // material, so a stale marking of the old key never gates the new
         // one.
-        let mut auth = storage_with(serde_json::json!({
+        let mut auth = storage_with(&serde_json::json!({
             "anthropic": { "type": "api_key", "key": "sk-old" }
         }));
         assert!(auth.mark_auth_stale("anthropic"));
@@ -1323,7 +1323,7 @@ mod tests {
 
     #[test]
     fn set_and_remove_credentials() {
-        let mut auth = storage_with(serde_json::json!({}));
+        let mut auth = storage_with(&serde_json::json!({}));
         auth.set(
             "anthropic",
             AuthCredential::ApiKey {
@@ -1350,7 +1350,7 @@ mod tests {
 
     #[test]
     fn command_keys_resolve() {
-        let mut auth = storage_with(serde_json::json!({
+        let mut auth = storage_with(&serde_json::json!({
             "anthropic": { "type": "api_key", "key": "!echo cmd-key" }
         }));
         assert_eq!(auth.get_api_key("anthropic").as_deref(), Some("cmd-key"));
@@ -1360,7 +1360,7 @@ mod tests {
     fn env_key_priority_for_prime_inference() {
         // prime-inference prefers the environment over stored.
         let mut auth = storage_with_env(
-            serde_json::json!({
+            &serde_json::json!({
                 "prime-inference": { "type": "api_key", "key": "stored-key" }
             }),
             ScriptedEnv(HashMap::from([(
@@ -1376,7 +1376,7 @@ mod tests {
 
     #[test]
     fn fallback_resolver_last_resort() {
-        let mut auth = storage_with(serde_json::json!({}));
+        let mut auth = storage_with(&serde_json::json!({}));
         auth.set_fallback_resolver(Arc::new(|provider| {
             (provider == "custom").then(|| "fb-key".to_string())
         }));
@@ -1385,7 +1385,7 @@ mod tests {
 
     #[test]
     fn provider_headers_team_selection() {
-        let auth = storage_with(serde_json::json!({
+        let auth = storage_with(&serde_json::json!({
             "prime-inference": {
                 "type": "api_key",
                 "key": "pi-key",
@@ -1406,7 +1406,7 @@ mod tests {
         // box posture): PRIME_API_KEY supplies the key, the stored login's
         // team still scopes the header.
         let mut auth = storage_with_env(
-            serde_json::json!({
+            &serde_json::json!({
                 "prime-inference": {
                     "type": "api_key",
                     "key": "pi-key",
@@ -1430,7 +1430,7 @@ mod tests {
             Some("team-1")
         );
         // The stored team survives a runtime API-key override too.
-        let mut auth = storage_with(serde_json::json!({
+        let mut auth = storage_with(&serde_json::json!({
             "prime-inference": {
                 "type": "api_key",
                 "key": "pi-key",
@@ -1451,7 +1451,7 @@ mod tests {
         );
         // PRIME_TEAM_ID env wins over the stored selection.
         let auth = storage_with_env(
-            serde_json::json!({
+            &serde_json::json!({
                 "prime-inference": {
                     "type": "api_key",
                     "key": "pi-key",
@@ -1484,7 +1484,7 @@ mod tests {
 
     #[test]
     fn prime_inference_key_writes_follow_the_ts_assignment_rules() {
-        let mut auth = storage_with(serde_json::json!({}));
+        let mut auth = storage_with(&serde_json::json!({}));
         // A team write binds the team to the key.
         auth.set_prime_inference_api_key("sk-1", PrimeTeamAssignment::Team(team("1", "Team 1")));
         assert_eq!(
@@ -1544,7 +1544,7 @@ mod tests {
 
     #[test]
     fn prime_inference_team_selection_rebinds_only_the_stored_key() {
-        let mut auth = storage_with(serde_json::json!({}));
+        let mut auth = storage_with(&serde_json::json!({}));
         // Without a stored credential the selection is a no-op.
         auth.set_prime_inference_team_selection(Some(team("1", "Team 1")), None);
         assert_eq!(auth.get_all().get(PRIME_INFERENCE_PROVIDER_ID), None);
@@ -1572,7 +1572,7 @@ mod tests {
             StoredPrimeTeam::PersonalAccount
         );
         // A non-api-key credential is never rebound.
-        let mut auth = storage_with(serde_json::json!({
+        let mut auth = storage_with(&serde_json::json!({
             "prime-inference": {
                 "type": "oauth", "access": "a", "refresh": null, "expires": 1
             }
@@ -1635,13 +1635,13 @@ mod tests {
     #[test]
     fn prime_inference_team_selection_reads_follow_the_ts_tri_state() {
         // No credential: no selection.
-        let auth = storage_with(serde_json::json!({}));
+        let auth = storage_with(&serde_json::json!({}));
         assert_eq!(
             auth.get_prime_inference_team_selection(),
             StoredPrimeTeam::NotSelected
         );
         // A stored team selection reads back.
-        let auth = storage_with(serde_json::json!({
+        let auth = storage_with(&serde_json::json!({
             "prime-inference": {
                 "type": "api_key",
                 "key": "pi-key",
@@ -1653,7 +1653,7 @@ mod tests {
             StoredPrimeTeam::Team(team("team-1", "Team 1"))
         );
         // A stored personal account reads back.
-        let auth = storage_with(serde_json::json!({
+        let auth = storage_with(&serde_json::json!({
             "prime-inference": {
                 "type": "api_key", "key": "pi-key", "primeTeam": null
             }
@@ -1665,7 +1665,7 @@ mod tests {
         // PRIME_TEAM_ID hides the stored selection (the env pin owns the
         // team).
         let auth = storage_with_env(
-            serde_json::json!({
+            &serde_json::json!({
                 "prime-inference": {
                     "type": "api_key", "key": "pi-key", "primeTeam": null
                 }
@@ -1684,7 +1684,7 @@ mod tests {
         // override (fleet P5, the dogfood daemon posture — no PRIME_TEAM_ID
         // pin needed).
         let auth = storage_with_env(
-            serde_json::json!({
+            &serde_json::json!({
                 "prime-inference": {
                     "type": "api_key",
                     "key": "pi-key",
@@ -1701,7 +1701,7 @@ mod tests {
             StoredPrimeTeam::Team(team("team-1", "Team 1"))
         );
         // A runtime override (the active source) does not hide it either.
-        let mut auth = storage_with(serde_json::json!({
+        let mut auth = storage_with(&serde_json::json!({
             "prime-inference": {
                 "type": "api_key",
                 "key": "pi-key",
@@ -1783,12 +1783,12 @@ mod tests {
     fn storage_over_backend_with(
         oauth: Arc<CountingOAuth>,
         provider: &str,
-        credential: AuthCredential,
+        credential: &AuthCredential,
     ) -> (AuthStorage, Arc<dyn AuthStorageBackend>) {
         let backend: Arc<dyn AuthStorageBackend> =
             Arc::new(crate::auth::storage::InMemoryAuthStorageBackend::default());
         let mut data = AuthStorageData::default();
-        data.insert(provider, &credential);
+        data.insert(provider, credential);
         let seed = serde_json::to_string_pretty(&data.0).unwrap_or_default();
         backend
             .with_lock(&mut |current| {
@@ -1811,7 +1811,7 @@ mod tests {
         let (mut auth, _backend) = storage_over_backend_with(
             oauth.clone(),
             "x-fast",
-            oauth_credential("live-access", now_epoch_ms() + 3_600_000),
+            &oauth_credential("live-access", now_epoch_ms() + 3_600_000),
         );
         assert_eq!(auth.get_api_key("x-fast").as_deref(), Some("live-access"));
         assert_eq!(
@@ -1832,7 +1832,7 @@ mod tests {
             delay_ms: 120,
         });
         let (mut auth, backend) =
-            storage_over_backend_with(oauth.clone(), "x-peer", expired_oauth("old-access"));
+            storage_over_backend_with(oauth.clone(), "x-peer", &expired_oauth("old-access"));
         let writer_backend = Arc::clone(&backend);
         let (wrote_tx, wrote_rx) = std::sync::mpsc::channel::<std::time::Duration>();
         std::thread::spawn(move || {
@@ -1892,7 +1892,7 @@ mod tests {
             delay_ms: 80,
         });
         let (_, backend) =
-            storage_over_backend_with(oauth.clone(), "x-flight", expired_oauth("old-access"));
+            storage_over_backend_with(oauth.clone(), "x-flight", &expired_oauth("old-access"));
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let mut handles = Vec::new();
         for _ in 0..2 {

@@ -858,7 +858,7 @@ mod tests {
 
     fn test_auth_storage() -> AuthStorage {
         AuthStorage::in_memory(
-            crate::auth::types::AuthStorageData::default(),
+            &crate::auth::types::AuthStorageData::default(),
             std::sync::Arc::new(crate::auth::manager::NoOAuth),
         )
     }

@@ -115,8 +115,8 @@ pub(crate) fn resolve_path(path: &str) -> String {
 }
 
 pub(crate) fn compare_optional_iso(
-    left: &Option<String>,
-    right: &Option<String>,
+    left: Option<&str>,
+    right: Option<&str>,
 ) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (left, right) {

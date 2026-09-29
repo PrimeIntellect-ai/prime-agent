@@ -447,7 +447,7 @@ impl IpythonKernelProvisioner {
 
 fn emit_startup_progress(
     inner: &Arc<ProvisionerInner>,
-    on_progress: &Option<KernelBootstrapProgressHandler>,
+    on_progress: Option<&KernelBootstrapProgressHandler>,
     message: &str,
 ) {
     let mut state = inner
@@ -524,7 +524,7 @@ async fn run_startup(
     let mut attempt: u32 = 0;
     let outcome = loop {
         attempt += 1;
-        match start_kernel(&inner, &on_progress).await {
+        match start_kernel(&inner, on_progress.as_ref()).await {
             Ok(manager) => break Ok(manager),
             Err(error) => {
                 if inner
@@ -543,7 +543,7 @@ async fn run_startup(
                     RETRY_BACKOFF_MS[(attempt as usize - 1).min(RETRY_BACKOFF_MS.len() - 1)];
                 emit_startup_progress(
                     &inner,
-                    &on_progress,
+                    on_progress.as_ref(),
                     &format!("Kernel start failed; retrying in {backoff_ms}ms…"),
                 );
                 tokio::select! {
@@ -620,7 +620,7 @@ async fn race_startup(
 /// spawn, `cold` means no prior namespace snapshot existed to restore.
 async fn start_kernel(
     inner: &Arc<ProvisionerInner>,
-    on_progress: &Option<KernelBootstrapProgressHandler>,
+    on_progress: Option<&KernelBootstrapProgressHandler>,
 ) -> anyhow::Result<ReplKernelManager> {
     let started = std::time::Instant::now();
     let cold = !inner
@@ -645,7 +645,7 @@ async fn start_kernel(
 /// The bootstrap itself; see [`start_kernel`].
 async fn start_kernel_impl(
     inner: &Arc<ProvisionerInner>,
-    on_progress: &Option<KernelBootstrapProgressHandler>,
+    on_progress: Option<&KernelBootstrapProgressHandler>,
 ) -> anyhow::Result<ReplKernelManager> {
     let options = &inner.options;
     let cwd = inner.cwd.clone();
@@ -716,7 +716,7 @@ async fn start_kernel_impl(
     // covers only start(). Restore/bootstrap run per-kernel afterwards.
     let start = manager.start(KernelStartOptions {
         signal: None,
-        on_bootstrap_progress: on_progress.clone(),
+        on_bootstrap_progress: on_progress.cloned(),
     });
     let boot = async {
         with_kernel_boot_permit(move || async move {

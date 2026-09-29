@@ -134,7 +134,7 @@ pub fn extract_json_object(text: &str) -> Result<serde_json::Value, String> {
 /// Normalize an untrusted proposal, preserving invalid edit fields for
 /// apply-time validation.
 #[must_use]
-pub fn normalize_refinement_proposal(value: serde_json::Value) -> RefinementProposal {
+pub fn normalize_refinement_proposal(value: &serde_json::Value) -> RefinementProposal {
     let record = value.as_object().cloned().unwrap_or_default();
     let string_field = |key: &str, fallback: &str| -> String {
         record
@@ -173,7 +173,7 @@ pub fn parse_proposal(text: &str) -> Result<RefinementProposal, String> {
     if !value.is_object() {
         return Err("Refiner JSON must be an object".to_string());
     }
-    Ok(normalize_refinement_proposal(value))
+    Ok(normalize_refinement_proposal(&value))
 }
 
 fn slug(raw: &str, fallback: &str) -> String {

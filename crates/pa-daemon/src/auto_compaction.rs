@@ -92,7 +92,7 @@ impl AgentSessionEngine {
         }
         pa_core::session_engine::compaction_trace::trace(
             "auto.threshold_start_emitted",
-            serde_json::Value::Null,
+            &serde_json::Value::Null,
         );
         // TS assigns `_autoCompactionAbortController` for the run's
         // duration: an `abort_compaction` command lands in the slot and
@@ -162,7 +162,7 @@ impl AgentSessionEngine {
                     }
                     pa_core::session_engine::compaction_trace::trace(
                         "auto.notice_emitted",
-                        serde_json::Value::Null,
+                        &serde_json::Value::Null,
                     );
                 }
                 // Adoption telemetry (TS `compaction_end` handling counts
@@ -192,7 +192,7 @@ impl AgentSessionEngine {
                 }
                 pa_core::session_engine::compaction_trace::trace(
                     "auto.end_emitted",
-                    serde_json::Value::Null,
+                    &serde_json::Value::Null,
                 );
             }
             // A skip consumed the check (TS `CompactionSkippedError`): the

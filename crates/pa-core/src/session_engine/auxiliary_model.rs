@@ -76,11 +76,11 @@ pub fn resolve_auxiliary_model(
     context: &AuxiliaryModelContext,
     purpose: &str,
     session_model: &Model,
-    session_api_key: Option<String>,
+    session_api_key: Option<&str>,
     required_context_tokens: Option<u64>,
 ) -> ResolvedAuxiliaryModel {
     let fallback =
-        || session_fallback_with_headers(context, session_model, session_api_key.clone());
+        || session_fallback_with_headers(context, session_model, session_api_key.map(str::to_string));
     let settings = crate::settings::SettingsManager::create(&context.cwd, &context.agent_dir);
     // A malformed or whitespace value behaves as unset (TS
     // `getAuxiliaryModel`): the pass falls back to the session model.
@@ -169,7 +169,7 @@ mod tests {
     /// The tempdir must outlive the resolve call (the registry reads
     /// models.json on demand); each test keeps the handle in scope.
     fn context_with_settings(
-        settings: serde_json::Value,
+        settings: &serde_json::Value,
     ) -> (tempfile::TempDir, AuxiliaryModelContext) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -191,7 +191,7 @@ mod tests {
     /// call is the only other path that must carry the stored team).
     #[test]
     fn the_session_fallback_keeps_the_merged_headers() {
-        let (dir, context) = context_with_settings(serde_json::json!({}));
+        let (dir, context) = context_with_settings(&serde_json::json!({}));
         std::fs::write(
             dir.path().join("auth.json"),
             serde_json::json!({
@@ -218,13 +218,13 @@ mod tests {
 
     #[test]
     fn unset_selector_keeps_the_session_model() {
-        let (_dir, context) = context_with_settings(serde_json::json!({}));
+        let (_dir, context) = context_with_settings(&serde_json::json!({}));
         let session = model("session-model", "faux", 8_000);
         let routed = resolve_auxiliary_model(
             &context,
             "compaction summary",
             &session,
-            Some("session-key".to_string()),
+            Some("session-key"),
             None,
         );
         assert_eq!(routed.model.id, "session-model");
@@ -234,13 +234,13 @@ mod tests {
     #[test]
     fn selector_equal_to_the_session_model_keeps_the_session_model() {
         let (_dir, context) =
-            context_with_settings(serde_json::json!({ "auxiliaryModel": "faux/session-model" }));
+            context_with_settings(&serde_json::json!({ "auxiliaryModel": "faux/session-model" }));
         let session = model("session-model", "faux", 8_000);
         let routed = resolve_auxiliary_model(
             &context,
             "compaction summary",
             &session,
-            Some("session-key".to_string()),
+            Some("session-key"),
             None,
         );
         assert_eq!(routed.model.id, "session-model");
@@ -250,13 +250,13 @@ mod tests {
     #[test]
     fn configured_selector_routes_to_the_auxiliary_model() {
         let (_dir, context) =
-            context_with_settings(serde_json::json!({ "auxiliaryModel": "testaux/aux-model" }));
+            context_with_settings(&serde_json::json!({ "auxiliaryModel": "testaux/aux-model" }));
         let session = model("session-model", "faux", 8_000);
         let routed = resolve_auxiliary_model(
             &context,
             "compaction summary",
             &session,
-            Some("session-key".to_string()),
+            Some("session-key"),
             None,
         );
         assert_eq!(routed.model.id, "aux-model");
@@ -270,13 +270,13 @@ mod tests {
     #[test]
     fn unknown_selector_falls_back_to_the_session_model() {
         let (_dir, context) =
-            context_with_settings(serde_json::json!({ "auxiliaryModel": "testaux/missing" }));
+            context_with_settings(&serde_json::json!({ "auxiliaryModel": "testaux/missing" }));
         let session = model("session-model", "faux", 8_000);
         let routed = resolve_auxiliary_model(
             &context,
             "branch summary",
             &session,
-            Some("session-key".to_string()),
+            Some("session-key"),
             None,
         );
         assert_eq!(routed.model.id, "session-model");
@@ -286,7 +286,7 @@ mod tests {
     #[test]
     fn too_small_window_falls_back_to_the_session_model() {
         let (_dir, context) =
-            context_with_settings(serde_json::json!({ "auxiliaryModel": "testaux/aux-model" }));
+            context_with_settings(&serde_json::json!({ "auxiliaryModel": "testaux/aux-model" }));
         let session = model("session-model", "faux", 8_000);
         // The required size exceeds the auxiliary window (128000): the
         // routing falls back instead of failing over-limit on the wire.
@@ -294,7 +294,7 @@ mod tests {
             &context,
             "compaction summary",
             &session,
-            Some("session-key".to_string()),
+            Some("session-key"),
             Some(200_000),
         );
         assert_eq!(routed.model.id, "session-model");
@@ -303,7 +303,7 @@ mod tests {
             &context,
             "compaction summary",
             &session,
-            Some("session-key".to_string()),
+            Some("session-key"),
             Some(1_000),
         );
         assert_eq!(routed.model.id, "aux-model");
@@ -311,7 +311,7 @@ mod tests {
 
     #[test]
     fn selector_outside_the_allowlist_falls_back() {
-        let (_dir, context) = context_with_settings(serde_json::json!({
+        let (_dir, context) = context_with_settings(&serde_json::json!({
             "auxiliaryModel": "testaux/aux-model",
             "allowedModels": ["faux/session-model"],
         }));
@@ -320,7 +320,7 @@ mod tests {
             &context,
             "compaction summary",
             &session,
-            Some("session-key".to_string()),
+            Some("session-key"),
             None,
         );
         assert_eq!(routed.model.id, "session-model");

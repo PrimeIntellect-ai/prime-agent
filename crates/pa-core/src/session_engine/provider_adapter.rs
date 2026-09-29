@@ -120,7 +120,7 @@ pub fn switchable_stream_fn(target: Arc<std::sync::RwLock<Option<ProviderTarget>
                 .clone()
                 .expect("provider target set before the first stream");
             Box::pin(
-                async move { stream_once(model, api_key, service_tier, headers, context, options) },
+                async move { stream_once(&model, api_key, service_tier, headers, context, options) },
             )
         },
     )
@@ -138,7 +138,7 @@ pub fn switchable_stream_fn(target: Arc<std::sync::RwLock<Option<ProviderTarget>
 /// Returns the provider stream's error when the request fails (the
 /// per-attempt failures the retry driver classifies).
 pub fn stream_once(
-    model: Model,
+    model: &Model,
     api_key: Option<String>,
     service_tier: Option<pa_types::ai::ServiceTier>,
     headers: Option<std::collections::BTreeMap<String, String>>,
@@ -188,7 +188,7 @@ pub fn stream_once(
         reasoning: Some(model_thinking_level(options.reasoning)),
         thinking_budgets: None,
     };
-    let stream = pa_ai::stream_simple(&model, &ai_context, Some(stream_options))
+    let stream = pa_ai::stream_simple(model, &ai_context, Some(stream_options))
         .map_err(|error| anyhow::anyhow!("{error:?}"))?;
     // Pump pa-ai events into a pa-agent event stream (the loop's
     // ModelStream): each provider event is forwarded verbatim.

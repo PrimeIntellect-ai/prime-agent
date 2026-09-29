@@ -40,7 +40,7 @@ fn sink() -> &'static Sink {
 /// One phase boundary. `phase` names the boundary (dotted
 /// `surface.stage[.what]`); `detail` carries phase-specific numbers
 /// (counts, byte sizes, entry ids).
-pub fn trace(phase: &str, detail: serde_json::Value) {
+pub fn trace(phase: &str, detail: &serde_json::Value) {
     let sink = sink();
     if matches!(sink, Sink::Off) {
         return;
@@ -49,7 +49,7 @@ pub fn trace(phase: &str, detail: serde_json::Value) {
     let line = serde_json::json!({
         "phase": phase,
         "elapsedMicros": elapsed,
-        "detail": detail,
+        "detail": detail.clone(),
     });
     match sink {
         Sink::Stderr => {
