@@ -74,7 +74,7 @@ pub struct AgentObserveSummary {
 }
 
 impl AgentObserveSummary {
-    fn to_value(&self) -> Value {
+    pub(super) fn to_value(&self) -> Value {
         let mut row = json!({
             "activeSessionId": self.active_session_id,
             "sessionId": self.session_id,
