@@ -166,10 +166,8 @@ pub fn stale_active_goal_failure(entries: &[pa_types::session::FileEntry]) -> Op
             pa_types::session::FileEntry::Message {
                 message: pa_types::session::AgentMessage::Assistant(assistant),
                 ..
-            } => {
-                if newest_assistant.is_none() {
-                    newest_assistant = Some(assistant);
-                }
+            } if newest_assistant.is_none() => {
+                newest_assistant = Some(assistant);
             }
             _ => {}
         }
@@ -604,7 +602,7 @@ mod tests {
                         .unwrap_or_default(),
                     ),
                 }]),
-                usage: Default::default(),
+                usage: pa_types::ai::Usage::default(),
                 stop_reason: pa_types::ai::StopReason::Error,
                 stop_reason_raw: None,
                 error_message: Some(error.to_string()),
@@ -642,7 +640,7 @@ mod tests {
         // A corpse with no error text still names the failure.
         // The quota-park class keeps the goal: not stale.
         assert_eq!(
-            stale_active_goal_failure(&[active.clone(), rate_limited.clone()]),
+            stale_active_goal_failure(&[active.clone(), rate_limited]),
             None
         );
         // A healthy turn after the mint: not stale.
@@ -661,7 +659,7 @@ mod tests {
                 response_model: None,
                 response_id: None,
                 diagnostics: None,
-                usage: Default::default(),
+                usage: pa_types::ai::Usage::default(),
                 stop_reason: pa_types::ai::StopReason::Stop,
                 stop_reason_raw: None,
                 error_message: None,
@@ -675,10 +673,7 @@ mod tests {
                 rest: serde_json::Map::default(),
             },
         };
-        assert_eq!(
-            stale_active_goal_failure(&[active.clone(), healthy.clone()]),
-            None
-        );
+        assert_eq!(stale_active_goal_failure(&[active.clone(), healthy]), None);
         // The settle completed: the error row is the newest goal row —
         // nothing to resurrect, not stale (the terminal row stands).
         assert_eq!(

@@ -161,12 +161,11 @@ pub fn is_permanent_provider_failure_kind(
 ) -> bool {
     match kind {
         Some("invalid_request") if status == Some(404) => false,
-        Some("invalid_request" | "refusal" | "permission" | "safety") => true,
         // A payment failure (HTTP 402's deterministic kind) never
         // reflills mid-ladder: no retry can succeed until the wallet is
         // topped up, so it settles on the first attempt (the disclosure
         // row still fires — the failure-scoped outcome).
-        Some("payment_required") => true,
+        Some("invalid_request" | "refusal" | "permission" | "safety" | "payment_required") => true,
         Some("auth") => retries_performed > 0,
         _ => false,
     }

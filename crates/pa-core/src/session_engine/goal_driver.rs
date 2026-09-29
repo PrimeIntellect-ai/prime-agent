@@ -815,7 +815,7 @@ mod tests {
                     .unwrap_or_default(),
                 ),
             }]),
-            usage: Default::default(),
+            usage: pa_types::ai::Usage::default(),
             stop_reason: pa_types::ai::StopReason::Error,
             stop_reason_raw: None,
             error_message: Some(error.to_string()),
