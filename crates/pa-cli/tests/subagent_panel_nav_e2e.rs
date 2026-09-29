@@ -440,3 +440,95 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
         "the agents-back key returned to the view"
     );
 }
+
+/// The attached parent's top bar bills the ledger-seeded passive child's
+/// spend: the parent's own $1.00 plus the child's $0.30.
+#[tokio::test]
+async fn the_title_bills_a_passive_subagents_spend() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+
+    // The family fixture: the parent and its ledger-linked child, each
+    // with one billed assistant turn (the parent $1.00, the child $0.30).
+    let parent_path = write_fixture(
+        &session_dir,
+        "title-bill-parent",
+        "title bill parent",
+        None,
+        0,
+        &[],
+    );
+    let child_path = write_fixture(
+        &session_dir,
+        "title-bill-worker",
+        "title bill worker",
+        Some(&parent_path),
+        1,
+        &[],
+    );
+    for (path, id, input, output, cost) in [
+        (&parent_path, "pm1a", 100, 10, 1.0),
+        (&child_path, "cm1a", 50, 5, 0.3),
+    ] {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .expect("open the fixture for its billed turn");
+        let _ = writeln!(
+            file,
+            "{{\"type\":\"message\",\"id\":\"{id}\",\"timestamp\":\"2026-09-29T00:00:02.100Z\",\"message\":{{\"role\":\"assistant\",\"provider\":\"prime-inference\",\"model\":\"internal/glm-5.3-fast\",\"content\":[{{\"type\":\"text\",\"text\":\"work complete\"}}],\"stopReason\":\"stop\",\"timestamp\":2100,\"usage\":{{\"input\":{input},\"output\":{output},\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":{},\"cost\":{{\"input\":0.0,\"output\":{cost},\"cacheRead\":0.0,\"cacheWrite\":0.0,\"total\":{cost}}}}}}}}}",
+            input + output,
+        );
+    }
+
+    // The durable spawn edge: the roster surfaces the child as the
+    // parent's passive descendant, so the attached parent's title rolls
+    // the child's spend up from the real daemon's seeded row.
+    let ledger = pa_daemon::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &session_dir, |_m| {});
+    ledger
+        .append_spawn(&pa_daemon::rlm_ledger::RlmSpawnInput {
+            child_id: "title-bill-child".to_string(),
+            parent: parent_path.to_string_lossy().to_string(),
+            child: child_path.to_string_lossy().to_string(),
+            depth: 1,
+            name: "title bill worker".to_string(),
+        })
+        .expect("append spawn edge");
+
+    let options = session_options(
+        &supervisor.socket,
+        &session_dir,
+        SessionSelection::Resume(parent_path.clone()),
+        None,
+        true,
+    );
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 15_000 },
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "$1.30".to_string(),
+                timeout_ms: 15_000,
+            },
+        ],
+        width: 120,
+        height: 36,
+    };
+    let run = pa_tui::interactive::run_interactive(options, UiMode::Headless(plan))
+        .await
+        .expect("parent session run");
+    // The top bar row (render_top_bar): the chat name plus one cost span,
+    // the family rollup - the parent's own $1.00 plus the passive child's
+    // $0.30 - with no split.
+    let top_bar = frame_of(&run.frames, "$1.30")
+        .lines()
+        .next()
+        .expect("the top bar row")
+        .to_string();
+    assert!(
+        top_bar.contains("title bill parent") && top_bar.contains("$1.30"),
+        "the top bar bills the family rollup beside the chat name:\n{top_bar}"
+    );
+}

@@ -151,6 +151,10 @@ impl SessionUi {
                 self.note("Usage: /clear", view);
             }
             "new" => {
+                // The lane's app.session.new dispatch owns /new: the
+                // startup-scope-aware session start (draft and prompt
+                // history cleared, the status row, the feature outcome)
+                // lives in one place, the same route the key takes.
                 self.start_new_session(view).await?;
             }
             // TS `/quit` shuts the client down; this build's exit detaches

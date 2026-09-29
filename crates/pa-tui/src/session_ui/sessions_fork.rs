@@ -454,8 +454,9 @@ impl SessionUi {
         self.stash_draft_for_switch(view);
         match self.attach_session(&id, DockFold::FirstFrame).await {
             Ok(()) => {
-                // Session-scoped stats again: the rebuilt title must show
-                // the switched-to session's pair, not the one being left.
+                // Session-scoped stats again: the rebuilt tray must show
+                // the switched-to session's context usage, not the one
+                // being left.
                 self.refresh_stats().await;
                 self.rebuild_view(view, &RebuildKind::Rebind);
                 self.note(&format!("switched to session {id}"), view);
