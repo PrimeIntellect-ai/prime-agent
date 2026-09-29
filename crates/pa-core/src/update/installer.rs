@@ -285,11 +285,17 @@ pub async fn run_installer_from(
 pub fn installed_channel(prefix: &Path) -> Option<&'static str> {
     let marker =
         std::fs::read_to_string(prefix.join("share/prime-agent/.prime-agent-install")).ok()?;
-    // The marker's first line is the installer's own write shape —
-    // "install-rust.sh channel <name>" — so the channel is the tail after
-    // the LAST "channel " marker token, not a line-prefix (a bare
-    // "channel <name>" line reads the same way).
-    let channel = marker.lines().next()?.rsplit_once("channel ")?.1.trim();
+    // The marker's first line must be the installer's OWN write shape —
+    // "install-rust.sh channel <name>" — not merely any line that ends in
+    // a channel claim: a foreign marker ("other installer channel beta")
+    // must never steer the update onto a channel; the exact prefix is the
+    // ownership proof, exactly like the share tree's own marker file.
+    let channel = marker
+        .lines()
+        .next()?
+        .trim()
+        .strip_prefix("install-rust.sh channel ")?
+        .trim();
     match channel {
         "stable" => Some("stable"),
         "beta" => Some("beta"),
@@ -494,6 +500,18 @@ mod tests {
         assert_eq!(installed_channel(&prefix), Some("stable"));
         // A foreign/garbage marker: never a channel claim.
         std::fs::write(share.join(".prime-agent-install"), "nightly\n").unwrap();
+        assert_eq!(installed_channel(&prefix), None);
+        // A FOREIGN channel claim (not the installer's own write shape):
+        // never a channel — the exact prefix is the ownership proof.
+        std::fs::write(
+            share.join(".prime-agent-install"),
+            "other installer channel beta\n",
+        )
+        .unwrap();
+        assert_eq!(installed_channel(&prefix), None);
+        // A bare channel line (not the installer's shape): also None —
+        // the update rides the fetched script's own default.
+        std::fs::write(share.join(".prime-agent-install"), "channel beta\n").unwrap();
         assert_eq!(installed_channel(&prefix), None);
     }
 
