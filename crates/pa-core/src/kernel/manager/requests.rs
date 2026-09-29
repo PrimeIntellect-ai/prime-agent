@@ -177,11 +177,18 @@ impl ReplKernelManager {
                 std::mem::replace(&mut g.pending_background_output_truncated, false);
             g.active_execution = None; // reset below with the execution in hand
         }
+        let (namespace_code, restores_namespace) = match &request {
+            Request::Execute { .. } => (true, false),
+            Request::Restore { .. } => (false, true),
+            _ => (false, false),
+        };
         let execution = Arc::new(ActiveExecution {
             request_id: request_id.clone(),
             code: code.to_string(),
             started,
             max_chars,
+            namespace_code,
+            restores_namespace,
             buffers: Mutex::new(buffers),
             result_tx: Mutex::new(Some(result_tx)),
             opts,
