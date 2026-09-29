@@ -779,7 +779,9 @@ struct FakeWorkerSocket {
     write_half: Box<dyn pa_types::platform::transport::AsyncWriteHalf>,
 }
 
-async fn bind_fake_worker(socket_path: &Path) -> Box<dyn pa_types::platform::transport::TransportListener> {
+async fn bind_fake_worker(
+    socket_path: &Path,
+) -> Box<dyn pa_types::platform::transport::TransportListener> {
     pa_types::platform::transport::bind_transport(socket_path)
         .await
         .expect("bind fake worker socket")
@@ -801,9 +803,7 @@ async fn accept_fake_worker(
 
 /// Read the next private frame the supervisor sent (its header carries the
 /// request id the test's answer must echo).
-async fn read_supervisor_frame(
-    socket: &mut FakeWorkerSocket,
-) -> crate::framing::PrivateFrame {
+async fn read_supervisor_frame(socket: &mut FakeWorkerSocket) -> crate::framing::PrivateFrame {
     let mut reader = PrivateFrameReader::new(&mut socket.read_half, DEFAULT_PRIVATE_FRAME_LIMITS);
     reader
         .read_frame()
@@ -814,11 +814,7 @@ async fn read_supervisor_frame(
 
 /// Answer one request the way the real worker does: the response frame
 /// with the line-serialized [`DaemonResponse`] as its payload.
-async fn answer_supervisor_frame(
-    socket: &mut FakeWorkerSocket,
-    request_id: &str,
-    command: &str,
-) {
+async fn answer_supervisor_frame(socket: &mut FakeWorkerSocket, request_id: &str, command: &str) {
     let payload = crate::protocol::response_line_bytes(&DaemonResponse {
         id: None,
         command: command.to_string(),
@@ -1013,7 +1009,8 @@ async fn a_mid_handshake_registration_cannot_kill_the_handshake() {
     // SERVED-PATH: the wire carries exactly the handshake — the
     // registration's roster refresh found no channel and skipped, so no
     // `get_state` raced the auth frame.
-    let raced = tokio::time::timeout(Duration::from_millis(100), read_supervisor_frame(&mut fake)).await;
+    let raced =
+        tokio::time::timeout(Duration::from_millis(100), read_supervisor_frame(&mut fake)).await;
     assert!(
         raced.is_err(),
         "no route may ride the private handshake channel"

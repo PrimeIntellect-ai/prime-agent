@@ -38,8 +38,15 @@ impl Supervisor {
             let guard = resident.cmd_tx.lock().await;
             guard.clone().ok_or_else(|| anyhow!(WORKER_NOT_CONNECTED))?
         };
-        self.route_command_on(resident, cmd_tx, command_type, payload, timeout_ms, admission)
-            .await
+        self.route_command_on(
+            resident,
+            cmd_tx,
+            command_type,
+            payload,
+            timeout_ms,
+            admission,
+        )
+        .await
     }
 
     /// Route one command over an explicit worker channel: the handshake's
@@ -251,9 +258,16 @@ impl Supervisor {
         timeout_ms: u64,
         admission: RouteAdmission,
     ) -> Result<DaemonResponse> {
-        self.route_command_on(resident, cmd_tx, command_type, payload, timeout_ms, admission)
-            .await?
-            .typed()
+        self.route_command_on(
+            resident,
+            cmd_tx,
+            command_type,
+            payload,
+            timeout_ms,
+            admission,
+        )
+        .await?
+        .typed()
     }
 
     /// The typed [`Self::route_command_ready`]: the replacement-aware route
