@@ -10,31 +10,11 @@
 //! the worker-side idle clock and park-arm gates are covered by the unit
 //! battery (`idle_passivation_window_*`), and the timed path against the
 //! real binary by the VM census (the settings-driven 1-minute threshold).
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
-#![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Pedantic-gate disposition for THIS test root: the settled-child
+// passivation flow is one intentionally linear harness script (the
+// fn-length gate is style, not correctness).
 #![allow(clippy::too_many_lines)]
-// API-shape opinions, not defects; the surfaces are deliberate.
-#![allow(
-    clippy::unnecessary_wraps,
-    clippy::zero_sized_map_values,
-    clippy::struct_excessive_bools,
-    clippy::struct_field_names
-)]
+
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
