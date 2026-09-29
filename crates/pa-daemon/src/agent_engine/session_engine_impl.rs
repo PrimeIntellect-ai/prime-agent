@@ -1353,7 +1353,7 @@ impl SessionEngine for AgentSessionEngine {
         // row already carries it (the transcript and the model would
         // disagree). The expansion is idempotent over the block, so the
         // admitted turn sees the same text the accepted row persists.
-        for row in request.batch.iter_mut() {
+        for row in &mut request.batch {
             if row.text.starts_with("/skill:") {
                 row.text = self.expand_skill_submission(&row.text);
             }
