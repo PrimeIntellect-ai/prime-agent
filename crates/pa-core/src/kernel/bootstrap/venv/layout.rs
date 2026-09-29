@@ -1,7 +1,7 @@
 //! The venv dir-layout concern (moved with its concern): the override-aware
 //! kernel venv dir, the writable-dir fallback, and the interpreter path.
 
-use super::{anyhow, PathBuf, Path, Digest};
+use super::{anyhow, Path, PathBuf};
 
 pub(crate) fn expand_home(path: &str) -> PathBuf {
     if path == "~" {
