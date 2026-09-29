@@ -21,7 +21,7 @@ impl AgentSession {
     /// post-compaction continuations of a routed turn keep serving it and
     /// the next image-free batch returns to the session model. `Err` fails
     /// the turn with the actionable refusal.
-    async fn apply_image_model_routing(
+    pub(super) async fn apply_image_model_routing(
         &self,
         images: &[pa_agent::types::ImageContent],
         batch: &[PromptBatchRow],
