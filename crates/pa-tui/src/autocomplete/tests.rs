@@ -392,8 +392,8 @@ fn provider_with_skill(base: &str) -> CombinedAutocompleteProvider {
         name: "skill:brainstorm".to_string(),
         aliases: Vec::new(),
         description: Some("Brainstorm approaches".to_string()),
-        argument_hint: None,
-        takes_argument: false,
+        argument_hint: Some(SKILL_ARGUMENT_HINT.to_string()),
+        takes_argument: true,
         source_tag: Some("#project".to_string()),
     }]);
     provider
@@ -440,9 +440,11 @@ fn skill_commands_suggest_for_the_typed_prefix_and_inline_references() {
 }
 
 #[test]
-fn skill_command_completes_without_a_trailing_separator() {
-    // TS `commandTakesArgument`: a skill command takes no argument,
-    // so completion stays on the command token.
+fn skill_command_completes_into_the_argument_position() {
+    // A skill invocation always wants the user's request text (a bare
+    // submission would expand into the protocol with no task), so the
+    // completion lands in the argument position: the trailing space
+    // stays and the cursor sits after it, ready for the request.
     let provider = provider_with_skill("/tmp");
     let item = item("skill:brainstorm");
     let result = provider.apply_slash_completion(
@@ -452,21 +454,22 @@ fn skill_command_completes_without_a_trailing_separator() {
         &item,
         "/skill:brain",
     );
-    assert_eq!(result.lines[0], "/skill:brainstorm");
-    assert_eq!(result.cursor_col, "/skill:brainstorm".chars().count());
+    assert_eq!(result.lines[0], "/skill:brainstorm ");
+    assert_eq!(result.cursor_col, "/skill:brainstorm ".chars().count());
 }
 
 #[test]
 fn skill_completions_apply_through_the_slash_path() {
     // TS `applyCompletion` finds skill items over the whole command
     // list, so a menu-confirmed skill keeps the leading `/` and stays
-    // a command submission (the file path would drop it).
+    // a command submission (the file path would drop it) — landing in
+    // the argument position like the direct slash completion.
     let provider = provider_with_skill("/tmp");
     let item = item("skill:brainstorm");
     let result =
         provider.apply_completion(&["/skill:brain".to_string()], 0, 12, &item, "/skill:brain");
-    assert_eq!(result.lines[0], "/skill:brainstorm");
-    assert_eq!(result.cursor_col, "/skill:brainstorm".chars().count());
+    assert_eq!(result.lines[0], "/skill:brainstorm ");
+    assert_eq!(result.cursor_col, "/skill:brainstorm ".chars().count());
 }
 
 #[test]
@@ -513,6 +516,15 @@ fn command_catalog_parse_keeps_skills_and_source_labels() {
     // A malformed or empty response yields no entries.
     assert!(skill_command_entries(&serde_json::json!({})).is_empty());
     assert!(skill_command_entries(&serde_json::json!({"commands": []})).is_empty());
+    // Every skill entry advertises its argument (the hint plus the
+    // argument position), never a bare command.
+    for entry in &entries {
+        assert!(
+            entry.takes_argument,
+            "the skill takes an argument: {entry:?}"
+        );
+        assert_eq!(entry.argument_hint.as_deref(), Some(SKILL_ARGUMENT_HINT));
+    }
 }
 
 #[test]

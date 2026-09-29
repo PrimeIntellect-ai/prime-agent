@@ -696,11 +696,19 @@ fn autocomplete_source_label(source_info: &serde_json::Value) -> Option<String> 
     autocomplete_source_tag(source_info).map(|tag| format!("#{tag}"))
 }
 
+/// The argument hint every skill menu row carries (the trailing muted
+/// metadata): a skill invocation always wants the user's request text,
+/// so the menu advertises the argument instead of a bare command.
+pub const SKILL_ARGUMENT_HINT: &str = "your request";
+
 /// The `skill:` commands of a daemon `get_commands` response (TS
 /// `createBaseAutocompleteProvider`'s skill list over
 /// `connectionCommands.filter(source === "skill")`): the name stays the
 /// wire form (`skill:<name>`), the description and the source label ride
-/// along for the menu row.
+/// along for the menu row, and the entry always takes an argument — a
+/// bare `/skill:<name>` submission expands into the skill's protocol with
+/// no task text, so the completion lands in the argument position (the
+/// trailing space) and the hint names what belongs there.
 pub fn skill_command_entries(commands: &serde_json::Value) -> Vec<SlashCommandEntry> {
     let Some(entries) = commands
         .get("commands")
@@ -720,8 +728,8 @@ pub fn skill_command_entries(commands: &serde_json::Value) -> Vec<SlashCommandEn
                     .get("description")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string),
-                argument_hint: None,
-                takes_argument: false,
+                argument_hint: Some(SKILL_ARGUMENT_HINT.to_string()),
+                takes_argument: true,
                 source_tag: entry.get("sourceInfo").and_then(autocomplete_source_label),
             })
         })

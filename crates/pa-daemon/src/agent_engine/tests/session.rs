@@ -320,3 +320,124 @@ async fn live_branch_rebuild_reloads_the_goal_state_from_the_moved_branch() {
         .await
         .expect("engine drop join");
 }
+
+/// One faux-driven engine with a demo skill installed on disk, running
+/// `prompt` through the daemon's admission seam (the `/skill:` expansion
+/// site) and collecting the emitted events. The faux lock discipline is
+/// [`run_prompts`]'s: held across the whole run.
+fn run_skill_prompt(prompt: &str) -> Vec<EngineEvent> {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = tempfile::TempDir::new().unwrap();
+    let skill_dir = dir.path().join("agent").join("skills").join("demo-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: demo-skill\ndescription: Demo the admission seam\n---\nRun the demo protocol.",
+    )
+    .unwrap();
+    let engine = AgentSessionEngine::new(AgentEngineConfig {
+        cwd: dir.path().to_path_buf(),
+        agent_dir: dir.path().join("agent"),
+        provider: None,
+        model: None,
+        api_key: None,
+        thinking: None,
+        session_dir: None,
+        session_file: None,
+        faux_script: Some(json!({ "engine": "faux", "responses": [{ "text": "ok" }] }).to_string()),
+        supervisor_link: None,
+        telemetry_disabled: None,
+        cron_store: None,
+        queued_steering_probe: None,
+    })
+    .unwrap();
+    let engine = std::sync::Arc::new(engine);
+    engine.register_arc();
+    let mut events: Vec<EngineEvent> = Vec::new();
+    engine.run_prompt(
+        0,
+        PromptRequest {
+            batch: Vec::new(),
+            images: Vec::new(),
+            message: prompt.to_string(),
+            source: "user".to_string(),
+            agent_message_id: None,
+            custom_message: None,
+        },
+        &|| false,
+        &mut |event| {
+            events.push(event);
+            true
+        },
+    );
+    events
+}
+
+/// A bare `/skill:<name>` submission (no task text) admits the turn with
+/// the harness-owned no-task instruction appended: the accepted row is
+/// the expanded skill block whose trailing user message is the
+/// instruction (the engine floor), never the bare protocol, and the
+/// model turn runs (the faux answer lands, no admission error). The
+/// driver is synchronous (the engine's own runtime drives the turn), so
+/// this is a plain test like [`run_prompts`]'s callers.
+#[test]
+fn a_bare_skill_invocation_admits_with_the_no_task_instruction() {
+    let events = run_skill_prompt("/skill:demo-skill");
+    let texts = user_texts(&events);
+    assert!(
+        texts.iter().all(|text| !text.starts_with("/skill:")),
+        "the raw command never reaches the rows: {texts:?}"
+    );
+    let row = texts
+        .iter()
+        .find(|text| text.starts_with("<skill"))
+        .unwrap_or_else(|| panic!("the accepted row carries the expanded block: {texts:?}"));
+    let parsed = pa_types::skill_blocks::parse_skill_block(row)
+        .unwrap_or_else(|| panic!("the accepted row parses as a skill block: {row:?}"));
+    assert_eq!(parsed.name, "demo-skill");
+    assert_eq!(
+        parsed.user_message.as_deref(),
+        Some(crate::agent_engine::lifecycle::BARE_SKILL_INVOCATION_INSTRUCTION),
+        "the floor's instruction rides the block's trailing user message"
+    );
+    assert!(
+        parsed.content.contains("Run the demo protocol."),
+        "the block body carries the skill content: {parsed:?}"
+    );
+    // The turn admits: the faux answer lands and no error ends the run.
+    assert_eq!(assistant_texts(&events), vec!["ok"]);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::Done(Err(_)))),
+        "the bare invocation admits without an error: {events:?}"
+    );
+}
+
+/// A `/skill:<name> args` invocation stays unchanged by the floor: the
+/// accepted row persists the expanded block with the user's args as the
+/// trailing user message, and the appended instruction never appears.
+#[test]
+fn a_skill_invocation_with_args_persists_the_block_and_the_args() {
+    let events = run_skill_prompt("/skill:demo-skill fix the flake");
+    let texts = user_texts(&events);
+    let row = texts
+        .iter()
+        .find(|text| text.starts_with("<skill"))
+        .unwrap_or_else(|| panic!("the accepted row carries the expanded block: {texts:?}"));
+    let parsed = pa_types::skill_blocks::parse_skill_block(row)
+        .unwrap_or_else(|| panic!("the accepted row parses as a skill block: {row:?}"));
+    assert_eq!(parsed.name, "demo-skill");
+    assert_eq!(
+        parsed.user_message.as_deref(),
+        Some("fix the flake"),
+        "the user's args persist as the trailing user message"
+    );
+    assert!(
+        !row.contains(crate::agent_engine::lifecycle::BARE_SKILL_INVOCATION_INSTRUCTION),
+        "the with-args row never carries the floor's instruction: {row:?}"
+    );
+    assert_eq!(assistant_texts(&events), vec!["ok"]);
+}

@@ -12,6 +12,12 @@ use super::{
     SupervisorChildSessions, Value,
 };
 
+/// The harness-owned instruction the engine floor appends to a bare
+/// skill invocation (no task text): the model receives the skill's
+/// protocol, but as an instruction to ask what the user wants first —
+/// never as an imperative to execute (the floor's whole point).
+pub(crate) const BARE_SKILL_INVOCATION_INSTRUCTION: &str = "The user invoked this skill with no task text - ask what they want before executing any protocol inside it.";
+
 impl AgentSessionEngine {
     /// Build the engine: the shared async runtime, the model selection
     /// (create config, else the process env pair), the supervisor link, the
@@ -245,6 +251,16 @@ impl AgentSessionEngine {
     /// inventory), then expand against it. Non-skill inputs and build
     /// failures pass the text through unchanged — the turn then surfaces
     /// the failure it would have surfaced anyway.
+    ///
+    /// A bare invocation (the expanded block parses without a trailing
+    /// user message) carries no task text: the model would receive the
+    /// skill's imperative protocol as its only user message and
+    /// confabulate a task. The engine floor appends the harness-owned
+    /// [`BARE_SKILL_INVOCATION_INSTRUCTION`] as the block's trailing user
+    /// message — the same `\n\n` tail the with-args shape uses, so the
+    /// row's shape is unchanged (every surface parses and renders it
+    /// exactly like the with-args invocation) and the turn admits with
+    /// the model asked what the user wants.
     pub(crate) fn expand_skill_submission(&self, text: &str) -> String {
         let Ok(model) = self.resolve_model() else {
             return text.to_string();
@@ -253,13 +269,22 @@ impl AgentSessionEngine {
             eprintln!("skill submission expansion skipped: session build failed: {error:#}");
             return text.to_string();
         }
-        self.runtime.block_on(async {
+        let expanded = self.runtime.block_on(async {
             let guard = self.session.lock().await;
             match guard.as_deref() {
                 Some(engine) => engine.expand_skill_submission(text),
                 None => text.to_string(),
             }
-        })
+        });
+        // The floor applies only to a parsed skill block without a user
+        // message: an unknown skill or a build failure keeps the raw
+        // command text, and a with-args invocation keeps the user's args.
+        match pa_types::skill_blocks::parse_skill_block(&expanded) {
+            Some(block) if block.user_message.is_none() => {
+                format!("{expanded}\n\n{BARE_SKILL_INVOCATION_INSTRUCTION}")
+            }
+            _ => expanded,
+        }
     }
 
     /// The async build of the core session (the same funnel as
