@@ -21,7 +21,7 @@ fn side_questions_start_abort_and_events_scripted() {
     let script_path = dir.path().join("script.json");
     std::fs::write(
         &script_path,
-        &serde_json::json!({
+        serde_json::json!({
             "responses": [],
             "sideQuestion": {
                 "responses": [

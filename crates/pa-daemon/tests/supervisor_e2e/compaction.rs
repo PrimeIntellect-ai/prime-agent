@@ -25,7 +25,7 @@ fn compaction_commands_scripted_session() {
     let script_path = dir.path().join("script.json");
     std::fs::write(
         &script_path,
-        &serde_json::json!({
+        serde_json::json!({
             "responses": [{ "text": "one turn" }],
             "compaction": { "responses": [
                 // Run 1 (aborted mid-delay), run 2 (success), run 3 (skip).

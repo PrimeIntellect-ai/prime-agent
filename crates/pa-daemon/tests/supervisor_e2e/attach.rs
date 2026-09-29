@@ -121,7 +121,7 @@ fn chunked_snapshot_attach_streams_begin_chunk_end() {
     let script_path = dir.path().join("script.json");
     std::fs::write(
         &script_path,
-        &serde_json::json!({
+        serde_json::json!({
             "responses": [{ "text": "x".repeat(700_000) }]
         })
         .to_string(),
