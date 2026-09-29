@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// The REAL shipped catalog payload projected to the v2 client contract.
-const REAL_PAYLOAD: &str = include_str!("../../tests/fixtures/mcp/plugins-catalog.v2.json");
+const REAL_PAYLOAD: &str = include_str!("../../../tests/fixtures/mcp/plugins-catalog.v2.json");
 
 fn real_catalog() -> crate::mcp::catalog_schema::PluginsCatalog {
     parse_plugins_catalog(REAL_PAYLOAD.as_bytes()).expect("fixture parses")
