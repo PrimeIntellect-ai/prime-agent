@@ -1148,7 +1148,14 @@ impl TurnRunner {
         // included — the TS `agent_end` `messages` payload) are the real
         // frames, and a run whose `agent_end` the abort gate swallowed
         // stays silent exactly like TS (the compact path's detached run).
-        if !engine_agent_end.load(std::sync::atomic::Ordering::SeqCst) {
+        // An ABORTED settle keeps the same silence: the abort flag is
+        // still armed from the abort (the runner clears it only at the
+        // next pickup), and the admission consult's pre-run abort ends
+        // the turn with NO engine `agent_end` at all (no run registered —
+        // the compact-interrupt probe's suppressed-run wire shape, which
+        // the fallback would otherwise break with a synthesized frame).
+        let abort_settled = self.core.lock().unwrap().abort_requested;
+        if !engine_agent_end.load(std::sync::atomic::Ordering::SeqCst) && !abort_settled {
             self.emit_turn_event(json!({ "type": "agent_end" }));
         }
         let snapshot = {

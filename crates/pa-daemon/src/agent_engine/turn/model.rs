@@ -208,7 +208,14 @@ impl AgentSessionEngine {
                             drop_trailing_assistant(&agent).await;
                         }
                         match self
-                            .run_turn_once(&agent, &prompt, first, boundary_passed, aborted, &mut **emit)
+                            .run_turn_once(
+                                &agent,
+                                &prompt,
+                                first,
+                                boundary_passed,
+                                aborted,
+                                &mut **emit,
+                            )
                             .await
                         {
                             Ok(TurnOnce::Message { assistant }) => {

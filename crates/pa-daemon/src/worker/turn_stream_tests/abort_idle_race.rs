@@ -30,7 +30,7 @@
 //!   never reached the run, the held turn serves "held reply" as its OWN
 //!   reply (the first assistant row behind ONE user row), the pre-fix
 //!   dump shape (busy=true abort_requested=true steering_len=2
-//!   run_signal=live). ANY occurrence fails the harness.
+//!   `run_signal=live`). ANY occurrence fails the harness.
 //! - `fixture_leaks` — the expected post-fix artifact of the same
 //!   interleaving: the consult aborts the turn BEFORE its provider call,
 //!   so the faux step the held turn never consumed (the delayed one)
@@ -57,6 +57,7 @@ fn race_knob(name: &str, default: u64) -> u64 {
 /// each, so the interleaving that left the session never-idle reads off
 /// the transcript directly.
 fn dump_hang_state(worker: &Worker) -> String {
+    use std::fmt::Write as _;
     let core = worker.core.lock().unwrap();
     let mut dump = format!(
         "core: busy={} abort_requested={} retry_abort_requested={} \
@@ -99,7 +100,7 @@ fn dump_hang_state(worker: &Worker) -> String {
                 }
                 None => "no-run",
             };
-            dump.push_str(&format!(" turn_agent=present run_signal={run_signal}"));
+            let _ = write!(dump, " turn_agent=present run_signal={run_signal}");
         }
         Some(None) => dump.push_str(" turn_agent=absent"),
         None => dump.push_str(" turn_agent=none-engine"),
@@ -128,13 +129,19 @@ async fn abort_and_send_idle_race_rate_harness() {
     let mut green_reps = 0usize;
     for rep in 1..=reps {
         if let Some(path) = &event_log {
-            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path)
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
             {
                 use std::io::Write;
                 let _ = writeln!(file, "=== RATE_HARNESS rep {rep} ===");
             }
         }
-        let dir = std::env::temp_dir().join(format!("pa-worker-abort-race-{rep}-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!(
+            "pa-worker-abort-race-{rep}-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let config = WorkerConfig {
             socket_path: dir.join("worker.sock"),
@@ -195,11 +202,17 @@ async fn abort_and_send_idle_race_rate_harness() {
             assert!(steered.success, "rep {rep}: steer failed: {steered:?}");
         }
         let follow = worker
-            .dispatch("follow_up", &json!({ "message": "follow up after the batch" }))
+            .dispatch(
+                "follow_up",
+                &json!({ "message": "follow up after the batch" }),
+            )
             .await;
         assert!(follow.success, "rep {rep}: follow_up failed: {follow:?}");
         let sent = worker.abort_and_send_queued();
-        assert!(sent, "rep {rep}: the armed steering batch sent with the abort");
+        assert!(
+            sent,
+            "rep {rep}: the armed steering batch sent with the abort"
+        );
         // THE SETTLE-LATENCY WINDOW first (the original symptom's
         // observable): an honored abort settles the whole queue in
         // single-digit ms when the abort lands on the registered run; the
@@ -222,13 +235,10 @@ async fn abort_and_send_idle_race_rate_harness() {
         // behind the batch's co-delivered user rows is the consult's
         // honored abort leaking the unconsumed step to the batch turn
         // (the fixture artifact).
-        let first_row = tokio::time::timeout(
-            std::time::Duration::from_millis(delay_ms + 10_000),
-            async {
+        let first_row =
+            tokio::time::timeout(std::time::Duration::from_millis(delay_ms + 10_000), async {
                 loop {
-                    let messages = worker
-                        .dispatch("get_messages", &json!({}))
-                        .await;
+                    let messages = worker.dispatch("get_messages", &json!({})).await;
                     if !messages.success {
                         anyhow::bail!("rep {rep}: get_messages failed: {messages:?}");
                     }
@@ -251,9 +261,8 @@ async fn abort_and_send_idle_race_rate_harness() {
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                 }
-            },
-        )
-        .await;
+            })
+            .await;
         let mut honored = false;
         match first_row {
             Ok(Ok((row, users_before))) => {
@@ -306,9 +315,8 @@ async fn abort_and_send_idle_race_rate_harness() {
     println!(
         "RATE_HARNESS reps={reps} green={green_reps} lost_aborts={lost_aborts} fixture_leaks={fixture_leaks}"
     );
-    if lost_aborts > 0 {
-        panic!(
-            "the idle race reproduced at rate: {lost_aborts}/{reps} lost aborts"
-        );
-    }
+    assert!(
+        lost_aborts == 0,
+        "the idle race reproduced at rate: {lost_aborts}/{reps} lost aborts"
+    );
 }

@@ -10,8 +10,8 @@ use crate::engine::{
 // fixtures stay here (burst_runner, turn_session_events, positions_of)
 // - every family drives them, and the children reach them + the worker
 // namespace through `use super::*`.
-mod broadcast;
 mod abort_idle_race;
+mod broadcast;
 mod burst;
 mod feed;
 mod park;
