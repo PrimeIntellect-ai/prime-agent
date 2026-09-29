@@ -174,6 +174,9 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
     fn theme(&self) -> Option<String> {
         None
     }
+    fn image_model(&self) -> Option<String> {
+        None
+    }
     fn default_service_tier(&self) -> String {
         "default".to_string()
     }

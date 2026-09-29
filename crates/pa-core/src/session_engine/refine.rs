@@ -168,6 +168,31 @@ pub fn create_refinement_notice_message(
     }
 }
 
+/// This run's live-context rows (TS `_appendDurableRefineMessage`: the
+/// outcome row, and the notice row only when any edit applied; the audit
+/// entry is durable-only and never enters the context), selected BY ID —
+/// exactly the rows `execute_refinement_with_rows` appended, so
+/// interleaved runs can never select each other's rows. Materialized from
+/// the appended durable entries — the same reconstruction a context
+/// rebuild performs — so the pushed rows are byte-identical to a
+/// rebuild's rows for them.
+pub(crate) fn context_rows_by_ids(entries: &[FileEntry], ids: &[String]) -> Vec<AgentMessage> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let id = entry.id()?;
+            ids.iter()
+                .position(|wanted| wanted == id)
+                .map(|_| match entry {
+                    FileEntry::CustomMessage { payload, .. } => {
+                        AgentMessage::Custom(crate::session::create_custom_message(payload, entry))
+                    }
+                    _ => unreachable!("refinement context rows are custom-message rows"),
+                })
+        })
+        .collect()
+}
+
 /// Refinement history recorded in this session's JSONL entries.
 pub fn session_refinement_history(entries: &[FileEntry]) -> Vec<RefinementResult> {
     entries
@@ -253,6 +278,36 @@ pub async fn execute_refinement(
     source: RefinementSource,
     refine_call: crate::refinement::executor::RefinerFn,
 ) -> anyhow::Result<RefinementResult> {
+    Ok(execute_refinement_with_rows(
+        session,
+        transcript,
+        global_harness_dir,
+        model,
+        options,
+        source,
+        refine_call,
+    )
+    .await?
+    .0)
+}
+
+/// [`execute_refinement`] plus the ids of the live-context rows this run
+/// appended (the outcome row, and the notice row when any edit applied):
+/// the exact-row set the caller's live-context push materializes, so two
+/// interleaved runs can never select each other's rows.
+///
+/// # Errors
+///
+/// Returns the same errors as [`execute_refinement`].
+pub async fn execute_refinement_with_rows(
+    session: &mut SessionManager,
+    transcript: RefinementTranscript<'_>,
+    global_harness_dir: &Path,
+    model: &pa_types::ai::Model,
+    options: &RefineOptions,
+    source: RefinementSource,
+    refine_call: crate::refinement::executor::RefinerFn,
+) -> anyhow::Result<(RefinementResult, Vec<String>)> {
     let RefinementTranscript {
         messages,
         refinement_history,
@@ -344,12 +399,13 @@ pub async fn execute_refinement(
     );
     // Outcome for the TUI; notice for the model (only when edits applied).
     let outcome = create_refinement_outcome_message(&result);
-    let (_, outcome_write) = session.append_custom_message_retained(
+    let (outcome_id, outcome_write) = session.append_custom_message_retained(
         &outcome.custom_type,
         outcome.content.clone(),
         outcome.display,
         outcome.details.clone(),
     );
+    let mut context_row_ids = vec![outcome_id];
     if let Some(error) = audit_write {
         anyhow::bail!("refinement audit row not persisted: {error}");
     }
@@ -358,14 +414,15 @@ pub async fn execute_refinement(
     }
     if result.applied_edits.iter().any(|edit| edit.applied) {
         let notice = create_refinement_notice_message(&result, source);
-        session.append_custom_message(
+        let notice_id = session.append_custom_message(
             &notice.custom_type,
             notice.content.clone(),
             notice.display,
             notice.details.clone(),
         )?;
+        context_row_ids.push(notice_id);
     }
-    Ok(result)
+    Ok((result, context_row_ids))
 }
 
 /// `/refine` request options (session layer).
