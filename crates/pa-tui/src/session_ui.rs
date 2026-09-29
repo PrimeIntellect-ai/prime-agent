@@ -173,11 +173,6 @@ pub(crate) struct SessionUi {
     /// The `terminal.fullscreenMouse` setting: whether the interactive
     /// surface enables mouse tracking; carried into `/new` runs.
     fullscreen_mouse: bool,
-    /// The runtime fullscreen flag (`/fullscreen`, TS `fullscreenEnabled`):
-    /// this surface always renders on the alternate screen, so the flag
-    /// starts on and the command persists the preference (TS
-    /// `settingsManager.setFullscreen`) and reports the TS status.
-    fullscreen_enabled: bool,
     /// The `/speed` display flag (TS `speedDisplayEnabled`): per-client
     /// runtime state, never persisted; turning it off clears the stats and
     /// the row.
