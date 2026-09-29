@@ -292,7 +292,7 @@ async fn compacting_window_parks_a_cleared_suspension_until_it_ends() {
 
 /// A settings fixture: the agent dir's `settings.json` carries the
 /// `idleEvictionMinutes` value under test.
-fn passivation_settings(dir: &std::path::Path, value: &serde_json::Value) {
+pub(super) fn passivation_settings(dir: &std::path::Path, value: &serde_json::Value) {
     std::fs::create_dir_all(dir).unwrap();
     let settings = serde_json::json!({ "idleEvictionMinutes": value });
     std::fs::write(
