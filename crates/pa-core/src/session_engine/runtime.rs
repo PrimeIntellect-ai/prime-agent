@@ -73,10 +73,12 @@ impl SessionRuntime {
         self.cron_mutation_hook = Some(hook);
     }
 
+    #[must_use]
     pub fn goal_driver(&self) -> &Arc<Mutex<GoalDriver>> {
         &self.goal_driver
     }
 
+    #[must_use]
     pub fn cron_store(&self) -> &Arc<AgentCronJobStore> {
         &self.cron_store
     }

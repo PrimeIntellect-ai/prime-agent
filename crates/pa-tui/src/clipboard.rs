@@ -160,6 +160,10 @@ fn copy_on_linux(text: &str, env: &Env) -> bool {
         // TS verifies the tool exists before relying on the async spawn.
         let wl_copy_exists = Command::new("which")
             .arg("wl-copy")
+            // No inherited fds: a probe must never hold the terminal the
+            // TUI owns (the fd-set audit's rule — no child holds
+            // /dev/tty).
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()

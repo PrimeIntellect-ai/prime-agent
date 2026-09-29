@@ -27,6 +27,27 @@ impl SessionUi {
         let (name, args) = pa_types::slash_commands::parse_slash_command(text)
             .unwrap_or_else(|| (String::new(), String::new()));
 
+        // A bare `/skill:<name>` submit never sends. The daemon's
+        // admission seam replaces a sent skill command with its expanded
+        // protocol block, so a bare invocation would hand the model the
+        // protocol as its only user message with no task attached (the
+        // engine floor appends a harness-owned instruction at the far
+        // end; this guard keeps the taskless submission from ever
+        // starting). The draft restores into the editor, the notice
+        // names the fix, and the user stays put to type the request.
+        if name.starts_with("skill:") && args.trim().is_empty() {
+            // The draft restores INTO THE ARGUMENT POSITION (the trailing
+            // space the completion added survives the round trip): the
+            // next keystrokes become the request instead of gluing onto
+            // the command name, so the recovery flow is one step.
+            view.editor.set_text(&format!("{text} "));
+            self.note(
+                "add your request after the skill, e.g. /skill:prime-agent-release make a release of PR #2731",
+                view,
+            );
+            return Ok(());
+        }
+
         // Client-local commands this build implements (not TS builtins).
         match name.as_str() {
             "help" => {
@@ -112,6 +133,7 @@ impl SessionUi {
                 self.refresh_stats().await;
                 self.rebuild_view(view, RebuildKind::Rebind);
                 self.note(&format!("started session {id}"), view);
+                self.track_feature_outcome("new", "completed", None);
             }
             // TS `/quit` shuts the client down; this build's exit detaches
             // and exits (the session keeps running in the daemon).
@@ -155,6 +177,7 @@ impl SessionUi {
                 }
                 self.open_model_picker(view, "").await?;
                 self.track_menu_opened("model", "command");
+                self.track_feature_outcome("model", "initiated", None);
             }
             // `/effort [level]` (TS `handleEffortCommand`): the
             // session's thinking levels drive the outcome — a model
@@ -190,6 +213,7 @@ impl SessionUi {
                 match effort_picker::effort_command(&levels, current.as_deref(), &resolved.args) {
                     effort_picker::EffortCommandOutcome::Open(picker) => {
                         view.effort_picker = Some(picker);
+                        self.track_feature_outcome("effort", "initiated", None);
                     }
                     effort_picker::EffortCommandOutcome::Unsupported => {
                         self.note("Current model does not support thinking", view);
@@ -214,6 +238,7 @@ impl SessionUi {
             "tree" => {
                 if resolved.args.is_empty() {
                     self.track_command_used("tree");
+                    self.track_feature_outcome("tree", "initiated", None);
                     self.open_tree_selector(view, None).await?;
                 } else {
                     self.note("Usage: /tree", view);
@@ -224,6 +249,7 @@ impl SessionUi {
             "fork" => {
                 if resolved.args.is_empty() {
                     self.track_command_used("fork");
+                    self.track_feature_outcome("fork", "initiated", None);
                     self.open_fork_selector(view).await?;
                 } else {
                     self.note("Usage: /fork", view);
@@ -234,6 +260,7 @@ impl SessionUi {
             "clone" => {
                 if resolved.args.is_empty() {
                     self.track_command_used("clone");
+                    self.track_feature_outcome("clone", "initiated", None);
                     self.handle_clone_command(view).await?;
                 } else {
                     self.note("Usage: /clone", view);
@@ -262,6 +289,7 @@ impl SessionUi {
                     self.track_command_used("login");
                     self.open_provider_auth(AuthSelectorKind::Login, view)
                         .await?;
+                    self.track_feature_outcome("login", "initiated", None);
                 } else {
                     view.editor
                         .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
@@ -275,6 +303,7 @@ impl SessionUi {
                     self.track_command_used("logout");
                     self.open_provider_auth(AuthSelectorKind::Logout, view)
                         .await?;
+                    self.track_feature_outcome("logout", "initiated", None);
                 } else {
                     view.editor
                         .set_text(&format!("/{} {}", resolved.original_name, resolved.args));

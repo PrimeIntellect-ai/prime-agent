@@ -51,6 +51,7 @@ const LAUNCHER_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The repo the update installs from (`PRIME_AGENT_RUST_REPO`, the
 /// installer's default).
+#[must_use]
 pub fn repo() -> String {
     std::env::var(ENV_REPO)
         .ok()
@@ -60,6 +61,7 @@ pub fn repo() -> String {
 
 /// The installer script URL: the branch's raw file by default
 /// (`PRIME_AGENT_RUST_INSTALLER_URL` overrides it).
+#[must_use]
 pub fn installer_script_url() -> String {
     if let Ok(url) = std::env::var(ENV_INSTALLER_URL) {
         if !url.trim().is_empty() {
@@ -74,6 +76,7 @@ pub fn installer_script_url() -> String {
 
 /// The install prefix the launcher probe reads (`PRIME_AGENT_RUST_PREFIX`,
 /// the installer's own `~/.local` default).
+#[must_use]
 pub fn install_prefix() -> PathBuf {
     if let Some(prefix) = std::env::var_os(ENV_PREFIX) {
         if !prefix.is_empty() {

@@ -272,7 +272,7 @@ impl AgentSessionEngine {
         }
         pa_core::session_engine::compaction_trace::trace(
             "auto.overflow_start_emitted",
-            serde_json::Value::Null,
+            &serde_json::Value::Null,
         );
         // TS `_runAutoCompaction` assigns `_autoCompactionAbortController`
         // for the overflow run too: an `abort_compaction` command lands in
@@ -319,7 +319,7 @@ impl AgentSessionEngine {
                         .as_deref()
                         .and_then(|engine| engine.telemetry.as_ref())
                     {
-                        telemetry.note_compaction();
+                        telemetry.note_compaction(Some(run.duration_ms));
                     }
                 }
                 // The post-compaction kernel notice goes out before the
@@ -354,7 +354,7 @@ impl AgentSessionEngine {
                 }
                 pa_core::session_engine::compaction_trace::trace(
                     "auto.overflow_end_emitted",
-                    serde_json::Value::Null,
+                    &serde_json::Value::Null,
                 );
                 // The compaction rebuild re-adds the error turn from the
                 // kept tail: drop it again so the retried request is free

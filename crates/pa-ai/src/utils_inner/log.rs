@@ -22,7 +22,7 @@ impl Serialize for LogLevel {
 }
 
 impl LogLevel {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             LogLevel::Debug => "debug",
             LogLevel::Info => "info",
@@ -74,7 +74,9 @@ fn iso_timestamp() -> String {
     let secs = now.as_secs();
     let millis = now.subsec_millis();
     let days = secs / 86_400;
-    let (year, month, day) = civil_from_days(days as i64);
+    // u64::MAX / 86_400 is ~2.1e14; the day count always fits i64.
+    let (year, month, day) =
+        civil_from_days(i64::try_from(days).expect("days since the epoch fit i64"));
     let rem = secs % 86_400;
     format!(
         "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{millis:03}Z",
@@ -88,13 +90,15 @@ fn iso_timestamp() -> String {
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
+    // Howard Hinnant's algorithm: the era remainder is 0..=146_096, the year
+    // of era 0..=399, day 1..=31, and month 1..=12 for any input day count.
+    let doe = u64::try_from(z - era * 146_097).expect("day of era is 0..=146_096");
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
+    let y = i64::try_from(yoe).expect("year of era is 0..=399") + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let d = u32::try_from(doy - (153 * mp + 2) / 5 + 1).expect("day of month is 1..=31");
+    let m = u32::try_from(if mp < 10 { mp + 3 } else { mp - 9 }).expect("month is 1..=12");
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 

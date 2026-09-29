@@ -60,6 +60,7 @@ pub enum ExecuteStatus {
 }
 
 impl ExecuteStatus {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             ExecuteStatus::Ok => EXECUTE_STATUS_OK,
@@ -131,6 +132,7 @@ pub enum ReceiverRole {
 }
 
 impl ReceiverRole {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             ReceiverRole::Parent => "parent",
@@ -241,6 +243,7 @@ pub struct HostRequestHandlers {
 }
 
 impl HostRequestHandlers {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -264,14 +267,17 @@ impl HostRequestHandlers {
         self.handlers = Arc::new(map);
     }
 
+    #[must_use]
     pub fn get(&self, request_type: &str) -> Option<&HostHandlerFn> {
         self.handlers.get(request_type)
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.handlers.is_empty()
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.handlers.len()
     }
@@ -323,6 +329,7 @@ pub struct KernelShutdownOptions {
 }
 
 /// Parse a [`DIFF_DISPLAY_MIME`] payload, tolerating malformed input.
+#[must_use]
 pub fn parse_diff_display(payload: &Value) -> Option<KernelDiffDisplay> {
     let obj = payload.as_object()?;
     let path = obj.get("path")?.as_str()?;

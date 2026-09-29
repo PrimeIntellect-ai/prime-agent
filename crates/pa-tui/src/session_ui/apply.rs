@@ -240,14 +240,43 @@ impl SessionUi {
         }
     }
 
+    /// Report a feature attempt's observed outcome (`agent feature
+    /// outcome`), fire-and-forget like the command event: the feature's
+    /// handling never waits on the telemetry flush.
+    pub(super) fn track_feature_outcome(
+        &mut self,
+        feature: &'static str,
+        outcome: &'static str,
+        duration_ms: Option<u64>,
+    ) {
+        if let Some(telemetry) = self.telemetry.clone() {
+            tokio::spawn(async move {
+                telemetry
+                    .feature_outcome(feature, outcome, duration_ms)
+                    .await;
+            });
+        }
+    }
+
     pub(crate) fn apply_client_event(&mut self, event: DaemonClientEvent, view: &mut AgentView) {
         match event {
             DaemonClientEvent::SessionEvent {
                 active_session_id,
                 event,
+                meta_sequence,
             } => {
                 if active_session_id != self.active_session_id {
                     return;
+                }
+                // The live event-sequence tracker (`view::handoff`): the
+                // run's stash keys the LATEST sequence the worker has
+                // reported — a turn during this run advances it, so the
+                // unchanged-sojourn re-entry matches the post-turn value
+                // the next attach reports instead of this run's own stale
+                // attach sequence. Monotonic max: a replayed event's
+                // sequence never lowers it below the attach's value.
+                if meta_sequence > self.last_event_sequence {
+                    self.last_event_sequence = meta_sequence;
                 }
                 if let Some(update) = event_to_update(&event) {
                     self.apply_update(update, view);

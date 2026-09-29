@@ -21,8 +21,8 @@ use crate::providers::openai_responses_shared::{
 use crate::providers::simple_options::build_base_options;
 use crate::registry::Provider;
 use crate::types::{
-    done_reason, error_reason, AssistantMessage, Context, Model, ModelExt, ModelThinkingLevel,
-    SimpleStreamOptions, StopReason, StreamOptions, Usage,
+    done_reason, error_reason, AssistantMessage, CacheRetention, Context, Model, ModelExt,
+    ModelThinkingLevel, SimpleStreamOptions, StopReason, StreamOptions, Usage,
 };
 use crate::utils_inner::diagnostics::now_ms;
 use crate::utils_inner::http::{send, HttpResponse, RequestOptions};
@@ -182,9 +182,17 @@ fn build_params(
     params.insert("model".into(), json!(deployment_name));
     params.insert("input".into(), json!(messages));
     params.insert("stream".into(), json!(true));
-    if let Some(session_id) = &options.base.session_id {
-        params.insert("prompt_cache_key".into(), json!(session_id));
+    // TS #2948: Azure stores responses server-side by default — pin
+    // `store: false` (the d1fce2ba1 fix the OpenAI Responses provider got and
+    // this Azure copy never did), and drop `prompt_cache_key` when the caller
+    // pinned cacheRetention to none. Azure does not send
+    // `prompt_cache_retention` (support unclear) — that stays as-is.
+    if options.base.cache_retention != Some(CacheRetention::None) {
+        if let Some(session_id) = &options.base.session_id {
+            params.insert("prompt_cache_key".into(), json!(session_id));
+        }
     }
+    params.insert("store".into(), json!(false));
     if let Some(max_tokens) = options.base.max_tokens {
         params.insert("max_output_tokens".into(), json!(max_tokens));
     }
@@ -297,6 +305,8 @@ pub fn stream_azure_openai_responses(
     reader
 }
 
+// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+#[allow(clippy::too_many_lines)]
 async fn run_stream(
     model: &Model,
     context: &Context,
@@ -551,5 +561,31 @@ mod tests {
             params.get("reasoning"),
             Some(&json!({ "effort": "xhigh", "summary": "auto" }))
         );
+    }
+
+    /// TS #2948: the request pins `store: false` (Azure stores responses
+    /// server-side by default) and drops `prompt_cache_key` when the caller
+    /// set cacheRetention to none; the key still ships by default.
+    #[test]
+    fn pins_store_false_and_gates_prompt_cache_key_on_cache_retention() {
+        let model = serde_json::from_value::<Model>(json!({
+            "id": "gpt-4o-mini", "name": "GPT-4o mini",
+            "api": "azure-openai-responses", "provider": "azure-openai-responses",
+            "baseUrl": "", "reasoning": false, "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128_000, "maxTokens": 16_384
+        }))
+        .unwrap();
+        let mut options = AzureOpenAIResponsesOptions::from_base(StreamOptions::default());
+        options.base.session_id = Some("session-1".into());
+
+        let params = build_params(&model, &Context::default(), &options, "deploy");
+        assert_eq!(params.get("store"), Some(&json!(false)));
+        assert_eq!(params.get("prompt_cache_key"), Some(&json!("session-1")));
+
+        options.base.cache_retention = Some(CacheRetention::None);
+        let params = build_params(&model, &Context::default(), &options, "deploy");
+        assert_eq!(params.get("store"), Some(&json!(false)));
+        assert_eq!(params.get("prompt_cache_key"), None);
     }
 }

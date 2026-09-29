@@ -151,6 +151,7 @@ fn get_message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
 
 /// Prepare entries under a token budget: newest-to-oldest until the budget
 /// is hit. File ops are collected from ALL entries (cumulative tracking).
+#[must_use]
 pub fn prepare_branch_entries(entries: &[FileEntry], token_budget: u64) -> BranchPreparation {
     let mut file_ops = FileOperations::default();
     // Cumulative tracking from prior branch summaries (never extension ones).
@@ -201,6 +202,7 @@ const BRANCH_SUMMARY_PREAMBLE: &str = "The user explored a different conversatio
 const BRANCH_SUMMARY_PROMPT: &str = "Create a structured summary of this conversation branch for context when returning later.\n\nUse this EXACT format:\n\n## Goal\n[What was the user trying to accomplish in this branch?]\n\n## Constraints & Preferences\n- [Any constraints, preferences, or requirements mentioned]\n- [Or \"(none)\" if none were mentioned]\n\n## Progress\n### Done\n- [x] [Completed tasks/changes]\n\n### In Progress\n- [ ] [Work that was started but not finished]\n\n### Blocked\n- [Issues preventing progress, if any]\n\n## Key Decisions\n- **[Decision]**: [Brief rationale]\n\n## Next Steps\n1. [What should happen next to continue this work]\n\nKeep each section concise. Preserve exact file paths, function names, and error messages.";
 
 /// Build the branch-summary request messages for the model.
+#[must_use]
 pub fn build_branch_summary_request(
     entries: &[FileEntry],
     token_budget: u64,
@@ -232,6 +234,7 @@ pub fn build_branch_summary_request(
 }
 
 /// Assemble the final summary text from a model response.
+#[must_use]
 pub fn finalize_branch_summary(
     response_text: &str,
     preparation: &BranchPreparation,
@@ -291,6 +294,7 @@ const BRANCH_SUMMARY_MAX_TOKENS: u64 = 2048;
 /// reserve would slice with a non-positive budget that
 /// [`prepare_branch_entries`] treats as unlimited, so the empty-slice
 /// shape still requires a window above the reserve.
+#[must_use]
 pub fn estimate_branch_summary_request_tokens(
     entries: &[FileEntry],
     context_window: u64,
@@ -373,7 +377,7 @@ pub async fn generate_branch_summary(
                         &context,
                         "branch summary",
                         &session_model,
-                        session_api_key,
+                        session_api_key.as_deref(),
                         Some(required),
                     )
                 })
@@ -484,6 +488,7 @@ pub async fn generate_branch_summary(
 }
 
 /// The presentation message users see for a branch summary.
+#[must_use]
 pub fn branch_summary_presentation(summary: &str) -> String {
     format!("{BRANCH_SUMMARY_PREFIX}{summary}{BRANCH_SUMMARY_SUFFIX}")
 }

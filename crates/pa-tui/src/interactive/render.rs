@@ -48,6 +48,10 @@ pub(super) async fn check_tmux_keyboard_setup() -> Option<String> {
             tokio::task::spawn_blocking(move || {
                 std::process::Command::new("tmux")
                     .args(["show", "-gv", option])
+                    // No inherited fds: a probe must never hold the
+                    // terminal the TUI owns (the fd-set audit's rule —
+                    // no TUI child ever holds /dev/tty).
+                    .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::null())
                     .output()
@@ -118,6 +122,10 @@ impl Renderer {
     ) -> Result<Renderer> {
         match ui {
             UiMode::Terminal => {
+                // The raw-mode bracket's own `cfmakeraw` write clears IXON,
+                // which is the kernel's one trigger for lifting a pending
+                // Ctrl+S stop: a tty stopped at the shell prompt self-heals
+                // here (verified by the flow e2e's launch route).
                 terminal::enable_raw_mode()?;
                 // The terminal state changed: every later setup step is
                 // fallible (the alt-screen enter, the mode enables, the
@@ -348,6 +356,11 @@ impl Renderer {
     pub(super) fn resume(&mut self) -> Result<()> {
         match self {
             Renderer::Terminal { term, mouse } => {
+                // The raw re-arm's `cfmakeraw` write clears IXON - the
+                // kernel's one trigger for lifting a pending Ctrl+S stop -
+                // so a stop armed at the shell while the process sat
+                // suspended never holds the resume's repaint (verified by
+                // the flow e2e's suspend route).
                 terminal::enable_raw_mode()?;
                 // The suspension released the alternate screen (the client
                 // command prompted on the primary one); re-enter it.

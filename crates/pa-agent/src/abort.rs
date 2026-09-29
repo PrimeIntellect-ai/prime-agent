@@ -15,6 +15,7 @@ pub struct AbortedError;
 pub const ABORT_ERROR_MESSAGE: &str = "Request was aborted";
 
 /// Build an `anyhow` abort error.
+#[must_use]
 pub fn aborted_error() -> anyhow::Error {
     anyhow::Error::new(AbortedError)
 }
@@ -25,6 +26,7 @@ pub fn aborted_error() -> anyhow::Error {
 /// message "Request was aborted" as an abort. Provider-level aborts never throw in
 /// this port (they arrive as terminal stream events), so the typed marker is the
 /// single abort signal on the error path.
+#[must_use]
 pub fn is_abort_error(err: &anyhow::Error) -> bool {
     err.downcast_ref::<AbortedError>().is_some()
 }
@@ -60,11 +62,13 @@ impl std::fmt::Debug for AbortSignal {
 
 impl AbortSignal {
     /// A signal that never aborts.
+    #[must_use]
     pub fn never() -> Self {
         Self::default()
     }
 
     /// Whether the controller has aborted.
+    #[must_use]
     pub fn is_aborted(&self) -> bool {
         *self.rx.borrow()
     }
@@ -107,6 +111,7 @@ impl Default for AbortController {
 }
 
 impl AbortController {
+    #[must_use]
     pub fn new() -> Self {
         let (tx, rx) = watch::channel(false);
         Self {
@@ -115,6 +120,7 @@ impl AbortController {
     }
 
     /// The signal owned by this controller.
+    #[must_use]
     pub fn signal(&self) -> AbortSignal {
         self.signal.clone()
     }
@@ -125,6 +131,7 @@ impl AbortController {
     }
 
     /// Whether this controller has aborted.
+    #[must_use]
     pub fn is_aborted(&self) -> bool {
         self.signal.is_aborted()
     }

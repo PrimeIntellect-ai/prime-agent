@@ -791,11 +791,13 @@ impl WindowedSessionStore {
     }
 
     /// Whether [`Self::take_retained`] handed the bodies to the manager.
+    #[must_use]
     pub fn retained_detached(&self) -> bool {
         self.detached
     }
 
     /// Whether [`Self::ensure_full_history`] rehydrated the whole file.
+    #[must_use]
     pub fn full_history(&self) -> bool {
         self.full
     }
@@ -805,31 +807,39 @@ impl WindowedSessionStore {
     /// walk handed over plus every append since — cover every persisted
     /// row, so a historical read over the file would rebuild a subset of
     /// what the manager already holds.
+    #[must_use]
     pub fn retained_whole_file(&self) -> bool {
         self.retained_whole_file
     }
 
     /// The walk-resolved settings (the owning manager's context overlay
     /// source while this window is attached).
+    #[must_use]
     pub fn settings(&self) -> &SessionContext {
         &self.settings
     }
 
+    #[must_use]
     pub fn has_non_bootstrap_entries(&self) -> bool {
         self.snapshot.non_bootstrap
     }
+    #[must_use]
     pub fn read_stats(&self) -> &WindowReadStats {
         &self.reads
     }
+    #[must_use]
     pub fn compaction_count(&self) -> usize {
         self.snapshot.compaction_count
     }
+    #[must_use]
     pub fn goal_state(&self) -> Option<&crate::goals::GoalState> {
         self.snapshot.goal.as_ref()
     }
+    #[must_use]
     pub fn has_thinking_level(&self) -> bool {
         self.snapshot.thinking_present
     }
+    #[must_use]
     pub fn has_service_tier(&self) -> bool {
         self.snapshot.tier_present
     }
@@ -872,43 +882,52 @@ impl WindowedSessionStore {
     }
 
     /// Retained file-order entries, including the original header.
+    #[must_use]
     pub fn entries(&self) -> &[FileEntry] {
         &self.entries
     }
 
     /// Original retained JSONL records, excluding the header. Preserves wire
     /// fields and map order for consumers with a separate raw entry type.
+    #[must_use]
     pub fn raw_entries(&self) -> &[String] {
         &self.raw_entries
     }
 
     /// Older non-message records, in file order, for persisted metadata
     /// consumers. These are not a complete ancestor chain.
+    #[must_use]
     pub fn metadata_entries(&self) -> &[String] {
         &self.metadata_entries
     }
 
+    #[must_use]
     pub fn older_path_stats(&self) -> &WindowStats {
         &self.older_path_stats
     }
 
+    #[must_use]
     pub fn message_count(&self) -> usize {
         self.message_count
     }
 
+    #[must_use]
     pub fn first_user_message(&self) -> Option<&serde_json::Value> {
         self.first_user_message.as_ref()
     }
 
+    #[must_use]
     pub fn leaf_id(&self) -> &str {
         &self.leaf_id
     }
 
+    #[must_use]
     pub fn source_path(&self) -> &Path {
         &self.path
     }
 
     #[cfg(test)]
+    #[must_use]
     pub fn is_full_history(&self) -> bool {
         self.full
     }
@@ -918,6 +937,7 @@ impl WindowedSessionStore {
     /// seeds its timeline with this — retained summarizer rows before the
     /// branch's first in-window `model_change` billed on it. `None` on a
     /// full-history load or a prefix without `model_change` rows.
+    #[must_use]
     pub fn boundary_model(&self) -> Option<&(String, String)> {
         self.boundary_model.as_ref()
     }
@@ -932,6 +952,7 @@ impl WindowedSessionStore {
     /// `file_entries` (the one-copy authority), never a re-walk of the
     /// (absent) retained rows. `ensure_full_history` re-arms the bodies
     /// and with them this constructor.
+    #[must_use]
     pub fn context(&self) -> SessionContext {
         assert!(
             !self.detached,

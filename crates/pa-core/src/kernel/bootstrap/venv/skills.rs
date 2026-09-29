@@ -2,7 +2,7 @@
 //! skill shape, the pyproject parsing, and the normalization that
 //! deduplicates and resolves sibling-local dependencies.
 
-use super::*;
+use super::{Digest, KernelPythonSkill, Path};
 
 /// One normalized skill as recorded in the bootstrap version file.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

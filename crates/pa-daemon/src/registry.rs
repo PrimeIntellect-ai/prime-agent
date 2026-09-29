@@ -277,6 +277,32 @@ impl ResidentWorker {
                 .load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Install the connection's channel for routing (TS
+    /// `worker.client = client`, set only after `authenticateWorker`
+    /// answered): a pre-auth connection stays private to its handshake —
+    /// the worker answers any non-`worker_auth` first command with the
+    /// authentication refusal and closes the connection, so a route that
+    /// wins the enqueue race against the handshake would kill the
+    /// connection and strand the handshake for the whole connect budget.
+    /// A superseded connect (a replacement already owns a newer epoch)
+    /// never installs over the live one.
+    pub(crate) async fn install_command_channel(
+        &self,
+        epoch: u64,
+        cmd_tx: tokio::sync::mpsc::Sender<WorkerRequest>,
+    ) {
+        // The epoch recheck runs UNDER the channel lock: a stale connect
+        // that passed the pre-lock check while a newer connection was
+        // installing must never overwrite the newer channel (the
+        // check-then-act window between the liveness read and the mutex
+        // acquisition is exactly the race the guard exists for).
+        let mut guard = self.cmd_tx.lock().await;
+        if !self.connection_is_current(epoch) {
+            return;
+        }
+        *guard = Some(cmd_tx);
+    }
+
     /// A connection's pumps ended (worker death or socket close). Stale
     /// epochs (a superseded connection ending late) never flip the state.
     pub(crate) fn note_connection_lost(&self, epoch: u64) {

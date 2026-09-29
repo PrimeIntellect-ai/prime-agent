@@ -86,6 +86,9 @@ impl FlagsClient {
     /// Flag value from a fresh cache: `Some(None)` = fresh cache that does not
     /// know the flag (serve default, no refetch), `None` = stale/missing
     /// cache (refetch).
+    // The two Option layers are a documented contract: outer = fresh-vs-stale
+    // cache, inner = flag known vs absent. Flattening loses a state.
+    #[allow(clippy::option_option)]
     fn cached_flag(&self, name: &str) -> Option<Option<Value>> {
         let cache = self.cache.lock().expect("flags cache poisoned");
         let cache = cache.as_ref()?;

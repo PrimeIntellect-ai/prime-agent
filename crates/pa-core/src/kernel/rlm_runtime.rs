@@ -25,6 +25,7 @@ pub struct RlmModelInfo {
 }
 
 impl RlmModelInfo {
+    #[must_use]
     pub fn selector(&self) -> String {
         format!("{}/{}", self.provider, self.id)
     }
@@ -39,7 +40,7 @@ pub struct RlmModelMatch {
     pub selector: String,
 }
 
-fn error(operation: &str, message: String) -> anyhow::Error {
+fn error(operation: &str, message: &str) -> anyhow::Error {
     anyhow::anyhow!("{operation} {message}")
 }
 
@@ -56,12 +57,12 @@ pub fn normalize_requested_rlm_subagent_session_name(
     let Some(value) = value else { return Ok(None) };
     let name = value.trim();
     if name.is_empty() {
-        return Err(error(operation, "name must not be empty".into()));
+        return Err(error(operation, "name must not be empty"));
     }
     if name.chars().count() > RLM_SUBAGENT_SESSION_NAME_MAX_LENGTH {
         return Err(error(
             operation,
-            format!("name must be at most {RLM_SUBAGENT_SESSION_NAME_MAX_LENGTH} characters"),
+            &format!("name must be at most {RLM_SUBAGENT_SESSION_NAME_MAX_LENGTH} characters"),
         ));
     }
     Ok(Some(name.to_string()))
@@ -85,7 +86,7 @@ pub fn normalize_requested_rlm_subagent_thinking_level(
     else {
         return Err(error(
             operation,
-            format!("thinking must be one of: {}", THINKING_LEVELS.join(", ")),
+            &format!("thinking must be one of: {}", THINKING_LEVELS.join(", ")),
         ));
     };
     Ok(Some(matched))
@@ -104,7 +105,7 @@ pub fn normalize_requested_rlm_subagent_model(
     let Some(value) = value else { return Ok(None) };
     let model = value.trim();
     if model.is_empty() {
-        return Err(error(operation, "model must not be empty".into()));
+        return Err(error(operation, "model must not be empty"));
     }
     Ok(Some(model.to_string()))
 }
@@ -230,6 +231,7 @@ fn normalize_model_search_text(value: &str) -> String {
 ///
 /// Candidates are sorted by score with a `partial_cmp().unwrap()`; every
 /// score is finite by construction, so the unwrap cannot fail.
+#[must_use]
 pub fn find_rlm_model_matches(
     query: &str,
     models: &[RlmModelInfo],
@@ -315,6 +317,7 @@ fn find_rlm_short_form_model_matches<'a>(
 /// The single model a short-form reference resolves to: its unique match, or
 /// the fallback when nothing matches. `None` when several match or nothing
 /// resolves, so an ambiguous reference is never auto-resolved.
+#[must_use]
 pub fn find_unique_rlm_short_form_model_match<'a>(
     reference: &str,
     models: &'a [RlmModelInfo],
@@ -338,6 +341,7 @@ pub fn find_unique_rlm_short_form_model_match<'a>(
 
 /// Rejection message for an unresolved model reference, with the expected
 /// selector form and close matches.
+#[must_use]
 pub fn format_rlm_model_unavailable_error(
     reference: &str,
     target: &str,

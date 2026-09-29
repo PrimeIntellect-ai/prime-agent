@@ -51,6 +51,42 @@ pub fn get_image_dimensions(data: &str, mime_type: &str) -> Option<ImageDimensio
     }
 }
 
+/// The bounded-prefix decode budget for [`get_image_dimensions_prefix`]
+/// (the image-heavy session-open fix): every supported format's dimension
+/// header lives in the first bytes, and a payload whose header spills past
+/// the budget reports `None` (the caller renders the payload size instead).
+pub const IMAGE_DIMENSIONS_PREFIX_BYTES: usize = 1024;
+
+/// Read an image's pixel dimensions from a BOUNDED PREFIX of its base64
+/// payload: the image-heavy session-open fix's render-path guard — a
+/// tool result can carry megabytes of base64, and its metadata row must
+/// never decode the whole string. `None` for unsupported mime types,
+/// payloads whose quantum-aligned prefix does not decode, or headers that
+/// spill past [`IMAGE_DIMENSIONS_PREFIX_BYTES`].
+pub fn get_image_dimensions_prefix(
+    data: &str,
+    mime_type: &str,
+    max_decoded_bytes: usize,
+) -> Option<ImageDimensions> {
+    let trimmed = data.trim();
+    // Keep the prefix at a multiple of 4 base64 characters so the slice
+    // decodes as a complete unpadded sequence; `get` returns `None` when
+    // the cut lands inside a multi-byte character (a non-ASCII payload is
+    // not decodable base64 anyway).
+    let take = (max_decoded_bytes.div_ceil(3) * 4).min(trimmed.len());
+    let prefix = trimmed.get(..take)?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(prefix)
+        .ok()?;
+    match mime_type {
+        "image/png" => png_dimensions(&bytes),
+        "image/gif" => gif_dimensions(&bytes),
+        "image/jpeg" => jpeg_dimensions(&bytes),
+        "image/webp" => webp_dimensions(&bytes),
+        _ => None,
+    }
+}
+
 fn be_u16(b: &[u8], off: usize) -> Option<u16> {
     Some(u16::from_be_bytes([*b.get(off)?, *b.get(off + 1)?]))
 }

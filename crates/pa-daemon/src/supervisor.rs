@@ -31,6 +31,8 @@ use signals_shutdown::daemon_closing_shutdown_event;
 mod supervision;
 
 #[cfg(test)]
+mod handshake_tests;
+#[cfg(test)]
 mod tests;
 
 // STABLE_LIFETIME_MS is read only by this facade's in-file test modules (via the module's
@@ -349,7 +351,7 @@ impl Supervisor {
         // hourly loop. Fire-and-forget: workers always have the
         // last-good chain (disk snapshot | bundled | compiled) and the
         // refresh only adds live pricing and catalog-repo/new entries.
-        pa_core::models::startup_refresh(&self.options.agent_dir);
+        let _ = pa_core::models::startup_refresh(&self.options.agent_dir);
         pa_core::models::spawn_hourly_refresh(&self.options.agent_dir);
         // The plugins service catalog's keep-warm (the `/mcp` view's remote
         // catalog): the same supervisor-owned cadence — a forced startup

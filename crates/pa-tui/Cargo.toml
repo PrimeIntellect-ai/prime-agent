@@ -21,6 +21,7 @@ anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net", "process"] }
+uuid = { version = "1", features = ["v4"] }
 
 [[bin]]
 name = "pa-tui-replay"

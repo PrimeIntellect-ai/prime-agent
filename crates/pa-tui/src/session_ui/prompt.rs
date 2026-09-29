@@ -52,6 +52,11 @@ pub(crate) struct PromptSubmitNote {
     /// The submit's generation (TS `inputSubmissionGeneration`): a newer
     /// submit supersedes an older one's draft-restore right.
     pub(crate) generation: u64,
+    /// The submission's `input_id` (#2117 `agent input stage`).
+    pub(crate) input_id: String,
+    /// When the submit was accepted (the stage durations measure from
+    /// here).
+    pub(crate) submitted_at: std::time::Instant,
     /// Whether a failure may still rebind once (the replayed request is
     /// the second and last attempt — the inline path's
     /// `rebind_available`).
@@ -83,6 +88,12 @@ pub(crate) struct PromptOrder {
     pub(crate) expected_turn_end: u64,
     pub(crate) generation: u64,
     pub(crate) rebind_available: bool,
+    /// The submission's `input_id` (#2117 `agent input stage`): a fresh
+    /// uuid per submitted prompt, pairing the stage observations.
+    pub(crate) input_id: String,
+    /// When the submit was accepted (the stage durations measure from
+    /// here).
+    pub(crate) submitted_at: std::time::Instant,
 }
 
 impl SessionUi {
@@ -801,6 +812,8 @@ impl SessionUi {
             expected_turn_end,
             generation,
             rebind_available,
+            input_id: uuid::Uuid::new_v4().to_string(),
+            submitted_at: std::time::Instant::now(),
         });
     }
 
@@ -862,6 +875,8 @@ impl SessionUi {
                 turn_was_active: order.turn_was_active,
                 expected_turn_end: order.expected_turn_end,
                 generation: order.generation,
+                input_id: order.input_id,
+                submitted_at: order.submitted_at,
                 rebind_available: order.rebind_available,
                 result,
             });
@@ -919,6 +934,25 @@ impl SessionUi {
         }
         match note.result {
             Ok(()) => {
+                // `agent input stage` (v2, #2117): the submission's observed
+                // dispatch outcome at the submit seam - queued behind a
+                // running turn, or dispatched straight into an admitted
+                // turn. The turn's own terminal state rides the session
+                // telemetry's run events.
+                if let Some(telemetry) = self.telemetry.clone() {
+                    let (stage, outcome) = if note.turn_was_active {
+                        ("queued", "started")
+                    } else {
+                        ("dispatch", "success")
+                    };
+                    let input_id = note.input_id.clone();
+                    let duration_ms = note.submitted_at.elapsed().as_millis() as u64;
+                    tokio::spawn(async move {
+                        telemetry
+                            .input_stage(input_id, stage, outcome, duration_ms)
+                            .await;
+                    });
+                }
                 // A submission while a turn runs parks in the queue behind
                 // it: the queue strip shows the message until the session
                 // delivers it (adoption telemetry for the follow-up queue).
@@ -951,6 +985,18 @@ impl SessionUi {
                 Ok(())
             }
             Err(error) => {
+                // `agent input stage` (v2): the submission was rejected at
+                // the dispatch boundary (the stage's `rejected` stage,
+                // outcome `error`).
+                if let Some(telemetry) = self.telemetry.clone() {
+                    let input_id = note.input_id.clone();
+                    let duration_ms = note.submitted_at.elapsed().as_millis() as u64;
+                    tokio::spawn(async move {
+                        telemetry
+                            .input_stage(input_id, "rejected", "error", duration_ms)
+                            .await;
+                    });
+                }
                 let rendered = format!("{error:#}");
                 // One rebind attempt per submit (never a loop): a prompt
                 // refused with the unknown-session error - the held active

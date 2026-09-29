@@ -14,6 +14,8 @@ use crate::utils_inner::sanitize_unicode::sanitize_surrogates;
 
 /// Convert a conversation into Chat Completions `messages` params.
 /// Port of `convertMessages` including tool-result bridging and image replay.
+// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+#[allow(clippy::too_many_lines)]
 pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompat) -> Vec<Value> {
     use crate::types::Message;
     let mut params: Vec<Value> = Vec::new();
@@ -58,7 +60,7 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                     "content": sanitize_surrogates(text),
                 })),
                 UserMessageContent::Blocks(blocks) => {
-                    let content: Vec<Value> = blocks
+                    let content_blocks: Vec<Value> = blocks
                         .iter()
                         .map(|item| match crate::types::user_block_payload(item) {
                             crate::types::UserBlockPayload::Text(text) => json!({
@@ -75,13 +77,13 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                             }),
                         })
                         .collect();
-                    if content.is_empty() {
+                    if content_blocks.is_empty() {
                         index += 1;
                         continue;
                     }
                     params.push(json!({
                         "role": "user",
-                        "content": content,
+                        "content": content_blocks,
                     }));
                 }
             },
@@ -251,8 +253,8 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                     assistant_msg.insert("content".into(), json!(""));
                 }
                 // Skip assistant messages that have no content and no tool calls.
-                let content = assistant_msg.get("content");
-                let has_content = match content {
+                let content_value = assistant_msg.get("content");
+                let has_content = match content_value {
                     Some(Value::Null) | None => false,
                     Some(Value::String(text)) => !text.is_empty(),
                     Some(Value::Array(array)) => !array.is_empty(),
@@ -336,14 +338,14 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                             "content": "I have processed the tool results.",
                         }));
                     }
-                    let mut content = vec![json!({
+                    let mut content_items = vec![json!({
                         "type": "text",
                         "text": "Attached image(s) from tool result:",
                     })];
-                    content.extend(image_blocks);
+                    content_items.extend(image_blocks);
                     params.push(json!({
                         "role": "user",
-                        "content": content,
+                        "content": content_items,
                     }));
                     last_role = Some("user");
                 }
@@ -461,6 +463,8 @@ pub(crate) fn parse_chunk_usage(
     } else {
         None
     };
+    // Token counts sit far below f64's 2^53 exact-integer range; the cost apportioning math is f64 by design.
+    #[allow(clippy::cast_precision_loss)]
     if let Some(reported_cost) = reported_cost {
         if usage.cost.total.as_f64() > 0.0 {
             let scale = reported_cost / usage.cost.total.as_f64();
@@ -561,6 +565,8 @@ mod tests {
         WithUpstreamBill(f64),
     }
 
+    // Test-only helper; adapting its signature and call sites would churn test fixtures.
+    #[allow(clippy::needless_pass_by_value)]
     fn raw_usage(cost: f64, byok: ByokBilling) -> Value {
         let mut raw = json!({
             "prompt_tokens": 50_000,

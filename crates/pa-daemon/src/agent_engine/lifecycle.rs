@@ -12,6 +12,12 @@ use super::{
     SupervisorChildSessions, Value,
 };
 
+/// The harness-owned instruction the engine floor appends to a bare
+/// skill invocation (no task text): the model receives the skill's
+/// protocol, but as an instruction to ask what the user wants first —
+/// never as an imperative to execute (the floor's whole point).
+pub(crate) const BARE_SKILL_INVOCATION_INSTRUCTION: &str = "The user invoked this skill with no task text - ask what they want before executing any protocol inside it.";
+
 impl AgentSessionEngine {
     /// Build the engine: the shared async runtime, the model selection
     /// (create config, else the process env pair), the supervisor link, the
@@ -159,6 +165,7 @@ impl AgentSessionEngine {
             mcp,
             published_goal: std::sync::Mutex::new(None),
             goal_runtime: std::sync::Mutex::new(None),
+            pending_goal_continuation: std::sync::Mutex::new(None),
             goal_budget_crossed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             goal_input_probe: std::sync::Mutex::new(None),
             goal_admission_sink: std::sync::Mutex::new(None),
@@ -244,7 +251,28 @@ impl AgentSessionEngine {
     /// inventory), then expand against it. Non-skill inputs and build
     /// failures pass the text through unchanged — the turn then surfaces
     /// the failure it would have surfaced anyway.
+    ///
+    /// A bare invocation (the expanded block parses without a trailing
+    /// user message) carries no task text: the model would receive the
+    /// skill's imperative protocol as its only user message and
+    /// confabulate a task. The engine floor appends the harness-owned
+    /// [`BARE_SKILL_INVOCATION_INSTRUCTION`] as the block's trailing user
+    /// message — the same `\n\n` tail the with-args shape uses, so the
+    /// row's shape is unchanged (every surface parses and renders it
+    /// exactly like the with-args invocation) and the turn admits with
+    /// the model asked what the user wants.
     pub(crate) fn expand_skill_submission(&self, text: &str) -> String {
+        // The floor keys on the ORIGINAL invocation's shape (a `/skill:`
+        // command with no argument text), not on the expanded block's
+        // parse: a skill body can itself contain a close tag plus a
+        // `\n\n` tail that parses as a trailing user message
+        // (`parse_skill_block`'s non-greedy body scan), which would
+        // misread the bare invocation as carrying args. The parse below
+        // then only answers whether the expansion produced a block at
+        // all — an unknown skill or a build failure keeps the raw
+        // command text, and a with-args invocation keeps the user's args.
+        let bare_invocation = pa_types::slash_commands::parse_slash_command(text)
+            .is_some_and(|(name, args)| name.starts_with("skill:") && args.trim().is_empty());
         let Ok(model) = self.resolve_model() else {
             return text.to_string();
         };
@@ -252,13 +280,17 @@ impl AgentSessionEngine {
             eprintln!("skill submission expansion skipped: session build failed: {error:#}");
             return text.to_string();
         }
-        self.runtime.block_on(async {
+        let expanded = self.runtime.block_on(async {
             let guard = self.session.lock().await;
             match guard.as_deref() {
                 Some(engine) => engine.expand_skill_submission(text),
                 None => text.to_string(),
             }
-        })
+        });
+        if bare_invocation && pa_types::skill_blocks::parse_skill_block(&expanded).is_some() {
+            return format!("{expanded}\n\n{BARE_SKILL_INVOCATION_INSTRUCTION}");
+        }
+        expanded
     }
 
     /// The async build of the core session (the same funnel as
@@ -311,7 +343,7 @@ impl AgentSessionEngine {
     /// first must adopt it, or a read-seam build would strand the parked
     /// branch and the session would start off the moved branch's entries.
     async fn adopt_built_session(&self, built: &CoreSessionEngine) -> anyhow::Result<()> {
-        self.mirror_goal_runtime(built);
+        self.mirror_goal_runtime(built).await;
         // The live compaction summary-delta sink (the worker's
         // `compaction_summary_delta` broadcast): adopted onto the built
         // session like the goal runtime mirrors, so every rebuild's

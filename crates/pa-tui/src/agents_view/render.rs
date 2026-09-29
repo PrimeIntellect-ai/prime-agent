@@ -323,6 +323,10 @@ impl AgentsViewMode {
             start
         };
         let slice_end = (slice_start + content_rows).min(display.len());
+        // The viewport's front rows (the leading ellipsis and the
+        // column legend block) shift the session rows down — the click
+        // rows and the hover band carry the shift with them.
+        let shift = header_rows + show_leading as usize;
         let mut lines: Vec<Line> = Vec::with_capacity(content_rows);
         let mut click_rows: Vec<(usize, usize)> = Vec::new();
         for item in &display[slice_start..slice_end] {
@@ -340,7 +344,13 @@ impl AgentsViewMode {
                     )]);
                 }
                 DisplayItem::Row(index, row) => {
-                    lines.push(self.render_row(row, &layout, width));
+                    // The row's frame position carries the hover
+                    // (operator directive 2026-09-29): the light band
+                    // rides the row the mouse rests on, exactly the
+                    // rows the click grammar covers.
+                    let frame_position = frame_row + local + shift;
+                    let hovered = self.hover_row == Some(frame_position);
+                    lines.push(self.render_row(row, &layout, width, hovered));
                     click_rows.push((local, *index));
                 }
             }
@@ -365,22 +375,43 @@ impl AgentsViewMode {
                 )],
             );
         }
-        // The viewport's front rows (the leading ellipsis and the column
-        // legend block) shift the session rows down; the recorded click
-        // rows carry the shift with them.
-        let shift = header_rows + show_leading as usize;
         self.click_rows = click_rows
             .into_iter()
             .map(|(local, index)| (frame_row + local + shift, index))
             .collect();
+        // The hover revalidates against THIS frame's rows (the session
+        // surface's hover contract): a roster rebuild that moved the
+        // rows re-aims the band at the row that took the hovered
+        // position's place, and a row that scrolled out of the window
+        // clears it — the band can never brighten a row the mouse is
+        // no longer on.
+        if self.hover_row.is_some_and(|row| {
+            !self
+                .click_rows
+                .iter()
+                .any(|(click_row, _)| *click_row == row)
+        }) {
+            self.hover_row = None;
+        }
         lines
     }
 
     /// One session row (TS `renderRow`): the summary rows render their
     /// `▸/▾ title` cell over the full width; agent rows render icon, title
     /// (nested rows indented), model, cost/age. The selected row
-    /// carries the selection background.
-    pub(super) fn render_row(&self, row: &AgentsViewRow, layout: &RowLayout, width: usize) -> Line {
+    /// carries the selection background; a hovered unselected row
+    /// carries the light hover band (operator directive 2026-09-29: the
+    /// row is clickable — every row, the summaries and the nested
+    /// children included, opens on a click), and a hovered selected row
+    /// keeps the purple selection band (both state styles apply where
+    /// they overlap; the focused state is never demoted).
+    pub(super) fn render_row(
+        &self,
+        row: &AgentsViewRow,
+        layout: &RowLayout,
+        width: usize,
+        hovered: bool,
+    ) -> Line {
         let theme = &self.theme;
         let selected = Some(row.identity.as_str())
             == self.rows.get(self.selected).map(|r| r.identity.as_str());
@@ -402,7 +433,7 @@ impl AgentsViewMode {
                 let zone = layout.name_width + 2 + layout.model_width;
                 let title = crate::agents_view_state::truncate_text(&text, zone);
                 let pad = zone.saturating_sub(str_width(&title));
-                let mut line: Line = vec![
+                let line: Line = vec![
                     crate::Span::raw(title),
                     crate::Span::raw(" ".repeat(pad)),
                     crate::Span::styled("  ".to_string(), ratatui::style::Style::default()),
@@ -415,20 +446,16 @@ impl AgentsViewMode {
                             .unwrap_or_default(),
                     ),
                 ];
-                line = pad_line(line, width);
-                if selected {
-                    return theme.selection_paint(line);
-                }
-                return line;
+                // The summary rows always pad to the full width (their
+                // original shape); the finish adds the affordance bands.
+                let line = pad_line(line, width);
+                return finish_session_row(theme, line, selected, hovered, width);
             }
-            let mut line: Line = vec![crate::Span::raw(crate::agents_view_state::truncate_text(
+            let line: Line = vec![crate::Span::raw(crate::agents_view_state::truncate_text(
                 &text, width,
             ))];
-            line = pad_line(line, width);
-            if selected {
-                return theme.selection_paint(line);
-            }
-            return line;
+            let line = pad_line(line, width);
+            return finish_session_row(theme, line, selected, hovered, width);
         }
         let icon = match row.section {
             Section::Running => ["\u{25c7}", "\u{25c8}", "\u{25c6}", "\u{25c8}"][self.pulse % 4],
@@ -494,11 +521,7 @@ impl AgentsViewMode {
             .cloned()
             .unwrap_or_default();
         line.push(theme.fg(ThemeColor::Dim, details));
-        if selected {
-            line = pad_line(line, width);
-            return theme.selection_paint(line);
-        }
-        line
+        finish_session_row(theme, line, selected, hovered, width)
     }
 
     /// The bottom hint/status line. `status_override` carries the
@@ -628,6 +651,30 @@ impl AgentsViewMode {
     }
 }
 
+/// One session row's affordance finish (operator directive
+/// 2026-09-29): the selected row pads to the full width and keeps the
+/// ONE purple selection band — a hovered selected row keeps it too
+/// (both state styles apply where they overlap; the focused state is
+/// never demoted) — while a hovered unselected row pads and gains the
+/// ONE light hover band, the same "clickable" affordance the dock's
+/// groups carry, and every other row renders exactly as before.
+pub(super) fn finish_session_row(
+    theme: &Theme,
+    mut line: Line,
+    selected: bool,
+    hovered: bool,
+    width: usize,
+) -> Line {
+    if selected {
+        return theme.selection_paint(pad_line(line, width));
+    }
+    if hovered {
+        line = pad_line(line, width);
+        theme.paint_hover_band(&mut line, 0..width);
+    }
+    line
+}
+
 pub(super) fn cell(value: &str, width: usize) -> String {
     let truncated = truncate_text(value, width);
     format!(
@@ -669,6 +716,9 @@ impl Renderer {
     ) -> Result<Renderer> {
         match ui {
             AgentsViewUiMode::Terminal => {
+                // The raw-mode bracket's `cfmakeraw` write clears IXON,
+                // which is the kernel's one trigger for lifting a pending
+                // Ctrl+S stop (see the flow e2e's launch route).
                 crossterm::terminal::enable_raw_mode()?;
                 // The terminal state changed: every later setup step is
                 // fallible and an error from any of them still owns the

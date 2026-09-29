@@ -162,6 +162,7 @@ impl AgentLoopConfig {
         }
     }
 
+    #[must_use]
     pub fn default_convert_to_llm() -> ConvertToLlmFn {
         Arc::new(|messages: Vec<AgentMessage>| {
             Box::pin(async move {

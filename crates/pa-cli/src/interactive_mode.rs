@@ -56,13 +56,15 @@ mod tests;
 /// Run the interactive TUI attached to the daemon. Returns the exit code.
 pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
     let socket_path = resolve_socket_path(options.daemon_socket.as_deref());
-    let tui_options = build_tui_options(
+    let configuration_load_started = std::time::Instant::now();
+    let (tui_options, pending_onboarding_stages) = build_tui_options(
         options,
         socket_path,
         std::sync::Arc::new(std::sync::Mutex::new(
             pa_tui::prompt_stash::PromptStashStore::default(),
         )),
     )?;
+    let configuration_load_ms = configuration_load_started.elapsed().as_millis() as u64;
     // Telemetry disclosure (TS agent-session-services): once per
     // installation, only after onboarding marked itself shown (a first
     // interactive run belongs to the onboarding screen; the notice surfaces
@@ -90,16 +92,70 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
         .context("build the interactive runtime")?;
     let startup_started = std::time::Instant::now();
     runtime.block_on(async {
+        // `agent startup stage` (v2, #2117): the configuration-load and
+        // session-attach stages measured on the same one-shot client as
+        // the `startup` event; the configuration stage covers the whole
+        // options resolution (`build_tui_options` above), the attach
+        // stage the daemon-socket resolution.
+        // The startup kind (#2117): a resume/continue launch is a `resumed`
+        // startup; every other selection is `cold` (the `warm_attach` value
+        // stays for the daemon-warmth seam, which does not exist yet).
+        let startup_kind: &'static str =
+            if options.session.resume.is_some() || options.session.continue_recent {
+                "resumed"
+            } else {
+                "cold"
+            };
+        let startup_telemetry = (!options.config.telemetry_disabled).then(|| {
+            let agent_dir = options.config.agent_dir.clone();
+            let settings =
+                pa_core::settings::SettingsManager::create(&options.config.cwd, &agent_dir);
+            pa_core::session_engine::telemetry::build_client(&settings, &agent_dir)
+        });
+        // The onboarding `entry`/`ready` stages (v2, #2117) defer to here:
+        // the task builds before the runtime exists (an inert client
+        // there would drop the events); inside the runtime they emit on
+        // a one-shot client - the stage facts carry no time data, so the
+        // deferral never distorts them.
+        if !pending_onboarding_stages.is_empty() {
+            let agent_dir = options.config.agent_dir.clone();
+            let settings =
+                pa_core::settings::SettingsManager::create(&options.config.cwd, &agent_dir);
+            if !crate::mode::telemetry_disabled(&settings) {
+                let client =
+                    pa_core::session_engine::telemetry::build_client(&settings, &agent_dir);
+                for stage in &pending_onboarding_stages {
+                    stage.track(&client);
+                }
+            }
+        }
+        if let Some(client) = startup_telemetry.as_ref() {
+            pa_telemetry::AgentStartupStage {
+                stage: "configuration_load",
+                outcome: "completed",
+                duration_ms: Some(configuration_load_ms),
+                startup_kind: Some(startup_kind),
+                timing_scope: Some("system_work"),
+            }
+            .track(client);
+        }
+        let attach_started = std::time::Instant::now();
         ensure_daemon_running(&tui_options.socket_path, &tui_options.cwd).await?;
+        if let Some(client) = startup_telemetry.as_ref() {
+            pa_telemetry::AgentStartupStage {
+                stage: "session_attach",
+                outcome: "completed",
+                duration_ms: Some(attach_started.elapsed().as_millis() as u64),
+                startup_kind: Some(startup_kind),
+                timing_scope: Some("system_work"),
+            }
+            .track(client);
+        }
         // `startup` (schema v1): process entry to a ready interactive
         // session environment (daemon listening). Emitted through a
         // one-shot client that flushes immediately; the session's own
         // telemetry rides the daemon worker.
-        if !options.config.telemetry_disabled {
-            let agent_dir = options.config.agent_dir.clone();
-            let settings =
-                pa_core::settings::SettingsManager::create(&options.config.cwd, &agent_dir);
-            let client = pa_core::session_engine::telemetry::build_client(&settings, &agent_dir);
+        if let Some(client) = startup_telemetry.as_ref() {
             let daemon_ready_ms = startup_started.elapsed().as_millis() as u64;
             let mut properties = pa_telemetry::base_properties("interactive");
             properties.set("duration_ms", serde_json::Value::from(daemon_ready_ms));
@@ -107,6 +163,14 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
             phase_timings.set("daemon_ready", serde_json::Value::from(daemon_ready_ms));
             properties.set_map("phase_timings", &phase_timings);
             client.track("startup", properties);
+            pa_telemetry::AgentStartupStage {
+                stage: "ui_ready",
+                outcome: "completed",
+                duration_ms: Some(daemon_ready_ms),
+                startup_kind: Some(startup_kind),
+                timing_scope: Some("system_work"),
+            }
+            .track(client);
             let _ = client.shutdown().await;
         }
         // `prime-agent agents` and bare `--resume` open the agents view
@@ -362,7 +426,7 @@ fn build_tui_options(
     options: &RunOptions,
     socket_path: PathBuf,
     prompt_stash: std::sync::Arc<std::sync::Mutex<pa_tui::prompt_stash::PromptStashStore>>,
-) -> Result<InteractiveOptions> {
+) -> Result<(InteractiveOptions, Vec<pa_telemetry::OnboardingStage>)> {
     let config = &options.config;
     let session_dir = options
         .session
@@ -428,7 +492,9 @@ fn build_tui_options(
     let provider_auth = pa_tui::provider_auth::ProviderAuthCommandsHandle(std::sync::Arc::new(
         crate::provider_login::ProviderAuth::new(config.cwd.clone(), config.agent_dir.clone()),
     ));
-    Ok(InteractiveOptions {
+    let (onboarding, pending_onboarding_stages) =
+        onboarding_task(options, Some(provider_auth.clone()));
+    let tui_options_value = InteractiveOptions {
         code_block_indent,
         tree_filter_mode,
         branch_summary_skip_prompt,
@@ -469,7 +535,7 @@ fn build_tui_options(
         // task; the carried startup-model state decides the branch and
         // gates the completion marker, and the auth handle serves the
         // not-ready branch's sign-in steps.
-        onboarding: onboarding_task(options, Some(provider_auth.clone())),
+        onboarding,
         // Only Some(true) rides the wire (TS `telemetryDisabled`).
         telemetry_disabled: config.telemetry_disabled.then_some(true),
         // `/mcp login` / `/mcp logout`: the client-side auth flows run in
@@ -512,7 +578,8 @@ fn build_tui_options(
         session_rlm_depth: None,
         session_has_children: false,
         restore_dock_focus: false,
-    })
+    };
+    Ok((tui_options_value, pending_onboarding_stages))
 }
 
 /// Map the CLI session flags onto the TUI session selection (the TS order:

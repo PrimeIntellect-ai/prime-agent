@@ -143,6 +143,30 @@ pub trait InteractionTelemetry: Send + Sync {
     /// `command` is the canonical name (`model`, `effort`, ...). Session
     /// commands report through the session telemetry instead.
     fn command_used(&self, command: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    /// A user-visible feature attempt's observed outcome (#2117
+    /// `agent feature outcome`): `feature` is the fixed feature name
+    /// (`model`, `effort`, `new`, `resume`, `fork`, `clone`, `tree`,
+    /// `login`, `logout`, `goal`, ...), `outcome` the #2117 vocabulary
+    /// (`initiated` for an open-picker dispatch, `completed`/`failed`/
+    /// `canceled` for direct-action results). The duration is the
+    /// observed handling time when the seam measured one.
+    fn feature_outcome(
+        &self,
+        feature: &'static str,
+        outcome: &'static str,
+        duration_ms: Option<u64>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    /// One input lifecycle observation (#2117 `agent input stage`): the
+    /// submission's id (a fresh uuid per submit) and the observed stage
+    /// (`queued` / `dispatch` / `rejected`), with the duration since the
+    /// submit was accepted.
+    fn input_stage(
+        &self,
+        input_id: String,
+        stage: &'static str,
+        outcome: &'static str,
+        duration_ms: u64,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// How the client run ended: `reason` is `ctrl_c_twice` / `ctrl_d` /
     /// `session_request` / `daemon_closed`, with whether a turn was still
     /// active at exit.
@@ -423,6 +447,12 @@ pub struct InteractiveOutcome {
     /// notice seeds the view's status line instead of the pane dying to
     /// the shell.
     pub agents_view_notice: Option<String>,
+    /// How many first-draw windows this run served from an adopted
+    /// cross-view layout handoff (`view::handoff`): the served-path
+    /// observable for the verifiers — the re-entry's frames are
+    /// byte-identical either way (the frozen-surface property), so a
+    /// zero here is the re-render and a nonzero is the reuse.
+    pub handoff_seeds: u32,
 }
 
 /// Inputs consumed by the UI loop. Terminal keys arrive one event at a time;

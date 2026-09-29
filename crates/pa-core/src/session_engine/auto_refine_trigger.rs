@@ -359,10 +359,10 @@ mod tests {
     /// One faux provider registration answering the review from its own
     /// isolated script (the registry is process-global; a unique api id
     /// per test keeps registrations independent).
-    fn faux_model(responses: Vec<serde_json::Value>) -> Model {
+    fn faux_model(responses: &[serde_json::Value]) -> Model {
         let script = serde_json::json!({
             "modelId": "compact-trigger-1",
-            "responses": responses,
+            "responses": responses.to_vec(),
         });
         let parsed =
             pa_ai::faux::script::parse_faux_script(&script).expect("the faux script parses");
@@ -388,7 +388,7 @@ mod tests {
     /// machine under test is the trigger bookkeeping, not the engine
     /// wiring that resolves the surface.
     async fn session(persisted: bool) -> AgentSession {
-        let model = faux_model(vec![serde_json::json!({"text": "unused"})]);
+        let model = faux_model(&[serde_json::json!({"text": "unused"})]);
         let agent_model: pa_agent::types::Model =
             super::super::provider_adapter::json_round_trip(&model)
                 .expect("the faux model crosses the loop boundary");
@@ -454,7 +454,7 @@ mod tests {
     #[tokio::test]
     async fn a_bare_consume_without_a_trigger_is_silent() {
         let session = session(true).await;
-        let model = faux_model(vec![serde_json::json!({"text": "never served"})]);
+        let model = faux_model(&[serde_json::json!({"text": "never served"})]);
         assert!(matches!(
             consume(&session, &model, CompactAutoRefineSurface::Checkpoint).await,
             Ok(None)
@@ -472,7 +472,7 @@ mod tests {
             },
         );
         session.mark_compact_auto_refine_pending();
-        let model = faux_model(vec![serde_json::json!({"text": "never served"})]);
+        let model = faux_model(&[serde_json::json!({"text": "never served"})]);
         assert!(matches!(
             consume(&session, &model, CompactAutoRefineSurface::Checkpoint).await,
             Ok(None)
@@ -491,7 +491,7 @@ mod tests {
             },
         );
         session.mark_compact_auto_refine_pending();
-        let model = faux_model(vec![serde_json::json!({"text": "never served"})]);
+        let model = faux_model(&[serde_json::json!({"text": "never served"})]);
         assert!(matches!(
             consume(&session, &model, CompactAutoRefineSurface::Checkpoint).await,
             Ok(None)
@@ -506,7 +506,7 @@ mod tests {
         session.note_settled_turn_since_auto_refine_review();
         session.mark_compact_auto_refine_pending();
         let review = r#"{"shouldRefine": false, "rationale": "one-off tool output"}"#;
-        let model = faux_model(vec![serde_json::json!({"text": review})]);
+        let model = faux_model(&[serde_json::json!({"text": review})]);
         assert!(matches!(
             consume(&session, &model, CompactAutoRefineSurface::Checkpoint).await,
             Ok(None)
@@ -523,7 +523,7 @@ mod tests {
         session.mark_compact_auto_refine_pending();
         // An unparseable review reply is a failed review (TS
         // `parseAutoRefineReview` throws on non-object output).
-        let model = faux_model(vec![serde_json::json!({"text": "not json"})]);
+        let model = faux_model(&[serde_json::json!({"text": "not json"})]);
         assert!(
             consume(&session, &model, CompactAutoRefineSurface::Checkpoint)
                 .await
@@ -540,7 +540,7 @@ mod tests {
         let session = session(true).await;
         session.mark_compact_auto_refine_pending();
         let review = r#"{"shouldRefine": false, "rationale": "no"}"#;
-        let model = faux_model(vec![
+        let model = faux_model(&[
             serde_json::json!({"text": review}),
             serde_json::json!({"text": review}),
         ]);
@@ -574,7 +574,7 @@ mod tests {
         session.mark_compact_auto_refine_pending();
         let review = r#"{"shouldRefine": true, "rationale": "the turn shows a reusable tactic"}"#;
         let plan = r#"{"summary":"note the tactic","rationale":"repeated","expectedOutcome":"recall","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#;
-        let model = faux_model(vec![
+        let model = faux_model(&[
             serde_json::json!({"text": review}),
             serde_json::json!({"text": plan}),
         ]);

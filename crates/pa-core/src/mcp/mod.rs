@@ -59,6 +59,7 @@ pub const BUILTIN_MCP_CATALOG: &[(&str, &str, &str)] = &[
     ("notion", "Notion", "https://mcp.notion.com/mcp"),
 ];
 
+#[must_use]
 pub fn get_catalog_entry(server: &str) -> Option<McpCatalogEntry> {
     BUILTIN_MCP_CATALOG
         .iter()
@@ -157,6 +158,7 @@ pub enum McpServerConfig {
 }
 
 impl McpServerConfig {
+    #[must_use]
     pub fn server_type(&self) -> &'static str {
         match self {
             McpServerConfig::Http { .. } => "http",
@@ -204,6 +206,7 @@ pub enum AcpMcpServerConfig {
 }
 
 impl AcpMcpServerConfig {
+    #[must_use]
     pub fn name(&self) -> &str {
         match self {
             AcpMcpServerConfig::Stdio { name, .. } | AcpMcpServerConfig::Http { name, .. } => name,
@@ -213,6 +216,9 @@ impl AcpMcpServerConfig {
 
 /// A resolved integration: catalog/user entry plus auth state.
 #[derive(Debug, Clone)]
+// The mirrored TS API shape is deliberate (the booleans are the
+// product's own surface, not a refactor target).
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct ResolvedIntegration {
     pub(crate) server: String,
     pub(crate) label: String,
@@ -523,6 +529,7 @@ impl McpManager {
     /// is not logged into, plus the enabled persistent generic servers (prompt
     /// MCP guidance). Returns the manager the caller keeps for `mcp.*` host
     /// requests.
+    #[must_use]
     pub fn prompt_gating(
         user_servers: std::collections::HashMap<String, McpServerConfig>,
         agent_dir: &std::path::Path,
@@ -986,6 +993,9 @@ pub struct McpServerStatus {
 /// transport, and whether it surfaces through the generic kernel API.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+// The mirrored TS API shape is deliberate (the booleans are the
+// product's own surface, not a refactor target).
+#[allow(clippy::struct_excessive_bools)]
 pub struct McpConnectionEntry {
     pub server: String,
     pub label: String,
@@ -1031,7 +1041,7 @@ mod tests {
 
     fn test_auth_storage() -> AuthStorage {
         AuthStorage::in_memory(
-            crate::auth::types::AuthStorageData::default(),
+            &crate::auth::types::AuthStorageData::default(),
             std::sync::Arc::new(crate::auth::manager::NoOAuth),
         )
     }

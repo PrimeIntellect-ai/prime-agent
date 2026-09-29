@@ -2,7 +2,7 @@
 //! accessor arm - the active context and history snapshot, the branch
 //! scans, the window-backed reads, and the getters.
 
-use super::*;
+use super::{FileEntry, Path, RefineTranscriptParts, SessionHeader, SessionManager, SessionTree};
 
 impl SessionManager {
     /// The active compacted context without hydrating old message bodies.
@@ -12,6 +12,7 @@ impl SessionManager {
     /// authority since `adopt_window` moves the walk's trees in). The
     /// window's own trees are detached at adoption, so asking the window
     /// for a context would walk an empty window.
+    #[must_use]
     pub fn active_context(&self) -> super::SessionContext {
         let mut context = super::build_session_context(&self.file_entries, self.get_leaf_id());
         if let Some(window) = &self.window {
@@ -158,6 +159,7 @@ impl SessionManager {
     }
 
     /// Loaded current-context records; not a whole-history view.
+    #[must_use]
     pub fn retained_entries(&self) -> &[FileEntry] {
         &self.file_entries
     }
@@ -199,6 +201,7 @@ impl SessionManager {
         branch
     }
 
+    #[must_use]
     pub fn active_goal_state(&self) -> Option<crate::goals::GoalState> {
         if let Some(window) = &self.window {
             return window.goal_state().cloned();
@@ -223,6 +226,7 @@ impl SessionManager {
     /// hydration (TS `_restoreQuotaPark`'s scan, newest first): the
     /// loaded active branch entries first, then — for a windowed store —
     /// the window's pre-boundary metadata records.
+    #[must_use]
     pub fn latest_quota_park(
         &self,
     ) -> Option<crate::session_engine::provider_park::PersistedQuotaPark> {
@@ -307,6 +311,7 @@ impl SessionManager {
     }
 
     #[cfg(test)]
+    #[must_use]
     pub fn is_full_history(&self) -> bool {
         self.window.is_none()
     }
@@ -345,6 +350,7 @@ impl SessionManager {
     }
     /// Session artifact directory (`dirname(sessionDir)/session-artifacts/<id>`,
     /// TS `getSessionArtifactDir`); only persisted sessions have one.
+    #[must_use]
     pub fn get_session_artifact_dir(&self) -> Option<std::path::PathBuf> {
         self.persist
             .then(|| {
@@ -356,18 +362,22 @@ impl SessionManager {
             .map(|root| root.join(&self.session_id))
     }
 
+    #[must_use]
     pub fn get_cwd(&self) -> &Path {
         &self.cwd
     }
 
+    #[must_use]
     pub fn get_session_dir(&self) -> &Path {
         &self.session_dir
     }
 
+    #[must_use]
     pub fn get_session_id(&self) -> &str {
         &self.session_id
     }
 
+    #[must_use]
     pub fn get_session_file(&self) -> Option<&Path> {
         self.session_file.as_deref()
     }
@@ -378,6 +388,7 @@ impl SessionManager {
     ///
     /// Asserts that the manager holds no windowed store: hydrate the full
     /// session history first.
+    #[must_use]
     pub fn get_entries(&self) -> Vec<FileEntry> {
         assert!(
             self.window.is_none(),
@@ -396,6 +407,7 @@ impl SessionManager {
     ///
     /// Asserts that the manager holds no windowed store: hydrate the full
     /// session history first.
+    #[must_use]
     pub fn get_all_entries(&self) -> &[FileEntry] {
         assert!(
             self.window.is_none(),
@@ -404,10 +416,12 @@ impl SessionManager {
         &self.file_entries
     }
 
+    #[must_use]
     pub fn get_leaf_id(&self) -> Option<&str> {
         self.leaf_id.as_deref()
     }
 
+    #[must_use]
     pub fn get_header(&self) -> Option<&SessionHeader> {
         self.file_entries.iter().find_map(|entry| match entry {
             FileEntry::Header { header } => Some(header),
@@ -415,6 +429,7 @@ impl SessionManager {
         })
     }
 
+    #[must_use]
     pub fn get_session_name(&self) -> Option<String> {
         if let Some(window) = &self.window {
             return self
@@ -452,6 +467,7 @@ impl SessionManager {
     ///
     /// Asserts that the manager holds no windowed store: hydrate the full
     /// session history first.
+    #[must_use]
     pub fn get_tree(&self) -> SessionTree {
         assert!(
             self.window.is_none(),
@@ -465,6 +481,7 @@ impl SessionManager {
     ///
     /// Asserts that the manager holds no windowed store: hydrate the full
     /// session history first.
+    #[must_use]
     pub fn get_entry_by_id(&self, id: &str) -> Option<&FileEntry> {
         assert!(
             self.window.is_none(),
@@ -479,6 +496,7 @@ impl SessionManager {
     ///
     /// Asserts that the manager holds no windowed store: hydrate the full
     /// session history first.
+    #[must_use]
     pub fn get_label(&self, target_id: &str) -> Option<String> {
         assert!(
             self.window.is_none(),
@@ -493,6 +511,7 @@ impl SessionManager {
     ///
     /// Asserts that the manager holds no windowed store: hydrate the full
     /// session history first.
+    #[must_use]
     pub fn get_label_timestamp(&self, target_id: &str) -> Option<String> {
         assert!(
             self.window.is_none(),
