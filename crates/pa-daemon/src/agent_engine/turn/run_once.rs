@@ -63,13 +63,18 @@ impl AgentSessionEngine {
     /// arrive. The first attempt prompts the session; retries continue the
     /// parked turn. Returns the turn outcome: the final assistant message
     /// (provider failures included), `None` when no assistant message was
-    /// produced, or `Aborted` when the emit callback cancelled the run.
+    /// produced, or `Aborted` when the emit callback cancelled the run or
+    /// the delivery's cancel flag raced the admission (the abort-and-send
+    /// idle race: an abort landing between the runner's pickup and the
+    /// agent run's registration was lost to a run that registered fresh
+    /// after it — see [`Self::run_model_turn`]'s admission consult).
     pub(super) async fn run_turn_once(
         &self,
         agent: &std::sync::Arc<pa_agent::agent::Agent>,
         prompt: &TurnPrompt,
         first_attempt: bool,
         boundary_passed: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+        aborted: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) -> anyhow::Result<TurnOnce> {
         // Stream assistant events while the turn runs.
@@ -362,7 +367,18 @@ impl AgentSessionEngine {
         // arrives. Buffering events until the future resolves is what made
         // clients render a turn as one final batch.
         let prompt = prompt.clone();
+        // The same admission consult as [`Self::run_model_turn`]'s, at the
+        // admission future's head — the last stop before the agent run
+        // registers: an abort landing in the driver's or the subscription's
+        // prefix (after the model-turn consult, before the registration)
+        // is honoured here the same way, so the whole [pickup,
+        // registration] window honours the delivery's cancel flag.
+        let abort_raced_admission = std::sync::atomic::AtomicBool::new(false);
         let mut admitted = std::pin::pin!(async {
+            if aborted() {
+                abort_raced_admission.store(true, std::sync::atomic::Ordering::SeqCst);
+                return Ok(());
+            }
             if first_attempt {
                 // The session lock covers the clone only: the turn below
                 // runs for the whole provider stream, and holding the
@@ -472,6 +488,13 @@ impl AgentSessionEngine {
         }
         let () = subscription.unsubscribe().await;
         if aborted {
+            return Ok(TurnOnce::Aborted);
+        }
+        // The admission consult fired: the turn never started (no run
+        // registered, no provider call) — the aborted outcome, never an
+        // admission error the retry driver would classify as a provider
+        // failure and re-issue.
+        if abort_raced_admission.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(TurnOnce::Aborted);
         }
         if let Some(error) = admission_error {
