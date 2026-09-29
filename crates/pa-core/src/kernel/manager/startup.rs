@@ -266,6 +266,7 @@ impl Inner {
             // description yet (its restore/bootstrap settles clear it too,
             // see resolve_execution — this is the boundary itself).
             g.capture_freshness = None;
+            g.freshness_epoch += 1;
         }
         Ok(())
     }

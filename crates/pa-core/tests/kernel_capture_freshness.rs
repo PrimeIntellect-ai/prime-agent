@@ -622,9 +622,11 @@ async fn concurrent_settles_keep_the_boundary_invariant() {
 
     // Cells and captures race for a bounded window (the settle-race class:
     // a cell settling between a consult's count sample and its decision).
-    // The served-path boundary invariant: once every settle is done, the
-    // next capture must re-dump — the memo may never describe a namespace
-    // older than the last settled user execution.
+    // The served-path invariant is the crash-resume one: whatever the racing
+    // captures skipped or committed, the final on-disk payload must revive
+    // the LAST SETTLED namespace — a capture may legitimately skip when a
+    // concurrent capture already committed that exact namespace, so the
+    // assertion is on the restored value, not on a re-dump happening.
     let writer = {
         let manager = manager.clone();
         tokio::spawn(async move {
@@ -645,17 +647,37 @@ async fn concurrent_settles_keep_the_boundary_invariant() {
     writer.await.expect("writer task");
     reader.await.expect("reader task");
 
-    let before = file_bytes(&manifest_path_in(dir.path()));
-    tokio::time::sleep(Duration::from_millis(5)).await;
+    // The final capture after every settle: its result describes the final
+    // namespace, and the payload revives the last settled value.
     let boundary = manager.snapshot_state().await.expect("boundary capture");
     assert!(
         boundary.saved.iter().any(|name| name == "v"),
         "the boundary capture describes the namespace"
     );
-    assert_ne!(
-        file_bytes(&manifest_path_in(dir.path())),
-        before,
-        "after settled cells the capture must re-dump (never replay stale)"
+    let shutdown = manager
+        .shutdown(KernelShutdownOptions {
+            snapshot: true,
+            drain_host_requests: true,
+        })
+        .await;
+    assert!(shutdown.is_ok());
+
+    let Some(reader_options) = test_options(Some(dir.path())) else {
+        return;
+    };
+    let revived = ReplKernelManager::new(reader_options);
+    revived
+        .start(KernelStartOptions::default())
+        .await
+        .expect("kernel must start");
+    let restore = revived.restore_state().await.expect("restore");
+    assert!(restore.restored.iter().any(|name| name == "v"));
+    let live = execute(&revived, "v").await;
+    assert_eq!(live.status, ExecuteStatus::Ok, "v cell: {:?}", live.stderr);
+    assert_eq!(
+        live.result.as_deref(),
+        Some("39"),
+        "the persisted payload must carry the LAST settled value through every racing capture"
     );
-    manager.kill().await;
+    revived.kill().await;
 }

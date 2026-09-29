@@ -37,15 +37,22 @@ impl Inner {
         if let Some(fresh) = self.fresh_capture(prune_oversized).await {
             return Some(fresh);
         }
-        // The user-settled count the memo may claim once this capture
-        // commits, read before the request is queued. This capture and
-        // every other internal state request (the listing, the repair
-        // bootstrap) settle without touching the user counter, and the
-        // kernel runs one request at a time, so only a user cell settling
-        // ahead of this capture can move the count first — which leaves the
-        // claim stale-low (the next consult never matches), never
-        // wrong-fresh.
-        let user_executions_before = lock(&self.guarded).user_executions;
+        // The user-settled count and the invalidation epoch the memo may
+        // claim once this capture commits, read before the request is
+        // queued. This capture and every other internal state request (the
+        // listing, the repair bootstrap) settle without touching the user
+        // counter, and the kernel runs one request at a time, so only a
+        // user cell settling ahead of this capture can move the count
+        // first — which leaves the claim stale-low (the next consult never
+        // matches), never wrong-fresh. The epoch carries the
+        // invalidation-revive ordering: a namespace-code/restore settle or
+        // a kernel start that lands while this capture's own request is in
+        // flight bumps it, and the post-await arm re-checks it before
+        // memoizing.
+        let (user_executions_before, epoch_before) = {
+            let g = lock(&self.guarded);
+            (g.user_executions, g.freshness_epoch)
+        };
         let request = Request::Snapshot {
             path: cfg.path.to_string_lossy().to_string(),
             manifest_path: cfg.manifest_path.to_string_lossy().to_string(),
@@ -82,8 +89,13 @@ impl Inner {
                     bytes: fields.get("bytes").and_then(Value::as_u64).unwrap_or(0),
                     path: cfg.path.clone(),
                 };
-                self.record_capture_freshness(&cfg, &committed, user_executions_before)
-                    .await;
+                self.record_capture_freshness(
+                    &cfg,
+                    &committed,
+                    user_executions_before,
+                    epoch_before,
+                )
+                .await;
                 Some(committed)
             }
             // A failed or timed-out capture leaves the memo describing the
@@ -132,11 +144,20 @@ impl Inner {
             return None;
         }
         let cfg = self.options.snapshot.clone()?;
-        // Off the executor, like the arming stat in perform_restore, and
-        // bounded: a stalled (network/FUSE) artifacts filesystem must not
-        // wedge the capture path — a timed-out stat reads as "not fresh".
-        let current = stats_after_commit(&cfg).await;
-        if current != (memo.payload_stat, memo.manifest_stat) {
+        let current = stats_after_commit(&self.freshness_stat_probe, &cfg).await;
+        // None never matches: a stalled or unavailable filesystem read (or
+        // a memo armed without both stats) must not vouch for the payload.
+        let (Some(current_payload), Some(current_manifest)) = current else {
+            return None;
+        };
+        if Some(current_payload) != memo.payload_stat
+            || Some(current_manifest) != memo.manifest_stat
+        {
+            return None;
+        }
+        // The invalidation epoch: a namespace-code/restore settle or a
+        // kernel start invalidated the memo since the arm — never replay.
+        if lock(&self.guarded).freshness_epoch != memo.epoch {
             return None;
         }
         // The settle-race guard: the count was sampled before the stat
@@ -166,14 +187,20 @@ impl Inner {
         cfg: &crate::kernel::shared::KernelSnapshotConfig,
         result: &SnapshotResult,
         user_executions: u64,
+        epoch: u64,
     ) {
         // The stat pair is the witness artifact: the payload stat is the
         // load-bearing one (it fingerprints what a later restore reads),
         // the manifest stat catches the paired bookkeeping being replaced.
-        // Bounded like the consult: a stalled filesystem must not wedge the
-        // capture; a timed-out stat arms the memo with None, which never
-        // matches a later consult (the conservative direction).
-        let (payload_stat, manifest_stat) = stats_after_commit(cfg).await;
+        // The memo arms ONLY with both stats present: a stalled or missing
+        // filesystem read never memoizes (and clears any previous memo, so
+        // an unstatable filesystem degrades to re-dumping, never to
+        // replaying). The epoch re-check after the await closes the
+        // invalidation-revive ordering: a namespace-code/restore settle or
+        // a kernel start that landed while this capture's own request ran
+        // must not be re-described by this arm.
+        let (payload_stat, manifest_stat) =
+            stats_after_commit(&self.freshness_stat_probe, cfg).await;
         let live_over_cap = result.skipped.iter().any(|skip| {
             skip.reason == OVER_CAP_SKIP_REASON
                 && !result
@@ -181,13 +208,21 @@ impl Inner {
                     .as_ref()
                     .is_some_and(|pruned| pruned.contains(&skip.name))
         });
-        lock(&self.guarded).capture_freshness = Some(CaptureFreshness {
-            user_executions,
-            payload_stat,
-            manifest_stat,
-            result: result.clone(),
-            live_over_cap,
-        });
+        let mut g = lock(&self.guarded);
+        if payload_stat.is_some() && manifest_stat.is_some() && g.freshness_epoch == epoch {
+            g.capture_freshness = Some(CaptureFreshness {
+                user_executions,
+                epoch,
+                payload_stat,
+                manifest_stat,
+                result: result.clone(),
+                live_over_cap,
+            });
+        } else {
+            // A failed stat read or an epoch move never arms: clear any
+            // previous memo rather than leaving a stale description.
+            g.capture_freshness = None;
+        }
     }
 
     /// Revive a previously snapshotted namespace into the kernel.
@@ -468,22 +503,34 @@ impl Inner {
 }
 
 /// File-stat identity of a snapshot manifest; `None` when it cannot be stated.
-/// Stat the committed payload + manifest pair, off the executor and
-/// bounded: a stalled artifacts filesystem must not wedge the capture path.
+/// Stat the committed payload + manifest pair, off the executor, bounded,
+/// and SERIALIZED: a stalled (network/FUSE) artifacts filesystem must not
+/// wedge the capture path, and a stalled `fs::metadata` cannot be
+/// interrupted — repeated unbounded probes would accumulate blocked pool
+/// tasks. One probe is in flight at a time; a probe that is already in
+/// flight (or times out) reads as `(None, None)`, which NEVER matches —
+/// the consult treats it as not-fresh and the arm refuses to memoize.
 async fn stats_after_commit(
+    claim: &std::sync::atomic::AtomicBool,
     cfg: &crate::kernel::shared::KernelSnapshotConfig,
 ) -> (Option<ManifestStat>, Option<ManifestStat>) {
     let payload = cfg.path.clone();
     let manifest = cfg.manifest_path.clone();
-    let stats = tokio::task::spawn_blocking(move || {
+    // Serialize: a stalled probe keeps exactly one pool task blocked, not
+    // one per capture; every other caller reads as no-stats.
+    if claim.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return (None, None);
+    }
+    let probe = tokio::task::spawn_blocking(move || {
         (manifest_stat_of(&payload), manifest_stat_of(&manifest))
     });
-    match tokio::time::timeout(STAT_TIMEOUT, stats).await {
+    let pair = match tokio::time::timeout(STAT_TIMEOUT, probe).await {
         Ok(Ok(pair)) => pair,
         _ => (None, None),
-    }
+    };
+    claim.store(false, std::sync::atomic::Ordering::Release);
+    pair
 }
-
 fn manifest_stat_of(path: &std::path::Path) -> Option<ManifestStat> {
     std::fs::metadata(path).ok().map(|m| ManifestStat {
         mtime: m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),

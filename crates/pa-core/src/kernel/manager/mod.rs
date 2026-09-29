@@ -238,6 +238,10 @@ struct CaptureFreshness {
     /// settled request that runs namespace code or restores the namespace
     /// clears the memo outright (see `resolve_execution`).
     user_executions: u64,
+    /// The invalidation epoch at the commit: any later bump (a
+    /// namespace-code or restore settle, a kernel start) defeats the
+    /// memo even if the count and the stat pair still match.
+    epoch: u64,
     /// The payload stat right after the commit: the load-bearing witness —
     /// it fingerprints the file a later restore actually reads, so an
     /// external payload replacement defeats the skip.
@@ -298,6 +302,11 @@ struct Guarded {
     /// changed: the recurring freshness memo every capture entry consults
     /// (see `CaptureFreshness`).
     capture_freshness: Option<CaptureFreshness>,
+    /// Bumped by every memo invalidation (a namespace-code or restore
+    /// settle, a kernel start): the consult and the arm compare it, so an
+    /// invalidation that lands while a capture's own request is in flight
+    /// can never be re-described by that capture's post-await arm.
+    freshness_epoch: u64,
     /// Unattributed stream text that arrived between cells; surfaced on the next execution.
     pending_background_output: String,
     pending_background_output_chars: usize,
@@ -346,6 +355,7 @@ impl std::fmt::Debug for ReplKernelManager {
 
 pub(crate) struct Inner {
     options: KernelManagerOptions,
+    freshness_stat_probe: std::sync::atomic::AtomicBool,
     resolved_python: Mutex<Option<std::path::PathBuf>>,
     guarded: Mutex<Guarded>,
     child: Mutex<Option<ChildHandle>>,
@@ -423,6 +433,7 @@ impl ReplKernelManager {
     pub fn new(options: KernelManagerOptions) -> Self {
         let inner = Arc::new(Inner {
             options,
+            freshness_stat_probe: std::sync::atomic::AtomicBool::new(false),
             resolved_python: Mutex::new(None),
             guarded: Mutex::new(Guarded {
                 state: KernelState::Idle,
@@ -439,6 +450,7 @@ impl ReplKernelManager {
                 restored_manifest_stat: None,
                 restored_namespace_skip: None,
                 capture_freshness: None,
+                freshness_epoch: 0,
                 pending_background_output: String::new(),
                 pending_background_output_chars: 0,
                 pending_background_output_truncated: false,

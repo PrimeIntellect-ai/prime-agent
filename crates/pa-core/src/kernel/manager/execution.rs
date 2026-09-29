@@ -159,6 +159,7 @@ impl Inner {
                 // commits.
                 if execution.namespace_code || execution.restores_namespace {
                     g.capture_freshness = None;
+                    g.freshness_epoch += 1;
                 }
             }
             if let Some(callback) = execution.opts.on_late_sent_agent_message.clone() {
