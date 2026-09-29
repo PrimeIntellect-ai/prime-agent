@@ -358,6 +358,7 @@ impl TurnRunner {
         {
             let core = self.core.lock().unwrap();
             if core.compacting
+                || core.queued_input_suspended
                 || !core.attached_client_ids.is_empty()
                 || !core.steering.is_empty()
                 || !core.follow_up.is_empty()
@@ -365,6 +366,9 @@ impl TurnRunner {
             {
                 return;
             }
+        }
+        if self.input_pauses.paused() {
+            return;
         }
         if self.user_bash.is_running() {
             return;

@@ -209,7 +209,7 @@ struct SessionAttachGuard {
 
 impl Drop for SessionAttachGuard {
     fn drop(&mut self) {
-        self.worker.release_session_attachments(&self.token);
+        self.worker.release_session_attachments(&self.token, true);
     }
 }
 
@@ -926,11 +926,23 @@ impl Worker {
     /// release arm, run from the connection guard's Drop on every return
     /// path AND the explicit detach command): a shared id leaves the
     /// core only when no other live connection holds it.
-    pub(crate) fn release_session_attachments(&self, token: &str) {
-        self.released_attach_tokens
-            .lock()
-            .unwrap()
-            .insert(token.to_string());
+    pub(crate) fn release_session_attachments(&self, token: &str, final_release: bool) {
+        // `final_release` (the guard's Drop) marks the token dead - the
+        // connection is gone, so a late registration from its detached
+        // attach handler is rejected (the round-8 race belt, now
+        // bounded: only FINAL releases enter the set, and the set caps
+        // at 8192 - the round-9 bots' unbounded-growth finding). The
+        // explicit DETACH is NOT final (the round-9 bots' finding: the
+        // connection lives on - a later re-attach on the same
+        // connection must re-register or the close would find no entry
+        // and leak the hold).
+        if final_release {
+            let mut released = self.released_attach_tokens.lock().unwrap();
+            released.insert(token.to_string());
+            if released.len() > 8192 {
+                released.clear();
+            }
+        }
         let mut core = self.core.lock().unwrap();
         let ids = {
             // The attachments' lock nests INSIDE the core lock (the
@@ -973,7 +985,7 @@ impl Worker {
         // direct core retain below stays as the detach's own belt (the
         // explicit detach command is the connection's own intent).
         if let Some(token) = payload.get("connectionToken").and_then(Value::as_str) {
-            self.release_session_attachments(token);
+            self.release_session_attachments(token, false);
         }
         let mut core = self.core.lock().unwrap();
         // The belt is scoped (the fresh bots' sibling-hold finding): the
