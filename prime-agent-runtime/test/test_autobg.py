@@ -36,6 +36,16 @@ class KnobTest(unittest.TestCase):
                 with mock.patch.dict(os.environ, env):
                     self.assertEqual(autobg.threshold_seconds(), expected)
 
+    def test_non_finite_values_fall_back_to_the_default(self):
+        # NaN compares false against every threshold check, which would
+        # silently disable both guards; inf would never fire.
+        from rlm import autobg
+
+        for raw in ("nan", "NaN", "inf", "-inf", "infinity"):
+            with self.subTest(raw=raw):
+                with mock.patch.dict(os.environ, {AUTOBG_MS: raw}):
+                    self.assertEqual(autobg.threshold_seconds(), 10.0)
+
 
 class BashGuardTest(unittest.IsolatedAsyncioTestCase):
     async def test_oneshot_await_degrades_to_the_handle(self):
@@ -251,6 +261,59 @@ class ReplAutoBgTest(unittest.TestCase):
         withdrawal = wait_for_host_request(self.repl, poll_events)
         self.assertEqual(withdrawal["data"]["type"], "bash.consumed")
         self.assertEqual(withdrawal["data"]["pid"], request["data"]["pid"])
+
+    def test_gather_composed_bash_await_degrades_with_the_bash_handle(self):
+        # gather wraps each awaitable in its own task: the bash guard races
+        # in the child, and the cell guard must defer to it through the
+        # wrapper chain (the cell resumes with the bash handle, not a future).
+        started = time.monotonic()
+        events = self.repl.execute(
+            "gather",
+            "from rlm import bash\n"
+            "import asyncio\n"
+            "res = await asyncio.gather(bash('sleep 5; echo gathered'))\n"
+            "res[0]",
+        )
+        waited = time.monotonic() - started
+        self.assertLess(waited, 3.5)
+        note = one(events, "result")["text"]
+        self.assertIn("bash await auto-backgrounded", note)
+        self.assertIn("still running (pid", note)
+
+    def test_bash_created_in_a_degraded_cell_still_notifies_an_idle_kernel(self):
+        # The degrade leaves the worker running past the request; a bash()
+        # spawned there schedules its notice from a foreign thread. The
+        # loop-level bridge must wake the idle kernel, or the completion
+        # notice never fires.
+        started = time.monotonic()
+        events = self.repl.execute(
+            "late-bash",
+            "from rlm import bash\n"
+            "import time\n"
+            "time.sleep(3)\n"
+            "late = bash('sleep 0.3; printf late-notice')\n"
+            "late.pid",
+        )
+        waited = time.monotonic() - started
+        self.assertLess(waited, 2.5)
+        self.assertIn("auto-backgrounded", one(events, "result")["text"])
+        # The worker reaches the bash() spawn ~3s in; the bridge must wake the
+        # idle kernel for the notice rather than queueing it unseen.
+        request = wait_for_host_request(self.repl, [])
+        self.assertEqual(request["data"]["type"], "bash.completed")
+        self.assertIn("late-notice", request["data"]["command"])
+        reply_ok(self.repl, request)
+
+    def test_future_cancel_from_a_later_cell_stops_the_execution(self):
+        events = self.repl.execute(
+            "spawn-forever", "import time\ntime.sleep(30)\n'never'"
+        )
+        self.assertIn("auto-backgrounded", one(events, "result")["text"])
+        follow = self.repl.execute("quick", "quick = 1\nquick")
+        self.assertEqual(one(follow, "result")["text"], "1")
+        # cancel() marshals onto the serving loop from this worker thread.
+        stopped = self.repl.execute("stop", "_bg_1.cancel()")
+        self.assertEqual(one(stopped, "done")["status"], "ok")
 
     def test_fast_paths_inline_with_the_guard_armed(self):
         events = self.repl.execute("fast", "print('fast-print')\n6*7")

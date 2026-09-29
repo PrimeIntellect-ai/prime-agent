@@ -84,6 +84,14 @@ _bg_counter = itertools.count(1)
 _autobg_tails: dict[str, "_TailBuffer"] = {}
 
 
+def _pop_tail(cell_id: str, tail: "_TailBuffer | None") -> None:
+    """Drop this execution's tail entry: request ids are reusable, so a bare
+    keyed pop could delete a later execution's buffer - only the entry that IS
+    this execution's buffer is removed."""
+    if tail is not None and _autobg_tails.get(cell_id) is tail:
+        _autobg_tails.pop(cell_id, None)
+
+
 class _TailBuffer:
     """Bounded newest-last text tail for one running cell's Python-level writes."""
 
@@ -112,10 +120,13 @@ class _SyncCellRunner:
     in a cell resolves it exactly like a loop-thread cell did.
     """
 
-    def __init__(self, codes: list[types.CodeType], ns: dict[str, Any], cell_id: str) -> None:
+    def __init__(
+        self, codes: list[types.CodeType], ns: dict[str, Any], cell_id: str, tail: "_TailBuffer | None"
+    ) -> None:
         self._codes = codes
         self._ns = ns
         self._cell_id = cell_id
+        self._tail = tail
         self._done = threading.Event()
         self._cb_lock = threading.Lock()
         self._cb: Callable[[], None] | None = None
@@ -150,7 +161,7 @@ class _SyncCellRunner:
                 self._done.set()
                 callback, self._cb = self._cb, None
             _sync_cell_worker.in_cell = False
-            _autobg_tails.pop(self._cell_id, None)
+            _pop_tail(self._cell_id, self._tail)
             if callback is not None:
                 callback()
 
@@ -251,7 +262,10 @@ class _KernelFuture:
             self._runner.request_stop()
             return True
         assert self._task is not None
-        return self._task.cancel()
+        # Task.cancel from a foreign thread races the serving loop (and raises
+        # in asyncio debug mode): marshal the cancellation onto the loop.
+        self._task.get_loop().call_soon_threadsafe(self._task.cancel)
+        return True
 
     def stdout_tail(self, max_chars: int = _AUTOBG_NOTE_PREVIEW_CAP) -> str:
         """The execution's Python-level writes so far, newest last (raw fd
@@ -278,6 +292,9 @@ class _KernelFuture:
 _sync_cell_worker = threading.local()
 
 _orig_create_task = asyncio.create_task
+# The serving loop's original bound create_task, captured when the loop-level
+# worker bridge installs (main() owns the loop's lifetime).
+_orig_loop_create_task: Any = None
 _orig_get_running_loop = asyncio.get_running_loop
 _orig_signal_signal = signal.signal
 
@@ -309,12 +326,12 @@ def _bridge_to_loop(spawn: Callable[[], None]) -> None:
         )
 
 
-def _create_task_from_worker(coro: Any, *, name: Any = None, context: Any = None) -> Any:
+def _create_task_from_worker(coro: Any, *, name: Any = None, context: Any = None, **kwargs: Any) -> Any:
     box: dict[str, Any] = {}
 
     def spawn() -> None:
         try:
-            box["task"] = _loop.create_task(coro, name=name, context=context)
+            box["task"] = _orig_loop_create_task(coro, name=name, context=context, **kwargs)
         except BaseException as exc:  # noqa: BLE001 - surfaced to the caller below
             box["exc"] = exc
 
@@ -339,6 +356,42 @@ def _signal_from_worker(sig: Any, handler: Any) -> Any:
     return box["previous"]
 
 
+def _install_loop_create_task_compat() -> None:
+    """Make the serving loop's create_task safe from sync-cell worker threads.
+
+    A worker cell reaches the serving loop through the get_event_loop/
+    get_running_loop shims and can call loop.create_task directly (bash
+    completion notices, spawned tasks): from a foreign thread that call is
+    not thread-safe (asyncio debug mode raises; without the debug check the
+    queued task never wakes the loop, so an idle kernel would miss bash
+    notices). The wrapper keeps the original on the loop's own thread and
+    bridges every other caller, preserving the cell's context.
+    """
+    global _orig_loop_create_task
+    assert _loop is not None
+    _orig_loop_create_task = _loop.create_task
+
+    def create_task(coro: Any, *, name: Any = None, context: Any = None, **kwargs: Any) -> Any:
+        if not _worker_in_cell():
+            return _orig_loop_create_task(coro, name=name, context=context, **kwargs)
+        if context is None:
+            context = contextvars.copy_context()
+        box: dict[str, Any] = {}
+
+        def spawn() -> None:
+            try:
+                box["task"] = _orig_loop_create_task(coro, name=name, context=context, **kwargs)
+            except BaseException as exc:  # noqa: BLE001 - surfaced to the caller below
+                box["exc"] = exc
+
+        _bridge_to_loop(spawn)
+        if "exc" in box:
+            raise box["exc"]
+        return box["task"]
+
+    _loop.create_task = create_task  # type: ignore[method-assign]
+
+
 def _install_sync_cell_compat() -> None:
     """Keep loop-thread and main-thread APIs working from sync-cell workers.
 
@@ -352,12 +405,12 @@ def _install_sync_cell_compat() -> None:
     Every other caller gets the original function untouched.
     """
 
-    def create_task(coro: Any, *, name: Any = None, context: Any = None) -> Any:
+    def create_task(coro: Any, *, name: Any = None, context: Any = None, **kwargs: Any) -> Any:
         if not _worker_in_cell():
-            return _orig_create_task(coro, name=name, context=context)
+            return _orig_create_task(coro, name=name, context=context, **kwargs)
         if context is None:
             context = contextvars.copy_context()
-        return _create_task_from_worker(coro, name=name, context=context)
+        return _create_task_from_worker(coro, name=name, context=context, **kwargs)
 
     def get_running_loop() -> asyncio.AbstractEventLoop:
         if not _worker_in_cell():
@@ -1024,7 +1077,7 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
             else:
                 # Sync-only cell: a worker thread keeps the loop free so the
                 # guard can fire even while the cell holds the GIL.
-                runner = _SyncCellRunner(codes, ns, cell_id)
+                runner = _SyncCellRunner(codes, ns, cell_id, tail)
                 task = _loop.create_task(_await_sync_cell(runner))
         else:
             task = _loop.create_task(_run_codes(codes, ns))
@@ -1056,10 +1109,11 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
                 task.add_done_callback(_consume_task_exception)
                 if runner is None:
                     # The async task keeps writing after this request ends; it
-                    # owns the tail's cleanup now.
+                    # owns the tail's cleanup now (identity-guarded: the
+                    # request id may be reused by a later execution).
                     tail_detached = True
                     task.add_done_callback(
-                        lambda _done_task, _cell_id=cell_id: _autobg_tails.pop(_cell_id, None)
+                        lambda _done_task, _cell_id=cell_id, _tail=tail: _pop_tail(_cell_id, _tail)
                     )
                 result_text = _cap_text(_autobg_degrade_note(name, threshold, tail))
                 status = "ok"
@@ -1082,11 +1136,12 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
             _send(error)
         _send({"event": "done", "id": cell_id, "status": status})
     finally:
-        # A sync cell's runner pops its own tail at thread completion; a
-        # degraded async task's done-callback owns its tail. Every other
-        # armed cell ends here.
-        if tail is not None and runner is None and not tail_detached:
-            _autobg_tails.pop(cell_id, None)
+        # A started sync cell's runner pops its own tail at thread completion;
+        # a degraded async task's done-callback owns its tail. A runner whose
+        # task was cancelled before its first step never starts, so its entry
+        # would otherwise leak; every other armed cell ends here.
+        if tail is not None and not tail_detached and (runner is None or runner.thread is None):
+            _pop_tail(cell_id, tail)
         execution.owner = None
         execution.finished.set()
         _current_cell_execution.reset(execution_token)
@@ -1997,6 +2052,7 @@ def main() -> None:
 
     _loop = asyncio.new_event_loop()
     asyncio.set_event_loop(_loop)
+    _install_loop_create_task_compat()
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
     signal.signal(signal.SIGINT, _sigint_handler)
     threading.Thread(target=_read_requests, args=(stdin_fd, queue), daemon=True).start()

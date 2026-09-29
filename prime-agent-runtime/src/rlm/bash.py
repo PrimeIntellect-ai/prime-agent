@@ -225,14 +225,28 @@ class BashAutoBackgrounded:
 # In-flight bash await races keyed by awaiting task: the kernel's python-cell
 # guard defers to them (a cell suspended inside a guarded bash await resumes
 # with the bash handle - that await's own degrade owns the blockage).
-_guard_race_deadlines: dict[int, float] = {}
+_guard_races: dict[int, tuple[asyncio.Task[Any], float]] = {}
 _guard_race_lock = threading.Lock()
 
 
 def active_guard_race_deadline(task: asyncio.Task[Any]) -> float | None:
-    """The deadline of the bash await this task is currently racing, if any."""
+    """The earliest bash-await race deadline this task is waiting on, if any.
+
+    The cell task itself holds a direct entry; a composed await (gather,
+    shield) holds it in the wrapped child task, so tasks the cell is waiting
+    for through asyncio's wrapper callbacks are checked too.
+    """
     with _guard_race_lock:
-        return _guard_race_deadlines.get(id(task))
+        entry = _guard_races.get(id(task))
+        racing = list(_guard_races.values())
+    if entry is not None:
+        return entry[1]
+    deadlines = [
+        deadline
+        for racing_task, deadline in racing
+        if _creating_cell_waits_for(task, racing_task)
+    ]
+    return min(deadlines) if deadlines else None
 
 
 async def _autobg_guarded_wait(wait: Awaitable[BashResult]) -> BashResult | None:
@@ -252,7 +266,7 @@ async def _autobg_guarded_wait(wait: Awaitable[BashResult]) -> BashResult | None
     deadline = time.monotonic() + threshold
     if racing_task is not None:
         with _guard_race_lock:
-            _guard_race_deadlines[id(racing_task)] = deadline
+            _guard_races[id(racing_task)] = (racing_task, deadline)
     wait_task = asyncio.ensure_future(wait)
     try:
         done, _pending = await asyncio.wait({wait_task}, timeout=threshold)
@@ -278,8 +292,9 @@ async def _autobg_guarded_wait(wait: Awaitable[BashResult]) -> BashResult | None
     finally:
         if racing_task is not None:
             with _guard_race_lock:
-                if _guard_race_deadlines.get(id(racing_task)) == deadline:
-                    _guard_race_deadlines.pop(id(racing_task), None)
+                entry = _guard_races.get(id(racing_task))
+                if entry is not None and entry[1] == deadline:
+                    _guard_races.pop(id(racing_task), None)
 
 
 class _BoundedBuffer:
