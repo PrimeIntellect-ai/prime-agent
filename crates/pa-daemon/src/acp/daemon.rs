@@ -796,7 +796,16 @@ async fn handle_session_prompt(
         message: admitted.text,
         input: pa_types::daemon::PromptInput {
             content: None,
-            images: None,
+            // The image blocks ride the wire form `parse_prompt_images`
+            // reads (`{type, data, mimeType}`); TS forwards `images`
+            // only when the prompt carries any.
+            images: (!admitted.images.is_empty()).then(|| {
+                json!(admitted
+                    .images
+                    .into_iter()
+                    .map(|image| json!({ "type": "image", "data": image.data, "mimeType": image.mime_type }))
+                    .collect::<Vec<_>>())
+            }),
             // TS sends `followUp` + `queueIfBusy: true` on every ACP
             // prompt (acp-mode.ts): a prompt carrying a streaming
             // behavior is the worker's resume site for the post-abort

@@ -876,6 +876,60 @@ fn acp_daemon_attached_prompt_after_cancel_runs() {
     );
 }
 
+#[test]
+fn acp_daemon_attached_image_only_prompt_reaches_the_session() {
+    let (mut client, socket) = AcpChild::spawn_daemon_attached(
+        &["--mode", "acp", "--no-session"],
+        &json!({ "engine": "faux", "responses": ["SAW-IMAGE"] }),
+    );
+    let init = client.request("initialize", &initialize_params());
+    let _ = client.wait_response(init, TIMEOUT);
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
+    let (new_response, _) = client.wait_response(new, TIMEOUT);
+    let session_id = new_response["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // 1x1 PNG
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    let prompt = client.request(
+        "session/prompt",
+        &json!({
+            "sessionId": session_id,
+            "prompt": [
+                { "type": "image", "data": png, "mimeType": "image/png" },
+            ],
+        }),
+    );
+    let (prompt_response, _) = client.wait_response(prompt, TIMEOUT);
+    assert_eq!(
+        prompt_response["result"]["stopReason"], "end_turn",
+        "an image-only prompt runs a turn: {prompt_response}"
+    );
+    // The stored user row carries the image: an empty text block first,
+    // then the images (TS `_buildPromptContent`).
+    let list = daemon_request(&socket, "img-list", &json!({ "type": "list" }));
+    let active_session_id = &list["data"]["sessions"][0]["activeSessionId"];
+    let messages = daemon_request(
+        &socket,
+        "img-msgs",
+        &json!({ "type": "get_messages", "activeSessionId": active_session_id }),
+    );
+    let user = messages["data"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "user")
+        .unwrap();
+    assert_eq!(
+        user["content"],
+        json!([
+            { "type": "text", "text": "" },
+            { "type": "image", "data": png, "mimeType": "image/png" },
+        ])
+    );
+}
+
 /// Stop the sandboxed supervisor a test spawned (the shared-daemon
 /// product behavior leaves it running; a test owns its sandbox).
 fn shutdown_sandboxed_daemon(socket: &std::path::Path) {
