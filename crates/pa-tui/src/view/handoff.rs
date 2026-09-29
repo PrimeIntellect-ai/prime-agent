@@ -19,16 +19,23 @@
 //!
 //! Soundness rides the attach's own freshness contract instead of a new
 //! validity domain: the handoff records the session id, the worker
-//! generation, the ATTACH's event sequence, and the entry count, and
-//! the adopt fires only on an exact match against the re-attach's
-//! values. The worker's event sequence is the same monotonic counter
-//! the resume cursor rides: every transcript change — a message
-//! appended, a tool card settled, a streamed block grown in place (the
-//! same-count mutation class), a compaction rewrite — rides an event
-//! that bumps it, so a matching sequence means the entries the packs
-//! were rendered from ARE the entries the rebuild just pushed, index
-//! for index; a worker restart changes the generation, and a different
-//! session changes the id. The packs are only held for a view whose
+//! generation, the LATEST event sequence the exiting run saw (the live
+//! tracker: the attach's value, then the monotonic max over every
+//! event's `meta.sequence`), and the entry count, and the adopt fires
+//! only on an exact match against the re-attach's values. The worker's
+//! event sequence is the same monotonic counter the resume cursor
+//! rides: every transcript change — a message appended, a tool card
+//! settled, a streamed block grown in place (the same-count mutation
+//! class), a compaction rewrite — rides an event that bumps it, so a
+//! matching sequence means the entries the packs were rendered from
+//! ARE the entries the rebuild just pushed, index for index (a turn
+//! run during the exiting chat run advances the stash's key to the
+//! value the next attach reports, so a transcript-unchanged sojourn
+//! still adopts — the post-turn class; a change during the sojourn
+//! itself still misses and re-renders); a worker restart changes the
+//! generation, and a different session changes the id. A cursor-less
+//! attach never keys: the collapsed default identity could alias
+//! across same-count attaches. The packs are only held for a view whose
 //! transcript did not change after the adopt (the pending handoff is
 //! dropped by every chat mutation — see [`AgentView::adopt_layout_handoff`]),
 //! so no post-adopt mutation can be served stale rows. Every miss
@@ -128,11 +135,14 @@ pub(super) fn reset() {
 impl AgentView {
     /// Hold this view's visible-window packs for the next chat run over
     /// the same session (the agents-back handoff's exit step): the last
-    /// composed frame's window entries' packed layouts keyed by this
-    /// run's attach cursor. The next run over the SAME unchanged session
-    /// — the operators' LEFT/ENTER round trip — adopts them and its
-    /// first draw serves the window instead of re-rendering it; every
-    /// other attach re-renders exactly as before.
+    /// composed frame's window entries' packed layouts keyed by the
+    /// LATEST event sequence the run has seen (the live tracker — a
+    /// turn during the run advances the key past this run's own attach
+    /// value, so the post-turn sojourn's re-entry still matches). The
+    /// next run over the SAME transcript-unchanged session — the
+    /// operators' LEFT/ENTER round trip — adopts them and its first
+    /// draw serves the window instead of re-rendering it; every other
+    /// attach re-renders exactly as before.
     pub fn stash_layout_handoff(&self, session_id: &str, generation: &str, sequence: u64) {
         if self.layout_width == 0 {
             // A view that never composed a window holds nothing visible

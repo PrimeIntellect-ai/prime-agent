@@ -263,3 +263,96 @@ fn the_slot_is_one_shot_and_a_second_store_wins() {
         "a fresh store serves its own key"
     );
 }
+
+/// The post-turn sojourn class (the live-sequence key): a turn during the
+/// run advanced the worker's sequence past this run's own attach value —
+/// the stash keys the LATEST sequence the run saw (the live tracker), so
+/// the transcript-unchanged sojourn's re-entry (the next attach reporting
+/// that same live value) adopts. Keying the run's own stale attach value
+/// instead (the pre-fix shape) misses the same re-entry: a re-entry whose
+/// transcript DID change must miss either way, but a turn before the exit
+/// never changes the sojourn's transcript.
+#[test]
+fn a_post_turn_sojourn_reentry_matches_the_live_sequence_key() {
+    let _guard = HANDOFF_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset();
+    let mut left = view();
+    fill(&mut left);
+    let left_rows = left.visible_transcript_window(80, 6).0;
+    let session_id = "sess".to_string();
+    let generation = "gen-1".to_string();
+    // The run attached at sequence 7; the turn during the run advanced the
+    // live tracker to 8 — the stash keys the live value.
+    left.stash_layout_handoff(&session_id, &generation, 8);
+
+    let mut reentry = view();
+    fill(&mut reentry);
+    reentry.adopt_layout_handoff(&session_id, &generation, 8);
+    assert!(
+        reentry.pending_handoff.is_some(),
+        "the live-keyed stash matches the post-turn re-entry's attach"
+    );
+    ENTRY_RENDERS.with(|count| count.set(0));
+    let reentry_rows = reentry.visible_transcript_window(80, 6).0;
+    assert_eq!(
+        ENTRY_RENDERS.with(std::cell::Cell::get),
+        0,
+        "the held packs served the post-turn re-entry: no render_entry call"
+    );
+    assert_eq!(reentry_rows, left_rows, "the served rows are byte-identical");
+
+    // The pre-fix shape for the same re-entry: a stash keyed at the run's
+    // own stale attach value misses the post-turn re-attach and re-renders.
+    let mut stale_left = view();
+    fill(&mut stale_left);
+    let _ = stale_left.visible_transcript_window(80, 6);
+    stale_left.stash_layout_handoff(&session_id, &generation, 7);
+    let mut stale_reentry = view();
+    fill(&mut stale_reentry);
+    stale_reentry.adopt_layout_handoff(&session_id, &generation, 8);
+    assert!(
+        stale_reentry.pending_handoff.is_none(),
+        "the stale attach-sequence key never serves the post-turn re-entry"
+    );
+    ENTRY_RENDERS.with(|count| count.set(0));
+    let _ = stale_reentry.visible_transcript_window(80, 6);
+    assert!(
+        ENTRY_RENDERS.with(std::cell::Cell::get) > 0,
+        "the stale-keyed handoff missed and the window re-rendered"
+    );
+}
+
+/// The retry-episode pop (`pop_chat_entry`, the retry collapse that
+/// retires the failed attempt's error row) is a transcript mutation: the
+/// held handoff retires exactly like every other post-adopt mutation, so a
+/// pop between the adopt and the first draw never serves pre-pop packs.
+#[test]
+fn a_retry_episode_pop_retires_the_held_handoff() {
+    let _guard = HANDOFF_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset();
+    let mut left = view();
+    fill(&mut left);
+    let (session_id, generation, sequence) = stash(&mut left, 7);
+
+    let mut reentry = view();
+    fill(&mut reentry);
+    reentry.adopt_layout_handoff(&session_id, &generation, sequence);
+    assert!(reentry.pending_handoff.is_some());
+    // The retry episode collapses the failed attempt's error row between
+    // the adopt and the first draw: the pop is a transcript mutation.
+    reentry.pop_chat_entry();
+    assert!(
+        reentry.pending_handoff.is_none(),
+        "the pop retired the held handoff"
+    );
+    ENTRY_RENDERS.with(|count| count.set(0));
+    let _ = reentry.visible_transcript_window(80, 6);
+    assert!(
+        ENTRY_RENDERS.with(std::cell::Cell::get) > 0,
+        "the popped transcript re-renders: the pre-pop packs never served"
+    );
+}

@@ -593,6 +593,7 @@ impl AgentView {
         let Some(handoff) = self.pending_handoff.take() else {
             return;
         };
+        self.handoff_seeds = self.handoff_seeds.saturating_add(1);
         let (width, options) = match self.layout_options.as_ref() {
             // The branch above leaves the view's layout state equal to
             // this draw's shape (it either just set it or found it

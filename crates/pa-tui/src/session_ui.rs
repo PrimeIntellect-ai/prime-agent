@@ -128,12 +128,24 @@ pub(crate) struct SessionUi {
     /// can never serve a stale handoff.
     pub(crate) attach_event_generation: String,
     /// The event sequence of this run's attach — the same monotonic
-    /// counter the resume cursor rides. The layout handoff stores this
-    /// value at the run's handoff and adopts only on the next attach's
-    /// exact match: every transcript change rides an event, so a match
-    /// means the entries the handoff's packs were rendered from are
-    /// exactly the ones the re-entry rebuilt (`view::handoff`).
+    /// counter the resume cursor rides. The layout handoff's ADOPT keys
+    /// on the next attach's value here: every transcript change rides an
+    /// event, so a match means the entries the handoff's packs were
+    /// rendered from are exactly the ones the re-entry rebuilt
+    /// (`view::handoff`).
     pub(crate) attach_event_sequence: u64,
+    /// The LATEST event sequence this run has seen — the attach's value,
+    /// then the monotonic max over every event's `meta.sequence` (the
+    /// live tracker `view::handoff` keys its STASH with, so a turn during
+    /// the run advances the stash's key to the value the next attach
+    /// reports instead of the run's own stale attach sequence).
+    pub(crate) last_event_sequence: u64,
+    /// Whether the attach supplied the resume cursor (the event
+    /// generation + sequence fields). The handoff's key collapses an
+    /// absent cursor to empty/zero defaults, which could alias across
+    /// cursor-less attaches of the same entry count — a cursor-less
+    /// attach stashes nothing (`view::handoff`).
+    pub(crate) attach_cursor_present: bool,
     session_name: Option<String>,
     /// Config carried over from the run options; `/new` sessions reuse it.
     cwd: PathBuf,
@@ -660,6 +672,8 @@ impl SessionUi {
             session_id: String::new(),
             attach_event_generation: String::new(),
             attach_event_sequence: 0,
+            last_event_sequence: 0,
+            attach_cursor_present: false,
             session_name: None,
             cwd: options.cwd.clone(),
             session_dir: options.session_dir.clone(),
@@ -1031,6 +1045,12 @@ impl SessionUi {
         self.attach_event_generation
             .clone_from(&reconstructed.event_generation);
         self.attach_event_sequence = reconstructed.last_event_sequence;
+        // The live tracker starts at the attach's value (the replayed
+        // events' sequences converge onto it by the monotonic max); the
+        // cursor-presence gate keeps a cursor-less attach from stashing
+        // a handoff under collapsed default key values.
+        self.last_event_sequence = reconstructed.last_event_sequence;
+        self.attach_cursor_present = reconstructed.cursor_present;
         // The closing notice is per-connection (TS #2458: it clears on
         // every attach): a later bare session stop must not route into a
         // stale shutdown recovery's reconnect hang.

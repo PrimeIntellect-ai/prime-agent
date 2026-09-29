@@ -62,10 +62,17 @@ pub struct DaemonClosingUpdate {
 
 #[derive(Debug, Clone)]
 pub enum DaemonClientEvent {
-    /// `session_event`: one streamed agent/turn event for an attached session.
+    /// `session_event`: one streamed agent/turn event for an attached
+    /// session. The frame's `meta.sequence` (the worker's monotonic
+    /// event counter — the same counter the attach cursor rides) rides
+    /// along: the cross-view layout handoff's stash keys the LATEST
+    /// sequence the run has seen (`view::handoff`), so a turn during
+    /// the run advances the stash's key to the value the next attach
+    /// reports instead of the run's own stale attach sequence.
     SessionEvent {
         active_session_id: String,
         event: Value,
+        meta_sequence: u64,
     },
     /// `session_closed`: the attached session stopped existing.
     SessionClosed {
@@ -143,6 +150,14 @@ pub(crate) fn client_event_from_value(value: &Value) -> Option<DaemonClientEvent
                 .unwrap_or_default()
                 .to_string(),
             event: value.get("event").cloned().unwrap_or(Value::Null),
+            meta_sequence: value
+                .get("meta")
+                .and_then(|meta| {
+                    meta.get("sequence")
+                        .or_else(|| meta.get("cursor").and_then(|cursor| cursor.get("sequence")))
+                })
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
         }),
         "session_closed" => Some(DaemonClientEvent::SessionClosed {
             active_session_id: value
@@ -1316,6 +1331,58 @@ mod tests {
             client_event_from_value(&value),
             Some(DaemonClientEvent::ModelCatalogChanged)
         ));
+    }
+
+    /// The cross-view layout handoff's live-sequence tracker keys the
+    /// stash on the LATEST sequence the worker reported, so the
+    /// session-event frame's `meta.sequence` must ride the parsed event
+    /// (`view::handoff`): a turn during the run advances the tracker past
+    /// the run's own attach value, and the post-turn sojourn re-entry
+    /// matches the value the next attach reports.
+    #[test]
+    fn session_event_parses_the_meta_sequence_for_the_handoff_tracker() {
+        let with_sequence = json!({
+            "type": "session_event",
+            "activeSessionId": "sess-1",
+            "event": { "type": "message_end" },
+            "meta": {
+                "id": "sess-1:41",
+                "sequence": 41,
+                "cursor": { "generation": "g-1", "sequence": 41 }
+            }
+        });
+        match client_event_from_value(&with_sequence) {
+            Some(DaemonClientEvent::SessionEvent {
+                meta_sequence, ..
+            }) => assert_eq!(meta_sequence, 41),
+                other => panic!("the frame must parse as a session event: {other:?}"),
+        }
+        // The cursor's sequence is the fallback shape; a frame without
+        // either collapses to zero (the tracker's monotonic max ignores
+        // it — an unkeyed event never lowers the tracked sequence).
+        let cursor_only = json!({
+            "type": "session_event",
+            "activeSessionId": "sess-1",
+            "event": { "type": "message_end" },
+            "meta": { "cursor": { "generation": "g-1", "sequence": 12 } }
+        });
+        match client_event_from_value(&cursor_only) {
+            Some(DaemonClientEvent::SessionEvent {
+                meta_sequence, ..
+            }) => assert_eq!(meta_sequence, 12),
+                other => panic!("the frame must parse as a session event: {other:?}"),
+        }
+        let no_meta = json!({
+            "type": "session_event",
+            "activeSessionId": "sess-1",
+            "event": { "type": "message_end" }
+        });
+        match client_event_from_value(&no_meta) {
+            Some(DaemonClientEvent::SessionEvent {
+                meta_sequence, ..
+            }) => assert_eq!(meta_sequence, 0),
+                other => panic!("the frame must parse as a session event: {other:?}"),
+        }
     }
 
     #[test]

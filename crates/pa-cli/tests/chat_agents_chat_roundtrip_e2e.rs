@@ -129,6 +129,21 @@ fn write_fixture(dir: &Path, id: &str, name: &str, turns: &[(&str, &str)]) -> Pa
     path
 }
 
+/// The scripted faux provider's script file (the `interactive_daemon_e2e`
+/// pattern): one scripted reply drives a REAL turn through the worker, so
+/// the transcript grows and the worker's event sequence advances during
+/// the chat run — the class the layout handoff's live-sequence key serves.
+fn write_faux_script(dir: &Path, replies: &[&str]) -> PathBuf {
+    let responses: Vec<serde_json::Value> = replies
+        .iter()
+        .map(|text| serde_json::json!({ "text": text }))
+        .collect();
+    let script = serde_json::json!({ "engine": "faux", "responses": responses });
+    let path = dir.join("script.json");
+    std::fs::write(&path, script.to_string()).expect("write faux script");
+    path
+}
+
 fn chat_options(socket: PathBuf, cwd: PathBuf) -> InteractiveOptions {
     InteractiveOptions {
         socket_path: socket,
@@ -221,6 +236,10 @@ async fn the_roundtrip_reentry_renders_the_same_transcript() {
             .any(|frame| frame.contains("flow audit clean")),
         "the first run rendered the fixture rows"
     );
+    assert_eq!(
+        first_outcome.handoff_seeds, 0,
+        "the FIRST run holds no handoff to serve (nothing stashed for it)"
+    );
 
     // The agents view anchored on the session just left: Enter opens it.
     let view_options = AgentsViewOptions {
@@ -296,5 +315,173 @@ async fn the_roundtrip_reentry_renders_the_same_transcript() {
             .iter()
             .any(|frame| frame.contains("flow audit clean")),
         "the re-entry rendered the same transcript rows over the adopted handoff"
+    );
+    // The served-path assertion (the frames are byte-identical either way —
+    // the frozen-surface property itself — so the reuse needs its own
+    // observable): this idle round trip's re-entry SERVED the window from
+    // the held packs.
+    assert!(
+        reentry_outcome.handoff_seeds > 0,
+        "the idle round trip's re-entry served its first draw from the held packs"
+    );
+}
+
+/// The post-turn sojourn class (the live-sequence key, `view::handoff`):
+/// a turn run DURING the chat run advances the worker's event sequence
+/// past the run's own attach value, the exit stashes under the LATEST
+/// sequence, and the transcript-unchanged sojourn's re-entry still
+/// adopts — the re-entry's first draw serves the held packs (the
+/// observable the byte-identical frames cannot prove on their own).
+#[tokio::test]
+async fn a_post_turn_sojourn_reentry_still_serves_the_held_packs() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let session_dir = dir.path().join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+
+    let fixture = write_fixture(
+        &session_dir,
+        "roundtrip-turn-01",
+        "roundtrip turn session",
+        &[
+            ("ship the feature", "shipped the feature"),
+            ("audit the flow", "flow audit clean"),
+        ],
+    );
+    let script_path = write_faux_script(dir.path(), &["the live turn reply"]);
+
+    // The first chat run opens the fixture, runs a REAL scripted turn (the
+    // worker's event sequence advances past this run's attach value), then
+    // exits through the agents-back LEFT handoff.
+    let mut first = chat_options(supervisor.socket.clone(), dir.path().to_path_buf());
+    first.session = SessionSelection::Resume(fixture.clone());
+    first.script_path = Some(script_path.clone());
+    let first_outcome = pa_tui::interactive::run_interactive(
+        first,
+        UiMode::Headless(HeadlessPlan {
+            steps: vec![
+                HeadlessStep::WaitRender {
+                    needle: "flow audit clean".to_string(),
+                    timeout_ms: 20_000,
+                },
+                HeadlessStep::Submit("one more turn".to_string()),
+                HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+                HeadlessStep::WaitRender {
+                    needle: "the live turn reply".to_string(),
+                    timeout_ms: 20_000,
+                },
+                HeadlessStep::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
+                HeadlessStep::WaitMs(500),
+            ],
+            width: 120,
+            height: 36,
+        }),
+    )
+    .await
+    .expect("the first chat run with the live turn");
+    assert!(
+        first_outcome.return_to_agents_view,
+        "the LEFT handoff ended the run into the agents view"
+    );
+    assert!(
+        first_outcome
+            .frames
+            .iter()
+            .any(|frame| frame.contains("the live turn reply")),
+        "the scripted turn landed in the transcript before the exit"
+    );
+    assert_eq!(
+        first_outcome.handoff_seeds, 0,
+        "the FIRST run holds no handoff to serve (nothing stashed for it)"
+    );
+
+    // The agents view anchored on the session just left: Enter opens it.
+    let view_options = AgentsViewOptions {
+        socket_path: supervisor.socket.clone(),
+        cwd: dir.path().to_path_buf(),
+        session_dir: Some(session_dir.clone()),
+        theme: "prime".to_string(),
+        version: "0.0.0".to_string(),
+        anchor_session_id: (!first_outcome.session_id.is_empty())
+            .then(|| first_outcome.session_id.clone())
+            .or(Some("roundtrip-turn-01".to_string())),
+        scope: None,
+        query: None,
+        expanded_ancestors: Vec::new(),
+        selected_row_identity: None,
+        selected_key: None,
+        status_message: None,
+        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
+        show_hardware_cursor: false,
+        incident_notice_state: None,
+    };
+    let view_run = pa_tui::agents_view::run_agents_view(
+        view_options,
+        AgentsViewUiMode::Headless(AgentsHeadlessPlan {
+            steps: vec![
+                AgentsStep::WaitSettle { timeout_ms: 1000 },
+                AgentsStep::Key("enter".to_string()),
+            ],
+            width: 120,
+            height: 36,
+        }),
+        None,
+    )
+    .await
+    .expect("the agents view run");
+    if let Some(link) = view_run.link {
+        link.close();
+    }
+    let selection = view_run
+        .outcome
+        .selection
+        .expect("Enter selected a session");
+
+    // The re-entry over the transcript-unchanged sojourn: the stash was
+    // keyed under the LATEST event sequence (the live tracker), so this
+    // attach — reporting the same post-turn value — adopts, and the
+    // re-entry's first draw serves the held packs instead of re-rendering
+    // the window (the post-turn class the stale attach-sequence key
+    // always missed).
+    let mut reentry = chat_options(supervisor.socket.clone(), dir.path().to_path_buf());
+    reentry.session = selection;
+    reentry.script_path = Some(script_path);
+    let reentry_outcome = pa_tui::interactive::run_interactive(
+        reentry,
+        UiMode::Headless(HeadlessPlan {
+            steps: vec![
+                HeadlessStep::WaitRender {
+                    needle: "the live turn reply".to_string(),
+                    timeout_ms: 20_000,
+                },
+                HeadlessStep::WaitMs(500),
+            ],
+            width: 120,
+            height: 36,
+        }),
+    )
+    .await
+    .expect("the post-turn re-entry chat run");
+    assert!(
+        !reentry_outcome.return_to_agents_view,
+        "the re-entry run completed"
+    );
+    assert!(
+        reentry_outcome
+            .frames
+            .iter()
+            .any(|frame| frame.contains("the live turn reply")),
+        "the re-entry rendered the turn's rows"
+    );
+    assert!(
+        reentry_outcome
+            .frames
+            .iter()
+            .any(|frame| frame.contains("flow audit clean")),
+        "the re-entry rendered the fixture rows too"
+    );
+    assert!(
+        reentry_outcome.handoff_seeds > 0,
+        "the post-turn sojourn's re-entry served its first draw from the held packs (the live-sequence key)"
     );
 }

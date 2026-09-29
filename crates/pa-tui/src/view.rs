@@ -244,6 +244,12 @@ pub struct AgentView {
     /// in-place mutation, or a wipe must never serve them after the
     /// transcript changed again).
     pending_handoff: Option<handoff::LayoutHandoff>,
+    /// How many first-draw windows this view served from an adopted
+    /// layout handoff (the served-path observable: an adopted pack
+    /// serving a window never enters `render_entry` — the headless
+    /// verifiers assert the reuse actually happened, else the
+    /// byte-identical frames make a vacuous pass).
+    pub(crate) handoff_seeds: u32,
     /// Per-assistant-entry markdown block caches (TS `Markdown.blockCache`,
     /// one per component instance): a streaming message re-renders every
     /// frame, so its settled blocks replay from the cache instead of
@@ -403,6 +409,7 @@ impl AgentView {
             selection_restyle: restyle::SelectionRestyle::default(),
             sparse_mutation: None,
             pending_handoff: None,
+        handoff_seeds: 0,
             click: click::ClickSurface::default(),
         }
     }
@@ -477,6 +484,11 @@ impl AgentView {
     /// operator ruling 2026-09-23). The sparse window's tail shrinks by
     /// the entry's rows, mirroring `push_entry`'s growth note.
     pub fn pop_chat_entry(&mut self) -> Option<ChatEntry> {
+        // Same rule as `push_entry`: the pop is a transcript mutation
+        // (the transcript this handoff was held for is no longer the
+        // one under the view), so a held handoff must never serve its
+        // rows after it (view::handoff).
+        self.pending_handoff = None;
         let index = self.chat.len().checked_sub(1)?;
         if self.sparse_window_is_tail_anchored() && self.layout_width > 0 {
             let rows = self.count_entry_rows(index, self.layout_width);

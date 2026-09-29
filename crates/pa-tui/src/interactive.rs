@@ -423,6 +423,12 @@ pub struct InteractiveOutcome {
     /// notice seeds the view's status line instead of the pane dying to
     /// the shell.
     pub agents_view_notice: Option<String>,
+    /// How many first-draw windows this run served from an adopted
+    /// cross-view layout handoff (`view::handoff`): the served-path
+    /// observable for the verifiers — the re-entry's frames are
+    /// byte-identical either way (the frozen-surface property), so a
+    /// zero here is the re-render and a nonzero is the reuse.
+    pub handoff_seeds: u32,
 }
 
 /// Inputs consumed by the UI loop. Terminal keys arrive one event at a time;

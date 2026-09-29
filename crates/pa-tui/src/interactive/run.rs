@@ -554,6 +554,7 @@ async fn run_interactive_surface(
                 copies: Vec::new(),
                 opened_urls: Vec::new(),
                 agents_view_notice: None,
+                handoff_seeds: 0,
             });
         }
     }
@@ -1839,16 +1840,23 @@ async fn run_interactive_surface(
     if session.open_agents_view || session.pending_selection.is_some() {
         session.stash_draft_for_agents_view(&view);
         // The cross-view layout handoff (view::handoff): hold the last
-        // frame's visible-window packs keyed by this run's attach cursor,
-        // so the unchanged-session re-entry's first draw reuses them
-        // instead of re-rendering the window (the process keeps running
-        // through the agents view; every changed attach misses and
-        // re-renders exactly as before).
-        view.stash_layout_handoff(
-            &session.session_id,
-            &session.attach_event_generation,
-            session.attach_event_sequence,
-        );
+        // frame's visible-window packs keyed by the LATEST event sequence
+        // this run has seen (the live tracker), so the unchanged-session
+        // re-entry's first draw reuses them instead of re-rendering the
+        // window — including the post-turn sojourn class, where a turn
+        // during this run advanced the worker's sequence past this run's
+        // own attach value: the stash keys the value the NEXT attach
+        // reports when the sojourn itself stayed transcript-unchanged
+        // (every changed attach still misses and re-renders exactly as
+        // before). A cursor-less attach never keys (the collapsed
+        // default identity could alias across same-count attaches).
+        if session.attach_cursor_present {
+            view.stash_layout_handoff(
+                &session.session_id,
+                &session.attach_event_generation,
+                session.last_event_sequence,
+            );
+        }
     }
     session.release_prompt_stash_session();
     // TS `shutdown` fetches the session stats while the connection is
@@ -1921,6 +1929,7 @@ async fn run_interactive_surface(
         } else {
             None
         },
+        handoff_seeds: view.handoff_seeds,
     };
     // The agents-view handoff's background detach owns this connection now
     // (it closes once the daemon answers); every other exit closes it here.
