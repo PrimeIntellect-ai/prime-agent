@@ -2,7 +2,7 @@
 //! `.bootstrap-version` read/write, and the current-version predicates the
 //! flows and the readiness gates compose.
 
-use super::{Path, BootstrapVersion, BootstrapPythonSkill, default_rlm_extra_uv_args};
+use super::{default_rlm_extra_uv_args, BootstrapPythonSkill, BootstrapVersion, Path};
 
 /// Schema of `.bootstrap-version`; a mismatch rebuilds the venv.
 pub(super) const BOOTSTRAP_SCHEMA: u64 = 9;
@@ -75,10 +75,7 @@ pub(super) fn bootstrap_version_current(
 ) -> bool {
     version.is_some_and(|version| {
         bootstrap_base_version_current(Some(version.clone()), runtime_identity)
-            && recorded_skills_cover(
-                version.python_skills.as_deref(),
-                python_skills,
-            )
+            && recorded_skills_cover(version.python_skills.as_deref(), python_skills)
     })
 }
 

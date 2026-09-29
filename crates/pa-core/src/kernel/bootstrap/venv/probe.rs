@@ -3,7 +3,10 @@
 //! two-layer memo (in-process map + the cross-process on-disk verdict)
 //! that skips re-probing a venv nobody damaged.
 
-use super::{Digest, Stdio, DEFAULT_RLM_EXTRA_PACKAGES, KernelPythonSkill, Mutex, HashMap, PathBuf, Path, collect_python_files};
+use super::{
+    collect_python_files, Digest, HashMap, KernelPythonSkill, Mutex, Path, PathBuf, Stdio,
+    DEFAULT_RLM_EXTRA_PACKAGES,
+};
 
 fn python_imports(python: &str, module_name: &str) -> bool {
     run_quiet(python, &["-c", &format!("import {module_name}")])

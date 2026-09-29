@@ -2,7 +2,7 @@
 //! sidecar layout, the source-checkout fallback, and the content identity
 //! that invalidates an existing venv on any runtime change.
 
-use super::{PathBuf, expand_home, Path, RUNTIME_REQUIREMENT, Digest};
+use super::{expand_home, Digest, Path, PathBuf, RUNTIME_REQUIREMENT};
 
 /// Directory of the installed `prime-agent-runtime` sources. The Rust binary
 /// ships the same sidecar layout the compiled TS executable uses; an explicit
