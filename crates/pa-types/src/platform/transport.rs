@@ -504,20 +504,21 @@ mod pipe_name_tests {
     #[test]
     fn relative_paths_derive_per_working_directory() {
         // The current directory is process-global: hold the module's lock
-        // and restore the previous directory afterwards.
+        // and restore the previous directory on scope exit - the drop
+        // guard covers the panic paths, so a failed assert never leaks
+        // the changed directory to the binary's other tests.
         use std::sync::Mutex;
         static CWD_LOCK: Mutex<()> = Mutex::new(());
-        let _guard = CWD_LOCK
+        let _lock = CWD_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let previous = std::env::current_dir().expect("current dir");
+        let _guard = CwdGuard::capture();
         let first = tempfile_dir();
         std::env::set_current_dir(&first).expect("chdir first");
         let here = pipe_name(Path::new("daemon.sock")).expect("derives");
         let second = tempfile_dir();
         std::env::set_current_dir(&second).expect("chdir second");
         let elsewhere = pipe_name(Path::new("daemon.sock")).expect("derives");
-        std::env::set_current_dir(&previous).expect("restore cwd");
         assert_ne!(
             here, elsewhere,
             "the same relative name derives per working directory"
@@ -526,6 +527,23 @@ mod pipe_name_tests {
             here.starts_with(r"\\.\pipe\prime-agent-explicit-"),
             "{here}"
         );
+    }
+
+    /// The process working directory on scope exit (including panics):
+    /// a drop guard, so a failed assert or chdir cannot leak the changed
+    /// directory to the binary's other tests.
+    struct CwdGuard(std::path::PathBuf);
+
+    impl CwdGuard {
+        fn capture() -> Self {
+            Self(std::env::current_dir().expect("current dir"))
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
     }
 
     /// A fresh directory to chdir into for the relative-path pin.
