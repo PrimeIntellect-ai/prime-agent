@@ -4,6 +4,31 @@
 //! with an answer the parent roster surfaces, and die on delete
 //! (`rlm.spawn` / `rlm.list_subagents` / `rlm.collect` /
 //! `rlm.delete_subagent` / `rlm.create_session` host surface).
+// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
+// the full rationale).
+// Stack-resident futures by design on the daemon's hot paths; boxing the
+// call sites for a lint tick is a perf regression with zero correctness gain.
+#![allow(clippy::large_futures)]
+// 64-bit-only targets; the narrowing casts sit at OS boundaries
+// (pid/fd/time/size) where the values are bounded by the kernel - the
+// dead-guard expect()s would add panic paths where silent wrap was
+// deliberate.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// The fn-length threshold is a style gate, not correctness; the structure
+// campaign owns the god-fn splits as a follow-up.
+#![allow(clippy::too_many_lines)]
+// API-shape opinions, not defects; the surfaces are deliberate.
+#![allow(
+    clippy::unnecessary_wraps,
+    clippy::zero_sized_map_values,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names
+)]
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -96,7 +121,7 @@ impl Client {
         (client, hello)
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -182,12 +207,7 @@ fn write_script(dir: &Path, answer: &str) -> PathBuf {
 
 /// Children registry bound to the running supervisor, with a parent identity
 /// rooted at `agent_dir`.
-async fn children(
-    socket: &Path,
-    agent_dir: &Path,
-    script: &Path,
-    depth: u32,
-) -> SupervisorChildSessions {
+fn children(socket: &Path, agent_dir: &Path, script: &Path, depth: u32) -> SupervisorChildSessions {
     let sessions = SupervisorChildSessions::new(
         Arc::new(SupervisorLink::new(socket.to_path_buf())),
         agent_dir.to_path_buf(),
@@ -245,7 +265,7 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
     let script = write_script(dir.path(), "child answer");
-    let children = children(&socket, &agent_dir, &script, 0).await;
+    let children = children(&socket, &agent_dir, &script, 0);
 
     // Spawn: one child worker session created through the supervisor.
     let handle = children
@@ -309,7 +329,7 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
 
     // The supervisor roster shows the child as a depth-1 subagent session.
     let roster_summary = wait_until(Duration::from_secs(10), || {
-        client.send_command("l1", json!({ "type": "list" }));
+        client.send_command("l1", &json!({ "type": "list" }));
         let list = client.read_response("l1");
         list["data"]["sessions"].as_array().and_then(|sessions| {
             sessions
@@ -387,7 +407,7 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
     let remaining = children.list_subagents().await.expect("list after delete");
     assert!(remaining.is_empty(), "child removed from the parent roster");
     wait_until(Duration::from_secs(10), || {
-        client.send_command("l2", json!({ "type": "list" }));
+        client.send_command("l2", &json!({ "type": "list" }));
         let list = client.read_response("l2");
         list["data"]["sessions"]
             .as_array()
@@ -475,7 +495,7 @@ async fn rlm_create_session_spawns_a_prompted_depth_zero_session() {
     let _daemon = spawn_daemon(&socket, &agent_dir);
     let (mut client, _hello) = Client::connect(&socket);
     let script = write_script(dir.path(), "root session answer");
-    let children = children(&socket, &agent_dir, &script, 0).await;
+    let children = children(&socket, &agent_dir, &script, 0);
 
     let handle = children
         .create_session(RlmCreateSessionRequest {
@@ -495,7 +515,7 @@ async fn rlm_create_session_spawns_a_prompted_depth_zero_session() {
     assert_eq!(handle.model, "scripted/faux-1");
 
     // A depth-0 resident session, not a subagent roster row.
-    client.send_command("l1", json!({ "type": "list" }));
+    client.send_command("l1", &json!({ "type": "list" }));
     let list = client.read_response("l1");
     let sessions = list["data"]["sessions"].as_array().expect("sessions");
     assert_eq!(sessions.len(), 1);
@@ -512,10 +532,10 @@ async fn rlm_create_session_spawns_a_prompted_depth_zero_session() {
     let answer = wait_until(Duration::from_secs(10), || {
         client.send_command(
             "g1",
-            json!({ "type": "get_last_assistant_text", "activeSessionId": active_id }),
+            &json!({ "type": "get_last_assistant_text", "activeSessionId": active_id }),
         );
-        let last = client.read_response("g1");
-        last["data"]["text"]
+        let final_answer = client.read_response("g1");
+        final_answer["data"]["text"]
             .as_str()
             .filter(|text| !text.is_empty())
             .map(str::to_string)
@@ -525,12 +545,12 @@ async fn rlm_create_session_spawns_a_prompted_depth_zero_session() {
     // Killing the session removes it from the supervisor roster.
     client.send_command(
         "k1",
-        json!({ "type": "kill", "activeSessionId": active_id }),
+        &json!({ "type": "kill", "activeSessionId": active_id }),
     );
     let killed = client.read_response("k1");
     assert_eq!(killed["success"], true, "kill failed: {killed}");
     wait_until(Duration::from_secs(10), || {
-        client.send_command("l2", json!({ "type": "list" }));
+        client.send_command("l2", &json!({ "type": "list" }));
         let list = client.read_response("l2");
         list["data"]["sessions"]
             .as_array()
@@ -550,7 +570,7 @@ async fn rlm_recursion_bound_is_enforced() {
     let _daemon = spawn_daemon(&socket, &agent_dir);
     let script = write_script(dir.path(), "unreachable");
     // A depth-2 parent (the default bound): spawns are refused.
-    let children = children(&socket, &agent_dir, &script, 2).await;
+    let children = children(&socket, &agent_dir, &script, 2);
     let error = children
         .spawn(spawn_request("too-deep", "nope"))
         .await
@@ -637,7 +657,7 @@ async fn parallel_same_name_subagent_creates_admit_exactly_one() {
     // in sequence.
     let ids = ["c1", "c2", "c3", "c4"];
     for id in ids {
-        client.send_command(id, subagent_create(&format!("sub-{id}")));
+        client.send_command(id, &subagent_create(&format!("sub-{id}")));
     }
     let deadline = Instant::now() + Duration::from_secs(90);
     let mut responses: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
@@ -675,7 +695,7 @@ async fn parallel_same_name_subagent_creates_admit_exactly_one() {
         .expect("winner active id");
     client.send_command(
         "k1",
-        json!({ "type": "kill", "activeSessionId": active_id }),
+        &json!({ "type": "kill", "activeSessionId": active_id }),
     );
     let killed = client.read_response_slow("k1");
     assert!(
@@ -683,14 +703,14 @@ async fn parallel_same_name_subagent_creates_admit_exactly_one() {
         "kill winner: {killed}"
     );
     wait_until(Duration::from_secs(10), || {
-        client.send_command("l1", json!({ "type": "list" }));
+        client.send_command("l1", &json!({ "type": "list" }));
         let list = client.read_response("l1");
         list["data"]["sessions"]
             .as_array()
             .filter(|sessions| sessions.is_empty())
             .map(|_| ())
     });
-    client.send_command("c5", subagent_create("sub-c5"));
+    client.send_command("c5", &subagent_create("sub-c5"));
     let retry = client.read_response_slow("c5");
     assert!(
         retry["success"].as_bool().unwrap_or(false),

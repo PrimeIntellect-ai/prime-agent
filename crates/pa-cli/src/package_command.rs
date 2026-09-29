@@ -44,7 +44,7 @@ enum PackageCommand {
 }
 
 impl PackageCommand {
-    fn usage(&self) -> String {
+    fn usage(self) -> String {
         match self {
             PackageCommand::Install => format!("{APP_NAME} package install <source> [--local]"),
             PackageCommand::Remove => format!("{APP_NAME} package remove <source> [--local]"),
@@ -78,6 +78,7 @@ impl UpdateTarget {
 }
 
 #[derive(Debug, Default)]
+#[allow(clippy::struct_excessive_bools)] // the package command's flag set is the deliberate surface
 struct PackageCommandOptions {
     local: bool,
     help: bool,
@@ -561,7 +562,7 @@ fn run_package_update(
     manager: &mut PackageManager,
     options: PackageCommandOptions,
     stdin_is_terminal: bool,
-    self_update: &dyn Fn(&SelfUpdateOptions, Option<String>) -> i32,
+    self_update: &dyn Fn(&SelfUpdateOptions, Option<&str>) -> i32,
 ) -> PackageCommandOutcome {
     let target = options.update_target.unwrap_or(UpdateTarget::All);
     let persisted_wire = manager
@@ -607,7 +608,7 @@ fn run_package_update(
         archive: None,
         source: None,
     };
-    let code = self_update(&invocation, persisted_wire);
+    let code = self_update(&invocation, persisted_wire.as_deref());
     if code == 0 {
         HANDLED_OK
     } else {
@@ -735,9 +736,12 @@ mod tests {
             }
         }
 
-        fn runner(&self) -> impl Fn(&SelfUpdateOptions, Option<String>) -> i32 + '_ {
+        fn runner(&self) -> impl Fn(&SelfUpdateOptions, Option<&str>) -> i32 + '_ {
             move |options, persisted| {
-                self.seen.lock().unwrap().push((options.clone(), persisted));
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .push((options.clone(), persisted.map(str::to_string)));
                 self.code
             }
         }

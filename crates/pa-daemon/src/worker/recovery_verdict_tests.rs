@@ -94,7 +94,7 @@ async fn a_bash_completion_notice_admits_the_steering_lane_with_busy_evidence() 
         &worker.recovery,
         &worker.core,
         &notify,
-        crate::engine::BashCompletionNotice {
+        &crate::engine::BashCompletionNotice {
             pid: 4321,
             command: "sleep 12; echo RW_WAKE_DONE".to_string(),
             exit_code: 0,
@@ -161,7 +161,7 @@ async fn a_bash_completion_notice_on_a_busy_session_queues_a_visible_steer_row()
         &worker.recovery,
         &worker.core,
         &notify,
-        crate::engine::BashCompletionNotice {
+        &crate::engine::BashCompletionNotice {
             pid: 99,
             command: "make gates".to_string(),
             exit_code: 2,
@@ -188,7 +188,7 @@ async fn bash_consumed_withdraws_the_undelivered_notice_and_settles() {
         &worker.recovery,
         &worker.core,
         &notify,
-        crate::engine::BashCompletionNotice {
+        &crate::engine::BashCompletionNotice {
             pid: 4321,
             command: "sleep 12; echo RW_WAKE_DONE".to_string(),
             exit_code: 0,
@@ -204,7 +204,7 @@ async fn bash_consumed_withdraws_the_undelivered_notice_and_settles() {
     withdraw_bash_completion_notice(
         &worker.recovery,
         &worker.core,
-        crate::engine::BashConsumedNotice {
+        &crate::engine::BashConsumedNotice {
             pid: 4321,
             command: "another command".to_string(),
         },
@@ -220,7 +220,7 @@ async fn bash_consumed_withdraws_the_undelivered_notice_and_settles() {
     withdraw_bash_completion_notice(
         &worker.recovery,
         &worker.core,
-        crate::engine::BashConsumedNotice {
+        &crate::engine::BashConsumedNotice {
             pid: 4321,
             command: "sleep 12; echo RW_WAKE_DONE".to_string(),
         },

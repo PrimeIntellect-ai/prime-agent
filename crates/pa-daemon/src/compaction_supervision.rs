@@ -613,7 +613,7 @@ impl crate::supervisor::Supervisor {
             rest: Map::default(),
         })
         .unwrap_or_default();
-        self.publish_session_event(&terminal.active_session_id, std::sync::Arc::new(frame));
+        self.publish_session_event(&terminal.active_session_id, &std::sync::Arc::new(frame));
         self.log_line(&format!(
             "declared terminal aborted compaction for {} (reason {}, declared {declared})",
             terminal.active_session_id, terminal.reason

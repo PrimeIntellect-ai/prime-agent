@@ -3,7 +3,12 @@
 
 use std::sync::Arc;
 
-use super::*;
+use super::{
+    anyhow, json, load_descriptors, persist_worker, response_failure, response_success, socket,
+    worker_connect_deadline, Context, DaemonCommand, DaemonResponse, DaemonWorkerLifecycle,
+    Duration, Ordering, Path, PathBuf, ResidentWorker, Result, Supervisor, Value,
+    WorkerRegistration,
+};
 
 /// The boot the descriptor-adoption pass runs under. An update boot
 /// relaunches kept workers from their descriptors before the roster
@@ -268,7 +273,11 @@ impl Supervisor {
                 match revived_child {
                     Some(child) => {
                         let child_pid = child.id().unwrap_or(0);
-                        self.spawn_monitor(Arc::clone(&resident), Some(child), child_pid as u64);
+                        self.spawn_monitor(
+                            Arc::clone(&resident),
+                            Some(child),
+                            u64::from(child_pid),
+                        );
                     }
                     None => self.spawn_monitor(Arc::clone(&resident), None, pid),
                 }
@@ -659,7 +668,7 @@ impl Supervisor {
             );
         let ledger = self.rlm_spawn_ledger_for(None).await?;
         ledger
-            .append_spawn(crate::rlm_ledger::RlmSpawnInput {
+            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
                 child_id: child_id.clone(),
                 parent: parent.to_string(),
                 child: child.to_string(),

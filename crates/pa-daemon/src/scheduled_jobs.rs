@@ -99,7 +99,7 @@ impl QueueHooks {
     /// session file present, still the job's session, still carrying the
     /// `active` state. A killed (`archived`) or deleted session fails the
     /// check.
-    fn persisted_target_gone(&self, job: &AgentCronJob) -> bool {
+    fn persisted_target_gone(job: &AgentCronJob) -> bool {
         if job.session_file.is_empty() {
             return true;
         }
@@ -131,7 +131,7 @@ impl AgentCronSchedulerHooks for QueueHooks {
         // longer live (killed — state `archived` — or deleted) cancels the
         // session's jobs and skips, so a fire can never revive a stopped
         // session (the zombie fix's delivery-side gate).
-        if self.persisted_target_gone(job) {
+        if Self::persisted_target_gone(job) {
             self.cancel_jobs_for_dead_target(job);
             return Ok(Some("skipped"));
         }
@@ -557,7 +557,7 @@ impl Worker {
 
     /// `cron_list` (TS daemon-mode case): the store's jobs filtered by the
     /// selector and the inactive cut.
-    pub(crate) async fn handle_cron_list(&self, payload: &Value) -> DaemonResponse {
+    pub(crate) fn handle_cron_list(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("cron_list") {
             return response;
         }
@@ -1016,7 +1016,7 @@ mod tests {
     /// verification (TS `isPersistedCronJobRunnable`) reads.
     fn write_active_session(dir: &std::path::Path) -> (String, std::path::PathBuf) {
         let mut session = crate::session_store::SessionFile::create("/w", None, 0);
-        session.append_message(serde_json::json!({
+        session.append_message(&serde_json::json!({
             "role": "user", "content": "hi", "timestamp": 1u64
         }));
         let path = dir.join(crate::session_store::session_file_name(

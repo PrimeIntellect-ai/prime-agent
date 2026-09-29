@@ -630,7 +630,7 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
                 let anchor = (!outcome.session_id.is_empty()).then(|| outcome.session_id.clone());
                 run_agents_view_flow(tui_options, anchor, outcome.agents_view_notice).await
             } else {
-                print_resume_hint(&outcome.resume_hint);
+                print_resume_hint(outcome.resume_hint.as_deref());
                 Ok(())
             }
         }
@@ -656,7 +656,7 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
 /// force-quit while progress lands — a draining terminal is not a stalled
 /// shutdown), and the stamp it leaves carries the fixed delay inside the
 /// guard's grace window.
-fn print_resume_hint(hint: &Option<String>) {
+fn print_resume_hint(hint: Option<&str>) {
     if let Some(hint) = hint {
         println!("\x1b[2m{hint}\x1b[22m");
     }
@@ -786,7 +786,7 @@ async fn run_agents_view_flow(
             status_message = Some(notice.clone());
         }
         if !outcome.return_to_agents_view {
-            print_resume_hint(&outcome.resume_hint);
+            print_resume_hint(outcome.resume_hint.as_deref());
             if let Some(link) = roster_link.take() {
                 link.close();
             }
@@ -819,7 +819,7 @@ async fn run_agents_view_flow(
                 status_message = Some(notice.clone());
             }
             if !outcome.return_to_agents_view {
-                print_resume_hint(&outcome.resume_hint);
+                print_resume_hint(outcome.resume_hint.as_deref());
                 if let Some(link) = roster_link.take() {
                     link.close();
                 }
@@ -840,6 +840,7 @@ async fn run_agents_view_flow(
 
 /// `--daemon-socket` value, the `PRIME_AGENT_DAEMON_SOCKET` environment,
 /// or the per-user default socket path (precedence in that order).
+#[must_use]
 pub fn resolve_socket_path(daemon_socket: Option<&str>) -> PathBuf {
     config::resolve_daemon_socket_path(daemon_socket)
 }
@@ -875,7 +876,7 @@ fn build_tui_options(
     // `sessionPath` (TS `getInteractiveDaemonSessionPath`).
     let session = match &options.session.fork {
         Some(selector) => fork_startup_selection(selector, &config.cwd, session_dir.as_deref())?,
-        None => session_selection(&options.session, &session_dir)?,
+        None => session_selection(&options.session, session_dir.as_deref()),
     };
     // The chat markdown code-block indent reads the effective settings on
     // startup (TS `getCodeBlockIndent` -> `getMarkdownThemeWithSettings`).
@@ -1008,14 +1009,14 @@ fn build_tui_options(
 /// here.
 fn session_selection(
     session: &crate::mode::SessionOptions,
-    session_dir: &Option<PathBuf>,
-) -> Result<SessionSelection> {
+    session_dir: Option<&Path>,
+) -> SessionSelection {
     if let Some(selector) = &session.resume {
         let default_dir = config::get_agent_dir().join("sessions");
-        let dir = session_dir.as_deref().unwrap_or(&default_dir);
-        return Ok(resolve_resume_selector(selector, dir));
+        let dir = session_dir.unwrap_or(&default_dir);
+        return resolve_resume_selector(selector, dir);
     }
-    Ok(SessionSelection::New)
+    SessionSelection::New
 }
 
 /// TS `createSessionManager`'s fork arm for the interactive launch: resolve
@@ -1045,7 +1046,7 @@ fn fork_startup_selection(
     let expanded = config::expand_tilde_path(selector);
     let selector = expanded.to_string_lossy();
     let resolved = resolve_session_path(&selector, cwd, dir)
-        .map_err(|error| anyhow!(crate::print_runtime::render_selector_error(error)))?;
+        .map_err(|error| anyhow!(crate::print_runtime::render_selector_error(&error)))?;
     let source = match resolved {
         ResolvedSession::Path(path)
         | ResolvedSession::Local(path)
@@ -1353,7 +1354,7 @@ mod tests {
         let session_dir = dir.path().join("sessions");
         std::fs::create_dir_all(&session_dir).expect("sessions dir");
         assert_eq!(
-            session_selection(&session, &Some(session_dir.clone())).unwrap(),
+            session_selection(&session, Some(session_dir.as_path())),
             SessionSelection::New
         );
         // `--continue` never maps to a resume: the continue-recent launch
@@ -1361,14 +1362,14 @@ mod tests {
         // `continue_recent_view`) or falls through to a fresh session.
         session.continue_recent = true;
         assert_eq!(
-            session_selection(&session, &Some(session_dir.clone())).unwrap(),
+            session_selection(&session, Some(session_dir.as_path())),
             SessionSelection::New
         );
         session.continue_recent = false;
         session.resume = Some("a1b2c3".to_string());
         // A bare selector that is not a file attaches a live session id.
         assert_eq!(
-            session_selection(&session, &Some(session_dir.clone())).unwrap(),
+            session_selection(&session, Some(session_dir.as_path())),
             SessionSelection::Attach("a1b2c3".to_string())
         );
         // An id with a saved file under the sessions dir reopens the file.
@@ -1376,7 +1377,7 @@ mod tests {
         std::fs::write(&saved, "{}\n").expect("write file");
         session.resume = Some("deadbeefcafe".to_string());
         assert_eq!(
-            session_selection(&session, &Some(session_dir.clone())).unwrap(),
+            session_selection(&session, Some(session_dir.as_path())),
             SessionSelection::Resume(saved)
         );
         // An explicit file path reopens that session file.
@@ -1384,7 +1385,7 @@ mod tests {
         std::fs::write(&file, "{}\n").expect("write file");
         session.resume = Some(file.to_string_lossy().to_string());
         assert_eq!(
-            session_selection(&session, &Some(session_dir)).unwrap(),
+            session_selection(&session, Some(session_dir.as_path())),
             SessionSelection::Resume(file)
         );
     }
