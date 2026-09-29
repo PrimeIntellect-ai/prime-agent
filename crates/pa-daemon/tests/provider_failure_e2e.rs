@@ -69,6 +69,12 @@ enum MockRejection {
     /// The prime-inference storm shape: 429 with `Retry-After` and the
     /// "Too many concurrent requests" body.
     RateLimit { retry_after_secs: u64 },
+    /// THE 402 REGRESSION (the diagnosis's variant B): a wallet-drain
+    /// 402 whose body carries the prime-inference `invalid_request_error`
+    /// type text — the shape that classified permanent on the first
+    /// attempt and settled SILENTLY (no retry episode, so no outcome
+    /// row) before the failure-scoped disclosure.
+    PaymentRequired,
 }
 
 impl FailingMock {
@@ -155,6 +161,18 @@ fn serve(
                 String::new(),
                 json!({
                     "error": { "message": "mock provider overloaded", "type": "server_error", "code": 500 }
+                })
+                .to_string(),
+            ),
+            MockRejection::PaymentRequired => (
+                "HTTP/1.1 402 Payment Required",
+                String::new(),
+                json!({
+                    "error": {
+                        "message": "402 Insufficient balance (team wallet drained)",
+                        "type": "invalid_request_error",
+                        "code": 402
+                    }
                 })
                 .to_string(),
             ),
@@ -708,7 +726,163 @@ fn storm_429_caps_requests_honors_retry_after_and_leaves_one_outcome_row() {
     assert_eq!(outcomes, 1, "exactly one outcome row: {list:?}");
 }
 
-/// A direct-transport client (thin-supervisor stage 2): ticket from the
+/// THE 402 REGRESSION (the diagnosis's variant B — the Mac's per-turn
+/// shape): a wallet-drain 402 whose body carries the
+/// `invalid_request_error` type text must (1) classify by STATUS — the
+/// deterministic `payment_required` kind — so it settles on the FIRST
+/// attempt with no retry ladder burning 13-15s on a dead wallet, and
+/// (2) still emit the failure-scoped disclosure row: the turn never
+/// settles as a silent empty message.
+#[test]
+fn payment_402_settles_once_with_the_disclosure() {
+    let (_dir, mock, _supervisor, mut client, session_id) = setup_with_rejection(
+        "p402",
+        5,
+        "never reached",
+        MockRejection::PaymentRequired,
+    );
+    client.send_command(
+        "p1",
+        &json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "hi" }),
+    );
+    let done = client.request("p1");
+    assert_eq!(done["success"], false, "prompt must fail: {done}");
+    client.drain_events(Duration::from_secs(1));
+
+    // The 402 is permanent on the first attempt: exactly ONE provider
+    // request, no retry ladder on the dead wallet.
+    assert_eq!(mock.count(), 1, "requests: the 402 settles once");
+
+    // The failure-scoped disclosure row fired with attempt 0 (the
+    // pre-fix silent arm: no episode, no row).
+    let outcome_pair: Vec<&Value> = client
+        .events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.get("type").and_then(Value::as_str),
+                Some("message_start" | "message_end")
+            ) && event["message"]["role"] == "custom"
+                && event["message"]["customType"] == "provider_retry_outcome"
+        })
+        .collect();
+    assert_eq!(
+        outcome_pair.len(),
+        2,
+        "one outcome row pair: {:?}",
+        event_types(&client.events)
+    );
+    let outcome = &outcome_pair[0]["message"];
+    assert_eq!(outcome["details"]["success"], false);
+    assert_eq!(outcome["details"]["attempts"], 0);
+    let text = outcome["content"].as_str().expect("outcome text");
+    assert!(
+        text.contains("Insufficient balance (team wallet drained)"),
+        "outcome text: {text}"
+    );
+    assert!(
+        !text.contains("Retry failed"),
+        "no retry ran, so the zero-attempt text reads as the plain failure: {text}"
+    );
+}
+
+/// THE GOAL-SIDE 402 REGRESSION (the diagnosis's repro contract): a goal
+/// whose continuation turn dies on the wallet-drain 402 refuses the NEXT
+/// continuation and finishes the goal — the pre-fix behavior minted a
+/// fresh continuation into the dead provider every boundary (the
+/// operator's 64-cycle hot loop). The turn's disclosure row still fires
+/// (BUG 1), and exactly ONE provider request runs: the loop is dead at
+/// the first failed boundary.
+#[test]
+fn goal_continuation_refuses_after_the_402_corpse() {
+    let (dir, mock, _supervisor, mut client, session_id) = setup_with_rejection(
+        "p402goal",
+        5,
+        "never reached",
+        MockRejection::PaymentRequired,
+    );
+    // Arm the goal through the session command path (no model call),
+    // like the operator's live session: the initial continuation row
+    // queues and drives the first turn.
+    client.send_command(
+        "g1",
+        &json!({
+            "type": "prompt_and_wait",
+            "activeSessionId": session_id,
+            "message": "/goal start Ship the feature end to end."
+        }),
+    );
+    let done = client.request("g1");
+    // The goal command arms the goal and its initial continuation row
+    // runs inside the same prompt: the run settles with the 402 error.
+    assert_eq!(done["success"], false, "the goal turn fails: {done}");
+    assert!(
+        done["error"]
+            .as_str()
+            .expect("error text")
+            .contains("Insufficient balance"),
+        "the failure is the turn's 402: {done}"
+    );
+    client.drain_events(Duration::from_secs(1));
+
+    // The single failed continuation turn: ONE provider request (the
+    // 402 is permanent), NO re-minted continuation after it.
+    assert_eq!(mock.count(), 1, "no continuation loop: one request total");
+
+    // The durable goal state: the errored turn finished the goal.
+    let session_dir = dir.path().join("agent").join("sessions");
+    let session_file = std::fs::read_dir(&session_dir)
+        .expect("session dir readable")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
+        .expect("one session file");
+    let goal_rows: Vec<Value> = std::fs::read_to_string(&session_file)
+        .expect("session file readable")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+        .filter(|entry| {
+            entry.get("type").and_then(Value::as_str) == Some("custom")
+                && entry.get("customType").and_then(Value::as_str)
+                    == Some("thread_goal_state")
+        })
+        .collect();
+    let latest = goal_rows.last().expect("at least one goal row");
+    assert_eq!(
+        latest["data"]["status"], "error",
+        "the goal finished on the errored turn: {latest}"
+    );
+    assert_eq!(latest["data"]["active"], false);
+    assert!(
+        latest["data"]["lastError"]
+            .as_str()
+            .expect("last error text")
+            .contains("Insufficient balance"),
+        "the goal's error is the turn's 402: {latest}"
+    );
+
+    // The failure-scoped disclosure row still fired (BUG 1).
+    let outcome_rows = client
+        .events
+        .iter()
+        .filter(|event| {
+            event.get("type").and_then(Value::as_str) == Some("message_start")
+                && event["message"]["role"] == "custom"
+                && event["message"]["customType"] == "provider_retry_outcome"
+        })
+        .count();
+    assert_eq!(outcome_rows, 1, "one disclosure row: the silent arm is gone");
+
+    // The failed continuation pair left the live loop context (BUG 2
+    // (c)): the transcript keeps the rows, the loop context does not.
+    // Re-read the session messages: the goal_context row and the corpse
+    // remain durable (the transcript's full fidelity) — the CONTEXT
+    // effect is asserted by the one-request count above (a re-minted
+    // continuation would have re-prompted).
+}
+
+/// A direct-transport client (thin-supervisor stage 2): ticket from the: ticket from the
 /// supervisor, `peer_auth` + `attach` on the worker's own socket. The turn
 /// events must stream live on this path (the per-connection fan-out writes
 /// while the routed command is still in flight).
