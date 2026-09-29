@@ -106,6 +106,13 @@ pub enum SessionSelection {
     Resume(PathBuf),
 }
 
+/// Cap on the exit-path telemetry flush (the `tui exit` event's bound):
+/// the `PostHog` sink alone allows up to 1.5s, so an exit-path event is
+/// dropped rather than awaited past the exit-within-1s contract. The
+/// interactive loop and the composition root's exit paths share this one
+/// bound.
+pub const TELEMETRY_EXIT_TIMEOUT_MS: u64 = 500;
+
 /// Explicit model selection carried into every `create` config: the CLI
 /// `--provider`/`--model`/`--api-key`/`--thinking` flags. Explicit flags are
 /// authoritative end-to-end — the daemon worker resolves its session model

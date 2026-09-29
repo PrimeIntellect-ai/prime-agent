@@ -8,14 +8,10 @@ use super::{
     HeadlessSettle, Instant, InteractiveOptions, InteractiveOutcome, PaneDrive, ReconnectConnect,
     ReconnectLoop, RecoveryKind, Renderer, Result, SessionReconnect, SessionSelection, SessionUi,
     TerminalHandoff, UiInput, UiMode, VecDeque, SESSION_RECONNECT_ATTEMPT_TIMEOUT_S,
+    TELEMETRY_EXIT_TIMEOUT_MS,
 };
 use crate::suspend::SuspendTerminal;
 use anyhow::Context;
-
-/// Cap on the exit-path telemetry flush: the `PostHog` sink alone allows up
-/// to 1.5s, so the exit event must be dropped rather than awaited past the
-/// exit-within-1s contract.
-const TELEMETRY_EXIT_TIMEOUT_MS: u64 = 500;
 
 /// The headless exit gate's settle bound: after the plan completes
 /// ([`UiInput::HeadlessDone`]), the run must end within this much wall
@@ -858,21 +854,10 @@ async fn run_interactive_surface(
                                 }
                             }
                         }
-                        // TS `app.editor.external` (default ctrl+g,
-                        // `openExternalEditor`): hand the terminal to the
-                        // configured editor child and resume the surface
-                        // after it exits. Unlike the suspend cycle
-                        // (SIGTSTP stops the whole process), the reader
-                        // thread keeps polling the tty while the editor
-                        // runs and would steal its keystrokes and
-                        // terminal query replies: the reader stops (flag
-                        // + join, bounded by one 10ms poll tick) and
-                        // respawns from the renderer's channel/guard
-                        // clones after the resume. Headless runs keep no
-                        // terminal renderer (TS never registers the
-                        // action without one), so the request is observed
-                        // and dropped — the no-editor warning still
-                        // rendered at dispatch.
+                        // TS `openExternalEditor`: hand the terminal to the
+                        // editor, then resume. The input reader would steal
+                        // the editor's keys, so it stops (flag + join) and
+                        // respawns after the resume. Headless runs drop it.
                         if let Some(command) = session.take_external_editor_request() {
                             let reader = match &renderer {
                                 Renderer::Terminal {

@@ -309,18 +309,20 @@ async fn run_agents_view_flow(
             roster_link.take(),
         )
         .await?;
-        let view = view_run.outcome;
-        // The view's actions report at the run's end (the view owns no
-        // telemetry handle; adoption counts, not keypress timing): an
-        // exit without an open still reports, before the early return.
-        for action in &view.actions {
-            let action = *action;
-            if let Some(telemetry) = base.telemetry.clone() {
-                tokio::spawn(async move {
-                    telemetry.agents_view_action(action).await;
-                });
+        let mut view = view_run.outcome;
+        // The view reports its actions when the run ends. On exit, await them
+        // under the shared exit bound so the runtime drop cannot lose them.
+        let actions_report = {
+            let telemetry = base.telemetry.clone();
+            let actions = std::mem::take(&mut view.actions);
+            async move {
+                for action in actions {
+                    if let Some(telemetry) = telemetry.as_ref() {
+                        telemetry.agents_view_action(action).await;
+                    }
+                }
             }
-        }
+        };
         // A handoff to a chat parked the connection for this loop's next
         // view run; a selection-less exit closed it already.
         roster_link = view_run.link;
@@ -332,8 +334,16 @@ async fn run_agents_view_flow(
             frames.pop();
         }
         let Some(selection) = view.selection else {
+            // The exit path flushes the adoption events before the
+            // process ends (bounded by the shared exit bound).
+            let _ = tokio::time::timeout(
+                Duration::from_millis(pa_tui::interactive::TELEMETRY_EXIT_TIMEOUT_MS),
+                actions_report,
+            )
+            .await;
             return Ok(());
         };
+        tokio::spawn(actions_report);
         expanded_ancestors = view.expanded_ancestors.clone();
         selected_row_identity = view.selected_row_identity.clone();
         selected_key = view.selected_key.clone();

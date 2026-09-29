@@ -4,8 +4,8 @@
 //! headless renderer (moved with their concern).
 use super::{
     build_layout, mpsc, pad_line, section_title, str_width, truncate_text, AgentsStep,
-    AgentsViewMode, AgentsViewRow, AgentsViewUiMode, Duration, Line, Result, RowKind, RowLayout,
-    Section, Theme, ThemeColor, UiInput,
+    AgentsViewMode, AgentsViewRow, AgentsViewUiMode, Composer, Duration, Line, Result, RowKind,
+    RowLayout, Section, Theme, ThemeColor, UiInput,
 };
 
 impl AgentsViewMode {
@@ -75,28 +75,11 @@ impl AgentsViewMode {
             }
         }
 
-        // Inline search prompt (TS renders the transparent editor with the
-        // `> ` prefix, paddingX 2, and the dim "Search sessions" placeholder).
-        let mut prompt: Line = vec![crate::Span::styled(
-            " >  ".to_string(),
-            theme.fg_style(ThemeColor::Muted),
-        )];
-        let head = truncate_text(&self.query, width.saturating_sub(5).max(1));
-        prompt.push(crate::Span::styled(head, theme.fg_style(ThemeColor::Muted)));
-        if self.query.is_empty() {
-            prompt.push(crate::Span::styled(
-                " ".to_string(),
-                theme.fg_style(ThemeColor::Muted),
-            ));
-            prompt.push(crate::Span::styled(
-                "Search sessions".to_string(),
-                theme.fg_style(ThemeColor::Dim),
-            ));
-        }
-        let cursor = Some((
-            lines.len(),
-            4 + str_width(&self.query).min(width.saturating_sub(4)),
-        ));
+        // TS `renderPrompt`: header lines go above the prompt row, before the
+        // cursor row is taken.
+        let (header, prompt, cursor_col) = self.render_prompt(theme, width);
+        lines.extend(header);
+        let cursor = Some((lines.len(), cursor_col));
         lines.push(prompt);
         lines.push(vec![]);
 
@@ -139,6 +122,79 @@ impl AgentsViewMode {
             lines.pop();
         }
         (lines, cursor)
+    }
+
+    /// The prompt block (TS `renderPrompt`, :2917-2926): the search
+    /// composer renders the transparent editor shape (the muted `> `
+    /// prefix, the dim "Search sessions" placeholder) over the plain
+    /// surface; the rename composer renders the non-inline shape — the
+    /// warning header line above, the buffer in the text color on the
+    /// editor background (TS `getEditorBackgroundColor`), the dim
+    /// placeholder while empty. Returns the header lines (above the
+    /// prompt), the prompt row, and the cursor column.
+    fn render_prompt(&self, theme: &Theme, width: usize) -> (Vec<Line>, Line, usize) {
+        match &self.composer {
+            Composer::Search => {
+                let mut prompt: Line = vec![crate::Span::styled(
+                    " >  ".to_string(),
+                    theme.fg_style(ThemeColor::Muted),
+                )];
+                let head = truncate_text(&self.query, width.saturating_sub(5).max(1));
+                prompt.push(crate::Span::styled(head, theme.fg_style(ThemeColor::Muted)));
+                if self.query.is_empty() {
+                    prompt.push(crate::Span::styled(
+                        " ".to_string(),
+                        theme.fg_style(ThemeColor::Muted),
+                    ));
+                    prompt.push(crate::Span::styled(
+                        "Search sessions".to_string(),
+                        theme.fg_style(ThemeColor::Dim),
+                    ));
+                }
+                (
+                    Vec::new(),
+                    prompt,
+                    4 + str_width(&self.query).min(width.saturating_sub(4)),
+                )
+            }
+            Composer::Rename(rename) => {
+                let header = vec![vec![
+                    // TS v0.9.7's renderPrompt header padding (the parity
+                    // run's a2 frame): the header indents two spaces.
+                    theme.fg(ThemeColor::Warning, "  Rename agent session".to_string()),
+                ]];
+                let mut prompt: Line = vec![crate::Span::styled(
+                    " >  ".to_string(),
+                    theme.fg_style(ThemeColor::Muted),
+                )];
+                prompt.push(crate::Span::styled(
+                    truncate_text(&rename.name, width.saturating_sub(5).max(1)),
+                    theme.fg_style(ThemeColor::Text),
+                ));
+                if rename.name.is_empty() {
+                    prompt.push(crate::Span::styled(
+                        " ".to_string(),
+                        theme.fg_style(ThemeColor::Muted),
+                    ));
+                    prompt.push(crate::Span::styled(
+                        "Name this agent session".to_string(),
+                        theme.fg_style(ThemeColor::Dim),
+                    ));
+                }
+                let prompt = theme.bg_paint(
+                    crate::theme::ThemeBg::UserMessageBg,
+                    pad_line(prompt, width),
+                );
+                // The caret parks after the same clipped text budget it
+                // renders (a name that fills the field parks the caret on
+                // the last visible cell, never one past the frame edge).
+                (
+                    header,
+                    prompt,
+                    4 + str_width(&rename.name).min(width.saturating_sub(5).max(1)),
+                )
+            }
+        }
     }
 
     /// The notice panel: the notice's own lines wrapped to the pane's
@@ -421,11 +477,8 @@ impl AgentsViewMode {
         hovered: bool,
     ) -> Line {
         let theme = &self.theme;
-        // TS `renderCodeRow`: the program's read-only line — muted,
-        // truncated (TS `finalizeRenderedLine`), on the tool-panel
-        // background over the full width, never selection-painted. An
-        // empty code line's cells are all blank on the painted
-        // background, so no `" "` fallback (TS `code || " "`).
+        // TS `renderCodeRow`: a muted, truncated program line on the tool-panel
+        // background; never selection-painted.
         if row.kind == RowKind::Code {
             let text = format!("{}  {}", "  ".repeat(row.depth), row.title);
             let line = pad_line(
@@ -582,6 +635,17 @@ impl AgentsViewMode {
                 width,
             );
         }
+        // The rename composer's hint (TS :2942-2944): save/cancel over
+        // the confirm/cancel bindings' every key (`keyText` — TS shows
+        // "Enter save   Esc/Ctrl+C cancel").
+        if let Composer::Rename(_) = &self.composer {
+            let hint = format!(
+                "{} save   {} cancel",
+                self.keybindings.key_text("tui.select.confirm"),
+                self.keybindings.key_text("tui.select.cancel")
+            );
+            return truncate_line(&vec![theme.fg(ThemeColor::Muted, hint)], width);
+        }
         // TS `renderHints`: every hint slot renders the effective binding
         // (`keyText`, arrows for up/down/left/right), so a user override
         // moves the hint with the handler. The summary row swaps the open
@@ -624,20 +688,17 @@ impl AgentsViewMode {
         if let Some(keys) = pair("tui.select.confirm", "app.agents.open") {
             segments.push(format!("{keys} {right_action}"));
         }
-        // The stop-or-delete, program, and parent slots share one
-        // empty-search gate (the keys are inert while a query is
-        // active): the delete slot rides the selected row's arming
-        // target with the word the second press would do, the program
-        // slot the target summary line's `has_spawn_code` (the same
-        // lookup the cycle reads, one definition of "actionable"). TS
-        // shows no delete/program hint; the operator's completeness
-        // directive adds the slots. A slot with no target or an emptied
-        // binding drops entirely instead of advertising a no-op.
+        // The rename, stop-or-delete, program, and parent hints only show with an
+        // empty search, and only when the selected row has a target for them.
         if self.query.is_empty() {
             // The multi-key slots render every configured key (dispatch
             // takes the whole set).
             let all =
                 |id: &str| Some(self.keybindings.key_text(id)).filter(|keys| !keys.is_empty());
+            if let Some(keys) = all("app.agents.rename").filter(|_| self.rename_target().is_some())
+            {
+                segments.push(format!("{keys} rename"));
+            }
             if let Some(pending) = self.delete_arm_target() {
                 if let Some(keys) = all("app.agents.delete") {
                     let word = if pending.stop { "stop" } else { "delete" };

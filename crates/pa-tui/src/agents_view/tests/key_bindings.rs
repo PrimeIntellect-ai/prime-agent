@@ -3,6 +3,8 @@
 
 use super::*;
 
+use super::super::rename::RenameTarget;
+
 #[test]
 fn open_key_override_fires_and_the_default_is_inert() {
     let mut mode = mode_with_user_bindings(&[("app.agents.open", "ctrl+g")]);
@@ -123,4 +125,139 @@ fn program_key_shows_and_hides_the_spawn_program() {
         mode.status.as_deref(),
         Some("No program recorded for these subagents")
     );
+}
+
+/// TS `enterRenameMode`/`confirmRename` (the `app.agents.rename` key,
+/// default ctrl+r): the composer owns the prompt and the key routing —
+/// the header and the save/cancel hint render, the prefill is the
+/// session's name, the editing grammar matches the search field, Enter
+/// submits the trimmed name with the live target, Esc exits with the
+/// query untouched, and a child row never enters.
+#[test]
+fn rename_key_composes_edits_and_dispatches() {
+    let mut mode = mode_with_parent_and_child();
+    mode.handle_key("ctrl+r");
+    let Composer::Rename(rename) = &mode.composer else {
+        panic!("the composer entered rename mode");
+    };
+    assert_eq!(rename.name, "p name", "the prefill is the session name");
+    // The rendered frame: the header; the hint: save/cancel.
+    let (frame, _) = mode.render_frame(120, 20);
+    let rendered: Vec<String> = frame.iter().map(flat).collect();
+    assert!(
+        rendered
+            .iter()
+            .any(|row| row.starts_with("  Rename agent session")),
+        "the rename header rendered with TS's two-space indent:
+{}",
+        rendered.join("\n")
+    );
+    assert_eq!(
+        flat(&mode.render_hints(120, None)),
+        "Enter save   Esc/Ctrl+C cancel"
+    );
+    // The editing grammar (the search field's): ctrl+u clears, the typed
+    // characters land, Enter submits the trimmed name with the live
+    // target.
+    mode.handle_key("ctrl+u");
+    mode.handle_key("n");
+    mode.handle_key("e");
+    mode.handle_key("w");
+    mode.handle_key("enter");
+    let rename = mode.pending_rename.take();
+    assert_eq!(
+        rename.as_ref(),
+        Some(&Rename {
+            target: RenameTarget::Live {
+                active_session_id: "p-live".to_string()
+            },
+            name: "new".to_string(),
+        }),
+        "the confirmed rename dispatches"
+    );
+    assert_eq!(mode.status.as_deref(), Some("Renaming agent..."));
+    // The landed outcome reports TS's row (the dispatched request itself).
+    mode.rename_result(rename.expect("the dispatched rename"), Ok(()));
+    assert_eq!(mode.status.as_deref(), Some("Renamed to new"));
+    // Esc exits back to search; the query stays untouched. Ctrl+C
+    // cancels too (TS :1120 — the default cancel binding includes it;
+    // the force-quit guard's handled note rides the routing).
+    mode.handle_key("ctrl+r");
+    mode.handle_key("escape");
+    assert_eq!(mode.composer, Composer::Search);
+    mode.handle_key("ctrl+r");
+    mode.handle_key("ctrl+c");
+    assert_eq!(
+        mode.composer,
+        Composer::Search,
+        "ctrl+c cancels rename mode (TS :1120)"
+    );
+    // A subagent row never enters rename mode (TS :1871: only
+    // top-level agents rename). Expand the list so the child row is
+    // the selection's landing.
+    mode.handle_key("down");
+    mode.handle_key("enter");
+    mode.handle_key("down");
+    assert_eq!(mode.rows[mode.selected].kind, RowKind::Subagent);
+    mode.handle_key("ctrl+r");
+    assert_eq!(mode.composer, Composer::Search);
+}
+
+#[test]
+fn second_ctrl_c_exits_and_other_keys_clear_the_hint() {
+    let mut mode = mode_with_parent_and_child();
+    // The first press arms the exit hint (TS `showCtrlCExitHint`).
+    mode.handle_key("ctrl+c");
+    assert!(mode.exit_armed);
+    assert!(mode.running);
+    // A second press exits (TS `handleCtrlC`'s visible-hint arm).
+    mode.handle_key("ctrl+c");
+    assert!(!mode.running);
+    // Any other key clears the hint, so the next press re-arms it.
+    let mut mode = mode_with_parent_and_child();
+    mode.handle_key("ctrl+c");
+    mode.handle_key("down");
+    assert!(!mode.exit_armed);
+    assert!(mode.running);
+    mode.handle_key("ctrl+c");
+    assert!(mode.exit_armed, "the cleared hint re-arms");
+    assert!(mode.running);
+}
+
+/// Kitty-protocol key releases map to no key id: the reader filters
+/// them the way every session handler does, so a release never runs
+/// `handle_key`'s "any other key" arm — which would clear the armed
+/// exit hint between the presses of a double Ctrl+C, and the second
+/// press would re-arm the hint instead of exiting.
+#[test]
+fn kitty_releases_map_to_no_key_id() {
+    let mut release = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('c'),
+        crossterm::event::KeyModifiers::CONTROL,
+    );
+    release.kind = crossterm::event::KeyEventKind::Release;
+    assert!(crate::keys::key_event_to_id(&release).is_none());
+}
+
+#[test]
+fn exit_hint_renders_the_effective_app_clear_key() {
+    let mut mode = mode_with_user_bindings(&[("app.clear", "ctrl+q")]);
+    // The rebound key arms the hint, rendered with the override (TS
+    // `renderHints`: `Press ${keyText("app.clear")} again to exit`).
+    mode.handle_key("ctrl+q");
+    assert!(mode.exit_armed);
+    assert_eq!(
+        flat(&mode.render_hints(120, None)),
+        "Press Ctrl+Q again to exit"
+    );
+    // The default ctrl+c no longer arms the exit flow.
+    mode.exit_armed = false;
+    mode.handle_key("ctrl+c");
+    assert!(!mode.exit_armed);
+    assert!(mode.running);
+    // Two presses of the override exit (the first re-arms the hint).
+    mode.handle_key("ctrl+q");
+    assert!(mode.exit_armed);
+    mode.handle_key("ctrl+q");
+    assert!(!mode.running);
 }

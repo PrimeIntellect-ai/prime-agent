@@ -6,18 +6,19 @@ use super::*;
 #[test]
 fn hints_render_the_effective_bindings() {
     // Defaults: TS `renderHints` with the stock keys, plus the
-    // stop-or-delete slot the selected live row arms.
+    // stop-or-delete slot the selected live row arms and the rename
+    // slot the renameable agent row arms.
     let mode = mode_with_parent_and_child();
     assert_eq!(
         flat(&mode.render_hints(120, None)),
-        "\u{2191}/\u{2193} navigate   Home/End first/last   Enter/\u{2192} open   Ctrl+X stop   Ctrl+N new"
+        "\u{2191}/\u{2193} navigate   Home/End first/last   Enter/\u{2192} open   Ctrl+R rename   Ctrl+X stop   Ctrl+N new"
     );
     // A user override moves the hint with the handler.
     let mode = mode_with_user_bindings(&[("app.agents.new", "ctrl+t")]);
     let hints = flat(&mode.render_hints(120, None));
     assert_eq!(
         hints,
-        "\u{2191}/\u{2193} navigate   Home/End first/last   Enter/\u{2192} open   Ctrl+X stop   Ctrl+T new"
+        "\u{2191}/\u{2193} navigate   Home/End first/last   Enter/\u{2192} open   Ctrl+R rename   Ctrl+X stop   Ctrl+T new"
     );
     assert!(!hints.contains("Ctrl+N"), "the default new hint is gone");
     // An override on the delete binding moves its slot too.
