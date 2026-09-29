@@ -648,6 +648,23 @@ impl AgentsViewMode {
         }
     }
 
+    /// One paste (bracketed, or the paste-aware reader's coalesced
+    /// marker-less burst — tmux ≤3.2 forwards pastes without markers,
+    /// and Enter submits in the composers, so a burst typed line by
+    /// line would submit per line): the armed composer's editor takes
+    /// it through TS's paste path (inline, or an atomic marker for a
+    /// large one); the search field ignores it, exactly as before.
+    pub(super) fn handle_paste(&mut self, text: String) {
+        match std::mem::replace(&mut self.composer, Composer::Search) {
+            Composer::Search => {}
+            Composer::Rename(mut rename) => {
+                rename.editor.handle_paste(&text);
+                let _ = rename.editor.take_events();
+                self.composer = Composer::Rename(rename);
+            }
+        }
+    }
+
     /// One mouse report (the session surface's click grammar, scoped to
     /// the view's rows): a plain left press always re-records the row
     /// under it (a release lost to a focus change or a touch cancel

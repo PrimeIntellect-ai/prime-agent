@@ -251,6 +251,10 @@ fn saved_catalog_timeout_ms() -> u64 {
 
 enum UiInput {
     Key(String),
+    /// One paste (bracketed, or the paste-aware reader's coalesced
+    /// marker-less burst): the armed composer's editor takes it; the
+    /// search field ignores it.
+    Paste(String),
     /// The headless plan's `WaitRender` barrier: the loop holds the
     /// queued plan batch behind it until a frame rendered after arming
     /// contains the needle (the interactive harness's condition-wait
@@ -509,11 +513,13 @@ struct PressedMouseClick {
 
 /// The prompt's composition state (TS the editor's composer modes): the
 /// plain search field, or one action's composer that owns the prompt
-/// and the key routing. The reply composer (C3) adds its variant here.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// and the key routing. Each composer owns its [`Editor`] — the text,
+/// the provider, and the history can never leak between modes, and an
+/// editor while searching cannot be represented. [`Box`] keeps the
+/// variant against the unit `Search` under clippy's large-enum-variant.
 enum Composer {
     Search,
-    Rename(Rename),
+    Rename(Box<rename::RenameComposer>),
 }
 
 impl AgentsViewMode {
@@ -1025,6 +1031,9 @@ async fn run_agents_view_surface(
                 // action); drags and wheel turns are consumed inside.
                 UiInput::Mouse(event) => {
                     mode.handle_mouse(&event);
+                }
+                UiInput::Paste(text) => {
+                    mode.handle_paste(text);
                 }
                 // `Settled` is the plan's own settle no-op;
                 // `WaitRender` never reaches the batch pop (the

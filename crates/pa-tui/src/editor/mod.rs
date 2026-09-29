@@ -227,6 +227,14 @@ impl Editor {
         self.autocomplete_provider = Some(provider);
     }
 
+    /// Drop the installed autocomplete provider (TS `setAutocompleteProvider(undefined)`):
+    /// an editor that must not complete (`Editor::new()` installs the
+    /// builtin registry by default) answers nothing.
+    pub fn clear_autocomplete_provider(&mut self) {
+        self.cancel_autocomplete();
+        self.autocomplete_provider = None;
+    }
+
     #[must_use]
     pub fn autocomplete_state(&self) -> Option<&crate::autocomplete::AutocompleteState> {
         self.autocomplete.as_ref()
