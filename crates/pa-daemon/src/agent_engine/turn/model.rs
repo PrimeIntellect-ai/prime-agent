@@ -215,17 +215,11 @@ impl AgentSessionEngine {
                     let telemetry = telemetry.clone();
                     async move {
                         if let Some(telemetry) = &telemetry {
-                            telemetry.note_auto_retry();
-                            if matches!(
-                                &event,
-                                pa_core::session_engine::auto_retry::AutoRetryEvent::Start {
-                                    reason:
-                                        pa_core::session_engine::auto_retry::RetryStartReason::Backup { .. },
-                                    ..
-                                }
-                            ) {
-                                telemetry.note_provider_failover();
-                            }
+                            // One retry event in, one telemetry seam out: the
+                            // Start counts the retry (plus a backup-provider
+                            // failover) and measures the wait; the End emits
+                            // the unresolved error's recovery update.
+                            telemetry.note_auto_retry_event(&event);
                         }
                         let engine_event = retry_event_to_engine_event(event);
                         if !emit(engine_event) {
@@ -260,8 +254,7 @@ impl AgentSessionEngine {
                         // session was built with, restored when the turn
                         // settles.
                         if primary.is_none() {
-                            let (api_key, headers) =
-                                self.resolve_request_key_and_headers(&model);
+                            let (api_key, headers) = self.resolve_request_key_and_headers(&model);
                             *primary = Some(FailoverPrimary {
                                 model: model.clone(),
                                 thinking_level: map_thinking_level(self.effective_thinking()),
@@ -311,9 +304,7 @@ impl AgentSessionEngine {
                             }
                         }
                         agent.set_model(agent_model).await;
-                        agent
-                            .set_thinking_level(map_thinking_level(clamped))
-                            .await;
+                        agent.set_thinking_level(map_thinking_level(clamped)).await;
                         if let Some(persistence) = persistence {
                             let mut session = persistence.lock().await;
                             session.append_model_change(&next.provider, &next.id)?;
@@ -363,10 +354,8 @@ impl AgentSessionEngine {
                         agent.set_thinking_level(thinking_level).await;
                         if let Some(persistence) = persistence {
                             let mut session = persistence.lock().await;
-                            session.append_model_change(
-                                &primary_model.provider,
-                                &primary_model.id,
-                            )?;
+                            session
+                                .append_model_change(&primary_model.provider, &primary_model.id)?;
                         }
                         Ok(Some(format!(
                             "{}/{}",

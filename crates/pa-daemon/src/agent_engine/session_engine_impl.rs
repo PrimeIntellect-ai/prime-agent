@@ -649,7 +649,7 @@ impl SessionEngine for AgentSessionEngine {
                         .as_deref()
                         .and_then(|engine| engine.telemetry.as_ref())
                     {
-                        telemetry.note_compaction();
+                        telemetry.note_compaction(Some(run.duration_ms));
                     }
                 }
                 // TS `compact()` schedules the compact-trigger auto-refine
