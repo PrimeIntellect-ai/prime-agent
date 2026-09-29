@@ -214,14 +214,30 @@ impl Args {
     }
 }
 
-fn parse_positive_u32(value: &str, flag: &str, diagnostics: &mut Vec<Diagnostic>) -> Option<u64> {
+fn parse_positive_u32(value: &str, flag: &str, diagnostics: &mut Vec<Diagnostic>) -> Option<u32> {
+    // Number() accepts arbitrary precision, so parse as i128 to cover the
+    // full accepted range before the integer/positivity/range checks. The
+    // u32::MAX bound is the point of the function: a value past it is a
+    // user error, never a silent truncation into the flag's u32 field.
+    match value.trim().parse::<i128>() {
+        Ok(parsed) if parsed > 0 && parsed <= i128::from(u32::MAX) => u32::try_from(parsed).ok(),
+        _ => {
+            diagnostics.push(Diagnostic::error(format!(
+                "{flag} must be a positive integer between 1 and u32::MAX (4294967295)"
+            )));
+            None
+        }
+    }
+}
+
+fn parse_positive_u64(value: &str, flag: &str, diagnostics: &mut Vec<Diagnostic>) -> Option<u64> {
     // Number() accepts arbitrary precision, so parse as i128 to cover the
     // full accepted range before the integer/positivity check.
     match value.trim().parse::<i128>() {
-        Ok(parsed) if parsed > 0 && parsed <= i128::from(u64::MAX) => Some(parsed as u64),
+        Ok(parsed) if parsed > 0 && parsed <= i128::from(u64::MAX) => u64::try_from(parsed).ok(),
         _ => {
             diagnostics.push(Diagnostic::error(format!(
-                "{flag} must be a positive integer"
+                "{flag} must be a positive integer between 1 and u64::MAX (18446744073709551615)"
             )));
             None
         }
@@ -416,37 +432,37 @@ pub fn parse_args(args: &[String]) -> Args {
                 result.autonomous = true;
                 let value = require_value!(arg);
                 result.autonomous_gate_retries =
-                    parse_positive_u32(&value, arg, &mut result.diagnostics).map(|v| v as u32);
+                    parse_positive_u32(&value, arg, &mut result.diagnostics);
             }
             "--autonomous-gate-timeout-ms" => {
                 result.autonomous = true;
                 let value = require_value!(arg);
                 result.autonomous_gate_timeout_ms =
-                    parse_positive_u32(&value, arg, &mut result.diagnostics);
+                    parse_positive_u64(&value, arg, &mut result.diagnostics);
             }
             "--autonomous-max-continuations" => {
                 result.autonomous = true;
                 let value = require_value!(arg);
                 result.autonomous_max_continuations =
-                    parse_positive_u32(&value, arg, &mut result.diagnostics).map(|v| v as u32);
+                    parse_positive_u32(&value, arg, &mut result.diagnostics);
             }
             "--autonomous-max-turns" => {
                 result.autonomous = true;
                 let value = require_value!(arg);
                 result.autonomous_max_turns =
-                    parse_positive_u32(&value, arg, &mut result.diagnostics).map(|v| v as u32);
+                    parse_positive_u32(&value, arg, &mut result.diagnostics);
             }
             "--autonomous-max-tokens" => {
                 result.autonomous = true;
                 let value = require_value!(arg);
                 result.autonomous_max_tokens =
-                    parse_positive_u32(&value, arg, &mut result.diagnostics);
+                    parse_positive_u64(&value, arg, &mut result.diagnostics);
             }
             "--autonomous-timeout-ms" => {
                 result.autonomous = true;
                 let value = require_value!(arg);
                 result.autonomous_timeout_ms =
-                    parse_positive_u32(&value, arg, &mut result.diagnostics);
+                    parse_positive_u64(&value, arg, &mut result.diagnostics);
             }
             "--goal" => {
                 let value = require_value!(arg);
@@ -460,8 +476,7 @@ pub fn parse_args(args: &[String]) -> Args {
             }
             "--goal-token-budget" => {
                 let value = require_value!(arg);
-                result.goal_token_budget =
-                    parse_positive_u32(&value, arg, &mut result.diagnostics).map(|v| v as u32);
+                result.goal_token_budget = parse_positive_u32(&value, arg, &mut result.diagnostics);
             }
             "--list-models" => {
                 let has_search = args
@@ -659,12 +674,26 @@ mod tests {
         let parsed = parse(&["--autonomous-max-turns", "0"]);
         assert_eq!(
             last_error(&parsed),
-            "--autonomous-max-turns must be a positive integer"
+            "--autonomous-max-turns must be a positive integer between 1 and u32::MAX (4294967295)"
         );
         let parsed = parse(&["--autonomous-max-turns", "abc"]);
         assert_eq!(
             last_error(&parsed),
-            "--autonomous-max-turns must be a positive integer"
+            "--autonomous-max-turns must be a positive integer between 1 and u32::MAX (4294967295)"
         );
+    }
+
+    #[test]
+    fn positive_int_rejects_past_the_field_range() {
+        // 2**32: the u32 flags reject it out loud instead of silently
+        // truncating into the flag's u32 field.
+        let parsed = parse(&["--autonomous-max-turns", "4294967296"]);
+        assert_eq!(
+            last_error(&parsed),
+            "--autonomous-max-turns must be a positive integer between 1 and u32::MAX (4294967295)"
+        );
+        // The u64 flags accept the same value.
+        let parsed = parse(&["--autonomous-timeout-ms", "4294967296"]);
+        assert_eq!(parsed.autonomous_timeout_ms, Some(4294967296));
     }
 }
