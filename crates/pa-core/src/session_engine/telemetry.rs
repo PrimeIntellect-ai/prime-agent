@@ -649,7 +649,7 @@ fn handle_event(
                 // re-entry disambiguates the trigger.
                 resolve_run_started(client, &mut state, RunTrigger::Continuation);
                 let Some(run) = state.active_run.as_mut() else {
-                    return Ok(());
+                    return;
                 };
                 if run.first_model_event_ms.is_none() {
                     if let Some(first_turn) = run.first_turn_started_at {
