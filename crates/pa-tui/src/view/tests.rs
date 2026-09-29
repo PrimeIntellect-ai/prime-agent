@@ -1,7 +1,7 @@
 use super::*;
 use crate::chat::{AssistantMessage, MessageBlock};
 use crate::osc133::RowMarkers;
-use crate::theme::{ColorMode, Theme};
+use crate::theme::{ColorMode, Theme, ThemeBg, ThemeColor};
 use crate::tool_card::{ToolCallCard, ToolResultView};
 
 fn view() -> AgentView {
