@@ -76,6 +76,11 @@ impl AgentSessionEngine {
     /// conservative no-burn behavior). Async for the mutation hook (the
     /// same post-mutation seam the kernel heartbeat controllers use).
     pub(crate) async fn schedule_goal_backoff_wake(&self, wake_at_ms: u64) -> Option<String> {
+        // Exactly one wake per window: the prior job (a still-armed
+        // earlier strike's, or a re-consulted boundary's) retires before
+        // the replacement arms — repeated boundaries inside the window
+        // must never stack multiple marker turns.
+        self.cancel_goal_backoff_wake();
         let wiring = self.cron_wiring()?;
         let binding = self.kernel_cron_binding()?;
         let schedule_text = format!(
@@ -136,18 +141,20 @@ impl AgentSessionEngine {
         // never receives the marker turn). A fired (or already-cancelled)
         // job stays untouched (the park's cancel arm: rewriting it would
         // hide that a wake landed).
-        let binding = self.kernel_cron_binding();
+        // The store scan needs the session binding: without it the scan
+        // would match EVERY session's goal-backoff-wake jobs (the shared
+        // store serves the whole worker). No binding = no scheduler-facing
+        // cancel path at all; the in-memory slot above already retired.
+        let Some(binding) = self.kernel_cron_binding() else {
+            return;
+        };
         for job in wiring.store.list() {
             if job.status != pa_core::cron::JobStatus::Active
                 || job.label.as_deref()
                     != Some(pa_core::session_engine::goal_driver::GOAL_BACKOFF_WAKE_CRON_LABEL)
+                || job.session_id != binding.session_id
             {
                 continue;
-            }
-            if let Some(binding) = &binding {
-                if job.session_id != binding.session_id {
-                    continue;
-                }
             }
             let _ = wiring.store.cancel(&job.id, crate::util::now_ms());
         }

@@ -167,6 +167,10 @@ impl SessionEngine for AgentSessionEngine {
             // mint's guard, never the mutable mirror.
             let pending_handle = Some(driver.pending_continuation_handle());
             let goal_update = self.publish_goal_state(&driver.state_with_creation_elapsed());
+            // The mint succeeded: the progress turn reset any armed
+            // streak — retire the pending wake.
+            drop(driver);
+            self.cancel_goal_backoff_wake();
             Some((
                 crate::engine::PromptRequest {
                     batch: Vec::new(),

@@ -127,6 +127,20 @@ pub const GOAL_BACKOFF_WAKE_CRON_LABEL: &str = "goal-backoff-wake";
 /// natural boundary re-consults the mint with the window passed.
 pub const GOAL_BACKOFF_WAKE_MARKER_TEXT: &str = "<goal_backoff_wake>\nThe goal continuation backoff window (the consecutive-no-progress cap) has elapsed; this wake is automatic. Continue the goal work from where it stopped.\n</goal_backoff_wake>";
 
+/// Whether the turn produced any output: a no-output turn is an EMPTY
+/// content block list OR one whose every block is itself empty (the
+/// abort conversion's corpse shape carries a single empty text part —
+/// `vec![Text { text: "" }]` — which the bare `is_empty` check would
+/// mistake for progress). Tool calls are always output.
+#[must_use]
+pub fn turn_produced_no_output(message: &pa_agent::types::AssistantMessage) -> bool {
+    message.content.iter().all(|part| match part {
+        pa_agent::types::AssistantContent::Text(text) => text.text.is_empty(),
+        pa_agent::types::AssistantContent::Thinking(thinking) => thinking.thinking.is_empty(),
+        pa_agent::types::AssistantContent::ToolCall(_) => false,
+    })
+}
+
 /// The just-settled turn's provider-failure text when the turn settled
 /// as a terminal provider failure (stop reason `error`, with a recorded
 /// stream failure that is not the quota-park class — the parked turn is
@@ -637,7 +651,17 @@ impl GoalDriver {
                 .state
                 .created_at
                 .is_none_or(|created_at| turn.timestamp >= created_at as i64);
-            if turn_is_this_goals {
+            // The examined-turn gate: a row the driver has already judged
+            // — or any row at or before it — never re-enters the progress
+            // machinery. Without this, the failed pair's removal from the
+            // live loop would expose the earlier PROGRESS row, whose
+            // consult would reset the streak (the drop-resets-the-cap
+            // review finding); re-consults inside the backoff window
+            // likewise never re-count.
+            let turn_is_new = self
+                .counted_no_progress_turn_ms
+                .is_none_or(|examined| turn.timestamp > examined);
+            if turn_is_this_goals && turn_is_new {
                 if let Some(error) = terminal_provider_failure(turn) {
                     self.finish_for_terminal_message(
                         session,
@@ -646,75 +670,75 @@ impl GoalDriver {
                     )?;
                     return Ok(None);
                 }
-                if turn.content.is_empty() {
+                // The quota-park class owns its own retry cadence (the
+                // wake re-probes; the park's budget declines): a parked
+                // corpse never consumes the no-progress budget — three
+                // quota parks must not mark an otherwise live goal dead.
+                if provider_stream_failure_kind(turn).as_deref() == Some("rate_limit") {
+                    self.counted_no_progress_turn_ms = Some(turn.timestamp);
+                    return Ok(None);
+                }
+                if turn_produced_no_output(turn) {
                     // The turn produced no output: a corpse that is not a
-                    // provider failure (an abort conversion, a degenerate
-                    // empty settle) still made no progress. Count the turn
-                    // once and arm the doubling backoff window — this
-                    // consult refuses, and a later boundary after the window
-                    // passes re-mints (the fall-through consult of the SAME
-                    // turn only checks the gate). At the cap the goal
-                    // finishes: the loop-killer for EVERY survival arm, not
-                    // just the engine's error arm.
-                    if self.counted_no_progress_turn_ms != Some(turn.timestamp) {
-                        self.counted_no_progress_turn_ms = Some(turn.timestamp);
-                        self.no_progress_streak += 1;
-                        self.no_progress_backoff_until_ms = now_millis()
-                            + CONTINUATION_NO_PROGRESS_BACKOFF_BASE_MS
-                                * 2u64.saturating_pow(self.no_progress_streak.saturating_sub(1));
-                        // The streak AND the counted-turn key persist with
-                        // the goal state (the cap counter is durable: a
-                        // worker restart cannot reset it and un-cap a
-                        // degenerate loop, and the same corpse never
-                        // strikes twice however often the session rebuilds).
+                    // provider failure (an abort conversion's empty text,
+                    // a degenerate empty settle) still made no progress.
+                    // Count the turn and arm the doubling backoff window —
+                    // this consult refuses, and a later boundary after the
+                    // window passes re-mints. At the cap the goal finishes:
+                    // the loop-killer for EVERY survival arm, not just the
+                    // engine's error arm.
+                    self.counted_no_progress_turn_ms = Some(turn.timestamp);
+                    self.no_progress_streak += 1;
+                    self.no_progress_backoff_until_ms = now_millis()
+                        + CONTINUATION_NO_PROGRESS_BACKOFF_BASE_MS
+                            * 2u64.saturating_pow(self.no_progress_streak.saturating_sub(1));
+                    // The streak AND the examined-turn key persist with
+                    // the goal state (the cap counter is durable: a worker
+                    // restart cannot reset it and un-cap a degenerate loop,
+                    // and the same corpse never strikes twice however often
+                    // the session rebuilds).
+                    self.set_state(
+                        session,
+                        GoalState {
+                            no_progress_streak: Some(self.no_progress_streak),
+                            no_progress_turn_ms: Some(turn.timestamp),
+                            ..self.state.clone()
+                        },
+                    )?;
+                    if self.no_progress_streak >= CONTINUATION_NO_PROGRESS_CAP {
+                        let reason =
+                            "Goal continuation cap reached: consecutive turns made no progress"
+                                .to_string();
                         self.set_state(
                             session,
                             GoalState {
+                                active: false,
+                                status: GoalStatus::Error,
                                 no_progress_streak: Some(self.no_progress_streak),
-                                no_progress_turn_ms: Some(turn.timestamp),
+                                last_reason: Some(reason.clone()),
+                                last_error: Some(reason),
                                 ..self.state.clone()
                             },
                         )?;
-                        if self.no_progress_streak >= CONTINUATION_NO_PROGRESS_CAP {
-                            let reason =
-                                "Goal continuation cap reached: consecutive turns made no progress"
-                                    .to_string();
-                            self.set_state(
-                                session,
-                                GoalState {
-                                    active: false,
-                                    status: GoalStatus::Error,
-                                    no_progress_streak: Some(self.no_progress_streak),
-                                    last_reason: Some(reason.clone()),
-                                    last_error: Some(reason),
-                                    ..self.state.clone()
-                                },
-                            )?;
-                            return Ok(None);
-                        }
                         return Ok(None);
                     }
-                    // An already-counted turn falls through to the backoff
-                    // gate below: once the window passes, the mint retries
-                    // (the retry's own turn counts again if it too makes no
-                    // progress).
-                } else {
-                    // The turn produced output: the streak resets and any
-                    // armed backoff window clears — and the reset persists
-                    // (a restart must not inherit a stale streak).
-                    if self.no_progress_streak != 0 {
-                        self.no_progress_streak = 0;
-                        self.no_progress_backoff_until_ms = 0;
-                        self.counted_no_progress_turn_ms = Some(turn.timestamp);
-                        self.set_state(
-                            session,
-                            GoalState {
-                                no_progress_streak: Some(0),
-                                no_progress_turn_ms: Some(turn.timestamp),
-                                ..self.state.clone()
-                            },
-                        )?;
-                    }
+                    return Ok(None);
+                }
+                // The turn produced output: the streak resets and any
+                // armed backoff window clears — and the reset persists (a
+                // restart must not inherit a stale streak).
+                if self.no_progress_streak != 0 {
+                    self.no_progress_streak = 0;
+                    self.no_progress_backoff_until_ms = 0;
+                    self.counted_no_progress_turn_ms = Some(turn.timestamp);
+                    self.set_state(
+                        session,
+                        GoalState {
+                            no_progress_streak: Some(0),
+                            no_progress_turn_ms: Some(turn.timestamp),
+                            ..self.state.clone()
+                        },
+                    )?;
                 }
             }
         }
@@ -896,7 +920,8 @@ impl GoalDriver {
     }
 
     /// The current consecutive-no-output-turn streak (the durable cap
-    /// counter; tests read it directly).
+    /// counter); the in-module tests read it directly.
+    #[cfg(test)]
     #[must_use]
     pub fn no_progress_streak(&self) -> u32 {
         self.no_progress_streak
@@ -1504,6 +1529,73 @@ mod tests {
                 .no_progress_streak,
             Some(2)
         );
+    }
+
+    /// THE WAVE'S REGRESSIONS (the late-review round):
+    /// (1) the quota-park class never consumes the no-progress budget —
+    ///     three parked corpses must not mark an otherwise live goal dead
+    ///     (the park's own wake/budget owns the retry cadence);
+    /// (2) an all-empty-parts corpse (the abort conversion's
+    ///     `vec![Text { text: "" }]` shape) IS a no-output turn;
+    /// (3) the streak survives a consult that sees an OLDER progress row
+    ///     (the drop-revealed row after the failed pair's removal).
+    #[test]
+    fn rate_limit_and_empty_text_corpses_and_the_examined_gate() {
+        let mut session = persisted_session();
+        let mut driver = GoalDriver::new();
+        driver.start(&mut session, "work", None).unwrap();
+        let created_at = driver.state().created_at.unwrap();
+
+        // (1) Three parked corpses: no strikes, the goal stays alive (the
+        // mint refuses the parked boundary without counting).
+        for offset in 1..=3 {
+            let parked = test_error_turn(
+                "rate_limit",
+                Some(429),
+                "429 Too many concurrent requests",
+                created_at as i64 + offset,
+            );
+            assert!(driver
+                .next_continuation_message(&mut session, Some(&parked))
+                .unwrap()
+                .is_none());
+        }
+        assert_eq!(driver.no_progress_streak(), 0);
+        assert_eq!(driver.state().status, GoalStatus::Active);
+
+        // (2) The abort conversion's empty-text corpse counts as no-output
+        // (the bare is_empty check would have mistaken it for progress).
+        let mut empty_text = test_progress_turn(created_at as i64 + 10);
+        empty_text.content = vec![pa_agent::types::AssistantContent::Text(
+            pa_agent::types::TextContent {
+                text: String::new(),
+                text_signature: None,
+            },
+        )];
+        assert!(driver
+            .next_continuation_message(&mut session, Some(&empty_text))
+            .unwrap()
+            .is_none());
+        assert_eq!(driver.no_progress_streak(), 1);
+
+        // (3) The drop-revealed OLDER progress row: the examined gate
+        // skips it — the strike survives (the naive consult would have
+        // reset the streak to 0).
+        let older_progress = test_progress_turn(created_at as i64 + 5);
+        assert!(driver
+            .next_continuation_message(&mut session, Some(&older_progress))
+            .unwrap()
+            .is_none());
+        assert_eq!(driver.no_progress_streak(), 1, "the older row never resets");
+
+        // A NEWER progress row still resets (the wake's turn made it).
+        let newer_progress = test_progress_turn(created_at as i64 + 20);
+        assert!(driver
+            .next_continuation_message(&mut session, Some(&newer_progress))
+            .unwrap()
+            .is_some());
+        assert_eq!(driver.no_progress_streak(), 0);
+        driver.continuation_consumed();
     }
 
     /// The restore-resurrection guard (the diagnosis's (d)): an active

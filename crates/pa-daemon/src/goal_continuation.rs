@@ -201,9 +201,14 @@ impl AgentSessionEngine {
                 // "drops the deferral for inactive goals"). A live goal in
                 // the no-progress backoff keeps the deferral (the take
                 // restored it) and arms the one-shot wake so the
-                // advertised retry actually runs.
+                // advertised retry actually runs. The refusal still changed
+                // the durable goal state (an Error finish or a backoff
+                // strike): publish it — this settle task runs OUTSIDE a
+                // turn's tracking wrapper, so nothing else would.
+                let state = driver.state_with_creation_elapsed();
                 let wake_at = driver.backoff_wake_at();
                 drop(driver);
+                self.publish_goal_state(&state);
                 if let Some(wake_at) = wake_at {
                     self.schedule_goal_backoff_wake(wake_at).await;
                 }
@@ -216,6 +221,9 @@ impl AgentSessionEngine {
                 return;
             }
         };
+        // The mint succeeded: the progress turn reset any armed streak —
+        // retire the pending wake instead of firing one more marker turn.
+        self.cancel_goal_backoff_wake();
         // This mint's own guard handle, captured under the driver lock:
         // every later release of the mint (the admission sink, the drop
         // paths, this task's own close-race branch) clears exactly this
@@ -395,9 +403,16 @@ impl AgentSessionEngine {
                 // window still armed schedules the one-shot retry (the
                 // advertised 10s/20s/40s backoff actually runs — without
                 // a wake the refusal would stall the goal until an
-                // unrelated boundary event).
+                // unrelated boundary event). The refusal also changed the
+                // durable goal state (an Error finish or a backoff
+                // strike): publish it here too — the run's tracking
+                // wrapper re-checks at the trailing Done, but the direct
+                // publish keeps every refusal site consistent and lets
+                // an attach mid-boundary see the transition.
+                let state = driver.state_with_creation_elapsed();
                 let wake_at = driver.backoff_wake_at();
                 drop(driver);
+                self.publish_goal_state(&state);
                 if let Some(wake_at) = wake_at {
                     self.schedule_goal_backoff_wake(wake_at).await;
                 }

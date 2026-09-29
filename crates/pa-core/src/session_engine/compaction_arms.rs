@@ -105,7 +105,7 @@ impl AgentSession {
                     return;
                 };
                 let no_progress = corpse.stop_reason == pa_agent::types::StopReason::Error
-                    || corpse.content.is_empty();
+                    || super::goal_driver::turn_produced_no_output(corpse);
                 if !no_progress {
                     return;
                 }

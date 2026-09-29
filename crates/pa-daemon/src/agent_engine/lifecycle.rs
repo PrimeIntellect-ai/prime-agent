@@ -167,6 +167,7 @@ impl AgentSessionEngine {
             bash_consumed_sink: std::sync::Mutex::new(None),
             goal_queue_purge: std::sync::Mutex::new(None),
             goal_backoff_wake_job_id: std::sync::Mutex::new(None),
+            stale_goal_terminal_pending: std::sync::Mutex::new(None),
             turn_agent: std::sync::Mutex::new(None),
             queue_modes,
             autonomous_boundary: std::sync::Mutex::new(None),
@@ -312,6 +313,42 @@ impl AgentSessionEngine {
     /// the moved branch in `pending_branch`; whichever build path runs
     /// first must adopt it, or a read-seam build would strand the parked
     /// branch and the session would start off the moved branch's entries.
+    /// The stale-row guard's deferred durable write (see
+    /// [`Self::stale_goal_terminal_pending`]): the terminal row lands AFTER
+    /// the context adoption replaced the manager's contents, so the active
+    /// row stops being rediscovered on every rebuild. Best effort — the
+    /// in-memory driver already adopted the terminal verdict, and a failed
+    /// write re-derives at the next rebuild's scan.
+    pub(crate) async fn flush_pending_stale_goal_terminal(&self) {
+        let terminal = self
+            .stale_goal_terminal_pending
+            .lock()
+            .expect("stale terminal pending lock")
+            .take();
+        let Some(terminal) = terminal else {
+            return;
+        };
+        let Some(handles) = self.goal_runtime.lock().expect("goal runtime lock").clone() else {
+            return;
+        };
+        let mut session = handles.session.lock().await;
+        let normalized = pa_core::goals::normalize_goal_state(terminal);
+        match serde_json::to_value(&normalized) {
+            Ok(value) => {
+                let appended = session
+                    .append_custom_entry(pa_core::goals::GOAL_STATE_CUSTOM_TYPE, Some(value))
+                    .map(|_| ())
+                    .and_then(|()| session.flush_now());
+                if let Err(persist_error) = appended {
+                    eprintln!("pa-daemon: stale goal terminal persist failed: {persist_error:#}");
+                }
+            }
+            Err(serialize_error) => {
+                eprintln!("pa-daemon: stale goal terminal serialize failed: {serialize_error:#}");
+            }
+        }
+    }
+
     async fn adopt_built_session(&self, built: &CoreSessionEngine) -> anyhow::Result<()> {
         self.mirror_goal_runtime(built).await;
         // The live compaction summary-delta sink (the worker's
@@ -507,52 +544,39 @@ impl AgentSessionEngine {
                     }
                 }
             }
-            let handles = self.goal_runtime.lock().expect("goal runtime lock").clone();
-            if let Some(handles) = handles {
-                let mut driver = handles.driver.lock().await;
-                driver.restore_from_persisted(state.clone());
-                if let Some(error) = stale_error {
-                    // The stale-row guard's adoption is DURABLE: the driver
-                    // restored the stale ACTIVE row (the scan's verdict is
-                    // re-derived through the driver's own terminal finish,
-                    // which PERSISTS the error row) — the session file
-                    // itself stops advertising the stale active goal (the
-                    // interrupted settle's missing write lands here), and
-                    // a later reload adopts the terminal state directly.
-                    let mut session = handles.session.lock().await;
-                    match driver.finish_for_terminal_message(
-                        &mut session,
-                        pa_types::ai::StopReason::Error,
-                        Some(&error),
-                    ) {
-                        Ok(()) => {}
-                        Err(persist_error) => {
-                            // Best effort on the durable row: the scan
-                            // re-adopts on the next rebuild. The PUBLISHED
-                            // verdict is still the terminal one (never
-                            // the driver's still-Active in-memory state —
-                            // a persist failure must not leave the
-                            // recovered provider failure looking
-                            // resumable).
-                            eprintln!(
-                                "pa-daemon: stale goal terminal persist failed: {persist_error:#}"
-                            );
-                        }
-                    }
+            if let Some(error) = stale_error {
+                // The stale-row guard's adoption: the IN-MEMORY driver and
+                // the published baseline take the terminal verdict directly
+                // (a mint consult can never resurrect the loop), and the
+                // DURABLE row is DEFERRED to the post-adoption flush — a
+                // write here would precede `rebuild_branch_context`/
+                // `restore_windowed_context` and be replaced with the
+                // adopted entries (the review round's ordering finding).
+                let terminal = pa_core::goals::GoalState {
+                    active: false,
+                    status: pa_core::goals::GoalStatus::Error,
+                    last_reason: Some(error.clone()),
+                    last_error: Some(error),
+                    ..state
+                };
+                let handles = self.goal_runtime.lock().expect("goal runtime lock").clone();
+                if let Some(handles) = handles {
+                    let mut driver = handles.driver.lock().await;
+                    driver.restore_from_persisted(terminal.clone());
                     drop(driver);
-                    *self.published_goal.lock().expect("published goal lock") =
-                        Some(pa_core::goals::GoalState {
-                            active: false,
-                            status: pa_core::goals::GoalStatus::Error,
-                            last_reason: Some(error.clone()),
-                            last_error: Some(error),
-                            ..state
-                        });
-                } else {
-                    drop(driver);
-                    *self.published_goal.lock().expect("published goal lock") = Some(state);
                 }
+                *self
+                    .stale_goal_terminal_pending
+                    .lock()
+                    .expect("stale terminal pending lock") = Some(terminal.clone());
+                *self.published_goal.lock().expect("published goal lock") = Some(terminal);
             } else {
+                let handles = self.goal_runtime.lock().expect("goal runtime lock").clone();
+                if let Some(handles) = handles {
+                    let mut driver = handles.driver.lock().await;
+                    driver.restore_from_persisted(state.clone());
+                    drop(driver);
+                }
                 *self.published_goal.lock().expect("published goal lock") = Some(state);
             }
         }
@@ -562,6 +586,9 @@ impl AgentSessionEngine {
             // would otherwise skip the build-tail restore and leave the
             // previous branch's park — or none — armed).
             self.restore_quota_park(built).await;
+            // The context adoption replaced the manager contents: the
+            // stale-row guard's deferred terminal row lands now.
+            self.flush_pending_stale_goal_terminal().await;
             return Ok(());
         }
         // Restore the retained context and certified metadata without loading
@@ -581,8 +608,14 @@ impl AgentSessionEngine {
                 .lock()
                 .await
                 .set_append_ownership(pa_core::session::window::AppendOwnership::SessionLeaseHeld);
+            // The context adoption replaced the manager contents: the
+            // stale-row guard's deferred terminal row lands now.
+            self.flush_pending_stale_goal_terminal().await;
         } else if let Some(entries) = shared_branch.take().filter(|entries| !entries.is_empty()) {
             built.session.rebuild_branch_context(entries).await?;
+            // The context adoption replaced the manager contents: the
+            // stale-row guard's deferred terminal row lands now.
+            self.flush_pending_stale_goal_terminal().await;
         }
         // Restore the quota park this branch ended on (TS
         // `_restoreQuotaPark`, at construction): the newest
