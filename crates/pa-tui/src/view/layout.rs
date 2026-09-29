@@ -593,7 +593,6 @@ impl AgentView {
         let Some(handoff) = self.pending_handoff.take() else {
             return;
         };
-        self.handoff_seeds = self.handoff_seeds.saturating_add(1);
         let (width, options) = match self.layout_options.as_ref() {
             // The branch above leaves the view's layout state equal to
             // this draw's shape (it either just set it or found it
@@ -603,8 +602,13 @@ impl AgentView {
             None => return,
         };
         if handoff.shape.0 != width || &handoff.shape.1 != options {
+            // A shape-mismatched handoff drops its packs and the window
+            // re-renders: the served-path observable must NOT count it
+            // (the counter is the verifiers' proof the reuse actually
+            // happened, so it counts only windows the packs served).
             return;
         }
+        let mut seeded = 0usize;
         for (index, slots) in handoff.packs {
             let Some(target) = self.entry_layout.get_mut(index) else {
                 continue;
@@ -612,9 +616,13 @@ impl AgentView {
             for (detail, slot) in slots.into_iter().enumerate() {
                 if slot.is_some() {
                     target[detail] = slot;
+                    seeded += 1;
                     self.sparse_entries.insert(index);
                 }
             }
+        }
+        if seeded > 0 {
+            self.handoff_seeds = self.handoff_seeds.saturating_add(1);
         }
     }
 }

@@ -79,6 +79,10 @@ fn the_reentry_window_serves_the_held_packs_byte_identically() {
         reentry_rows, left_rows,
         "the served rows are byte-identical"
     );
+    assert_eq!(
+        reentry.handoff_seeds, 1,
+        "the served-path observable counts the window the packs served"
+    );
 
     // The full frame is the frozen surface: the re-entry's composed
     // frame equals the pre-exit frame row for row.
@@ -107,16 +111,30 @@ fn a_changed_transcript_misses_and_re_renders() {
     reentry.adopt_layout_handoff(&session_id, &generation, sequence);
     assert!(reentry.pending_handoff.is_none());
 
-    // A moved event sequence (any event since the stored attach): the
-    // same-count case misses too — the in-place stream growth class.
+    // Each mismatch probe needs its OWN held handoff: a mismatching
+    // adopt consumes the one-shot store (a stale key never serves — not
+    // even to the next probe), so probing two mismatched keys back to
+    // back would only prove the second probe read an empty slot. The
+    // held key is re-stashed before every probe so each mismatch key is
+    // genuinely exercised against a live store.
     let mut reentry_same_count = view();
     fill(&mut reentry_same_count);
+    // A moved event sequence (any event since the stored attach): the
+    // same-count case misses too — the in-place stream growth class.
     reentry_same_count.adopt_layout_handoff(&session_id, &generation, sequence + 1);
-    // A restarted worker (a different generation) misses.
-    reentry_same_count.adopt_layout_handoff(&session_id, "gen-2", sequence);
-    // A different session misses.
-    reentry_same_count.adopt_layout_handoff("other", &generation, sequence);
     assert!(reentry_same_count.pending_handoff.is_none());
+    // A restarted worker (a different generation) misses a fresh stash.
+    let mut regen = view();
+    fill(&mut regen);
+    stash(&mut regen, sequence);
+    regen.adopt_layout_handoff(&session_id, "gen-2", sequence);
+    assert!(regen.pending_handoff.is_none());
+    // A different session misses a fresh stash.
+    let mut others = view();
+    fill(&mut others);
+    stash(&mut others, sequence);
+    others.adopt_layout_handoff("other", &generation, sequence);
+    assert!(others.pending_handoff.is_none());
 
     ENTRY_RENDERS.with(|count| count.set(0));
     let _ = reentry_same_count.visible_transcript_window(80, 6);
@@ -147,6 +165,10 @@ fn a_shape_mismatch_drops_the_held_packs() {
     assert!(
         ENTRY_RENDERS.with(std::cell::Cell::get) > 0,
         "a width-mismatched handoff never serves: the window re-rendered"
+    );
+    assert_eq!(
+        reentry.handoff_seeds, 0,
+        "a shape-mismatched handoff drops its packs WITHOUT burning a seed: the observable counts only served windows"
     );
 }
 

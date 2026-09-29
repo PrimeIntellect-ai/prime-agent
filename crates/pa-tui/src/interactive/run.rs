@@ -462,11 +462,16 @@ async fn run_interactive_surface(
     // mutation after this point retires the handoff (the notice folds
     // below included — a startup notice changes the transcript, so the
     // re-entry conservatively re-renders on boxes that show one).
-    view.adopt_layout_handoff(
-        &session.session_id,
-        &session.attach_event_generation,
-        session.attach_event_sequence,
-    );
+    // A cursor-less re-attach never adopts either (the belt-and-braces
+    // companion to the stash-side gate): the store holds no collapsed
+    // identity to match, and the adopt side never keys on one.
+    if session.attach_cursor_present {
+        view.adopt_layout_handoff(
+            &session.session_id,
+            &session.attach_event_generation,
+            session.attach_event_sequence,
+        );
+    }
     if let Some(notice) = check_tmux_keyboard_setup().await {
         view.push_entry(crate::chat::ChatEntry::Status {
             text: format!("\u{26a0} {notice}"),
