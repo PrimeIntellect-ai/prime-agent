@@ -31,6 +31,31 @@
 //! The parent's kernel Python is ambient product state; like the other
 //! live-kernel verifiers these tests skip (with a note) on machines
 //! without a live install.
+// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
+// the full rationale).
+// Stack-resident futures by design on the daemon's hot paths; boxing the
+// call sites for a lint tick is a perf regression with zero correctness gain.
+#![allow(clippy::large_futures)]
+// 64-bit-only targets; the narrowing casts sit at OS boundaries
+// (pid/fd/time/size) where the values are bounded by the kernel - the
+// dead-guard expect()s would add panic paths where silent wrap was
+// deliberate.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// The fn-length threshold is a style gate, not correctness; the structure
+// campaign owns the god-fn splits as a follow-up.
+#![allow(clippy::too_many_lines)]
+// API-shape opinions, not defects; the surfaces are deliberate.
+#![allow(
+    clippy::unnecessary_wraps,
+    clippy::zero_sized_map_values,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names
+)]
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -143,7 +168,7 @@ impl Client {
         (client, hello)
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -210,7 +235,7 @@ fn wait_until<T>(
 /// The supervisor roster's resident session summaries (the plain `list`
 /// wire surface).
 fn roster_summaries(client: &mut Client, id: &str) -> Vec<Value> {
-    client.send_command(id, json!({ "type": "list" }));
+    client.send_command(id, &json!({ "type": "list" }));
     let list = client.read_response(id);
     assert_eq!(list["success"], true, "list failed: {list}");
     list["data"]["sessions"]
@@ -222,7 +247,7 @@ fn roster_summaries(client: &mut Client, id: &str) -> Vec<Value> {
 /// The `list --all` surface: resident summaries plus the passive ledger
 /// rows (TS `buildSessionList`).
 fn all_roster_summaries(client: &mut Client, id: &str) -> Vec<Value> {
-    client.send_command(id, json!({ "type": "list", "all": true }));
+    client.send_command(id, &json!({ "type": "list", "all": true }));
     let list = client.read_response(id);
     assert_eq!(list["success"], true, "list --all failed: {list}");
     list["data"]["sessions"]
@@ -235,7 +260,7 @@ fn all_roster_summaries(client: &mut Client, id: &str) -> Vec<Value> {
 fn rlm_children_rows(client: &mut Client, id: &str, parent: &str) -> Vec<Value> {
     client.send_command(
         id,
-        json!({ "type": "get_rlm_children", "activeSessionId": parent }),
+        &json!({ "type": "get_rlm_children", "activeSessionId": parent }),
     );
     let response = client.read_response(id);
     assert_eq!(
@@ -252,14 +277,14 @@ fn rlm_children_rows(client: &mut Client, id: &str, parent: &str) -> Vec<Value> 
 fn run_turn(client: &mut Client, session_id: &str, message: &str, id: &str) {
     client.send_command(
         id,
-        json!({ "type": "prompt", "activeSessionId": session_id, "message": message }),
+        &json!({ "type": "prompt", "activeSessionId": session_id, "message": message }),
     );
     let prompted = client.read_response(id);
     assert_eq!(prompted["success"], true, "prompt failed: {prompted}");
     let idle_id = format!("{id}-idle");
     client.send_command(
         &idle_id,
-        json!({ "type": "wait_for_idle", "activeSessionId": session_id }),
+        &json!({ "type": "wait_for_idle", "activeSessionId": session_id }),
     );
     let idle = client.read_response(&idle_id);
     assert_eq!(idle["success"], true, "wait_for_idle failed: {idle}");
@@ -349,7 +374,7 @@ fn create_parent(
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
     client.send_command(
         id,
-        json!({
+        &json!({
             "type": "create",
             "name": "parent",
             "config": {
@@ -517,7 +542,7 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
     wait_until(&mut client, Duration::from_mins(1), |client| {
         client.send_command(
             "g3",
-            json!({ "type": "get_rlm_children", "activeSessionId": parent_id }),
+            &json!({ "type": "get_rlm_children", "activeSessionId": parent_id }),
         );
         let response = client.read_response("g3");
         (response["success"] == true
@@ -629,7 +654,7 @@ fn sigkill_keeps_a_created_root_session_running() {
     wait_until(&mut client, Duration::from_mins(1), |client| {
         client.send_command(
             "g1",
-            json!({ "type": "get_rlm_children", "activeSessionId": parent_id }),
+            &json!({ "type": "get_rlm_children", "activeSessionId": parent_id }),
         );
         let response = client.read_response("g1");
         (response["success"] == true

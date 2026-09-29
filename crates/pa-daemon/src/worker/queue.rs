@@ -1,6 +1,9 @@
 //! Queued input: the item model, the lanes, admission, delivery batching,
 //! and queue recovery.
-use super::*;
+use super::{
+    emit_worker_event_with, json, oneshot, Arc, Duration, EventPump, Mutex, Notify, Result,
+    SessionCore, Value, VecDeque, WorkerRecoveryJournal, AUTONOMOUS_QUEUE_KEY,
+};
 
 /// Queue delivery lanes (port of the session action store's two deliveries).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10,7 +13,7 @@ pub enum Lane {
 }
 
 impl Lane {
-    pub(crate) fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Lane::Steering => "steering",
             Lane::FollowUp => "follow_up",
@@ -633,7 +636,7 @@ pub(crate) fn admit_bash_completion_notice(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
     work_notify: &Arc<Notify>,
-    notice: crate::engine::BashCompletionNotice,
+    notice: &crate::engine::BashCompletionNotice,
     session_is_closed: impl Fn() -> bool,
 ) {
     let row = pa_core::session_engine::messages::create_async_bash_completion_message(
@@ -712,7 +715,7 @@ pub(crate) fn admit_bash_completion_notice(
 pub(crate) fn withdraw_bash_completion_notice(
     recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
-    notice: crate::engine::BashConsumedNotice,
+    notice: &crate::engine::BashConsumedNotice,
 ) {
     let removed = {
         let mut core_guard = core.lock().unwrap();
@@ -723,7 +726,7 @@ pub(crate) fn withdraw_bash_completion_notice(
         // across the two lanes, never the whole set.
         let mut withdrawn = false;
         let mut withdraw_one = |item: &QueuedItem| {
-            if !withdrawn && is_bash_completion_notice_for(item, &notice) {
+            if !withdrawn && is_bash_completion_notice_for(item, notice) {
                 withdrawn = true;
                 false
             } else {
@@ -765,6 +768,6 @@ fn is_bash_completion_notice_for(
         return false;
     }
     let details = row.get("details").unwrap_or(&Value::Null);
-    details.get("pid").and_then(Value::as_u64) == Some(notice.pid as u64)
+    details.get("pid").and_then(Value::as_u64) == Some(u64::from(notice.pid))
         && details.get("command").and_then(Value::as_str) == Some(notice.command.as_str())
 }

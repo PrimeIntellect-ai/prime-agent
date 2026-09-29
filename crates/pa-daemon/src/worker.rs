@@ -422,9 +422,9 @@ impl Worker {
                         Err(_) => std::sync::Arc::new(ScriptedEngine::default()),
                     }
                 }
-                Some(script) => std::sync::Arc::new(
-                    ScriptedEngine::from_value(script.clone()).unwrap_or_default(),
-                ),
+                Some(script) => {
+                    std::sync::Arc::new(ScriptedEngine::from_value(script).unwrap_or_default())
+                }
                 None => {
                     let cwd =
                         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -649,7 +649,7 @@ impl Worker {
                         &notice_recovery,
                         &notice_core,
                         &notice_notify,
-                        notice,
+                        &notice,
                         // Revalidated inside the admission's own lock
                         // section: the close paths mark the session
                         // BEFORE clearing the lanes, so a notice that
@@ -661,7 +661,7 @@ impl Worker {
                 let withdraw_core = Arc::clone(&core);
                 let withdraw_recovery = Arc::clone(&recovery);
                 let consumed: crate::engine::BashConsumedSink = Arc::new(move |notice| {
-                    withdraw_bash_completion_notice(&withdraw_recovery, &withdraw_core, notice);
+                    withdraw_bash_completion_notice(&withdraw_recovery, &withdraw_core, &notice);
                 });
                 concrete.set_bash_notice_sinks(completion, consumed);
             }
@@ -683,10 +683,7 @@ impl Worker {
                     roster_delta_sequence: std::sync::Arc::clone(&roster_delta_sequence),
                     roster_push_order: std::sync::Arc::clone(&roster_push_order),
                 });
-            crate::roster_activity::spawn_roster_activity_watch(
-                events.clone(),
-                roster_pushes.clone(),
-            );
+            crate::roster_activity::spawn_roster_activity_watch(&events, roster_pushes.clone());
             let runner = TurnRunner {
                 recovery: Arc::clone(&recovery),
                 core: Arc::clone(&core),
@@ -840,7 +837,7 @@ fn emit_refinement_row(
     core: &Arc<Mutex<SessionCore>>,
     events: &Arc<EventPump>,
     review_session_id: &str,
-    message: Value,
+    message: &Value,
 ) -> bool {
     {
         let mut core = core.lock().unwrap();

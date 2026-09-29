@@ -8,7 +8,12 @@ use super::launch_budget::{
 };
 #[cfg(not(unix))]
 use super::launch_budget::{WORKER_PROBE_BACKOFF_MAX_MS, WORKER_PROBE_BACKOFF_MIN_MS};
-use super::*;
+use super::{
+    anyhow, create_command_payload, json, persist_worker, socket, util, Arc, Context,
+    DaemonCommand, DaemonWorkerDescriptor, DaemonWorkerLifecycle, DurableDaemonCreateCommand,
+    Duration, EngineModelSelection, Map, Ordering, Path, ResidentWorker, Result, RouteAdmission,
+    Supervisor, TypedCreateRejection, Value, LONG_ROUTE_TIMEOUT_MS, ROUTE_TIMEOUT_MS,
+};
 use crate::lease::is_process_alive;
 
 impl Supervisor {
@@ -452,7 +457,7 @@ impl Supervisor {
         // route gates on this, so nothing overtakes the session's create).
         resident.note_session_ready();
         let pid = child.id().unwrap_or(0);
-        self.spawn_monitor(Arc::clone(&resident), Some(child), pid as u64);
+        self.spawn_monitor(Arc::clone(&resident), Some(child), u64::from(pid));
         Ok((resident, create_summary))
     }
 

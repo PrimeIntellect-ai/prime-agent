@@ -511,7 +511,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = faux_engine_with_settings(
-            serde_json::json!({ "responses": [{"text": "warm ok"}, {"text": "turn reply"}] }),
+            &serde_json::json!({ "responses": [{"text": "warm ok"}, {"text": "turn reply"}] }),
             u64::MAX,
         );
         let engine = Arc::new(engine);

@@ -152,7 +152,7 @@ mod tests {
     /// dir derives from (the worker shape: sessions with the refine
     /// surface), or without one (sessions that never auto-refine).
     fn trigger_engine(
-        script: serde_json::Value,
+        script: &serde_json::Value,
         reserve_tokens: u64,
         with_session_file: bool,
     ) -> (AgentSessionEngine, tempfile::TempDir) {
@@ -199,7 +199,7 @@ mod tests {
     /// below, the big turns cross, environment-independently.
     fn crossing_headroom() -> u64 {
         let (probe, _probe_dir) =
-            faux_engine_with_settings(json!({ "responses": [{"text": "seed reply"}] }), 1);
+            faux_engine_with_settings(&json!({ "responses": [{"text": "seed reply"}] }), 1);
         let mut probe_events: Vec<EngineEvent> = Vec::new();
         admit(&probe, "seed turn".to_string(), &mut probe_events);
         let baseline = probe_events
@@ -230,7 +230,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let headroom = crossing_headroom();
         let (engine, _dir) = trigger_engine(
-            json!({
+            &json!({
                 "responses": [
                     {"text": "seed reply"},
                     {"text": "crossing reply"},
@@ -296,7 +296,7 @@ mod tests {
         // reserve 1: the headroom never crosses, so only the manual
         // compaction runs.
         let (engine, _dir) = trigger_engine(
-            json!({
+            &json!({
                 "responses": [
                     {"text": "first reply"},
                     {"text": "second reply"},
@@ -375,7 +375,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let headroom = crossing_headroom();
         let (engine, _dir) = trigger_engine(
-            json!({
+            &json!({
                 "responses": [
                     {"text": "seed reply"},
                     {"text": "crossing reply"},
@@ -425,7 +425,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = trigger_engine(
-            json!({
+            &json!({
                 "responses": [
                     {"text": "first reply"},
                     {"text": "second reply"},

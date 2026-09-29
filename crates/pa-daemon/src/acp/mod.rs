@@ -286,7 +286,7 @@ async fn handle_request(
     tx: producer::FrameSink,
 ) {
     match method.as_str() {
-        "initialize" => handle_initialize(id, params, &mode.product_version, tx),
+        "initialize" => handle_initialize(&id, &params, &mode.product_version, &tx),
         "session/new" => {
             handle_session_new(id, params, state, mode, tx).await;
         }
@@ -301,22 +301,22 @@ async fn handle_request(
         }
         other => {
             let _ = tx.send(jsonrpc::error_response(
-                id,
+                &id,
                 jsonrpc::METHOD_NOT_FOUND,
                 &format!("\"Method not found\": {other}"),
-                Some(json!({ "method": other })),
+                Some(&json!({ "method": other })),
             ));
         }
     }
 }
 
-fn handle_initialize(id: Value, params: Value, product_version: &str, tx: producer::FrameSink) {
-    if let Err(error_response) = validate_initialize(&id, &params) {
+fn handle_initialize(id: &Value, params: &Value, product_version: &str, tx: &producer::FrameSink) {
+    if let Err(error_response) = validate_initialize(id, params) {
         let _ = tx.send(error_response);
         return;
     }
     let result = serde_json::to_value(initialize_result(product_version)).expect("serializes");
-    let _ = tx.send(jsonrpc::response(id, result));
+    let _ = tx.send(jsonrpc::response(id, &result));
 }
 
 /// The `initialize` schema check the TS SDK performs: the protocol version
@@ -324,10 +324,10 @@ fn handle_initialize(id: Value, params: Value, product_version: &str, tx: produc
 fn validate_initialize(id: &Value, params: &Value) -> std::result::Result<(), Value> {
     let field_error = |received: &str| {
         jsonrpc::error_response(
-            id.clone(),
+            id,
             jsonrpc::INVALID_PARAMS,
             "Invalid params",
-            Some(json!({
+            Some(&json!({
                 "_errors": [],
                 "protocolVersion": {
                     "_errors": [format!("Invalid input: expected number, received {received}")]
@@ -420,7 +420,7 @@ async fn handle_session_new(
             state.session_new_in_flight = false;
             state.session = Some(entry);
             drop(state);
-            let _ = tx.send(jsonrpc::response(id, result));
+            let _ = tx.send(jsonrpc::response(&id, &result));
             producer.commit_session_new_response().await;
         }
     }
@@ -500,7 +500,7 @@ async fn session_new(
         "configOptions": *config.published.lock().await,
     });
     if let Some(cwd_mismatch) = cwd_mismatch {
-        result["_meta"] = meta::prime_agent_meta(PrimeAgentSessionMeta {
+        result["_meta"] = meta::prime_agent_meta(&PrimeAgentSessionMeta {
             cwd: Some(cwd_mismatch),
             ..Default::default()
         });
@@ -583,7 +583,7 @@ async fn handle_session_close(
     // admitted.
     entry.session.close_producer().await;
     mcp::release_session_servers(&mode).await;
-    let _ = tx.send(jsonrpc::response(id, json!({})));
+    let _ = tx.send(jsonrpc::response(&id, &json!({})));
     let mut state = state.lock().await;
     state.session_close_in_flight = false;
 }
@@ -595,10 +595,10 @@ fn stop_reason_response(stop_reason: AcpStopReason) -> Value {
 
 fn internal_error(id: &Value, details: &str) -> Value {
     jsonrpc::error_response(
-        id.clone(),
+        id,
         jsonrpc::INTERNAL_ERROR,
         "Internal error",
-        Some(json!({ "details": details })),
+        Some(&json!({ "details": details })),
     )
 }
 

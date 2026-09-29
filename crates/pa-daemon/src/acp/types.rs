@@ -404,7 +404,7 @@ pub fn initialize_result(product_version: &str) -> InitializeResult {
             title: "Prime Agent".to_string(),
             version: product_version.to_string(),
         },
-        meta: super::meta::prime_agent_meta(super::meta::PrimeAgentSessionMeta::default()),
+        meta: super::meta::prime_agent_meta(&super::meta::PrimeAgentSessionMeta::default()),
     }
 }
 
