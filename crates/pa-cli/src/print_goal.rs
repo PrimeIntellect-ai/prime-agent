@@ -197,7 +197,12 @@ impl PrintGoalSurface {
         let goal = engine.goal_state().await;
         let changed = {
             let mut last = self.last_published_goal.lock().await;
-            if *last == goal {
+            // The dedupe is age-invariant: the creation-based timer's age
+            // ticks with the wall clock (a second boundary between reads
+            // must not re-emit an unchanged goal).
+            if pa_core::goals::goal_update_dedupe_projection(&last)
+                == pa_core::goals::goal_update_dedupe_projection(&goal)
+            {
                 false
             } else {
                 *last = goal.clone();

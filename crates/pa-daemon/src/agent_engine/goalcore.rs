@@ -165,7 +165,13 @@ impl AgentSessionEngine {
         };
         {
             let mut published = self.published_goal.lock().expect("published goal lock");
-            if published.as_ref() == Some(&goal) {
+            // The dedupe is age-invariant: the creation-based timer's age
+            // ticks with the wall clock (a second boundary between reads
+            // must not re-emit an unchanged goal).
+            if published.as_ref().is_some_and(|last| {
+                pa_core::goals::goal_update_dedupe_projection(last)
+                    == pa_core::goals::goal_update_dedupe_projection(&goal)
+            }) {
                 return true;
             }
             let baseline_only =

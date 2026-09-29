@@ -81,6 +81,18 @@ pub struct GoalContextDetails {
 /// adopts its `updated_at` as the creation time, so legacy rows read a
 /// sane age instead of no age. The empty state (no goal id, no objective)
 /// never fabricates a creation time.
+/// The goal-update dedupe's age-invariant projection: the creation-based
+/// timer recomputes `time_used_seconds` from the wall clock on every read
+/// (the operator's ruling), so the age must not participate in an
+/// "unchanged state" comparison — an unchanged goal would otherwise
+/// re-emit `goal_update` every time a second boundary passes between two
+/// reads. Emit the real state; dedupe on this projection.
+pub fn goal_update_dedupe_projection(state: &GoalState) -> GoalState {
+    let mut projected = state.clone();
+    projected.time_used_seconds = 0;
+    projected
+}
+
 pub fn normalize_goal_state(goal: GoalState) -> GoalState {
     let created_at = match goal.created_at {
         Some(created_at) => Some(created_at),
