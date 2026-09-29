@@ -130,6 +130,7 @@ pub struct ParentIdentity {
 
 impl ParentIdentity {
     /// Identity with the default depth bound (TS `resolveRlmMaxDepth`).
+    #[must_use]
     pub fn with_default_depth() -> Self {
         Self {
             rlm_max_depth: DEFAULT_RLM_MAX_DEPTH,
@@ -491,6 +492,7 @@ impl SupervisorChildSessions {
     ///
     /// Panics when the identity mutex is poisoned (a holder panicked
     /// while holding the lock).
+    #[must_use]
     pub fn rlm_max_depth(&self) -> u32 {
         self.inner
             .identity

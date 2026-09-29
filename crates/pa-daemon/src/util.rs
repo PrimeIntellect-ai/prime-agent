@@ -4,12 +4,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 12-char hex display id (port of `formatSessionDisplayId`): the last 12
 /// hex characters of a random UUID.
+#[must_use]
 pub fn new_display_id() -> String {
     let normalized: String = uuid::Uuid::new_v4().simple().to_string().to_lowercase();
     normalized[(normalized.len() - 12)..].to_string()
 }
 
 /// Milliseconds since the Unix epoch.
+#[must_use]
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -17,12 +19,14 @@ pub fn now_ms() -> u64 {
 }
 
 /// RFC 3339 / ISO 8601 UTC timestamp, matching `new Date().toISOString()`.
+#[must_use]
 pub fn now_iso() -> String {
     iso_from_unix_ms(now_ms())
 }
 
 /// RFC 3339 UTC timestamp from epoch milliseconds (no external time crate;
 /// civil-from-days algorithm from Howard Hinnant, used by chrono).
+#[must_use]
 pub fn iso_from_unix_ms(ms: u64) -> String {
     let secs = (ms / 1000) as i64;
     let millis = (ms % 1000) as u32;
@@ -86,7 +90,7 @@ pub fn iso_to_unix_ms(iso: &str) -> Option<u64> {
         return None;
     }
     let days = days_from_civil(year, month, day);
-    let secs = days * 86_400 + hour as i64 * 3_600 + minute as i64 * 60 + second as i64;
+    let secs = days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second);
 
     if secs < 0 {
         return None;
@@ -100,7 +104,7 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let yoe = y.rem_euclid(400);
     let mp = (m + 9) % 12;
     let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy as i64;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + i64::from(doy);
     era * 146_097 + doe - 719_468
 }
 

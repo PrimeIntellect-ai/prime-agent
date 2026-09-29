@@ -515,16 +515,30 @@ impl SessionUi {
         // The activity dock owns focus while focused: Enter (and a second
         // Alt+A) opens the focused group's own view directly (the
         // operator's direct-navigation redesign), left/right step the
-        // dock's groups, up/cancel/back returns to the editor, expand
-        // cycles the conversation detail and KEEPS the focus, and every
-        // other key falls through after releasing the focus (TS
-        // `onChatAction` -> `focusEditor` -> the editor handles it).
+        // dock's groups — except left from the subagents selection,
+        // which opens the agents view (the operator's 2026-09-28 ask) —
+        // up/cancel/back returns to the editor, expand cycles the
+        // conversation detail and KEEPS the focus, and every other key
+        // falls through after releasing the focus (TS `onChatAction` ->
+        // `focusEditor` -> the editor handles it).
         if self.subagents_focused {
             let kb = view.editor.keybindings();
             if kb.matches(&id, "tui.select.confirm") || kb.matches(&id, "app.subagents.focus") {
                 // The dock is the direct launcher: Enter opens the
                 // focused group's own view (the operator's redesign —
                 // the grouped activity panel is gone).
+                self.open_dock_group_view(view);
+                return Ok(());
+            }
+            if id == "left" && self.activity_group == crate::chrome::ActivityGroup::Subagents {
+                // Left from the subagents selection opens the agents
+                // view (the operator's 2026-09-28 muscle-memory ask —
+                // the same route as Enter and clicking the group): the
+                // dock's subagents item is the row's own entry into
+                // the scoped agents view, and left reads as `agents
+                // back` everywhere else on this surface (the empty
+                // editor's `app.agents.back` hands the pane to the
+                // agents view the same way).
                 self.open_dock_group_view(view);
                 return Ok(());
             }

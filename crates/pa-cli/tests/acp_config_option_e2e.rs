@@ -1,3 +1,22 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
+// by design on hot paths (boxing 130 fns is allocation-churn with zero
+// correctness gain); the fn-length threshold is a style gate, not
+// correctness (the harness fns are intentionally linear); 64-bit targets -
+// the narrowing sits at OS/protocol boundaries where the values are
+// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
+// guarded parses), and checked conversions would add panic paths where
+// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
+// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
+// dossier for the conductor).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! ACP picker e2e (the TS #2455 port): `session/new` advertises the
 //! standard `model` and `thought_level` select options, and
 //! `session/set_config_option` applies selections — the effort picker
@@ -88,17 +107,17 @@ impl AcpChild {
         }
     }
 
-    fn send(&mut self, frame: Value) {
+    fn send(&mut self, frame: &Value) {
         let mut line = serde_json::to_string(&frame).unwrap();
         line.push('\n');
         self.stdin.write_all(line.as_bytes()).unwrap();
         self.stdin.flush().unwrap();
     }
 
-    fn request(&mut self, method: &str, params: Value) -> u64 {
+    fn request(&mut self, method: &str, params: &Value) -> u64 {
         self.next_id += 1;
         let id = self.next_id;
-        self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
+        self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
         id
     }
 
@@ -124,7 +143,9 @@ impl AcpChild {
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     panic!("timed out waiting for response {id}")
                 }
-                Err(_) => panic!("ACP server closed stdout"),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("ACP server closed stdout")
+                }
             }
         }
     }
@@ -154,7 +175,7 @@ fn config_updates(notifications: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-fn select_params(session_id: &str, config_id: &str, value: Value) -> Value {
+fn select_params(session_id: &str, config_id: &str, value: &Value) -> Value {
     json!({ "sessionId": session_id, "configId": config_id, "value": value })
 }
 
@@ -260,9 +281,9 @@ fn acp_in_process_config_option_advertises_and_applies() {
         // a set-but-empty env var is a missing credential.
         &[("PROBE_LOCKED_KEY".to_string(), String::new())],
     );
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let result = &new_response["result"];
     let session_id = result["sessionId"].as_str().unwrap().to_string();
@@ -306,7 +327,7 @@ fn acp_in_process_config_option_advertises_and_applies() {
     // A valid effort selection applies and publishes the change.
     let select = client.request(
         "session/set_config_option",
-        select_params(&session_id, "thought_level", json!("high")),
+        &select_params(&session_id, "thought_level", &json!("high")),
     );
     let (response, notifications) = client.wait_response(select, TIMEOUT);
     assert_eq!(
@@ -337,7 +358,7 @@ fn acp_in_process_config_option_advertises_and_applies() {
     ] {
         let select = client.request(
             "session/set_config_option",
-            select_params(&session_id, config_id, value),
+            &select_params(&session_id, config_id, &value),
         );
         let (response, _) = client.wait_response(select, TIMEOUT);
         assert_eq!(response["error"]["code"], -32602, "{config_id}: {response}");
@@ -346,7 +367,7 @@ fn acp_in_process_config_option_advertises_and_applies() {
     // An unknown session is invalid params, never an internal error.
     let select = client.request(
         "session/set_config_option",
-        select_params("missing-session", "thought_level", json!("high")),
+        &select_params("missing-session", "thought_level", &json!("high")),
     );
     let (response, _) = client.wait_response(select, TIMEOUT);
     assert_eq!(response["error"]["code"], -32602);
@@ -361,7 +382,7 @@ fn acp_in_process_config_option_advertises_and_applies() {
     let plain = r#"["faux","plain-model"]"#;
     let select = client.request(
         "session/set_config_option",
-        select_params(&session_id, "model", json!(plain)),
+        &select_params(&session_id, "model", &json!(plain)),
     );
     let (response, notifications) = client.wait_response(select, TIMEOUT);
     let options = &response["result"]["configOptions"];
@@ -376,7 +397,7 @@ fn acp_in_process_config_option_advertises_and_applies() {
     );
     let select = client.request(
         "session/set_config_option",
-        select_params(&session_id, "thought_level", json!("high")),
+        &select_params(&session_id, "thought_level", &json!("high")),
     );
     let (response, _) = client.wait_response(select, TIMEOUT);
     assert_eq!(response["error"]["code"], -32602);
@@ -389,7 +410,7 @@ fn acp_in_process_config_option_advertises_and_applies() {
     // switch, so the next prompt streams on the selected model.
     let prompt = client.request(
         "session/prompt",
-        json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "hello" }] }),
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "hello" }] }),
     );
     let (prompt_response, _) = client.wait_response(prompt, TIMEOUT);
     assert_eq!(prompt_response["result"]["stopReason"], "end_turn");
@@ -399,7 +420,7 @@ fn acp_in_process_config_option_advertises_and_applies() {
     let reasoner = r#"["faux","faux-1"]"#;
     let select = client.request(
         "session/set_config_option",
-        select_params(&session_id, "model", json!(reasoner)),
+        &select_params(&session_id, "model", &json!(reasoner)),
     );
     let (response, _) = client.wait_response(select, TIMEOUT);
     let options = &response["result"]["configOptions"];
@@ -410,7 +431,7 @@ fn acp_in_process_config_option_advertises_and_applies() {
     // The current model re-selected: refresh only, no discovery needed.
     let select = client.request(
         "session/set_config_option",
-        select_params(&session_id, "model", json!(reasoner)),
+        &select_params(&session_id, "model", &json!(reasoner)),
     );
     let (response, _) = client.wait_response(select, TIMEOUT);
     assert_eq!(
@@ -425,7 +446,7 @@ fn acp_in_process_config_option_advertises_and_applies() {
     let map = r#"["faux","map-model"]"#;
     let select = client.request(
         "session/set_config_option",
-        select_params(&session_id, "model", json!(map)),
+        &select_params(&session_id, "model", &json!(map)),
     );
     let (response, _) = client.wait_response(select, TIMEOUT);
     let options = &response["result"]["configOptions"];
@@ -444,7 +465,7 @@ fn acp_in_process_config_option_advertises_and_applies() {
     assert_eq!(levels, vec!["minimal", "low", "medium", "high", "xhigh"]);
     let select = client.request(
         "session/set_config_option",
-        select_params(&session_id, "thought_level", json!("xhigh")),
+        &select_params(&session_id, "thought_level", &json!("xhigh")),
     );
     let (response, notifications) = client.wait_response(select, TIMEOUT);
     assert_eq!(
@@ -465,7 +486,7 @@ fn acp_in_process_config_option_advertises_and_applies() {
     let locked = r#"["locked","locked-model"]"#;
     let select = client.request(
         "session/set_config_option",
-        select_params(&session_id, "model", json!(locked)),
+        &select_params(&session_id, "model", &json!(locked)),
     );
     let (response, _) = client.wait_response(select, TIMEOUT);
     assert_eq!(response["error"]["code"], -32603, "{response}");
@@ -480,7 +501,7 @@ fn acp_in_process_config_option_advertises_and_applies() {
     // no-op re-selection refreshes and reports it).
     let select = client.request(
         "session/set_config_option",
-        select_params(&session_id, "model", json!(map)),
+        &select_params(&session_id, "model", &json!(map)),
     );
     let (response, _) = client.wait_response(select, TIMEOUT);
     assert_eq!(
@@ -488,7 +509,7 @@ fn acp_in_process_config_option_advertises_and_applies() {
         "the uncredentialed switch mutated nothing: {response}"
     );
 
-    let close = client.request("session/close", json!({ "sessionId": session_id }));
+    let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, TIMEOUT);
     assert_eq!(close_response["result"], json!({}));
 }
@@ -515,9 +536,9 @@ fn acp_in_process_failed_settings_persist_keeps_the_session_coherent() {
     // The global settings file as a directory: every settings write
     // fails at its read step, deterministically.
     std::fs::create_dir_all(client.home.path().join("agent").join("settings.json")).unwrap();
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let result = &new_response["result"];
     let session_id = result["sessionId"].as_str().unwrap().to_string();
@@ -532,7 +553,7 @@ fn acp_in_process_failed_settings_persist_keeps_the_session_coherent() {
     let plain = r#"["faux","plain-model"]"#;
     let select = client.request(
         "session/set_config_option",
-        select_params(&session_id, "model", json!(plain)),
+        &select_params(&session_id, "model", &json!(plain)),
     );
     let (response, _) = client.wait_response(select, TIMEOUT);
     assert_eq!(response["error"]["code"], -32603, "{response}");
@@ -549,7 +570,7 @@ fn acp_in_process_failed_settings_persist_keeps_the_session_coherent() {
     // unsupported — a stale pre-switch slot would have accepted it.
     let select = client.request(
         "session/set_config_option",
-        select_params(&session_id, "thought_level", json!("high")),
+        &select_params(&session_id, "thought_level", &json!("high")),
     );
     let (response, _) = client.wait_response(select, TIMEOUT);
     assert_eq!(response["error"]["code"], -32602, "{response}");
@@ -562,7 +583,7 @@ fn acp_in_process_failed_settings_persist_keeps_the_session_coherent() {
     // applied): the no-op re-selection refreshes and reports it...
     let select = client.request(
         "session/set_config_option",
-        select_params(&session_id, "model", json!(plain)),
+        &select_params(&session_id, "model", &json!(plain)),
     );
     let (response, _) = client.wait_response(select, TIMEOUT);
     assert_eq!(
@@ -578,12 +599,12 @@ fn acp_in_process_failed_settings_persist_keeps_the_session_coherent() {
     // ...and the next turn still streams on it.
     let prompt = client.request(
         "session/prompt",
-        json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "hello" }] }),
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "hello" }] }),
     );
     let (prompt_response, _) = client.wait_response(prompt, TIMEOUT);
     assert_eq!(prompt_response["result"]["stopReason"], "end_turn");
 
-    let close = client.request("session/close", json!({ "sessionId": session_id }));
+    let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, TIMEOUT);
     assert_eq!(close_response["result"], json!({}));
 }
@@ -655,9 +676,9 @@ fn acp_daemon_attached_config_option_pickers() {
             home,
         }
     };
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let result = &new_response["result"];
     assert!(
@@ -678,7 +699,7 @@ fn acp_daemon_attached_config_option_pickers() {
     // publishes the change.
     let select = client.request(
         "session/set_config_option",
-        select_params(&session_id, "thought_level", json!("high")),
+        &select_params(&session_id, "thought_level", &json!("high")),
     );
     let (response, notifications) = client.wait_response(select, TIMEOUT);
     assert_eq!(
@@ -710,7 +731,7 @@ fn acp_daemon_attached_config_option_pickers() {
     ] {
         let select = client.request(
             "session/set_config_option",
-            select_params(&session_id, config_id, value),
+            &select_params(&session_id, config_id, &value),
         );
         let (response, _) = client.wait_response(select, TIMEOUT);
         assert_eq!(response["error"]["code"], -32602, "{config_id}: {response}");
@@ -718,7 +739,7 @@ fn acp_daemon_attached_config_option_pickers() {
     }
     let select = client.request(
         "session/set_config_option",
-        select_params(&session_id, "model", json!(r#"["faux","faux-1"]"#)),
+        &select_params(&session_id, "model", &json!(r#"["faux","faux-1"]"#)),
     );
     let (response, _) = client.wait_response(select, TIMEOUT);
     assert_eq!(
@@ -729,12 +750,12 @@ fn acp_daemon_attached_config_option_pickers() {
     // The switched level survives a turn: the prompt still settles.
     let prompt = client.request(
         "session/prompt",
-        json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "Name a river." }] }),
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "Name a river." }] }),
     );
     let (prompt_response, _) = client.wait_response(prompt, Duration::from_mins(2));
     assert_eq!(prompt_response["result"]["stopReason"], "end_turn");
 
-    let close = client.request("session/close", json!({ "sessionId": session_id }));
+    let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, TIMEOUT);
     assert_eq!(close_response["result"], json!({}));
     drop(client);

@@ -48,7 +48,7 @@ impl FailingMock {
                 let Ok(stream) = stream else { continue };
                 let requests = Arc::clone(&requests_for_thread);
                 std::thread::spawn(move || {
-                    let _ = serve(stream, failures, answer, requests);
+                    let _ = serve(stream, failures, answer, &requests);
                 });
             }
         });
@@ -64,7 +64,7 @@ impl FailingMock {
     }
 }
 
-fn chunk(delta: Value, finish_reason: Option<&str>) -> String {
+fn chunk(delta: &Value, finish_reason: Option<&str>) -> String {
     json!({
         "id": "chatcmpl-test",
         "object": "chat.completion.chunk",
@@ -79,7 +79,7 @@ fn serve(
     mut stream: TcpStream,
     failures: usize,
     answer: &str,
-    requests: Arc<Mutex<usize>>,
+    requests: &Arc<Mutex<usize>>,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut head = String::new();
@@ -125,8 +125,8 @@ fn serve(
     }
     let mut payload = String::new();
     for data in [
-        chunk(json!({"role": "assistant", "content": answer}), None),
-        chunk(json!({}), Some("stop")),
+        chunk(&json!({"role": "assistant", "content": answer}), None),
+        chunk(&json!({}), Some("stop")),
     ] {
         write!(payload, "data: {data}\n\n").expect("write to String");
     }
@@ -217,7 +217,7 @@ impl Client {
         }
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -348,7 +348,7 @@ fn setup(
     let mut client = Client::connect(&socket);
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -367,7 +367,7 @@ fn setup(
         .to_string();
     client.send_command(
         "a1",
-        json!({ "type": "attach", "activeSessionId": session_id }),
+        &json!({ "type": "attach", "activeSessionId": session_id }),
     );
     let attached = client.request("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
@@ -397,7 +397,7 @@ fn provider_failure_fails_over_to_the_next_provider_and_recovers() {
     let (_dir, _supervisor, mut client, session_id) = setup("failover", &primary, &backup);
     client.send_command(
         "p1",
-        json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "hi" }),
+        &json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "hi" }),
     );
     let done = client.request("p1");
     assert_eq!(done["success"], true, "prompt must succeed: {done}");
@@ -494,7 +494,7 @@ fn every_provider_failing_surfaces_the_final_error() {
     let (_dir, _supervisor, mut client, session_id) = setup("exhausted", &primary, &backup);
     client.send_command(
         "p1",
-        json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "hi" }),
+        &json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "hi" }),
     );
     let done = client.request("p1");
     assert_eq!(done["success"], false, "prompt must fail: {done}");

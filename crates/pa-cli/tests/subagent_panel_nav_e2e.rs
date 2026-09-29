@@ -1,3 +1,22 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
+// by design on hot paths (boxing 130 fns is allocation-churn with zero
+// correctness gain); the fn-length threshold is a style gate, not
+// correctness (the harness fns are intentionally linear); 64-bit targets -
+// the narrowing sits at OS/protocol boundaries where the values are
+// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
+// guarded parses), and checked conversions would add panic paths where
+// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
+// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
+// dossier for the conductor).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! End-to-end verifier for the subagent panel's keyboard path from the main
 //! chat (Kevin's live-dogfood ruling, TS parity): the attached session with a
 //! ledger-seeded child renders the subagent summary box; Down at the end of
@@ -257,7 +276,7 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
     // attached parent renders the subagent summary box from the real daemon.
     let ledger = pa_daemon::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &session_dir, |_m| {});
     ledger
-        .append_spawn(pa_daemon::rlm_ledger::RlmSpawnInput {
+        .append_spawn(&pa_daemon::rlm_ledger::RlmSpawnInput {
             child_id: "panel-nav-child".to_string(),
             parent: parent_path.to_string_lossy().to_string(),
             child: child_path.to_string_lossy().to_string(),
