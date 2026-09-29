@@ -714,11 +714,19 @@ pub fn decode_plugin_cursor(cursor: Option<&str>) -> Result<usize, String> {
 }
 
 /// Slice one bounded page out of the plugin cards (TS `pagePluginViews`).
+///
+/// A cursor at or past the end yields an empty page and no continuation —
+/// the TS float-arithmetic outcome for any oversized cursor, which `usize`
+/// addition would otherwise overflow on (`cursor + limit` panics checked
+/// builds and wraps in release to a bogus low cursor).
 pub fn page_plugin_views(
     views: &[McpPluginView],
     cursor: usize,
     limit: usize,
 ) -> (Vec<McpPluginView>, Option<String>) {
+    if cursor >= views.len() {
+        return (Vec::new(), None);
+    }
     let page: Vec<McpPluginView> = views.iter().skip(cursor).take(limit).cloned().collect();
     let next_cursor = (cursor + limit < views.len()).then(|| (cursor + limit).to_string());
     (page, next_cursor)
@@ -903,6 +911,45 @@ mod connection_view_tests {
             .unwrap();
         assert_eq!(acp.status, McpConnectionStatus::Connected);
         assert_eq!(acp.source, ViewSource::Acp);
+    }
+
+    /// An oversized cursor pages to an empty page with NO continuation
+    /// instead of overflowing `cursor + limit` (the TS float outcome; the
+    /// registered Macroscope finding on the review of the first push).
+    #[test]
+    fn oversized_cursor_yields_empty_page_without_overflow() {
+        let views: Vec<McpPluginView> = (0..4)
+            .map(|i| McpPluginView {
+                service_id: format!("s{i}"),
+                label: format!("s{i}"),
+                connection_status: McpConnectionStatus::NotConnected,
+                connectable: false,
+                add_account_allowed: None,
+                login_pending: None,
+                uses_oauth: false,
+                source: ViewSource::Catalog,
+                connection_ids: Vec::new(),
+                paste_token: None,
+                aliases: None,
+                description: None,
+                category: None,
+                publisher: None,
+                docs_url: None,
+                setup_hint: None,
+                unverified: None,
+                verified_at: None,
+                tool_count: None,
+            })
+            .collect();
+        let (page, next) = page_plugin_views(&views, 0, 2);
+        assert_eq!(page.len(), 2);
+        assert_eq!(next.as_deref(), Some("2"));
+        // A cursor past the end (incl. usize::MAX): empty page, no cursor.
+        for cursor in [views.len(), usize::MAX] {
+            let (page, next) = page_plugin_views(&views, cursor, 50);
+            assert!(page.is_empty(), "cursor {cursor} must page empty");
+            assert_eq!(next, None, "cursor {cursor} must end paging");
+        }
     }
 
     /// A service with no dispatchable accounts and no reserved conflict
