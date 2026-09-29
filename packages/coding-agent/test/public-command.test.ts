@@ -356,6 +356,21 @@ describe("public command routing", () => {
 		expect(console.log).toHaveBeenCalledWith(expect.stringContaining("prime-agent sessions [--all] [--json]"));
 	});
 
+	it("resolves tailscale subcommands in command help", async () => {
+		await expect(handlePublicCommand(["help", "tailscale", "serve"])).resolves.toMatchObject({ handled: true });
+		expect(console.log).toHaveBeenLastCalledWith(expect.stringContaining("prime-agent tailscale serve --port <n>"));
+		await expect(handlePublicCommand(["--offline", "help", "tailscale", "status"])).resolves.toMatchObject({
+			handled: true,
+		});
+		expect(console.log).toHaveBeenLastCalledWith(expect.stringContaining("prime-agent tailscale status [--json]"));
+		await expect(
+			handlePublicCommand(["--offline", "tailscale", "serve", "--port", "3000", "--help"]),
+		).resolves.toMatchObject({ handled: true });
+		expect(console.log).toHaveBeenLastCalledWith(expect.stringContaining("prime-agent tailscale serve --port <n>"));
+		expect(console.error).not.toHaveBeenCalled();
+		expect(process.exitCode).toBeUndefined();
+	});
+
 	it("separates Prime Agent updates from package updates", async () => {
 		await handlePublicCommand(["update", "--force"]);
 		await handlePublicCommand(["package", "update"]);

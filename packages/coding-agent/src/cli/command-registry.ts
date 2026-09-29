@@ -93,6 +93,23 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 		options: ["--fix   Remove stale sockets and stop idle orphaned services", "--json  Print JSON"],
 	},
 	{
+		path: ["tailscale"],
+		usage: "tailscale <status|serve>",
+		summary: "Tailscale tailnet support: status, and expose a local port via serve/funnel",
+	},
+	{
+		path: ["tailscale", "status"],
+		usage: "tailscale status [--json]",
+		summary: "Show tailnet state, MagicDNS name, and served endpoints (the default)",
+		options: ["--json  Print machine-readable output"],
+	},
+	{
+		path: ["tailscale", "serve"],
+		usage: "tailscale serve --port <n> [--funnel]",
+		summary: "Expose localhost:<n> on your tailnet (wraps `tailscale serve --bg`)",
+		options: ["--port <n>  The local port to expose", "--funnel    Expose publicly via Tailscale Funnel"],
+	},
+	{
 		path: ["incident"],
 		usage: "incident [--since <time>] [--until <time>] [--session <id>]",
 		summary: "Reconstruct a daemon incident from its logs",
