@@ -223,6 +223,7 @@ pub struct LoadSkillsFromDirResult {
 /// - a directory containing SKILL.md is a skill root; no further recursion
 /// - otherwise direct .md children of the root count as skills
 /// - recurse into subdirectories looking for SKILL.md
+#[must_use]
 pub fn load_skills_from_dir(dir: &Path, source: &str) -> LoadSkillsFromDirResult {
     let state = DiscoveryState {
         root: dir.to_path_buf(),

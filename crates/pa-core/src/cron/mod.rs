@@ -285,6 +285,7 @@ pub fn normalize_heartbeat_delivery_mode(
     }
 }
 
+#[must_use]
 pub fn resolve_heartbeat_streaming_behavior(delivery_mode: Option<DeliveryMode>) -> &'static str {
     match delivery_mode.unwrap_or(DEFAULT_HEARTBEAT_DELIVERY_MODE) {
         DeliveryMode::FollowUp => "followUp",
@@ -542,11 +543,13 @@ fn consume_leading_every_schedule(text: &str) -> Option<(String, String)> {
     None
 }
 
+#[must_use]
 pub fn is_heartbeat_cron_job(job: &AgentCronJob) -> bool {
     matches!(job.source.as_deref(), Some("heartbeat" | "rlm_heartbeat"))
 }
 
 /// Whether a due heartbeat should wait instead of firing now.
+#[must_use]
 pub fn should_defer_heartbeat_cron_job(
     job: &AgentCronJob,
     activity: &HeartbeatSessionActivity,
@@ -596,6 +599,7 @@ pub fn next_run_at_for_schedule(
 
 /// One-line job summary (the TS format; timestamps in local rendering are
 /// approximated by UTC ISO strings).
+#[must_use]
 pub fn format_agent_cron_job(job: &AgentCronJob) -> String {
     let next = job.next_run_at.as_deref().unwrap_or("-");
     let last = job.last_run_at.as_deref().unwrap_or("-");

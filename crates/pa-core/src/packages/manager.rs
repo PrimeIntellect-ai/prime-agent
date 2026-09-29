@@ -119,6 +119,7 @@ impl PackageManager {
         })
     }
 
+    #[must_use]
     pub fn with_options(options: PackageManagerOptions) -> Self {
         let bundled_skills_dir = match options.bundled_skills_dir {
             BundledSkillsDir::Packaged => Some(super::get_bundled_skills_dir()),
@@ -136,6 +137,7 @@ impl PackageManager {
         }
     }
 
+    #[must_use]
     pub fn settings(&self) -> &SettingsManager {
         &self.settings
     }
@@ -348,6 +350,7 @@ impl PackageManager {
     }
 
     /// Configured packages across both scopes (user first).
+    #[must_use]
     pub fn list_configured_packages(&self) -> Vec<ConfiguredPackage> {
         let mut packages = Vec::new();
         for scope in [UserOrProject::User, UserOrProject::Project] {
@@ -365,6 +368,7 @@ impl PackageManager {
     }
 
     /// Absolute install location for a configured source, when present.
+    #[must_use]
     pub fn get_installed_path(&self, source: &str, scope: UserOrProject) -> Option<PathBuf> {
         match parse_source(source) {
             ParsedSource::Npm(npm_source) => {

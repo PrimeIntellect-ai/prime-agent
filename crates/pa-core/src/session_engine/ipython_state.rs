@@ -67,6 +67,7 @@ pub struct EngineOwnedProbe {
 
 impl EngineOwnedProbe {
     /// Wrap the engine-owned provisioner.
+    #[must_use]
     pub fn new(
         provisioner: std::sync::Weak<crate::kernel::provisioner::IpythonKernelProvisioner>,
     ) -> Self {
@@ -139,6 +140,7 @@ fn now_millis() -> u64 {
 /// listing failed on a kernel that is still running (the notice lands
 /// without the detail arm, TS `names === null`); `pruned` carries the
 /// names removed above the per-variable snapshot limit.
+#[must_use]
 pub fn notice_content(pruned: Option<&[String]>, names: Option<&[String]>) -> String {
     let detail = match names {
         None => String::new(),
@@ -163,6 +165,7 @@ Your Python kernel persisted through compaction; its remaining variables, import
 
 /// The durable notice row: display false, no details (TS appends
 /// `appendCustomMessageEntry(customType, content, display, undefined)`).
+#[must_use]
 pub fn notice_message(content: String) -> CustomMessage {
     CustomMessage {
         custom_type: IPYTHON_STATE_CUSTOM_TYPE.to_string(),

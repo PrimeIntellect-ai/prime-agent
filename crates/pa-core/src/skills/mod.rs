@@ -53,6 +53,7 @@ pub enum SourceOrigin {
 /// Markdown entry test: the file name carries a lowercase `.md` extension
 /// (TS `endsWith('.md')` parity: mixed-case suffixes stay undiscovered, and a
 /// bare `.md` name has no extension and does not count).
+#[must_use]
 pub fn skill_markdown_name(name: &str) -> bool {
     std::path::Path::new(name)
         .extension()
@@ -105,12 +106,14 @@ pub enum SkillKind {
 }
 
 impl Skill {
+    #[must_use]
     pub fn is_python(&self) -> bool {
         self.kind == SkillKind::Python
     }
 
     /// The kind label the prompt inventory and telemetry share
     /// (`<type>` in `format_skills_for_prompt`, `skill_kind` in events).
+    #[must_use]
     pub fn kind_label(&self) -> &'static str {
         if self.is_python() {
             "python"
@@ -136,6 +139,7 @@ pub struct PythonSkillRuntimeInfo {
 ///
 /// The `expect` on the Python metadata cannot fire: the loader marks a
 /// skill `Python` only when its metadata was parsed.
+#[must_use]
 pub fn get_python_skill_runtime_info(skills: &[Skill]) -> Vec<PythonSkillRuntimeInfo> {
     skills
         .iter()
@@ -202,6 +206,7 @@ pub(crate) use validate_name as validate_skill_name;
 
 /// Format skills for a system prompt (Agent Skills XML standard).
 /// Skills with disableModelInvocation are excluded.
+#[must_use]
 pub fn format_skills_for_prompt(skills: &[Skill]) -> String {
     let visible: Vec<&Skill> = skills
         .iter()
@@ -258,6 +263,7 @@ pub(crate) fn escape_xml(value: &str) -> String {
 /// fails to read passes through (TS emits an extension error event here,
 /// a seam the Rust extension runner does not have yet). Returns the skill
 /// the expansion used so the caller can report the invocation.
+#[must_use]
 pub fn expand_skill_command<'a>(text: &str, skills: &'a [Skill]) -> (String, Option<&'a Skill>) {
     let Some((name, args)) = parse_slash_command(text) else {
         return (text.to_string(), None);

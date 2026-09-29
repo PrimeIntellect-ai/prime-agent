@@ -475,6 +475,7 @@ pub async fn execute_compaction(
 
 /// Rebuild the live agent context after compaction. Keep session-only roles
 /// (especially the compaction boundary) until the provider conversion seam.
+#[must_use]
 pub fn rebuilt_context_after_compaction(session: &SessionManager) -> Vec<AgentMessage> {
     session.active_context().messages
 }

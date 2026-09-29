@@ -71,6 +71,7 @@ fn warn_fallback(selector: &str, purpose: &str) {
 /// context window smaller than the request falls back to the session
 /// model instead of failing over-limit on the wire, and an unknown
 /// window keeps the routing rather than guessing.
+#[must_use]
 pub fn resolve_auxiliary_model(
     context: &AuxiliaryModelContext,
     purpose: &str,

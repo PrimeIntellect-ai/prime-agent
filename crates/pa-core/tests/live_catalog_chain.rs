@@ -259,7 +259,7 @@ async fn startup_refresh_warms_the_process_shared_catalog() {
     install_mock_catalog(agent_dir.path(), bundled_dir.path(), &server);
 
     // Fire-and-forget: poll the served catalog until it settles.
-    startup_refresh(agent_dir.path());
+    let _ = startup_refresh(agent_dir.path());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         let mut registry = file_registry(agent_dir.path());

@@ -33,6 +33,7 @@ pub const CONTENT_ENTRY_TYPES: [&str; 10] = [
 ];
 
 /// ISO-8601 timestamp -> unix milliseconds (best effort, UTC assumed).
+#[must_use]
 pub fn timestamp_to_millis(timestamp: &str) -> u64 {
     // Accept common forms: with/without fractional seconds and Z/offset.
     timeparse(timestamp).unwrap_or(0)
@@ -102,6 +103,7 @@ fn civil_days(year: i64, month: i64, day: i64) -> Option<i64> {
 }
 
 /// Parse a session file body into entries; malformed lines are skipped.
+#[must_use]
 pub fn parse_session_entries(content: &str) -> Vec<FileEntry> {
     let mut entries = Vec::new();
     for line in content.trim().lines() {
@@ -267,6 +269,7 @@ pub fn migrate_session_entries(entries: &mut [FileEntry]) {
 }
 
 /// The latest compaction on a leaf's ancestor path, or the last one anywhere.
+#[must_use]
 pub fn get_latest_compaction_entry(entries: &[FileEntry]) -> Option<&CompactionEntry> {
     entries.iter().rev().find_map(|entry| match entry {
         FileEntry::Compaction { payload, .. } => Some(payload),

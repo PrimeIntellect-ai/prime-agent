@@ -89,6 +89,7 @@ impl SessionManager {
         self.persist_listeners.push(listener);
     }
 
+    #[must_use]
     pub fn is_persisted(&self) -> bool {
         self.persist
     }

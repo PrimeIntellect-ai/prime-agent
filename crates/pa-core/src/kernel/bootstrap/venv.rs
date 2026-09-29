@@ -230,6 +230,7 @@ fn resolve_sibling_python_skill_dependency(
 }
 
 /// Directory of the kernel venv, honoring `PRIME_AGENT_KERNEL_VENV`.
+#[must_use]
 pub fn kernel_venv_dir() -> PathBuf {
     if let Ok(override_dir) = std::env::var("PRIME_AGENT_KERNEL_VENV") {
         if !override_dir.is_empty() {
@@ -270,6 +271,7 @@ pub(crate) fn resolve_writable_kernel_venv_dir() -> anyhow::Result<PathBuf> {
 }
 
 /// Path of the venv's python interpreter.
+#[must_use]
 pub fn kernel_venv_python(venv: &Path) -> PathBuf {
     if cfg!(windows) {
         venv.join("Scripts").join("python.exe")
@@ -571,6 +573,7 @@ fn resolve_runtime_source_dir() -> Option<PathBuf> {
 ///
 /// Panics when hashing the resolved local runtime source fails (unreadable
 /// or missing runtime files).
+#[must_use]
 pub fn resolve_runtime_identity() -> String {
     let Some(source_dir) = resolve_runtime_source_dir() else {
         return RUNTIME_REQUIREMENT.to_string();

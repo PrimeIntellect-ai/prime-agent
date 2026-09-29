@@ -138,6 +138,7 @@ impl Default for McpOAuth {
 }
 
 impl McpOAuth {
+    #[must_use]
     pub fn new() -> Self {
         McpOAuth {
             http: Arc::new(super::ReqwestOAuthHttp::new()),

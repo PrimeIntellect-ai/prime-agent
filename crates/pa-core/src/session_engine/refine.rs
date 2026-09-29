@@ -59,6 +59,7 @@ impl AutoRefineGates {
     /// `getAutoRefineSettings`: `enabled`/`compact` default on, the turn
     /// interval clamps to at least 1 and defaults to 25, the cooldown
     /// clamps to at least 0 and defaults to 20 minutes).
+    #[must_use]
     pub fn from_settings(raw: Option<&crate::settings::AutoRefineSettings>) -> Self {
         let Some(raw) = raw else {
             return Self::default();
@@ -75,6 +76,7 @@ impl AutoRefineGates {
 
 /// The instructions an approved auto-refine review carries into the
 /// refinement run (TS `autoRefineInstructions`).
+#[must_use]
 pub fn auto_refine_instructions(reason: &str, review: &AutoRefineReview) -> String {
     let detail = review
         .instructions
@@ -119,6 +121,7 @@ pub(crate) fn now_millis() -> u64 {
 }
 
 /// TUI-rendered outcome message (`refinement_outcome`).
+#[must_use]
 pub fn create_refinement_outcome_message(result: &RefinementResult) -> CustomMessage {
     let mut details = json!({
         "refinementId": result.id,
@@ -140,6 +143,7 @@ pub fn create_refinement_outcome_message(result: &RefinementResult) -> CustomMes
 }
 
 /// Model-facing notice (`refinement_notice`, display=false).
+#[must_use]
 pub fn create_refinement_notice_message(
     result: &RefinementResult,
     source: RefinementSource,
@@ -194,6 +198,7 @@ pub(crate) fn context_rows_by_ids(entries: &[FileEntry], ids: &[String]) -> Vec<
 }
 
 /// Refinement history recorded in this session's JSONL entries.
+#[must_use]
 pub fn session_refinement_history(entries: &[FileEntry]) -> Vec<RefinementResult> {
     entries
         .iter()
@@ -212,6 +217,7 @@ pub fn session_refinement_history(entries: &[FileEntry]) -> Vec<RefinementResult
 }
 
 /// Merged cross-session + in-session refinement history.
+#[must_use]
 pub fn load_refinement_history(
     session: &SessionManager,
     global_harness_dir: &Path,
@@ -227,6 +233,7 @@ pub fn load_refinement_history(
 ///
 /// The `expect` cannot fire: mapping the session dir onto the local harness
 /// dir is total for `Some` session dirs.
+#[must_use]
 pub fn local_harness_state_dir(session: &SessionManager) -> PathBuf {
     let session_dir = session.get_session_dir().to_path_buf();
     crate::refinement::get_local_harness_state_dir(Some(&session_dir))
@@ -595,6 +602,7 @@ impl AgentSession {
 }
 
 /// The default model seam over pa-ai completion.
+#[must_use]
 pub fn default_refiner_call(api_key: Option<String>) -> crate::refinement::executor::RefinerFn {
     Box::new(move |model, system_prompt, prompt| {
         let api_key = api_key;

@@ -101,6 +101,7 @@ pub struct SessionKernelWiring {
 /// and `rlm.*` host handlers the kernel reaches through its registry.
 /// `goal_complete_purge` is the embedding's queued-goal-context purge (TS
 /// `_completeGoalFromHost` -> `_clearQueuedGoalContexts`).
+#[must_use]
 pub fn wire_session_runtime(
     session: SessionManager,
     agent_dir: &std::path::Path,
@@ -195,6 +196,7 @@ pub fn wire_session_runtime(
 }
 
 /// Kernel-side Python skill modules, pre-imported at bootstrap.
+#[must_use]
 pub fn kernel_python_skills(skills: &[Skill]) -> Vec<KernelPythonSkill> {
     get_python_skill_runtime_info(skills)
         .into_iter()
@@ -222,6 +224,7 @@ pub fn kernel_python_skills(skills: &[Skill]) -> Vec<KernelPythonSkill> {
 /// session cwd differs from the process cwd (a daemon worker switched onto
 /// another session file) must spawn the kernel in the session's cwd.
 #[allow(clippy::too_many_arguments)] // one wiring funnel, same style as AgentSession::from_session_arc
+#[must_use]
 pub fn kernel_provisioner(
     session_id: String,
     handlers: HostRequestHandlers,
@@ -363,6 +366,7 @@ fn convert_execute_result(
 }
 
 /// Build the ipython tool options for a wired kernel provisioner.
+#[must_use]
 pub fn ipython_tool_options(provisioner: Arc<KernelProvisioner>) -> IpythonToolOptions {
     IpythonToolOptions {
         provisioner,

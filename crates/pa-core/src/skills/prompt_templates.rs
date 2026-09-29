@@ -22,6 +22,7 @@ pub struct PromptTemplate {
 }
 
 /// Parse command arguments respecting quoted strings (bash-style).
+#[must_use]
 pub fn parse_command_args(args_string: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut current = String::new();
@@ -241,6 +242,7 @@ fn resolve_prompt_path(path: &str, cwd: &Path) -> PathBuf {
 
 /// Load templates from agentDir/prompts/, `cwd/{CONFIG_DIR_NAME}/prompts/`, and
 /// explicit paths (later entries win nothing: templates append in order).
+#[must_use]
 pub fn load_prompt_templates(options: &LoadPromptTemplatesOptions) -> Vec<PromptTemplate> {
     let mut templates = Vec::new();
     let global_prompts_dir = options.agent_dir.join("prompts");
@@ -312,6 +314,7 @@ pub fn load_prompt_templates(options: &LoadPromptTemplatesOptions) -> Vec<Prompt
 }
 
 /// Expand `/name args...` into the matching template, else return the text.
+#[must_use]
 pub fn expand_prompt_template(text: &str, templates: &[PromptTemplate]) -> String {
     let Some(parsed) = parse_slash_command(text) else {
         return text.to_string();

@@ -40,6 +40,7 @@ impl Default for CompactionSettings {
 
 /// Context tokens from usage: `totalTokens` when present, else the sum.
 /// Output counts: the response becomes part of the next prompt.
+#[must_use]
 pub fn calculate_context_tokens(usage: &pa_types::ai::Usage) -> u64 {
     if usage.total_tokens > 0 {
         usage.total_tokens
@@ -59,6 +60,7 @@ fn assistant_usage(message: &AgentMessage) -> Option<pa_types::ai::Usage> {
 }
 
 /// Last non-aborted assistant usage from session entries.
+#[must_use]
 pub fn get_last_assistant_usage(entries: &[FileEntry]) -> Option<pa_types::ai::Usage> {
     for entry in entries.iter().rev() {
         if let FileEntry::Message { message, .. } = entry {
@@ -71,6 +73,7 @@ pub fn get_last_assistant_usage(entries: &[FileEntry]) -> Option<pa_types::ai::U
 }
 
 /// Chars/4 heuristic token estimate (conservative; overestimates).
+#[must_use]
 pub fn estimate_tokens(message: &AgentMessage) -> u64 {
     let chars = |text: &str| text.chars().count() as u64;
     match message {
@@ -158,6 +161,7 @@ fn div4(chars: u64) -> u64 {
 /// says "not due". A non-positive threshold disables the trigger (the TS
 /// degenerate-config semantics: compaction cannot fix it; overflow
 /// recovery remains the backstop).
+#[must_use]
 pub fn compaction_threshold(
     context_window: u64,
     max_output_tokens: u64,
@@ -172,6 +176,7 @@ pub fn compaction_threshold(
 }
 
 /// Whether compaction should trigger.
+#[must_use]
 pub fn should_compact(
     context_tokens: u64,
     context_window: u64,
@@ -196,6 +201,7 @@ pub fn should_compact(
 /// max output. The combined input+output ceiling reserves what the request
 /// will actually claim, or a budget-folded request can overflow while the
 /// trigger still says "not due".
+#[must_use]
 pub fn request_output_budget(
     model: &pa_types::ai::Model,
     thinking: pa_types::ai::ModelThinkingLevel,
@@ -265,6 +271,7 @@ fn message_timestamp(message: &AgentMessage) -> u64 {
 /// the latest compaction boundary — usage from
 /// before it reflects the pre-compaction context and never re-triggers
 /// (the TS `assistantIsFromBeforeCompaction` / stale-usage guards).
+#[must_use]
 pub fn threshold_compaction_due(
     messages: &[AgentMessage],
     context_window: u64,
@@ -311,6 +318,7 @@ pub fn threshold_compaction_due(
 
 /// Valid cut point indices: user/assistant/custom/branch/compaction-summary
 /// messages plus `branch_summary` and `custom_message` entries. Never tool results.
+#[must_use]
 pub fn find_valid_cut_points(
     entries: &[FileEntry],
     start_index: usize,
@@ -379,6 +387,7 @@ pub struct CutPointResult {
 ///
 /// The `unwrap` on the last cut point cannot fire: the cut-point list was
 /// checked non-empty above.
+#[must_use]
 pub fn find_cut_point(
     entries: &[FileEntry],
     start_index: usize,
@@ -458,6 +467,7 @@ const UPDATE_SUMMARIZATION_PROMPT: &str = "The messages above are NEW conversati
 
 /// The instruction part of the summarization prompt (initial or update
 /// template, user instructions, kernel persistence note).
+#[must_use]
 pub fn build_summarization_prompt(
     custom_instructions: Option<&str>,
     previous_summary: Option<&str>,

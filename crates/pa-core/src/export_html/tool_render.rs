@@ -93,6 +93,7 @@ fn is_blank_rendered_line(line: &str) -> bool {
 
 /// Trim leading/trailing blank lines from a rendered result (the TS
 /// `trimRenderedResultLines`).
+#[must_use]
 pub fn trim_rendered_result_lines(lines: &[String]) -> &[String] {
     let mut start = 0;
     let mut end = lines.len();

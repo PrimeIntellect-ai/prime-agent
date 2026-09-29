@@ -80,6 +80,7 @@ pub fn extract_file_ops_from_message(message: &AgentMessage, file_ops: &mut File
 /// (TS #2385): read-only entries are the least valuable and drop first,
 /// from the alphabetical end; modified entries drop only after the
 /// read-only list is empty.
+#[must_use]
 pub fn compute_file_lists(file_ops: &FileOperations) -> (Vec<String>, Vec<String>) {
     let mut modified: BTreeSet<String> = file_ops.edited.clone();
     modified.extend(file_ops.written.iter().cloned());
@@ -108,6 +109,7 @@ pub fn compute_file_lists(file_ops: &FileOperations) -> (Vec<String>, Vec<String
 }
 
 /// Format file lists as XML tags (empty when no files).
+#[must_use]
 pub fn format_file_operations(read_files: &[String], modified_files: &[String]) -> String {
     let mut sections = Vec::new();
     if !read_files.is_empty() {
@@ -141,6 +143,7 @@ pub fn format_file_operations(read_files: &[String], modified_files: &[String]) 
 /// and an open tag without its close never matched the TS regex, so it
 /// stays — and the scan resumes after it so later complete blocks still
 /// strip, exactly like the regex's global scan.
+#[must_use]
 pub fn strip_file_list_blocks(summary: &str) -> String {
     let mut result = String::with_capacity(summary.len());
     let mut rest = summary;
@@ -213,6 +216,7 @@ fn user_text(content: &pa_types::ai::UserContent) -> String {
 /// Tool calls are serialized with a sequential `#N` prefix and results
 /// repeat the matching index, so repeated calls of the same tool pair
 /// unambiguously (TS #2424).
+#[must_use]
 pub fn serialize_conversation(messages: &[AgentMessage]) -> String {
     let mut parts: Vec<String> = Vec::new();
     // Tool calls are serialized with a 1-based sequential index and

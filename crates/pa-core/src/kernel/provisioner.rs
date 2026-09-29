@@ -226,16 +226,19 @@ impl IpythonKernelProvisioner {
     }
 
     /// The kernel manager, once a startup has completed successfully.
+    #[must_use]
     pub fn manager(&self) -> Option<ReplKernelManager> {
         self.lock_state().manager.clone()
     }
 
     /// Result of reviving a prior session's namespace on the last kernel start.
+    #[must_use]
     pub fn last_restore(&self) -> Option<RestoreResult> {
         self.lock_state().last_restore.clone()
     }
 
     /// Whether a kernel has finished starting and is currently running.
+    #[must_use]
     pub fn has_running_kernel(&self) -> bool {
         self.manager().is_some_and(|m| m.is_running())
     }
@@ -891,6 +894,7 @@ async fn start_kernel_impl(
 }
 
 /// Same as [`IpythonKernelProvisioner::new`] for a `Path`-shaped cwd.
+#[must_use]
 pub fn provisioner_for_path(
     cwd: &Path,
     options: IpythonKernelProvisionerOptions,

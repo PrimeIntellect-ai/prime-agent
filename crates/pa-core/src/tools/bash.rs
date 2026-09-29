@@ -500,10 +500,12 @@ pub fn bash_tool_description() -> String {
 }
 
 /// The `bash` tool definition: exact name, schema, and description.
+#[must_use]
 pub fn create_bash_tool_definition(cwd: &str) -> ToolDefinition {
     create_bash_tool_definition_with_options(cwd, BashToolOptions::default())
 }
 
+#[must_use]
 pub fn create_bash_tool_definition_with_options(
     cwd: &str,
     options: BashToolOptions,

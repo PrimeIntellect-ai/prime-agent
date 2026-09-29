@@ -16,6 +16,7 @@ pub enum CompactSkip {
 
 impl CompactSkip {
     /// The `/compact` skip message (TS `CompactionSkippedError`).
+    #[must_use]
     pub fn user_message(self) -> &'static str {
         match self {
             CompactSkip::AlreadyCompacted => "Already compacted",
@@ -24,6 +25,7 @@ impl CompactSkip {
     }
 
     /// The `compact.run` host-request reason (TS `handleCompactHostRequest`).
+    #[must_use]
     pub fn request_reason(self) -> &'static str {
         match self {
             CompactSkip::AlreadyCompacted => "already compacted",
@@ -146,6 +148,7 @@ pub fn prepare_compaction(
 }
 
 /// The cut computed for a session (test seam for decision verification).
+#[must_use]
 pub fn compute_cut(session: &SessionManager, keep_recent_tokens: u64) -> (CutPointResult, u64) {
     let entries = session.retained_entries();
     let start = usize::from(matches!(entries.first(), Some(FileEntry::Header { .. })));

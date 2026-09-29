@@ -25,6 +25,7 @@ pub struct RlmModelInfo {
 }
 
 impl RlmModelInfo {
+    #[must_use]
     pub fn selector(&self) -> String {
         format!("{}/{}", self.provider, self.id)
     }
@@ -230,6 +231,7 @@ fn normalize_model_search_text(value: &str) -> String {
 ///
 /// Candidates are sorted by score with a `partial_cmp().unwrap()`; every
 /// score is finite by construction, so the unwrap cannot fail.
+#[must_use]
 pub fn find_rlm_model_matches(
     query: &str,
     models: &[RlmModelInfo],
@@ -315,6 +317,7 @@ fn find_rlm_short_form_model_matches<'a>(
 /// The single model a short-form reference resolves to: its unique match, or
 /// the fallback when nothing matches. `None` when several match or nothing
 /// resolves, so an ambiguous reference is never auto-resolved.
+#[must_use]
 pub fn find_unique_rlm_short_form_model_match<'a>(
     reference: &str,
     models: &'a [RlmModelInfo],
@@ -338,6 +341,7 @@ pub fn find_unique_rlm_short_form_model_match<'a>(
 
 /// Rejection message for an unresolved model reference, with the expected
 /// selector form and close matches.
+#[must_use]
 pub fn format_rlm_model_unavailable_error(
     reference: &str,
     target: &str,

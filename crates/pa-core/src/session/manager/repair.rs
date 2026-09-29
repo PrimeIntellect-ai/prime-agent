@@ -132,6 +132,7 @@ pub(super) fn repair_jsonl_damage(file_path: &Path) {
 }
 
 /// Load entries from a session file (repairing damage first when persisting).
+#[must_use]
 pub fn load_entries_from_file(file_path: &Path, repair: bool) -> Vec<FileEntry> {
     if !file_path.exists() {
         return Vec::new();

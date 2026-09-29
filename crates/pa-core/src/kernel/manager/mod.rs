@@ -369,6 +369,7 @@ use requests::{append_truncated, describe_failure, Signal};
 // ---------------------------------------------------------------------------
 
 impl ReplKernelManager {
+    #[must_use]
     pub fn new(options: KernelManagerOptions) -> Self {
         let inner = Arc::new(Inner {
             options,
@@ -417,30 +418,36 @@ impl ReplKernelManager {
         Self { inner }
     }
 
+    #[must_use]
     pub fn owner_session_id(&self) -> Option<&str> {
         self.inner.options.session_id.as_deref()
     }
 
+    #[must_use]
     pub fn has_background_work(&self) -> bool {
         !lock(&self.inner.guarded).background_bash_handles.is_empty()
     }
 
     /// Process id of the spawned kernel child, when present. Used by tests and
     /// orphan bookkeeping; not part of the TS surface.
+    #[must_use]
     pub fn process_id(&self) -> Option<i32> {
         lock(&self.inner.child).as_ref().map(|c| c.pid)
     }
 
+    #[must_use]
     pub fn is_running(&self) -> bool {
         lock(&self.inner.guarded).state == KernelState::Running
     }
 
     /// Terminal: the kernel died or was torn down; only a fresh manager can serve again.
+    #[must_use]
     pub fn is_defunct(&self) -> bool {
         lock(&self.inner.guarded).state == KernelState::Shutdown
     }
 
     /// Diagnostics tail (kernel stderr, at most the last 8 KiB).
+    #[must_use]
     pub fn kernel_stderr(&self) -> String {
         lock(&self.inner.guarded).kernel_stderr.clone()
     }

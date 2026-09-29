@@ -54,6 +54,7 @@ pub struct RefinementProposal {
 
 /// Whether a JSON candidate ends mid-value (unterminated string, unclosed
 /// object/array): a truncated reply, as opposed to a malformed-but-balanced one.
+#[must_use]
 pub fn is_incomplete_json(candidate: &str) -> bool {
     let mut depth = 0i64;
     let mut in_string = false;
@@ -132,6 +133,7 @@ pub fn extract_json_object(text: &str) -> Result<serde_json::Value, String> {
 
 /// Normalize an untrusted proposal, preserving invalid edit fields for
 /// apply-time validation.
+#[must_use]
 pub fn normalize_refinement_proposal(value: serde_json::Value) -> RefinementProposal {
     let record = value.as_object().cloned().unwrap_or_default();
     let string_field = |key: &str, fallback: &str| -> String {
@@ -457,6 +459,7 @@ pub fn apply_refinement_proposal(
 }
 
 /// The proposal that reverts a previously applied result.
+#[must_use]
 pub fn rollback_proposal(target: &super::RefinementResult) -> RefinementProposal {
     let mut edits: Vec<RefinementEdit> = Vec::new();
     for edit in target.applied_edits.iter().rev() {

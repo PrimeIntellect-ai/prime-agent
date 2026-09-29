@@ -84,6 +84,7 @@ fn truthy_env_flag(value: Option<&str>) -> bool {
 /// Request timing is on when either the settings flag or the env override
 /// is set (TS `isRequestTimingEnabled`). Both checks are cheap on the
 /// disabled path.
+#[must_use]
 pub fn is_request_timing_enabled(settings_flag: bool) -> bool {
     settings_flag || truthy_env_flag(std::env::var(REQUEST_TIMING_ENV).ok().as_deref())
 }
@@ -104,6 +105,7 @@ pub struct RequestTimingLog {
 
 impl RequestTimingLog {
     /// The log at `<agentDir>/logs/agent.jsonl` with the TS rotation cap.
+    #[must_use]
     pub fn new(agent_dir: &Path) -> Self {
         Self {
             path: agent_dir.join("logs").join("agent.jsonl"),
@@ -297,6 +299,7 @@ impl RequestTimingWiring {
 /// The pass-through context transform (the stand-in for TS's extension
 /// `emitContext` transform, which the Rust engine has not ported yet): it
 /// exists so the instrumented seam can mark the turn's dispatch moment.
+#[must_use]
 pub fn pass_through_transform() -> TransformContextFn {
     Arc::new(|messages, _signal| Box::pin(async move { Ok(messages) }))
 }

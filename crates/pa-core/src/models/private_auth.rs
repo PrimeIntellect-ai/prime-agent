@@ -25,6 +25,7 @@ pub const PRIVATE_MODEL_TIMEOUT_MS: u64 = 10_000;
 pub const PRIVATE_BACKGROUND_TIMEOUT_MS: u64 = 3_000;
 
 /// The bundled private model table (cloned, like the TS accessor).
+#[must_use]
 pub fn get_private_prime_inference_models() -> Vec<Model> {
     super::prime_inference::private_prime_inference_models()
 }
@@ -35,6 +36,7 @@ pub fn get_private_prime_inference_models() -> Vec<Model> {
 ///
 /// The `expect` on HMAC key construction cannot fail: HMAC accepts any key
 /// length, so this never panics.
+#[must_use]
 pub fn private_prime_authorization_fingerprint(api_key: &str, team_id: &str) -> String {
     let mut mac = Hmac::<Sha256>::new_from_slice(api_key.as_bytes()).expect("hmac key");
     mac.update(b"prime-agent:private-prime-authorization:v1\0");

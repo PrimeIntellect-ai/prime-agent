@@ -80,6 +80,7 @@ impl SettingsManager {
     }
 
     /// In-memory manager (tests, embedded hosts).
+    #[must_use]
     pub fn in_memory(initial: Settings) -> Self {
         let storage: Arc<dyn SettingsStorage> =
             Arc::new(super::storage::InMemorySettingsStorage::default());
@@ -94,10 +95,12 @@ impl SettingsManager {
     }
 
     /// Effective (global + project) settings.
+    #[must_use]
     pub fn settings(&self) -> &Settings {
         &self.merged
     }
 
+    #[must_use]
     pub fn global_settings(&self) -> &Settings {
         &self.global
     }
@@ -105,14 +108,17 @@ impl SettingsManager {
     /// The raw global document (post-migration, pre-lenient-load value);
     /// `None` when the scope has no document or it failed to parse (the
     /// load error covers the latter).
+    #[must_use]
     pub fn global_raw(&self) -> Option<&serde_json::Value> {
         self.global_raw.as_ref()
     }
 
+    #[must_use]
     pub fn project_settings(&self) -> &Settings {
         &self.project
     }
 
+    #[must_use]
     pub fn errors(&self) -> &[SettingsError] {
         &self.errors
     }
@@ -208,6 +214,7 @@ impl SettingsManager {
     /// `markdown.codeBlockIndent` (TS `getCodeBlockIndent`): the string the
     /// chat markdown renderer indents fenced code blocks by; the default
     /// matches the TS default, two spaces.
+    #[must_use]
     pub fn get_code_block_indent(&self) -> String {
         self.settings()
             .markdown
@@ -219,6 +226,7 @@ impl SettingsManager {
     /// `terminal.fullscreenMouse` (TS `getFullscreenMouse`): whether the
     /// fullscreen transcript surface enables mouse tracking and wheel
     /// scrolling; the default matches the TS default, true.
+    #[must_use]
     pub fn get_fullscreen_mouse(&self) -> bool {
         self.settings()
             .terminal
@@ -230,6 +238,7 @@ impl SettingsManager {
     /// `terminal.showImages` (TS `getShowImages`): whether image blocks in
     /// tool results render their type/dimension metadata rows; the
     /// default matches the TS default, true.
+    #[must_use]
     pub fn get_show_images(&self) -> bool {
         self.settings()
             .terminal
@@ -241,6 +250,7 @@ impl SettingsManager {
     /// `treeFilterMode` (TS `getTreeFilterMode`): the `/tree` selector's
     /// initial filter; an unset or invalid value falls back to
     /// `user-only`, like the TS default.
+    #[must_use]
     pub fn get_tree_filter_mode(&self) -> String {
         let mode = self.settings().tree_filter_mode.clone().unwrap_or_default();
         let valid = ["default", "no-tools", "user-only", "labeled-only", "all"];
@@ -256,6 +266,7 @@ impl SettingsManager {
     /// `overview` (the collapse mode: every activity item renders as
     /// `details` does with only the thinking hidden - operator
     /// directive 2026-09-28).
+    #[must_use]
     pub fn get_chat_detail(&self) -> String {
         match self.settings().chat_detail.as_deref() {
             Some("details") => "details",
@@ -266,6 +277,7 @@ impl SettingsManager {
     }
 
     /// `branchSummary.skipPrompt` (TS `getBranchSummarySkipPrompt`).
+    #[must_use]
     pub fn get_branch_summary_skip_prompt(&self) -> bool {
         self.settings()
             .branch_summary
@@ -431,6 +443,7 @@ impl SettingsManager {
 
     /// TS `getOnboardingShown`: the shown flag with the legacy completed
     /// flag as fallback; first run is defined by the settings alone.
+    #[must_use]
     pub fn get_onboarding_shown(&self) -> bool {
         self.merged
             .onboarding_shown
@@ -440,6 +453,7 @@ impl SettingsManager {
 
     /// TS `getCompactionEnabled`: the auto-compaction toggle, on until the
     /// user opts out (the merged view, like every TS settings getter).
+    #[must_use]
     pub fn get_compaction_enabled(&self) -> bool {
         self.merged
             .compaction
@@ -452,6 +466,7 @@ impl SettingsManager {
     /// opt-in, exactly the TS default. The first-run onboarding question
     /// is the opt-in moment; `/traces` stays the change path, and the
     /// value persists only when a choice is made.
+    #[must_use]
     pub fn get_agent_traces_enabled(&self) -> bool {
         self.merged
             .agent_traces
@@ -466,6 +481,7 @@ impl SettingsManager {
     /// flow never asks such a home the trace question — the standing
     /// choice stands and the flow completes silently. Only a fresh home
     /// (no choice written) is asked, once.
+    #[must_use]
     pub fn agent_traces_choice_written(&self) -> bool {
         self.merged
             .agent_traces
@@ -595,15 +611,18 @@ impl SettingsManager {
 
     // -- getters with TS semantics ------------------------------------------
 
+    #[must_use]
     pub fn get_default_provider(&self) -> Option<&str> {
         self.merged.default_provider.as_deref()
     }
 
+    #[must_use]
     pub fn get_default_model(&self) -> Option<&str> {
         self.merged.default_model.as_deref()
     }
 
     /// Model for `rlm.spawn` without a pinned model; unset inherits parent.
+    #[must_use]
     pub fn get_subagent_default_model(&self) -> Option<String> {
         self.merged
             .subagent_default_model
@@ -612,6 +631,7 @@ impl SettingsManager {
             .filter(|m| !m.is_empty())
     }
 
+    #[must_use]
     pub fn get_auxiliary_model(&self) -> Option<&str> {
         self.merged.auxiliary_model.as_deref()
     }
@@ -620,6 +640,7 @@ impl SettingsManager {
     /// that serves turns attaching images on session models without image
     /// input. Same shape as `providerBackupModel`: malformed values behave
     /// as unset and the image-turn refusal names the setting instead.
+    #[must_use]
     pub fn get_image_model(&self) -> Option<String> {
         self.merged
             .image_model
@@ -636,6 +657,7 @@ impl SettingsManager {
     /// unrestricted. A daemon policy like `idleEvictionMinutes`: read from
     /// the global scope only, so a project cannot weaken a box-level pin.
     /// A list that trims to empty behaves as unset.
+    #[must_use]
     pub fn get_allowed_models(&self) -> Option<Vec<String>> {
         let patterns = self.global.allowed_models.as_ref()?;
         let patterns: Vec<String> = patterns
@@ -669,6 +691,7 @@ impl SettingsManager {
     /// Service tier a fresh session records as its preference (TS
     /// `getDefaultServiceTier`: the setting when present, else `default`).
     /// An unrecognized setting value falls back to the same `default`.
+    #[must_use]
     pub fn get_default_service_tier(&self) -> pa_types::ai::ServiceTier {
         use pa_types::ai::ServiceTier;
         self.merged
@@ -685,6 +708,7 @@ impl SettingsManager {
             .unwrap_or(ServiceTier::Default)
     }
 
+    #[must_use]
     pub fn get_recent_models(&self) -> Vec<String> {
         self.merged.recent_models.clone().unwrap_or_default()
     }
@@ -694,25 +718,30 @@ impl SettingsManager {
     /// at the next turn boundary; `one-at-a-time` delivers one per turn.
     /// The product default is `all`; both modes stay selectable through
     /// the setting surface.
+    #[must_use]
     pub fn get_steering_mode(&self) -> QueueModeSetting {
         self.merged.steering_mode.unwrap_or(QueueModeSetting::All)
     }
 
+    #[must_use]
     pub fn get_follow_up_mode(&self) -> QueueModeSetting {
         self.merged
             .follow_up_mode
             .unwrap_or(QueueModeSetting::OneAtATime)
     }
 
+    #[must_use]
     pub fn get_theme(&self) -> Option<&str> {
         self.merged.theme.as_deref()
     }
 
     /// Global-only read of the two known values; anything else is unset.
+    #[must_use]
     pub fn get_update_channel(&self) -> Option<UpdateChannel> {
         self.global.update_channel
     }
 
+    #[must_use]
     pub fn get_default_thinking_level(&self) -> Option<ThinkingLevelSetting> {
         self.merged.default_thinking_level
     }
@@ -721,6 +750,7 @@ impl SettingsManager {
     /// `getRetrySettings` and `getProviderRetrySettings` reads: the
     /// `retry.enabled`, `retry.maxRetries`, and `retry.baseDelayMs` knobs
     /// plus the `retry.provider.maxRetryDelayMs` cap.
+    #[must_use]
     pub fn get_provider_retry_policy(
         &self,
     ) -> crate::session_engine::provider_retry::ProviderRetryPolicy {
@@ -765,6 +795,7 @@ impl SettingsManager {
     }
 
     /// The provider-failover policy from settings (`retry.failover`).
+    #[must_use]
     pub fn get_provider_failover_policy(
         &self,
     ) -> crate::session_engine::provider_failover::ProviderFailoverPolicy {
@@ -797,6 +828,7 @@ impl SettingsManager {
     /// the bounded wait park the session, the per-park ceiling (clamped
     /// to one week), and the per-episode park budget. Only the park keys
     /// have a consumer until a wait-for-usage port lands.
+    #[must_use]
     pub fn get_provider_park_policy(
         &self,
     ) -> crate::session_engine::provider_park::ProviderParkPolicy {
@@ -822,12 +854,14 @@ impl SettingsManager {
         }
     }
 
+    #[must_use]
     pub fn get_rlm_max_depth(&self) -> Option<u64> {
         self.global.rlm_max_depth
     }
 
     /// `number | "off" | "none"` -> finite minutes or Off; malformed falls
     /// back to the default (90).
+    #[must_use]
     pub fn get_idle_eviction(&self) -> IdleEviction {
         match &self.global.idle_eviction_minutes {
             Some(serde_json::Value::String(text)) if text == "off" || text == "none" => {
@@ -849,6 +883,7 @@ impl SettingsManager {
     /// sweep moves out of the sessions directory. Both rules are independent —
     /// a session is archived when EITHER fires. `None` on a field disables
     /// that rule.
+    #[must_use]
     pub fn get_session_archive_policy(&self) -> SessionArchivePolicy {
         let max_age_days = match &self.global.session_archive_max_age_days {
             Some(serde_json::Value::String(text)) if text == "off" || text == "none" => None,
@@ -874,11 +909,13 @@ impl SettingsManager {
         }
     }
 
+    #[must_use]
     pub fn get_transport(&self) -> TransportSetting {
         self.merged.transport.unwrap_or(TransportSetting::Auto)
     }
 
     /// Telemetry is enabled only when every scope says so (default true).
+    #[must_use]
     pub fn get_telemetry_enabled(&self) -> bool {
         [
             self.global.telemetry.as_ref(),
@@ -889,6 +926,7 @@ impl SettingsManager {
         .all(|scope| scope.and_then(|t| t.enabled).unwrap_or(true))
     }
 
+    #[must_use]
     pub fn get_telemetry_notice_shown(&self) -> bool {
         self.runtime_overrides
             .telemetry
@@ -900,10 +938,12 @@ impl SettingsManager {
 
     /// `requestTiming`: unset means OFF — the per-request timing timeline
     /// is opt-in, exactly the TS default (`getRequestTiming`).
+    #[must_use]
     pub fn get_request_timing(&self) -> bool {
         self.merged.request_timing.unwrap_or(false)
     }
 
+    #[must_use]
     pub fn get_session_dir(&self) -> Option<std::path::PathBuf> {
         let session_dir = self.merged.session_dir.as_ref()?;
         let home = pa_types::platform::home_dir()?;

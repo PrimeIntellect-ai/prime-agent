@@ -31,6 +31,7 @@ pub const KNOWN_PLATFORMS: &[&str] = &[
 /// The TS release-platform alias of the running build (`assemble_artifacts.py`
 /// `TARGET_ALIASES`). Baseline/musl variants cannot be distinguished at
 /// runtime; the plain alias matches what the coordinator downloads.
+#[must_use]
 pub fn current_platform_alias() -> &'static str {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
@@ -77,12 +78,15 @@ pub struct Installation {
 }
 
 impl Installation {
+    #[must_use]
     pub fn root(&self) -> &Path {
         &self.target.root
     }
+    #[must_use]
     pub fn executable(&self) -> &Path {
         &self.target.executable
     }
+    #[must_use]
     pub fn version(&self) -> &str {
         &self.target.version
     }
@@ -108,6 +112,7 @@ pub const PREVIOUS_LAUNCHER: &str = "previous";
 /// Read the install root of `executable`'s managed layout: the executable
 /// resolves through `<root>/bin/<link>`; the root is `<root>/.managed`'s
 /// directory (TS `getNativeInstallationTarget`).
+#[must_use]
 pub fn install_root_of(executable: &Path) -> Option<PathBuf> {
     let resolved = executable.canonicalize().ok()?;
     // The resolved executable is <root>/releases/<name>/prime-agent: walk up
@@ -154,6 +159,7 @@ fn read_target(root: &Path, link: &str) -> Result<InstallTarget> {
 
 /// The version of a release directory name (the launcher-link parse over the
 /// same shape; `None` for anything that is not a managed release name).
+#[must_use]
 pub fn release_version_of(directory_name: &str) -> Option<String> {
     parse_release_link(Path::new(&format!(
         "../releases/{directory_name}/prime-agent"
@@ -218,6 +224,7 @@ pub fn running_release(executable: &Path) -> Result<RunningRelease> {
 
 /// Whether an install source is one the release layout accepts
 /// (`http://`/`https://`, the `validate_release_dir` read-side contract).
+#[must_use]
 pub fn install_source_is_valid(source: &str) -> bool {
     let protocol = source.trim().split("://").next().unwrap_or_default();
     protocol == "https" || protocol == "http"

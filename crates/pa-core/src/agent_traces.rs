@@ -81,6 +81,7 @@ pub struct TraceCredential {
 /// `prime-agent-traces` key, the Prime env key, then the stored
 /// prime-inference credential. The store read is fresh — the engine holds
 /// no long-lived snapshot, which is TS's post-`authStorage.reload()` view.
+#[must_use]
 pub fn trace_credential(agent_dir: &Path) -> Option<TraceCredential> {
     if let Ok(value) = std::env::var("PRIME_AGENT_TRACES_API_KEY") {
         if !value.trim().is_empty() {
@@ -128,6 +129,7 @@ fn stored_key(auth: &mut crate::auth::AuthStorage, provider_id: &str) -> Option<
 /// TS `resolvePrimeAgentTracesBaseUrl` (imported from the auth module there
 /// too): the override (or the env key) normalized, else the platform
 /// default.
+#[must_use]
 pub fn resolve_traces_base_url(base_url: Option<&str>) -> String {
     crate::auth::resolve_prime_agent_traces_base_url(base_url)
 }
@@ -239,6 +241,7 @@ pub struct TraceUploadCancel {
 }
 
 impl TraceUploadCancel {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -249,6 +252,7 @@ impl TraceUploadCancel {
         self.notify.notify_waiters();
     }
 
+    #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.flag.load(Ordering::Acquire)
     }
@@ -624,6 +628,7 @@ pub enum TraceHttpError {
 
 impl TraceHttpError {
     /// TS `describeError`'s message for each class.
+    #[must_use]
     pub fn message(&self) -> String {
         match self {
             TraceHttpError::TimedOut { timeout_ms } => {
@@ -710,6 +715,7 @@ impl TraceHttp for ReqwestTraceHttp {
 
 /// TS `encodeURIComponent` (every byte outside the JS unreserved set
 /// escapes).
+#[must_use]
 pub fn encode_uri_component(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for &byte in value.as_bytes() {
@@ -771,6 +777,7 @@ pub fn read_response_message(status: u16, body: &str) -> String {
 
 /// TS `retryAfterDelay`: the `Retry-After` seconds, or an HTTP date,
 /// clamped to `cap_ms`.
+#[must_use]
 pub fn retry_after_delay(retry_after: Option<&str>, cap_ms: u64) -> Option<u64> {
     let value = retry_after?.trim();
     if value.is_empty() {
@@ -1128,6 +1135,7 @@ pub struct TraceRequestGate {
 }
 
 impl TraceRequestGate {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -1198,6 +1206,7 @@ fn find_session_files_under(root: &Path, files: &mut HashSet<PathBuf>) {
 }
 
 /// TS `getSessionArtifactsRoot`: the sibling `session-artifacts` directory.
+#[must_use]
 pub fn session_artifacts_root(session_dir: &Path) -> PathBuf {
     session_dir
         .parent()
@@ -1206,6 +1215,7 @@ pub fn session_artifacts_root(session_dir: &Path) -> PathBuf {
 }
 
 /// TS `findAgentTraceFiles`: both roots walked, deduplicated, sorted.
+#[must_use]
 pub fn find_trace_files(session_dir: &Path) -> Vec<PathBuf> {
     let mut files: HashSet<PathBuf> = HashSet::new();
     let roots = [
@@ -1425,6 +1435,7 @@ pub async fn preview_trace_file(
 // ---------------------------------------------------------------------------
 
 /// TS `getAgentTracesLogPath`.
+#[must_use]
 pub fn agent_traces_log_path(agent_dir: &Path) -> PathBuf {
     agent_dir.join("logs").join("agent-traces.log")
 }

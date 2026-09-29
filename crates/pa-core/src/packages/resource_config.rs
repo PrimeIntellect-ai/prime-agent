@@ -45,6 +45,7 @@ pub struct ResourceGroup {
 }
 
 /// The subgroup label for one resource kind (TS `RESOURCE_TYPE_LABELS`).
+#[must_use]
 pub fn resource_type_label(resource_type: ResourceType) -> &'static str {
     match resource_type {
         ResourceType::Extensions => "Extensions",
@@ -114,6 +115,7 @@ fn display_name(path: &Path, resource_type: ResourceType) -> String {
 /// The grouped view of a full resolution (TS `buildGroups`): items grouped by
 /// origin/scope/source, subgroups per resource kind in
 /// extensions/skills/prompts/themes order, items sorted by display name.
+#[must_use]
 pub fn build_groups(resolved: &ResolvedPaths) -> Vec<ResourceGroup> {
     let mut groups: Vec<ResourceGroup> = Vec::new();
     let mut add = |resource: &ResolvedResource, resource_type: ResourceType| {

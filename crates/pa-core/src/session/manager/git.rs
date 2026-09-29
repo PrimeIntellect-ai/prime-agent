@@ -28,6 +28,7 @@ fn run_git_probe(cwd: &Path, args: &[&str]) -> Option<String> {
 /// `--show-current`, so a detached HEAD yields no branch. The remote URL is
 /// normalized through the git-source parser when it parses, else kept
 /// verbatim.
+#[must_use]
 pub fn capture_git_context(cwd: &Path) -> Option<GitContext> {
     let commit = run_git_probe(cwd, &["rev-parse", "HEAD"]);
     let branch = run_git_probe(cwd, &["branch", "--show-current"]);

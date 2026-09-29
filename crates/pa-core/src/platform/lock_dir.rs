@@ -168,6 +168,7 @@ pub struct LockDir {
 
 impl LockDir {
     /// Lock path for the guarded file.
+    #[must_use]
     pub fn path_for(file: &Path) -> PathBuf {
         let mut path = file.as_os_str().to_os_string();
         path.push(".lock");

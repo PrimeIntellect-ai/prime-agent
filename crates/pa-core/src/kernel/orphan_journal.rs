@@ -38,6 +38,7 @@ fn journal_path() -> Option<std::path::PathBuf> {
 
 /// Pid-reuse identity (`proc:<starttime>`), shared with pa-daemon through
 /// `pa_types::platform::process`.
+#[must_use]
 pub fn get_process_start_id(pid: i32) -> Option<String> {
     if pid <= 0 {
         return None;
@@ -168,6 +169,7 @@ pub fn read_active_orphan_processes(path: &Path) -> anyhow::Result<Vec<ActiveOrp
 
 /// True when the record's pid identity still matches the live process, so
 /// killing it cannot hit a reused pid.
+#[must_use]
 pub fn is_orphan_process_identity_current(orphan: &ActiveOrphanProcess) -> bool {
     match &orphan.process_start_id {
         None => false,
@@ -185,6 +187,7 @@ fn should_reap(orphan: &ActiveOrphanProcess) -> bool {
 
 /// Kill a journaled orphan: its process group first (`bash()` children are
 /// group-contained), then the bare pid.
+#[must_use]
 pub fn kill_orphan_process(pid: i32) -> bool {
     crate::platform::process::kill_process_group_or_pid(pid)
 }

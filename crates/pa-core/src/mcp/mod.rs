@@ -59,6 +59,7 @@ pub const BUILTIN_MCP_CATALOG: &[(&str, &str, &str)] = &[
     ("notion", "Notion", "https://mcp.notion.com/mcp"),
 ];
 
+#[must_use]
 pub fn get_catalog_entry(server: &str) -> Option<McpCatalogEntry> {
     BUILTIN_MCP_CATALOG
         .iter()
@@ -157,6 +158,7 @@ pub enum McpServerConfig {
 }
 
 impl McpServerConfig {
+    #[must_use]
     pub fn server_type(&self) -> &'static str {
         match self {
             McpServerConfig::Http { .. } => "http",
@@ -204,6 +206,7 @@ pub enum AcpMcpServerConfig {
 }
 
 impl AcpMcpServerConfig {
+    #[must_use]
     pub fn name(&self) -> &str {
         match self {
             AcpMcpServerConfig::Stdio { name, .. } | AcpMcpServerConfig::Http { name, .. } => name,
@@ -523,6 +526,7 @@ impl McpManager {
     /// is not logged into, plus the enabled persistent generic servers (prompt
     /// MCP guidance). Returns the manager the caller keeps for `mcp.*` host
     /// requests.
+    #[must_use]
     pub fn prompt_gating(
         user_servers: std::collections::HashMap<String, McpServerConfig>,
         agent_dir: &std::path::Path,

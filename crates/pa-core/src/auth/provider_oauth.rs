@@ -47,6 +47,7 @@ impl Default for ProviderOAuth {
 
 impl ProviderOAuth {
     /// The production transports.
+    #[must_use]
     pub fn new() -> Self {
         ProviderOAuth {
             http: Arc::new(ReqwestCodexHttp::new()),

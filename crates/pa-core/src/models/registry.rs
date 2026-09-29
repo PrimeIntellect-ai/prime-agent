@@ -59,6 +59,7 @@ pub enum SetModelSelectionError {
 impl SetModelSelectionError {
     /// The refused provider of the sign-in variant (the daemon's typed
     /// `errorInfo` payload); `None` on the not-found refusal.
+    #[must_use]
     pub fn unauthenticated_provider(&self) -> Option<&str> {
         match self {
             SetModelSelectionError::ProviderUnauthenticated { provider } => Some(provider),
