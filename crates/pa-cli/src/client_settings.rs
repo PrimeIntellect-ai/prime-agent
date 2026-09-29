@@ -77,13 +77,6 @@ impl ClientSettings for CliClientSettings {
     }
 
     setting!(
-        fullscreen,
-        set_fullscreen,
-        get_fullscreen,
-        set_fullscreen,
-        bool
-    );
-    setting!(
         show_images,
         set_show_images,
         get_show_images,
@@ -251,7 +244,6 @@ mod tests {
         let settings = CliClientSettings::new(dir.path().to_path_buf(), agent_dir.clone());
 
         // The TS defaults read first.
-        assert!(settings.fullscreen());
         assert!(settings.show_images());
         assert!(!settings.quiet_startup());
         assert_eq!(settings.idle_eviction_minutes(), "90");
@@ -260,13 +252,11 @@ mod tests {
         assert!(settings.warnings_anthropic_extra_usage());
 
         // Writes persist (the settings file lands in the agent dir).
-        settings.set_fullscreen(false).expect("write");
         settings.set_theme("dark").expect("theme");
         settings.set_idle_eviction_minutes("off").expect("idle");
         settings.set_tree_filter_mode("all").expect("tree filter");
         settings.set_show_images(false).expect("show images");
 
-        assert!(!settings.fullscreen());
         assert_eq!(settings.theme().as_deref(), Some("dark"));
         assert_eq!(settings.idle_eviction_minutes(), "off");
         assert_eq!(settings.tree_filter_mode(), "all");
@@ -276,7 +266,6 @@ mod tests {
         let content =
             std::fs::read_to_string(agent_dir.join("settings.json")).expect("settings file");
         let value: serde_json::Value = serde_json::from_str(&content).expect("parse");
-        assert_eq!(value["terminal"]["fullscreen"], false);
         assert_eq!(value["theme"], "dark");
         assert_eq!(value["idleEvictionMinutes"], "off");
         assert_eq!(value["treeFilterMode"], "all");

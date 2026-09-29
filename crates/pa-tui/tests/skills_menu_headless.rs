@@ -217,12 +217,6 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
     fn set_theme(&self, _theme: &str) -> Result<()> {
         Ok(())
     }
-    fn fullscreen(&self) -> bool {
-        true
-    }
-    fn set_fullscreen(&self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
     fn show_images(&self) -> bool {
         true
     }
