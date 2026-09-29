@@ -151,6 +151,11 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          # The PR body reports the fragment set BEFORE the fold consumes it
+          # (the fold git-rms the fragments it absorbs), and README.md is the
+          # pattern's explanation, never a fragment.
+          find .changes -maxdepth 1 -name '*.md' ! -name 'README.md' -printf '%f\n' 2>/dev/null \
+            | sort > "$RUNNER_TEMP/release-fragments.txt" || true
           python3 scripts/release/fold_changelog.py --version "${INPUT_VERSION}"
           git add -A CHANGELOG.md Cargo.toml Cargo.lock
       - name: Commit the release branch (release/vX.Y.Z off the rust tip)
@@ -184,14 +189,16 @@ jobs:
         run: |
           set -euo pipefail
           python3 - "${INPUT_VERSION}" > "$RUNNER_TEMP/release-pr-body.md" <<'PY'
-          import datetime, json, pathlib, re, subprocess, sys, textwrap
+          import datetime, json, os, pathlib, re, subprocess, sys, textwrap
           version = sys.argv[1]
           tag = f"v{version}"
           repo = json.loads(subprocess.run(
               ["gh", "repo", "view", "--json", "nameWithOwner"],
               capture_output=True, text=True, check=True).stdout)["nameWithOwner"]
-          fragments = sorted(p.name for p in pathlib.Path(".changes").glob("*.md")) \
-              if pathlib.Path(".changes").is_dir() else []
+          # The fragment list was captured before the fold consumed them.
+          cap = pathlib.Path(os.environ["RUNNER_TEMP"]) / "release-fragments.txt"
+          fragments = sorted(line.strip() for line in cap.read_text().splitlines()
+                              if line.strip()) if cap.is_file() else []
           section = ""
           changelog = pathlib.Path("CHANGELOG.md")
           if changelog.is_file():
@@ -255,16 +262,25 @@ jobs:
           """
           print(textwrap.dedent(body).lstrip("\n"))
           PY
-          gh pr create \
+          # The refresh path is an explicit retry branch: a successful create
+          # must not fall through to a `gh pr edit` with an empty number
+          # (the `|| ... &&` chain would do exactly that under set -u).
+          if gh pr create \
             --base rust \
             --head "release/v${INPUT_VERSION}" \
             --title "release: v${INPUT_VERSION}" \
-            --body-file "$RUNNER_TEMP/release-pr-body.md" \
-            || existing="$(gh pr list --head "release/v${INPUT_VERSION}" --json number --jq '.[0].number')" \
-            && gh pr edit "${existing}" \
-              --title "release: v${INPUT_VERSION}" \
-              --body-file "$RUNNER_TEMP/release-pr-body.md" \
-            && echo "the existing release PR #${existing} was refreshed by this re-dispatch"
+            --body-file "$RUNNER_TEMP/release-pr-body.md"; then
+            exit 0
+          fi
+          existing="$(gh pr list --head "release/v${INPUT_VERSION}" --json number --jq '.[0].number')"
+          if [ -z "${existing}" ] || [ "${existing}" = "null" ]; then
+            echo "::error::the release PR could neither be created nor found on branch release/v${INPUT_VERSION}"
+            exit 1
+          fi
+          gh pr edit "${existing}" \
+            --title "release: v${INPUT_VERSION}" \
+            --body-file "$RUNNER_TEMP/release-pr-body.md"
+          echo "the existing release PR #${existing} was refreshed by this re-dispatch"
 
   tag:
     # The second act: a merged release PR cuts its annotated tag GitHub-side.
@@ -303,6 +319,17 @@ jobs:
               "merge_sha": ev["pull_request"]["merge_commit_sha"],
               "pr_number": str(ev["pull_request"]["number"]),
           }
+          # The tag act only serves the prepare flow's own PRs: the head must
+          # be the release branch the prepare act cut (release/vX.Y.Z). A
+          # coincidentally titled PR from any other branch is refused here,
+          # before the release bot is ever touched.
+          head_ref = ev["pull_request"]["head"]["ref"]
+          if head_ref != f"release/v{m.group(1)}":
+              sys.exit(
+                  f"::error::the release PR's head branch must be release/v{m.group(1)} "
+                  f"(the prepare flow's branch), not {head_ref!r} - the tag act does not "
+                  f"serve hand-titled PRs"
+              )
           state = pathlib.Path(os.environ["RUNNER_TEMP"]) / "release-merge.json"
           state.write_text(json.dumps(out))
           PY
@@ -318,11 +345,19 @@ jobs:
             echo "::error::tag v${version} != Cargo.toml ${cargo_ver} at the merge commit ${merge_sha}; release.yml tag-check would refuse it"
             exit 1
           fi
-          # Idempotent: a re-run (the closed event fires once, but the run
-          # can be re-run from the UI) must not fail on the existing tag.
-          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${version}" >/dev/null 2>&1; then
-            echo "tag v${version} already exists; nothing to do"
-            exit 0
+          # Idempotent ONLY when the existing tag is this release: resolve the
+          # ref (an annotated tag object) down to its commit and require it to
+          # be this PR's merge commit. A same-name tag pointing elsewhere is a
+          # version collision and fails loudly instead of silently skipping.
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${version}" \
+               --jq .object.sha > "${RUNNER_TEMP}/tag-object-sha" 2>/dev/null; then
+            tagged="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/$(cat "${RUNNER_TEMP}/tag-object-sha")" --jq .object.sha)"
+            if [ "${tagged}" = "${merge_sha}" ]; then
+              echo "tag v${version} already points at this release's merge commit; nothing to do"
+              exit 0
+            fi
+            echo "::error::tag v${version} already exists at ${tagged}, not this PR's merge commit ${merge_sha}; a release version is never reused - retitle or reversion this PR"
+            exit 1
           fi
           # The annotated tag object (codex's convention: 'Release vX.Y.Z'),
           # then the ref. Two API calls = the tag is created BY GitHub, and

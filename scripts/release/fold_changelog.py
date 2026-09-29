@@ -136,11 +136,19 @@ def fold(repo: Path, changes_dir: Path, changelog: Path, version: str,
 
     changelog.write_text(content)
     if consumed:
-        subprocess.run(["git", "rm", "-q", "--",
+        # A fragment that is folded must be gone when the fold returns,
+        # tracked or not: `git rm` fails outright on an untracked path and
+        # would leave the fold half-applied (CHANGELOG.md written, the
+        # fragment still present, and a retry refused by the section guard).
+        # --ignore-unmatch drops the tracked ones; the unlink sweep removes
+        # any untracked remainder so no half-fold can exist.
+        subprocess.run(["git", "rm", "-q", "--ignore-unmatch", "--",
                         *[p.name for p in consumed]],
                        cwd=changes_dir, check=True)
-        for p in consumed:
-            print(f"consumed {p.name}")
+        for path in consumed:
+            if path.is_file():
+                path.unlink()
+            print(f"consumed {path.name}")
     return 0
 
 

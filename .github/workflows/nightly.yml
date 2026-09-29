@@ -92,7 +92,13 @@ jobs:
         with:
           client-id: ${{ secrets.RELEASE_BOT_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          # contents: write for the git data API (the tag-only commit + the
+          # ref); actions: read for the workflow-runs list that resolves the
+          # newest successful continuous run (the scoped token 403s without
+          # it). Setting any permission input narrows the token to exactly
+          # these.
           permission-contents: write
+          permission-actions: read
       - name: Resolve the inputs (continuous SHA, beta.json, latest stable)
         if: env.HAS_RELEASE_BOT == 'true'
         env:
@@ -171,16 +177,24 @@ jobs:
                   x, y, z = parse_semver(tag)
                   stable_key = (x, y, z + 1)
 
-          # base = max(workspace version, latest stable + one patch)
-          base_key = max(k for k in (ws_key, stable_key) if k is not None)
-          base = ".".join(str(p) for p in base_key)
-
-          counter = 1
+          beta_key = None
+          cb_n = 0
           beta_file = out / "beta.json"
           if beta_file.is_file():
               doc = json.loads(beta_file.read_text())
-              cb_key, cb_n = parse_beta(doc["version"])
-              counter = cb_n + 1 if cb_key == base_key else 1
+              beta_key, cb_n = parse_beta(doc["version"])
+
+          # base = max(workspace version, latest stable + one patch, the
+          # published nightly's base). The floor matters: `releases/latest`
+          # serves the newest non-prerelease by created_at, not the highest
+          # semver, and a workspace-version revert could otherwise derive a
+          # base BELOW the published nightly - the rolling refresh's
+          # newest-wins guard would skip every such tag and the channel
+          # would stick. With the floor, the base never regresses.
+          base_key = max(k for k in (ws_key, stable_key, beta_key) if k is not None)
+          base = ".".join(str(p) for p in base_key)
+
+          counter = cb_n + 1 if beta_key == base_key else 1
 
           version = f"{base}-beta.{counter}"
           tag = f"v{version}"
