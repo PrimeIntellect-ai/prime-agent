@@ -1,7 +1,7 @@
-//! The scheduling protocol arms on the worker (cron_list, heartbeats_list,
-//! heartbeat_manage, cron_add, cron_cancel, heartbeat_get, heartbeat_set,
-//! heartbeat_update): payload validation and the store calls behind each
-//! `scheduled`-surface command.
+//! The scheduling protocol arms on the worker (`cron_list`, `heartbeats_list`,
+//! `heartbeat_manage`, `cron_add`, `cron_cancel`, `heartbeat_get`,
+//! `heartbeat_set`, `heartbeat_update`): payload validation and the store
+//! calls behind each `scheduled`-surface command.
 use super::*;
 
 impl Worker {
