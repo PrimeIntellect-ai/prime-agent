@@ -27,6 +27,9 @@ pub(crate) struct ExportTheme {
 
 /// The export page/card/info backgrounds, either explicit in the theme's
 /// `export` section or derived from the user-message background.
+// The `_bg` postfix family mirrors the theme's export surface
+// (page/card/info): the names ARE the API shape.
+#[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone, PartialEq)]
 struct ExportBackgrounds {
     page_bg: String,

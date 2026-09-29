@@ -33,6 +33,9 @@ fn probe_mtime() -> (i64, i64) {
     (seconds, 5_000_000)
 }
 
+// The `libc::timespec` field names are the syscall's own vocabulary -
+// the struct-literal shorthand below is the point of the params.
+#[allow(clippy::similar_names)]
 #[cfg(unix)]
 fn set_mtime(path: &Path, tv_sec: i64, tv_nsec: i64) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
@@ -56,6 +59,9 @@ fn set_mtime(path: &Path, tv_sec: i64, tv_nsec: i64) -> io::Result<()> {
 /// way to open a directory is `FILE_FLAG_BACKUP_SEMANTICS`) +
 /// `SetFileTime` - the mtime probe proper-lockfile performs with
 /// `utimensat` on Unix.
+// The `libc::timespec` field names are the syscall's own vocabulary -
+// the struct-literal shorthand below is the point of the params.
+#[allow(clippy::similar_names)]
 #[cfg(windows)]
 fn set_mtime(path: &Path, tv_sec: i64, tv_nsec: i64) -> io::Result<()> {
     win32::set_last_write_time(path, tv_sec, tv_nsec)
@@ -168,6 +174,7 @@ pub struct LockDir {
 
 impl LockDir {
     /// Lock path for the guarded file.
+    #[must_use]
     pub fn path_for(file: &Path) -> PathBuf {
         let mut path = file.as_os_str().to_os_string();
         path.push(".lock");
@@ -216,8 +223,8 @@ impl LockDir {
     #[cfg(unix)]
     fn create(path: &Path) -> io::Result<()> {
         fs::create_dir(path)?;
-        let (tv_sec, tv_nsec) = probe_mtime();
-        if let Err(error) = set_mtime(path, tv_sec, tv_nsec) {
+        let (sec, nanos) = probe_mtime();
+        if let Err(error) = set_mtime(path, sec, nanos) {
             // Never leave a lock artifact behind a failed probe.
             let _ = fs::remove_dir(path);
             return Err(error);
@@ -231,8 +238,8 @@ impl LockDir {
     #[cfg(windows)]
     fn create(path: &Path) -> io::Result<()> {
         fs::create_dir(path)?;
-        let (tv_sec, tv_nsec) = probe_mtime();
-        if let Err(error) = set_mtime(path, tv_sec, tv_nsec) {
+        let (sec, nanos) = probe_mtime();
+        if let Err(error) = set_mtime(path, sec, nanos) {
             // Never leave a lock artifact behind a failed probe.
             let _ = fs::remove_dir(path);
             return Err(error);
@@ -264,7 +271,7 @@ impl LockDir {
             // running pre-compat binary is not clobbered mid-write.
             #[cfg(unix)]
             {
-                if Self::legacy_flock_held(path)? {
+                if Self::legacy_flock_held(path) {
                     return Err(io::Error::new(
                         io::ErrorKind::WouldBlock,
                         format!("Lock file is already being held: {}", path.display()),
@@ -304,14 +311,13 @@ impl LockDir {
     /// lock FILE. Its absence (or an unopenable path) means nobody guards
     /// it, so the artifact can be reclaimed safely.
     #[cfg(unix)]
-    fn legacy_flock_held(path: &Path) -> io::Result<bool> {
+    fn legacy_flock_held(path: &Path) -> bool {
         use std::os::unix::io::AsRawFd;
         let Ok(file) = fs::OpenOptions::new().write(true).open(path) else {
-            return Ok(false);
+            return false;
         };
-        let held = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0
-            && io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock;
-        Ok(held)
+        (unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0
+            && io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock)
     }
 
     /// Release: remove the lock directory. A missing directory means someone

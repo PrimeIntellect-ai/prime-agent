@@ -1,7 +1,13 @@
 //! Snapshot / restore: capture state snapshots from the kernel, restore them,
 //! and flush on dispose.
 
-use super::*;
+use super::{
+    describe_failure, lock, Arc, CaptureFreshness, Duration, ExecuteOptions, ExecuteStatus, Inner,
+    Instant, KernelState, ManifestStat, MemoSlot, Request, RestoreResult, RestoredNamespaceSkip,
+    SnapshotResult, SnapshotSkip, Value, DEFAULT_SNAPSHOT_DEBOUNCE_MS, DEFAULT_SNAPSHOT_MAX_BYTES,
+    DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES, REPAIR_STEP_TIMEOUT_MS, RESTORE_EXECUTION_TIMEOUT_MS,
+    SNAPSHOT_EXECUTION_TIMEOUT_MS,
+};
 
 /// The runtime snapshot writer's reason for a name above the per-variable
 /// cap (prime-agent-runtime/src/rlm/repl.py): such a skipped name is a live

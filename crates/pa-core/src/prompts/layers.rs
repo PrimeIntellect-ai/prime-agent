@@ -25,6 +25,7 @@ pub const PER_MODEL_MAP: &str = include_str!("layers/per_model.md");
 pub const LAYER_NAMES: [&str; 4] = ["core", "usage", "opinionated", "per-model"];
 
 /// Source file of one layer (breakdown provenance).
+#[must_use]
 pub fn layer_source(name: &str) -> Option<&'static str> {
     match name {
         "core" => Some("prompts/layers/core.md"),
@@ -102,6 +103,7 @@ fn strip_documentation_comments(map: &str) -> String {
 
 /// Wildcard match: `*` matches any run of characters, the rest matches
 /// literally.
+#[must_use]
 pub fn selector_matches(pattern: &str, selector: &str) -> bool {
     let mut parts = pattern.split('*');
     let mut rest = selector;
@@ -129,6 +131,7 @@ pub fn selector_matches(pattern: &str, selector: &str) -> bool {
 /// The per-model instructions that apply to `model` (a resolved
 /// `provider/id` selector), in map order. `None` model selects blocks whose
 /// patterns include `*`.
+#[must_use]
 pub fn per_model_text(model: Option<&str>) -> Vec<String> {
     parse_per_model_blocks(PER_MODEL_MAP)
         .into_iter()
@@ -147,6 +150,7 @@ pub fn per_model_text(model: Option<&str>) -> Vec<String> {
 /// The cache-stable static prefix for `model`: the three constant layers plus
 /// any matching per-model blocks, joined with blank lines. This is exactly
 /// what a provider may cache; everything after it is session-specific.
+#[must_use]
 pub fn static_prefix(model: Option<&str>) -> String {
     let mut parts: Vec<String> = vec![
         CORE_LAYER.trim().to_string(),

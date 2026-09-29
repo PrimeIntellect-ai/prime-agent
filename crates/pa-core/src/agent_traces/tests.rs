@@ -49,12 +49,12 @@ impl TraceHttp for ScriptedTraceHttp {
     }
 }
 
-fn response(status: u16, body: &str) -> Result<TraceHttpResponse, TraceHttpError> {
-    Ok(TraceHttpResponse {
+fn response(status: u16, body: &str) -> TraceHttpResponse {
+    TraceHttpResponse {
         status,
         body: body.to_string(),
         retry_after: None,
-    })
+    }
 }
 
 struct Fixture {
@@ -150,10 +150,10 @@ async fn the_upload_sends_the_ts_request_and_records_the_cursor() {
     let fixture = Fixture::new();
     let session = fixture.write_session("s.jsonl", "sid-1");
     std::env::set_var("PRIME_AGENT_TRACES_API_KEY", "trace-key");
-    let http = ScriptedTraceHttp::new(vec![response(
+    let http = ScriptedTraceHttp::new(vec![Ok(response(
         200,
         r#"{"session_id":"sid-1","trace_id":"tid","bytes_stored":42,"key":"k"}"#,
-    )]);
+    ))]);
     let result = upload_trace_file(&fixture.options(&http, Some(&session))).await;
     assert_eq!(
         result,
@@ -269,7 +269,7 @@ async fn an_error_response_carries_the_status_and_message() {
     std::env::set_var("PRIME_AGENT_TRACES_API_KEY", "trace-key");
     let fixture = Fixture::new();
     let session = fixture.write_session("s.jsonl", "sid");
-    let http = ScriptedTraceHttp::new(vec![response(404, r#"{"error":{"message":"nope"}}"#)]);
+    let http = ScriptedTraceHttp::new(vec![Ok(response(404, r#"{"error":{"message":"nope"}}"#))]);
     let result = upload_trace_file(&fixture.options(&http, Some(&session))).await;
     assert_eq!(
         result,
@@ -297,10 +297,10 @@ async fn the_retriable_statuses_back_off_and_503_honors_retry_after() {
             body: String::new(),
             retry_after: Some("1".to_string()),
         }),
-        response(
+        Ok(response(
             200,
             r#"{"session_id":"sid","trace_id":"sid","bytes_stored":1}"#,
-        ),
+        )),
     ]);
     let delays = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let observed = delays.clone();
@@ -499,10 +499,10 @@ async fn the_upload_all_sweeps_with_the_gate_and_tallies() {
     std::env::set_var("PRIME_AGENT_TRACES_API_KEY", "trace-key");
     let fixture = Fixture::new();
     fixture.write_session("a.jsonl", "sid-a");
-    let http = ScriptedTraceHttp::new(vec![response(
+    let http = ScriptedTraceHttp::new(vec![Ok(response(
         200,
         r#"{"session_id":"sid-a","bytes_stored":10}"#,
-    )]);
+    ))]);
     let (progress_tx, mut progress_rx) =
         tokio::sync::mpsc::unbounded_channel::<TraceUploadAllProgress>();
     let options = TraceUploadAllOptions {

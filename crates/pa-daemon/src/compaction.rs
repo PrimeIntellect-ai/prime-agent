@@ -92,7 +92,7 @@ impl CompactionManager {
         let _ = self.emit_session_event(start);
         pa_core::session_engine::compaction_trace::trace(
             "manual.start_emitted",
-            serde_json::Value::Null,
+            &serde_json::Value::Null,
         );
 
         let engine = Arc::clone(&self.engine);
@@ -112,13 +112,13 @@ impl CompactionManager {
         if let CompactionOutcome::Compacted { run } = &outcome {
             pa_core::session_engine::compaction_trace::trace(
                 "manual.compact_returned",
-                serde_json::Value::Null,
+                &serde_json::Value::Null,
             );
             let persist_started = std::time::Instant::now();
             self.persist_compaction(run, custom_instructions.as_deref());
             pa_core::session_engine::compaction_trace::trace(
                 "manual.compaction_persisted",
-                serde_json::json!({
+                &serde_json::json!({
                     "micros": persist_started.elapsed().as_micros(),
                 }),
             );
@@ -135,7 +135,7 @@ impl CompactionManager {
         let _ = self.emit_session_event(end);
         pa_core::session_engine::compaction_trace::trace(
             "manual.end_emitted",
-            serde_json::Value::Null,
+            &serde_json::Value::Null,
         );
         // TS clears `_compactionAbortController` in `compact()`'s
         // `finally` - AFTER the durable entry (appended inside

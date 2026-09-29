@@ -90,6 +90,7 @@ fn session_basename(session_file: &Path) -> String {
 
 /// The default HTML output file name (TS
 /// `` `${APP_NAME}-session-${basename}.html` ``), relative like the TS one.
+#[must_use]
 pub fn default_html_output_path(session_file: &Path) -> String {
     format!(
         "{EXPORT_APP_NAME}-session-{}.html",

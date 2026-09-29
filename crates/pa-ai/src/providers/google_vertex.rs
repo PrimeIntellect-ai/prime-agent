@@ -435,20 +435,32 @@ pub fn stream_simple_google_vertex(
     options: Option<&SimpleStreamOptions>,
 ) -> AssistantMessageEventStream {
     let base = build_base_options(model, options, None);
+    let stream_options = GoogleVertexOptions {
+        base,
+        thinking: Some(resolve_simple_thinking(model, options)),
+        tool_choice: None,
+        project: None,
+        location: None,
+    };
+    stream_google_vertex(model, context, Some(&stream_options))
+}
+
+/// The thinking arm `stream_simple_google_vertex` picks for a model +
+/// reasoning level: disabled, level-based, or budget-based. Level-based covers
+/// Gemini 3 Pro/Flash and Gemma 4 (TS #2946: the Gemini API rejects
+/// `thinkingBudget` with a 400 for Gemma 4, so it must ride `thinkingLevel`
+/// like the Generative AI provider has since ee2483cd3).
+fn resolve_simple_thinking(
+    model: &Model,
+    options: Option<&SimpleStreamOptions>,
+) -> crate::providers::google::GoogleThinking {
     let reasoning = options.and_then(|options| options.reasoning);
     if reasoning.is_none() || reasoning == Some(ModelThinkingLevel::Off) {
-        let stream_options = GoogleVertexOptions {
-            base,
-            thinking: Some(crate::providers::google::GoogleThinking {
-                enabled: false,
-                budget_tokens: None,
-                level: None,
-            }),
-            tool_choice: None,
-            project: None,
-            location: None,
+        return crate::providers::google::GoogleThinking {
+            enabled: false,
+            budget_tokens: None,
+            level: None,
         };
-        return stream_google_vertex(model, context, Some(&stream_options));
     }
 
     let clamped = reasoning.map(|reasoning| clamp_thinking_level(model, reasoning));
@@ -456,35 +468,22 @@ pub fn stream_simple_google_vertex(
 
     if crate::providers::google_shared::is_gemini3_pro_model(&model.id)
         || crate::providers::google_shared::is_gemini3_flash_model(&model.id)
+        || crate::providers::google_shared::is_gemma4_model(&model.id)
     {
-        let stream_options = GoogleVertexOptions {
-            base,
-            thinking: Some(crate::providers::google::GoogleThinking {
-                enabled: true,
-                budget_tokens: None,
-                level: Some(get_thinking_level(effort, &model.id)),
-            }),
-            tool_choice: None,
-            project: None,
-            location: None,
+        return crate::providers::google::GoogleThinking {
+            enabled: true,
+            budget_tokens: None,
+            level: Some(get_thinking_level(effort, &model.id)),
         };
-        return stream_google_vertex(model, context, Some(&stream_options));
     }
 
     let budgets = options.and_then(|options| options.thinking_budgets.as_ref());
     let budget = get_google_thinking_budget(&model.id, budget_effort(effort), budgets);
-    let stream_options = GoogleVertexOptions {
-        base,
-        thinking: Some(crate::providers::google::GoogleThinking {
-            enabled: true,
-            budget_tokens: Some(budget),
-            level: None,
-        }),
-        tool_choice: None,
-        project: None,
-        location: None,
-    };
-    stream_google_vertex(model, context, Some(&stream_options))
+    crate::providers::google::GoogleThinking {
+        enabled: true,
+        budget_tokens: Some(budget),
+        level: None,
+    }
 }
 
 /// Registry provider for the `google-vertex` API.
@@ -519,4 +518,93 @@ impl Provider for GoogleVertexProvider {
 #[allow(dead_code)]
 fn _options_marker() -> Option<GoogleOptions> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gemma4_model() -> Model {
+        serde_json::from_value::<Model>(json!({
+            "id": "gemma-4-26b-a4b-it", "name": "Gemma 4 26B (Vertex)",
+            "api": "google-vertex", "provider": "google-vertex",
+            "baseUrl": "https://{location}-aiplatform.googleapis.com",
+            "reasoning": true, "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 131_072, "maxTokens": 8_192
+        }))
+        .unwrap()
+    }
+
+    fn vertex_options(reasoning: ModelThinkingLevel) -> GoogleVertexOptions {
+        let simple = SimpleStreamOptions {
+            reasoning: Some(reasoning),
+            ..SimpleStreamOptions::default()
+        };
+        let base = build_base_options(&gemma4_model(), Some(&simple), None);
+        GoogleVertexOptions {
+            thinking: Some(resolve_simple_thinking(&gemma4_model(), Some(&simple))),
+            base,
+            ..GoogleVertexOptions::default()
+        }
+    }
+
+    /// TS #2946: Gemma 4 on Vertex rides `thinkingLevel` (like the Generative
+    /// AI provider since ee2483cd3), never `thinkingBudget` — the Gemini API
+    /// answers a budget for Gemma 4 with a 400.
+    #[test]
+    fn gemma4_reasoning_uses_thinking_levels_not_budgets() {
+        let model = gemma4_model();
+
+        // off -> the disabled arm: thinkingLevel MINIMAL, no includeThoughts.
+        let opts = vertex_options(ModelThinkingLevel::Off);
+        let params = build_params(&model, &Context::default(), &opts);
+        assert_eq!(
+            params["generationConfig"]["thinkingConfig"],
+            json!({ "thinkingLevel": "MINIMAL" })
+        );
+
+        // low -> includeThoughts + thinkingLevel MINIMAL, no budget.
+        let thinking = vertex_options(ModelThinkingLevel::Low).thinking;
+        let thinking = thinking.as_ref().expect("thinking options");
+        assert!(thinking.enabled);
+        assert_eq!(thinking.budget_tokens, None);
+        assert_eq!(
+            thinking
+                .level
+                .map(crate::providers::google_shared::GoogleThinkingLevel::as_str),
+            Some("MINIMAL")
+        );
+
+        // high -> includeThoughts + thinkingLevel HIGH, no budget.
+        let opts = vertex_options(ModelThinkingLevel::High);
+        let params = build_params(&model, &Context::default(), &opts);
+        assert_eq!(
+            params["generationConfig"]["thinkingConfig"],
+            json!({ "includeThoughts": true, "thinkingLevel": "HIGH" })
+        );
+    }
+
+    /// A budget-based model keeps the budget arm (the level list must not
+    /// swallow the default path).
+    #[test]
+    fn gemini2_keeps_the_budget_arm() {
+        let model = serde_json::from_value::<Model>(json!({
+            "id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro",
+            "api": "google-vertex", "provider": "google-vertex",
+            "baseUrl": "https://{location}-aiplatform.googleapis.com",
+            "reasoning": true, "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 1_000_000, "maxTokens": 65_536
+        }))
+        .unwrap();
+        let simple = SimpleStreamOptions {
+            reasoning: Some(ModelThinkingLevel::High),
+            ..SimpleStreamOptions::default()
+        };
+        let thinking = resolve_simple_thinking(&model, Some(&simple));
+        assert!(thinking.enabled);
+        assert_eq!(thinking.level, None);
+        assert_eq!(thinking.budget_tokens, Some(32768));
+    }
 }

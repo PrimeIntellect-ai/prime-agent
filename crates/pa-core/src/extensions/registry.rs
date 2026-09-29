@@ -118,6 +118,7 @@ pub struct ExtensionRegistry {
 }
 
 impl ExtensionRegistry {
+    #[must_use]
     pub fn from_registrations(registrations: &[ExtensionRegistration]) -> Self {
         ExtensionRegistry {
             by_path: registrations.to_vec(),
@@ -126,6 +127,7 @@ impl ExtensionRegistry {
 
     /// True when empty: no sidecar state landed (the session proceeds
     /// without extension machinery, preserving the fast path).
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.by_path.is_empty()
     }
@@ -153,12 +155,14 @@ impl ExtensionRegistry {
     }
 
     /// All loaded extensions, in load order.
+    #[must_use]
     pub fn extensions(&self) -> &[ExtensionRegistration] {
         &self.by_path
     }
 
     /// Registered tools, first registration per name wins across
     /// extensions (runner.ts `getAllRegisteredTools`).
+    #[must_use]
     pub fn tools(&self) -> Vec<&ToolRegistration> {
         let mut seen = HashSet::new();
         let mut tools = Vec::new();
@@ -173,12 +177,14 @@ impl ExtensionRegistry {
     }
 
     /// A tool definition by name (first-wins, `getToolDefinition`).
+    #[must_use]
     pub fn tool(&self, name: &str) -> Option<&ToolRegistration> {
         self.tools().into_iter().find(|tool| tool.name == name)
     }
 
     /// Commands with invocation names (runner.ts `resolveRegisteredCommands`
     /// collision suffixing).
+    #[must_use]
     pub fn commands(&self) -> Vec<ResolvedExtensionCommand> {
         let mut commands = Vec::new();
         let mut counts: HashMap<&str, usize> = HashMap::new();
@@ -223,6 +229,7 @@ impl ExtensionRegistry {
     }
 
     /// A command by invocation name (runner.ts `getCommand`).
+    #[must_use]
     pub fn command(&self, invocation_name: &str) -> Option<ResolvedExtensionCommand> {
         self.commands()
             .into_iter()
@@ -230,6 +237,7 @@ impl ExtensionRegistry {
     }
 
     /// Flags, first registration per name wins (runner.ts `getFlags`).
+    #[must_use]
     pub fn flags(&self) -> Vec<&pa_types::extension_rpc::FlagRegistration> {
         let mut seen = HashSet::new();
         let mut flags = Vec::new();
@@ -246,6 +254,7 @@ impl ExtensionRegistry {
     /// Resolved flag values: CLI-provided values win over registered
     /// defaults (the `flagValues`/`setFlagValue` end state); the first
     /// registration of a name owns the default.
+    #[must_use]
     pub fn flag_values(&self, cli_values: &JsonMap) -> BTreeMap<String, Value> {
         let mut values = BTreeMap::new();
         for extension in &self.by_path {
@@ -267,6 +276,7 @@ impl ExtensionRegistry {
     /// reserved builtins win, non-reserved builtins lose to the extension
     /// with a diagnostic, extension-vs-extension conflicts resolve
     /// last-wins with a diagnostic. Returns the map plus diagnostics.
+    #[must_use]
     pub fn shortcuts(
         &self,
         builtins: &BuiltinKeybindings,
@@ -322,6 +332,7 @@ impl ExtensionRegistry {
     }
 
     /// Event names with at least one handler, for `hasHandlers` gating.
+    #[must_use]
     pub fn handled_events(&self) -> HashSet<String> {
         self.by_path
             .iter()
@@ -331,6 +342,7 @@ impl ExtensionRegistry {
 
     /// Whether any extension subscribes to `event` (runner.ts
     /// `hasHandlers`: Rust only emits events with handlers).
+    #[must_use]
     pub fn has_handlers(&self, event: &str) -> bool {
         self.by_path
             .iter()
@@ -338,6 +350,7 @@ impl ExtensionRegistry {
     }
 
     /// Custom session message types with a registered renderer.
+    #[must_use]
     pub fn message_renderer_types(&self) -> Vec<String> {
         let mut types = Vec::new();
         let mut seen = HashSet::new();
@@ -354,6 +367,7 @@ impl ExtensionRegistry {
     /// Queued provider registrations, in load order, first registration of
     /// a name wins (flushed at bind in TS; the provider seam lands with the
     /// event-surface stage).
+    #[must_use]
     pub fn providers(&self) -> Vec<&pa_types::extension_rpc::ProviderRegistration> {
         let mut seen = HashSet::new();
         let mut providers = Vec::new();
@@ -388,6 +402,7 @@ impl ExtensionRegistry {
     /// Normalized prompt guidelines of the registered tools: trimmed,
     /// empty dropped, deduplicated preserving order (TS agent-session.ts
     /// `_normalizePromptGuidelines`).
+    #[must_use]
     pub fn prompt_guidelines(&self) -> Vec<String> {
         let mut seen = HashSet::new();
         let mut guidelines = Vec::new();

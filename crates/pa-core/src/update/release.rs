@@ -51,6 +51,7 @@ struct RawArtifact {
 
 /// The `User-Agent` of update requests (TS `getPiUserAgent` shape, with the
 /// Rust runtime in the runtime slot).
+#[must_use]
 pub fn update_user_agent(version: &str) -> String {
     format!(
         "prime-agent/{version} ({}; rust/{}; {})",
@@ -111,6 +112,7 @@ pub async fn latest_release(
 /// hex chars, and no supported platform repeats. A row that fails any of
 /// that empties the artifact list (never the whole release); a body that
 /// is not the manifest schema or carries no version is `None`.
+#[must_use]
 pub fn parse_channel_manifest(body: &[u8]) -> Option<LatestRelease> {
     let manifest: ManifestFile = match serde_json::from_slice(body) {
         Ok(manifest) => manifest,
@@ -170,6 +172,7 @@ pub fn artifact_for_platform(release: &LatestRelease) -> Result<&ReleaseArtifact
 
 /// sha256 hex of one byte slice (shared by the download's streaming digest
 /// checks and tests that build fixture archives).
+#[must_use]
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().fold(String::new(), |mut output, b| {

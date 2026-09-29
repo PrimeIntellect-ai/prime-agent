@@ -68,6 +68,7 @@ pub fn install_catalog(models_json_path: &Path, catalog: Arc<ModelCatalog>) {
 /// so a login or logout between ticks is picked up by the next refresh
 /// (the scope-keyed caches discard the previous account's view on the
 /// credential change).
+#[must_use]
 pub fn prime_credentials_for_dir(agent_dir: &Path) -> Option<PrimeCredentials> {
     let mut auth = AuthStorage::create(agent_dir);
     let api_key = auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID)?;
@@ -82,6 +83,7 @@ pub fn prime_credentials_for_dir(agent_dir: &Path) -> Option<PrimeCredentials> {
 /// caches fill in the background and every registry resolves the
 /// last-good chain immediately). TS parity: the supervisor process keeps
 /// the disk caches warm for the workers it spawns.
+#[must_use]
 pub fn startup_refresh(agent_dir: &Path) -> Arc<ModelCatalog> {
     let catalog = catalog_for(Some(&agent_dir.join("models.json")));
     catalog.trigger_refresh_with_credentials(

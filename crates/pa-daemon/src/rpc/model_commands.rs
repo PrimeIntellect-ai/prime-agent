@@ -116,7 +116,7 @@ async fn apply_model_selection(
     let mut settings =
         pa_core::settings::SettingsManager::create(&state.settings_cwd().await, &state.agent_dir);
     settings
-        .set_default_model_and_provider(model.provider.clone(), model.id.clone())
+        .set_default_model_and_provider(&model.provider, &model.id)
         .map_err(|error| error.to_string())?;
     Ok(())
 }

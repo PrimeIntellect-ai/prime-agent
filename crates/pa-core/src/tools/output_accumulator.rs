@@ -35,7 +35,7 @@ fn default_temp_file_path(prefix: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    let id = nanos ^ ((std::process::id() as u128) << 64);
+    let id = nanos ^ (u128::from(std::process::id()) << 64);
     std::env::temp_dir().join(format!("{prefix}-{id:032x}.log"))
 }
 
@@ -219,8 +219,8 @@ impl OutputSpill {
 
     /// Flush and settle: the complete file's path, or None when degraded.
     #[allow(dead_code)]
-    pub async fn finalize(&mut self) -> Option<String> {
-        self.finalize_sync()
+    pub fn finalize(&mut self) -> impl std::future::Future<Output = Option<String>> {
+        std::future::ready(self.finalize_sync())
     }
 
     /// Blocking form of [`Self::finalize`].
@@ -269,7 +269,7 @@ pub struct OutputAccumulator {
 }
 
 impl OutputAccumulator {
-    pub fn new(options: OutputAccumulatorOptions) -> Self {
+    pub fn new(options: &OutputAccumulatorOptions) -> Self {
         let max_rolling_bytes = (options.max_bytes * 2).max(1);
         let spill = OutputSpill::new(&options.temp_file_prefix);
         Self {

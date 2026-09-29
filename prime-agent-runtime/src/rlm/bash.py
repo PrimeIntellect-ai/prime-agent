@@ -19,12 +19,12 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable, Generator
+from collections.abc import Awaitable, Callable, Generator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, cast
 
-from . import _winjob
+from . import _winjob, autobg
 
 _IS_POSIX = os.name == "posix"
 
@@ -180,6 +180,121 @@ class BashResult:
     exit_code: int
     output: str
     duration: float
+
+
+_AUTOBG_OUTPUT_PREVIEW_CAP = 2048
+
+
+class BashAutoBackgrounded:
+    """An await that outlived the auto-bg threshold; the command keeps running.
+
+    Delegates everything to the live ``BashHandle``, so ``poll()``/``output()``/
+    ``tail()``/``kill()``/``await`` work exactly like a background handle created
+    with ``h = bash(...)``. The await never completed, so the command's
+    completion notice still reaches the model.
+    """
+
+    def __init__(self, handle: BashHandle, threshold: float) -> None:
+        self.handle = handle
+        self.threshold = threshold
+
+    def __repr__(self) -> str:
+        handle = self.handle
+        head = (
+            f"bash await auto-backgrounded after {self.threshold:.1f}s "
+            f"(PRIME_AGENT_AUTOBG_MS): the command is still running (pid {handle._pid}) "
+            "- poll or await later"
+        )
+        body = f"handle: {handle!r}"
+        output = handle._buffer.text()
+        if len(output) > _AUTOBG_OUTPUT_PREVIEW_CAP:
+            output = "... " + output[-_AUTOBG_OUTPUT_PREVIEW_CAP:]
+        if output.strip():
+            return f"{head}\n{body}\npartial output:\n{output}"
+        return f"{head}\n{body}"
+
+    def __getattr__(self, name: str) -> Any:
+        # Everything else (pid, running, command, output, tail, poll, kill) is
+        # the live handle's.
+        return getattr(self.handle, name)
+
+    def __await__(self) -> Generator[Any, None, BashResult]:
+        return self.handle.__await__()
+
+
+# In-flight bash await races keyed by awaiting task: the kernel's python-cell
+# guard defers to them (a cell suspended inside a guarded bash await resumes
+# with the bash handle - that await's own degrade owns the blockage).
+_guard_races: dict[int, tuple[asyncio.Task[Any], float]] = {}
+_guard_race_lock = threading.Lock()
+
+
+def active_guard_race_deadline(task: asyncio.Task[Any]) -> float | None:
+    """The earliest bash-await race deadline this task is waiting on, if any.
+
+    The cell task itself holds a direct entry; a composed await (gather,
+    shield) holds it in the wrapped child task, so tasks the cell is waiting
+    for through asyncio's wrapper callbacks are checked too.
+    """
+    with _guard_race_lock:
+        entry = _guard_races.get(id(task))
+        racing = list(_guard_races.values())
+    if entry is not None:
+        return entry[1]
+    deadlines = [
+        deadline
+        for racing_task, deadline in racing
+        if _creating_cell_waits_for(task, racing_task)
+    ]
+    return min(deadlines) if deadlines else None
+
+
+async def _autobg_guarded_wait(wait: Awaitable[BashResult]) -> BashResult | None:
+    """Await the command result, abandoning the wait past the auto-bg threshold.
+
+    Returns None only on the degrade: the process keeps running (the abandoned
+    wait task finishes by itself once it completes), so the caller hands the
+    handle back instead of the result.
+    """
+    threshold = autobg.threshold_seconds()
+    if threshold <= 0.0:
+        return await wait
+    try:
+        racing_task = asyncio.current_task()
+    except RuntimeError:
+        racing_task = None
+    deadline = time.monotonic() + threshold
+    if racing_task is not None:
+        with _guard_race_lock:
+            _guard_races[id(racing_task)] = (racing_task, deadline)
+    wait_task = asyncio.ensure_future(wait)
+    try:
+        done, _pending = await asyncio.wait({wait_task}, timeout=threshold)
+        if wait_task in done:
+            return wait_task.result()
+        # Degraded: cancelling the wait would kill an owned command (that is
+        # the one-shot cancel contract, not the degrade), so the wait is
+        # abandoned to finish by itself; a late failure in it is consumed,
+        # never logged noise.
+        wait_task.add_done_callback(_consume_notice_task)
+        return None
+    except asyncio.CancelledError:
+        # The awaiting cell was interrupted: the wait must observe the cancel
+        # (a one-shot await runs its kill dance inside _wait_owned) before the
+        # CancelledError propagates.
+        wait_task.cancel()
+        while not wait_task.done():
+            try:
+                await asyncio.shield(wait_task)
+            except asyncio.CancelledError:
+                continue
+        raise
+    finally:
+        if racing_task is not None:
+            with _guard_race_lock:
+                entry = _guard_races.get(id(racing_task))
+                if entry is not None and entry[1] == deadline:
+                    _guard_races.pop(id(racing_task), None)
 
 
 class _BoundedBuffer:
@@ -691,6 +806,10 @@ class BashHandle:
             return
         from . import repl
 
+        # A sync-cell worker thread resolves the serving loop through the
+        # repl.py compat shim, so the notice is created here - on the cell's
+        # own thread - and steps on the serving loop, where host_request and
+        # the completion waits are native.
         activity = {"id": self._activity_id, "pid": self._pid, "active": True}
         # Publish synchronously before bash() returns and the creating cell can end.
         repl.emit({"application/vnd.prime-agent.bash-activity+json": activity})
@@ -920,7 +1039,7 @@ class BashHandle:
         if delivered:
             _record_journal(self._pid, active=False)
 
-    def __await__(self) -> Generator[Any, None, BashResult]:
+    def __await__(self) -> Generator[Any, None, BashResult | BashAutoBackgrounded]:
         # A handle awaited before any other API use is a one-shot command tied
         # to the await (kill-on-cancel); touching the handle API first marks it
         # as a deliberate background handle whose awaits only wait.
@@ -933,18 +1052,30 @@ class BashHandle:
         wait = self._wait_owned() if owned else self._wait()
         self._released = True
         completed = False
+        degraded = False
         try:
-            result = yield from wait.__await__()
-            completed = True
-            return result
+            result = yield from _autobg_guarded_wait(wait).__await__()
+            if result is None:
+                degraded = True
+            else:
+                completed = True
         finally:
-            if (completed or owned) and (
-                creating_cell_waited
-                or _creating_cell_waits_for(self._creating_cell_task, current_task)
+            # A degraded await never completed: the command's completion notice
+            # must still reach the model, so it never counts as awaited.
+            if (
+                not degraded
+                and (completed or owned)
+                and (
+                    creating_cell_waited
+                    or _creating_cell_waits_for(self._creating_cell_task, current_task)
+                )
             ):
                 self._awaited_by_creating_cell = True
             if completed:
                 self._note_result_consumed(current_task)
+        if degraded:
+            return BashAutoBackgrounded(self, autobg.threshold_seconds())
+        return cast("BashResult", result)
 
     def __repr__(self) -> str:
         state = f"exit_code={self._result.exit_code}" if self._result else "running"
@@ -955,7 +1086,11 @@ def bash(command: str) -> BashHandle:
     """Start a shell command immediately; await the handle for the result.
 
     `await bash(cmd)` is a one-shot: cancelling the await (e.g. an interrupt)
-    kills the command's process group. `h = bash(cmd)` used as a background
+    kills the command's process group. An await that outlives the auto-bg
+    threshold (PRIME_AGENT_AUTOBG_MS, default 10000; 0 disables the guard)
+    degrades instead: it returns a `BashAutoBackgrounded` wrapping the live
+    handle, and the command keeps running — its completion notice still
+    arrives. `h = bash(cmd)` used as a background
     handle (any .pid/.running/.output()/.tail()/.poll()/.kill() access before
     the first await) survives cancellation; awaiting it only waits. Leak
     containment is per-platform: process groups plus the orphan journal on

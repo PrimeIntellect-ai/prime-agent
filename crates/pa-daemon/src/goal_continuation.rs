@@ -196,6 +196,13 @@ impl AgentSessionEngine {
                 return;
             }
         };
+        // This mint's own guard handle, captured under the driver lock:
+        // every later release of the mint (the admission sink, the drop
+        // paths, this task's own close-race branch) clears exactly this
+        // handle, never the mutable mirror (a core rebuild may have
+        // re-swapped the mirror onto a replacement session's handle
+        // meanwhile).
+        let pending_handle = Some(driver.pending_continuation_handle());
         // TS `_getContinuationMessages`: new session input arriving
         // during the mint cancels it (the arrival-epoch restore).
         // A close that lands during the mint cancels it the same way:
@@ -203,25 +210,41 @@ impl AgentSessionEngine {
         // the stopped session's durable state stays as the close left it.
         if self.session_input_queued() || self.session_is_closed() {
             if let Err(error) = driver.rollback_continuation_mint(&mut session) {
-                // The restore hook must not reject: warn and re-owe anyway.
+                // The restore hook must not reject: warn. The failed
+                // decrement leaves the slot durably charged (the mint's
+                // increment already landed) and the guard released with
+                // the dead mint — re-owing would re-mint and double-charge
+                // the eventual turn, so the cancelled boundary absorbs the
+                // spent slot and the next natural boundary mints normally.
                 eprintln!("pa-daemon: goal mint rollback persist failed: {error:#}");
+            } else {
+                driver.mark_continuation_owed();
             }
-            driver.mark_continuation_owed();
             return;
         }
-        let goal_update = self.publish_goal_state(driver.state());
+        let goal_update = self.publish_goal_state(&driver.state_with_creation_elapsed());
         drop(driver);
         // The close can land while the awaits above ran (the worker's kill
         // sets the marker before its own children close — each child's
         // settle fires this retry): a session that closed mid-mint mints
         // nothing (the driver's owed flag is already taken, so the mint is
-        // consumed — the same TS race, but the zombie never runs).
+        // consumed — the same TS race, but the zombie never runs). The
+        // unconsumed mint releases the pending guard with it.
         if self.session_is_closed() {
+            // The unconsumed mint releases its OWN pending guard (the
+            // handle captured under the driver lock at the mint — a
+            // rebuild may have re-swapped the mirror onto a replacement
+            // session's handle while this task's awaits ran). The mint
+            // always arms the guard, so the handle is always `Some`
+            // here; the release names it, and an item that armed no
+            // guard would release nothing.
+            self.release_goal_continuation_handle(&pending_handle);
             return;
         }
         self.deliver_goal_work(GoalTurnEndWork::Continuation(GoalContinuation {
             request: goal_prompt_request(&message),
             goal_update,
+            pending_handle,
         }));
     }
 
@@ -325,25 +348,36 @@ impl AgentSessionEngine {
             if message.is_none() {
                 return GoalBoundary::End;
             }
+            // This mint's own guard handle, captured under the driver
+            // lock: the admission sink and the drop paths release exactly
+            // this mint's guard, never the mutable mirror (a rebuild may
+            // have re-swapped it meanwhile).
+            let pending_handle = Some(driver.pending_continuation_handle());
             // The mint's arrival-epoch restore: input that arrived while
             // the mint ran rolls the slot back so the next boundary
             // re-mints without double-counting.
             if self.session_input_queued() {
                 if let Err(error) = driver.rollback_continuation_mint(&mut session) {
-                    // The restore hook must not reject: warn and re-owe anyway.
+                    // The restore hook must not reject: warn. The failed
+                    // decrement leaves the slot durably charged (the
+                    // mint's increment already landed) and the guard
+                    // released with the dead mint — re-owing would re-mint
+                    // and double-charge the eventual turn, so the
+                    // cancelled boundary absorbs the spent slot and the
+                    // next natural boundary mints normally.
                     eprintln!("pa-daemon: goal mint rollback persist failed: {error:#}");
-                }
-                if was_owed {
+                } else if was_owed {
                     driver.mark_continuation_owed();
                 }
                 return GoalBoundary::End;
             }
-            let goal_update = self.publish_goal_state(driver.state());
+            let goal_update = self.publish_goal_state(&driver.state_with_creation_elapsed());
             let message = message.expect("the mint produced a message");
             drop(driver);
             self.deliver_goal_work(GoalTurnEndWork::Continuation(GoalContinuation {
                 request: goal_prompt_request(&message),
                 goal_update,
+                pending_handle,
             }));
             GoalBoundary::End
         })
@@ -365,12 +399,12 @@ impl AgentSessionEngine {
             .clone()?;
         let message = self.runtime.block_on(async {
             let driver = handles.driver.lock().await;
-            let state = driver.state();
+            let state = driver.state_with_creation_elapsed();
             if state.status != pa_core::goals::GoalStatus::BudgetLimited {
                 return None;
             }
             pa_core::goals::create_goal_context_message(
-                state,
+                &state,
                 pa_core::goals::GoalContextKind::BudgetLimit,
             )
             .ok()
@@ -378,6 +412,9 @@ impl AgentSessionEngine {
         Some(GoalTurnEndWork::BudgetLimitSteer(GoalContinuation {
             request: goal_prompt_request(&message),
             goal_update: None,
+            // The budget steer mints no continuation slot: no pending
+            // guard exists for this item.
+            pending_handle: None,
         }))
     }
 
@@ -389,7 +426,13 @@ impl AgentSessionEngine {
         goal: &pa_core::goals::GoalState,
     ) -> Option<serde_json::Value> {
         let mut published = self.published_goal.lock().expect("published goal lock");
-        if published.as_ref() == Some(goal) {
+        // The dedupe is age-invariant: the creation-based timer's age ticks
+        // with the wall clock (a second boundary between reads must not
+        // re-emit an unchanged goal).
+        if published.as_ref().is_some_and(|last| {
+            pa_core::goals::goal_update_dedupe_projection(last)
+                == pa_core::goals::goal_update_dedupe_projection(goal)
+        }) {
             return None;
         }
         *published = Some(goal.clone());
@@ -403,8 +446,11 @@ impl AgentSessionEngine {
     fn deliver_goal_work(&self, work: GoalTurnEndWork) {
         // The final gate: a closed session admits no minted goal work (the
         // worker's kill sets the marker; the runner is parked — this keeps
-        // the queue itself free of zombie rows).
+        // the queue itself free of zombie rows). The minted continuation
+        // never reaches a turn on this path, so the driver's pending guard
+        // releases with it (a wedged guard would block every later mint).
         if self.session_is_closed() {
+            self.release_goal_work_continuation(&work);
             return;
         }
         let sink = self
@@ -412,11 +458,11 @@ impl AgentSessionEngine {
             .lock()
             .expect("goal sink lock")
             .clone();
-        match sink {
-            Some(sink) => sink(work),
-            None => {
-                eprintln!("pa-daemon: goal follow-up dropped: no admission sink wired");
-            }
+        if let Some(sink) = sink {
+            sink(work);
+        } else {
+            eprintln!("pa-daemon: goal follow-up dropped: no admission sink wired");
+            self.release_goal_work_continuation(&work);
         }
     }
 }

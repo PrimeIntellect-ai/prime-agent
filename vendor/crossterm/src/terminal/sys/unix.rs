@@ -200,7 +200,7 @@ fn read_supports_keyboard_enhancement_flags() -> io::Result<bool> {
 }
 
 #[cfg(feature = "events")]
-fn read_supports_keyboard_enhancement_raw() -> io::Result<bool> {
+pub(crate) fn read_supports_keyboard_enhancement_raw() -> io::Result<bool> {
     use crate::event::{
         filter::{KeyboardEnhancementFlagsFilter, PrimaryDeviceAttributesFilter},
         poll_internal, read_internal, InternalEvent,

@@ -60,6 +60,10 @@ fn select_supported_image_mime_type(types: &[String]) -> Option<String> {
 async fn run_command(program: &str, args: &[&str], timeout: Duration) -> Option<Vec<u8>> {
     let child = Command::new(program)
         .args(args)
+        // The timeout arm drops the child mid-wait: without the drop-kill
+        // a hung converter (a kitten/magick that never answers) keeps
+        // running past the deadline — an orphaned direct child of the TUI.
+        .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())

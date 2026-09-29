@@ -105,6 +105,7 @@ fn now_millis() -> u64 {
 /// The durable command echo row (`session_slash_command`). Public for the
 /// host transports that emit the echo before execution (TS
 /// `_executeSelectedSessionCommand` records it before the command runs).
+#[must_use]
 pub fn session_command_echo_row(command: &SessionSlashCommand) -> CustomMessage {
     CustomMessage {
         custom_type: SESSION_SLASH_COMMAND_CUSTOM_TYPE.to_string(),
@@ -130,6 +131,7 @@ fn command_details(command: &SessionSlashCommand) -> serde_json::Value {
 /// The failure result row for a command that failed before or during
 /// execution: hosts append it so the transcript still records the attempt
 /// (TS `_executeQueuedSessionCommand` catch arm).
+#[must_use]
 pub fn session_command_failure_row(command: &SessionSlashCommand, error: &str) -> CustomMessage {
     slash_command_result(
         command,
