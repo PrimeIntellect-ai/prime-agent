@@ -607,6 +607,9 @@ fn a_suspend_cycle_with_a_ctrl_s_in_the_stopped_window_never_stops_the_shell() {
     harness
         .master
         .wait_from(0, KITTY_QUERY, "the first mount's kitty query");
+    // The flags push only happens once the terminal ANSWERS the query —
+    // the same answer_kitty_query contract the other routes use.
+    harness.master.write(KITTY_ANSWER);
     harness
         .master
         .wait_from(0, KITTY_FLAGS_PUSH, "the kitty flags push");

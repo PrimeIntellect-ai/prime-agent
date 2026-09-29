@@ -23,11 +23,12 @@
 //!    the tty raw and crossterm adopted that state as the baseline)
 //!    would silently restore raw ([`pa_types::platform::terminal`]'s
 //!    `stty sane` reconstruction repairs it);
-//! 7. a pending Ctrl+S output stop lifts — the stop is runtime state,
-//!    not termios, and survives every restore; a raw bracket that never
-//!    re-arms would hand the shell a frozen prompt, so the IXON-toggle
-//!    lift runs with the handback
-//!    ([`pa_types::platform::terminal::restart_output`]).
+//! 7. a pending Ctrl+S output stop lifts FIRST — the stop is runtime
+//!    state, not termios, and it HOLDS writes: the lift (the IXON-toggle,
+//!    [`pa_types::platform::terminal::restart_output`]) must precede the
+//!    restore's own output writes or the restore itself would hang on a
+//!    stopped tty, and the shell would keep the frozen prompt the
+//!    restore owed it.
 //!
 //! The parity exit (the normal quit) keeps the TS byte order for its
 //! visible exit frame — the inline transcript flush after the
@@ -70,6 +71,12 @@ pub(crate) static TEST_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(
 pub(crate) fn restore_terminal() {
     #[cfg(test)]
     RESTORE_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // The output-stop lift runs FIRST: a tty still holding a Ctrl+S stop
+    // (armed in a cooked window this bracket never re-armed — the suspend
+    // error paths, the force-quit from a wedge) holds every WRITE below,
+    // so the restore itself would hang before reaching the lift. The
+    // lift is two termios writes, no terminal-output writes — it flows.
+    pa_types::platform::terminal::restart_output();
     let mut out = std::io::stdout();
     crate::enhanced_keys::release_for_exit();
     if out.is_terminal() {
@@ -91,13 +98,6 @@ pub(crate) fn restore_terminal() {
     // there would hand the shell a raw tty with no repair.
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = report_cooked_repair();
-    // The output-stop lift runs with the termios handback: a Ctrl+S the
-    // line discipline processed in a cooked window (a suspend cycle, or
-    // the pre-launch prompt) is RUNTIME state that survives every
-    // restore — a raw bracket that never re-arms (the suspend's error
-    // paths, the force-quit from a wedge) would hand the shell a frozen
-    // prompt until Ctrl+Q.
-    pa_types::platform::terminal::restart_output();
     let _ = out.flush();
 }
 
@@ -114,15 +114,17 @@ pub(crate) fn restore_terminal() {
 /// (a terminal still draining), not as a stalled shutdown — a forced
 /// exit here would cut the terminal restore in half.
 pub(crate) fn terminal_release_tail(out: &mut Stdout) {
+    // The output-stop lift runs FIRST, before the tail's first write: a
+    // tty still holding a Ctrl+S stop would hold SYNC_OUTPUT_OFF (and
+    // every write after it), hanging the release before the lift could
+    // run — the exact stall the guard's progress windows exist to catch.
+    pa_types::platform::terminal::restart_output();
     let _ = out.write_all(SYNC_OUTPUT_OFF);
     let _ = out.write_all(SGR_RESET);
     let _ = crossterm::execute!(out, crossterm::cursor::Show);
     crate::exit_guard::note_exit_progress();
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = report_cooked_repair();
-    // The same output-stop lift as `restore_terminal`: a stop armed in a
-    // cooked window must not outlive the handback into the shell.
-    pa_types::platform::terminal::restart_output();
     let _ = out.flush();
     crate::exit_guard::note_exit_progress();
 }

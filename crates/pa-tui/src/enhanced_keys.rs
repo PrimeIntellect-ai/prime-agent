@@ -546,6 +546,18 @@ fn spawn_kitty_probe() {
                     // race the module docs warn about). Settle no-kitty
                     // instead; the capability stays unresolved for this
                     // run, never poisoned.
+                    //
+                    // The mode lock closes the check-suspend TOCTOU: the
+                    // suspend path's first terminal action is the
+                    // enhanced-keys release (which takes this lock), so
+                    // holding it across the guard and the whole check
+                    // means the app's raw bracket cannot come off while
+                    // the check runs — the check can only ever take its
+                    // raw-read path, never the implicit raw bracket. The
+                    // once-per-process cost: a suspend racing the first
+                    // mount's probe window stalls behind the check's
+                    // 250ms bound before its teardown starts.
+                    let modes = lock_modes();
                     let raw_bracket_on =
                         crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
                     if EXIT_RELEASE.load(Ordering::SeqCst) || !raw_bracket_on {
@@ -553,6 +565,9 @@ fn spawn_kitty_probe() {
                         return;
                     }
                     let _ = answer_tx.send(crossterm::terminal::supports_keyboard_enhancement());
+                    // The guard releases at this scope's end; the answer
+                    // path's `enable_kitty` takes the lock after it.
+                    drop(modes);
                 });
             match answer_rx.recv_timeout(KITTY_QUERY_FALLBACK) {
                 Ok(Ok(true)) => {
