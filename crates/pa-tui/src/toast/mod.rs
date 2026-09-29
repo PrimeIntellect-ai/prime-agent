@@ -105,6 +105,14 @@ impl Toasts {
         before != self.entries.len()
     }
 
+    /// The earliest entry's expiry, active or not: the run loop arms its
+    /// TTL wakeup on this so an idle surface still repaints the overlay
+    /// away (a stale past deadline self-drains — the prune at that
+    /// iteration empties it).
+    pub fn next_expiry(&self) -> Option<Instant> {
+        self.entries.iter().map(|toast| toast.expires_at).min()
+    }
+
     /// The still-active toasts' labels, oldest first.
     pub fn active(&self, now: Instant) -> Vec<String> {
         self.entries

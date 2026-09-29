@@ -133,11 +133,13 @@ impl SequenceGuard {
     }
 
     /// The poll wait: never past a pending sequence's deadline.
-    pub(crate) fn poll_timeout(&self, default: Duration, now: Instant) -> Duration {
-        match &self.pending {
-            Some(pending) => default.min(pending.deadline.saturating_duration_since(now)),
-            None => default,
-        }
+    /// The parking wait: the remaining flush deadline while a partial
+    /// sequence is held, or `None` to park until real input — an idle
+    /// wait has no tick of its own to bound.
+    pub(crate) fn poll_deadline(&self, now: Instant) -> Option<Duration> {
+        self.pending
+            .as_ref()
+            .map(|pending| pending.deadline.saturating_duration_since(now))
     }
 
     /// Flush whatever the deadline released.
@@ -1372,18 +1374,21 @@ mod tests {
     }
 
     #[test]
-    fn poll_timeout_never_waits_past_the_deadline() {
+    fn poll_deadline_parks_when_nothing_is_held() {
         let guard = SequenceGuard::default();
-        let now = Instant::now();
-        assert_eq!(guard.poll_timeout(HOLD, now), HOLD);
+        assert_eq!(guard.poll_deadline(Instant::now()), None);
+    }
 
+    #[test]
+    fn poll_deadline_is_the_remaining_hold() {
         let mut guard = SequenceGuard::default();
+        let now = Instant::now();
         assert!(guard.feed(esc_press(), now).is_empty());
         assert_eq!(
-            guard.poll_timeout(HOLD, now + Duration::from_millis(6)),
-            Duration::from_millis(4)
+            guard.poll_deadline(now + Duration::from_millis(6)),
+            Some(Duration::from_millis(4))
         );
-        assert_eq!(guard.poll_timeout(HOLD, now + HOLD), Duration::ZERO);
+        assert_eq!(guard.poll_deadline(now + HOLD), Some(Duration::ZERO));
     }
 
     // -- reassembled key sequences --------------------------------------

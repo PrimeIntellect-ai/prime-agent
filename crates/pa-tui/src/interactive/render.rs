@@ -502,6 +502,13 @@ impl Renderer {
         if !preserve_alt_screen && self.is_terminal() {
             crate::enhanced_keys::release_for_exit();
         }
+        // The surface's input reader stands down FIRST (TS tears its
+        // listener down with the chat): the drain below reads the tty
+        // through crossterm's global event-reader lock, and a parked
+        // reader would hold it — the wake makes the flagged reader exit
+        // now, the drain owns the reader, and the next surface's mount
+        // joins an already-exited thread instead of waiting out a poll.
+        crate::input::request_reader_stop();
         // In-flight kitty key releases are consumed before the terminal is
         // restored (TS `drainInput` before `stop`): a release that lands
         // after raw mode is off would leak its escape sequence into the
@@ -538,12 +545,6 @@ impl Renderer {
                     };
                     drop(term);
                     let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Hide);
-                    // Flag this surface's input reader for the background
-                    // stop now (TS tears its listener down with the chat):
-                    // the next surface joins it at mount, and the already
-                    // flagged reader exits at its next poll tick instead
-                    // of making the switch wait a full timeout.
-                    crate::input::request_reader_stop();
                 } else {
                     let _ = self.flush_to_main_screen(view);
                     // The shared exit tail ends the parity teardown: the

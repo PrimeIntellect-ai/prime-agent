@@ -1024,7 +1024,29 @@ async fn run_interactive_surface(
             }
         }
 
+        // An exit key must not wait out the select: the loop condition
+        // consumes `running`/`exit_requested` at the NEXT wake, and the
+        // input batch's bare `break` only leaves the batch — the select
+        // after it parks the exit (the old unconditional quiet tick was
+        // the guaranteed ≤50ms wake; with the tick parked on idle work,
+        // an exit on an otherwise idle surface would wait for whatever
+        // timer happens to be armed). The frame arm is the one that can
+        // wake now, so a pending exit takes it immediately: the tail
+        // pass paints its final frame and the loop condition runs within
+        // the same iteration, strictly sooner than the tick ever did.
+        if (!running || session.exit_requested)
+            && render_deadline.is_none_or(|deadline| deadline > Instant::now())
+        {
+            render_deadline = Some(Instant::now());
+        }
         let was_active = session.turn_active;
+        // The quiet tick's arming state, snapshotted before the select:
+        // parked autocomplete requests and an armed selection auto-scroll
+        // are the only work the tick exists for, and the arm future reads
+        // these locals instead of borrowing the surface.
+        let autocomplete_pending = view.editor.has_pending_autocomplete();
+        let auto_scroll_armed = session.selection_auto_scroll_armed();
+        let bash_refresh_wanted = session.kernel_bash_refresh_wanted();
         tokio::select! {
             maybe_event = async {
                 // A closed channel's recv() resolves None instantly and
@@ -1650,23 +1672,44 @@ async fn run_interactive_surface(
                     }
                 }
             }
-            () = tokio::time::sleep(Duration::from_millis(50)) => {
-                // The input stream went quiet for a tick: parked editor
-                // autocomplete requests materialize now (TS resolves
-                // suggestions asynchronously after the keystroke batch, so
-                // a typed command plus Enter in one burst submits as typed
-                // and the dropdown opens only once typing pauses).
-                session.materialize_editor_autocomplete(&mut view);
-                // The same tick drives the selection auto-scroll (TS's
-                // 150 ms hold + 50 ms interval timer): a drag holding the
-                // window edge keeps scrolling while no other input
-                // arrives, which is the only time this arm runs at that
-                // cadence.
-                session.selection_auto_scroll_tick(&mut view);
-                if last_bash_refresh.elapsed() >= Duration::from_secs(2) {
-                    last_bash_refresh = Instant::now();
-                    session.spawn_bash_activity_refresh();
+            () = async {
+                // The quiet tick runs only while work is actually
+                // pending: a parked editor autocomplete request (TS
+                // resolves suggestions asynchronously after the
+                // keystroke batch, so a typed command plus Enter in one
+                // burst submits as typed and the dropdown opens only
+                // once typing pauses) or an armed selection auto-scroll
+                // (TS's 150 ms hold + 50 ms interval timer, armed only
+                // while a drag holds the window edge). An idle surface
+                // parks this arm — TS keeps no free-running timer either
+                // (the loader's interval runs only while a turn
+                // animates, scheduleRender arms only on a render
+                // request), so the unconditional tick spent its wakeups
+                // on nothing observable.
+                if !(autocomplete_pending || auto_scroll_armed) {
+                    std::future::pending::<()>().await;
                 }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            } => {
+                session.materialize_editor_autocomplete(&mut view);
+                session.selection_auto_scroll_tick(&mut view);
+            }
+            () = async {
+                // The 2s bash-activity poll, on its own absolute
+                // deadline and only on daemons that advertise the
+                // kernel-bash registry (the same gate the spawn applies —
+                // without the capability every fire was a no-op, so the
+                // arm parks and an idle surface spends no wakeups on it).
+                if !bash_refresh_wanted {
+                    std::future::pending::<()>().await;
+                }
+                tokio::time::sleep_until(
+                    tokio::time::Instant::from_std(last_bash_refresh + Duration::from_secs(2)),
+                )
+                .await;
+            } => {
+                last_bash_refresh = Instant::now();
+                session.spawn_bash_activity_refresh();
             }
             _frame = async {
                 match render_deadline {
@@ -1795,6 +1838,16 @@ async fn run_interactive_surface(
         // armed after the gate so the paint above cannot wipe it — an
         // otherwise idle loop must still wake once to clear the hint row.
         if let Some(until) = session.ctrl_c_hint_expiry() {
+            if render_deadline.is_none_or(|deadline| deadline > until) {
+                render_deadline = Some(until);
+            }
+        }
+        // The visible toasts' TTL wakeup, the same way: prune_expired at
+        // the TTL marks the surface dirty, but only an iteration there
+        // repaints the overlay away — the quiet tick used to be that
+        // iteration on an idle surface, and a parked surface would leave
+        // the toast on screen until the next keypress.
+        if let Some(until) = view.toasts.next_expiry() {
             if render_deadline.is_none_or(|deadline| deadline > until) {
                 render_deadline = Some(until);
             }

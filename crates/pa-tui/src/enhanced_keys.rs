@@ -128,6 +128,17 @@ fn lock_modes() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Whether the kitty probe's answer window is open. The input reader
+/// keys its bounded poll cadence on this: the probe's slices and the
+/// reader share crossterm's process-global event-reader lock, and the
+/// reader's indefinite park would hold it — starving the probe's
+/// slices for the window's whole duration (the window is bounded and
+/// once per process, so the cadence there is the startup cost it
+/// already was).
+pub(crate) fn query_in_flight() -> bool {
+    QUERY_IN_FLIGHT.load(Ordering::SeqCst)
+}
+
 /// Mark the terminal released for process exit (the force-quit restore
 /// calls this before writing the restore sequences): the kitty probe's
 /// answer paths check it before enabling, so no push can land after the

@@ -5,7 +5,7 @@ pub(crate) mod tty;
 pub(crate) mod mio;
 
 #[cfg(feature = "use-dev-tty")]
-pub(crate) use self::tty::Waker;
+pub use self::tty::Waker;
 
 #[cfg(not(feature = "use-dev-tty"))]
-pub(crate) use self::mio::Waker;
+pub use self::mio::Waker;

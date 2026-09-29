@@ -67,6 +67,12 @@ pub(crate) fn restore_terminal() {
     RESTORE_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let mut out = std::io::stdout();
     crate::enhanced_keys::release_for_exit();
+    // The exit drain below reads the tty through crossterm's global
+    // event-reader lock: the surface's input reader must stand down
+    // first — a parked reader holds that lock indefinitely, and the
+    // drain would starve. A no-op when no reader is alive (headless
+    // runs, pre-session surfaces).
+    crate::input::request_reader_stop();
     if out.is_terminal() {
         crate::enhanced_keys::drain_for_exit(&mut out);
         let _ = crate::mouse_tracking::disable(&mut out);

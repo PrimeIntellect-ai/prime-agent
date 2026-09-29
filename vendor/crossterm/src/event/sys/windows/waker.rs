@@ -4,7 +4,7 @@ use crossterm_winapi::Semaphore;
 
 /// Allows to wake up the `WinApiPoll::poll()` method.
 #[derive(Clone, Debug)]
-pub(crate) struct Waker {
+pub struct Waker {
     inner: Arc<Mutex<Semaphore>>,
 }
 
@@ -22,7 +22,7 @@ impl Waker {
     }
 
     /// Wakes the `WaitForMultipleObjects`.
-    pub(crate) fn wake(&self) -> std::io::Result<()> {
+    pub fn wake(&self) -> std::io::Result<()> {
         self.inner.lock().unwrap().release()?;
         Ok(())
     }

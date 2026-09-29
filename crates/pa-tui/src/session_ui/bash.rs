@@ -204,6 +204,14 @@ impl SessionUi {
         self.bash_activities = data;
     }
 
+    /// Whether the run loop should arm the 2s bash-activity poll at all:
+    /// the daemon's own capability, the same gate [`spawn_bash_activity_refresh`]
+    /// applies — without it every fire is a no-op, so the arm parks and an
+    /// idle surface spends no wakeups on it.
+    pub(crate) fn kernel_bash_refresh_wanted(&self) -> bool {
+        self.kernel_bash_supported()
+    }
+
     /// Whether the daemon advertises the kernel-bash registry (older
     /// daemons never see the list requests).
     fn kernel_bash_supported(&self) -> bool {
