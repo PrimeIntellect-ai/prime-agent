@@ -514,6 +514,40 @@ async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups()
         );
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
+    // The TS acceptance case's positive-signal discipline (ENG-5991's
+    // `waitForToolStart`): the abort must land on the REGISTERED run —
+    // `core.busy` flips at the runner's pickup, before the engine's
+    // admission, so a busy-only sync races the first turn's session
+    // build and the abort lands in the admission prefix (the
+    // abort-and-send idle race: the consult aborts the turn before its
+    // provider call, the faux step the held turn never consumed leaks
+    // to the batch turn, and the batch inherits the 600s hold). The
+    // run slot is the registration signal: once it exists the abort
+    // lands on the run itself, the shape this family means to pin.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let registered = worker
+            .agent_engine
+            .as_ref()
+            .map(|engine| {
+                engine
+                    .turn_agent
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            })
+            .flatten()
+            .and_then(|agent| agent.signal())
+            .is_some();
+        if registered {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the held turn's run never registered"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     // Two steering messages and one follow-up behind the streaming
     // turn (the real wire admission path: queue-visible, policy-queued
