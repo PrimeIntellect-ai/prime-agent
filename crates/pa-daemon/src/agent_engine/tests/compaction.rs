@@ -1150,7 +1150,7 @@ fn compact_session_command_emits_the_result_on_success() {
     let filler = "history ".repeat(6_000); // ~48k chars = ~12k tokens each
     let big_second = format!("second {}", "padded ".repeat(6_000)); // ~10.5k tokens
     let (_engine, events) = run_prompts(
-        serde_json::json!({
+        &serde_json::json!({
             "responses": [
                 { "text": filler },
                 { "text": filler },
