@@ -72,7 +72,7 @@ struct DiffEngine<'a> {
 }
 
 impl DiffEngine<'_> {
-    fn equals(&self, left: &str, right: &str) -> bool {
+    fn equals(left: &str, right: &str) -> bool {
         left == right
     }
 
@@ -120,7 +120,7 @@ impl DiffEngine<'_> {
         let mut common_count = 0usize;
         while new_pos + 1 < new_len
             && old_pos + 1 < old_len
-            && self.equals(
+            && Self::equals(
                 &self.old_tokens[(old_pos + 1) as usize],
                 &self.new_tokens[(new_pos + 1) as usize],
             )

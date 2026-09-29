@@ -32,6 +32,7 @@ pub enum UserOrProject {
 }
 
 impl UserOrProject {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             UserOrProject::User => "user",
@@ -274,6 +275,7 @@ fn parse_generic_git_url(url: &str) -> Option<GitSource> {
 ///
 /// Rules: with the `git:` prefix every historical shorthand form is accepted;
 /// without it only explicit protocol URLs parse as git.
+#[must_use]
 pub fn parse_git_url(source: &str) -> Option<GitSource> {
     let trimmed = source.trim();
     let has_git_prefix = trimmed.starts_with("git:");

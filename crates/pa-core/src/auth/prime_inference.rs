@@ -38,6 +38,7 @@ pub struct PrimeInferenceAuthConfig {
 impl PrimeInferenceAuthConfig {
     /// The production guard (TS `loginPrimeInference`'s candidate rule):
     /// the prime-cli config is only reused when both URLs stay stock.
+    #[must_use]
     pub fn is_production(&self) -> bool {
         self.base_url == DEFAULT_PRIME_API_BASE_URL
             && self.frontend_url == DEFAULT_PRIME_FRONTEND_URL
@@ -47,6 +48,7 @@ impl PrimeInferenceAuthConfig {
 /// TS `resolvePrimeInferenceAuthConfig`: the env overrides over the
 /// production URLs (`PRIME_AGENT_INFERENCE_API_BASE_URL`,
 /// `PRIME_AGENT_INFERENCE_FRONTEND_URL`).
+#[must_use]
 pub fn resolve_prime_inference_auth_config() -> PrimeInferenceAuthConfig {
     PrimeInferenceAuthConfig {
         base_url: normalize_base_url(
@@ -196,6 +198,7 @@ pub struct PrimeCliConfig {
 }
 
 /// TS `getPrimeCliConfigPath`'s default: `~/.prime/config.json`.
+#[must_use]
 pub fn default_prime_cli_config_path() -> PathBuf {
     pa_types::platform::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -251,6 +254,7 @@ pub struct PrimeAccessFailure {
 impl PrimeAccessFailure {
     /// TS `formatAccessFailure`: `HTTP {status}: {message}` (the status
     /// prefix drops when the API never answered).
+    #[must_use]
     pub fn format(&self) -> String {
         match self.status {
             Some(status) => format!("HTTP {status}: {}", self.message),

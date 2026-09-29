@@ -47,6 +47,7 @@ pub enum SessionSelectorError {
 
 impl SessionSelectorError {
     /// The error message body, matching the TS constructor text.
+    #[must_use]
     pub fn message(&self) -> String {
         match self {
             SessionSelectorError::NotFound { selector, .. } => {
@@ -62,6 +63,7 @@ impl SessionSelectorError {
     }
 
     /// The suggestion sentence main appends to a not-found error.
+    #[must_use]
     pub fn suggestion(&self) -> Option<String> {
         match self {
             SessionSelectorError::NotFound {
@@ -94,6 +96,7 @@ fn normalize_hex_session_id(id: &str) -> Option<String> {
 }
 
 /// `looksLikeSessionPath`: separators or a `.jsonl` suffix mean a path.
+#[must_use]
 pub fn looks_like_session_path(selector: &str) -> bool {
     selector.contains('/')
         || selector.contains('\\')
@@ -113,6 +116,7 @@ fn header_matches_cwd(header: &SessionHeaderInfo, cwd: &Path) -> bool {
 }
 
 /// Scan a session directory for valid session headers (invalid files skip).
+#[must_use]
 pub fn scan_session_headers(session_dir: &Path) -> Vec<SessionHeaderInfo> {
     let mut headers = Vec::new();
     let Ok(entries) = std::fs::read_dir(session_dir) else {
@@ -139,6 +143,7 @@ pub fn scan_session_headers(session_dir: &Path) -> Vec<SessionHeaderInfo> {
 
 /// `findMostRecentSessionForCwd`: the newest session file in `session_dir`
 /// whose header cwd matches, or None.
+#[must_use]
 pub fn find_most_recent_session_for_cwd(session_dir: &Path, cwd: &Path) -> Option<PathBuf> {
     let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = scan_session_headers(session_dir)
         .into_iter()

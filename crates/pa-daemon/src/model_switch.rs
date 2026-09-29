@@ -123,7 +123,7 @@ impl Worker {
             // TS `session.setModel` persists the default provider/model so
             // the next session starts on the switched model.
             let mut settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
-            let _ = settings.set_default_model_and_provider(provider, model_id);
+            let _ = settings.set_default_model_and_provider(&provider, &model_id);
             Some(())
         })
         .await

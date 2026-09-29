@@ -847,7 +847,7 @@ fn emit_refinement_row(
         if store.session_id() != review_session_id {
             pa_core::session_engine::compaction_trace::trace(
                 "autorefine.rows_dropped_session_moved",
-                serde_json::Value::Null,
+                &serde_json::Value::Null,
             );
             return false;
         }

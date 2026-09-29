@@ -1,3 +1,25 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
+// by design on hot paths (boxing the 27 flagged fns is allocation-churn
+// with zero correctness gain); the fn-length threshold is a style gate,
+// not correctness (the session-engine fns are intentionally linear); 64-bit
+// targets - the narrowing sits at OS/protocol boundaries where the values
+// are bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
+// guarded parses), and checked conversions would add panic paths where
+// silent wrap was deliberate (the per-site triage found NO genuinely
+// suspect family in this crate - the lane dossier records the read).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// Test-only: the exact-float `assert_eq!`s assert parsed fixture values
+// (the byte-identity contract - values written as JSON literals); an
+// epsilon compare would weaken the assertions, not fix a lint.
+#![cfg_attr(test, allow(clippy::float_cmp))]
+
 //! Session engine: tools, skills, prompts, compaction, refinement, kernel/RLM
 //! manager, subagents, session manager, settings.
 //!

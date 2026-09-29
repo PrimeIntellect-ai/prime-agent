@@ -66,6 +66,7 @@ pub struct PythonSkillRuntimeInfo {
 ///
 /// Panics if the sorted import-name list cannot be serialized as JSON,
 /// which cannot fail for a list of strings.
+#[must_use]
 pub fn build_rlm_bootstrap_code(python_skills: &[PythonSkillRuntimeInfo]) -> String {
     let base_code = format!("{RLM_BOOTSTRAP_HEADER_CODE}\n\n{RLM_BOOTSTRAP_RUNTIME_CODE}");
 

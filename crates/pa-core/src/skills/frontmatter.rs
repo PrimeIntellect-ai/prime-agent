@@ -34,6 +34,7 @@ fn extract_frontmatter(content: &str) -> (Option<String>, String) {
 }
 
 /// Parse `---` YAML frontmatter into a JSON object plus the body.
+#[must_use]
 pub fn parse_frontmatter(content: &str) -> (Value, String) {
     let (yaml_string, body) = extract_frontmatter(content);
     let Some(yaml_string) = yaml_string else {
@@ -53,6 +54,7 @@ pub fn parse_frontmatter(content: &str) -> (Value, String) {
 }
 
 /// The body with frontmatter stripped.
+#[must_use]
 pub fn strip_frontmatter(content: &str) -> String {
     parse_frontmatter(content).1
 }

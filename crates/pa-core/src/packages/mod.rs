@@ -63,6 +63,7 @@ pub(crate) fn package_dir() -> PathBuf {
 }
 
 /// The bundled docs directory (TS `getDocsPath`): `<package dir>/docs`.
+#[must_use]
 pub fn docs_path() -> PathBuf {
     package_dir().join("docs")
 }

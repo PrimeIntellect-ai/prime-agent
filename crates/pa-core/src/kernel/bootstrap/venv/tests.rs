@@ -120,7 +120,7 @@ fn version_file_round_trips() {
     let version = read_bootstrap_version(dir.path()).expect("version written");
     assert_eq!(version.schema, BOOTSTRAP_SCHEMA);
     assert_eq!(version.runtime.as_deref(), Some("sha256:abc"));
-    assert!(bootstrap_version_current(Some(version), "sha256:abc", &[]));
+    assert!(bootstrap_version_current(Some(&version), "sha256:abc", &[]));
     assert!(!bootstrap_base_version_current(
         read_bootstrap_version(dir.path()),
         "sha256:other"
@@ -976,10 +976,10 @@ fn extra_recorded_skills_do_not_force_reinstall() {
         skill("websearch", "/skills/websearch", "h2"),
     ]);
     let current = [skill("edit", "/skills/edit", "h1")];
-    assert!(recorded_skills_cover(&recorded, &current));
+    assert!(recorded_skills_cover(recorded.as_deref(), &current));
     // A missing record (new session skill) does force a sync.
     assert!(!recorded_skills_cover(
-        &recorded,
+        recorded.as_deref(),
         &[
             skill("edit", "/skills/edit", "h1"),
             skill("goal", "/skills/goal", "h3")
@@ -987,12 +987,12 @@ fn extra_recorded_skills_do_not_force_reinstall() {
     ));
     // A changed pyproject hash does force a sync.
     assert!(!recorded_skills_cover(
-        &recorded,
+        recorded.as_deref(),
         &[skill("edit", "/skills/edit", "changed")],
     ));
     // No records at all: nothing is covered.
-    assert!(!recorded_skills_cover(&None, &current));
-    assert!(recorded_skills_cover(&None, &[]));
+    assert!(!recorded_skills_cover(None, &current));
+    assert!(recorded_skills_cover(None, &[]));
 }
 
 #[cfg(unix)]

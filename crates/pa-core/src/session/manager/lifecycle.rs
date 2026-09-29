@@ -2,7 +2,14 @@
 //! the open/fork/new/materialize/adopt arm, and the fork's branch-copy
 //! helpers (TS SessionManager.forkFrom).
 
-use super::*;
+#[cfg(test)]
+use super::repair::repair_jsonl_damage;
+use super::{
+    capture_git_context, create_session_id, format_iso_now, get_session_file_path,
+    is_valid_rlm_depth, load_entries_from_file, migrate_to_current_version,
+    resolve_session_rlm_depth, root_rlm_depth_from_env, AgentMessage, FileEntry, HashMap,
+    NewSessionOptions, Path, PathBuf, SessionHeader, SessionManager, CURRENT_SESSION_VERSION,
+};
 
 /// The fork's branch copy (TS `forkFrom`'s entry loop): drop the source
 /// header and its `git_state` rows, re-linking any child whose parent was a
@@ -142,11 +149,13 @@ impl SessionManager {
     }
 
     /// Create a persisted manager rooted at `session_dir`.
+    #[must_use]
     pub fn persisted(cwd: &Path, session_dir: &Path) -> Self {
         Self::new_with(cwd.to_path_buf(), session_dir.to_path_buf(), None, true)
     }
 
     /// Create an in-memory (non-persisted) manager.
+    #[must_use]
     pub fn in_memory(cwd: &Path) -> Self {
         Self::new_with(cwd.to_path_buf(), cwd.to_path_buf(), None, false)
     }
@@ -155,6 +164,7 @@ impl SessionManager {
     /// own directory: the daemon worker owns the durable file and mirrors
     /// the entries, but the session's identity (its directory, the local
     /// harness state's home) stays the session's own.
+    #[must_use]
     pub fn in_memory_in_session_dir(cwd: &Path, session_dir: &Path) -> Self {
         let mut manager = Self::new_with(cwd.to_path_buf(), session_dir.to_path_buf(), None, false);
         manager.session_dir_backed = true;
@@ -166,11 +176,13 @@ impl SessionManager {
     /// session-backed manager (persisted, or the daemon's mirrored
     /// engine session) does. Session-owned artifacts (the local harness
     /// state) need it.
+    #[must_use]
     pub fn has_session_dir(&self) -> bool {
         self.session_dir_backed
     }
 
     /// Open an existing session file (repair + migrate), or a fresh one.
+    #[must_use]
     pub fn open(cwd: &Path, session_dir: &Path, session_file: &Path) -> Self {
         Self::new_with(
             cwd.to_path_buf(),

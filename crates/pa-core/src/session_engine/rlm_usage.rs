@@ -420,7 +420,7 @@ impl RlmChildUsageAttributions {
     /// # Panics
     ///
     /// Panics if the children or fallback state mutexes are poisoned.
-    pub async fn forget_child(&self, rlm_child_id: &str) {
+    pub fn forget_child(&self, rlm_child_id: &str) -> impl std::future::Future<Output = ()> {
         self.children
             .lock()
             .expect("rlm usage children lock")
@@ -440,6 +440,7 @@ impl RlmChildUsageAttributions {
                 .expect("rlm usage children lock")
                 .remove(rlm_child_id);
         }
+        std::future::ready(())
     }
 }
 
@@ -526,7 +527,7 @@ mod tests {
 
     /// A file-backed manager holding one assistant row, plus the handle
     /// the producer locks.
-    async fn manager_with_assistant(
+    fn manager_with_assistant(
         usage: Usage,
     ) -> (
         tempfile::TempDir,
@@ -577,7 +578,7 @@ mod tests {
         // Parts sum 24,184 with totalTokens 23,032; input 2,690 captured.
         let raw_parent = usage_block(2_690, 1_577, 19_917, 0, 23_032, 0.0);
         let child = usage_block(50_208, 2_929, 0, 0, 53_137, 0.008_995_7);
-        let (_tmp, manager) = manager_with_assistant(raw_parent).await;
+        let (_tmp, manager) = manager_with_assistant(raw_parent);
         let producer = RlmChildUsageAttributions::new(manager.clone());
         producer.register_spawn("sub-abc12345").await;
         producer
@@ -637,7 +638,7 @@ mod tests {
     #[tokio::test]
     async fn rebuild_adoption_continues_the_aggregate_chain() {
         let raw_parent = usage_block(1_000, 0, 0, 0, 4_096, 0.0);
-        let (_tmp, manager) = manager_with_assistant(raw_parent).await;
+        let (_tmp, manager) = manager_with_assistant(raw_parent);
         let retired = std::sync::Arc::new(RlmChildUsageAttributions::new(manager.clone()));
         let fresh = std::sync::Arc::new(RlmChildUsageAttributions::new(manager.clone()));
         retired.register_spawn("sub-rebuild1").await;
@@ -810,7 +811,7 @@ mod tests {
     #[tokio::test]
     async fn multiple_children_and_origins_share_the_cumulative_base() {
         let raw_parent = usage_block(1_000, 100, 0, 0, 1_100, 0.01);
-        let (_tmp, manager) = manager_with_assistant(raw_parent).await;
+        let (_tmp, manager) = manager_with_assistant(raw_parent);
         let producer = RlmChildUsageAttributions::new(manager.clone());
         producer.register_spawn("sub-one").await;
         producer.register_spawn("sub-two").await;
@@ -863,7 +864,7 @@ mod tests {
     /// no parent row, no row on disk).
     #[tokio::test]
     async fn unregistered_child_report_attributes_nothing() {
-        let (_tmp, manager) = manager_with_assistant(usage_block(1, 1, 0, 0, 2, 0.0)).await;
+        let (_tmp, manager) = manager_with_assistant(usage_block(1, 1, 0, 0, 2, 0.0));
         let producer = RlmChildUsageAttributions::new(manager.clone());
         producer
             .record_child_usage(RlmChildUsageReport {

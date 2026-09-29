@@ -26,7 +26,7 @@ pub enum GoalContextKind {
 }
 
 impl GoalContextKind {
-    fn label(&self) -> &'static str {
+    fn label(self) -> &'static str {
         match self {
             GoalContextKind::Continuation => "continuation",
             GoalContextKind::BudgetLimit => "budget-limit",
@@ -87,12 +87,13 @@ pub fn goal_update_dedupe_projection(state: &GoalState) -> GoalState {
     projected
 }
 
-/// Clamp counters, derive `active` from the status, and backfill
+/// Clamp counters and derive `active` from the status. Backfills
 /// `created_at` for goals persisted before the creation-based timer
 /// contract (operator ruling 2026-09-28): a goal without `created_at`
 /// adopts its `updated_at` as the creation time, so rows persisted
 /// before the contract read a sane age instead of no age. The empty
 /// state (no goal id, no objective) never fabricates a creation time.
+#[must_use]
 pub fn normalize_goal_state(goal: GoalState) -> GoalState {
     let created_at = match goal.created_at {
         Some(created_at) => Some(created_at),
@@ -144,6 +145,7 @@ pub fn validate_goal_budget(value: Option<u64>) -> anyhow::Result<Option<u64>> {
 }
 
 /// Token accounting delta for one usage event.
+#[must_use]
 pub fn goal_token_delta_for_usage(input: i64, output: i64) -> u64 {
     input.max(0) as u64 + output.max(0) as u64
 }
@@ -177,6 +179,7 @@ pub fn is_persisted_goal_state(value: &serde_json::Value) -> bool {
         })
 }
 
+#[must_use]
 pub fn goal_host_response(goal: &GoalState, include_completion_report: bool) -> GoalHostResponse {
     if goal.status == GoalStatus::Idle || goal.objective.is_none() {
         return GoalHostResponse {
@@ -241,6 +244,7 @@ pub fn create_goal_context_message(
 }
 
 /// Human-readable usage line for status displays.
+#[must_use]
 pub fn format_goal_usage(goal: &GoalState) -> Option<String> {
     if let Some(budget) = goal.token_budget {
         return Some(format!("{} / {budget} tokens", goal.tokens_used));

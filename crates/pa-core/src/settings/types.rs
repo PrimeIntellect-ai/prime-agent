@@ -37,6 +37,7 @@ impl ThinkingLevelSetting {
     /// The reverse of [`ThinkingLevelSetting::model_level`]: a live switch
     /// (daemon `set_thinking_level`) persists a model-vocabulary level as
     /// the settings default without re-matching this enum at the call site.
+    #[must_use]
     pub fn from_model_level(level: pa_types::ai::ModelThinkingLevel) -> ThinkingLevelSetting {
         match level {
             pa_types::ai::ModelThinkingLevel::Off => ThinkingLevelSetting::Off,
@@ -52,6 +53,7 @@ impl ThinkingLevelSetting {
     /// The same level in the shared model vocabulary: the settings default
     /// feeds session thinking-level resolution, so callers need the
     /// pa-types value without re-matching this enum.
+    #[must_use]
     pub fn model_level(self) -> pa_types::ai::ModelThinkingLevel {
         match self {
             ThinkingLevelSetting::Off => pa_types::ai::ModelThinkingLevel::Off,

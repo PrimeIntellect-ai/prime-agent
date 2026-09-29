@@ -96,6 +96,7 @@ pub struct BuildSystemPromptOptions<'a> {
 }
 
 /// Build the system prompt (assembled text only).
+#[must_use]
 pub fn build_system_prompt(options: &BuildSystemPromptOptions) -> String {
     system_prompt_breakdown(options).assembled
 }

@@ -347,7 +347,7 @@ fn user_server_view(
     };
     let uses_oauth = *oauth == Some(true);
     let state = http_connection_status(
-        HttpStatusOptions {
+        &HttpStatusOptions {
             connection_id: name,
             endpoint: url,
             uses_oauth,

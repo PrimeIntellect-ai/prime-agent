@@ -56,6 +56,7 @@ pub enum ProviderRetryDelay {
 const MAX_TIMER_DELAY_MS: u64 = 2_147_483_647;
 
 /// Local listener/lifecycle crashes are not provider failures; never retry them.
+#[must_use]
 pub fn is_agent_lifecycle_failure(message: &AssistantMessage) -> bool {
     message.diagnostics.as_ref().is_some_and(|diagnostics| {
         diagnostics
@@ -66,6 +67,7 @@ pub fn is_agent_lifecycle_failure(message: &AssistantMessage) -> bool {
 
 /// The faux test provider's queue running dry is deterministic; retrying it
 /// only stalls tests.
+#[must_use]
 pub fn is_faux_provider_queue_exhausted(message: &AssistantMessage) -> bool {
     message.provider == "faux"
         && message.error_message.as_deref() == Some("No more faux responses queued")
@@ -74,6 +76,7 @@ pub fn is_faux_provider_queue_exhausted(message: &AssistantMessage) -> bool {
 /// A context-overflow failure (TS `_isRetryableError`'s overflow guard): the
 /// request itself is too large, so re-issuing it unchanged can never succeed.
 /// The session-level compact-and-retry recovery owns it instead.
+#[must_use]
 pub fn is_context_overflow_failure(message: &AssistantMessage, context_window: u64) -> bool {
     // The shared overflow classifier works over the wire message shape;
     // a round-trip failure means no usage/error fields to inspect.
@@ -99,6 +102,7 @@ const UNSUPPORTED_TOOL_FAILURE_MARKER: &str = "no endpoints found that support t
 /// plain routing-blip 404 (transient), the request's tools make this a
 /// permanent capability mismatch: every provider serving the same model
 /// rejects it identically, so it is never retried and never fails over.
+#[must_use]
 pub fn is_unsupported_tool_failure(message: &AssistantMessage) -> bool {
     provider_stream_failure_status(message) == Some(404)
         && message.error_message.as_deref().is_some_and(|error| {
@@ -109,6 +113,7 @@ pub fn is_unsupported_tool_failure(message: &AssistantMessage) -> bool {
 }
 
 /// The `details` payload of the `provider_stream_failure` diagnostic.
+#[must_use]
 pub fn provider_stream_failure_details(message: &AssistantMessage) -> Option<&Value> {
     message
         .diagnostics
@@ -144,6 +149,7 @@ pub fn provider_stream_failure_status(message: &AssistantMessage) -> Option<u16>
 /// blips, so it counts as transient unavailability, not a permanent rejection.
 /// Safety filters deterministically reject identical requests, so they never
 /// retry (TS #2472: a `content_filter` rejection surfaces immediately).
+#[must_use]
 pub fn is_permanent_provider_failure_kind(
     kind: Option<&str>,
     retries_performed: u32,
@@ -171,6 +177,7 @@ const RETRY_JITTER_FRACTION: f64 = 0.2;
 /// `[0, 1]`; `0.5` is the no-change identity). Pure so tests stay
 /// deterministic: `jittered_delay_ms(1000, 0.0) == 800`,
 /// `jittered_delay_ms(1000, 1.0) == 1200`.
+#[must_use]
 pub fn jittered_delay_ms(delay_ms: u64, rand01: f64) -> u64 {
     let rand01 = rand01.clamp(0.0, 1.0);
     let factor = 1.0 + RETRY_JITTER_FRACTION * (2.0 * rand01 - 1.0);
@@ -186,7 +193,7 @@ pub fn retry_jitter_rand01() -> f64 {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| {
-            duration.subsec_nanos() as u64 ^ (duration.as_secs() << 32)
+            u64::from(duration.subsec_nanos()) ^ (duration.as_secs() << 32)
         });
     let mut x = nanos ^ count.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     x ^= x >> 12;
@@ -196,6 +203,7 @@ pub fn retry_jitter_rand01() -> f64 {
 }
 
 /// Delay before retry `attempt` (1-based), honoring a server-requested wait.
+#[must_use]
 pub fn provider_retry_delay(
     attempt: u32,
     retry_after_ms: Option<u64>,
