@@ -669,6 +669,9 @@ impl Renderer {
     ) -> Result<Renderer> {
         match ui {
             AgentsViewUiMode::Terminal => {
+                // The raw-mode bracket's `cfmakeraw` write clears IXON,
+                // which is the kernel's one trigger for lifting a pending
+                // Ctrl+S stop (see the flow e2e's launch route).
                 crossterm::terminal::enable_raw_mode()?;
                 // The terminal state changed: every later setup step is
                 // fallible and an error from any of them still owns the

@@ -22,7 +22,12 @@
 //!    swallows errors, so a poisoned start (a killed previous run left
 //!    the tty raw and crossterm adopted that state as the baseline)
 //!    would silently restore raw ([`pa_types::platform::terminal`]'s
-//!    `stty sane` reconstruction repairs it).
+//!    `stty sane` reconstruction repairs it);
+//! 7. a pending Ctrl+S output stop lifts — the stop is runtime state,
+//!    not termios, and survives every restore; a raw bracket that never
+//!    re-arms would hand the shell a frozen prompt, so the IXON-toggle
+//!    lift runs with the handback
+//!    ([`pa_types::platform::terminal::restart_output`]).
 //!
 //! The parity exit (the normal quit) keeps the TS byte order for its
 //! visible exit frame — the inline transcript flush after the
@@ -86,6 +91,13 @@ pub(crate) fn restore_terminal() {
     // there would hand the shell a raw tty with no repair.
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = report_cooked_repair();
+    // The output-stop lift runs with the termios handback: a Ctrl+S the
+    // line discipline processed in a cooked window (a suspend cycle, or
+    // the pre-launch prompt) is RUNTIME state that survives every
+    // restore — a raw bracket that never re-arms (the suspend's error
+    // paths, the force-quit from a wedge) would hand the shell a frozen
+    // prompt until Ctrl+Q.
+    pa_types::platform::terminal::restart_output();
     let _ = out.flush();
 }
 
@@ -108,6 +120,9 @@ pub(crate) fn terminal_release_tail(out: &mut Stdout) {
     crate::exit_guard::note_exit_progress();
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = report_cooked_repair();
+    // The same output-stop lift as `restore_terminal`: a stop armed in a
+    // cooked window must not outlive the handback into the shell.
+    pa_types::platform::terminal::restart_output();
     let _ = out.flush();
     crate::exit_guard::note_exit_progress();
 }

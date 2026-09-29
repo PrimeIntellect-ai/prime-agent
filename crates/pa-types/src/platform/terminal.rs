@@ -104,6 +104,46 @@ fn tty() -> Option<File> {
     }
 }
 
+/// Lift a pending Ctrl+S output stop on the process tty: the stop the
+/// line discipline armed from a VSTOP received while the tty was
+/// cooked (a Ctrl+S at the shell prompt, or in a suspend window) is
+/// RUNTIME state — it survives every `tcsetattr`, and an exit restore
+/// that never re-arms raw would leave the shell on a frozen prompt
+/// until Ctrl+Q. The kernel lifts it on one condition only: the IXON
+/// transition to off (`n_tty` clears the stopped flag when software
+/// flow control turns off; a `tcflow(TCOON)` clears only the separate
+/// `TCOFF` state, and an identical-attrs write clears nothing). The
+/// two-step toggle clears IXON for one `tcsetattr` (lifting any armed
+/// stop) and writes the captured attributes straight back, so the
+/// shell's own flow-control configuration returns byte-equal.
+/// Best-effort: no tty means nothing to lift, and the caller proceeds
+/// (the same swallow-first contract as `disable_raw_mode`).
+#[cfg(unix)]
+pub fn restart_output() {
+    let Some(tty) = tty() else {
+        return;
+    };
+    let fd = tty.as_raw_fd();
+    let mut attrs: libc::termios = unsafe { std::mem::zeroed() };
+    // SAFETY: `tcgetattr` only reads the line discipline into `attrs`.
+    if unsafe { libc::tcgetattr(fd, &mut attrs) } != 0 {
+        return;
+    }
+    let restored = attrs;
+    attrs.c_iflag &= !libc::IXON;
+    // SAFETY: the two `tcsetattr` writes run the kernel's one stop-lift
+    // (the IXON transition) and then restore the exact captured state.
+    unsafe {
+        if libc::tcsetattr(fd, libc::TCSANOW, &attrs) == 0 {
+            let _ = libc::tcsetattr(fd, libc::TCSANOW, &restored);
+        }
+    }
+}
+
+/// The non-unix arm: no POSIX software flow control to lift.
+#[cfg(not(unix))]
+pub fn restart_output() {}
+
 /// Verify the process tty and repair a raw state: the force-quit
 /// restore already ran its best-effort `disable_raw_mode`, so a raw
 /// read here means the saved original was poisoned or the restore write

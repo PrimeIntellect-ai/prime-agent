@@ -535,7 +535,20 @@ fn spawn_kitty_probe() {
                     // the raw-mode save slot. The exit paths set the
                     // standdown before they restore, so settle with no
                     // answer instead of running the check.
-                    if EXIT_RELEASE.load(Ordering::SeqCst) {
+                    //
+                    // The same standdown holds for the SUSPEND window: the
+                    // check's bracket only runs when the app's raw mode is
+                    // off, and a suspend cycle that raced the probe's
+                    // thread start (early typing is delivered inside the
+                    // probe window) leaves exactly that state — the check
+                    // would re-arm raw on the terminal the shell now owns
+                    // while the process group stops (the probe-bracket
+                    // race the module docs warn about). Settle no-kitty
+                    // instead; the capability stays unresolved for this
+                    // run, never poisoned.
+                    let raw_bracket_on =
+                        crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
+                    if EXIT_RELEASE.load(Ordering::SeqCst) || !raw_bracket_on {
                         let _ = answer_tx.send(Ok(false));
                         return;
                     }
