@@ -194,4 +194,25 @@ mod tests {
         assert_eq!(expand_tilde_path("/abs/path"), PathBuf::from("/abs/path"));
         assert_eq!(expand_tilde_path("~foo"), PathBuf::from("~foo"));
     }
+
+    /// The TS `expandTildePath` win32 arm this crate already carries: a
+    /// `~\`-prefixed value expands against the home dir (the pa-types
+    /// twin gained the same arm, so the CLI and the daemon agree on the
+    /// state dir).
+    #[test]
+    #[cfg(windows)]
+    fn expands_the_win32_backslash_tilde() {
+        let _env = env_lock();
+        std::env::remove_var("HOME");
+        std::env::set_var("USERPROFILE", r"C:\Users\tester");
+        assert_eq!(
+            expand_tilde_path(r"~\sessions"),
+            PathBuf::from(r"C:\Users\tester\sessions")
+        );
+        assert_eq!(
+            expand_tilde_path(r"~\deep\dir"),
+            PathBuf::from(r"C:\Users\tester\deep\dir")
+        );
+        std::env::remove_var("USERPROFILE");
+    }
 }

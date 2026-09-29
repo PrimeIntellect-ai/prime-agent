@@ -782,7 +782,7 @@ async fn a_compacted_session_restores_its_post_compaction_model() {
     ));
     session.set_path(path.clone());
     session.append_model_change("battery", "mock-reason");
-    let kept = session.append_message(serde_json::json!({
+    let kept = session.append_message(&serde_json::json!({
         "role": "assistant",
         "provider": "battery",
         "model": "mock-plain",

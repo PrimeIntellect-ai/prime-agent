@@ -8,6 +8,31 @@
 //!
 //! Linux-only e2e (`AF_UNIX` sockets, `kill -9` semantics): compiles to
 //! nothing elsewhere, like the other pa-daemon e2e verifiers.
+// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
+// the full rationale).
+// Stack-resident futures by design on the daemon's hot paths; boxing the
+// call sites for a lint tick is a perf regression with zero correctness gain.
+#![allow(clippy::large_futures)]
+// 64-bit-only targets; the narrowing casts sit at OS boundaries
+// (pid/fd/time/size) where the values are bounded by the kernel - the
+// dead-guard expect()s would add panic paths where silent wrap was
+// deliberate.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// The fn-length threshold is a style gate, not correctness; the structure
+// campaign owns the god-fn splits as a follow-up.
+#![allow(clippy::too_many_lines)]
+// API-shape opinions, not defects; the surfaces are deliberate.
+#![allow(
+    clippy::unnecessary_wraps,
+    clippy::zero_sized_map_values,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names
+)]
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -96,10 +121,10 @@ fn child_pids_of(ppid: u32) -> Vec<u32> {
     let mut pids = Vec::new();
     let entries = std::fs::read_dir("/proc").expect("read /proc");
     for entry in entries.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+        let Ok(entry_pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
             continue;
         };
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{entry_pid}/stat")) else {
             continue;
         };
         let Some((_, rest)) = stat.rsplit_once(')') else {
@@ -111,7 +136,7 @@ fn child_pids_of(ppid: u32) -> Vec<u32> {
             continue;
         };
         if parent == ppid {
-            pids.push(pid);
+            pids.push(entry_pid);
         }
     }
     pids
@@ -141,7 +166,7 @@ impl Client {
         self.writer.flush().expect("flush");
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         self.send(&json!({
             "type": "command",
             "id": id,
@@ -434,7 +459,7 @@ fn supervisor_kill9_restart_sessions_re_register_and_survive() {
         .expect("write script");
         client.send_command(
             &format!("c{index}"),
-            json!({
+            &json!({
                 "type": "create",
                 "config": {
                     "cwd": dir.path().to_string_lossy(),
@@ -452,7 +477,7 @@ fn supervisor_kill9_restart_sessions_re_register_and_survive() {
             .to_string();
         client.send_command(
             &format!("a{index}"),
-            json!({ "type": "attach", "activeSessionId": session_id }),
+            &json!({ "type": "attach", "activeSessionId": session_id }),
         );
         let attached = client.read_response(&format!("a{index}"));
         assert_eq!(attached["success"], true, "attach {index} failed");
@@ -475,7 +500,7 @@ fn supervisor_kill9_restart_sessions_re_register_and_survive() {
     for (index, session_id) in sessions.iter().enumerate() {
         client.send_command(
             &format!("p{index}"),
-            json!({
+            &json!({
                 "type": "prompt",
                 "activeSessionId": session_id,
                 "message": "go",
@@ -568,7 +593,7 @@ fn supervisor_kill9_restart_sessions_re_register_and_survive() {
 
     // The roster is rebuilt: list shows the sessions again.
     let (mut client2, _hello) = Client::connect(&socket);
-    client2.send_command("list1", json!({ "type": "list" }));
+    client2.send_command("list1", &json!({ "type": "list" }));
     let list = client2.read_response("list1");
     assert_eq!(list["success"], true, "list failed: {list}");
     let listed = list["data"]["sessions"].as_array().expect("sessions");
@@ -583,7 +608,10 @@ fn supervisor_kill9_restart_sessions_re_register_and_survive() {
 
     // Attach to one session through the rebuilt roster and complete a turn.
     let target = &sessions[1];
-    client2.send_command("a1", json!({ "type": "attach", "activeSessionId": target }));
+    client2.send_command(
+        "a1",
+        &json!({ "type": "attach", "activeSessionId": target }),
+    );
     let attached = client2.read_response("a1");
     assert_eq!(
         attached["success"], true,
@@ -591,7 +619,7 @@ fn supervisor_kill9_restart_sessions_re_register_and_survive() {
     );
     client2.send_command(
         "p1",
-        json!({
+        &json!({
             "type": "prompt_and_wait",
             "activeSessionId": target,
             "message": "second turn",
@@ -615,7 +643,7 @@ fn supervisor_kill9_restart_sessions_re_register_and_survive() {
     assert_eq!(answer, "turn-2-1", "scripted turn completed post-restart");
 
     // Shutdown takes the restarted supervisor and its adopted workers down.
-    client2.send_command("sd", json!({ "type": "shutdown" }));
+    client2.send_command("sd", &json!({ "type": "shutdown" }));
     let shutdown = client2.read_response("sd");
     assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -667,7 +695,7 @@ fn plain_boot_revives_only_journal_busy_workers() {
     .expect("write script");
     client.send_command(
         "c0",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -685,7 +713,7 @@ fn plain_boot_revives_only_journal_busy_workers() {
         .to_string();
     client.send_command(
         "p0",
-        json!({
+        &json!({
             "type": "prompt_and_wait",
             "activeSessionId": idle_session,
             "message": "go",
@@ -712,7 +740,7 @@ fn plain_boot_revives_only_journal_busy_workers() {
     .expect("write script");
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -730,13 +758,13 @@ fn plain_boot_revives_only_journal_busy_workers() {
         .to_string();
     client.send_command(
         "a1",
-        json!({ "type": "attach", "activeSessionId": busy_session }),
+        &json!({ "type": "attach", "activeSessionId": busy_session }),
     );
     let attached = client.read_response("a1");
     assert_eq!(attached["success"], true, "attach busy failed: {attached}");
     client.send_command(
         "p1",
-        json!({
+        &json!({
             "type": "prompt",
             "activeSessionId": busy_session,
             "message": "go",
@@ -824,7 +852,7 @@ fn plain_boot_revives_only_journal_busy_workers() {
         std::thread::sleep(Duration::from_millis(50));
     }
     let (mut client2, _hello) = Client::connect(&socket);
-    client2.send_command("list1", json!({ "type": "list" }));
+    client2.send_command("list1", &json!({ "type": "list" }));
     let list = client2.read_response("list1");
     assert_eq!(list["success"], true, "list failed: {list}");
     let listed = list["data"]["sessions"].as_array().expect("sessions");
@@ -845,7 +873,7 @@ fn plain_boot_revives_only_journal_busy_workers() {
     // reply - the budgets below absorb the whole stop pass (the barrier
     // wait, then the terminal escalation), never a fixed fast exit.
     let relaunched = load_worker_descriptor(&agent_dir, &socket, &busy_session);
-    client2.send_command("sd", json!({ "type": "shutdown" }));
+    client2.send_command("sd", &json!({ "type": "shutdown" }));
     let shutdown = client2.read_response("sd");
     assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");
     let deadline = Instant::now() + Duration::from_secs(45);
@@ -897,7 +925,7 @@ fn update_boot_revives_only_roster_kept_workers() {
         .expect("write script");
         client.send_command(
             &format!("c{index}"),
-            json!({
+            &json!({
                 "type": "create",
                 "config": {
                     "cwd": dir.path().to_string_lossy(),
@@ -915,7 +943,7 @@ fn update_boot_revives_only_roster_kept_workers() {
             .to_string();
         client.send_command(
             &format!("p{index}"),
-            json!({
+            &json!({
                 "type": "prompt_and_wait",
                 "activeSessionId": session_id,
                 "message": "go",
@@ -1025,7 +1053,7 @@ fn update_boot_revives_only_roster_kept_workers() {
     }
 
     let (mut client2, _hello) = Client::connect(&socket);
-    client2.send_command("list1", json!({ "type": "list" }));
+    client2.send_command("list1", &json!({ "type": "list" }));
     let list = client2.read_response("list1");
     assert_eq!(list["success"], true, "list failed: {list}");
     let listed = list["data"]["sessions"].as_array().expect("sessions");
@@ -1040,7 +1068,7 @@ fn update_boot_revives_only_roster_kept_workers() {
     );
 
     let relaunched = load_worker_descriptor(&agent_dir, &socket, &sessions[0]);
-    client2.send_command("sd", json!({ "type": "shutdown" }));
+    client2.send_command("sd", &json!({ "type": "shutdown" }));
     let shutdown = client2.read_response("sd");
     assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -1086,7 +1114,7 @@ fn write_revival_fixture(
     let worker_id = format!("w{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
     let mut session =
         pa_daemon::session_store::SessionFile::create(&dir.to_string_lossy(), None, 0);
-    session.append_message(json!({
+    session.append_message(&json!({
         "role": "user", "content": "lane work", "timestamp": 1u64
     }));
     session.append_session_state(session_state);
@@ -1221,7 +1249,7 @@ fn plain_boot_parks_stale_busy_evidence() {
         "the stale-evidence worker resurrected"
     );
     let (mut client, _hello) = Client::connect(&socket);
-    client.send_command("list1", json!({ "type": "list" }));
+    client.send_command("list1", &json!({ "type": "list" }));
     let list = client.read_response("list1");
     assert_eq!(list["success"], true, "list failed: {list}");
     let listed = list["data"]["sessions"].as_array().expect("sessions");
@@ -1363,7 +1391,7 @@ fn plain_boot_still_revives_fresh_busy_evidence() {
 
     let (mut client, _hello) = Client::connect(&socket);
     let relaunched = load_worker_descriptor(&agent_dir, &socket, &fixture.worker_id);
-    client.send_command("sd", json!({ "type": "shutdown" }));
+    client.send_command("sd", &json!({ "type": "shutdown" }));
     let shutdown = client.read_response("sd");
     assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");
     let deadline = Instant::now() + Duration::from_secs(10);

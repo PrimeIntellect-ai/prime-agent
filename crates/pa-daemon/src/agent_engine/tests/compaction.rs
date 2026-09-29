@@ -25,7 +25,7 @@ fn threshold_crossing_auto_compacts_with_the_event_pair() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Probe: the baseline turn's total usage (system prompt included).
     let (probe, _probe_dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "seed reply"}] }),
+        &serde_json::json!({ "responses": [{"text": "seed reply"}] }),
         1,
     );
     let mut probe_events: Vec<EngineEvent> = Vec::new();
@@ -50,7 +50,7 @@ fn threshold_crossing_auto_compacts_with_the_event_pair() {
     // shape: reserveTokens so exactly the seeded crossing fires).
     let headroom = baseline + big_tokens / 2;
     let (engine, _engine_dir) = faux_engine_with_settings(
-        serde_json::json!({
+        &serde_json::json!({
             "responses": [
                 {"text": "seed reply"},
                 {"text": "crossing reply"},
@@ -494,7 +494,7 @@ fn threshold_compaction_counts_into_the_run_telemetry() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Probe: the baseline turn's total usage (system prompt included).
     let (probe, _probe_dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "seed reply"}] }),
+        &serde_json::json!({ "responses": [{"text": "seed reply"}] }),
         1,
     );
     let mut probe_events: Vec<EngineEvent> = Vec::new();
@@ -512,7 +512,7 @@ fn threshold_compaction_counts_into_the_run_telemetry() {
     let big_tokens = (48_000 + "seed turn  crossing".len() as u64).div_ceil(4);
     let headroom = baseline + big_tokens / 2;
     let (engine, dir) = faux_engine_with_settings(
-        serde_json::json!({
+        &serde_json::json!({
             "responses": [
                 {"text": "seed reply"},
                 {"text": "crossing reply"},
@@ -555,7 +555,7 @@ fn requested_compaction_counts_into_the_run_telemetry() {
     // A tiny reserve keeps the threshold arm silent (TS reserve 1 means
     // the context must nearly fill the window).
     let (engine, dir) = faux_engine_with_settings(
-        serde_json::json!({
+        &serde_json::json!({
             "responses": [
                 {"text": "seed reply"},
                 {"text": "second reply"},
@@ -613,7 +613,7 @@ fn manual_wire_compaction_counts_into_the_run_telemetry() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, dir) = faux_engine_with_settings(
-        serde_json::json!({
+        &serde_json::json!({
             "responses": [
                 {"text": "seed reply"},
                 {"text": "second reply"},
@@ -690,7 +690,7 @@ fn outcome_row_and_end_event(
     assert_eq!(row["display"], serde_json::json!(true));
     assert_eq!(
         row["details"],
-        serde_json::json!({
+        &serde_json::json!({
             "reason": expected_reason,
             "outcome": expected_outcome,
         })
@@ -730,7 +730,7 @@ fn threshold_skip_records_the_durable_outcome_row() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Probe: the baseline turn's total usage (system prompt included).
     let (probe, _probe_dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "seed reply"}] }),
+        &serde_json::json!({ "responses": [{"text": "seed reply"}] }),
         1,
     );
     let mut probe_events: Vec<EngineEvent> = Vec::new();
@@ -750,7 +750,7 @@ fn threshold_skip_records_the_durable_outcome_row() {
     let big_tokens = (48_000 + "seed turn  crossing".len() as u64).div_ceil(4);
     let headroom = baseline + big_tokens / 2;
     let (engine, _engine_dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "crossing reply"}] }),
+        &serde_json::json!({ "responses": [{"text": "crossing reply"}] }),
         128_000u64
             .saturating_sub(FAUX_REQUEST_BUDGET + headroom)
             .max(1),
@@ -868,7 +868,7 @@ fn threshold_compaction_aborted_mid_run_records_the_cancelled_outcome() {
     // threshold crossing test; the headroom sits between the two
     // turns' usage).
     let (probe, _probe_dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "seed reply"}] }),
+        &serde_json::json!({ "responses": [{"text": "seed reply"}] }),
         1,
     );
     let mut probe_events: Vec<EngineEvent> = Vec::new();
@@ -1105,7 +1105,7 @@ fn compaction_events(events: &[EngineEvent]) -> Vec<serde_json::Value> {
 #[test]
 fn compact_session_command_emits_the_ts_event_pair_on_a_skip() {
     let (_engine, events) = run_prompts(
-        serde_json::json!({ "responses": ["unused"] }),
+        &serde_json::json!({ "responses": ["unused"] }),
         &["/compact"],
     );
     // The echo row precedes the events (TS `_executeSelectedSessionCommand`

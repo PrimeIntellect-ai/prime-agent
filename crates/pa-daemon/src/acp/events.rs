@@ -223,7 +223,7 @@ pub fn acp_updates_for_event(
             tokens_before,
             summary,
         } => {
-            vec![session_info_update(PrimeAgentSessionMeta {
+            vec![session_info_update(&PrimeAgentSessionMeta {
                 compaction: Some(super::meta::PrimeAgentCompactionMeta {
                     tokens_before: *tokens_before,
                     summary: summary.clone(),
@@ -237,7 +237,7 @@ pub fn acp_updates_for_event(
             token_budget,
             tokens_used,
         } => {
-            vec![session_info_update(PrimeAgentSessionMeta {
+            vec![session_info_update(&PrimeAgentSessionMeta {
                 goal: Some(super::meta::PrimeAgentGoalMeta {
                     status: status.clone(),
                     objective: objective.clone(),
@@ -248,7 +248,7 @@ pub fn acp_updates_for_event(
             })]
         }
         AcpEngineEvent::RefineComplete { summary, changes } => {
-            vec![session_info_update(PrimeAgentSessionMeta {
+            vec![session_info_update(&PrimeAgentSessionMeta {
                 refinement: Some(super::meta::PrimeAgentRefinementMeta {
                     status: "complete".to_string(),
                     summary: Some(summary.clone()),
@@ -259,7 +259,7 @@ pub fn acp_updates_for_event(
             })]
         }
         AcpEngineEvent::RefineFailed { error } => {
-            vec![session_info_update(PrimeAgentSessionMeta {
+            vec![session_info_update(&PrimeAgentSessionMeta {
                 refinement: Some(super::meta::PrimeAgentRefinementMeta {
                     status: "failed".to_string(),
                     summary: None,
@@ -270,7 +270,7 @@ pub fn acp_updates_for_event(
             })]
         }
         AcpEngineEvent::RlmChildUpdate { child } => {
-            vec![session_info_update(PrimeAgentSessionMeta {
+            vec![session_info_update(&PrimeAgentSessionMeta {
                 subagents: Some(vec![super::meta::PrimeAgentSubagentMeta {
                     id: child.id.clone(),
                     session_name: child.session_name.clone(),
@@ -288,7 +288,7 @@ pub fn acp_updates_for_event(
             target,
             delivery_status,
         } => {
-            vec![session_info_update(PrimeAgentSessionMeta {
+            vec![session_info_update(&PrimeAgentSessionMeta {
                 agent_message: Some(super::meta::PrimeAgentAgentMessageMeta {
                     tool_call_id: tool_call_id.clone(),
                     target: target.clone(),
@@ -298,7 +298,7 @@ pub fn acp_updates_for_event(
             })]
         }
         AcpEngineEvent::HeartbeatsChanged => {
-            vec![session_info_update(PrimeAgentSessionMeta {
+            vec![session_info_update(&PrimeAgentSessionMeta {
                 heartbeats_changed: Some(true),
                 ..Default::default()
             })]
@@ -362,7 +362,7 @@ pub fn acp_updates_for_event(
                 }),
                 content: text.map(|text| vec![ToolCallContent::new(text)]),
                 meta: rich.map(|rich| {
-                    super::meta::prime_agent_meta(super::meta::PrimeAgentSessionMeta {
+                    super::meta::prime_agent_meta(&super::meta::PrimeAgentSessionMeta {
                         ipython: Some(rich),
                         ..Default::default()
                     })
@@ -373,7 +373,7 @@ pub fn acp_updates_for_event(
 }
 
 /// A `session_info_update` carrying one namespaced payload.
-fn session_info_update(meta: PrimeAgentSessionMeta) -> AcpSessionUpdate {
+fn session_info_update(meta: &PrimeAgentSessionMeta) -> AcpSessionUpdate {
     AcpSessionUpdate::SessionInfoUpdate {
         meta: super::meta::prime_agent_meta(meta),
     }
@@ -468,9 +468,9 @@ fn base64_byte_length(data: &str) -> usize {
 mod tests {
     use super::*;
 
-    fn update_values(event: AcpEngineEvent) -> Vec<Value> {
+    fn update_values(event: &AcpEngineEvent) -> Vec<Value> {
         let mut state = MappingState::default();
-        acp_updates_for_event(&event, &mut state)
+        acp_updates_for_event(event, &mut state)
             .iter()
             .map(AcpSessionUpdate::to_bare_value)
             .collect()
@@ -518,12 +518,12 @@ mod tests {
 
     #[test]
     fn assistant_deltas_map_to_distinct_chunk_kinds() {
-        let values = update_values(AcpEngineEvent::AssistantDelta {
+        let values = update_values(&AcpEngineEvent::AssistantDelta {
             thinking: true,
             delta: "think".into(),
         });
         assert_eq!(values[0]["sessionUpdate"], "agent_thought_chunk");
-        let values = update_values(AcpEngineEvent::AssistantDelta {
+        let values = update_values(&AcpEngineEvent::AssistantDelta {
             thinking: false,
             delta: "say".into(),
         });
@@ -828,7 +828,7 @@ mod tests {
 
     #[test]
     fn non_assistant_roles_map_to_nothing() {
-        let values = update_values(AcpEngineEvent::MessageStart {
+        let values = update_values(&AcpEngineEvent::MessageStart {
             role: "user".into(),
         });
         assert!(values.is_empty());

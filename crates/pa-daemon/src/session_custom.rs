@@ -29,7 +29,7 @@ impl Worker {
                 None,
             );
         };
-        self.emit_custom_row(message);
+        self.emit_custom_row(&message);
         response_success(None, "append_custom_message", None)
     }
 
@@ -316,7 +316,7 @@ impl Worker {
             if let Ok(value) =
                 serde_json::to_value(pa_types::session::AgentMessage::Custom(outcome))
             {
-                self.emit_custom_row(value);
+                self.emit_custom_row(&value);
             }
             if typed.applied_edits.iter().any(|edit| edit.applied) {
                 let notice = pa_core::session_engine::refine::create_refinement_notice_message(
@@ -326,7 +326,7 @@ impl Worker {
                 if let Ok(value) =
                     serde_json::to_value(pa_types::session::AgentMessage::Custom(notice))
                 {
-                    self.emit_custom_row(value);
+                    self.emit_custom_row(&value);
                 }
             }
         }
@@ -339,7 +339,7 @@ impl Worker {
     /// every model resolution, MCP user servers on every store resolve), so
     /// the reload's observable state is already fresh and the command is
     /// the TS success with no extra work to perform.
-    pub(crate) async fn handle_reload(&self) -> DaemonResponse {
+    pub(crate) fn handle_reload(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("reload") {
             return response;
         }

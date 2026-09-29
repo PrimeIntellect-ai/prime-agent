@@ -150,13 +150,22 @@ pub type OnPayloadHook =
 pub type OnResponseHook = std::sync::Arc<dyn Fn(ProviderResponse, &Model) + Send + Sync>;
 
 /// Stream request options (subset of the TS `SimpleStreamOptions` the loop
-/// uses, plus the request hooks the TS options carry).
+/// uses, plus the request hooks the TS options carry). Every option is
+/// either serialized into the proxy request (`temperature`, `max_tokens`,
+/// `reasoning`, `session_id`, `service_tier` — see [`crate::proxy`]) or
+/// client-local (`api_key`, `signal`); TS `PROXY_SERIALIZED_OPTIONS` marks
+/// the same classification so a new shared option cannot be silently
+/// dropped by the proxy transport.
 #[derive(Clone)]
 pub struct StreamRequestOptions {
     pub temperature: Option<f64>,
     pub max_tokens: Option<u64>,
     pub reasoning: ThinkingLevel,
     pub session_id: Option<String>,
+    /// TS `SimpleStreamOptions.serviceTier`: the requested provider
+    /// service tier for the request. `None` (the TS `null`) means no tier
+    /// request.
+    pub service_tier: Option<crate::types::ServiceTier>,
     pub api_key: Option<String>,
     pub signal: crate::abort::AbortSignal,
     /// Outbound-payload hook (TS `SimpleStreamOptions.onPayload`). `None`
@@ -190,6 +199,7 @@ impl Default for StreamRequestOptions {
             max_tokens: None,
             reasoning: ThinkingLevel::Off,
             session_id: None,
+            service_tier: None,
             api_key: None,
             signal: crate::abort::AbortSignal::never(),
             on_payload: None,

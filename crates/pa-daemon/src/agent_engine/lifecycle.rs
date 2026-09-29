@@ -2,7 +2,15 @@
 //! build/adopt/retire cycle, the closed-state markers, the skill
 //! expansion and session-command funnels, and the kernel host
 //! wiring the session build installs (moved with its concern).
-use super::*;
+use super::{
+    execute_session_command, json_round_trip, map_thinking_level,
+    register_agent_message_host_handlers, register_agent_observe_host_handlers,
+    switchable_stream_fn, AgentEngineConfig, AgentSessionEngine, Arc, CoreSessionEngine,
+    EngineModelSelection, HostRequestHandlers, LinkAgentMessageController,
+    LinkAgentObserveController, Model, OverflowRecovery, ProducerUsageSink, ProviderTarget,
+    QuotaParkState, SessionCommandExecution, SessionCommandParams, SessionEngineConfig,
+    SupervisorChildSessions, Value,
+};
 
 impl AgentSessionEngine {
     /// Build the engine: the shared async runtime, the model selection
@@ -173,6 +181,7 @@ impl AgentSessionEngine {
             session_build: tokio::sync::Mutex::new(()),
             pending_branch: std::sync::Mutex::new(None),
             provider_target: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            image_route: std::sync::Mutex::new(None),
             own_summary: std::sync::Arc::new(std::sync::Mutex::new(None)),
             autonomous: std::sync::Arc::new(tokio::sync::Mutex::new(
                 pa_core::autonomous::create_autonomous_runtime_state(None, None),
@@ -225,7 +234,7 @@ impl AgentSessionEngine {
     }
 
     /// The session's live working directory (the engine's cwd slot).
-    pub(super) fn cwd(&self) -> std::path::PathBuf {
+    pub(crate) fn cwd(&self) -> std::path::PathBuf {
         self.cwd.read().expect("engine cwd lock").clone()
     }
 
@@ -779,8 +788,9 @@ impl AgentSessionEngine {
     }
 
     /// The current explicit selection (create-config flags merged over the
-    /// process fallback).
-    pub(super) fn current_selection(&self) -> EngineModelSelection {
+    /// process fallback). `pub(crate)`: the image-route acceptance probe
+    /// reads the create-config key pin alongside the registry resolution.
+    pub(crate) fn current_selection(&self) -> EngineModelSelection {
         self.selection.read().expect("model selection lock").clone()
     }
 
@@ -852,10 +862,10 @@ impl AgentSessionEngine {
         // under a scoped lock — a std guard must never ride the build's
         // awaits below.
         let (steering_mode, follow_up_mode) = {
-            let modes = self.queue_modes.lock().expect("queue modes");
+            let delivery_modes = self.queue_modes.lock().expect("queue modes");
             (
-                modes.0.as_deref().and_then(Self::queue_mode),
-                modes.1.as_deref().and_then(Self::queue_mode),
+                delivery_modes.0.as_deref().and_then(Self::queue_mode),
+                delivery_modes.1.as_deref().and_then(Self::queue_mode),
             )
         };
 
@@ -955,6 +965,10 @@ impl AgentSessionEngine {
         pa_core::session_engine::engine::create_session(SessionEngineConfig {
             telemetry,
             cwd,
+            // TS settings.imageModel routing: the daemon owns the routing
+            // (the armed route overrides the serving target + the run's
+            // model); the headless surfaces pass `None` to keep their own.
+            image_model_router: None,
             agent_dir: self.config.agent_dir.clone(),
             mcp_manager: Some(std::sync::Arc::clone(&self.mcp)),
             model: Some(agent_model),
@@ -1030,10 +1044,10 @@ impl AgentSessionEngine {
             // built once per session, so the race does not exist there;
             // this port's lazy build needs the catch-up).
             let (steering_mode, follow_up_mode) = {
-                let modes = self.queue_modes.lock().expect("queue modes");
+                let delivery_modes = self.queue_modes.lock().expect("queue modes");
                 (
-                    modes.0.as_deref().and_then(Self::queue_mode),
-                    modes.1.as_deref().and_then(Self::queue_mode),
+                    delivery_modes.0.as_deref().and_then(Self::queue_mode),
+                    delivery_modes.1.as_deref().and_then(Self::queue_mode),
                 )
             };
             if let Some(mode) = steering_mode {

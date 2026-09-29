@@ -179,8 +179,8 @@ fn recovered_engine_compaction_walk_sees_the_durable_history() {
     let mut store = crate::session_store::SessionFile::create("/tmp", None, 0);
     let session_path = dir.path().join("session.jsonl");
     store.set_path(session_path.clone());
-    store.append_message(wire_user_message(format!("work turn one {long}")));
-    store.append_message(wire_assistant_message(format!("reply one {long}")));
+    store.append_message(&wire_user_message(format!("work turn one {long}")));
+    store.append_message(&wire_assistant_message(format!("reply one {long}")));
     store.rewrite().expect("write session file");
     let engine = AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.path().to_path_buf(),
@@ -253,7 +253,7 @@ fn post_compaction_goal_continuation_mint() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "goal turn reply"}] }),
+        &serde_json::json!({ "responses": [{"text": "goal turn reply"}] }),
         1,
     );
     let engine = std::sync::Arc::new(engine);
@@ -489,7 +489,7 @@ fn paused_goal_mints_no_turn_end_continuation() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [
+        &serde_json::json!({ "responses": [
             {"text": "start turn reply"},
             {"text": "paused turn reply"},
         ]}),
@@ -539,7 +539,7 @@ fn budget_exhausted_stops_with_the_ts_budget_steer() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "crossing turn reply"}] }),
+        &serde_json::json!({ "responses": [{"text": "crossing turn reply"}] }),
         1,
     );
     let engine = std::sync::Arc::new(engine);
@@ -608,7 +608,7 @@ fn queued_input_defers_the_turn_end_mint() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "first"}, {"text": "second"}] }),
+        &serde_json::json!({ "responses": [{"text": "first"}, {"text": "second"}] }),
         1,
     );
     let engine = std::sync::Arc::new(engine);
@@ -777,7 +777,7 @@ fn injected_custom_turn_holds_one_representation() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "notice acknowledged"}] }),
+        &serde_json::json!({ "responses": [{"text": "notice acknowledged"}] }),
         1,
     );
     let notice_text = "[child-exited: no-reply child:lane]";
@@ -884,7 +884,7 @@ fn goal_start_continuation_holds_one_representation() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "goal turn reply"}] }),
+        &serde_json::json!({ "responses": [{"text": "goal turn reply"}] }),
         1,
     );
     let mut events: Vec<EngineEvent> = Vec::new();

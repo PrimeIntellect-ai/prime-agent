@@ -170,7 +170,7 @@ fn settled_turn_emits_the_terminal_turn_end_payload() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "settled reply"}] }),
+        &serde_json::json!({ "responses": [{"text": "settled reply"}] }),
         1,
     );
     let mut events: Vec<EngineEvent> = Vec::new();
@@ -220,7 +220,7 @@ fn settled_turn_emits_the_run_agent_end_payload() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = faux_engine_with_settings(
-        serde_json::json!({ "responses": [{"text": "settled reply"}] }),
+        &serde_json::json!({ "responses": [{"text": "settled reply"}] }),
         1,
     );
     let mut events: Vec<EngineEvent> = Vec::new();
@@ -293,7 +293,7 @@ fn retried_run_restarts_with_its_own_agent_frames() {
     std::fs::create_dir_all(dir.path().join("agent")).unwrap();
     std::fs::write(
         dir.path().join("agent").join("settings.json"),
-        serde_json::json!({
+        &serde_json::json!({
             "compaction": { "enabled": true, "reserveTokens": 1, "keepRecentTokens": 10 },
             "retry": { "enabled": true, "maxRetries": 1, "baseDelayMs": 10 }
         })
@@ -411,12 +411,12 @@ struct KernelEnvOverride {
 
 #[cfg(test)]
 impl KernelEnvOverride {
-    fn apply(pairs: Vec<(&str, Option<String>)>) -> Self {
+    fn apply(pairs: &[(&str, Option<String>)]) -> Self {
         let saved = pairs
             .iter()
             .map(|(key, _)| ((*key).to_string(), std::env::var(key).ok()))
             .collect();
-        for (key, value) in &pairs {
+        for (key, value) in pairs {
             match value {
                 Some(value) => std::env::set_var(key, value),
                 None => std::env::remove_var(key),
@@ -485,7 +485,7 @@ fn abort_in_flight_turn_cancels_a_running_kernel_cell() {
     let Some(release) = live_release_dir() else {
         return;
     };
-    let _env = KernelEnvOverride::apply(vec![
+    let _env = KernelEnvOverride::apply(&[
         (
             "PRIME_AGENT_KERNEL_PYTHON",
             Some(kernel_python.display().to_string()),

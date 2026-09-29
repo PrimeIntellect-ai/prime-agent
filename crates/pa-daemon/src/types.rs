@@ -11,6 +11,7 @@ use serde_json::Value;
 pub type AgentMessage = Value;
 
 /// Extract the text of a message content field (string or content blocks).
+#[must_use]
 pub fn message_text(message: &Value) -> String {
     let Some(content) = message.get("content") else {
         return String::new();
@@ -18,6 +19,7 @@ pub fn message_text(message: &Value) -> String {
     content_to_text(content)
 }
 
+#[must_use]
 pub fn content_to_text(content: &Value) -> String {
     match content {
         Value::String(s) => s.clone(),
@@ -153,29 +155,44 @@ pub struct SessionActionSnapshot {
     /// for: which parked lane items are RLM child status notices, by
     /// index (the condensed queue strip folds exactly these rows). The
     /// lane strings stay the TS preview projection verbatim.
-    #[serde(default, skip_serializing_if = "RlmChildStatusIndices::is_empty")]
-    pub rlm_child_status: RlmChildStatusIndices,
+    #[serde(default, skip_serializing_if = "QueueLaneIndices::is_empty")]
+    pub rlm_child_status: QueueLaneIndices,
+    /// Rust-native typed provenance the TS snapshot has no counterpart
+    /// for: which parked lane items are engine-minted internal prompts
+    /// (the injected, queue-invisible continuations TS's projection
+    /// filters out entirely — goal continuations and threshold
+    /// compaction continuations), by index. The condensed queue strip
+    /// folds exactly these rows into its counts too (operator directive
+    /// 2026-09-28: internal prompts never render as individual rows),
+    /// and the browser renders them read-only.
+    #[serde(default, skip_serializing_if = "QueueLaneIndices::is_empty")]
+    pub injected_prompts: QueueLaneIndices,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<SessionActionActive>,
 }
 
-/// The parked RLM child status notices (`rlm_child_terminal_notice` /
-/// `rlm_child_failure` injected rows), by lane index: the worker derives
-/// the indices from each parked item's injected custom row, so the
-/// classification rides the wire typed — a user-typed message that
-/// merely looks like a notice preview never carries it.
+/// The lane-indices rider shape the queue projection's typed-provenance
+/// marks share: parked lane items, by index, of one internal class. The
+/// riders are [`SessionActionSnapshot::rlm_child_status`] (the
+/// `rlm_child_terminal_notice` / `rlm_child_failure` injected rows — the
+/// worker derives the indices from each parked item's injected custom
+/// row) and [`SessionActionSnapshot::injected_prompts`] (the
+/// engine-minted continuations). The classification rides the wire typed
+/// either way — a user-typed message that merely looks like an internal
+/// preview never carries either mark.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RlmChildStatusIndices {
+pub struct QueueLaneIndices {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steering: Vec<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub follow_up: Vec<usize>,
 }
 
-impl RlmChildStatusIndices {
+impl QueueLaneIndices {
     /// Whether no lane item is marked (the wire omits the rider then, so
     /// a notice-free projection serializes byte-identical to TS).
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.steering.is_empty() && self.follow_up.is_empty()
     }

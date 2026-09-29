@@ -13,25 +13,28 @@
 //! The kitty query runs on a probe thread that holds no UI state: it
 //! blocks inside crossterm's terminal support check until the terminal
 //! answers (or its patched 250ms budget lapses) while the fallback timer
-//! fires on the TS schedule. Crossterm parks user keys in its internal event
-//! queue, so early typing is preserved; the app reader never sees protocol
-//! bytes as key input. An answer after the 150ms fallback but within the
-//! 250ms query window still upgrades to kitty. Replies arriving after that
-//! window are filtered by crossterm, and the terminal stays in legacy mode.
+//! fires on the TS schedule. The check holds its window in 10ms poll
+//! slices (the vendored crossterm patch), so the app reader interleaves
+//! and early typing delivers at its own cadence while the probe listens.
+//! Crossterm parks user keys in its internal event queue, so early
+//! typing is preserved; the app reader never sees protocol bytes as key
+//! input. An answer after the 150ms fallback but within the 250ms query
+//! window still upgrades to kitty. Replies arriving after that window are
+//! filtered by crossterm, and the terminal stays in legacy mode.
 //!
 //! The query runs ONCE per process (the first terminal surface), never
-//! again on a later start or resume: the support check holds the
-//! process-global event-reader lock for up to 250ms on silent terminals,
-//! so re-querying at every start would delay input after every SIGCONT
-//! resume (and the check's implicit raw-mode bracket can race the app's
-//! own suspend bracket). The terminal's kitty capability cannot change across a
-//! stop/continue of the same process, so the probe resolves once and
-//! every later start re-applies the resolved state — the observable
-//! TS contract (kitty terminals keep CSI-u parsing after a resume;
-//! non-kitty terminals never gain it) with none of the reader
-//! starvation. The first-mount window is the one accepted cost: input
-//! typed during it queues and delivers when the probe settles, exactly
-//! like keys typed while the TS query is pending.
+//! again on a later start or resume: the terminal's kitty capability
+//! cannot change across a stop/continue of the same process, so the
+//! probe resolves once and every later start re-applies the resolved
+//! state — the observable TS contract (kitty terminals keep CSI-u
+//! parsing after a resume; non-kitty terminals never gain it) — and the
+//! check's implicit raw-mode bracket can race the app's own suspend
+//! bracket, so a re-query at every start carries bracket risk for no
+//! capability gain. The first-mount window is the one accepted cost: on
+//! silent terminals the probe parks the process-global event-reader
+//! lock for its window, but in 10ms slices (the vendored crossterm
+//! patch), so input typed during it delivers within a slice instead of
+//! waiting for the settle.
 //!
 //! DIVERGENCE FROM TS (the shift-modified printable bug class): this port
 //! never arms modifyOtherKeys mode 2 and instead resets it

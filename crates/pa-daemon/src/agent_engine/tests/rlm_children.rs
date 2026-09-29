@@ -24,7 +24,7 @@ fn persisted_rlm_max_depth_reference(path: Option<&str>) -> Option<u64> {
         })
 }
 
-fn depth_override_row(id: &str, depth: serde_json::Value) -> String {
+fn depth_override_row(id: &str, depth: &serde_json::Value) -> String {
     json!({
         "type": "custom",
         "id": id,
@@ -97,14 +97,14 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
         ("absent", [header(), message()].join("\n")),
         (
             "present_last",
-            [header(), message(), depth_override_row("d1", json!(5))].join("\n"),
+            [header(), message(), depth_override_row("d1", &json!(5))].join("\n"),
         ),
         (
             "present_mid",
             [
                 header(),
                 message(),
-                depth_override_row("d1", json!(5)),
+                depth_override_row("d1", &json!(5)),
                 message(),
             ]
             .join("\n"),
@@ -117,8 +117,8 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
             [
                 header(),
                 message(),
-                depth_override_row("d1", json!(5)),
-                depth_override_row("d2", json!("many")),
+                depth_override_row("d1", &json!(5)),
+                depth_override_row("d2", &json!("many")),
             ]
             .join("\n"),
         ),
@@ -127,7 +127,7 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
             [
                 header(),
                 message(),
-                depth_override_row("d1", json!(5)),
+                depth_override_row("d1", &json!(5)),
                 missing_bound_row(),
             ]
             .join("\n"),
@@ -137,7 +137,7 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
             [
                 header(),
                 malformed(),
-                depth_override_row("d1", json!(9)),
+                depth_override_row("d1", &json!(9)),
                 malformed(),
             ]
             .join("\n"),
@@ -152,7 +152,7 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
         ),
         (
             "crlf_lines",
-            [header(), message(), depth_override_row("d1", json!(11))].join("\r\n"),
+            [header(), message(), depth_override_row("d1", &json!(11))].join("\r\n"),
         ),
         (
             "unicode_content_absent",
@@ -163,7 +163,7 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
             [
                 header(),
                 unicode_message(),
-                depth_override_row("d1", json!(3)),
+                depth_override_row("d1", &json!(3)),
             ]
             .join("\n"),
         ),
@@ -223,7 +223,7 @@ fn persisted_rlm_max_depth_scan_matches_reference_across_classes() {
             "{}\n{}\n{}\n",
             header(),
             message(),
-            depth_override_row("d1", json!(5))
+            depth_override_row("d1", &json!(5))
         )
         .into_bytes();
         bytes.push(0xff);

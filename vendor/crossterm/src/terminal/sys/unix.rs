@@ -206,7 +206,7 @@ fn read_supports_keyboard_enhancement_raw() -> io::Result<bool> {
         poll_internal, read_internal, InternalEvent,
     };
     use std::io::Write;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     // This is the recommended method for testing support for the keyboard enhancement protocol.
     // We send a query for the flags supported by the terminal and then the primary device attributes
@@ -229,13 +229,27 @@ fn read_supports_keyboard_enhancement_raw() -> io::Result<bool> {
         stdout.flush()?;
     }
 
+    // Prime Agent v2: the same 250ms answer window, held in short slices
+    // instead of one blocking hold. Each slice parks the shared event-reader
+    // lock for at most a slice, so the app reader interleaves and delivers
+    // early typing at its own cadence while the probe listens; a slice
+    // timeout just yields to the app reader (an unanswered query keeps
+    // waiting until the window deadline, like the 250ms hold it replaces).
+    // The parked-reply queue and the app reader's skipped-event parking are
+    // shared state guarded by the same lock, so a reply read on the app
+    // reader's side is found by the probe's next slice — the reply-filtering
+    // contract is unchanged (diagnostic 1c5af0f for the window's origin).
+    let deadline = Instant::now() + Duration::from_millis(250);
+    let slice = Duration::from_millis(10);
     loop {
-        // Prime Agent: cap the shared event-reader lock to the UI probe window.
-        // An unanswered query otherwise blocks key input for 2s (diagnostic 1c5af0f).
-        match poll_internal(
-            Some(Duration::from_millis(250)),
-            &KeyboardEnhancementFlagsFilter,
-        ) {
+        let leftover = deadline.saturating_duration_since(Instant::now());
+        if leftover.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "The keyboard enhancement status could not be read within a normal duration",
+            ));
+        }
+        match poll_internal(Some(leftover.min(slice)), &KeyboardEnhancementFlagsFilter) {
             Ok(true) => {
                 match read_internal(&KeyboardEnhancementFlagsFilter) {
                     Ok(InternalEvent::KeyboardEnhancementFlags(_current_flags)) => {
@@ -247,12 +261,23 @@ fn read_supports_keyboard_enhancement_raw() -> io::Result<bool> {
                 }
             }
             Ok(false) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "The keyboard enhancement status could not be read within a normal duration",
-                ));
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        "The keyboard enhancement status could not be read within a normal duration",
+                    ));
+                }
+                // Yield the reader to the app between slices.
+                std::thread::yield_now();
             }
-            Err(_) => {}
+            Err(_) => {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        "The keyboard enhancement status could not be read within a normal duration",
+                    ));
+                }
+            }
         }
     }
 }

@@ -51,13 +51,13 @@ fn oracle_session() -> (
 #[test]
 fn saved_context_windowed_matches_full_parse_without_a_boundary() {
     let (mut file, path, _dir) = oracle_session();
-    file.append_message(json!({"role":"user","content":"hello","timestamp":0}));
+    file.append_message(&json!({"role":"user","content":"hello","timestamp":0}));
     file.append_entry(
         "model_change",
         json!({"provider":"battery","modelId":"mock-1"}),
     );
     file.append_entry("thinking_level_change", json!({"thinkingLevel":"medium"}));
-    file.append_message(json!({
+    file.append_message(&json!({
         "role":"assistant","provider":"battery","model":"mock-1","api":"openai-responses",
         "content":[{"type":"text","text":"hi"}],"stopReason":"stop","timestamp":1
     }));
@@ -71,7 +71,7 @@ fn saved_context_windowed_matches_full_parse_with_changes_inside_the_window() {
     let mut kept = String::new();
     for i in 0..12 {
         let id = file
-            .append_message(json!({"role":"user","content":format!("message {i}"),"timestamp":i}));
+            .append_message(&json!({"role":"user","content":format!("message {i}"),"timestamp":i}));
         if i == 4 {
             kept = id;
         }
@@ -99,7 +99,7 @@ fn saved_context_windowed_matches_full_parse_with_model_only_before_the_boundary
     let mut kept = String::new();
     for i in 0..12 {
         let id = file
-            .append_message(json!({"role":"user","content":format!("message {i}"),"timestamp":i}));
+            .append_message(&json!({"role":"user","content":format!("message {i}"),"timestamp":i}));
         if i == 4 {
             kept = id;
         }
@@ -121,7 +121,7 @@ fn saved_context_windowed_matches_full_parse_with_thinking_only_before_the_bound
     let mut kept = String::new();
     for i in 0..12 {
         let id = file
-            .append_message(json!({"role":"user","content":format!("message {i}"),"timestamp":i}));
+            .append_message(&json!({"role":"user","content":format!("message {i}"),"timestamp":i}));
         if i == 4 {
             kept = id;
         }
@@ -142,7 +142,7 @@ fn saved_context_windowed_falls_back_to_the_full_open_on_a_malformed_retained_ro
     let mut kept = String::new();
     for i in 0..12 {
         let id = file
-            .append_message(json!({"role":"user","content":format!("message {i}"),"timestamp":i}));
+            .append_message(&json!({"role":"user","content":format!("message {i}"),"timestamp":i}));
         if i == 4 {
             kept = id;
         }

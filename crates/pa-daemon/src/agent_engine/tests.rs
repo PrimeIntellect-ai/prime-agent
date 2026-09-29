@@ -58,7 +58,7 @@ fn write_compaction_settings(dir: &std::path::Path, reserve_tokens: u64) {
 /// One faux-driven engine over its own tempdir (settings written before
 /// the first prompt so the session build resolves them).
 pub(crate) fn faux_engine_with_settings(
-    script: serde_json::Value,
+    script: &serde_json::Value,
     reserve_tokens: u64,
 ) -> (AgentSessionEngine, tempfile::TempDir) {
     let dir = tempfile::TempDir::new().unwrap();
@@ -239,7 +239,7 @@ pub(crate) fn assert_cancelled_end_event(
     assert_eq!(row["content"], serde_json::json!(expected_row_message));
     assert_eq!(
         row["details"],
-        serde_json::json!({
+        &serde_json::json!({
             "reason": expected_reason,
             "outcome": "cancelled",
         })
@@ -276,7 +276,7 @@ pub(crate) fn assert_cancelled_end_event(
 /// faux lock while the engine runs.
 #[cfg(test)]
 fn run_prompts(
-    script: serde_json::Value,
+    script: &serde_json::Value,
     prompts: &[&str],
 ) -> (std::sync::Arc<AgentSessionEngine>, Vec<EngineEvent>) {
     let _faux = FAUX_TEST_LOCK

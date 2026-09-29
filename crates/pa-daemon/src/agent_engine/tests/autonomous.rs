@@ -4,7 +4,7 @@ use super::*;
 #[test]
 fn autonomous_on_enables_the_driver_loop() {
     let (engine, events) = run_prompts(
-        serde_json::json!({ "responses": ["unused"] }),
+        &serde_json::json!({ "responses": ["unused"] }),
         &["/autonomous on --max-continuations 1 --max-turns 5"],
     );
     // The enable prompt runs the session command (echo + status rows) and
@@ -27,7 +27,7 @@ fn autonomous_on_enables_the_driver_loop() {
 #[test]
 fn autonomous_limit_stops_the_run_without_a_row() {
     let (engine, events) = run_prompts(
-        serde_json::json!({ "responses": ["first", "second"] }),
+        &serde_json::json!({ "responses": ["first", "second"] }),
         &["/autonomous on --max-continuations 1 --max-turns 5", "go"],
     );
     // The continuation churns INSIDE the one run (the TS in-run shape,

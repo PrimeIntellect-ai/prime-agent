@@ -214,6 +214,11 @@ fn pipe_name(path: &Path) -> Result<String> {
 }
 
 /// Bind a listening endpoint at `path` (a named pipe on Windows).
+///
+/// # Errors
+///
+/// Returns an error when `path` is not valid UTF-8 (the pipe name
+/// surface) or the named-pipe listener cannot be created.
 #[cfg(windows)]
 pub async fn bind_transport(path: &Path) -> Result<Box<dyn TransportListener>> {
     let name = pipe_name(path)?;
@@ -222,6 +227,12 @@ pub async fn bind_transport(path: &Path) -> Result<Box<dyn TransportListener>> {
 }
 
 /// Connect to the endpoint at `path` asynchronously.
+///
+/// # Errors
+///
+/// Returns an error when `path` is not valid UTF-8 (the pipe name
+/// surface) or the connection attempt fails, including the
+/// busy-instance retry window.
 #[cfg(windows)]
 pub async fn connect_transport(path: &Path) -> Result<Box<dyn TransportStream>> {
     let name = pipe_name(path)?;
@@ -274,6 +285,11 @@ pub fn connect_blocking(path: &Path) -> std::io::Result<Box<dyn BlockingTranspor
 }
 
 /// Connect to the endpoint at `path`, blocking until connected.
+///
+/// # Errors
+///
+/// Returns an error when `path` is not valid UTF-8 (the pipe name
+/// surface) or the blocking connection attempt fails.
 #[cfg(windows)]
 pub fn connect_blocking(path: &Path) -> std::io::Result<Box<dyn BlockingTransportStream>> {
     let name = pipe_name(path).map_err(std::io::Error::other)?;

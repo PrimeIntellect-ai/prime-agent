@@ -366,5 +366,46 @@ pub(crate) fn write_jobs_state(path: &Path, state: &CronJobsState) {
         let _ = std::fs::create_dir_all(parent);
     }
     let serialized = serde_json::to_string_pretty(state).unwrap_or_default();
-    let _ = crate::settings::storage::atomic_write(path, &format!("{serialized}\n"));
+    // The one opt-in in the shared helper's family: TS `writeJobsState`
+    // passes `{ mode: 0o600, fsync: true }`. One fsync per write — losing
+    // the atomic rename after a power failure rolls back to the previous
+    // valid file, which cron recovery already tolerates (the dispatch
+    // journal pairs with it; both products keep this write durable).
+    let _ = crate::settings::storage::atomic_write_with(
+        path,
+        &format!("{serialized}\n"),
+        crate::settings::storage::AtomicWriteOptions { fsync: true },
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Per-call-site served-path oracle (cron-jobs.ts:1697 passes
+    /// `{ mode: 0o600, fsync: true }` — the TS test pins
+    /// `expect(options).toMatchObject({ fsync: true, mode: 0o600 })`):
+    /// the cron state write opts in and syncs exactly once, landing exactly
+    /// `to_string_pretty(state) + "\n"` bytes.
+    #[test]
+    fn jobs_state_write_keeps_exactly_one_fsync() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.json");
+        let state = CronJobsState::default();
+        let expected = format!("{}\n", serde_json::to_string_pretty(&state).unwrap());
+        let before = crate::settings::storage::opt_in_fsync_calls();
+        write_jobs_state(&path, &state);
+        assert_eq!(
+            crate::settings::storage::opt_in_fsync_calls(),
+            before + 1,
+            "the cron state write must keep its one opt-in fsync"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+        #[cfg(unix)]
+        assert_eq!(
+            crate::platform::perms::file_mode(&path),
+            Some(0o600),
+            "the durable write keeps the private mode"
+        );
+    }
 }

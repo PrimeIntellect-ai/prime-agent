@@ -99,7 +99,7 @@ impl Client {
         }
     }
 
-    fn request(&mut self, id: &str, command: Value) -> Value {
+    fn request(&mut self, id: &str, command: &Value) -> Value {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -171,7 +171,7 @@ fn offline_daemon_serves_the_bundled_catalog_fallback() {
     let session_dir = agent_dir.join("sessions");
     let created = client.request(
         "create-1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.to_string_lossy(),
@@ -191,7 +191,7 @@ fn offline_daemon_serves_the_bundled_catalog_fallback() {
     // get_model_catalog: the full catalog with the configured providers.
     let response = client.request(
         "catalog-1",
-        json!({ "type": "get_model_catalog", "activeSessionId": session_id }),
+        &json!({ "type": "get_model_catalog", "activeSessionId": session_id }),
     );
     assert!(response["success"].as_bool().unwrap_or(false), "{response}");
     let data = &response["data"];

@@ -4,6 +4,31 @@
 //! rejects with the descriptive refusal and its typed wire info, and the
 //! daemon logs the detected conflict. Untyped create failures keep the
 //! supervisor's wrap (the control).
+// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
+// the full rationale).
+// Stack-resident futures by design on the daemon's hot paths; boxing the
+// call sites for a lint tick is a perf regression with zero correctness gain.
+#![allow(clippy::large_futures)]
+// 64-bit-only targets; the narrowing casts sit at OS boundaries
+// (pid/fd/time/size) where the values are bounded by the kernel - the
+// dead-guard expect()s would add panic paths where silent wrap was
+// deliberate.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// The fn-length threshold is a style gate, not correctness; the structure
+// campaign owns the god-fn splits as a follow-up.
+#![allow(clippy::too_many_lines)]
+// API-shape opinions, not defects; the surfaces are deliberate.
+#![allow(
+    clippy::unnecessary_wraps,
+    clippy::zero_sized_map_values,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names
+)]
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -85,7 +110,7 @@ impl Client {
         client
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let mut line = serde_json::to_string(&json!({
             "type": "command",
             "id": id,
@@ -150,7 +175,7 @@ fn write_script(dir: &Path, responses: &[&str]) -> PathBuf {
 fn session_file_of(client: &mut Client, id: &str, request_id: &str) -> String {
     client.send_command(
         request_id,
-        json!({ "type": "get_session_stats", "activeSessionId": id }),
+        &json!({ "type": "get_session_stats", "activeSessionId": id }),
     );
     let stats = client.read_response(request_id);
     assert_eq!(stats["success"], true, "stats failed: {stats}");
@@ -163,7 +188,7 @@ fn session_file_of(client: &mut Client, id: &str, request_id: &str) -> String {
 /// The active id a create response answered (the summary's `id`, the same
 /// field a pane attaches by).
 fn create_session(client: &mut Client, request_id: &str, config: &Value) -> (String, Value) {
-    client.send_command(request_id, json!({ "type": "create", "config": config }));
+    client.send_command(request_id, &json!({ "type": "create", "config": config }));
     let created = client.read_response(request_id);
     assert_eq!(created["success"], true, "create failed: {created}");
     let id = created["data"]["id"]
@@ -213,7 +238,7 @@ fn a_foreign_lease_holder_rejects_the_create_with_the_hold_refusal() {
     // the other product's worker).
     client.send_command(
         "k1",
-        json!({ "type": "kill", "activeSessionId": worker_id }),
+        &json!({ "type": "kill", "activeSessionId": worker_id }),
     );
     let killed = client.read_response("k1");
     assert_eq!(killed["success"], true, "kill failed: {killed}");
@@ -237,7 +262,7 @@ fn a_foreign_lease_holder_rejects_the_create_with_the_hold_refusal() {
     // dump and not the supervisor's untyped wrap.
     client.send_command(
         "c2",
-        json!({
+        &json!({
             "type": "create",
             "sessionPath": session_file,
             "config": create_config,
@@ -329,7 +354,7 @@ fn a_foreign_lease_holder_rejects_the_create_with_the_hold_refusal() {
     std::fs::write(&corrupt, "this is not session jsonl\n").expect("write corrupt file");
     client.send_command(
         "c3",
-        json!({
+        &json!({
             "type": "create",
             "sessionPath": corrupt.to_string_lossy(),
             "config": create_config,

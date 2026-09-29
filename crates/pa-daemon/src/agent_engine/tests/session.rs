@@ -106,7 +106,7 @@ async fn replacement_teardown_retires_the_session_and_the_funnel_adopts_the_bran
     let engine = {
         let (engine, _events) = tokio::task::spawn_blocking(|| {
             run_prompts(
-                json!({ "engine": "faux", "responses": [{ "text": "first" }] }),
+                &json!({ "engine": "faux", "responses": [{ "text": "first" }] }),
                 &["hello"],
             )
         })
@@ -131,7 +131,7 @@ async fn replacement_teardown_retires_the_session_and_the_funnel_adopts_the_bran
     // The replacement tail parks the moved branch on the unbuilt engine
     // (the worker parks it on a blocking thread; so does the test).
     let mut store = crate::session_store::SessionFile::create("/tmp", None, 0);
-    store.append_message(json!({
+    store.append_message(&json!({
         "role": "user",
         "content": "moved branch marker",
         "timestamp": 1u64,
@@ -213,7 +213,7 @@ async fn live_branch_rebuild_reloads_the_goal_state_from_the_moved_branch() {
     let engine = {
         let (engine, _events) = tokio::task::spawn_blocking(|| {
             run_prompts(
-                json!({
+                &json!({
                     "engine": "faux",
                     "responses": (0..4).map(|index| json!({ "text": format!("reply {index}") })).collect::<Vec<_>>(),
                 }),
@@ -264,7 +264,7 @@ async fn live_branch_rebuild_reloads_the_goal_state_from_the_moved_branch() {
 
     // A pre-goal branch: no `thread_goal_state` entry anywhere.
     let mut store = crate::session_store::SessionFile::create("/tmp", None, 0);
-    store.append_message(json!({
+    store.append_message(&json!({
         "role": "user",
         "content": "moved branch marker",
         "timestamp": 1u64,
