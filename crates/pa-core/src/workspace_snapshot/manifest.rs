@@ -55,6 +55,7 @@ pub enum CapturedEntry {
 
 impl CapturedEntry {
     /// The entry's repo-relative path.
+    #[must_use]
     pub fn path(&self) -> &str {
         match self {
             CapturedEntry::File { path, .. }
