@@ -1,0 +1,4 @@
+The package's test suite fails one test: when an amount cannot be split
+evenly, the allocated shares do not sum back to the original income. Fix
+the allocation logic, not the tests, so the full suite passes. The fix
+must keep every share a whole cent and never over-allocate.
