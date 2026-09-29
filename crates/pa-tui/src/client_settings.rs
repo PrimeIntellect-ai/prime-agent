@@ -1,6 +1,6 @@
 //! The client-settings seam. pa-tui depends on pa-types only, so the
-//! interactive commands that read or persist user settings (`/settings`,
-//! `/fullscreen`) call this trait; the composition
+//! interactive commands that read or persist user settings (`/settings`)
+//! call this trait; the composition
 //! root (pa-cli) implements it over the real settings manager. Every
 //! getter reads the effective settings with the TS default; every setter
 //! persists the global scope (TS `markModified` + `save`).
@@ -17,15 +17,6 @@ pub trait ClientSettings: Send + Sync {
     /// Returns `Err` when opening or persisting the settings
     /// store fails.
     fn set_theme(&self, theme: &str) -> Result<()>;
-    /// `terminal.fullscreen` (TS default true).
-    fn fullscreen(&self) -> bool;
-    /// Persists `terminal.fullscreen` to the global scope.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` when opening or persisting the settings
-    /// store fails.
-    fn set_fullscreen(&self, enabled: bool) -> Result<()>;
     /// `terminal.showImages` (TS default true).
     fn show_images(&self) -> bool;
     /// Persists `terminal.showImages` to the global scope.
