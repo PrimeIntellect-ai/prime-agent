@@ -41,8 +41,14 @@ mod prepare;
 pub use prepare::{compute_cut, prepare_compaction, CompactSkip, CompactionPreparation};
 
 // The test mass (the in-file unit battery) moved to the child module at
-// the same tree position (compact_session::tests); the tests' `super` and
-// `super::super` paths resolve unchanged.
+// the same tree position (compact_session::tests) and splits by test
+// family under compact_session::tests; the moved blocks keep their
+// `super` and `super::super` path literals, and these session_engine
+// module bindings re-anchor those literals one level deeper (the same
+// pattern the summarization bindings above serve for
+// `super::compaction_exec::`).
+#[cfg(test)]
+use super::{compaction, harness_digest, messages, session_message_to_loop};
 #[cfg(test)]
 mod tests;
 

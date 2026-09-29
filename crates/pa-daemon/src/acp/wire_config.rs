@@ -61,10 +61,10 @@ pub(super) async fn handle_set_config_option(
     };
     let Some((daemon_session_id, config, producer)) = resolved else {
         let _ = tx.send(jsonrpc::error_response(
-            id,
+            &id,
             jsonrpc::INVALID_PARAMS,
             "Invalid params",
-            Some(json!({ "reason": format!("Unknown ACP session: {}", params.session_id) })),
+            Some(&json!({ "reason": format!("Unknown ACP session: {}", params.session_id) })),
         ));
         return;
     };
@@ -96,7 +96,7 @@ pub(super) async fn handle_set_config_option(
         ))
     };
     if let Err(error) = outcome {
-        let _ = tx.send(error.response(id));
+        let _ = tx.send(error.response(&id));
         return;
     }
     // TS's `refreshConfig` rethrows a failed `getState`, so the enqueued
@@ -105,11 +105,11 @@ pub(super) async fn handle_set_config_option(
     let options = match refresh_wire_config(link, &daemon_session_id, &config, &producer).await {
         Ok(options) => options,
         Err(error) => {
-            let _ = tx.send(error.response(id));
+            let _ = tx.send(error.response(&id));
             return;
         }
     };
-    let _ = tx.send(jsonrpc::response(id, config_options_value(&options)));
+    let _ = tx.send(jsonrpc::response(&id, &config_options_value(&options)));
 }
 
 /// One failed wire config operation: the TS handler's `RequestError`
@@ -129,19 +129,19 @@ impl WireConfigError {
     }
 
     /// The JSON-RPC error frame (the TS `invalidParams` data shape).
-    fn response(self, id: Value) -> Value {
+    fn response(self, id: &Value) -> Value {
         match self {
             WireConfigError::InvalidParams(reason) => jsonrpc::error_response(
                 id,
                 jsonrpc::INVALID_PARAMS,
                 "Invalid params",
-                Some(json!({ "reason": reason })),
+                Some(&json!({ "reason": reason })),
             ),
             WireConfigError::Internal(details) => jsonrpc::error_response(
                 id,
                 jsonrpc::INTERNAL_ERROR,
                 "Internal error",
-                Some(json!({ "details": details })),
+                Some(&json!({ "details": details })),
             ),
         }
     }
@@ -329,7 +329,7 @@ pub(super) async fn fetch_available_models(
 /// Build the pickers from one connection state (the shared computation's
 /// wire-side input adapter).
 pub(super) fn picker_options_from_state(
-    state: &Option<Value>,
+    state: Option<&Value>,
     models: &[pa_types::ai::Model],
 ) -> Vec<SessionConfigOption> {
     let Some(state) = state else {
@@ -366,7 +366,7 @@ pub(super) async fn refresh_wire_config(
             "the post-apply refresh failed: the worker's live state could not be read",
         ));
     };
-    let options = picker_options_from_state(&Some(state), &config.models.lock().await);
+    let options = picker_options_from_state(Some(&state), &config.models.lock().await);
     publish_config_options(producer, &config.published, options.clone()).await;
     Ok(options)
 }

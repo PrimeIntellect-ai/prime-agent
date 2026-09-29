@@ -8,6 +8,31 @@
 //! queue strip row (dogfood P0: the steered message sends but still
 //! shows in the queue), and a queued edit addressed against the stale
 //! row is rejected as `rejected` even though the user sees it parked.
+// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
+// the full rationale).
+// Stack-resident futures by design on the daemon's hot paths; boxing the
+// call sites for a lint tick is a perf regression with zero correctness gain.
+#![allow(clippy::large_futures)]
+// 64-bit-only targets; the narrowing casts sit at OS boundaries
+// (pid/fd/time/size) where the values are bounded by the kernel - the
+// dead-guard expect()s would add panic paths where silent wrap was
+// deliberate.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// The fn-length threshold is a style gate, not correctness; the structure
+// campaign owns the god-fn splits as a follow-up.
+#![allow(clippy::too_many_lines)]
+// API-shape opinions, not defects; the surfaces are deliberate.
+#![allow(
+    clippy::unnecessary_wraps,
+    clippy::zero_sized_map_values,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names
+)]
 #![cfg(unix)]
 
 use std::fmt::Write as _;
@@ -144,7 +169,7 @@ impl DelayedMock {
                 let bodies = Arc::clone(&bodies_for_thread);
                 let hold = Arc::clone(&hold_for_thread);
                 std::thread::spawn(move || {
-                    let _ = serve(stream, requests, bodies, hold);
+                    let _ = serve(stream, &requests, &bodies, &hold);
                 });
             }
         });
@@ -187,7 +212,7 @@ impl DelayedMock {
     }
 }
 
-fn chunk(delta: Value, finish_reason: Option<&str>) -> String {
+fn chunk(delta: &Value, finish_reason: Option<&str>) -> String {
     json!({
         "id": "chatcmpl-test",
         "object": "chat.completion.chunk",
@@ -200,9 +225,9 @@ fn chunk(delta: Value, finish_reason: Option<&str>) -> String {
 
 fn serve(
     mut stream: TcpStream,
-    requests: Arc<Mutex<usize>>,
-    bodies: Arc<Mutex<Vec<String>>>,
-    hold: Arc<HoldGate>,
+    requests: &Arc<Mutex<usize>>,
+    bodies: &Arc<Mutex<Vec<String>>>,
+    hold: &Arc<HoldGate>,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut head = String::new();
@@ -249,7 +274,7 @@ fn serve(
                 })
         })
         .unwrap_or_default();
-    let held = hold.observe(&marker_text);
+    let gate_observed = hold.observe(&marker_text);
     let index = {
         let mut requests = requests.lock().expect("mock lock");
         *requests += 1;
@@ -259,14 +284,14 @@ fn serve(
         .lock()
         .expect("mock lock")
         .push(format!("#{index}: {marker_text}"));
-    if !held {
+    if !gate_observed {
         std::thread::sleep(Duration::from_millis(ANSWER_DELAY_MS));
     }
     let answer = format!("answer {index}");
     let mut payload = String::new();
     for data in [
-        chunk(json!({"role": "assistant", "content": answer}), None),
-        chunk(json!({}), Some("stop")),
+        chunk(&json!({"role": "assistant", "content": answer}), None),
+        chunk(&json!({}), Some("stop")),
     ] {
         write!(payload, "data: {data}\n\n").expect("write to String");
     }
@@ -354,7 +379,7 @@ impl Client {
         }
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -412,7 +437,7 @@ impl Client {
         }
     }
 
-    fn send(&mut self, id: &str, command: Value) -> Value {
+    fn send(&mut self, id: &str, command: &Value) -> Value {
         self.send_command(id, command);
         self.request(id)
     }
@@ -453,7 +478,7 @@ fn setup(name: &str) -> (tempfile::TempDir, DelayedMock, Supervisor, Client, Str
     let mut client = Client::connect(&socket);
     let created = client.send(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -471,7 +496,7 @@ fn setup(name: &str) -> (tempfile::TempDir, DelayedMock, Supervisor, Client, Str
         .to_string();
     let attached = client.send(
         "a1",
-        json!({ "type": "attach", "activeSessionId": session_id }),
+        &json!({ "type": "attach", "activeSessionId": session_id }),
     );
     assert_eq!(attached["success"], true, "attach failed: {attached}");
     (dir, mock, supervisor, client, session_id)
@@ -539,7 +564,7 @@ fn queue_pickup_projection_reaches_clients_before_the_delivered_turn_starts() {
     mock.hold_busy_turn("turn one");
     let started = client.send(
         "p1",
-        json!({ "type": "prompt", "activeSessionId": session_id, "message": "turn one" }),
+        &json!({ "type": "prompt", "activeSessionId": session_id, "message": "turn one" }),
     );
     assert_eq!(started["success"], true, "prompt failed: {started}");
     // The busy turn is streaming before anything parks behind it.
@@ -549,7 +574,7 @@ fn queue_pickup_projection_reaches_clients_before_the_delivered_turn_starts() {
         ("s2", "steer B", "steer"),
         ("f1", "follow C", "followUp"),
     ] {
-        let response = client.send(id, queued_prompt(&session_id, message, behavior));
+        let response = client.send(id, &queued_prompt(&session_id, message, behavior));
         assert_eq!(response["success"], true, "{id} failed: {response}");
     }
     // The parked projection reaches attached clients.
@@ -659,7 +684,7 @@ fn multi_item_queue_delivers_every_item_in_lane_order() {
     mock.hold_busy_turn("turn zero");
     let started = client.send(
         "p1",
-        json!({ "type": "prompt", "activeSessionId": session_id, "message": "turn zero" }),
+        &json!({ "type": "prompt", "activeSessionId": session_id, "message": "turn zero" }),
     );
     assert_eq!(started["success"], true, "prompt failed: {started}");
     // The busy turn is streaming before anything parks behind it.
@@ -672,7 +697,7 @@ fn multi_item_queue_delivers_every_item_in_lane_order() {
         ("f2", "follow two", "followUp"),
         ("f3", "follow three", "followUp"),
     ] {
-        let response = client.send(id, queued_prompt(&session_id, message, behavior));
+        let response = client.send(id, &queued_prompt(&session_id, message, behavior));
         assert_eq!(response["success"], true, "{id} failed: {response}");
     }
     let parked = wait_for_projection(
@@ -751,11 +776,11 @@ fn queue_delivery_projects_the_active_action_phases_around_the_turn() {
     mock.hold_busy_turn("turn one");
     let started = client.send(
         "p1",
-        json!({ "type": "prompt", "activeSessionId": session_id, "message": "turn one" }),
+        &json!({ "type": "prompt", "activeSessionId": session_id, "message": "turn one" }),
     );
     assert_eq!(started["success"], true, "prompt failed: {started}");
     mock.wait_busy_turn_request();
-    let parked = client.send("f1", queued_prompt(&session_id, "follow C", "followUp"));
+    let parked = client.send("f1", &queued_prompt(&session_id, "follow C", "followUp"));
     assert_eq!(parked["success"], true, "follow-up failed: {parked}");
     // The parked lane projects while the busy turn still holds.
     wait_for_projection(&mut client, &[], &["follow C"], "parked lane");

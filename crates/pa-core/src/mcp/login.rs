@@ -401,10 +401,7 @@ mod tests {
         wire_begin_login(&manager, ui, http);
 
         let mut handlers = HostRequestHandlers::default();
-        manager
-            .lock()
-            .unwrap()
-            .register_host_handlers(&mut handlers);
+        McpManager::register_host_handlers(&manager, &mut handlers);
         let begin_login = handlers.get("mcp.begin_login").expect("wired").clone();
         begin_login(HostRequestPayload {
             data: json!({ "server": "fixture" }),
@@ -499,10 +496,7 @@ mod tests {
         });
         wire_begin_login(&manager, ui, http);
         let mut handlers = HostRequestHandlers::default();
-        manager
-            .lock()
-            .unwrap()
-            .register_host_handlers(&mut handlers);
+        McpManager::register_host_handlers(&manager, &mut handlers);
         let begin_login = handlers.get("mcp.begin_login").expect("wired").clone();
         begin_login(HostRequestPayload {
             data: json!({ "server": "linear" }),
@@ -535,10 +529,7 @@ mod tests {
         });
         wire_begin_login(&manager, ui, http);
         let mut handlers = HostRequestHandlers::default();
-        manager
-            .lock()
-            .unwrap()
-            .register_host_handlers(&mut handlers);
+        McpManager::register_host_handlers(&manager, &mut handlers);
         let begin_login = handlers.get("mcp.begin_login").expect("wired").clone();
         let error = begin_login(HostRequestPayload {
             data: json!({ "server": "nope" }),
@@ -607,10 +598,7 @@ mod tests {
         let http = Arc::new(fixture_http());
         let manager = manager(agent.path(), None, http);
         let mut handlers = HostRequestHandlers::default();
-        manager
-            .lock()
-            .unwrap()
-            .register_host_handlers(&mut handlers);
+        McpManager::register_host_handlers(&manager, &mut handlers);
         let refresh = handlers.get("mcp.refresh").expect("wired").clone();
         let error = refresh(HostRequestPayload {
             data: json!({ "server": "fixture" }),
@@ -667,10 +655,7 @@ mod tests {
             )
             .unwrap();
         let mut handlers = HostRequestHandlers::default();
-        manager
-            .lock()
-            .unwrap()
-            .register_host_handlers(&mut handlers);
+        McpManager::register_host_handlers(&manager, &mut handlers);
         let refresh = handlers.get("mcp.refresh").expect("wired").clone();
         let error = refresh(HostRequestPayload {
             data: json!({ "server": "session-tool" }),

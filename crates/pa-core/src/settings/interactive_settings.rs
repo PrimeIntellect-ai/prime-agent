@@ -1,5 +1,5 @@
 //! The interactive settings-menu accessors (TS settings-manager getters and
-//! setters behind the `/settings` rows and `/fullscreen` persistence). Every
+//! setters behind the `/settings` rows). Every
 //! setter writes the global scope like the TS `markModified` + `save` pair;
 //! every getter reads the merged effective settings with the TS defaults.
 
@@ -19,31 +19,6 @@ impl SettingsManager {
             .terminal
             .get_or_insert_with(Default::default)
             .show_images = Some(show);
-        self.save_global_scope()
-    }
-
-    /// `terminal.fullscreen` (TS `getFullscreen`/`setFullscreen`; the Rust
-    /// surface always renders on the alternate screen, so the value is the
-    /// persisted preference the startup surface would read).
-    #[must_use]
-    pub fn get_fullscreen(&self) -> bool {
-        self.settings()
-            .terminal
-            .as_ref()
-            .and_then(|terminal| terminal.fullscreen)
-            .unwrap_or(true)
-    }
-
-    /// `terminal.fullscreen` setter.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the global settings scope cannot be saved.
-    pub fn set_fullscreen(&mut self, enabled: bool) -> Result<()> {
-        self.global_mut()
-            .terminal
-            .get_or_insert_with(Default::default)
-            .fullscreen = Some(enabled);
         self.save_global_scope()
     }
 

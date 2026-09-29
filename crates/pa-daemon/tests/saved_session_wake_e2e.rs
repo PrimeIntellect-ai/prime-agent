@@ -6,6 +6,31 @@
 //! a selector that matches no saved session keeps the TS unknown-session
 //! error. The provider is a local always-200 OpenAI-completions mock, so
 //! the woken worker resolves the real engine path hermetically.
+// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
+// the full rationale).
+// Stack-resident futures by design on the daemon's hot paths; boxing the
+// call sites for a lint tick is a perf regression with zero correctness gain.
+#![allow(clippy::large_futures)]
+// 64-bit-only targets; the narrowing casts sit at OS boundaries
+// (pid/fd/time/size) where the values are bounded by the kernel - the
+// dead-guard expect()s would add panic paths where silent wrap was
+// deliberate.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// The fn-length threshold is a style gate, not correctness; the structure
+// campaign owns the god-fn splits as a follow-up.
+#![allow(clippy::too_many_lines)]
+// API-shape opinions, not defects; the surfaces are deliberate.
+#![allow(
+    clippy::unnecessary_wraps,
+    clippy::zero_sized_map_values,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names
+)]
 #![cfg(unix)]
 
 use std::fmt::Write as _;
@@ -50,7 +75,7 @@ fn spawn_mock(answer: &'static str) -> PathBuf /* url */ {
     PathBuf::from(url)
 }
 
-fn chunk(delta: Value, finish_reason: Option<&str>) -> String {
+fn chunk(delta: &Value, finish_reason: Option<&str>) -> String {
     json!({
         "id": "chatcmpl-wake",
         "object": "chat.completion.chunk",
@@ -83,8 +108,8 @@ fn serve(mut stream: TcpStream, answer: &str) -> std::io::Result<()> {
     }
     let mut payload = String::new();
     for data in [
-        chunk(json!({"role": "assistant", "content": answer}), None),
-        chunk(json!({}), Some("stop")),
+        chunk(&json!({"role": "assistant", "content": answer}), None),
+        chunk(&json!({}), Some("stop")),
     ] {
         write!(payload, "data: {data}\n\n").expect("write to String");
     }
@@ -160,7 +185,7 @@ impl Client {
         (client, hello)
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -224,7 +249,7 @@ fn wait_until<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T 
 fn messages(client: &mut Client, id: &str, active_session_id: &str) -> String {
     client.send_command(
         id,
-        json!({ "type": "get_messages", "activeSessionId": active_session_id }),
+        &json!({ "type": "get_messages", "activeSessionId": active_session_id }),
     );
     let response = client.read_response(id);
     assert_eq!(response["success"], true, "get_messages failed: {response}");
@@ -270,7 +295,7 @@ fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
     // The session file persists under the agent dir.
     client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "name": "alpha",
             "config": {
@@ -294,7 +319,7 @@ fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
         .to_string();
     client.send_command(
         "p1",
-        json!({
+        &json!({
             "type": "prompt_and_wait",
             "activeSessionId": active_id,
             "message": "first turn",
@@ -310,11 +335,11 @@ fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
 
     client.send_command(
         "k1",
-        json!({ "type": "kill", "activeSessionId": active_id }),
+        &json!({ "type": "kill", "activeSessionId": active_id }),
     );
     assert_eq!(client.read_response("k1")["success"], true, "kill failed");
     // The session went inactive: no live residents, one saved session.
-    client.send_command("l1", json!({ "type": "list" }));
+    client.send_command("l1", &json!({ "type": "list" }));
     let list = client.read_response("l1");
     assert_eq!(
         list["data"]["sessions"].as_array().map(Vec::len),
@@ -323,7 +348,7 @@ fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
     );
     client.send_command(
         "l2",
-        json!({ "type": "list_saved_sessions", "cwd": dir.path().to_string_lossy() }),
+        &json!({ "type": "list_saved_sessions", "cwd": dir.path().to_string_lossy() }),
     );
     // The list streams item/progress events before the final response.
     let saved_rows = loop {
@@ -343,7 +368,7 @@ fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
     // delivers the message with the TS receipt.
     client.send_command(
         "s1",
-        json!({ "type": "send_message", "targetActiveSessionId": "alpha", "message": "wake up" }),
+        &json!({ "type": "send_message", "targetActiveSessionId": "alpha", "message": "wake up" }),
     );
     let sent = client.read_response("s1");
     assert_eq!(sent["success"], true, "send by name failed: {sent}");
@@ -359,7 +384,7 @@ fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
     // The woken worker spawned: the roster lists the session again, with the
     // saved transcript (same sessionId, the wake resumed the file).
     let listed = wait_until(Duration::from_secs(15), || {
-        client.send_command("l3", json!({ "type": "list" }));
+        client.send_command("l3", &json!({ "type": "list" }));
         let list = client.read_response("l3");
         list["data"]["sessions"].as_array().and_then(|sessions| {
             sessions
@@ -387,7 +412,7 @@ fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
     // file and delivers without a second wake (one new worker only).
     client.send_command(
         "s2",
-        json!({ "type": "send_message", "targetActiveSessionId": "alpha", "message": "again" }),
+        &json!({ "type": "send_message", "targetActiveSessionId": "alpha", "message": "again" }),
     );
     let resent = client.read_response("s2");
     assert_eq!(resent["success"], true, "second send failed: {resent}");
@@ -405,7 +430,7 @@ fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
     // An unknown selector that matches no saved session keeps the TS error.
     client.send_command(
         "s3",
-        json!({ "type": "send_message", "targetActiveSessionId": "ghost", "message": "no" }),
+        &json!({ "type": "send_message", "targetActiveSessionId": "ghost", "message": "no" }),
     );
     let missed = client.read_response("s3");
     assert_eq!(missed["success"], false, "{missed}");
@@ -415,7 +440,7 @@ fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
     // keys by session id and name, so it stays unknown (TS parity).
     client.send_command(
         "s4",
-        json!({ "type": "send_message", "targetActiveSessionId": active_id, "message": "no" }),
+        &json!({ "type": "send_message", "targetActiveSessionId": active_id, "message": "no" }),
     );
     let stale = client.read_response("s4");
     assert_eq!(stale["success"], false, "{stale}");
@@ -428,7 +453,7 @@ fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
     // so the send lands on the reused worker.
     client.send_command(
         "s5",
-        json!({
+        &json!({
             "type": "send_message",
             "targetActiveSessionId": &session_id[..8],
             "message": "by id",

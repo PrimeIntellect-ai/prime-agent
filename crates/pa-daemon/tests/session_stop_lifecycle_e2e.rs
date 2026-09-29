@@ -18,6 +18,31 @@
 //! stop) must come back — the wake model survives crashes — while A must
 //! stay dead: no resurrection, no continuation, its jobs cancelled on
 //! disk, its file archived.
+// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
+// the full rationale).
+// Stack-resident futures by design on the daemon's hot paths; boxing the
+// call sites for a lint tick is a perf regression with zero correctness gain.
+#![allow(clippy::large_futures)]
+// 64-bit-only targets; the narrowing casts sit at OS boundaries
+// (pid/fd/time/size) where the values are bounded by the kernel - the
+// dead-guard expect()s would add panic paths where silent wrap was
+// deliberate.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// The fn-length threshold is a style gate, not correctness; the structure
+// campaign owns the god-fn splits as a follow-up.
+#![allow(clippy::too_many_lines)]
+// API-shape opinions, not defects; the surfaces are deliberate.
+#![allow(
+    clippy::unnecessary_wraps,
+    clippy::zero_sized_map_values,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names
+)]
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -117,7 +142,7 @@ impl Client {
         }
     }
 
-    fn request(&mut self, id: &str, command: Value) -> Value {
+    fn request(&mut self, id: &str, command: &Value) -> Value {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -141,7 +166,7 @@ impl Client {
 
     /// The active sessions the supervisor lists (active id + session id).
     fn listed_sessions(&mut self) -> Vec<(String, String)> {
-        let response = self.request("list", json!({ "type": "list" }));
+        let response = self.request("list", &json!({ "type": "list" }));
         assert_eq!(response["success"], true, "list failed: {response}");
         response["data"]["sessions"]
             .as_array()
@@ -184,7 +209,7 @@ fn create_session(
     std::fs::create_dir_all(&sessions_dir).expect("session dir");
     let created = client.request(
         id,
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.to_string_lossy(),
@@ -340,7 +365,7 @@ fn kill_cancels_goal_and_heartbeat_and_no_wake_revives_the_session() {
     // lane-liveness heartbeat.
     let started = client.request(
         "a-goal",
-        json!({
+        &json!({
             "type": "prompt_and_wait",
             "activeSessionId": a.active_id,
             "message": format!("/goal {OBJECTIVE}"),
@@ -353,7 +378,7 @@ fn kill_cancels_goal_and_heartbeat_and_no_wake_revives_the_session() {
     );
     let heartbeat = client.request(
         "a-hb",
-        json!({
+        &json!({
             "type": "heartbeat_set",
             "activeSessionId": a.active_id,
             "schedule": "every 10s",
@@ -369,7 +394,7 @@ fn kill_cancels_goal_and_heartbeat_and_no_wake_revives_the_session() {
     // B: the crashed sibling — a heartbeat, no stop.
     let heartbeat = client.request(
         "b-hb",
-        json!({
+        &json!({
             "type": "heartbeat_set",
             "activeSessionId": b.active_id,
             "schedule": "every 10s",
@@ -386,7 +411,7 @@ fn kill_cancels_goal_and_heartbeat_and_no_wake_revives_the_session() {
     // (TS cancelScheduledJobsForSession) and its file archives.
     let killed = client.request(
         "a-kill",
-        json!({ "type": "kill", "activeSessionId": a.active_id }),
+        &json!({ "type": "kill", "activeSessionId": a.active_id }),
     );
     assert_eq!(killed["success"], true, "kill failed: {killed}");
     let deadline = Instant::now() + Duration::from_secs(10);

@@ -9,6 +9,16 @@ use super::{
     SNAPSHOT_EXECUTION_TIMEOUT_MS,
 };
 
+/// The runtime snapshot writer's reason for a name above the per-variable
+/// cap (prime-agent-runtime/src/rlm/repl.py): such a skipped name is a live
+/// over-cap survivor unless the same capture also pruned it.
+const OVER_CAP_SKIP_REASON: &str = "exceeds per-variable snapshot size cap";
+
+/// Bound on the witness stat pair's await: a stalled (network/FUSE)
+/// artifacts filesystem must not wedge a capture; a timed-out stat reads
+/// as "not fresh" (the consult skips the skip, the arm never matches).
+const STAT_TIMEOUT: Duration = Duration::from_millis(250);
+
 // ---------------------------------------------------------------------------
 // Snapshot / restore
 // ---------------------------------------------------------------------------
@@ -26,6 +36,29 @@ impl Inner {
         if !self.is_running_state() {
             return None;
         }
+        // While the namespace provably cannot have changed since the last
+        // committed capture, a fresh capture would reproduce the committed
+        // payload byte-for-byte: skip the kernel request (the full-namespace
+        // re-dump serialized on the kernel's single request queue).
+        if let Some(fresh) = self.fresh_capture(prune_oversized).await {
+            return Some(fresh);
+        }
+        // The user-settled count and the invalidation epoch the memo may
+        // claim once this capture commits, read before the request is
+        // queued. This capture and every other internal state request (the
+        // listing, the repair bootstrap) settle without touching the user
+        // counter, and the kernel runs one request at a time, so only a
+        // user cell settling ahead of this capture can move the count
+        // first — which leaves the claim stale-low (the next consult never
+        // matches), never wrong-fresh. The epoch carries the
+        // invalidation-revive ordering: a namespace-code/restore settle or
+        // a kernel start that lands while this capture's own request is in
+        // flight bumps it, and the post-await arm re-checks it before
+        // memoizing.
+        let (user_executions_before, epoch_before) = {
+            let g = lock(&self.guarded);
+            (g.user_executions, g.freshness_epoch)
+        };
         let request = Request::Snapshot {
             path: cfg.path.to_string_lossy().to_string(),
             manifest_path: cfg.manifest_path.to_string_lossy().to_string(),
@@ -52,7 +85,7 @@ impl Inner {
                     self.append_diagnostic("state snapshot failed: no done fields");
                     return None;
                 };
-                Some(SnapshotResult {
+                let committed = SnapshotResult {
                     saved: as_string_array(fields, "saved"),
                     skipped: as_reason_array(fields, "skipped"),
                     pruned: {
@@ -60,9 +93,31 @@ impl Inner {
                         (!pruned.is_empty()).then_some(pruned)
                     },
                     bytes: fields.get("bytes").and_then(Value::as_u64).unwrap_or(0),
-                    path: cfg.path,
-                })
+                    path: cfg.path.clone(),
+                };
+                // This capture's commit sequence: the arm may only run
+                // while no LATER capture has committed, or a straggling
+                // earlier record's delayed stat probe could pair its stale
+                // result lists with the newer capture's files.
+                let capture_sequence = {
+                    let mut g = lock(&self.guarded);
+                    g.capture_sequence += 1;
+                    g.capture_sequence
+                };
+                self.record_capture_freshness(
+                    &cfg,
+                    &committed,
+                    user_executions_before,
+                    epoch_before,
+                    capture_sequence,
+                )
+                .await;
+                Some(committed)
             }
+            // A failed or timed-out capture leaves the memo describing the
+            // last successful commit: the payload still matches the
+            // namespace while no execution settled since, so the next
+            // capture consults it unchanged.
             Ok(r) => {
                 self.append_diagnostic(&format!(
                     "state snapshot {}: {}",
@@ -84,6 +139,119 @@ impl Inner {
 
     fn is_running_state(&self) -> bool {
         lock(&self.guarded).state == KernelState::Running
+    }
+
+    /// The recurring capture-freshness skip (see `CaptureFreshness`).
+    /// `Some(result)` replays the last committed capture — the caller sees
+    /// exactly what a fresh capture of the unchanged namespace would report.
+    async fn fresh_capture(self: &Arc<Self>, prune_oversized: bool) -> Option<SnapshotResult> {
+        let (user_executions, memo) = {
+            let g = lock(&self.guarded);
+            (g.user_executions, g.capture_freshness.clone())
+        };
+        let memo = memo?;
+        if user_executions != memo.user_executions {
+            return None;
+        }
+        // A pruning capture still must run while live over-cap names
+        // survive: it removes them from the namespace and the compaction
+        // notice discloses the removal (#227 semantics).
+        if prune_oversized && memo.live_over_cap {
+            return None;
+        }
+        let cfg = self.options.snapshot.clone()?;
+        let current = stats_after_commit(&self.freshness_stat_probe, &cfg).await;
+        // None never matches: a stalled or unavailable filesystem read (or
+        // a memo armed without both stats) must not vouch for the payload.
+        let (Some(current_payload), Some(current_manifest)) = current else {
+            return None;
+        };
+        if Some(current_payload) != memo.payload_stat
+            || Some(current_manifest) != memo.manifest_stat
+        {
+            return None;
+        }
+        // The invalidation epoch and the settle-race guard, read together
+        // under ONE lock acquisition: a namespace-code/restore settle or a
+        // kernel start invalidated the memo since the arm — never replay;
+        // and the count was sampled before the stat await, so a user cell
+        // can settle while it runs — the decision must describe the
+        // namespace at decision time. Reading both under the same
+        // acquisition the settle bumps closes the split-lock window where
+        // an internal request could invalidate the memo between the two
+        // checks while leaving the count unchanged (a cell settling after
+        // this read is the settles-after-the-capture class a real dump
+        // misses too).
+        {
+            let g = lock(&self.guarded);
+            if g.freshness_epoch != memo.epoch || g.user_executions != memo.user_executions {
+                return None;
+            }
+        }
+        let mut result = memo.result;
+        // The pruned names left the live namespace with the commit that
+        // pruned them; a fresh prune finds nothing to disclose.
+        result.pruned = None;
+        Some(result)
+    }
+
+    /// Arm the freshness memo with a committed capture: the namespace on
+    /// disk is the live one again, and stays provably unchanged until the
+    /// next settled USER execution, a settled request that runs namespace
+    /// code or replaces the namespace (see `resolve_execution`), or an
+    /// external replacement of the committed payload or manifest.
+    async fn record_capture_freshness(
+        self: &Arc<Self>,
+        cfg: &crate::kernel::shared::KernelSnapshotConfig,
+        result: &SnapshotResult,
+        user_executions: u64,
+        epoch: u64,
+        capture_sequence: u64,
+    ) {
+        // The stat pair is the witness artifact: the payload stat is the
+        // load-bearing one (it fingerprints what a later restore reads),
+        // the manifest stat catches the paired bookkeeping being replaced.
+        // The memo arms ONLY with both stats present and the epoch
+        // unmoved: a stalled, contended, or missing filesystem read never
+        // memoizes, and any previous memo is left untouched (its stat pair
+        // described the files as of its own commit, which this capture
+        // just rewrote — the stale pair can no longer match a later
+        // consult, so it is inert). The epoch re-check after the await
+        // closes the invalidation-revive ordering: a namespace-code or
+        // restore settle or a kernel start that landed while this
+        // capture's own request ran must not be re-described by this arm.
+        let (payload_stat, manifest_stat) =
+            stats_after_commit(&self.freshness_stat_probe, cfg).await;
+        let live_over_cap = result.skipped.iter().any(|skip| {
+            skip.reason == OVER_CAP_SKIP_REASON
+                && !result
+                    .pruned
+                    .as_ref()
+                    .is_some_and(|pruned| pruned.contains(&skip.name))
+        });
+        let mut g = lock(&self.guarded);
+        if payload_stat.is_some()
+            && manifest_stat.is_some()
+            && g.freshness_epoch == epoch
+            && g.capture_sequence == capture_sequence
+        {
+            g.capture_freshness = Some(CaptureFreshness {
+                user_executions,
+                epoch,
+                payload_stat,
+                manifest_stat,
+                result: result.clone(),
+                live_over_cap,
+            });
+        }
+        // A missing stat pair (a contended probe) or an epoch move never
+        // arms — and leaves any previous memo untouched: that memo's stat
+        // pair described the files as of ITS commit, and this capture just
+        // rewrote both, so the stale pair can no longer match a later
+        // consult (the count and epoch checks cover the changed-namespace
+        // corners). An inert memo is strictly safer to leave than to wipe:
+        // wiping would cost the next capture a redundant re-dump of an
+        // unchanged namespace.
     }
 
     /// Revive a previously snapshotted namespace into the kernel.
@@ -364,6 +532,48 @@ impl Inner {
 }
 
 /// File-stat identity of a snapshot manifest; `None` when it cannot be stated.
+/// Releases the probe claim on any exit path, including a dropped future
+/// (see [`stats_after_commit`]).
+struct ProbeClaimGuard<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for ProbeClaimGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Stat the committed payload + manifest pair, off the executor, bounded,
+/// and SERIALIZED: a stalled (network/FUSE) artifacts filesystem must not
+/// wedge the capture path, and a stalled `fs::metadata` cannot be
+/// interrupted — repeated unbounded probes would accumulate blocked pool
+/// tasks. One probe is in flight at a time; a probe that is already in
+/// flight (or times out) reads as `(None, None)`, which NEVER matches —
+/// the consult treats it as not-fresh and the arm refuses to memoize.
+async fn stats_after_commit(
+    claim: &std::sync::atomic::AtomicBool,
+    cfg: &crate::kernel::shared::KernelSnapshotConfig,
+) -> (Option<ManifestStat>, Option<ManifestStat>) {
+    let payload = cfg.path.clone();
+    let manifest = cfg.manifest_path.clone();
+    // Serialize: a stalled probe keeps exactly one pool task blocked, not
+    // one per capture; every other caller reads as no-stats.
+    if claim.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return (None, None);
+    }
+    // A drop guard, not a trailing store: the capture future can be
+    // dropped at ANY await (the debounce timer's abort, a teardown) — a
+    // cancelled probe must release the claim or every later call would
+    // read as in-flight and the skip would stay off for the manager's
+    // lifetime.
+    let _guard = ProbeClaimGuard(claim);
+    let probe = tokio::task::spawn_blocking(move || {
+        (manifest_stat_of(&payload), manifest_stat_of(&manifest))
+    });
+    match tokio::time::timeout(STAT_TIMEOUT, probe).await {
+        Ok(Ok(pair)) => pair,
+        _ => (None, None),
+    }
+}
 fn manifest_stat_of(path: &std::path::Path) -> Option<ManifestStat> {
     std::fs::metadata(path).ok().map(|m| ManifestStat {
         mtime: m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),

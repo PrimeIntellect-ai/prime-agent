@@ -90,10 +90,10 @@ pub(super) async fn handle_set_config_option(
     };
     let Some((session, config)) = resolved else {
         let _ = tx.send(jsonrpc::error_response(
-            id,
+            &id,
             jsonrpc::INVALID_PARAMS,
             "Invalid params",
-            Some(json!({ "reason": format!("Unknown ACP session: {}", params.session_id) })),
+            Some(&json!({ "reason": format!("Unknown ACP session: {}", params.session_id) })),
         ));
         return;
     };
@@ -128,11 +128,11 @@ pub(super) async fn handle_set_config_option(
     let options = match outcome {
         Ok(options) => options,
         Err(error) => {
-            let _ = tx.send(error.response(id));
+            let _ = tx.send(error.response(&id));
             return;
         }
     };
-    let _ = tx.send(jsonrpc::response(id, config_options_value(&options)));
+    let _ = tx.send(jsonrpc::response(&id, &config_options_value(&options)));
 }
 
 /// One failed config operation: the TS handler's `RequestError` shape.
@@ -148,15 +148,15 @@ impl ConfigOptionError {
     }
 
     /// The JSON-RPC error frame (the TS `invalidParams` data shape).
-    fn response(self, id: Value) -> Value {
+    fn response(self, id: &Value) -> Value {
         match self {
             ConfigOptionError::InvalidParams(reason) => jsonrpc::error_response(
                 id,
                 jsonrpc::INVALID_PARAMS,
                 "Invalid params",
-                Some(json!({ "reason": reason })),
+                Some(&json!({ "reason": reason })),
             ),
-            ConfigOptionError::Internal(details) => internal_error(&id, &details),
+            ConfigOptionError::Internal(details) => internal_error(id, &details),
         }
     }
 }

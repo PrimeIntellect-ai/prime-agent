@@ -1,6 +1,11 @@
 //! The input handlers behind dispatch: prompt delivery, queue
 //! operations, and agent-message delivery.
-use super::*;
+use super::{
+    enqueue_priority, json, oneshot, parse_custom_message, parse_prompt_images, response_success,
+    sender_is_child_of, AgentFamilyRelationship, AgentMessagePromptPayload, Lane, QueueCheckpoint,
+    QueuePriority, QueuedItem, TurnPolicy, Worker, AGENT_MESSAGE_SOURCE,
+    DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION, QUEUED_INPUT_SUSPENDED,
+};
 
 use serde_json::Value;
 
@@ -123,7 +128,7 @@ impl Worker {
                 Lane::Steering => enqueue_priority(&mut core.steering, item),
                 Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
             }
-            let snapshot = self.snapshot_locked(&core);
+            let snapshot = Self::snapshot_locked(&core);
             (snapshot, queued_behind_work)
         };
         // The admission checkpoint (TS `prompt_accepted`, busy=true): the
@@ -210,7 +215,7 @@ impl Worker {
             Lane::Steering => enqueue_priority(&mut core.steering, item),
             Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
         }
-        let snapshot = self.snapshot_locked(&core);
+        let snapshot = Self::snapshot_locked(&core);
         drop(core);
         // The queue-write checkpoint (busy=true): an undelivered lane is
         // live work. The operation names are TS's journal strings
@@ -393,7 +398,7 @@ impl Worker {
                 Lane::Steering => enqueue_priority(&mut core.steering, item),
                 Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
             }
-            let snapshot = self.snapshot_locked(&core);
+            let snapshot = Self::snapshot_locked(&core);
             (id, queued, snapshot, target)
         };
         // The delivery checkpoint (busy=true): the queued agent message is

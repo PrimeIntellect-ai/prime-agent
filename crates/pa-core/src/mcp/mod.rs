@@ -565,17 +565,74 @@ impl McpManager {
             .collect()
     }
 
-    /// Register the `mcp.*` host-request handlers onto a handler map.
+    /// Register the `mcp.*` host-request handlers onto a handler map
+    /// (TS `McpManager.hostHandlers`): `refresh`/`config`/`begin_login` dispatch
+    /// plumbing plus the bounded inventory surface the kernel's generic
+    /// `mcp` module reaches for (`mcp.list_plugins`, `mcp.search_plugins`,
+    /// `mcp.list_connections`).
+    ///
+    /// The inventory handlers capture this manager so each request serves
+    /// LIVE views (the same `pluginViews()` reads the TS handlers serve);
+    /// view computation reads the blocking auth-store snapshot, so it runs
+    /// on a blocking thread.
     ///
     /// # Panics
     ///
-    /// The registered `mcp.refresh`, `mcp.config`, and `mcp.begin_login`
-    /// handlers panic at request time if the ACP server mutex is poisoned.
-    pub fn register_host_handlers(&self, handlers: &mut HostRequestHandlers) {
-        let auth = self.auth_storage.clone();
-        let acp_servers = self.acp_servers.clone();
-        let usage_refresh = self.usage_report.clone();
-        let acp_servers_for_config = self.acp_servers.clone();
+    /// The registered handlers panic at request time if the manager or ACP
+    /// server mutex is poisoned.
+    pub fn register_host_handlers(
+        manager: &Arc<std::sync::Mutex<Self>>,
+        handlers: &mut HostRequestHandlers,
+    ) {
+        /// The TS `boundedLimit`: the default when absent, a positive
+        /// integer check, then a clamp to the maximum.
+        fn bounded_limit(
+            value: Option<&Value>,
+            default_limit: usize,
+            max_limit: usize,
+        ) -> Result<usize, anyhow::Error> {
+            let Some(value) = value else {
+                return Ok(default_limit);
+            };
+            let number = value
+                .as_u64()
+                .or_else(|| {
+                    value
+                        .as_f64()
+                        .filter(|number| number.fract() == 0.0)
+                        .map(|number| number as u64)
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!("mcp host request limit must be a positive integer")
+                })?;
+            if number < 1 {
+                return Err(anyhow::anyhow!(
+                    "mcp host request limit must be a positive integer"
+                ));
+            }
+            Ok(number.min(max_limit as u64) as usize)
+        }
+
+        let (
+            auth,
+            acp_servers,
+            usage_refresh,
+            acp_servers_for_config,
+            integrations,
+            usage_config,
+            begin_login,
+        ) = {
+            let manager = manager.lock().unwrap();
+            (
+                manager.auth_storage.clone(),
+                manager.acp_servers.clone(),
+                manager.usage_report.clone(),
+                manager.acp_servers.clone(),
+                manager.integrations.clone(),
+                manager.usage_report.clone(),
+                manager.begin_login.clone(),
+            )
+        };
         handlers.register(
             "mcp.refresh",
             host_handler(move |payload| {
@@ -618,8 +675,6 @@ impl McpManager {
                 })
             }),
         );
-        let integrations = self.integrations.clone();
-        let usage_config = self.usage_report.clone();
         handlers.register(
             "mcp.config",
             host_handler(move |payload| {
@@ -679,7 +734,7 @@ impl McpManager {
             }),
         );
         // Only expose begin_login when an interactive login is actually wired.
-        if let Some(begin_login) = self.begin_login.clone() {
+        if let Some(begin_login) = begin_login {
             handlers.register(
                 "mcp.begin_login",
                 host_handler(move |payload| {
@@ -701,6 +756,128 @@ impl McpManager {
                 }),
             );
         }
+        // -- the bounded inventory surface (TS `hostHandlers` list_plugins /
+        // search_plugins / list_connections) -------------------------------
+
+        let manager = std::sync::Arc::clone(manager);
+        let manager_for_plugins = std::sync::Arc::clone(&manager);
+        handlers.register(
+            "mcp.list_plugins",
+            host_handler(move |payload| {
+                let manager = std::sync::Arc::clone(&manager_for_plugins);
+                Box::pin(async move {
+                    let status = payload.data.get("connectionStatus");
+                    let status = match status {
+                        None => None,
+                        Some(Value::String(status)) => Some(status.clone()),
+                        Some(_) => {
+                            return Err(anyhow::anyhow!(
+                                "mcp.list_plugins connectionStatus must be a string"
+                            ));
+                        }
+                    };
+                    if let Some(status) = status.as_deref() {
+                        if !matches!(
+                            status,
+                            "connected"
+                                | "pending"
+                                | "not_connected"
+                                | "setup_required"
+                                | "disabled"
+                                | "error"
+                        ) {
+                            return Err(anyhow::anyhow!(
+                                "mcp.list_plugins received an unknown connectionStatus: {status}"
+                            ));
+                        }
+                    }
+                    let limit = bounded_limit(payload.data.get("limit"), 50, 200)?;
+                    let cursor = match payload.data.get("cursor") {
+                        None => 0,
+                        Some(Value::String(cursor)) => {
+                            crate::mcp::catalog_plugin_views::decode_plugin_cursor(Some(cursor))
+                                .map_err(anyhow::Error::msg)?
+                        }
+                        Some(_) => {
+                            return Err(anyhow::anyhow!(
+                                "mcp.list_plugins received an invalid cursor"
+                            ));
+                        }
+                    };
+                    // The views read the auth store through a blocking
+                    // snapshot; keep that off the async runtime.
+                    let views = tokio::task::spawn_blocking(move || {
+                        let manager = manager.lock().unwrap();
+                        manager.service_catalog_views()
+                    })
+                    .await
+                    .map_err(|error| anyhow::anyhow!("MCP inventory read failed: {error}"))?;
+                    let views = match status.as_deref() {
+                        Some(status) => {
+                            crate::mcp::catalog_plugin_views::filter_plugin_views_by_status(
+                                &views, status,
+                            )
+                        }
+                        None => views,
+                    };
+                    let (plugins, next_cursor) =
+                        crate::mcp::catalog_plugin_views::page_plugin_views(&views, cursor, limit);
+                    let next_cursor = match next_cursor {
+                        Some(next) => json!(next),
+                        None => Value::Null,
+                    };
+                    Ok(json!({ "plugins": plugins, "nextCursor": next_cursor }))
+                })
+            }),
+        );
+        let manager_for_search = std::sync::Arc::clone(&manager);
+        handlers.register(
+            "mcp.search_plugins",
+            host_handler(move |payload| {
+                let manager = std::sync::Arc::clone(&manager_for_search);
+                Box::pin(async move {
+                    let query = payload
+                        .data
+                        .get("query")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .unwrap_or_default()
+                        .to_string();
+                    if query.is_empty() {
+                        return Err(anyhow::anyhow!(
+                            "mcp.search_plugins requires a non-empty query"
+                        ));
+                    }
+                    let limit = bounded_limit(payload.data.get("limit"), 10, 50)?;
+                    let views = tokio::task::spawn_blocking(move || {
+                        let manager = manager.lock().unwrap();
+                        manager.service_catalog_views()
+                    })
+                    .await
+                    .map_err(|error| anyhow::anyhow!("MCP inventory read failed: {error}"))?;
+                    let plugins = crate::mcp::catalog_plugin_views::search_plugin_views(
+                        &views, &query, limit,
+                    );
+                    Ok(json!({ "plugins": plugins, "nextCursor": Value::Null }))
+                })
+            }),
+        );
+        handlers.register(
+            "mcp.list_connections",
+            host_handler(move |_payload| {
+                let manager = std::sync::Arc::clone(&manager);
+                Box::pin(async move {
+                    let connections = tokio::task::spawn_blocking(move || {
+                        let manager = manager.lock().unwrap();
+                        let acp_servers = manager.get_acp_servers();
+                        manager.service_catalog_connection_views(&acp_servers)
+                    })
+                    .await
+                    .map_err(|error| anyhow::anyhow!("MCP inventory read failed: {error}"))?;
+                    Ok(json!({ "connections": connections }))
+                })
+            }),
+        );
     }
 
     /// Session-scoped servers supplied by the active ACP client.
@@ -1080,13 +1257,16 @@ mod tests {
                 call_timeout_ms: None,
             },
         );
-        let manager = manager_with(Some(user_servers));
+        let manager = std::sync::Arc::new(std::sync::Mutex::new(manager_with(Some(user_servers))));
         assert_eq!(
-            manager.get_enabled_persistent_generic_servers(),
+            manager
+                .lock()
+                .unwrap()
+                .get_enabled_persistent_generic_servers(),
             vec!["fixture-echo".to_string()]
         );
         let mut handlers = HostRequestHandlers::default();
-        manager.register_host_handlers(&mut handlers);
+        McpManager::register_host_handlers(&manager, &mut handlers);
         let config = handlers.get("mcp.config").unwrap().clone();
         let result = config(crate::kernel::shared::HostRequestPayload {
             data: json!({ "server": "fixture-echo" }),
@@ -1102,9 +1282,9 @@ mod tests {
 
     #[tokio::test]
     async fn config_host_handler_resolves_user_and_acp_servers() {
-        let manager = manager_with(None);
+        let manager = std::sync::Arc::new(std::sync::Mutex::new(manager_with(None)));
         let mut handlers = HostRequestHandlers::default();
-        manager.register_host_handlers(&mut handlers);
+        McpManager::register_host_handlers(&manager, &mut handlers);
         let config = handlers.get("mcp.config").unwrap().clone();
         // Unknown server -> empty object.
         let result = config(crate::kernel::shared::HostRequestPayload {
@@ -1123,9 +1303,13 @@ mod tests {
             env: HashMap::new(),
         }];
 
-        manager.replace_acp_servers(&servers, "client-a").unwrap();
+        manager
+            .lock()
+            .unwrap()
+            .replace_acp_servers(&servers, "client-a")
+            .unwrap();
         let mut handlers = HostRequestHandlers::default();
-        manager.register_host_handlers(&mut handlers);
+        McpManager::register_host_handlers(&manager, &mut handlers);
         let config = handlers.get("mcp.config").unwrap().clone();
         let result = config(crate::kernel::shared::HostRequestPayload {
             data: json!({ "server": "session-tool" }),
@@ -1145,5 +1329,236 @@ mod tests {
         assert_eq!(error.to_string(), "mcp.config requires a server");
         // begin_login is not registered when no login is wired.
         assert!(handlers.get("mcp.begin_login").is_none());
+    }
+
+    #[tokio::test]
+    async fn list_plugins_host_handler_pages_filters_and_validates() {
+        let manager = std::sync::Arc::new(std::sync::Mutex::new(manager_with(None)));
+        let mut handlers = HostRequestHandlers::default();
+        McpManager::register_host_handlers(&manager, &mut handlers);
+        let list_plugins = handlers.get("mcp.list_plugins").expect("wired").clone();
+        // Default page: the first 50 plugin cards, and the real catalog is
+        // present (the compiled builtins resolve).
+        let page = list_plugins(crate::kernel::shared::HostRequestPayload {
+            data: json!({}),
+            cell_source_code: None,
+        })
+        .await
+        .unwrap();
+        assert!(page["plugins"].as_array().expect("plugins").len() > 1);
+        assert!(
+            page["plugins"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["serviceId"] == json!("linear")),
+            "the compiled builtin catalog services page"
+        );
+        // The status filter reaches the host and validates.
+        let filtered = list_plugins(crate::kernel::shared::HostRequestPayload {
+            data: json!({ "connectionStatus": "connected" }),
+            cell_source_code: None,
+        })
+        .await
+        .unwrap();
+        assert!(
+            filtered["plugins"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| entry["connectionStatus"] == json!("connected")),
+            "every filtered row carries the requested status"
+        );
+        let error = list_plugins(crate::kernel::shared::HostRequestPayload {
+            data: json!({ "connectionStatus": "maybe" }),
+            cell_source_code: None,
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "mcp.list_plugins received an unknown connectionStatus: maybe"
+        );
+        let error = list_plugins(crate::kernel::shared::HostRequestPayload {
+            data: json!({ "connectionStatus": 7 }),
+            cell_source_code: None,
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "mcp.list_plugins connectionStatus must be a string"
+        );
+        // The cursor is digits-only; the limit clamps to the host maximum.
+        let error = list_plugins(crate::kernel::shared::HostRequestPayload {
+            data: json!({ "cursor": "not-digits" }),
+            cell_source_code: None,
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "mcp.list_plugins received an invalid cursor"
+        );
+        let error = list_plugins(crate::kernel::shared::HostRequestPayload {
+            data: json!({ "limit": 0 }),
+            cell_source_code: None,
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "mcp host request limit must be a positive integer"
+        );
+        let clamped = list_plugins(crate::kernel::shared::HostRequestPayload {
+            data: json!({ "limit": 1000 }),
+            cell_source_code: None,
+        })
+        .await
+        .unwrap();
+        assert!(
+            clamped["plugins"].as_array().unwrap().len() <= 200,
+            "the host clamps the page size to its maximum"
+        );
+        // A limit under the catalog size pages with a cursor; following the
+        // cursor yields the rest.
+        let total = page["plugins"].as_array().unwrap().len();
+        if total > 2 {
+            let first = list_plugins(crate::kernel::shared::HostRequestPayload {
+                data: json!({ "limit": 2 }),
+                cell_source_code: None,
+            })
+            .await
+            .unwrap();
+            let next_cursor = first["nextCursor"]
+                .as_str()
+                .expect("a cursor when more exist");
+            assert_eq!(next_cursor, "2");
+            let second = list_plugins(crate::kernel::shared::HostRequestPayload {
+                data: json!({ "limit": 2, "cursor": next_cursor }),
+                cell_source_code: None,
+            })
+            .await
+            .unwrap();
+            assert_ne!(
+                second["plugins"][0]["serviceId"], first["plugins"][0]["serviceId"],
+                "the next page starts where the cursor left off"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn search_plugins_host_handler_searches_and_validates() {
+        let manager = std::sync::Arc::new(std::sync::Mutex::new(manager_with(None)));
+        let mut handlers = HostRequestHandlers::default();
+        McpManager::register_host_handlers(&manager, &mut handlers);
+        let search = handlers.get("mcp.search_plugins").expect("wired").clone();
+        let result = search(crate::kernel::shared::HostRequestPayload {
+            data: json!({ "query": "linear" }),
+            cell_source_code: None,
+        })
+        .await
+        .unwrap();
+        let plugins = result["plugins"].as_array().expect("plugins");
+        assert!(plugins
+            .iter()
+            .any(|entry| entry["serviceId"] == json!("linear")));
+        assert_eq!(result["nextCursor"], serde_json::Value::Null);
+        // The query is required to be a non-empty string.
+        for bad in [json!(["query", ""]), json!({}), json!({ "query": "   " })] {
+            let error = search(crate::kernel::shared::HostRequestPayload {
+                data: bad,
+                cell_source_code: None,
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "mcp.search_plugins requires a non-empty query"
+            );
+        }
+        let error = search(crate::kernel::shared::HostRequestPayload {
+            data: json!({ "query": "linear", "limit": -3 }),
+            cell_source_code: None,
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "mcp host request limit must be a positive integer"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_connections_host_handler_serves_the_inventory() {
+        let mut user_servers = HashMap::new();
+        user_servers.insert(
+            "fixture-echo".to_string(),
+            McpServerConfig::Stdio {
+                command: "python3".to_string(),
+                args: Some(vec!["fixtures/mcp_echo_server.py".to_string()]),
+                cwd: None,
+                env: None,
+                enabled: None,
+                enabled_tools: None,
+                disabled_tools: None,
+                startup_timeout_ms: None,
+                call_timeout_ms: None,
+            },
+        );
+        let manager = std::sync::Arc::new(std::sync::Mutex::new(manager_with(Some(user_servers))));
+        // A session ACP server surfaces as its own connected row.
+        manager
+            .lock()
+            .unwrap()
+            .replace_acp_servers(
+                &[AcpMcpServerConfig::Stdio {
+                    name: "session-tool".to_string(),
+                    command: "run".to_string(),
+                    args: vec![],
+                    cwd: "/tmp".to_string(),
+                    env: HashMap::new(),
+                }],
+                "client-a",
+            )
+            .unwrap();
+        let mut handlers = HostRequestHandlers::default();
+        McpManager::register_host_handlers(&manager, &mut handlers);
+        let list_connections = handlers.get("mcp.list_connections").expect("wired").clone();
+        let result = list_connections(crate::kernel::shared::HostRequestPayload {
+            data: json!({}),
+            cell_source_code: None,
+        })
+        .await
+        .unwrap();
+        let connections = result["connections"].as_array().expect("connections");
+        // Every row carries the dispatch id, a status, and a transport; rows
+        // sort by connectionId.
+        let mut ids = Vec::new();
+        for entry in connections {
+            assert!(entry["connectionId"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty()));
+            assert!(entry["status"].as_str().is_some());
+            assert!(entry["transport"].as_str().is_some());
+            ids.push(entry["connectionId"].as_str().unwrap().to_string());
+        }
+        let mut sorted_ids = ids.clone();
+        sorted_ids.sort();
+        assert_eq!(ids, sorted_ids, "connection rows sort by connectionId");
+        // The user stdio server and the ACP server both have rows.
+        assert!(ids.contains(&"fixture-echo".to_string()));
+        assert!(ids.contains(&"session-tool".to_string()));
+        let acp_row = connections
+            .iter()
+            .find(|entry| entry["connectionId"] == json!("session-tool"))
+            .expect("the acp row");
+        assert_eq!(acp_row["status"], json!("connected"));
+        assert_eq!(acp_row["transport"], json!("stdio"));
+        assert_eq!(acp_row["source"], json!("acp"));
+        // No setup_required status ever leaks into the inventory rows.
+        for entry in connections {
+            assert_ne!(entry["status"], json!("setup_required"));
+        }
     }
 }

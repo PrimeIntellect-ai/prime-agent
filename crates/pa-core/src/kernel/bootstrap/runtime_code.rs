@@ -87,12 +87,16 @@ except Exception as _prime_agent_rlm_error:
 #[must_use]
 pub fn build_rlm_bootstrap_code(python_skills: &[KernelPythonSkill]) -> String {
     let base_code = format!("{RLM_BOOTSTRAP_HEADER_CODE}\n\n{RLM_BOOTSTRAP_RUNTIME_CODE}");
-    let mut import_names: Vec<&str> = python_skills
-        .iter()
-        .map(|s| s.import_name.as_str())
-        .collect();
-    import_names.sort_unstable();
-    import_names.dedup();
+    // TS: `[...new Set(pythonSkills.map(...))]` — first-seen order, so the
+    // pre-import loop (and the unavailable-skills report it prints) follows
+    // the session's skill discovery order.
+    let mut import_names: Vec<&str> = Vec::new();
+    for skill in python_skills {
+        let import_name = skill.import_name.as_str();
+        if !import_names.contains(&import_name) {
+            import_names.push(import_name);
+        }
+    }
     if import_names.is_empty() {
         return base_code;
     }

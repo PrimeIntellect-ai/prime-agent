@@ -99,9 +99,12 @@ pub(crate) fn load_skill_from_file(
         });
     }
 
+    // TS `frontmatter.name || parentDirName`: a falsy name (missing or the
+    // empty string) falls back to the parent directory name.
     let name = frontmatter
         .get("name")
         .and_then(|value| value.as_str())
+        .filter(|name| !name.is_empty())
         .map_or_else(|| parent_dir_name.clone(), str::to_string);
 
     for error in validate_skill_name(&name, &parent_dir_name) {

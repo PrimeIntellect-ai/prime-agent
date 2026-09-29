@@ -193,6 +193,7 @@ fn classify_from(exe: Option<&Path>, own_exe: Option<&Path>) -> HolderFlavor {
 /// the picker names). `session_path` is the refused file (the name probe
 /// is best-effort: an unreadable file renders without the name, never
 /// fails the refusal).
+#[must_use]
 pub fn refusal_message(hold: &HoldIdentity, session_path: Option<&Path>) -> String {
     let (flavor, holder_exe) = holder_process(hold.pid);
     refusal_for_flavor(flavor, hold, session_path, holder_exe.as_deref())
