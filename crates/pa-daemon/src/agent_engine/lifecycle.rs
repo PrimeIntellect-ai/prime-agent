@@ -490,17 +490,16 @@ impl AgentSessionEngine {
             // operator's ~84s restart cadence, 64 cycles in 1.5h). The
             // scan reads the SAME artifact the seed came from.
             if state.status == pa_core::goals::GoalStatus::Active {
-                let scan: Option<Vec<pa_types::session::FileEntry>> = if let Some(entries) =
-                    &pending_branch
-                {
-                    Some(entries.clone())
-                } else if let Some(branch) = &shared_branch {
-                    Some(branch.clone())
-                } else if let Some(window) = &shared_window {
-                    Some(window.entries().to_vec())
-                } else {
-                    None
-                };
+                let scan: Option<Vec<pa_types::session::FileEntry>> =
+                    if let Some(entries) = &pending_branch {
+                        Some(entries.clone())
+                    } else if let Some(branch) = &shared_branch {
+                        Some(branch.clone())
+                    } else if let Some(window) = &shared_window {
+                        Some(window.entries().to_vec())
+                    } else {
+                        None
+                    };
                 if let Some(entries) = scan {
                     if let Some(error) = pa_core::goals::stale_active_goal_failure(&entries) {
                         state = pa_core::goals::GoalState {

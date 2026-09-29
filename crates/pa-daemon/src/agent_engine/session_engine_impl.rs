@@ -126,9 +126,7 @@ impl SessionEngine for AgentSessionEngine {
             // persist ends the boundary without a continuation (TS
             // `_maybeResumeGoalContinuationAfterRlmWork`'s catch: the
             // hook must not reject; the unchanged count retries).
-            let message = match driver
-                .next_continuation_message(&mut session, last_turn.as_ref())
-            {
+            let message = match driver.next_continuation_message(&mut session, last_turn.as_ref()) {
                 Ok(message) => message,
                 Err(error) => {
                     eprintln!("pa-daemon: goal continuation mint persist failed: {error:#}");

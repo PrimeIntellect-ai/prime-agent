@@ -5,12 +5,12 @@
 
 use pa_types::session::CustomMessage;
 
+use super::provider_retry::provider_stream_failure_kind;
 use crate::goals::{
     create_goal_context_message, empty_goal_state, goal_token_delta_for_usage,
     normalize_goal_state, validate_goal_budget, validate_goal_objective, GoalContextKind,
     GoalState, GoalStatus, GOAL_STATE_CUSTOM_TYPE,
 };
-use super::provider_retry::provider_stream_failure_kind;
 use crate::session::manager::SessionManager;
 
 /// The goal-state reload rule at a branch rebuild (TS
@@ -89,9 +89,7 @@ const CONTINUATION_NO_PROGRESS_BACKOFF_BASE_MS: u64 = 10_000;
 /// stream failure that is not the quota-park class — the parked turn is
 /// the park's pause, not the goal's death). `None` for healthy, aborted,
 /// or parked turns.
-pub fn terminal_provider_failure(
-    message: &pa_agent::types::AssistantMessage,
-) -> Option<String> {
+pub fn terminal_provider_failure(message: &pa_agent::types::AssistantMessage) -> Option<String> {
     if message.stop_reason != pa_agent::types::StopReason::Error {
         return None;
     }
@@ -717,7 +715,11 @@ mod tests {
     /// A failed provider turn in the pa-agent wire shape (the mint's
     /// progress-check input), carrying the `provider_stream_failure`
     /// diagnostic the classification reads.
-    fn test_error_turn(kind: &str, status: Option<u16>, error: &str) -> pa_agent::types::AssistantMessage {
+    fn test_error_turn(
+        kind: &str,
+        status: Option<u16>,
+        error: &str,
+    ) -> pa_agent::types::AssistantMessage {
         pa_agent::types::AssistantMessage {
             content: Vec::new(),
             api: String::new(),
@@ -1154,9 +1156,12 @@ mod tests {
             .next_continuation_message(&mut session, None)
             .unwrap();
         session
-            .append_message(pa_types::session::AgentMessage::Assistant(
-                wire_error_turn("invalid_request", Some(402), "402 Insufficient balance", 0),
-            ))
+            .append_message(pa_types::session::AgentMessage::Assistant(wire_error_turn(
+                "invalid_request",
+                Some(402),
+                "402 Insufficient balance",
+                0,
+            )))
             .unwrap();
         let rehydrated = GoalDriver::load_persisted(&session);
         assert_eq!(rehydrated.state().status, GoalStatus::Error);
@@ -1173,9 +1178,12 @@ mod tests {
             .next_continuation_message(&mut session, None)
             .unwrap();
         session
-            .append_message(pa_types::session::AgentMessage::Assistant(
-                wire_error_turn("rate_limit", Some(429), "429 Too many requests", 0),
-            ))
+            .append_message(pa_types::session::AgentMessage::Assistant(wire_error_turn(
+                "rate_limit",
+                Some(429),
+                "429 Too many requests",
+                0,
+            )))
             .unwrap();
         assert_eq!(
             GoalDriver::load_persisted(&session).state().status,
@@ -1187,12 +1195,13 @@ mod tests {
         let mut session = persisted_session();
         let mut driver = GoalDriver::new();
         driver.start(&mut session, "work", None).unwrap();
-        driver.finish_for_terminal_message(
-            &mut session,
-            pa_types::ai::StopReason::Error,
-            Some("settled failure"),
-        )
-        .unwrap();
+        driver
+            .finish_for_terminal_message(
+                &mut session,
+                pa_types::ai::StopReason::Error,
+                Some("settled failure"),
+            )
+            .unwrap();
         assert_eq!(
             GoalDriver::load_persisted(&session).state().status,
             GoalStatus::Error

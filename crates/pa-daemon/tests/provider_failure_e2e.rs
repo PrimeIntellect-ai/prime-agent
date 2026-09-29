@@ -735,12 +735,8 @@ fn storm_429_caps_requests_honors_retry_after_and_leaves_one_outcome_row() {
 /// settles as a silent empty message.
 #[test]
 fn payment_402_settles_once_with_the_disclosure() {
-    let (_dir, mock, _supervisor, mut client, session_id) = setup_with_rejection(
-        "p402",
-        5,
-        "never reached",
-        MockRejection::PaymentRequired,
-    );
+    let (_dir, mock, _supervisor, mut client, session_id) =
+        setup_with_rejection("p402", 5, "never reached", MockRejection::PaymentRequired);
     client.send_command(
         "p1",
         &json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "hi" }),
@@ -844,8 +840,7 @@ fn goal_continuation_refuses_after_the_402_corpse() {
         .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
         .filter(|entry| {
             entry.get("type").and_then(Value::as_str) == Some("custom")
-                && entry.get("customType").and_then(Value::as_str)
-                    == Some("thread_goal_state")
+                && entry.get("customType").and_then(Value::as_str) == Some("thread_goal_state")
         })
         .collect();
     let latest = goal_rows.last().expect("at least one goal row");
@@ -872,7 +867,10 @@ fn goal_continuation_refuses_after_the_402_corpse() {
                 && event["message"]["customType"] == "provider_retry_outcome"
         })
         .count();
-    assert_eq!(outcome_rows, 1, "one disclosure row: the silent arm is gone");
+    assert_eq!(
+        outcome_rows, 1,
+        "one disclosure row: the silent arm is gone"
+    );
 
     // The failed continuation pair left the live loop context (BUG 2
     // (c)): the transcript keeps the rows, the loop context does not.

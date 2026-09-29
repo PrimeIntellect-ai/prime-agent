@@ -583,36 +583,34 @@ mod tests {
         error: &str,
     ) -> pa_types::session::FileEntry {
         pa_types::session::FileEntry::Message {
-            message: pa_types::session::AgentMessage::Assistant(
-                pa_types::ai::AssistantMessage {
-                    content: Vec::new(),
-                    api: "openai-completions".to_string(),
-                    provider: "test".to_string(),
-                    model: "m".to_string(),
-                    response_model: None,
-                    response_id: None,
-                    diagnostics: Some(vec![pa_types::ai::AssistantMessageDiagnostic {
-                        type_: "provider_stream_failure".to_string(),
-                        timestamp: 0,
-                        error: None,
-                        details: Some(
-                            serde_json::json!({
-                                "kind": kind,
-                                "status": status,
-                            })
-                            .as_object()
-                            .cloned()
-                            .unwrap_or_default(),
-                        ),
-                    }]),
-                    usage: Default::default(),
-                    stop_reason: pa_types::ai::StopReason::Error,
-                    stop_reason_raw: None,
-                    error_message: Some(error.to_string()),
+            message: pa_types::session::AgentMessage::Assistant(pa_types::ai::AssistantMessage {
+                content: Vec::new(),
+                api: "openai-completions".to_string(),
+                provider: "test".to_string(),
+                model: "m".to_string(),
+                response_model: None,
+                response_id: None,
+                diagnostics: Some(vec![pa_types::ai::AssistantMessageDiagnostic {
+                    type_: "provider_stream_failure".to_string(),
                     timestamp: 0,
-                    rest: serde_json::Map::default(),
-                },
-            ),
+                    error: None,
+                    details: Some(
+                        serde_json::json!({
+                            "kind": kind,
+                            "status": status,
+                        })
+                        .as_object()
+                        .cloned()
+                        .unwrap_or_default(),
+                    ),
+                }]),
+                usage: Default::default(),
+                stop_reason: pa_types::ai::StopReason::Error,
+                stop_reason_raw: None,
+                error_message: Some(error.to_string()),
+                timestamp: 0,
+                rest: serde_json::Map::default(),
+            }),
             base: pa_types::session::EntryBase {
                 id: None,
                 parent_id: None,
@@ -632,11 +630,8 @@ mod tests {
         finished.active = false;
         let finished = goal_state_entry(&finished);
         let failure = error_turn_entry("invalid_request", Some(402), "402 Insufficient balance");
-        let rate_limited = error_turn_entry(
-            "rate_limit",
-            Some(429),
-            "429 Too many concurrent requests",
-        );
+        let rate_limited =
+            error_turn_entry("rate_limit", Some(429), "429 Too many concurrent requests");
 
         // The interrupted settle: the active mint row, then the corpse.
         // Stale -> the failure's text.
@@ -652,29 +647,27 @@ mod tests {
         );
         // A healthy turn after the mint: not stale.
         let healthy = pa_types::session::FileEntry::Message {
-            message: pa_types::session::AgentMessage::Assistant(
-                pa_types::ai::AssistantMessage {
-                    content: vec![pa_types::ai::AssistantContentBlock::Text(
-                        pa_types::ai::TextContent {
-                            text: "progress".to_string(),
-                            text_signature: None,
-                            rest: serde_json::Map::default(),
-                        },
-                    )],
-                    api: "openai-completions".to_string(),
-                    provider: "test".to_string(),
-                    model: "m".to_string(),
-                    response_model: None,
-                    response_id: None,
-                    diagnostics: None,
-                    usage: Default::default(),
-                    stop_reason: pa_types::ai::StopReason::Stop,
-                    stop_reason_raw: None,
-                    error_message: None,
-                    timestamp: 0,
-                    rest: serde_json::Map::default(),
-                },
-            ),
+            message: pa_types::session::AgentMessage::Assistant(pa_types::ai::AssistantMessage {
+                content: vec![pa_types::ai::AssistantContentBlock::Text(
+                    pa_types::ai::TextContent {
+                        text: "progress".to_string(),
+                        text_signature: None,
+                        rest: serde_json::Map::default(),
+                    },
+                )],
+                api: "openai-completions".to_string(),
+                provider: "test".to_string(),
+                model: "m".to_string(),
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
+                usage: Default::default(),
+                stop_reason: pa_types::ai::StopReason::Stop,
+                stop_reason_raw: None,
+                error_message: None,
+                timestamp: 0,
+                rest: serde_json::Map::default(),
+            }),
             base: pa_types::session::EntryBase {
                 id: None,
                 parent_id: None,
@@ -694,15 +687,9 @@ mod tests {
         );
         // The goal restarted after the failure: the active row is NEWER
         // than the old corpse — not stale.
-        assert_eq!(
-            stale_active_goal_failure(&[failure, active]),
-            None
-        );
+        assert_eq!(stale_active_goal_failure(&[failure, active]), None);
         // A goal row that is the newest entry overall: no failure after
         // it — not stale.
-        assert_eq!(
-            stale_active_goal_failure(&[finished]),
-            None
-        );
+        assert_eq!(stale_active_goal_failure(&[finished]), None);
     }
 }
