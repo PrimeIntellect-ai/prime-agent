@@ -196,6 +196,13 @@ impl AgentSessionEngine {
                 return;
             }
         };
+        // This mint's own guard handle, captured under the driver lock:
+        // every later release of the mint (the admission sink, the drop
+        // paths, this task's own close-race branch) clears exactly this
+        // handle, never the mutable mirror (a core rebuild may have
+        // re-swapped the mirror onto a replacement session's handle
+        // meanwhile).
+        let pending_handle = Some(driver.pending_continuation_handle());
         // TS `_getContinuationMessages`: new session input arriving
         // during the mint cancels it (the arrival-epoch restore).
         // A close that lands during the mint cancels it the same way:
@@ -203,10 +210,16 @@ impl AgentSessionEngine {
         // the stopped session's durable state stays as the close left it.
         if self.session_input_queued() || self.session_is_closed() {
             if let Err(error) = driver.rollback_continuation_mint(&mut session) {
-                // The restore hook must not reject: warn and re-owe anyway.
+                // The restore hook must not reject: warn. The failed
+                // decrement leaves the slot durably charged (the mint's
+                // increment already landed) and the guard released with
+                // the dead mint — re-owing would re-mint and double-charge
+                // the eventual turn, so the cancelled boundary absorbs the
+                // spent slot and the next natural boundary mints normally.
                 eprintln!("pa-daemon: goal mint rollback persist failed: {error:#}");
+            } else {
+                driver.mark_continuation_owed();
             }
-            driver.mark_continuation_owed();
             return;
         }
         let goal_update = self.publish_goal_state(&driver.state_with_creation_elapsed());
@@ -218,12 +231,20 @@ impl AgentSessionEngine {
         // consumed — the same TS race, but the zombie never runs). The
         // unconsumed mint releases the pending guard with it.
         if self.session_is_closed() {
-            self.clear_pending_goal_continuation();
+            // The unconsumed mint releases its OWN pending guard (the
+            // handle captured under the driver lock at the mint — a
+            // rebuild may have re-swapped the mirror onto a replacement
+            // session's handle while this task's awaits ran).
+            match pending_handle.as_ref() {
+                Some(pending) => pending.store(false, std::sync::atomic::Ordering::SeqCst),
+                None => self.clear_pending_goal_continuation(),
+            }
             return;
         }
         self.deliver_goal_work(GoalTurnEndWork::Continuation(GoalContinuation {
             request: goal_prompt_request(&message),
             goal_update,
+            pending_handle,
         }));
     }
 
@@ -327,15 +348,25 @@ impl AgentSessionEngine {
             if message.is_none() {
                 return GoalBoundary::End;
             }
+            // This mint's own guard handle, captured under the driver
+            // lock: the admission sink and the drop paths release exactly
+            // this mint's guard, never the mutable mirror (a rebuild may
+            // have re-swapped it meanwhile).
+            let pending_handle = Some(driver.pending_continuation_handle());
             // The mint's arrival-epoch restore: input that arrived while
             // the mint ran rolls the slot back so the next boundary
             // re-mints without double-counting.
             if self.session_input_queued() {
                 if let Err(error) = driver.rollback_continuation_mint(&mut session) {
-                    // The restore hook must not reject: warn and re-owe anyway.
+                    // The restore hook must not reject: warn. The failed
+                    // decrement leaves the slot durably charged (the
+                    // mint's increment already landed) and the guard
+                    // released with the dead mint — re-owing would re-mint
+                    // and double-charge the eventual turn, so the
+                    // cancelled boundary absorbs the spent slot and the
+                    // next natural boundary mints normally.
                     eprintln!("pa-daemon: goal mint rollback persist failed: {error:#}");
-                }
-                if was_owed {
+                } else if was_owed {
                     driver.mark_continuation_owed();
                 }
                 return GoalBoundary::End;
@@ -346,6 +377,7 @@ impl AgentSessionEngine {
             self.deliver_goal_work(GoalTurnEndWork::Continuation(GoalContinuation {
                 request: goal_prompt_request(&message),
                 goal_update,
+                pending_handle,
             }));
             GoalBoundary::End
         })
@@ -380,6 +412,9 @@ impl AgentSessionEngine {
         Some(GoalTurnEndWork::BudgetLimitSteer(GoalContinuation {
             request: goal_prompt_request(&message),
             goal_update: None,
+            // The budget steer mints no continuation slot: no pending
+            // guard exists for this item.
+            pending_handle: None,
         }))
     }
 
@@ -409,7 +444,7 @@ impl AgentSessionEngine {
         // never reaches a turn on this path, so the driver's pending guard
         // releases with it (a wedged guard would block every later mint).
         if self.session_is_closed() {
-            self.clear_pending_goal_continuation();
+            self.release_goal_work_continuation(&work);
             return;
         }
         let sink = self
@@ -421,7 +456,7 @@ impl AgentSessionEngine {
             sink(work);
         } else {
             eprintln!("pa-daemon: goal follow-up dropped: no admission sink wired");
-            self.clear_pending_goal_continuation();
+            self.release_goal_work_continuation(&work);
         }
     }
 }

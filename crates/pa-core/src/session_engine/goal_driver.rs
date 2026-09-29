@@ -141,7 +141,18 @@ impl GoalDriver {
                     ..previous
                 }
             }
-            _ => reloaded,
+            _ => {
+                // A different goal (or none) adopts: the previous goal's
+                // pending mint and its armed deferral belong to the old
+                // timeline — keeping either would block (or mis-deliver)
+                // the adopted goal's continuations until the next
+                // pause/start/clear. Every other state-adoption site
+                // drops both with the replaced goal; the branch reload
+                // does the same.
+                self.continuation_consumed();
+                self.owed_continuation_for_rlm_work = false;
+                reloaded
+            }
         };
     }
 
@@ -520,7 +531,18 @@ impl GoalDriver {
     /// turn end defers the continuation while descendant RLM work is
     /// unsettled. The mint consumes nothing while it waits; descendant
     /// settlement delivers it (`take_owed_continuation`).
+    ///
+    /// TS arms only when nothing is already queued
+    /// (`_goalContinuationAwaitsRlmWork ||= !hasQueuedMessages()`): a
+    /// minted-but-unadmitted continuation IS this boundary's queued
+    /// delivery, so arming beside it would leave the flag set when the
+    /// pending mint admits — a later settle would deliver a SECOND
+    /// continuation for the same boundary. The pending guard makes the
+    /// arm a no-op instead.
     pub fn mark_continuation_owed(&mut self) {
+        if self.pending_continuation() {
+            return;
+        }
         self.owed_continuation_for_rlm_work = true;
     }
 
@@ -612,19 +634,28 @@ impl GoalDriver {
         &mut self,
         session: &mut SessionManager,
     ) -> anyhow::Result<()> {
-        // The rolled-back mint never reaches a turn: the pending guard
-        // releases with the slot.
-        self.continuation_consumed();
         if self.state.continuations_used == 0 {
+            // The rolled-back mint never reaches a turn: the pending guard
+            // releases with the slot.
+            self.continuation_consumed();
             return Ok(());
         }
-        self.set_state(
+        let rolled_back = self.set_state(
             session,
             GoalState {
                 continuations_used: self.state.continuations_used - 1,
                 ..self.state.clone()
             },
-        )
+        );
+        // The rolled-back mint never reaches a turn, so its pending
+        // guard releases on both outcomes (`set_state` persists before
+        // assigning, so a failed write leaves the slot charged at the
+        // mint's increment — in memory and on disk, consistently). The
+        // CALLER must drop the re-owe on that failure branch: the slot
+        // stays spent, and a re-minted follow-up would double-charge
+        // the eventual turn.
+        self.continuation_consumed();
+        rolled_back
     }
 
     /// Whether the goal drives session wake-ups.
@@ -1279,15 +1310,19 @@ mod tests {
         }
         let elapsed = reloaded.state_with_creation_elapsed();
         assert_eq!(elapsed.status, GoalStatus::Active);
+        // The created_at is fabricated 2h in the past, so the read is
+        // arithmetic — the lower bound cannot fail; the generous upper
+        // bound tolerates a descheduled CI worker between the fabricated
+        // anchor and the read (never a tight execution-time window).
         assert!(
-            (7_190..=7_210).contains(&elapsed.time_used_seconds),
+            (7_190..=7_260).contains(&elapsed.time_used_seconds),
             "a 2h-old goal reads ~2h, got {}",
             elapsed.time_used_seconds
         );
         // The persisted rows carry the age at write, never an accumulated
         // value (the quadratic compounding class is dead).
         assert!(
-            (7_190..=7_210).contains(&reloaded.state().time_used_seconds),
+            (7_190..=7_260).contains(&reloaded.state().time_used_seconds),
             "the durable row carries the age: {}",
             reloaded.state().time_used_seconds
         );
@@ -1309,7 +1344,7 @@ mod tests {
         // the goal's age.
         assert!(driver.state().created_at.is_some());
         assert!(
-            driver.state_with_creation_elapsed().time_used_seconds <= 1,
+            driver.state_with_creation_elapsed().time_used_seconds <= 60,
             "a freshly paused goal reads its (small) age"
         );
         // A rehydrated paused goal created 2h ago reads ~2h.
@@ -1321,7 +1356,7 @@ mod tests {
         let elapsed = reloaded.state_with_creation_elapsed();
         assert_eq!(elapsed.status, GoalStatus::Paused);
         assert!(
-            (7_190..=7_210).contains(&elapsed.time_used_seconds),
+            (7_190..=7_260).contains(&elapsed.time_used_seconds),
             "a paused 2h-old goal reads its age, got {}",
             elapsed.time_used_seconds
         );
@@ -1356,7 +1391,7 @@ mod tests {
         );
         let elapsed = driver.state_with_creation_elapsed();
         assert!(
-            (3_590..=3_610).contains(&elapsed.time_used_seconds),
+            (3_590..=3_660).contains(&elapsed.time_used_seconds),
             "a legacy 1h-old goal reads ~1h, got {}",
             elapsed.time_used_seconds
         );
@@ -1398,28 +1433,49 @@ mod tests {
             "a pending continuation must not re-arm another"
         );
         assert_eq!(driver.state().continuations_used, 1);
-        // The owed delivery waits behind the pending mint as well: the
-        // deferral stays armed instead of minting beside it.
+        // The arm never fires BESIDE a pending mint (TS
+        // `_goalContinuationAwaitsRlmWork ||= !hasQueuedMessages()`:
+        // the pending mint IS this boundary's queued delivery, so a
+        // later settle must never deliver a second continuation for the
+        // same boundary once the pending one admits).
+        driver.mark_continuation_owed();
+        assert!(
+            !driver.owes_continuation(),
+            "the arm is a no-op while a mint is pending"
+        );
+        // An arm that fired BEFORE the mint waits behind it: the take
+        // refuses while the pending mint holds the guard, the armed flag
+        // stays put, and the delivery lands once the admission released
+        // the guard.
+        driver.continuation_consumed();
+        assert!(!driver.pending_continuation());
         driver.mark_continuation_owed();
         assert!(driver.owes_continuation());
+        assert!(
+            driver
+                .next_continuation_message(&mut session)
+                .unwrap()
+                .is_some(),
+            "a direct mint lands while an earlier arm waits"
+        );
+        assert!(driver.pending_continuation());
         assert!(driver
             .take_owed_continuation(&mut session)
             .unwrap()
             .is_none());
         assert!(driver.owes_continuation());
-        assert_eq!(driver.state().continuations_used, 1);
+        assert_eq!(driver.state().continuations_used, 2);
         // The admission releases the guard; the owed delivery mints next.
         driver.continuation_consumed();
-        assert!(!driver.pending_continuation());
         let delivered = driver.take_owed_continuation(&mut session).unwrap();
         assert!(delivered.is_some());
         assert!(!driver.owes_continuation());
         assert!(driver.pending_continuation());
-        assert_eq!(driver.state().continuations_used, 2);
+        assert_eq!(driver.state().continuations_used, 3);
         // A rollback un-mints and releases the guard together.
         driver.rollback_continuation_mint(&mut session).unwrap();
         assert!(!driver.pending_continuation());
-        assert_eq!(driver.state().continuations_used, 1);
+        assert_eq!(driver.state().continuations_used, 2);
         // Pausing drops a pending mint with the queued contexts.
         assert!(driver
             .next_continuation_message(&mut session)

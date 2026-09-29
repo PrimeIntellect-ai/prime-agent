@@ -124,6 +124,10 @@ impl SessionEngine for AgentSessionEngine {
                     None
                 }
             }?;
+            // This mint's own guard handle, captured under the driver
+            // lock: the worker's admission sink releases exactly this
+            // mint's guard, never the mutable mirror.
+            let pending_handle = Some(driver.pending_continuation_handle());
             let goal_update = self.publish_goal_state(&driver.state_with_creation_elapsed());
             Some((
                 crate::engine::PromptRequest {
@@ -135,12 +139,14 @@ impl SessionEngine for AgentSessionEngine {
                     custom_message: Some(crate::session_commands::custom_message_value(&message)),
                 },
                 goal_update,
+                pending_handle,
             ))
         })?;
-        let (request, goal_update) = continuation;
+        let (request, goal_update, pending_handle) = continuation;
         Some(crate::engine::GoalContinuation {
             request,
             goal_update,
+            pending_handle,
         })
     }
 

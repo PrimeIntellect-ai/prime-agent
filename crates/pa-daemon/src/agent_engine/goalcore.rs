@@ -122,6 +122,36 @@ impl AgentSessionEngine {
         }
     }
 
+    /// Release the pending guard of one admitted (or dropped) goal work
+    /// item: the item carries its OWN mint's handle (captured under the
+    /// driver lock at the mint), so the release touches exactly that
+    /// mint's guard — a stale task from before a core rebuild can never
+    /// clear a replacement session's guard through the mutable mirror
+    /// it may have been re-swapped onto. An item that armed no guard (the
+    /// budget steer, the quota-resume marker) falls back to the mirror
+    /// clear (the historical behavior).
+    pub(crate) fn release_goal_work_continuation(&self, work: &crate::engine::GoalTurnEndWork) {
+        let handle = match work {
+            crate::engine::GoalTurnEndWork::Continuation(item)
+            | crate::engine::GoalTurnEndWork::BudgetLimitSteer(item) => &item.pending_handle,
+        };
+        self.release_goal_continuation_handle(handle);
+    }
+
+    /// The handle form of [`release_goal_work_continuation`] for sinks that
+    /// hand the work item away before releasing (the admission takes
+    /// ownership): clone the item's handle first, then release through
+    /// this.
+    pub(crate) fn release_goal_continuation_handle(
+        &self,
+        handle: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) {
+        match handle {
+            Some(pending) => pending.store(false, std::sync::atomic::Ordering::SeqCst),
+            None => self.clear_pending_goal_continuation(),
+        }
+    }
+
     /// Emit the `goal_update` engine event when the session's goal state
     /// changed since the last emission (per-session dedupe: the TS session
     /// listener fires on state change). Returns the emit callback's verdict.

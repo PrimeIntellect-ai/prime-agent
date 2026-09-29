@@ -190,6 +190,14 @@ pub struct GoalContinuation {
     /// The `goal_update` event's `goal` payload, `None` when an
     /// unchanged state stays silent.
     pub goal_update: Option<Value>,
+    /// This mint's own pending-continuation guard handle, captured under
+    /// the driver lock at the mint: the admission and drop surfaces
+    /// release exactly the mint's guard, never whichever handle the
+    /// engine's mutable mirror currently holds (a stale task from before
+    /// a core rebuild must not clear a replacement session's guard).
+    /// `None` when the item armed no guard (the budget steer mints no
+    /// continuation slot).
+    pub pending_handle: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// The goal-driven work a settled run boundary owes: TS
@@ -1265,6 +1273,8 @@ impl SessionEngine for ScriptedEngine {
                 })),
             },
             goal_update: Some(goal.state.clone()),
+            // The scripted faux mints through no real driver: no guard.
+            pending_handle: None,
         })
     }
 
