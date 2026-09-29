@@ -1,0 +1,134 @@
+//! The workspace snapshot manifest: the portable, verifiable description
+//! of a captured worktree delta.
+//!
+//! A staged snapshot directory is
+//!
+//! ```text
+//! <staging>/manifest.json    this module's types, written last
+//! <staging>/blobs/<sha256>    content-addressed file blobs
+//! ```
+//!
+//! Every manifest path is a repo-relative POSIX path in git's own form, so
+//! a snapshot stages the same content on any filesystem. The manifest is
+//! written after all blobs, so a reader that sees it holds a complete
+//! set; determinism (path-sorted entries, no timestamps) makes two
+//! snapshots of the same worktree byte-identical.
+
+use std::path::{Component, Path};
+
+use serde::{Deserialize, Serialize};
+
+/// The manifest format version this build reads and writes.
+pub const MANIFEST_VERSION: u32 = 1;
+
+/// The manifest file name inside a staging directory.
+pub const MANIFEST_FILE: &str = "manifest.json";
+
+/// The blob directory name inside a staging directory.
+pub const BLOBS_DIR: &str = "blobs";
+
+/// A captured worktree path: file content staged as a blob, an in-root
+/// symlink, or a deletion recorded for the materializer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CapturedEntry {
+    /// A regular file staged as a content-addressed blob; `sha256` and
+    /// `bytes` describe the blob and `executable` its mode bit.
+    File {
+        path: String,
+        status: String,
+        sha256: String,
+        bytes: u64,
+        executable: bool,
+    },
+    /// A symlink whose target resolves inside the worktree; the link is
+    /// recreated from `target` verbatim (no blob).
+    Symlink {
+        path: String,
+        status: String,
+        target: String,
+    },
+    /// A tracked path absent from the worktree; the materializer removes
+    /// it after checking out HEAD.
+    Deleted { path: String, status: String },
+}
+
+impl CapturedEntry {
+    /// The entry's repo-relative path.
+    pub fn path(&self) -> &str {
+        match self {
+            CapturedEntry::File { path, .. }
+            | CapturedEntry::Symlink { path, .. }
+            | CapturedEntry::Deleted { path, .. } => path,
+        }
+    }
+}
+
+/// Why a path present in `git status` was deliberately left uncaptured.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExcludeReason {
+    /// A credential-shaped file name (`.env*`, `*.pem`, `id_rsa`, ...).
+    Secret,
+    /// A symlink whose target escapes the worktree root.
+    EscapingSymlink,
+    /// An untracked directory that is itself a git repository.
+    NestedRepository,
+    /// A submodule gitlink reference.
+    Submodule,
+    /// A path that is neither a regular file nor a symlink (a directory,
+    /// fifo, socket, or device).
+    NotRegularFile,
+}
+
+/// A path excluded from capture, with the reason it was left out.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExcludedEntry {
+    pub path: String,
+    pub reason: ExcludeReason,
+}
+
+/// The manifest of one staged snapshot; `captured` and `excluded` are
+/// sorted by path and written deterministically.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotManifest {
+    pub version: u32,
+    pub head_commit: Option<String>,
+    pub captured: Vec<CapturedEntry>,
+    pub excluded: Vec<ExcludedEntry>,
+}
+
+/// True for a repo-relative POSIX path that is safe to join onto a root:
+/// non-empty, with no absolute, parent, or current-directory components.
+pub(crate) fn is_safe_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && Path::new(path)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
+/// True when the symlink `target` of the entry at `entry_path` resolves
+/// inside the worktree: relative, colon-free (portable across platforms),
+/// and never climbing above the root via `..`.
+pub(crate) fn symlink_target_stays_inside(entry_path: &str, target: &str) -> bool {
+    if target.is_empty() || target.starts_with('/') || target.contains(':') {
+        return false;
+    }
+    let base_dir = entry_path.rsplit_once('/').map_or("", |(parent, _)| parent);
+    let mut depth: i64 = 0;
+    base_dir
+        .split('/')
+        .chain(target.split('/'))
+        .filter(|segment| !segment.is_empty())
+        .all(|segment| match segment {
+            ".." => {
+                depth -= 1;
+                depth >= 0
+            }
+            "." => true,
+            _ => {
+                depth += 1;
+                true
+            }
+        })
+}
