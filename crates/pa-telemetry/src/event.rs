@@ -29,6 +29,7 @@ impl TelemetryEvent {
     }
 
     /// ISO-8601 UTC rendering of the timestamp, e.g. `2026-09-29T16:51:45.951Z`.
+    #[must_use]
     pub fn timestamp_iso8601(&self) -> String {
         EpochMs(self.timestamp_ms).iso8601()
     }

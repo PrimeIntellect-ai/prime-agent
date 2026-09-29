@@ -151,6 +151,7 @@ impl TelemetryClient {
     /// A client that counts every track as dropped. Fallback for
     /// environments without a tokio runtime (telemetry must never fail the
     /// caller, and must never silently pretend events were sent).
+    #[must_use]
     pub fn inert() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         drop(rx);
@@ -203,6 +204,9 @@ impl TelemetryClient {
     /// Enqueue an event. The config base properties are merged under the
     /// event properties. Never blocks; if the worker is gone the event is
     /// dropped and counted.
+    // Workspace API consumed across crates (pa-cli, pa-core); the by-value
+    // `Properties` signature is fleet-wide, out of this lane's scope.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn track(&self, name: impl Into<String>, properties: Properties) {
         let mut merged = self.base_properties.clone();
         merged.merge(&properties);
@@ -245,11 +249,13 @@ impl TelemetryClient {
     }
 
     /// Events dropped so far (queue overflow / worker gone / expiry).
+    #[must_use]
     pub fn dropped_count(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
 
     /// The installation id this client reports as.
+    #[must_use]
     pub fn install_id(&self) -> &str {
         &self.install_id
     }

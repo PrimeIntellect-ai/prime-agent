@@ -208,6 +208,7 @@ pub struct AssistantMessageEventStream {
 
 impl AssistantMessageEventStream {
     /// Create a linked writer/stream pair.
+    #[must_use]
     pub fn new() -> (AssistantMessageEventWriter, Self) {
         let shared = Arc::new(Shared {
             state: Mutex::new(SharedState::default()),
@@ -317,6 +318,11 @@ pub fn create_assistant_message_event_stream(
 /// Initial assistant message shape shared by every provider.
 #[allow(dead_code)] // provider constructors use this once each port lands
 pub fn initial_assistant_message(api: &str, provider: &str, model_id: &str) -> AssistantMessage {
+    // Epoch millis fit u64 for ~584 million years; the u128 duration's millis are the wire's u64 convention.
+    #[allow(clippy::cast_possible_truncation)]
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
     AssistantMessage {
         content: Vec::new(),
         api: api.to_string(),
@@ -329,9 +335,7 @@ pub fn initial_assistant_message(api: &str, provider: &str, model_id: &str) -> A
         stop_reason: StopReason::Stop,
         stop_reason_raw: None,
         error_message: None,
-        timestamp: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64),
+        timestamp: timestamp_ms,
         rest: Map::default(),
     }
 }

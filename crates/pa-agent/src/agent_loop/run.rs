@@ -21,6 +21,9 @@ use super::{AgentEventSink, AgentLoopConfig};
 // ---------------------------------------------------------------------------
 
 /// Port of `runLoop`.
+// Direct port of the TS turn loop; refactoring is out of scope for this
+// zero-behavior-change sweep.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn run_loop(
     current_context: &mut AgentContext,
     new_messages: &mut Vec<AgentMessage>,

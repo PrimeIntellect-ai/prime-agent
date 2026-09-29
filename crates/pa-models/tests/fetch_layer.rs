@@ -11,7 +11,7 @@ use std::time::Duration;
 #[tokio::test]
 async fn serves_200_bodies_with_etags_and_sends_catalog_headers() {
     let server = common::MockServer::start(vec![ok_json(
-        "{\"schemaVersion\":1,\"models\":[]}".into(),
+        "{\"schemaVersion\":1,\"models\":[]}",
         Some("\"v-1\""),
     )])
     .await;

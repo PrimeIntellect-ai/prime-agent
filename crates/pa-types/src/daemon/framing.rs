@@ -58,8 +58,14 @@ pub fn encode_private_frame(
     assert_frame_length("header length", header_bytes.len(), limits.max_header_bytes)?;
     assert_frame_length("payload length", payload.len(), limits.max_payload_bytes)?;
     let mut frame = Vec::with_capacity(FRAME_PREFIX_BYTES + header_bytes.len() + payload.len());
-    frame.extend_from_slice(&(header_bytes.len() as u32).to_be_bytes());
-    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    // Wire widths: the prefix packs lengths as u32 BE, which the decoder
+    // reads back; limits were asserted just above.
+    #[allow(clippy::cast_possible_truncation)]
+    let header_len = header_bytes.len() as u32;
+    #[allow(clippy::cast_possible_truncation)]
+    let payload_len = payload.len() as u32;
+    frame.extend_from_slice(&header_len.to_be_bytes());
+    frame.extend_from_slice(&payload_len.to_be_bytes());
     frame.extend_from_slice(&header_bytes);
     frame.extend_from_slice(payload);
     Ok(frame)
@@ -73,6 +79,7 @@ pub struct PrivateFrameDecoder {
 }
 
 impl PrivateFrameDecoder {
+    #[must_use]
     pub fn new(limits: PrivateFrameLimits) -> Self {
         Self {
             buffer: Vec::new(),
@@ -80,6 +87,7 @@ impl PrivateFrameDecoder {
         }
     }
 
+    #[must_use]
     pub fn buffered_bytes(&self) -> usize {
         self.buffer.len()
     }
@@ -195,8 +203,14 @@ pub async fn write_frame_segments<W: AsyncWrite + Unpin>(
     assert_frame_length("header length", header_bytes.len(), limits.max_header_bytes)?;
     assert_frame_length("payload length", payload.len(), limits.max_payload_bytes)?;
     let mut prefix = Vec::with_capacity(FRAME_PREFIX_BYTES + header_bytes.len());
-    prefix.extend_from_slice(&(header_bytes.len() as u32).to_be_bytes());
-    prefix.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    // Wire widths: the prefix packs lengths as u32 BE, which the decoder
+    // reads back; limits were asserted just above.
+    #[allow(clippy::cast_possible_truncation)]
+    let header_len = header_bytes.len() as u32;
+    #[allow(clippy::cast_possible_truncation)]
+    let payload_len = payload.len() as u32;
+    prefix.extend_from_slice(&header_len.to_be_bytes());
+    prefix.extend_from_slice(&payload_len.to_be_bytes());
     prefix.extend_from_slice(&header_bytes);
     writer.write_all(&prefix).await?;
     writer.write_all(payload).await?;
@@ -277,14 +291,16 @@ mod tests {
         )
         .unwrap();
         let mut decoder = PrivateFrameDecoder::new(DEFAULT_PRIVATE_FRAME_LIMITS);
-        let decoded = decoder.push(&frame).unwrap();
-        assert_eq!(decoded.len(), 1);
-        assert_eq!(decoded[0].header["kind"], "command");
-        assert_eq!(decoded[0].payload, b"{\"x\":1}");
+        let frames = decoder.push(&frame).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].header["kind"], "command");
+        assert_eq!(frames[0].payload, b"{\"x\":1}");
     }
 
     #[tokio::test]
     async fn segments_write_the_same_stream_as_the_buffered_frame() {
+        // `i % 251` is 0..=250: non-negative, fits u8 exactly.
+        #[allow(clippy::cast_sign_loss)]
         let payload: Vec<u8> = (0..100_000).map(|i| (i % 251) as u8).collect();
         let mut buffered = Vec::new();
         write_frame(
@@ -307,10 +323,10 @@ mod tests {
         assert_eq!(buffered, segmented);
 
         let mut decoder = PrivateFrameDecoder::new(DEFAULT_PRIVATE_FRAME_LIMITS);
-        let decoded = decoder.push(&segmented).unwrap();
-        assert_eq!(decoded.len(), 1);
-        assert_eq!(decoded[0].header["kind"], "outbound");
-        assert_eq!(decoded[0].payload, payload);
+        let frames = decoder.push(&segmented).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].header["kind"], "outbound");
+        assert_eq!(frames[0].payload, payload);
     }
 
     #[tokio::test]
@@ -339,9 +355,9 @@ mod tests {
         let mut decoder = PrivateFrameDecoder::new(DEFAULT_PRIVATE_FRAME_LIMITS);
         assert!(decoder.push(&frame[..10]).unwrap().is_empty());
         assert!(decoder.push(&frame[10..60]).unwrap().is_empty());
-        let decoded = decoder.push(&frame[60..]).unwrap();
-        assert_eq!(decoded.len(), 1);
-        assert_eq!(decoded[0].payload, vec![7u8; 100]);
+        let frames = decoder.push(&frame[60..]).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].payload, vec![7u8; 100]);
     }
 
     #[tokio::test]

@@ -1,7 +1,12 @@
 //! Client commands: envelope, frame types, and the full `DaemonCommand` union.
 //! Wire shapes match the TS daemon protocol exactly.
 
-use super::*;
+#[cfg(test)]
+use super::rt;
+use super::{
+    AgentMessage, DaemonClientCapability, DaemonClientId, DaemonCommandId, DaemonProtocolInfo,
+    DaemonResumeCursor, Deserialize, JsonMap, Serialize, Value,
+};
 
 // ---------------------------------------------------------------------------
 // Commands (client/worker -> supervisor/worker)

@@ -38,9 +38,11 @@ impl PostHogEndpoint {
     pub fn from_env() -> Option<Self> {
         let endpoint = std::env::var("PRIME_AGENT_TELEMETRY_ENDPOINT")
             .ok()
+            .as_deref()
             .and_then(trimmed_non_empty);
         let api_key = std::env::var("PRIME_AGENT_TELEMETRY_API_KEY")
             .ok()
+            .as_deref()
             .and_then(trimmed_non_empty);
         Some(Self {
             endpoint: endpoint?,
@@ -60,7 +62,7 @@ impl PostHogEndpoint {
     }
 }
 
-fn trimmed_non_empty(value: String) -> Option<String> {
+fn trimmed_non_empty(value: &str) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
@@ -81,6 +83,7 @@ pub struct PostHogSink {
 
 impl PostHogSink {
     /// Sink with the TS-parity 1.5s request timeout.
+    #[must_use]
     pub fn new(endpoint: &PostHogEndpoint) -> Self {
         Self::with_timeout(endpoint, DEFAULT_REQUEST_TIMEOUT)
     }
@@ -90,6 +93,7 @@ impl PostHogSink {
     /// # Panics
     ///
     /// Panics if the reqwest HTTP client (rustls backend) cannot be built.
+    #[must_use]
     pub fn with_timeout(endpoint: &PostHogEndpoint, timeout: Duration) -> Self {
         let http = reqwest::Client::builder()
             .timeout(timeout)

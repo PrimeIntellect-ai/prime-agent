@@ -62,6 +62,7 @@ fn non_overflow_patterns() -> &'static Vec<Regex> {
 /// message), silent overflow (usage.input exceeds the context window while the
 /// stream reported success), and length-stop overflow (server truncates input,
 /// returns `stop_reason` "length" with zero output).
+#[must_use]
 pub fn is_context_overflow(message: &AssistantMessage, context_window: Option<u64>) -> bool {
     if message.stop_reason == StopReason::Error {
         if let Some(error_message) = &message.error_message {
@@ -90,6 +91,8 @@ pub fn is_context_overflow(message: &AssistantMessage, context_window: Option<u6
         // input to fit the context window, leaving no room for output.
         if message.stop_reason == StopReason::Length && message.usage.output == 0 {
             let input_tokens = message.usage.input + message.usage.cache_read;
+            // The 0.99 ratio threshold is the TS port's f64 comparison; token counts sit far below 2^53.
+            #[allow(clippy::cast_precision_loss)]
             if (input_tokens as f64) >= context_window as f64 * 0.99 {
                 return true;
             }
@@ -100,6 +103,7 @@ pub fn is_context_overflow(message: &AssistantMessage, context_window: Option<u6
 }
 
 /// Convenience used by providers when assembling error messages from a raw body.
+#[must_use]
 pub fn error_message_has_overflow(error_message: &str) -> bool {
     let is_non_overflow = non_overflow_patterns()
         .iter()

@@ -35,6 +35,7 @@ struct PlatformFidelity {
 }
 
 /// Base properties for one event, with the given `execution_mode`.
+#[must_use]
 pub fn base_properties(execution_mode: &str) -> Properties {
     let fidelity = fidelity();
     let mut properties = Properties::new();
@@ -108,8 +109,8 @@ fn detect_fidelity() -> PlatformFidelity {
         libc: detect_libc(),
         libc_version: detect_libc_version(),
         cpu_baseline: detect_cpu_baseline(),
-        os_release: sanitize_version(detect_os_release()),
-        os_product_version: sanitize_version(detect_os_product_version()),
+        os_release: sanitize_version(&detect_os_release()),
+        os_product_version: sanitize_version(&detect_os_product_version()),
     }
 }
 
@@ -200,7 +201,7 @@ fn read_text_prefix(path: &str, max_bytes: usize) -> Option<String> {
     String::from_utf8(buffer).ok()
 }
 
-fn sanitize_version(value: String) -> String {
+fn sanitize_version(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return UNKNOWN.to_string();
@@ -282,12 +283,9 @@ mod tests {
 
     #[test]
     fn sanitize_trims_and_caps() {
-        assert_eq!(
-            sanitize_version("  6.8.0-45-generic ".into()),
-            "6.8.0-45-generic"
-        );
-        assert_eq!(sanitize_version("   ".into()), UNKNOWN);
+        assert_eq!(sanitize_version("  6.8.0-45-generic "), "6.8.0-45-generic");
+        assert_eq!(sanitize_version("   "), UNKNOWN);
         let long = "a".repeat(MAX_VERSION_LENGTH + 10);
-        assert_eq!(sanitize_version(long).len(), MAX_VERSION_LENGTH);
+        assert_eq!(sanitize_version(&long).len(), MAX_VERSION_LENGTH);
     }
 }

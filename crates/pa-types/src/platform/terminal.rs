@@ -126,7 +126,7 @@ pub fn restart_output() {
     let fd = tty.as_raw_fd();
     let mut attrs: libc::termios = unsafe { std::mem::zeroed() };
     // SAFETY: `tcgetattr` only reads the line discipline into `attrs`.
-    if unsafe { libc::tcgetattr(fd, &mut attrs) } != 0 {
+    if unsafe { libc::tcgetattr(fd, &raw mut attrs) } != 0 {
         return;
     }
     let restored = attrs;
@@ -134,8 +134,8 @@ pub fn restart_output() {
     // SAFETY: the two `tcsetattr` writes run the kernel's one stop-lift
     // (the IXON transition) and then restore the exact captured state.
     unsafe {
-        if libc::tcsetattr(fd, libc::TCSANOW, &attrs) == 0 {
-            let _ = libc::tcsetattr(fd, libc::TCSANOW, &restored);
+        if libc::tcsetattr(fd, libc::TCSANOW, &raw const attrs) == 0 {
+            let _ = libc::tcsetattr(fd, libc::TCSANOW, &raw const restored);
         }
     }
 }
@@ -149,6 +149,7 @@ pub fn restart_output() {}
 /// read here means the saved original was poisoned or the restore write
 /// failed - the sane reconstruction applies directly.
 #[cfg(unix)]
+#[must_use]
 pub fn ensure_cooked_tty() -> TtyCooked {
     let Some(tty) = tty() else {
         return TtyCooked::Unavailable;
@@ -157,7 +158,7 @@ pub fn ensure_cooked_tty() -> TtyCooked {
     let mut attrs: libc::termios = unsafe { std::mem::zeroed() };
     // SAFETY: `tcgetattr` only reads the line discipline into `attrs`;
     // the fd is the freshly opened process tty.
-    if unsafe { libc::tcgetattr(fd, &mut attrs) } != 0 {
+    if unsafe { libc::tcgetattr(fd, &raw mut attrs) } != 0 {
         return TtyCooked::Unavailable;
     }
     if cooked(&attrs) {
@@ -166,7 +167,7 @@ pub fn ensure_cooked_tty() -> TtyCooked {
     make_sane(&mut attrs);
     // SAFETY: `tcsetattr` applies the reconstructed `attrs` to the
     // caller's own tty; the recipe matches the `stty sane` set.
-    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &attrs) } != 0 {
+    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw const attrs) } != 0 {
         let _ = io::Write::write_all(
             &mut io::stderr(),
             b"Prime Agent: a raw terminal could not be repaired.\n",

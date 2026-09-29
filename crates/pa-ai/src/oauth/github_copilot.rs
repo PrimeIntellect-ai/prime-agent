@@ -101,6 +101,8 @@ fn urls_for(domain: &str) -> DeviceUrls {
     }
 }
 
+// The three TS `getUrls` endpoints are all named `*_url`; renaming would drift from the port.
+#[allow(clippy::struct_field_names)]
 struct DeviceUrls {
     device_code_url: String,
     access_token_url: String,
@@ -247,10 +249,13 @@ pub async fn refresh_github_copilot_token(
         .and_then(serde_json::Value::as_f64)
         .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
         .ok_or_else(|| "Invalid Copilot token response fields".to_string())?;
+    // The wire's expires_at is epoch seconds (f64); i64 millis is the credentials' convention.
+    #[allow(clippy::cast_possible_truncation)]
+    let expires_ms = (expires_at * 1000.0) as i64;
     Ok(CopilotCredentials {
         access: token,
         refresh: github_access_token.to_string(),
-        expires: ((expires_at * 1000.0) as i64).saturating_sub(EXPIRY_SKEW_MS),
+        expires: expires_ms.saturating_sub(EXPIRY_SKEW_MS),
         enterprise_url: enterprise_domain.map(str::to_string),
     })
 }
@@ -290,6 +295,8 @@ async fn enable_all_github_copilot_models(
 }
 
 /// One device-code response (TS `DeviceCodeResponse`).
+// Field names mirror the TS `DeviceCodeResponse` wire payload; renaming is a contract change.
+#[allow(clippy::struct_field_names)]
 struct DeviceCode {
     device_code: String,
     user_code: String,
@@ -366,12 +373,17 @@ async fn start_device_flow(http: &dyn ProviderHttp, domain: &str) -> Result<Devi
         .as_f64()
         .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
         .ok_or_else(|| "Invalid device code response fields".to_string())?;
+    // The device-flow wire sends integer second counts as JSON numbers; u64 seconds is the port's unit.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let interval_seconds = interval as u64;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let expires_in_seconds = expires_in as u64;
     Ok(DeviceCode {
         device_code,
         user_code,
         verification_uri,
-        interval: interval as u64,
-        expires_in: expires_in as u64,
+        interval: interval_seconds,
+        expires_in: expires_in_seconds,
     })
 }
 
@@ -379,6 +391,8 @@ async fn start_device_flow(http: &dyn ProviderHttp, domain: &str) -> Result<Devi
 /// TS backoff (the 1.2x initial multiplier, the 1.4x `slow_down`
 /// multiplier, and the `slow_down` interval bump) and the cooperative
 /// cancel between the wait steps.
+// Long by design (a 1:1 port of the TS poll loop); refactoring is out of scope for the zero-behavior pedantic sweep.
+#[allow(clippy::too_many_lines)]
 async fn poll_for_github_access_token(
     http: &dyn ProviderHttp,
     domain: &str,
@@ -395,6 +409,12 @@ async fn poll_for_github_access_token(
             return Err(LOGIN_CANCELLED.to_string());
         }
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        // Backoff math: u64 ms -> f64 scaling -> u64 ms, capped by the u128 deadline remainder.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
         let wait_ms = ((interval_ms as f64 * interval_multiplier).ceil() as u64)
             .min(remaining.as_millis() as u64);
         cancel_aware_sleep(ui, Duration::from_millis(wait_ms)).await?;
@@ -459,9 +479,12 @@ async fn poll_for_github_access_token(
                     .get("interval")
                     .and_then(serde_json::Value::as_f64)
                     .filter(|seconds| *seconds > 0.0);
-                interval_ms = advertised.map_or((interval_ms + 5000).max(1000), |seconds| {
+                // The advertised slow_down interval is a wire f64 second count; u64 ms is the poll's unit.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let advertised_ms = advertised.map_or((interval_ms + 5000).max(1000), |seconds| {
                     (seconds * 1000.0) as u64
                 });
+                interval_ms = advertised_ms;
                 interval_multiplier = SLOW_DOWN_POLL_INTERVAL_MULTIPLIER;
             }
             other => {

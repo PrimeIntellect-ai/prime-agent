@@ -44,6 +44,7 @@ pub enum FetchError {
 impl FetchError {
     /// HTTP status for the 401/403 scope-clearing rule; None for transport
     /// failures and redirects.
+    #[must_use]
     pub fn status(&self) -> Option<u16> {
         match self {
             FetchError::Status { status } => Some(*status),
@@ -78,6 +79,7 @@ impl Default for CatalogFetcher {
 
 impl CatalogFetcher {
     /// The production client: 5 s timeout, no redirects, 8 MiB cap.
+    #[must_use]
     pub fn new() -> Self {
         Self::with_limits(FETCH_TIMEOUT, MAX_RESPONSE_BYTES)
     }
@@ -87,6 +89,7 @@ impl CatalogFetcher {
     /// # Panics
     ///
     /// Panics if the reqwest client fails to build.
+    #[must_use]
     pub fn with_limits(timeout: Duration, max_bytes: usize) -> Self {
         let client = reqwest::Client::builder()
             // A moved catalog must be a client change, never a silent hop.
