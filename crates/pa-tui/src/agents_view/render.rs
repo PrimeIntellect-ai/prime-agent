@@ -355,7 +355,11 @@ impl AgentsViewMode {
                     let frame_position = frame_row + local + shift;
                     let hovered = self.hover_row == Some(frame_position);
                     lines.push(self.render_row(row, &layout, width, hovered));
-                    click_rows.push((local, *index));
+                    // Only selectable rows open on a click (a program
+                    // row is read-only context).
+                    if row.selectable() {
+                        click_rows.push((local, *index));
+                    }
                 }
             }
         }
@@ -417,6 +421,19 @@ impl AgentsViewMode {
         hovered: bool,
     ) -> Line {
         let theme = &self.theme;
+        // TS `renderCodeRow`: the program's read-only line — muted,
+        // truncated (TS `finalizeRenderedLine`), on the tool-panel
+        // background over the full width, never selection-painted. An
+        // empty code line's cells are all blank on the painted
+        // background, so no `" "` fallback (TS `code || " "`).
+        if row.kind == RowKind::Code {
+            let text = format!("{}  {}", "  ".repeat(row.depth), row.title);
+            let line = pad_line(
+                vec![theme.fg(ThemeColor::Muted, truncate_text(&text, width))],
+                width,
+            );
+            return theme.bg_paint(crate::theme::ThemeBg::ToolPanelBg, line);
+        }
         let selected = Some(row.identity.as_str())
             == self.rows.get(self.selected).map(|r| r.identity.as_str());
         if row.kind == RowKind::SubagentSummary {
@@ -489,8 +506,8 @@ impl AgentsViewMode {
         ));
         // TS `formatTableCell(title, nameWidth)`: the name cell (indent +
         // icon + title) clips to the column width, so a long session name
-        // can never push the model and cost/age columns
-        // off-screen. The icon and its space take the first two cells.
+        // can never push the model and cost/age columns off-screen. The
+        // icon and its space take the first two cells.
         let title = truncate_text(
             &row.title,
             layout.name_width.saturating_sub(2 + indent_width),
@@ -498,18 +515,11 @@ impl AgentsViewMode {
         // Session titles render uniformly (no bold for named sessions);
         // explicit product decision — differs from TS `styleRowTitle`, which
         // bolds explicit session names.
-        line.push(crate::Span::styled(
-            title.clone(),
-            theme.fg_style(ThemeColor::Text),
-        ));
-        line.push(crate::Span::styled(
-            " ".repeat(
-                layout
-                    .name_width
-                    .saturating_sub(str_width(&title) + 2 + indent_width),
-            ),
-            ratatui::style::Style::default(),
-        ));
+        let pad = layout
+            .name_width
+            .saturating_sub(str_width(&title) + 2 + indent_width);
+        line.push(crate::Span::styled(title, theme.fg_style(ThemeColor::Text)));
+        line.push(crate::Span::raw(" ".repeat(pad)));
         line.push(crate::Span::styled(
             "  ".to_string(),
             ratatui::style::Style::default(),
@@ -532,17 +542,21 @@ impl AgentsViewMode {
     /// notice's first line when the degenerate pane skipped the panel.
     pub(super) fn render_hints(&self, width: usize, status_override: Option<&str>) -> Line {
         let theme = &self.theme;
+        // Every slot's effective binding label (TS `keyText`), hoisted so
+        // the mode branches and the bar slots share one definition.
+        let first = |id: &str| {
+            self.keybindings
+                .first_key(id)
+                .map(|key| crate::keybindings::format_key_text(&key))
+        };
         if self.exit_armed {
             // TS `renderHints`: the exit hint renders the effective
             // `app.clear` key ("Press Ctrl+C again to exit"); a disabled
             // binding (an empty override) falls back to the plain hint.
-            let hint = match self.keybindings.first_key("app.clear") {
-                Some(key) => format!(
-                    "Press {} again to exit",
-                    crate::keybindings::format_key_text(&key)
-                ),
-                None => "Press again to exit".to_string(),
-            };
+            let hint = first("app.clear").map_or_else(
+                || "Press again to exit".to_string(),
+                |key| format!("Press {key} again to exit"),
+            );
             return truncate_line(&vec![theme.fg(ThemeColor::Muted, hint)], width);
         }
         // The armed stop-or-delete confirm: "Press ctrl+x again to
@@ -556,13 +570,10 @@ impl AgentsViewMode {
                 .find(|row| row.identity == pending.identity)
                 .map_or(pending.stop, Self::delete_arm_word);
             let word = if stop { "stop" } else { "delete" };
-            let hint = match self.keybindings.first_key("app.agents.delete") {
-                Some(key) => format!(
-                    "Press {} again to {word}",
-                    crate::keybindings::format_key_text(&key)
-                ),
-                None => format!("Press again to {word}"),
-            };
+            let hint = first("app.agents.delete").map_or_else(
+                || format!("Press again to {word}"),
+                |key| format!("Press {key} again to {word}"),
+            );
             return truncate_line(&vec![theme.fg(ThemeColor::Muted, hint)], width);
         }
         if let Some(status) = status_override.or(self.status.as_deref()) {
@@ -594,11 +605,6 @@ impl AgentsViewMode {
         // (the same contract as the jump and stop-or-delete slots; the
         // bar never advertises a default key the handler does not
         // take).
-        let first = |id: &str| {
-            self.keybindings
-                .first_key(id)
-                .map(|key| crate::keybindings::format_key_text(&key))
-        };
         // A two-key segment keeps whichever of the pair is bound.
         let pair = |a: &str, b: &str| match (first(a), first(b)) {
             (Some(a), Some(b)) => Some(format!("{a}/{b}")),
@@ -612,42 +618,44 @@ impl AgentsViewMode {
         // The jump slot shows the first effective key of each edge
         // binding (the full key sets would overflow the one-line hint);
         // an override that empties either binding drops the slot.
-        if let (Some(top), Some(bottom)) = (
-            self.keybindings.first_key("tui.select.top"),
-            self.keybindings.first_key("tui.select.bottom"),
-        ) {
-            segments.push(format!(
-                "{}/{} first/last",
-                crate::keybindings::format_key_text(&top),
-                crate::keybindings::format_key_text(&bottom)
-            ));
+        if let (Some(top), Some(bottom)) = (first("tui.select.top"), first("tui.select.bottom")) {
+            segments.push(format!("{top}/{bottom} first/last"));
         }
         if let Some(keys) = pair("tui.select.confirm", "app.agents.open") {
             segments.push(format!("{keys} {right_action}"));
         }
-        // The stop-or-delete slot rides the selected row's arming target
-        // and the handler's empty-search gate (the key is inert while a
-        // query is active): the word matches what the second press would
-        // do, the segment carries every configured key (dispatch takes
-        // the whole set), and a row with no target — a summary row, or
-        // no selection — or an emptied binding drops the slot instead
-        // of advertising a no-op.
+        // The stop-or-delete, program, and parent slots share one
+        // empty-search gate (the keys are inert while a query is
+        // active): the delete slot rides the selected row's arming
+        // target with the word the second press would do, the program
+        // slot the target summary line's `has_spawn_code` (the same
+        // lookup the cycle reads, one definition of "actionable"). TS
+        // shows no delete/program hint; the operator's completeness
+        // directive adds the slots. A slot with no target or an emptied
+        // binding drops entirely instead of advertising a no-op.
         if self.query.is_empty() {
+            // The multi-key slots render every configured key (dispatch
+            // takes the whole set).
+            let all =
+                |id: &str| Some(self.keybindings.key_text(id)).filter(|keys| !keys.is_empty());
             if let Some(pending) = self.delete_arm_target() {
-                let keys = self.keybindings.get_keys("app.agents.delete");
-                if !keys.is_empty() {
+                if let Some(keys) = all("app.agents.delete") {
                     let word = if pending.stop { "stop" } else { "delete" };
-                    segments.push(format!(
-                        "{} {word}",
-                        crate::keybindings::format_key_text(&keys.join("/"))
-                    ));
+                    segments.push(format!("{keys} {word}"));
                 }
             }
-        }
-        // The parent key shares the handler's empty-search gate.
-        if self.scope_active && self.query.is_empty() {
-            if let Some(back) = first("app.agents.back") {
-                segments.push(format!("{back} parent"));
+            if self
+                .program_target()
+                .is_some_and(|summary| summary.has_spawn_code)
+            {
+                if let Some(keys) = all("app.agents.program") {
+                    segments.push(format!("{keys} program"));
+                }
+            }
+            if self.scope_active {
+                if let Some(back) = first("app.agents.back") {
+                    segments.push(format!("{back} parent"));
+                }
             }
         }
         if let Some(new) = first("app.agents.new") {

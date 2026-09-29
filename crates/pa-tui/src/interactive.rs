@@ -277,6 +277,14 @@ pub trait InteractionTelemetry: Send + Sync {
         action: &'static str,
         scoped: bool,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    /// An agents-view action ran (`tui agents action`): `action` is
+    /// `program_shown` (the ctrl+o toggle turned a spawn program on) or
+    /// `renamed` (a rename landed) — primitives only, no prompt,
+    /// session, or file content.
+    fn agents_view_action(
+        &self,
+        action: &'static str,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
 }
 
 /// Options for one interactive run. `Debug` skips the telemetry handle (the

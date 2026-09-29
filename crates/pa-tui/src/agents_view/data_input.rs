@@ -76,6 +76,7 @@ impl AgentsViewMode {
             &filtered,
             self.options.scope.as_ref(),
             &self.expanded_parents,
+            &self.program_shown_parents,
             &rollups,
             self.options.anchor_session_id.as_deref(),
         );
@@ -125,6 +126,7 @@ impl AgentsViewMode {
                         &filtered,
                         self.options.scope.as_ref(),
                         &self.expanded_parents,
+                        &self.program_shown_parents,
                         &rollups,
                         self.options.anchor_session_id.as_deref(),
                     );
@@ -501,6 +503,13 @@ impl AgentsViewMode {
             self.opened = None;
             self.running = false;
             self.new_session = true;
+            return;
+        }
+        // TS `app.agents.program` (default ctrl+o, empty editor only,
+        // after the new-session action): show or hide the selected
+        // row's target spawn program.
+        if !has_query && self.keybindings.matches(key, "app.agents.program") {
+            self.cycle_program_for_selected();
             return;
         }
         // TS `app.agents.expand` (default alt+right, search empty): toggle

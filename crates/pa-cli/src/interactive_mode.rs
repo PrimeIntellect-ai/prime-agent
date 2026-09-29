@@ -310,6 +310,17 @@ async fn run_agents_view_flow(
         )
         .await?;
         let view = view_run.outcome;
+        // The view's actions report at the run's end (the view owns no
+        // telemetry handle; adoption counts, not keypress timing): an
+        // exit without an open still reports, before the early return.
+        for action in &view.actions {
+            let action = *action;
+            if let Some(telemetry) = base.telemetry.clone() {
+                tokio::spawn(async move {
+                    telemetry.agents_view_action(action).await;
+                });
+            }
+        }
         // A handoff to a chat parked the connection for this loop's next
         // view run; a selection-less exit closed it already.
         roster_link = view_run.link;

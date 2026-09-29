@@ -208,6 +208,11 @@ pub struct AgentsViewOutcome {
     /// `statusMessage` on the open result): the unattachable-child
     /// fallback surfaces it in the next view run.
     pub status_message: Option<String>,
+    /// The view actions this run performed (`program_shown`, when a
+    /// ctrl+o turned a spawn program on; `renamed`, when a rename
+    /// landed): the composition root emits the `tui agents action`
+    /// adoption events at the run's end.
+    pub actions: Vec<&'static str>,
     /// The incident notice state this run ended with, for the caller to
     /// restore on re-entry (TS `persistentState.incidentNoticeState`):
     /// dismissal horizons and the consumed log offset survive.
@@ -373,6 +378,12 @@ struct AgentsViewMode {
     /// `expandedSubagentParents`): the one summary line per parent
     /// reads a single set.
     expanded_parents: std::collections::HashSet<String>,
+    /// Parent row identities whose spawn programs render inside their
+    /// open list (TS `programShownParents`). Like `expanded_parents`,
+    /// it never carries across view runs (a shown program without its
+    /// expansion is meaningless — TS persists both, an inherited
+    /// divergence).
+    program_shown_parents: std::collections::HashSet<String>,
     /// Session ids to expand on the next rebuild (TS
     /// `pendingExpandedAncestorSessionIds`, consumed once).
     pending_ancestors: Option<Vec<String>>,
@@ -457,6 +468,11 @@ struct AgentsViewMode {
     /// grammar): the pressed row and whether the press turned into a
     /// drag — a dragged release never opens.
     pressed_click: Option<PressedMouseClick>,
+    /// The view actions this run performed (reported on the outcome so
+    /// the composition root emits the adoption events at the run's
+    /// end — the view owns no telemetry handle): `program_shown`,
+    /// `renamed`.
+    actions: Vec<&'static str>,
 }
 
 /// The press state of one left click on the agents view (TS
@@ -523,6 +539,7 @@ impl AgentsViewMode {
             scope_active: false,
             scope_dropped: false,
             expanded_parents: std::collections::HashSet::default(),
+            program_shown_parents: std::collections::HashSet::default(),
             pending_ancestors,
             selected_identity,
             selected_key,
@@ -543,6 +560,7 @@ impl AgentsViewMode {
             click_rows: Vec::new(),
             hover_row: None,
             pressed_click: None,
+            actions: Vec::new(),
         }
     }
 }
@@ -1256,6 +1274,7 @@ async fn run_agents_view_surface(
                 .and_then(|row| row.cwd.clone())
                 .map(std::path::PathBuf::from),
             status_message: opened.as_ref().and_then(|row| row.status_message.clone()),
+            actions: std::mem::take(&mut mode.actions),
             incident_notice_state: mode.incident_notice_state,
         },
     })

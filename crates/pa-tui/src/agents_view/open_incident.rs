@@ -21,7 +21,58 @@ impl AgentsViewMode {
             RowKind::SubagentSummary => self.toggle_subagent_list(&row),
             RowKind::Subagent => self.open_subagent_row(&row),
             RowKind::Agent => self.open_row(&row, Vec::new()),
+            // A program row is read-only context: the open action never
+            // fires on it.
+            RowKind::Code => {}
         }
+    }
+
+    /// The selected row's program target summary line (TS
+    /// `cycleProgramForSelected`'s target + `targetHasSpawnCode`,
+    /// :1701-1735): the agent row itself for a top-level selection, its
+    /// parent for a summary line or a nested child, resolved to the
+    /// target's summary row — the one place that says whether the
+    /// program exists (the cycle and the hint slot both read it).
+    pub(super) fn program_target(&self) -> Option<&AgentsViewRow> {
+        let row = self.rows.get(self.selected)?;
+        let target = match row.kind {
+            RowKind::Agent => row.identity.as_str(),
+            RowKind::SubagentSummary | RowKind::Subagent => row.parent_identity.as_deref()?,
+            // Unreachable (code rows are not selectable), exhaustive by
+            // the match rule.
+            RowKind::Code => return None,
+        };
+        self.rows.iter().find(|row| {
+            row.kind == RowKind::SubagentSummary && row.parent_identity.as_deref() == Some(target)
+        })
+    }
+
+    /// TS `cycleProgramForSelected` (:1696-1719): show or hide the spawn
+    /// program of the selected row's target. The list expands with it
+    /// (the code sits directly above the subagents it launched), and a
+    /// target with no recorded program reports instead of toggling.
+    pub(super) fn cycle_program_for_selected(&mut self) {
+        // TS :1701-1708: no target summary line, or a line whose children
+        // carry no code, is the same report.
+        let target = match self.program_target() {
+            Some(summary) if summary.has_spawn_code => summary.parent_identity.clone(),
+            _ => None,
+        };
+        let Some(target) = target else {
+            self.status = Some("No program recorded for these subagents".to_string());
+            return;
+        };
+        // TS :1709-1717: the program only renders inside the expanded
+        // list, so reveal the expansion too, toggle the program, and
+        // re-sync the selection (the rebuild can re-order rows).
+        self.expanded_parents.insert(target.clone());
+        if !self.program_shown_parents.remove(&target) {
+            self.program_shown_parents.insert(target);
+            self.actions.push("program_shown");
+        }
+        // `rebuild_rows` ends with TS `syncSelectedRowState`, so the
+        // selection re-resolves onto its row through the rebuild.
+        self.rebuild_rows();
     }
 
     /// Toggle the selected parent's subagent list (TS
@@ -39,9 +90,11 @@ impl AgentsViewMode {
             return;
         };
         if self.expanded_parents.remove(&target) {
-            // Collapsing also hides the spawn program (TS clears
-            // `programShownParents` with the expansion); the program
-            // surface is not part of this lane.
+            // Collapsing also hides the spawn program (TS
+            // `toggleSubagentList` clears `programShownParents` with the
+            // expansion, :1680-1682): the program only renders inside
+            // the open list.
+            self.program_shown_parents.remove(&target);
         } else {
             self.expanded_parents.insert(target);
         }
