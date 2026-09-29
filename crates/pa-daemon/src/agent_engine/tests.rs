@@ -97,8 +97,17 @@ pub(crate) fn goal_admission_collector(
     engine.set_goal_admission(
         std::sync::Arc::new(|| false),
         std::sync::Arc::new(move |work| {
+            // The item's OWN handle (cloned before the push takes the
+            // work): the release names this mint's guard, never the
+            // mutable mirror.
+            let pending_handle = match &work {
+                crate::engine::GoalTurnEndWork::Continuation(item) => item.pending_handle.clone(),
+                crate::engine::GoalTurnEndWork::BudgetLimitSteer(item) => {
+                    item.pending_handle.clone()
+                }
+            };
             sink.lock().unwrap().push(work);
-            sink_engine.release_goal_work_continuation(&work);
+            sink_engine.release_goal_continuation_handle(&pending_handle);
         }),
         std::sync::Arc::new(|| {}),
     );
