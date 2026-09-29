@@ -1008,9 +1008,9 @@ impl Supervisor {
         // never re-passivates).
         let (depth, child_id) = {
             let roster = self.roster.lock().unwrap();
-            roster
-                .by_active_session_id(selector)
-                .map(|row| {
+            roster.by_active_session_id(selector).map_or(
+                (0, String::new()),
+                |row| {
                     (
                         row.summary
                             .get("rlmDepth")
@@ -1022,27 +1022,28 @@ impl Supervisor {
                             .unwrap_or_default()
                             .to_string(),
                     )
-                })
-                .unwrap_or((0, String::new()))
+                },
+            )
         };
         let cwd = crate::session_store::read_session_info(std::path::Path::new(&session_file))
             .map_or_else(|| "/".to_string(), |info| info.cwd);
+        // The identity rides `config.rlmDepth` + `runtime_metadata.rlmChildId`
+        // - the keys launch_worker copies into the DURABLE create command's
+        // rest (the parent-owned passivation fence reads that rest; a bare
+        // create `rest` is never read on this path).
         let create = DaemonCommand::Create {
             id: None,
             session_path: Some(session_file.clone()),
             continue_recent: Some(false),
             no_session: None,
             name: None,
-            config: Some(json!({ "cwd": cwd })),
+            config: Some(json!({ "cwd": cwd, "rlmDepth": depth })),
             telemetry_disabled: None,
-            runtime_metadata: None,
+            runtime_metadata: Some(json!({ "rlmChildId": child_id })),
             lifecycle: None,
             env: None,
             launch_env: None,
-            rest: serde_json::Map::from_iter([
-                ("rlmDepth".to_string(), json!(depth)),
-                ("rlmChildId".to_string(), json!(child_id)),
-            ]),
+            rest: serde_json::Map::default(),
         };
         // Reuse before launching (TS `createOrReuseWorker`): a concurrent
         // revival — or the resident the previous wake launched — may
