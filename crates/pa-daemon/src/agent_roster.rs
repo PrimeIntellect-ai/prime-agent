@@ -28,6 +28,14 @@ pub(crate) struct AgentRoster {
     /// the value on every write - a delta costs one map lookup on the key
     /// `store` already computes, and no delta path reads the ledger.
     deleted_descendant_usage: HashMap<String, SessionUsageSummary>,
+    /// The bucket folds' ordering tickets, the delta watermark's rule for
+    /// the ledger fold: a fold takes its ticket before it reads the
+    /// ledger, and an apply with an older ticket than the last applied
+    /// one never overwrites it (the folds run on independent tasks, so
+    /// an older read can otherwise finish after a newer apply and hide a
+    /// deleted child's spend until the next event).
+    bucket_fold_ticket: u64,
+    bucket_applied_ticket: u64,
     /// The stale-delta gate of one worker: a single bounded slot naming
     /// the worker's CURRENT process generation (`instance`) and the
     /// newest sequence applied from it. The Rust supervisor link dials
@@ -58,6 +66,8 @@ impl AgentRoster {
             agent_id_by_active_session_id: HashMap::new(),
             agent_id_by_session_file: HashMap::new(),
             deleted_descendant_usage: HashMap::new(),
+            bucket_fold_ticket: 0,
+            bucket_applied_ticket: 0,
             delta_watermarks: HashMap::new(),
         }
     }
@@ -304,6 +314,14 @@ impl AgentRoster {
         stored
     }
 
+    /// Take the next fold ticket: a bucket fold reads it before it
+    /// reads the ledger, so a fold that started earlier can never
+    /// overwrite a bucket applied by a newer one.
+    pub(crate) fn begin_bucket_fold(&mut self) -> u64 {
+        self.bucket_fold_ticket += 1;
+        self.bucket_fold_ticket
+    }
+
     /// Replace the deleted-descendant bucket (the ledger fold keyed by
     /// canonical parent session path) and rewrite in place every row
     /// whose attached value differs, returning those rows for the
@@ -311,11 +329,19 @@ impl AgentRoster {
     /// (the session-file index). The bucket changes only at ledger
     /// events and when a root appears, so the event's one fold rewrites
     /// the rows that did not re-store (a passivated parent, a live
-    /// worker's row); a row whose value did not change never ships.
+    /// worker's row); a row whose value did not change never ships. An
+    /// older fold's ticket never overwrites a newer applied bucket (the
+    /// delta watermark's rule) - the newer apply already rewrote and
+    /// pushed its rows, so skipping the older one loses nothing.
     pub(crate) fn set_deleted_descendant_usage(
         &mut self,
+        ticket: u64,
         bucket: HashMap<String, SessionUsageSummary>,
     ) -> Vec<AgentRosterEntry> {
+        if ticket < self.bucket_applied_ticket {
+            return Vec::new();
+        }
+        self.bucket_applied_ticket = ticket;
         self.deleted_descendant_usage = bucket;
         let mut changed = Vec::new();
         for (file, agent_id) in &self.agent_id_by_session_file {
@@ -686,5 +712,52 @@ mod tests {
         }
         roster.forget_worker_sequences("w1");
         assert!(roster.delta_watermarks.is_empty());
+    }
+
+    /// The bucket folds' ordering rule (the delta watermark's twin): a
+    /// fold that started earlier never overwrites a bucket applied by a
+    /// newer one, whatever order the two folds FINISH in.
+    #[test]
+    fn an_older_bucket_fold_never_overwrites_a_newer_one() {
+        let roster = locked();
+        let mut roster = roster.lock().unwrap();
+        let parent = roster.write_summary(
+            summary("s1", Some("a1"), Some("/tmp/s1.jsonl")),
+            Some("w1"),
+            None,
+        );
+        let file = canonical_roster_path("/tmp/s1.jsonl");
+        let older = HashMap::from([(
+            file.clone(),
+            SessionUsageSummary {
+                input_tokens: 1_000,
+                output_tokens: 100,
+                cost: 0.30,
+            },
+        )]);
+        let newer = HashMap::from([(
+            file,
+            SessionUsageSummary {
+                input_tokens: 2_000,
+                output_tokens: 200,
+                cost: 0.55,
+            },
+        )]);
+        // Two folds read the ledger; the newer one applies first (the
+        // older fold's blocking read finished last).
+        let older_ticket = roster.begin_bucket_fold();
+        let newer_ticket = roster.begin_bucket_fold();
+        let applied = roster.set_deleted_descendant_usage(newer_ticket, newer);
+        assert_eq!(applied.len(), 1, "the newer fold rewrites the parent's row");
+        assert_eq!(
+            roster.set_deleted_descendant_usage(older_ticket, older),
+            Vec::<AgentRosterEntry>::new(),
+            "the older fold never overwrites the newer applied bucket"
+        );
+        assert_eq!(
+            roster.get(&parent.agent_id),
+            applied.first(),
+            "the newer bucket stays on the row"
+        );
     }
 }

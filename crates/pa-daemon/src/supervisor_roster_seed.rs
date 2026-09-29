@@ -212,21 +212,25 @@ impl Supervisor {
     }
 
     /// The deleted-descendant bucket (the spawn ledger's fold keyed by
-    /// canonical parent session path), computed off the async runtime:
-    /// the fold reads the ledger, stats tombstoned paths, and may
-    /// cold-scan a legacy child's transcript once. `None` is the
-    /// degrade (a failed fold is logged) - the roster keeps its last
-    /// bucket instead of billing a broken read as zero.
+    /// canonical parent session path) with the fold's ticket, computed
+    /// off the async runtime: the fold reads the ledger, stats
+    /// tombstoned paths, and may cold-scan a legacy child's transcript
+    /// once. The ticket is taken under the roster lock BEFORE the ledger
+    /// is read (the folds run on independent tasks, so an older read can
+    /// otherwise finish after a newer apply). `None` is the degrade (a
+    /// failed fold is logged) - the roster keeps its last bucket instead
+    /// of billing a broken read as zero.
     pub(crate) async fn deleted_descendant_usage_bucket(
         self: &Arc<Self>,
-    ) -> Option<HashMap<String, SessionUsageSummary>> {
+    ) -> Option<(u64, HashMap<String, SessionUsageSummary>)> {
+        let ticket = self.roster.lock().unwrap().begin_bucket_fold();
         let ledger = self.rlm_spawn_ledger_for(None).await.ok()?;
         let bucket =
             tokio::task::spawn_blocking(move || ledger.deleted_descendant_usage_by_parent())
                 .await
                 .unwrap_or_else(|error| Err(anyhow::anyhow!(error)));
         match bucket {
-            Ok(bucket) => Some(bucket),
+            Ok(bucket) => Some((ticket, bucket)),
             Err(error) => {
                 self.log_line(&format!(
                     "Could not refresh deleted-descendant usage: {error:#}"
@@ -250,13 +254,13 @@ impl Supervisor {
     pub(crate) async fn refresh_deleted_descendant_usage(
         self: &Arc<Self>,
     ) -> Vec<AgentRosterEntry> {
-        let Some(bucket) = self.deleted_descendant_usage_bucket().await else {
+        let Some((ticket, bucket)) = self.deleted_descendant_usage_bucket().await else {
             return Vec::new();
         };
         self.roster
             .lock()
             .unwrap()
-            .set_deleted_descendant_usage(bucket)
+            .set_deleted_descendant_usage(ticket, bucket)
     }
 
     /// The seeded candidate's roster row when already present (TS
