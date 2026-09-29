@@ -40,7 +40,7 @@
 		"marked": "^18.0.7"
 	},
 	"optionalDependencies": {
-		"koffi": "^2.9.0"
+		"koffi": "^3.3.1"
 	},
 	"devDependencies": {
 		"@xterm/headless": "^6.0.0",
