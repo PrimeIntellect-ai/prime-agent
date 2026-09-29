@@ -120,13 +120,36 @@ impl SessionEngine {
     /// catch arm: `_finishGoalWithError(error)`, then no continuation —
     /// the hook must not reject).
     pub async fn mint_goal_continuation(&self) -> Option<CustomMessage> {
+        // The progress check's input (the 402 diagnosis's (a)) + the
+        // failed pair's drop ((c)), read before the driver lock: the
+        // just-settled turn gates the mint (a provider failure finishes
+        // the goal; a no-output turn counts toward the cap), and a
+        // trailing failed continuation pair stops riding the context.
+        let last_turn: Option<pa_agent::types::AssistantMessage> = self
+            .session
+            .last_assistant_message()
+            .await
+            .and_then(|wire| match wire {
+                pa_types::session::AgentMessage::Assistant(assistant) => {
+                    super::provider_adapter::json_round_trip(&assistant)
+                }
+                _ => None,
+            });
+        if last_turn
+            .as_ref()
+            .is_some_and(|turn: &pa_agent::types::AssistantMessage| {
+                turn.stop_reason == pa_agent::types::StopReason::Error || turn.content.is_empty()
+            })
+        {
+            self.session.drop_failed_goal_continuation().await;
+        }
         let persistence = self.session.shared_persistence();
         let mut driver = self.goal_driver.lock().await;
         if !driver.owns_continuation_wakeup() {
             return None;
         }
         let mut session = persistence.lock().await;
-        match driver.next_continuation_message(&mut session) {
+        match driver.next_continuation_message(&mut session, last_turn.as_ref()) {
             Ok(message) => message,
             Err(error) => {
                 let message = format!("{error:#}");

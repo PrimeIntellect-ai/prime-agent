@@ -180,9 +180,21 @@ impl AgentSessionEngine {
         if self.session_input_queued() {
             return;
         }
+        // The progress check's input (the 402 diagnosis's (a)) + the
+        // failed pair's drop ((c)), read before the driver lock like the
+        // natural-boundary mint.
+        let last_turn = self.last_loop_assistant_message_async().await;
+        if last_turn
+            .as_ref()
+            .is_some_and(|turn: &pa_agent::types::AssistantMessage| {
+                turn.stop_reason == pa_agent::types::StopReason::Error || turn.content.is_empty()
+            })
+        {
+            self.drop_failed_goal_continuation_pair().await;
+        }
         let mut driver = handles.driver.lock().await;
         let mut session = handles.session.lock().await;
-        let message = match driver.take_owed_continuation(&mut session) {
+        let message = match driver.take_owed_continuation(&mut session, last_turn.as_ref()) {
             Ok(Some(message)) => message,
             Ok(None) => {
                 // An inactive goal drops the deferral without minting (TS:
@@ -280,6 +292,22 @@ impl AgentSessionEngine {
         let Some(handles) = self.goal_runtime.lock().expect("goal runtime lock").clone() else {
             return GoalBoundary::Proceed;
         };
+        // The progress check's input (the 402 diagnosis's (a)): the
+        // just-settled turn of the live loop context, read BEFORE the
+        // driver lock (the engine-session mutex never nests under the
+        // driver lock). A trailing failed continuation pair also drops
+        // here ((c)): the corpse pair stops riding the context into
+        // every next request.
+        let last_turn = self.last_loop_assistant_message();
+        if last_turn
+            .as_ref()
+            .is_some_and(|turn: &pa_agent::types::AssistantMessage| {
+                turn.stop_reason == pa_agent::types::StopReason::Error || turn.content.is_empty()
+            })
+        {
+            self.runtime
+                .block_on(async { self.drop_failed_goal_continuation_pair().await });
+        }
         self.runtime.block_on(async {
             let mut driver = handles.driver.lock().await;
             if !driver.owns_continuation_wakeup() {
@@ -287,7 +315,7 @@ impl AgentSessionEngine {
                 // drops a stale deferral for inactive goals).
                 let mut session = handles.session.lock().await;
                 if driver.owes_continuation() {
-                    let _ = driver.take_owed_continuation(&mut session);
+                    let _ = driver.take_owed_continuation(&mut session, None);
                 }
                 return GoalBoundary::Proceed;
             }
@@ -308,9 +336,9 @@ impl AgentSessionEngine {
             let was_owed = driver.owes_continuation();
             let mut session = handles.session.lock().await;
             let message = if was_owed {
-                driver.take_owed_continuation(&mut session)
+                driver.take_owed_continuation(&mut session, last_turn.as_ref())
             } else {
-                driver.next_continuation_message(&mut session)
+                driver.next_continuation_message(&mut session, last_turn.as_ref())
             };
             let message = match message {
                 Ok(message) => message,

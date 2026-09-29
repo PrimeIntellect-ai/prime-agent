@@ -478,7 +478,41 @@ impl AgentSessionEngine {
                 shared_branch = branch;
             }
         }
-        if let Some(state) = seed {
+        if let Some(mut state) = seed {
+            // The restore-resurrection guard (the 402 diagnosis's (d)):
+            // an active seed whose trailing turn settled as a terminal
+            // provider failure adopts the failure as the goal's terminal
+            // state. The failed turn's own error-finish never persisted
+            // (a worker death or restart interrupted the settle), so the
+            // newest goal row is still the mint's active row — adopting
+            // it would resurrect the goal and the resume sites would
+            // keep delivering continuations into the dead provider (the
+            // operator's ~84s restart cadence, 64 cycles in 1.5h). The
+            // scan reads the SAME artifact the seed came from.
+            if state.status == pa_core::goals::GoalStatus::Active {
+                let scan: Option<Vec<pa_types::session::FileEntry>> = if let Some(entries) =
+                    &pending_branch
+                {
+                    Some(entries.clone())
+                } else if let Some(branch) = &shared_branch {
+                    Some(branch.clone())
+                } else if let Some(window) = &shared_window {
+                    Some(window.entries().to_vec())
+                } else {
+                    None
+                };
+                if let Some(entries) = scan {
+                    if let Some(error) = pa_core::goals::stale_active_goal_failure(&entries) {
+                        state = pa_core::goals::GoalState {
+                            active: false,
+                            status: pa_core::goals::GoalStatus::Error,
+                            last_reason: Some(error.clone()),
+                            last_error: Some(error),
+                            ..state
+                        };
+                    }
+                }
+            }
             let handles = self.goal_runtime.lock().expect("goal runtime lock").clone();
             if let Some(handles) = handles {
                 let mut driver = handles.driver.lock().await;

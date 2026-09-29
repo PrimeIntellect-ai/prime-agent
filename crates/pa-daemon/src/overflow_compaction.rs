@@ -123,7 +123,7 @@ impl AgentSessionEngine {
 
     /// The last assistant message of the live loop context in the wire
     /// shape (TS `_findLastAssistantMessage`).
-    fn last_loop_assistant_message(&self) -> Option<pa_agent::types::AssistantMessage> {
+    pub(crate) fn last_loop_assistant_message(&self) -> Option<pa_agent::types::AssistantMessage> {
         let guard = self.session.blocking_lock();
         let engine = guard.as_deref()?;
         let wire = self
@@ -133,6 +133,35 @@ impl AgentSessionEngine {
             pa_types::session::AgentMessage::Assistant(assistant) => json_round_trip(&assistant),
             _ => None,
         }
+    }
+
+    /// [`Self::last_loop_assistant_message`]'s async form, for callers
+    /// already inside the engine runtime (a nested `block_on` would
+    /// panic): the goal boundary consults read the just-settled turn
+    /// through this seam.
+    pub(crate) async fn last_loop_assistant_message_async(
+        &self,
+    ) -> Option<pa_agent::types::AssistantMessage> {
+        let guard = self.session.lock().await;
+        let engine = guard.as_deref()?;
+        let wire = engine.session.last_assistant_message().await?;
+        match wire {
+            pa_types::session::AgentMessage::Assistant(assistant) => json_round_trip(&assistant),
+            _ => None,
+        }
+    }
+
+    /// Drop the failed continuation pair from the live loop context (the
+    /// 402 diagnosis's (c)): the goal boundary consult calls this after
+    /// reading the just-settled turn, so the failed cycle's corpse pair
+    /// stops riding the context into every next request. A no-op when no
+    /// failed continuation pair is trailing.
+    pub(crate) async fn drop_failed_goal_continuation_pair(&self) {
+        let guard = self.session.lock().await;
+        let Some(engine) = guard.as_deref() else {
+            return;
+        };
+        engine.session.drop_failed_goal_continuation().await;
     }
 
     /// The shared Case-1 body. Guard order is the TS one: the message may

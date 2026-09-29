@@ -276,6 +276,18 @@ impl SessionManager {
             })
     }
 
+    /// The restore-resurrection guard over this branch (the 402
+    /// diagnosis's (d)): `Some(failure_text)` when the branch's newest
+    /// goal-state row is `active` but a terminal provider failure
+    /// (stop reason `error`, not the quota-park class) settled after it
+    /// — the interrupted terminal settle's stale-active marker. A
+    /// rehydrating driver adopts the failure as the goal's terminal
+    /// state instead of resurrecting the active row.
+    pub fn stale_active_goal_failure(&self) -> Option<String> {
+        let branch: Vec<FileEntry> = self.active_branch_entries().into_iter().cloned().collect();
+        crate::goals::stale_active_goal_failure(&branch)
+    }
+
     pub fn has_non_bootstrap_entries(&self) -> bool {
         self.window
             .as_ref()

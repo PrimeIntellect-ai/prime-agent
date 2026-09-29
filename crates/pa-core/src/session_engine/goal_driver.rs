@@ -10,6 +10,7 @@ use crate::goals::{
     normalize_goal_state, validate_goal_budget, validate_goal_objective, GoalContextKind,
     GoalState, GoalStatus, GOAL_STATE_CUSTOM_TYPE,
 };
+use super::provider_retry::provider_stream_failure_kind;
 use crate::session::manager::SessionManager;
 
 /// The goal-state reload rule at a branch rebuild (TS
@@ -55,6 +56,17 @@ pub struct GoalDriver {
     /// unsettled RLM descendant work. In-memory only (never persisted,
     /// never rehydrated): descendant quiescence is a live-session fact.
     owed_continuation_for_rlm_work: bool,
+    /// The consecutive-no-progress continuation bookkeeping (the hot-loop
+    /// killer, the 402 diagnosis's (b)): a mint consult that finds the
+    /// just-settled turn produced no output counts once (keyed by the
+    /// turn's timestamp), arms the doubling backoff window, and at the
+    /// cap finishes the goal. A progress turn resets the streak. In-memory
+    /// only: the restart paths are guarded by the stale-row handling at
+    /// rehydration and the mint's own progress check re-derives from the
+    /// just-settled turn.
+    no_progress_streak: u32,
+    no_progress_backoff_until_ms: u64,
+    counted_no_progress_turn_ms: Option<i64>,
 }
 
 fn now_millis() -> u64 {
@@ -64,6 +76,37 @@ fn now_millis() -> u64 {
         .unwrap_or_default()
 }
 
+/// How many consecutive no-output turns the continuation mint tolerates
+/// before the goal finishes (the 402 diagnosis's small cap).
+const CONTINUATION_NO_PROGRESS_CAP: u32 = 3;
+
+/// The backoff base for consecutive no-output turns (10s, 20s, 40s ...):
+/// each retry of a no-progress continuation waits twice as long.
+const CONTINUATION_NO_PROGRESS_BACKOFF_BASE_MS: u64 = 10_000;
+
+/// The just-settled turn's provider-failure text when the turn settled
+/// as a terminal provider failure (stop reason `error`, with a recorded
+/// stream failure that is not the quota-park class — the parked turn is
+/// the park's pause, not the goal's death). `None` for healthy, aborted,
+/// or parked turns.
+pub fn terminal_provider_failure(
+    message: &pa_agent::types::AssistantMessage,
+) -> Option<String> {
+    if message.stop_reason != pa_agent::types::StopReason::Error {
+        return None;
+    }
+    if provider_stream_failure_kind(message).as_deref() == Some("rate_limit") {
+        return None;
+    }
+    Some(
+        message
+            .error_message
+            .clone()
+            .filter(|error| !error.is_empty())
+            .unwrap_or_else(|| "Assistant response failed".to_string()),
+    )
+}
+
 impl GoalDriver {
     pub fn new() -> Self {
         Self {
@@ -71,12 +114,33 @@ impl GoalDriver {
             accounting_started_at: None,
             accounted_messages: std::collections::HashSet::default(),
             owed_continuation_for_rlm_work: false,
+            no_progress_streak: 0,
+            no_progress_backoff_until_ms: 0,
+            counted_no_progress_turn_ms: None,
         }
     }
 
-    /// Rehydrate the driver from the session branch (latest persisted entry).
+    /// Rehydrate the driver from the session branch (latest persisted
+    /// entry). The restore-resurrection guard (the 402 diagnosis's (d)):
+    /// an `active` newest row whose trailing turn failed on a provider
+    /// error (the terminal finish never persisted — a worker death or
+    /// restart interrupted the settle) adopts the failure as the goal's
+    /// terminal state instead of resurrecting the loop; the resume sites
+    /// then deliver no continuations into the dead provider.
     pub fn load_persisted(session: &SessionManager) -> Self {
-        Self::restore_persisted(Self::latest_persisted_state(session))
+        let mut state = Self::latest_persisted_state(session);
+        if state.status == GoalStatus::Active {
+            if let Some(error) = session.stale_active_goal_failure() {
+                state = GoalState {
+                    active: false,
+                    status: GoalStatus::Error,
+                    last_reason: Some(error.clone()),
+                    last_error: Some(error),
+                    ..state
+                };
+            }
+        }
+        Self::restore_persisted(state)
     }
 
     /// The branch's latest valid persisted goal state (TS
@@ -442,8 +506,81 @@ impl GoalDriver {
     pub fn next_continuation_message(
         &mut self,
         session: &mut SessionManager,
+        last_turn: Option<&pa_agent::types::AssistantMessage>,
     ) -> anyhow::Result<Option<CustomMessage>> {
         if self.state.status != GoalStatus::Active || self.state.objective.is_none() {
+            return Ok(None);
+        }
+        // SANCTIONED DIVERGENCE (the 402 diagnosis, operator ruling): the
+        // mint checks progress. TS `_getGoalContinuationMessages` mints
+        // whenever the goal is Active — whether the previous turn
+        // produced 2,000 tokens of work or an empty 402 corpse is
+        // invisible to it, so a dead provider drove the operator's
+        // 64-continuation hot loop. The just-settled turn now gates the
+        // mint: a provider failure finishes the goal (mirroring
+        // `finish_for_terminal_message`), a no-output turn counts toward
+        // the consecutive cap with backoff, and only a turn that produced
+        // output continues the loop.
+        if let Some(turn) = last_turn {
+            if let Some(error) = terminal_provider_failure(turn) {
+                self.finish_for_terminal_message(
+                    session,
+                    pa_types::ai::StopReason::Error,
+                    Some(&error),
+                )?;
+                return Ok(None);
+            }
+            if turn.content.is_empty() {
+                // The turn produced no output: a corpse that is not a
+                // provider failure (an abort conversion, a degenerate
+                // empty settle) still made no progress. Count the turn
+                // once and arm the doubling backoff window — this
+                // consult refuses, and a later boundary after the window
+                // passes re-mints (the fall-through consult of the SAME
+                // turn only checks the gate). At the cap the goal
+                // finishes: the loop-killer for EVERY survival arm, not
+                // just the engine's error arm.
+                if self.counted_no_progress_turn_ms != Some(turn.timestamp) {
+                    self.counted_no_progress_turn_ms = Some(turn.timestamp);
+                    self.no_progress_streak += 1;
+                    self.no_progress_backoff_until_ms = now_millis()
+                        + CONTINUATION_NO_PROGRESS_BACKOFF_BASE_MS
+                            * 2u64.saturating_pow(self.no_progress_streak.saturating_sub(1));
+                    if self.no_progress_streak >= CONTINUATION_NO_PROGRESS_CAP {
+                        let goal = self.with_accounted_wall_clock();
+                        let reason =
+                            "Goal continuation cap reached: consecutive turns made no progress"
+                                .to_string();
+                        self.set_state(
+                            session,
+                            GoalState {
+                                active: false,
+                                status: GoalStatus::Error,
+                                last_reason: Some(reason.clone()),
+                                last_error: Some(reason),
+                                ..goal
+                            },
+                        )?;
+                        return Ok(None);
+                    }
+                    return Ok(None);
+                }
+                // An already-counted turn falls through to the backoff
+                // gate below: once the window passes, the mint retries
+                // (the retry's own turn counts again if it too makes no
+                // progress).
+            } else {
+                // The turn produced output: the streak resets and any
+                // armed backoff window clears.
+                self.no_progress_streak = 0;
+                self.no_progress_backoff_until_ms = 0;
+                self.counted_no_progress_turn_ms = Some(turn.timestamp);
+            }
+        }
+        // The backoff gate: a consult inside the window mints nothing;
+        // the next boundary after the window re-mints (the goal stays
+        // Active — this is a delay, not a death).
+        if now_millis() < self.no_progress_backoff_until_ms {
             return Ok(None);
         }
         self.set_state(
@@ -486,13 +623,25 @@ impl GoalDriver {
     pub fn take_owed_continuation(
         &mut self,
         session: &mut SessionManager,
+        last_turn: Option<&pa_agent::types::AssistantMessage>,
     ) -> anyhow::Result<Option<CustomMessage>> {
         let owed = self.owed_continuation_for_rlm_work;
         self.owed_continuation_for_rlm_work = false;
         if !owed {
             return Ok(None);
         }
-        match self.next_continuation_message(session) {
+        match self.next_continuation_message(session, last_turn) {
+            Ok(None) => {
+                // The mint refused for progress reasons (the goal
+                // finished, or the backoff window): an inactive goal
+                // drops the deferral (TS); a live goal in backoff keeps
+                // it, so a later boundary after the window still
+                // delivers the owed continuation.
+                if self.state.status == GoalStatus::Active {
+                    self.owed_continuation_for_rlm_work = true;
+                }
+                Ok(None)
+            }
             Ok(message) => Ok(message),
             Err(error) => {
                 // A failed mint (the durable continuation slot never landed)
@@ -563,6 +712,114 @@ mod tests {
         let mut session = SessionManager::in_memory(dir.path());
         session.materialize_session_file(Some(session_dir));
         session
+    }
+
+    /// A failed provider turn in the pa-agent wire shape (the mint's
+    /// progress-check input), carrying the `provider_stream_failure`
+    /// diagnostic the classification reads.
+    fn test_error_turn(kind: &str, status: Option<u16>, error: &str) -> pa_agent::types::AssistantMessage {
+        pa_agent::types::AssistantMessage {
+            content: Vec::new(),
+            api: String::new(),
+            provider: "test".to_string(),
+            model: "m".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: Some(vec![pa_agent::types::AssistantMessageDiagnostic {
+                kind: "provider_stream_failure".to_string(),
+                timestamp: 0,
+                error: None,
+                details: Some(serde_json::json!({
+                    "kind": kind,
+                    "status": status,
+                })),
+            }]),
+            usage: pa_agent::types::Usage::zero(),
+            stop_reason: pa_agent::types::StopReason::Error,
+            stop_reason_raw: None,
+            error_message: Some(error.to_string()),
+            timestamp: 0,
+        }
+    }
+
+    /// A turn that settled without output and without a provider failure
+    /// (an abort conversion's corpse, or a degenerate empty settle).
+    fn test_empty_turn(timestamp: i64) -> pa_agent::types::AssistantMessage {
+        pa_agent::types::AssistantMessage {
+            content: Vec::new(),
+            api: String::new(),
+            provider: "test".to_string(),
+            model: "m".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: pa_agent::types::Usage::zero(),
+            stop_reason: pa_agent::types::StopReason::Stop,
+            stop_reason_raw: None,
+            error_message: None,
+            timestamp,
+        }
+    }
+
+    /// A turn that produced output: progress.
+    fn test_progress_turn(timestamp: i64) -> pa_agent::types::AssistantMessage {
+        pa_agent::types::AssistantMessage {
+            content: vec![pa_agent::types::AssistantContent::Text(
+                pa_agent::types::TextContent {
+                    text: "made progress".to_string(),
+                    text_signature: None,
+                },
+            )],
+            api: String::new(),
+            provider: "test".to_string(),
+            model: "m".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: pa_agent::types::Usage::zero(),
+            stop_reason: pa_agent::types::StopReason::Stop,
+            stop_reason_raw: None,
+            error_message: None,
+            timestamp,
+        }
+    }
+
+    /// A failed provider turn in the session wire shape (the durable
+    /// row the stale-row scan reads).
+    fn wire_error_turn(
+        kind: &str,
+        status: Option<u16>,
+        error: &str,
+        timestamp: u64,
+    ) -> pa_types::ai::AssistantMessage {
+        pa_types::ai::AssistantMessage {
+            content: Vec::new(),
+            api: "openai-completions".to_string(),
+            provider: "test".to_string(),
+            model: "m".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: Some(vec![pa_types::ai::AssistantMessageDiagnostic {
+                type_: "provider_stream_failure".to_string(),
+                timestamp: 0,
+                error: None,
+                details: Some(
+                    serde_json::json!({
+                        "kind": kind,
+                        "status": status,
+                    })
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default(),
+                ),
+            }]),
+            usage: Default::default(),
+            stop_reason: pa_types::ai::StopReason::Error,
+            stop_reason_raw: None,
+            error_message: Some(error.to_string()),
+            timestamp,
+            rest: serde_json::Map::default(),
+        }
     }
 
     fn usage(input: u64, output: u64) -> pa_types::ai::Usage {
@@ -734,7 +991,7 @@ mod tests {
         let mut driver = GoalDriver::new();
         driver.start(&mut session, "work", None).unwrap();
         let first = driver
-            .next_continuation_message(&mut session)
+            .next_continuation_message(&mut session, None)
             .unwrap()
             .unwrap();
         let UserContent::Text(text) = &first.content else {
@@ -743,26 +1000,203 @@ mod tests {
         assert!(text.contains("- status: active"));
         assert_eq!(driver.state().continuations_used, 1);
         assert!(driver
-            .next_continuation_message(&mut session)
+            .next_continuation_message(&mut session, None)
             .unwrap()
             .is_some());
         assert_eq!(driver.state().continuations_used, 2);
         // Inactive goals produce no continuations.
         driver.pause(&mut session, "Paused by user").unwrap();
         assert!(driver
-            .next_continuation_message(&mut session)
+            .next_continuation_message(&mut session, None)
             .unwrap()
             .is_none());
         // The mint persists the state change: the session branch's latest
         // goal-state entry carries the incremented count.
         driver.start(&mut session, "work again", None).unwrap();
         assert!(driver
-            .next_continuation_message(&mut session)
+            .next_continuation_message(&mut session, None)
             .unwrap()
             .is_some());
         assert_eq!(driver.state().continuations_used, 1);
         let reloaded = GoalDriver::load_persisted(&session);
         assert_eq!(reloaded.state().continuations_used, 1);
+    }
+
+    /// THE 402 REGRESSION (the diagnosis's (a), the repro's acceptance):
+    /// the mint refuses the continuation when the just-settled turn
+    /// errored, and finishes the goal with the turn's error text instead
+    /// of re-prompting the dead provider. The hot loop dies at the first
+    /// failed boundary.
+    #[test]
+    fn the_mint_refuses_and_finishes_on_an_errored_turn() {
+        let mut session = persisted_session();
+        let mut driver = GoalDriver::new();
+        driver.start(&mut session, "work", None).unwrap();
+        let corpse = test_error_turn("server_error", None, "402 Payment required: wallet drained");
+        assert!(driver
+            .next_continuation_message(&mut session, Some(&corpse))
+            .unwrap()
+            .is_none());
+        assert_eq!(driver.state().status, GoalStatus::Error);
+        assert_eq!(
+            driver.state().last_error.as_deref(),
+            Some("402 Payment required: wallet drained")
+        );
+        assert!(!driver.owns_continuation_wakeup());
+        // The refusal persisted: a reload keeps the goal dead.
+        assert_eq!(
+            GoalDriver::load_persisted(&session).state().status,
+            GoalStatus::Error
+        );
+    }
+
+    /// The quota-park class keeps the goal (TS `_finishQuotaParkedTurn`:
+    /// the parked turn is the park's pause, not the goal's death): a
+    /// rate-limited corpse never triggers the mint's hard finish — the
+    /// goal stays Active for the park's wake. The empty parked corpse
+    /// still counts toward the no-output backoff (a delay, not a death),
+    /// so this consult mints nothing; the next progress turn mints
+    /// normally.
+    #[test]
+    fn a_rate_limited_turn_keeps_the_goal_alive() {
+        let mut session = persisted_session();
+        let mut driver = GoalDriver::new();
+        driver.start(&mut session, "work", None).unwrap();
+        let parked = test_error_turn("rate_limit", Some(429), "429 Too many concurrent requests");
+        assert!(driver
+            .next_continuation_message(&mut session, Some(&parked))
+            .unwrap()
+            .is_none());
+        assert_eq!(driver.state().status, GoalStatus::Active);
+        assert!(driver.state().last_error.is_none());
+        // The park's wake turn makes progress: the mint resumes.
+        let wake_progress = test_progress_turn(7);
+        assert!(driver
+            .next_continuation_message(&mut session, Some(&wake_progress))
+            .unwrap()
+            .is_some());
+        assert_eq!(driver.state().continuations_used, 1);
+    }
+
+    /// The consecutive-no-output cap with backoff (the diagnosis's (b)):
+    /// a turn that produced no output counts once; the consult refuses
+    /// while the backoff window is armed; the third distinct no-output
+    /// turn finishes the goal. A turn that produced output resets the
+    /// streak.
+    #[test]
+    fn no_output_turns_count_to_the_cap_and_backoff() {
+        let mut session = persisted_session();
+        let mut driver = GoalDriver::new();
+        driver.start(&mut session, "work", None).unwrap();
+        let empty_one = test_empty_turn(1);
+        // The first no-output turn: counted, refused, the goal lives.
+        assert!(driver
+            .next_continuation_message(&mut session, Some(&empty_one))
+            .unwrap()
+            .is_none());
+        assert_eq!(driver.state().status, GoalStatus::Active);
+        assert_eq!(driver.state().continuations_used, 0);
+        // The same turn re-consulted inside the window: still refused,
+        // not re-counted.
+        assert!(driver
+            .next_continuation_message(&mut session, Some(&empty_one))
+            .unwrap()
+            .is_none());
+        // A second distinct no-output turn: counted again.
+        let empty_two = test_empty_turn(2);
+        assert!(driver
+            .next_continuation_message(&mut session, Some(&empty_two))
+            .unwrap()
+            .is_none());
+        assert_eq!(driver.state().status, GoalStatus::Active);
+        // A progress turn resets the streak and mints.
+        let progress = test_progress_turn(3);
+        assert!(driver
+            .next_continuation_message(&mut session, Some(&progress))
+            .unwrap()
+            .is_some());
+        assert_eq!(driver.state().continuations_used, 1);
+        // Three consecutive no-output turns (the fresh streak): the
+        // third hits the cap and finishes the goal.
+        for timestamp in 4..=6 {
+            let empty = test_empty_turn(timestamp);
+            assert!(driver
+                .next_continuation_message(&mut session, Some(&empty))
+                .unwrap()
+                .is_none());
+        }
+        assert_eq!(driver.state().status, GoalStatus::Error);
+        assert_eq!(
+            driver.state().last_reason.as_deref(),
+            Some("Goal continuation cap reached: consecutive turns made no progress")
+        );
+        // The cap persisted: a reload keeps the goal dead.
+        assert_eq!(
+            GoalDriver::load_persisted(&session).state().status,
+            GoalStatus::Error
+        );
+    }
+
+    /// The restore-resurrection guard (the diagnosis's (d)): an active
+    /// newest goal row with a terminal provider failure settled after it
+    /// (the interrupted settle — the worker died before the error row
+    /// persisted) adopts the failure as the goal's terminal state at
+    /// rehydration instead of resurrecting the loop.
+    #[test]
+    fn load_persisted_adopts_the_stale_active_failure() {
+        let mut session = persisted_session();
+        let mut driver = GoalDriver::new();
+        driver.start(&mut session, "work", None).unwrap();
+        // The mint's active row is the newest goal row; the corpse
+        // message persists after it (message_end precedes the settle's
+        // error row — the interrupted-settle ordering).
+        driver
+            .next_continuation_message(&mut session, None)
+            .unwrap();
+        session
+            .append_message(pa_types::session::AgentMessage::Assistant(
+                wire_error_turn("invalid_request", Some(402), "402 Insufficient balance", 0),
+            ))
+            .unwrap();
+        let rehydrated = GoalDriver::load_persisted(&session);
+        assert_eq!(rehydrated.state().status, GoalStatus::Error);
+        assert_eq!(
+            rehydrated.state().last_error.as_deref(),
+            Some("402 Insufficient balance")
+        );
+        // The rate-limit corpse is the park's pause: the goal resurrects
+        // (the park wake owns the resume).
+        let mut session = persisted_session();
+        let mut driver = GoalDriver::new();
+        driver.start(&mut session, "work", None).unwrap();
+        driver
+            .next_continuation_message(&mut session, None)
+            .unwrap();
+        session
+            .append_message(pa_types::session::AgentMessage::Assistant(
+                wire_error_turn("rate_limit", Some(429), "429 Too many requests", 0),
+            ))
+            .unwrap();
+        assert_eq!(
+            GoalDriver::load_persisted(&session).state().status,
+            GoalStatus::Active
+        );
+        // A settled terminal row (the error row landed after the corpse)
+        // is the newest row: no stale adoption, the error stands on its
+        // own.
+        let mut session = persisted_session();
+        let mut driver = GoalDriver::new();
+        driver.start(&mut session, "work", None).unwrap();
+        driver.finish_for_terminal_message(
+            &mut session,
+            pa_types::ai::StopReason::Error,
+            Some("settled failure"),
+        )
+        .unwrap();
+        assert_eq!(
+            GoalDriver::load_persisted(&session).state().status,
+            GoalStatus::Error
+        );
     }
 
     /// TS `_getGoalContinuationMessages`'s quiescence arm and
@@ -781,7 +1215,7 @@ mod tests {
         assert_eq!(driver.state().continuations_used, 0);
         // Delivery: one slot consumed, the flag clears.
         let delivered = driver
-            .take_owed_continuation(&mut session)
+            .take_owed_continuation(&mut session, None)
             .unwrap()
             .unwrap();
         let UserContent::Text(text) = &delivered.content else {
@@ -792,7 +1226,7 @@ mod tests {
         assert!(!driver.owes_continuation());
         // A second take (a racing settle site) delivers nothing.
         assert!(driver
-            .take_owed_continuation(&mut session)
+            .take_owed_continuation(&mut session, None)
             .unwrap()
             .is_none());
         assert_eq!(driver.state().continuations_used, 1);
@@ -801,7 +1235,7 @@ mod tests {
         driver.mark_continuation_owed();
         driver.pause(&mut session, "Paused by user").unwrap();
         assert!(driver
-            .take_owed_continuation(&mut session)
+            .take_owed_continuation(&mut session, None)
             .unwrap()
             .is_none());
         assert_eq!(driver.state().continuations_used, 1);
@@ -825,7 +1259,7 @@ mod tests {
         let mut driver = GoalDriver::new();
         driver.start(&mut session, "work", None).unwrap();
         assert!(driver
-            .next_continuation_message(&mut session)
+            .next_continuation_message(&mut session, None)
             .unwrap()
             .is_some());
         assert_eq!(driver.state().continuations_used, 1);
@@ -841,7 +1275,7 @@ mod tests {
         );
         // The next mint counts from the restored slot.
         assert!(driver
-            .next_continuation_message(&mut session)
+            .next_continuation_message(&mut session, None)
             .unwrap()
             .is_some());
         assert_eq!(driver.state().continuations_used, 1);
@@ -926,7 +1360,7 @@ mod tests {
             ..empty_goal_state()
         });
         assert!(driver
-            .next_continuation_message(&mut session)
+            .next_continuation_message(&mut session, None)
             .unwrap()
             .is_some());
         assert_eq!(driver.state().continuations_used, 3);

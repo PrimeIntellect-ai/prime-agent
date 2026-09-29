@@ -97,6 +97,18 @@ impl SessionEngine for AgentSessionEngine {
             .lock()
             .expect("goal runtime lock")
             .clone()?;
+        // The progress check's input (the 402 diagnosis's (a)) + the
+        // failed pair's drop ((c)), read before the driver lock.
+        let last_turn = self.last_loop_assistant_message();
+        if last_turn
+            .as_ref()
+            .is_some_and(|turn: &pa_agent::types::AssistantMessage| {
+                turn.stop_reason == pa_agent::types::StopReason::Error || turn.content.is_empty()
+            })
+        {
+            self.runtime
+                .block_on(async { self.drop_failed_goal_continuation_pair().await });
+        }
         let continuation = self.runtime.block_on(async {
             let mut driver = handles.driver.lock().await;
             // TS `resumeQueuedWork()`'s quiescence arm: unsettled RLM
@@ -114,7 +126,9 @@ impl SessionEngine for AgentSessionEngine {
             // persist ends the boundary without a continuation (TS
             // `_maybeResumeGoalContinuationAfterRlmWork`'s catch: the
             // hook must not reject; the unchanged count retries).
-            let message = match driver.next_continuation_message(&mut session) {
+            let message = match driver
+                .next_continuation_message(&mut session, last_turn.as_ref())
+            {
                 Ok(message) => message,
                 Err(error) => {
                     eprintln!("pa-daemon: goal continuation mint persist failed: {error:#}");
