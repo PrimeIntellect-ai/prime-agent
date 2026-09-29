@@ -317,13 +317,11 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
 }
 
 /// The focused dock's selection reads as the ONE shared selection
-/// band (the operator's 2026-09-29 one-color ruling, superseding
-/// #3031's purple): the selection paints the hover band's own light
-/// color — the same ONE color on the dock's tab and the agents view's
-/// rows — never #3031's accent purple and never the 2026-09-26
-/// dark-green `ToolSuccessBg` band, across exactly the group's spans,
-/// while each span keeps its own status color (the selection never
-/// repaints the text).
+/// band (the operator's 2026-09-29 one-color ruling): the selection
+/// paints the hover band's own light color — the same ONE color on
+/// the dock's tab and the agents view's rows — never the accent,
+/// across exactly the group's spans, while each span keeps its own
+/// status color (the selection never repaints the text).
 #[test]
 fn activity_dock_selection_is_the_hover_colored_band() {
     let theme = Theme::builtin("prime", ColorMode::TrueColor);
@@ -340,11 +338,10 @@ fn activity_dock_selection_is_the_hover_colored_band() {
     let frame = render_activity_dock(&dock, &theme, 120);
     let row = &frame[1];
     // The band is the theme's hover color (`Theme::hover_row_style`,
-    // the #3109 light wash — the live reference, the operator's
-    // one-color ruling) with no extra modifiers: the ONE style every
-    // activity surface's selected row paints
-    // (`theme::selection_row_style`), never the accent purple and
-    // never the 2026-09-26 dark-green panel background.
+    // the one light wash — the operator's one-color ruling) with no
+    // extra modifiers: the ONE style every activity surface's
+    // selected row paints (`theme::selection_row_style`), never the
+    // accent.
     let band = theme.selection_row_style();
     assert_eq!(band.bg, theme.hover_row_style().bg);
     assert_ne!(band.bg, theme.fg_style(ThemeColor::Accent).fg);
@@ -377,8 +374,8 @@ fn activity_dock_selection_is_the_hover_colored_band() {
             span.content
         );
     }
-    // The pink is gone: the accent never rides the row as the band
-    // (the selection is the hover's own light color).
+    // The accent never rides the row as the band (the selection is
+    // the hover's own light color).
     let accent = theme.fg_style(ThemeColor::Accent).fg;
     assert!(row.iter().all(|span| span.style.bg != accent));
     // The band is a focus-owned signal: the same dock without focus

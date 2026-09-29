@@ -670,11 +670,9 @@ impl Theme {
     /// IDENTICAL across the dock's groups, the agents view's rows, the
     /// heartbeats picker, and the bash view — one style, not
     /// per-surface copies): the SAME light band the hover paints
-    /// ([`Theme::hover_row_style`] — the #3109 hover band is the live
-    /// reference; the operator's 2026-09-29 one-color ruling: the
-    /// #3031 purple+opaque+bold selection read ugly and dies by
-    /// replacement, never by restoring an older gray). The two states
-    /// distinguish by their CUES, never by color: the hover is
+    /// ([`Theme::hover_row_style`] — the operator's 2026-09-29
+    /// one-color ruling: one band color for both states). The two
+    /// states distinguish by their CUES, never by color: the hover is
     /// transient and rides the mouse position; the selection is
     /// sticky and rides the keyboard — and where they overlap the
     /// hover paint skips cells that already carry the selection's
@@ -941,15 +939,14 @@ mod tests {
     }
 
     /// The ONE selection style paints the hover band's own color (the
-    /// operator's 2026-09-29 one-color ruling: the #3031 purple read
-    /// ugly and dies by replacement — the #3109 light hover band is
-    /// the live reference, no archaeology): the selection IS the
-    /// hover color in every theme, never the accent, never a bold
-    /// modifier. A theme whose slots resolve to no band (a `selectedBg`
-    /// that is missing or explicitly empty resolves to `Color::Reset`,
-    /// which paints nothing) falls through to the onboarding wash
-    /// (Macroscope 2026-09-28: an unresolvable slot must fall through,
-    /// not strand the selection without a band).
+    /// operator's 2026-09-29 one-color ruling: one band color for
+    /// both states): the selection IS the hover color in every theme,
+    /// never the accent, never a bold modifier. A theme whose slots
+    /// resolve to no band (a `selectedBg` that is missing or
+    /// explicitly empty resolves to `Color::Reset`, which paints
+    /// nothing) falls through to the onboarding wash (Macroscope
+    /// 2026-09-28: an unresolvable slot must fall through, not strand
+    /// the selection without a band).
     #[test]
     fn the_selection_style_is_the_hover_color_never_the_accent() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
@@ -1110,8 +1107,8 @@ mod tests {
     /// mouse position; the selection is sticky and rides the
     /// keyboard), never by color, and where they overlap the hover
     /// paint skips cells that already carry the selection's
-    /// background. The selection carries NO modifiers (#3031's bold
-    /// dies with its purple).
+    /// background. The selection carries NO modifiers — a selected
+    /// row's own styles stay its own.
     #[test]
     fn the_hover_band_and_the_selection_share_one_color() {
         for name in ["prime", "dark", "light"] {

@@ -815,11 +815,10 @@ pub fn render_activity_dock_segments(
         if dock.focused && dock.selected == group {
             // The focused group reads as one unit behind the ONE shared
             // selection band (the operator's 2026-09-29 one-color
-            // ruling: #3031's purple read ugly and dies by
-            // replacement — the selection paints the hover band's own
-            // light color, the same style every activity surface's
-            // selected row paints); each span keeps its own status
-            // color, so the selection never repaints the text.
+            // ruling: the same light band the hover paints, the same
+            // style every activity surface's selected row paints);
+            // each span keeps its own status color, so the selection
+            // never repaints the text.
             let band = theme.selection_row_style();
             for span in spans {
                 line.push(Span::styled(span.content.clone(), span.style.patch(band)));
