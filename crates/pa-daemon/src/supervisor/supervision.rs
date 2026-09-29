@@ -830,7 +830,9 @@ impl Supervisor {
         // `worker.client = client`, after `authenticateWorker`). A
         // superseded connect (a replacement already owns a newer
         // connection) never installs over it.
-        resident.install_command_channel(connection_epoch, cmd_tx);
+        resident
+            .install_command_channel(connection_epoch, cmd_tx)
+            .await;
         // Peer-transport capability rides on the worker instance id (the TS
         // worker only advertises `direct_peer_transport` with one).
         let peer_transport_capable = response
