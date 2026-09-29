@@ -736,6 +736,87 @@ fn a_terminal_error_sharing_the_millisecond_still_refuses() {
     assert_eq!(driver.state().status, GoalStatus::Error);
 }
 
+/// THE WAVE-7 PINS (the split-head review):
+/// (T1) a fresh goal started in the SAME millisecond as a prior
+///      terminal-error row never adopts that pre-goal row — the gate
+///      requires a STRICTLY later turn (a same-ms row is not the new
+///      goal's own);
+/// (T2) a parked refusal clears an earlier strike's backoff window:
+///      `backoff_wake_at` never exposes a deadline during the quota
+///      park (the park's own wake owns the retry).
+#[test]
+fn a_same_ms_pre_goal_corpse_never_judges_the_new_goal() {
+    let mut session = persisted_session();
+    let mut driver = GoalDriver::new();
+    driver.start(&mut session, "work", None).unwrap();
+    let created_at = driver.state().created_at.unwrap();
+
+    // A pre-goal terminal corpse AT the goal's own creation
+    // millisecond: the strict-later gate excludes it — the fresh
+    // goal mints.
+    let same_ms = test_error_turn(
+        "invalid_request",
+        Some(400),
+        "a corpse from before the goal began, same millisecond",
+        created_at as i64,
+    );
+    assert!(driver
+        .next_continuation_message(&mut session, Some(&same_ms))
+        .unwrap()
+        .is_some());
+    assert_eq!(driver.state().status, GoalStatus::Active);
+    driver.continuation_consumed();
+
+    // A turn a millisecond LATER is the goal's own and judges it.
+    let next_ms = test_error_turn(
+        "invalid_request",
+        Some(400),
+        "the goal's own corpse, one millisecond later",
+        created_at as i64 + 1,
+    );
+    assert!(driver
+        .next_continuation_message(&mut session, Some(&next_ms))
+        .unwrap()
+        .is_none());
+    assert_eq!(driver.state().status, GoalStatus::Error);
+}
+
+#[test]
+fn a_parked_refusal_clears_an_earlier_strikes_window() {
+    let mut session = persisted_session();
+    let mut driver = GoalDriver::new();
+    driver.start(&mut session, "work", None).unwrap();
+    let created_at = driver.state().created_at.unwrap();
+
+    // Strike one: the backoff window arms (the wake would be exposed).
+    let empty = test_empty_turn(created_at as i64 + 1);
+    assert!(driver
+        .next_continuation_message(&mut session, Some(&empty))
+        .unwrap()
+        .is_none());
+    assert_eq!(driver.no_progress_streak(), 1);
+    assert!(driver.backoff_wake_at().is_some());
+
+    // The parked corpse: the refusal CLEARS the strike's window and
+    // arms only the parked refusal — no wake is ever exposed during
+    // the quota park.
+    let parked = test_error_turn(
+        "rate_limit",
+        Some(429),
+        "429 Too many concurrent requests",
+        created_at as i64 + 2,
+    );
+    assert!(driver
+        .next_continuation_message(&mut session, Some(&parked))
+        .unwrap()
+        .is_none());
+    assert!(
+        driver.backoff_wake_at().is_none(),
+        "no wake during the park"
+    );
+    assert_eq!(driver.no_progress_streak(), 1, "the strike stays durable");
+}
+
 /// THE WAVE-4 REGRESSION: the quota-park refusal STICKS — the
 /// standard backoff window arms, so a re-consult (the same corpse,
 /// or the older progress row the pair-drop exposes) refuses too;

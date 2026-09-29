@@ -286,14 +286,19 @@ impl AgentSessionEngine {
             }
             let baseline_only =
                 published.is_none() && goal.status == pa_core::goals::GoalStatus::Idle;
+            let replaced = published
+                .as_ref()
+                .is_some_and(|last| last.goal_id != goal.goal_id);
             *published = Some(goal.clone());
             if baseline_only {
                 return true;
             }
             // A goal that left the active state retires its pending
             // no-progress wake: a terminal or paused goal never fires the
-            // one-shot retry marker.
-            if goal.status != pa_core::goals::GoalStatus::Active {
+            // one-shot retry marker. A REPLACEMENT goal (`start` on a live
+            // goal) retires it too — the old goal's wake would fire its
+            // marker into the new goal as an unsolicited follow-up turn.
+            if goal.status != pa_core::goals::GoalStatus::Active || replaced {
                 self.cancel_goal_backoff_wake();
             }
         }

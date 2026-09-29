@@ -97,7 +97,7 @@ impl GoalDriver {
         let turn_is_this_goals = self
             .state
             .created_at
-            .is_none_or(|created_at| turn.timestamp >= created_at as i64);
+            .is_none_or(|created_at| turn.timestamp > created_at as i64);
         // The examined-turn gate: a row the driver has already judged
         // — or any row at or before it — never re-enters the progress
         // machinery. Without this, the failed pair's removal from the
@@ -146,6 +146,14 @@ impl GoalDriver {
             // normally.
             if provider_stream_failure_kind(turn).as_deref() == Some("rate_limit") {
                 self.counted_no_progress_turn_ms = Some(turn.timestamp);
+                // An earlier no-progress strike's window is CLEARED here:
+                // the parked session owns the retry cadence now, and a
+                // live backoff window would expose `backoff_wake_at` —
+                // the daemon would schedule a 10s marker probe into the
+                // parked session. The durable streak carries the strike;
+                // the park's wake turn re-arms the cadence if it too
+                // makes no progress.
+                self.no_progress_backoff_until_ms = 0;
                 self.parked_refusal_until_ms =
                     now_millis() + CONTINUATION_NO_PROGRESS_BACKOFF_BASE_MS;
                 return Ok(false);
