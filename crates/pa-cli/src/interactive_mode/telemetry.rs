@@ -2,7 +2,7 @@
 //! one-shot client wrapper and the adoption events the pa-tui
 //! interactive loop reports through the `InteractionTelemetry` trait.
 
-use super::*;
+use super::{Future, PathBuf, Pin};
 
 /// `tui scroll used` / `tui exit` adoption telemetry: a one-shot client per
 /// event, tracked and flushed at the emission point (the `startup`-event

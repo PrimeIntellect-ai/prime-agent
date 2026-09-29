@@ -1,7 +1,10 @@
 //! The turn loop (moved with its concern): the queue-mode mapping, the
 //! turn runner over the admission/boundary/once machinery, and the
 //! session-agent constructor.
-use super::*;
+use super::{
+    AgentSessionEngine, AutoCompactionRun, BoundaryRun, EngineEvent, GoalBoundary, Model,
+    OverflowArmRun, TurnAdmission, TurnPrompt, TurnResult,
+};
 
 impl AgentSessionEngine {
     /// Map a wire/settings queue mode ("all"/"one-at-a-time") onto the

@@ -1,7 +1,12 @@
 //! The scripted faux session (moved with its concern): the deterministic
 //! replay engine for the integration harness, its script records, the
 //! `SessionEngine` impl, and the abortable delay helper.
-use super::*;
+use super::{
+    json, AbortSignal, AssistantSnapshot, BranchSummaryOutcome, BranchSummaryRequest,
+    BranchSummaryRun, CompactionOutcome, CompactionRequest, CompactionRun, EngineEvent,
+    PromptRequest, ProviderRetryPolicy, Result, SessionEngine, SideQuestionOutcome,
+    SideQuestionRequest, SideQuestionSink, Value, UNBOUNDED_BACKOFF_MS,
+};
 
 /// A scripted faux session: replays a deterministic sequence of assistant
 /// messages for the first N prompts, then echoes. Script format (JSON):

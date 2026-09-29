@@ -2,7 +2,9 @@
 //! probe, the stale-daemon shutdown, the detached supervisor spawn,
 //! and the startup poll window with its timing consts.
 
-use super::*;
+use anyhow::Context as _;
+
+use super::{anyhow, Command, Duration, Instant, Path, Result, Stdio};
 
 const DAEMON_STARTUP_TIMEOUT_MS: u64 = 30_000;
 const DAEMON_SHUTDOWN_WAIT_MS: u64 = 5_000;

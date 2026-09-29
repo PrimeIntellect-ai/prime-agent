@@ -803,18 +803,18 @@ fn handle_event(
                     run.tool_error_count += 1;
                 }
                 run.tool_duration_ms += duration_ms;
-                let stats = run.tool_summary.entry(category).or_default();
-                stats.calls += 1;
+                let tool_stats = run.tool_summary.entry(category).or_default();
+                tool_stats.calls += 1;
                 if is_error {
-                    stats.failures += 1;
-                    stats.last_call_failed = true;
+                    tool_stats.failures += 1;
+                    tool_stats.last_call_failed = true;
                 } else {
-                    if stats.last_call_failed {
-                        stats.recovered += 1;
+                    if tool_stats.last_call_failed {
+                        tool_stats.recovered += 1;
                     }
-                    stats.last_call_failed = false;
+                    tool_stats.last_call_failed = false;
                 }
-                stats.duration_ms += duration_ms;
+                tool_stats.duration_ms += duration_ms;
             }
             state.totals.tool_call_count += 1;
             // `tool executed` (v1): tool name + duration + outcome.

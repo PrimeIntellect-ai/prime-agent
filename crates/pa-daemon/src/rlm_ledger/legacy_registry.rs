@@ -2,7 +2,11 @@
 //! the pre-ledger per-parent registry reader with its bounded
 //! header-line probe, and the per-child display sidecar entry with
 //! its atomic writer.
-use super::*;
+use std::io::Write as _;
+
+use anyhow::Context as _;
+
+use super::{fs, Deserialize, HashMap, Path, PathBuf, Result, Serialize, Value};
 
 /// One legacy `rlm-subagents.jsonl` registry entry (the pre-ledger topology
 /// store; still read for seeding and hydration metadata). The fields beyond

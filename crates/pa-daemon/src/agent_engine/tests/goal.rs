@@ -313,7 +313,7 @@ fn post_compaction_goal_continuation_mint() {
     // The minted continuation's admission releases the driver's pending
     // guard (the worker's queue push is the admission on the live path):
     // the item's OWN handle, never the mutable mirror.
-    engine.release_goal_continuation_handle(&minted.pending_handle);
+    AgentSessionEngine::release_goal_continuation_handle(minted.pending_handle.as_ref());
     // TS #2465: a live background bash handle holds the post-compaction
     // mint the same way (the TS resume site's gate): the mint defers
     // (owed, not consumed) until the handle settles.

@@ -150,6 +150,7 @@ pub fn provider_stream_failure_status(message: &AssistantMessage) -> Option<u16>
 /// exhaustion carry none, and an abort conversion is a user action, not a
 /// provider failure — those stay silent (the 402 diagnosis: only a real
 /// provider failure must never settle silently).
+#[must_use]
 pub fn has_provider_stream_failure(message: &AssistantMessage) -> bool {
     !is_faux_provider_queue_exhausted(message) && provider_stream_failure_details(message).is_some()
 }

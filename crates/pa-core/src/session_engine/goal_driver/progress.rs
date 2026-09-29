@@ -52,6 +52,7 @@ pub fn turn_produced_no_output(message: &pa_agent::types::AssistantMessage) -> b
 /// stream failure that is not the quota-park class — the parked turn is
 /// the park's pause, not the goal's death). `None` for healthy, aborted,
 /// or parked turns.
+#[must_use]
 pub fn terminal_provider_failure(message: &pa_agent::types::AssistantMessage) -> Option<String> {
     if message.stop_reason != pa_agent::types::StopReason::Error {
         return None;
