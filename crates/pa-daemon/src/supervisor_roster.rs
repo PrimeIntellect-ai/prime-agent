@@ -297,6 +297,12 @@ impl Supervisor {
         ) = (Vec::new(), HashMap::new());
         let (_, parent_by_child) = ledger_view.as_ref().unwrap_or(&empty_view);
         let roots = self.roster_seed_roots().await;
+        // The stop's own ledger event: an RLM delete tombstoned its child
+        // before the stop began, and the shutdown route was the
+        // transcript's flush barrier, so the fold beside the ledger view
+        // reads the final bucket - the later capture amendment yields the
+        // same value, so no second push follows it.
+        let bucket = self.deleted_descendant_usage_bucket().await;
         // The ledger/roots awaits opened a late-write window. Only
         // rows that carry the STOPPED generation settle here: the
         // stopped worker's own in-flight delta can have written a row
@@ -321,6 +327,14 @@ impl Supervisor {
         let mut removed = Vec::new();
         {
             let mut roster = self.roster.lock().unwrap();
+            // The refreshed bucket applies FIRST: the settle loop's
+            // passivated rewrites then attach the new value at store
+            // time, and the rewritten rows ship in this same push - the
+            // child's removal and its parent's new bucket together, with
+            // no frame in between where the spend dips.
+            if let Some(bucket) = bucket {
+                changed.extend(roster.set_deleted_descendant_usage(bucket));
+            }
             let mut settle: Vec<AgentRosterEntry> = owned;
             for late in roster.entries_for_worker(worker_id).into_iter().cloned() {
                 if !settle
@@ -821,6 +835,105 @@ mod tests {
             "the durable pair, not the live descriptor: {row:?}"
         );
         assert_eq!(row.summary["thinkingLevel"], json!("low"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The RLM delete's stop: the passivation's single push carries both
+    /// the tombstoned child's removal and its parent's refreshed
+    /// deleted-descendant bucket. The child's transcript survives under
+    /// session-artifacts (the real RLM-delete shape: no catalog row
+    /// exists for it), so its captured spend bills through the bucket
+    /// on the parent's row - not through a row anywhere.
+    #[tokio::test]
+    async fn stop_carries_the_deleted_childs_spend_to_its_parent() {
+        let (dir, supervisor, root_file, child_file) = roster_fixture().await;
+        let agent_dir = dir.join("agent");
+        let sessions_dir = agent_dir.join("sessions");
+        register_root_worker(&supervisor, "w-root", &root_file).await;
+        // The parent's top-level row: the bucket's target.
+        let mut parent_summary = live_child_summary(&root_file, &child_file);
+        parent_summary["runtimeKind"] = json!("top-level");
+        parent_summary["sessionId"] = json!("root-persisted");
+        parent_summary["id"] = json!("root-persisted");
+        parent_summary["sessionFile"] = json!(root_file.to_string_lossy());
+        parent_summary.as_object_mut().unwrap().remove("rlmChildId");
+        parent_summary
+            .as_object_mut()
+            .unwrap()
+            .remove("parentSessionPath");
+        supervisor.write_roster_summary(&parent_summary, Some("w-root"));
+        // The deleted child's real transcript location: under the agent
+        // dir's session-artifacts tree (the file exists - the shape the
+        // RLM delete leaves behind).
+        let child_artifact = agent_dir
+            .join("session-artifacts")
+            .join("root-1")
+            .join("sub-9")
+            .join("sub-9.jsonl");
+        std::fs::create_dir_all(child_artifact.parent().expect("artifact dir")).unwrap();
+        write_display_file(&child_artifact, "/the/deleted/cwd");
+        append_family_edge(
+            &agent_dir,
+            &sessions_dir,
+            "sub-9",
+            &root_file,
+            &child_artifact,
+        );
+        // The RLM delete's tombstone carrying the captured usage (the
+        // amendment the stop finalize appends after the flush barrier).
+        let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
+        ledger
+            .append_delete_with_usage(
+                "sub-9",
+                &child_artifact.to_string_lossy(),
+                crate::rlm_ledger::RlmLedgerDeleteReason::User,
+                &crate::session_usage::SessionUsageSummary {
+                    input_tokens: 60,
+                    output_tokens: 6,
+                    cost: 0.3,
+                },
+            )
+            .expect("append delete with usage");
+        // The child's live roster row, owned by the stopping worker.
+        let mut events = supervisor.events.subscribe();
+        supervisor.write_roster_summary(
+            &live_child_summary(&root_file, &child_artifact),
+            Some("w-child"),
+        );
+        let child_agent_id = drain_roster_pushes(&mut events)[0]["changed"][0]["agentId"]
+            .as_str()
+            .expect("the child agent id")
+            .to_string();
+
+        supervisor.passivate_roster_worker("w-child", false).await;
+        let pushes = drain_roster_pushes(&mut events);
+        assert_eq!(pushes.len(), 1, "one settle push: {pushes:?}");
+        // The parent's refreshed row is the push's whole `changed`.
+        let parent_after = supervisor
+            .roster
+            .lock()
+            .unwrap()
+            .entries()
+            .into_iter()
+            .find(|entry| {
+                entry.summary.get("sessionId").and_then(Value::as_str) == Some("root-persisted")
+            })
+            .expect("the parent row");
+        assert_eq!(
+            pushes[0]["changed"],
+            serde_json::to_value(vec![parent_after]).expect("serialized parent"),
+            "the push carries the parent's refreshed row: {pushes:?}"
+        );
+        assert_eq!(
+            pushes[0]["changed"][0]["summary"]["deletedDescendantUsage"],
+            json!({ "inputTokens": 60, "outputTokens": 6, "cost": 0.3 }),
+            "the deleted child's captured spend bills through the parent"
+        );
+        assert_eq!(
+            pushes[0]["removed"],
+            json!([child_agent_id]),
+            "the tombstoned child's row dies in the same push: {pushes:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

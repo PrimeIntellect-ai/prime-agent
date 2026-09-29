@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use crate::lease::canonical_session_path;
 use crate::rlm_ledger::RlmLedgerEdge;
 use crate::session_store::read_session_info;
+use crate::session_usage::SessionUsageSummary;
 use crate::supervisor::Supervisor;
 
 impl Supervisor {
@@ -179,6 +180,13 @@ impl Supervisor {
                     // themselves.
                     drop(supervisor.spawn_seeded_hydration(seeded));
                 }
+                // The newly resident root's family bills its deleted
+                // descendants: the registration is the event that makes
+                // the bucket observable, and the subscribe barrier that
+                // drains this task lands the refreshed rows before the
+                // roster snapshot answers.
+                let refreshed = supervisor.refresh_deleted_descendant_usage().await;
+                supervisor.push_roster_update(refreshed, Vec::new());
             });
             pending.push(handle);
         }
@@ -201,6 +209,54 @@ impl Supervisor {
             })
             .collect();
         Ok((edges, parent_by_child))
+    }
+
+    /// The deleted-descendant bucket (the spawn ledger's fold keyed by
+    /// canonical parent session path), computed off the async runtime:
+    /// the fold reads the ledger, stats tombstoned paths, and may
+    /// cold-scan a legacy child's transcript once. `None` is the
+    /// degrade (a ledger failure, logged) - the roster keeps its last
+    /// bucket instead of billing a broken read as zero.
+    pub(crate) async fn deleted_descendant_usage_bucket(
+        self: &Arc<Self>,
+    ) -> Option<HashMap<String, SessionUsageSummary>> {
+        let ledger = self.rlm_spawn_ledger_for(None).await.ok()?;
+        let bucket =
+            tokio::task::spawn_blocking(move || ledger.deleted_descendant_usage_by_parent())
+                .await
+                .unwrap_or_else(|error| Err(anyhow::anyhow!(error)));
+        match bucket {
+            Ok(bucket) => Some(bucket),
+            Err(error) => {
+                self.log_line(&format!(
+                    "Could not refresh deleted-descendant usage: {error:#}"
+                ));
+                None
+            }
+        }
+    }
+
+    /// Recompute the deleted-descendant bucket and rewrite the roster
+    /// rows whose attached value changed, returning them for the
+    /// caller's push. The bucket changes only at ledger events and when
+    /// a root appears, so this runs at exactly those: a registration
+    /// seed (create, resume, and supervisor-restart re-registration),
+    /// a stop passivation (the RLM delete's tombstone landed before the
+    /// stop, and the later capture amendment yields the same value),
+    /// and a saved-session delete. The worker-process delete arm and
+    /// the forwarded-owner arm stay uncovered by design: their
+    /// tombstones are picked up at the next registration or stop, so a
+    /// refresh there would duplicate the event, not add one.
+    pub(crate) async fn refresh_deleted_descendant_usage(
+        self: &Arc<Self>,
+    ) -> Vec<AgentRosterEntry> {
+        let Some(bucket) = self.deleted_descendant_usage_bucket().await else {
+            return Vec::new();
+        };
+        self.roster
+            .lock()
+            .unwrap()
+            .set_deleted_descendant_usage(bucket)
     }
 
     /// The seeded candidate's roster row when already present (TS

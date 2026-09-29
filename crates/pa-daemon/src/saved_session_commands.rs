@@ -679,11 +679,16 @@ impl Supervisor {
             self.session_bindings.forget_file(&canonical);
             if let Some(entry) = roster_entry {
                 let agent_id = entry.agent_id;
+                // The tombstone above landed with its captured usage: the
+                // deleted child's spend now bills through the bucket on
+                // its parent's row, which ships with this same removal
+                // push instead of waiting for the next event.
+                let changed = self.refresh_deleted_descendant_usage().await;
                 self.roster
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .delete(&agent_id);
-                self.push_roster_update(Vec::new(), vec![agent_id]);
+                self.push_roster_update(changed, vec![agent_id]);
             }
         }
         (

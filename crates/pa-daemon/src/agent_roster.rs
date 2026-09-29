@@ -9,10 +9,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::session_usage::SessionUsageSummary;
 use pa_types::daemon::agent_roster::{
     classify_summary_value, roster_agent_id_for_summary, slim_roster_summary, AgentRosterEntry,
 };
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 /// The supervisor-owned roster. `Write()` classifies once and its file index
 /// converges seed and worker keys.
@@ -20,6 +21,13 @@ pub(crate) struct AgentRoster {
     entries: HashMap<String, AgentRosterEntry>,
     agent_id_by_active_session_id: HashMap<String, String>,
     agent_id_by_session_file: HashMap<String, String>,
+    /// The deleted-descendant spend bucket keyed by canonical parent
+    /// session path (the spawn ledger's fold): the bucket changes only at
+    /// ledger events and when a root appears, never on a worker delta, so
+    /// the store holds the current map and [`AgentRoster::store`] attaches
+    /// the value on every write - a delta costs one map lookup on the key
+    /// `store` already computes, and no delta path reads the ledger.
+    deleted_descendant_usage: HashMap<String, SessionUsageSummary>,
     /// The stale-delta gate of one worker: a single bounded slot naming
     /// the worker's CURRENT process generation (`instance`) and the
     /// newest sequence applied from it. The Rust supervisor link dials
@@ -49,6 +57,7 @@ impl AgentRoster {
             entries: HashMap::new(),
             agent_id_by_active_session_id: HashMap::new(),
             agent_id_by_session_file: HashMap::new(),
+            deleted_descendant_usage: HashMap::new(),
             delta_watermarks: HashMap::new(),
         }
     }
@@ -228,11 +237,12 @@ impl AgentRoster {
     }
 
     /// The shared write path behind [`AgentRoster::write_summary`] and
-    /// [`AgentRoster::write_seeded`]: classify once, converge the indexes,
-    /// and evict a previous owner of the same session file.
+    /// [`AgentRoster::write_seeded`]: classify once, attach the
+    /// deleted-descendant bucket, converge the indexes, and evict a
+    /// previous owner of the same session file.
     fn store(
         &mut self,
-        summary: Value,
+        mut summary: Value,
         queued_child: Option<bool>,
         worker_id: Option<&str>,
         status_label: Option<&str>,
@@ -240,6 +250,28 @@ impl AgentRoster {
     ) -> AgentRosterEntry {
         let queued = queued_child.unwrap_or(false);
         let agent_id = roster_agent_id_for_summary(&summary);
+        let file = summary
+            .get("sessionFile")
+            .and_then(Value::as_str)
+            .filter(|file| !file.is_empty())
+            .map(canonical_roster_path);
+        // The bucket rides the row under the same canonical session-file
+        // key the index converges on (a summary rewritten for another
+        // worker keeps its family's deleted spend, and a rewrite whose
+        // family no longer has any sheds the stale value).
+        if let Value::Object(object) = &mut summary {
+            match file
+                .as_deref()
+                .and_then(|key| self.deleted_descendant_usage.get(key))
+            {
+                Some(usage) => {
+                    object.insert("deletedDescendantUsage".to_string(), json!(usage));
+                }
+                None => {
+                    object.remove("deletedDescendantUsage");
+                }
+            }
+        }
         let stored = AgentRosterEntry {
             agent_id: agent_id.clone(),
             queued_child,
@@ -258,13 +290,7 @@ impl AgentRoster {
         if let Some(previous) = self.entries.get(&agent_id).cloned() {
             self.drop_indexes(&previous);
         }
-        if let Some(file) = stored
-            .summary
-            .get("sessionFile")
-            .and_then(Value::as_str)
-            .filter(|file| !file.is_empty())
-        {
-            let file = canonical_roster_path(file);
+        if let Some(file) = file {
             if let Some(existing) = self.agent_id_by_session_file.get(&file) {
                 if existing != &agent_id {
                     let existing = existing.clone();
@@ -284,6 +310,48 @@ impl AgentRoster {
         }
         self.entries.insert(agent_id, stored.clone());
         stored
+    }
+
+    /// Replace the deleted-descendant bucket (the ledger fold keyed by
+    /// canonical parent session path) and rewrite in place every row
+    /// whose attached value differs, returning those rows for the
+    /// caller's push. The bucket changes only at ledger events and when
+    /// a root appears, so the event's one fold rewrites the rows that
+    /// did not re-store (a passivated parent, a live worker's row); a
+    /// row whose value did not change never ships.
+    pub(crate) fn set_deleted_descendant_usage(
+        &mut self,
+        bucket: HashMap<String, SessionUsageSummary>,
+    ) -> Vec<AgentRosterEntry> {
+        self.deleted_descendant_usage = bucket;
+        let mut changed = Vec::new();
+        for entry in self.entries.values_mut() {
+            let file = entry
+                .summary
+                .get("sessionFile")
+                .and_then(Value::as_str)
+                .filter(|file| !file.is_empty())
+                .map(canonical_roster_path);
+            let next = file
+                .as_deref()
+                .and_then(|key| self.deleted_descendant_usage.get(key))
+                .and_then(|usage| serde_json::to_value(usage).ok());
+            if entry.summary.get("deletedDescendantUsage") == next.as_ref() {
+                continue;
+            }
+            if let Some(object) = entry.summary.as_object_mut() {
+                match &next {
+                    Some(value) => {
+                        object.insert("deletedDescendantUsage".to_string(), value.clone());
+                    }
+                    None => {
+                        object.remove("deletedDescendantUsage");
+                    }
+                }
+            }
+            changed.push(entry.clone());
+        }
+        changed
     }
 
     pub(crate) fn delete(&mut self, agent_id: &str) {
