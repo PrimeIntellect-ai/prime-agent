@@ -27,10 +27,10 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// The child plus the tempdir it runs in: the tempdir must outlive the
 /// child process (its cwd), so it is held on the struct.
@@ -1401,15 +1401,15 @@ fn rpc_compact_flushes_the_start_frame_before_the_pipeline() {
             _ => {}
         }
     }
-    let (cs_at, cs_event) = cs.expect("the compaction_start event");
-    let (ce_at, _) = ce.expect("the compaction_end event");
+    let (start_at, cs_event) = cs.expect("the compaction_start event");
+    let (end_at, _) = ce.expect("the compaction_end event");
     assert_eq!(cs_event["reason"], "requested");
     assert!(
         cs_event.get("result").is_none(),
         "compaction_start carries no result (TS shape)"
     );
-    let cs_ms = cs_at.duration_since(sent).as_secs_f64() * 1000.0;
-    let start_to_end_ms = ce_at.duration_since(cs_at).as_secs_f64() * 1000.0;
+    let cs_ms = start_at.duration_since(sent).as_secs_f64() * 1000.0;
+    let start_to_end_ms = end_at.duration_since(start_at).as_secs_f64() * 1000.0;
     // The flush: the start frame is visible to the client immediately
     // (a pipe write, microseconds) — well before the pre-summarizer span
     // (tens of milliseconds at this session size) could strand it.
@@ -1550,13 +1550,13 @@ fn rpc_prompt_admitted_compact_frames_flush_after_the_response() {
                     frame.get("type").and_then(Value::as_str) == Some("response")
                         && frame.get("id").and_then(Value::as_str) == Some(&id)
                 });
-                let has_cs = seen.iter().any(|frame: &Value| {
+                let has_start = seen.iter().any(|frame: &Value| {
                     frame.get("type").and_then(Value::as_str) == Some("compaction_start")
                 });
-                let has_ce = seen.iter().any(|frame: &Value| {
+                let has_end = seen.iter().any(|frame: &Value| {
                     frame.get("type").and_then(Value::as_str) == Some("compaction_end")
                 });
-                if seen_response && has_cs && has_ce {
+                if seen_response && has_start && has_end {
                     break;
                 }
             }

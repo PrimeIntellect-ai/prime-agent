@@ -6,15 +6,15 @@ use std::sync::Arc;
 
 use pa_agent::types::Model as AgentModel;
 use pa_core::session::discovery::{
-    find_most_recent_session_for_cwd, resolve_session_path, ResolvedSession, SessionSelectorError,
+    ResolvedSession, SessionSelectorError, find_most_recent_session_for_cwd, resolve_session_path,
 };
 use pa_types::ai::Model;
 
-use crate::headless_autonomous::{autonomous_runtime_config, HeadlessAutonomous};
+use crate::headless_autonomous::{HeadlessAutonomous, autonomous_runtime_config};
 use crate::mode::{AppMode, MissingSubsystem, RunOptions};
 use pa_agent::stream::{LlmContext, StreamFn, StreamRequestOptions};
 use pa_core::session_engine::provider_adapter::{
-    json_round_trip, map_thinking_level, stream_once, switchable_stream_fn, ProviderTarget,
+    ProviderTarget, json_round_trip, map_thinking_level, stream_once, switchable_stream_fn,
 };
 use pa_core::session_engine::session_events::agent_event_json;
 
@@ -502,7 +502,7 @@ async fn build_headless_engine_with(
     // thinking level per batch (the engine passes its agent state's level,
     // so a mid-run `/effort` or model switch never routes at a stale level).
     let image_model_router = headless_image_model_router(
-        std::sync::Arc::clone(&provider_target),
+        &provider_target,
         std::sync::Arc::clone(&armed_target),
         config.cwd.clone(),
         config.agent_dir.clone(),
@@ -656,7 +656,7 @@ fn route_authoritative_stream_fn(
 /// actionable refusal that fails the turn — and the serving-target swap
 /// (`None` restores the session target).
 fn headless_image_model_router(
-    provider_target: std::sync::Arc<
+    provider_target: &std::sync::Arc<
         std::sync::RwLock<Option<pa_core::session_engine::provider_adapter::ProviderTarget>>,
     >,
     armed_target: std::sync::Arc<
