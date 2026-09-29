@@ -52,6 +52,13 @@ pub struct GoalState {
     pub continuations_used: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<u64>,
+    /// The consecutive-no-output-turn streak at the continuation mint
+    /// (the hot-loop killer's cap counter, the 402 diagnosis's (b)):
+    /// durable so a worker restart cannot reset the streak and un-cap a
+    /// degenerate loop. A fresh goal starts at 0; a turn that produced
+    /// output resets it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_progress_streak: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -78,6 +85,7 @@ pub fn empty_goal_state() -> GoalState {
         time_used_seconds: 0,
         continuations_used: 0,
         created_at: None,
+        no_progress_streak: None,
         updated_at: None,
         last_reason: None,
         last_error: None,

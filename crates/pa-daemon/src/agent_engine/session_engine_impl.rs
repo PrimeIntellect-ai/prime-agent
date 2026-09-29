@@ -143,7 +143,16 @@ impl SessionEngine for AgentSessionEngine {
                     eprintln!("pa-daemon: goal continuation mint persist failed: {error:#}");
                     None
                 }
-            }?;
+            };
+            if message.is_none() {
+                // A refused mint (the progress check's terminal finish or
+                // the backoff window) still changed the durable goal
+                // state: publish it so connected clients see the error or
+                // the backoff transition instead of a stale active read.
+                self.publish_goal_state(&driver.state_with_creation_elapsed());
+                return None;
+            }
+            let message = message?;
             // This mint's own guard handle, captured under the driver
             // lock: the worker's admission sink releases exactly this
             // mint's guard, never the mutable mirror.

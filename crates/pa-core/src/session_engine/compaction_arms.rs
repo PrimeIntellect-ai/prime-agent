@@ -94,43 +94,59 @@ impl AgentSession {
     /// other non-goal row; the durable transcript keeps everything (this
     /// drops only the live loop, like [`Self::drop_trailing_assistant`]).
     pub async fn drop_failed_goal_continuation(&self) {
-        let state = self.agent.state().await;
-        let mut messages = state.messages;
-        let Some(pa_agent::types::Message::Assistant(corpse)) =
-            messages.last().and_then(standard_message)
-        else {
-            return;
-        };
-        let no_progress =
-            corpse.stop_reason == pa_agent::types::StopReason::Error || corpse.content.is_empty();
-        if !no_progress {
-            return;
-        }
-        let continuation_row_under =
-            messages
-                .get(messages.len().saturating_sub(2))
-                .is_some_and(|message| {
-                    let pa_agent::types::AgentMessage::Custom(custom) = message else {
-                        return false;
-                    };
-                    custom
-                        .payload
-                        .get("customType")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("goal_context")
-                        && custom
+        // The whole drop runs under ONE state lock (the atomic mutate):
+        // a concurrent append's rows cannot be dropped between a stale
+        // snapshot and the replace.
+        self.agent
+            .mutate_messages(|messages| {
+                let Some(pa_agent::types::Message::Assistant(corpse)) =
+                    messages.last().and_then(standard_message)
+                else {
+                    return;
+                };
+                let no_progress = corpse.stop_reason == pa_agent::types::StopReason::Error
+                    || corpse.content.is_empty();
+                if !no_progress {
+                    return;
+                }
+                // The driving continuation row sits under the corpse,
+                // possibly behind trailing display rows (the
+                // `provider_retry_outcome` disclosure a restored loop
+                // replays): scan backward over Custom rows only — the
+                // first goal_context continuation row wins, and every
+                // display row it scanned past stays.
+                let goal_context_row_at = messages[..messages.len() - 1]
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .take_while(|(_, message)| {
+                        matches!(message, pa_agent::types::AgentMessage::Custom(_))
+                    })
+                    .find(|(_, message)| {
+                        let pa_agent::types::AgentMessage::Custom(custom) = message else {
+                            return false;
+                        };
+                        custom
                             .payload
-                            .get("details")
-                            .and_then(|details| details.get("kind"))
+                            .get("customType")
                             .and_then(serde_json::Value::as_str)
-                            == Some("continuation")
-                });
-        if !continuation_row_under {
-            return;
-        }
-        messages.pop();
-        messages.pop();
-        self.agent.set_messages(messages).await;
+                            == Some("goal_context")
+                            && custom
+                                .payload
+                                .get("details")
+                                .and_then(|details| details.get("kind"))
+                                .and_then(serde_json::Value::as_str)
+                                == Some("continuation")
+                    })
+                    .map(|(index, _)| index);
+                let Some(context_index) = goal_context_row_at else {
+                    return;
+                };
+                let corpse_index = messages.len() - 1;
+                messages.remove(corpse_index);
+                messages.remove(context_index);
+            })
+            .await;
     }
 
     /// The last assistant message in the live loop context (TS

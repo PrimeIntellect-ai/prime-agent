@@ -66,6 +66,86 @@ impl AgentSessionEngine {
         }
     }
 
+    /// Arm the no-progress backoff's one-shot wake (the goal-side
+    /// analogue of `create_quota_resume_job`): a durable cron job at
+    /// `wake_at_ms` whose prompt is the wake marker, fired into the
+    /// session's follow-up lane by the scheduler. Without it the backoff
+    /// refusal would stall the goal until an unrelated boundary event and
+    /// the advertised 10s/20s/40s retry would never run. Best effort:
+    /// `None` outside a daemon worker (no scheduler — the stall keeps the
+    /// conservative no-burn behavior). Async for the mutation hook (the
+    /// same post-mutation seam the kernel heartbeat controllers use).
+    pub(crate) async fn schedule_goal_backoff_wake(&self, wake_at_ms: u64) -> Option<String> {
+        let wiring = self.cron_wiring()?;
+        let binding = self.kernel_cron_binding()?;
+        let schedule_text = format!(
+            "at {}",
+            pa_core::session::manager::format_iso(wake_at_ms as i64)
+        );
+        let job = wiring
+            .store
+            .create(&pa_core::cron::store::CreateAgentCronJobInput {
+                active_session_id: binding.active_session_id.clone(),
+                session_id: binding.session_id.clone(),
+                session_file: binding.session_file.clone(),
+                cwd: binding.cwd.clone(),
+                source: Some("goal_backoff_wake".to_string()),
+                label: Some(
+                    pa_core::session_engine::goal_driver::GOAL_BACKOFF_WAKE_CRON_LABEL.to_string(),
+                ),
+                prompt: pa_core::session_engine::goal_driver::GOAL_BACKOFF_WAKE_MARKER_TEXT
+                    .to_string(),
+                schedule_text,
+                now: Some(crate::util::now_ms()),
+                ..Default::default()
+            })
+            .ok()?;
+        // Re-arm the scheduler so the armed job gets a live timer (the
+        // same post-mutation seam the kernel heartbeat controllers use;
+        // `drop_queued: false` keeps the queued-fire withdrawal a no-op).
+        if let Some(hook) = &wiring.mutation_hook {
+            let mutation = pa_core::session_engine::host_requests::RlmHeartbeatMutation {
+                job: job.clone(),
+                drop_queued: false,
+            };
+            hook(mutation).await;
+        }
+        *self
+            .goal_backoff_wake_job_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(job.id.clone());
+        Some(job.id)
+    }
+
+    /// Cancel the pending no-progress backoff wake: the successful mint
+    /// (the streak reset) and the goal's terminal transitions retire the
+    /// stale wake instead of firing one more marker turn. A fired (or
+    /// missing) job stays untouched — rewriting it would hide that a
+    /// wake landed.
+    pub(crate) fn cancel_goal_backoff_wake(&self) {
+        let job_id = self
+            .goal_backoff_wake_job_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(job_id) = job_id else {
+            return;
+        };
+        let Some(wiring) = self.cron_wiring() else {
+            return;
+        };
+        // A fired (or already-cancelled) job stays untouched (the park's
+        // cancel arm: rewriting it would hide that a wake landed).
+        let matches_job = wiring
+            .store
+            .list()
+            .iter()
+            .any(|job| job.id == job_id && job.status == pa_core::cron::JobStatus::Active);
+        if matches_job {
+            let _ = wiring.store.cancel(&job_id, crate::util::now_ms());
+        }
+    }
+
     /// Mirror the built session's goal handles: the core session's own
     /// mutex stays held across a turn's admission, so goal checks in emit
     /// callbacks read the mirror instead of the session. The driver's
@@ -195,6 +275,12 @@ impl AgentSessionEngine {
             *published = Some(goal.clone());
             if baseline_only {
                 return true;
+            }
+            // A goal that left the active state retires its pending
+            // no-progress wake: a terminal or paused goal never fires the
+            // one-shot retry marker.
+            if goal.status != pa_core::goals::GoalStatus::Active {
+                self.cancel_goal_backoff_wake();
             }
         }
         emit(EngineEvent::GoalUpdate {

@@ -212,14 +212,19 @@ fn wire_terminal_provider_failure(message: &pa_types::ai::AssistantMessage) -> O
     if message.stop_reason != pa_types::ai::StopReason::Error {
         return None;
     }
-    let kind = message
-        .diagnostics
-        .as_ref()?
-        .iter()
-        .find(|diagnostic| diagnostic.type_ == "provider_stream_failure")
-        .and_then(|diagnostic| diagnostic.details.as_ref())
-        .and_then(|details| details.get("kind"))
-        .and_then(serde_json::Value::as_str);
+    // The diagnostic is consulted ONLY to exclude the quota-park class —
+    // an error-stop row WITHOUT a provider diagnostic is still terminal
+    // (the same predicate the live mint's `terminal_provider_failure`
+    // applies: one semantic, two shapes; a diagnostic-less restore must
+    // not resurrect a goal the engine itself would have finished).
+    let kind = message.diagnostics.as_ref().and_then(|diagnostics| {
+        diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.type_ == "provider_stream_failure")
+            .and_then(|diagnostic| diagnostic.details.as_ref())
+            .and_then(|details| details.get("kind"))
+            .and_then(serde_json::Value::as_str)
+    });
     if kind == Some("rate_limit") {
         return None;
     }
@@ -447,6 +452,7 @@ mod tests {
             time_used_seconds: 120,
             continuations_used: 3,
             created_at: Some(1),
+            no_progress_streak: None,
             updated_at: Some(2),
             last_reason: None,
             last_error: None,
@@ -710,7 +716,23 @@ mod tests {
         );
         // The goal restarted after the failure: the active row is NEWER
         // than the old corpse — not stale.
-        assert_eq!(stale_active_goal_failure(&[failure, active]), None);
+        assert_eq!(stale_active_goal_failure(&[failure, active.clone()]), None);
+        // A diagnostic-less error row is STILL terminal (the aligned
+        // predicate: the diagnostic only excludes the quota-park class —
+        // a restore must not resurrect a goal the engine itself would
+        // have finished).
+        let mut bare_failure = error_turn_entry("invalid_request", Some(402), "402 no diagnostic");
+        if let pa_types::session::FileEntry::Message {
+            message: pa_types::session::AgentMessage::Assistant(assistant),
+            ..
+        } = &mut bare_failure
+        {
+            assistant.diagnostics = None;
+        }
+        assert_eq!(
+            stale_active_goal_failure(&[active, bare_failure]),
+            Some("402 no diagnostic".to_string())
+        );
         // A goal row that is the newest entry overall: no failure after
         // it — not stale.
         assert_eq!(stale_active_goal_failure(&[finished]), None);

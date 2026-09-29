@@ -111,6 +111,19 @@ const CONTINUATION_NO_PROGRESS_CAP: u32 = 3;
 /// each retry of a no-progress continuation waits twice as long.
 const CONTINUATION_NO_PROGRESS_BACKOFF_BASE_MS: u64 = 10_000;
 
+/// The durable one-shot wake's cron label (the no-progress backoff's
+/// `quota-resume` analogue): the daemon's boundary sites arm a one-shot
+/// cron job at [`GoalDriver::backoff_wake_at`] whose prompt is the wake
+/// marker, so the backoff's 10s/20s/40s retry actually runs instead of
+/// stalling until an unrelated boundary event.
+pub const GOAL_BACKOFF_WAKE_CRON_LABEL: &str = "goal-backoff-wake";
+
+/// The wake marker prompt (the goal-backoff analogue of
+/// `QUOTA_RESUME_MARKER_TEXT`): the scheduler fires it into the session's
+/// follow-up lane; its turn re-probes the provider, and the turn's own
+/// natural boundary re-consults the mint with the window passed.
+pub const GOAL_BACKOFF_WAKE_MARKER_TEXT: &str = "<goal_backoff_wake>\nThe goal continuation backoff window (the consecutive-no-progress cap) has elapsed; this wake is automatic. Continue the goal work from where it stopped.\n</goal_backoff_wake>";
+
 /// The just-settled turn's provider-failure text when the turn settled
 /// as a terminal provider failure (stop reason `error`, with a recorded
 /// stream failure that is not the quota-park class — the parked turn is
@@ -215,6 +228,12 @@ impl GoalDriver {
                 // does the same.
                 self.continuation_consumed();
                 self.owed_continuation_for_rlm_work = false;
+                // The adopted goal's own durable streak applies (a
+                // different goal never inherits the previous goal's
+                // strikes); the backoff window does not survive the move.
+                self.no_progress_streak = reloaded.no_progress_streak.unwrap_or(0);
+                self.no_progress_backoff_until_ms = 0;
+                self.counted_no_progress_turn_ms = None;
                 reloaded
             }
         };
@@ -241,6 +260,13 @@ impl GoalDriver {
     /// queued-but-unconsumed continuation are live-session facts.
     pub fn restore_from_persisted(&mut self, state: GoalState) {
         self.state = normalize_goal_state(state);
+        // The no-progress streak is durable: a rebuilt driver adopts the
+        // persisted strikes (a worker restart cannot reset the streak and
+        // un-cap a degenerate loop). The backoff window itself is not —
+        // a restart outlives it, so the next consult passes the gate.
+        self.no_progress_streak = self.state.no_progress_streak.unwrap_or(0);
+        self.no_progress_backoff_until_ms = 0;
+        self.counted_no_progress_turn_ms = None;
         self.continuation_consumed();
     }
 
@@ -297,6 +323,9 @@ impl GoalDriver {
             time_used_seconds: 0,
             continuations_used: 0,
             created_at: Some(now),
+            // A fresh goal never inherits the previous goal's no-progress
+            // streak: its own three-strike budget starts at 0.
+            no_progress_streak: Some(0),
             updated_at: Some(now),
             last_reason: None,
             last_error: None,
@@ -306,8 +335,13 @@ impl GoalDriver {
         let previous_pending = self.pending_continuation();
         // TS `_startGoal`: a fresh goal starts with no owed continuation
         // (and no pending one — `_clearQueuedGoalContexts` drops the queued
-        // contexts with the state change).
+        // contexts with the state change) — and with a fresh no-progress
+        // streak: a replacement goal never inherits the terminal goal's
+        // strikes.
         self.owed_continuation_for_rlm_work = false;
+        self.no_progress_streak = 0;
+        self.no_progress_backoff_until_ms = 0;
+        self.counted_no_progress_turn_ms = None;
         self.continuation_consumed();
         if let Err(error) = self.set_state(session, goal) {
             // A failed start leaves the previous goal's bookkeeping intact.
@@ -579,58 +613,94 @@ impl GoalDriver {
         // the consecutive cap with backoff, and only a turn that produced
         // output continues the loop.
         if let Some(turn) = last_turn {
-            if let Some(error) = terminal_provider_failure(turn) {
-                self.finish_for_terminal_message(
-                    session,
-                    pa_types::ai::StopReason::Error,
-                    Some(&error),
-                )?;
-                return Ok(None);
-            }
-            if turn.content.is_empty() {
-                // The turn produced no output: a corpse that is not a
-                // provider failure (an abort conversion, a degenerate
-                // empty settle) still made no progress. Count the turn
-                // once and arm the doubling backoff window — this
-                // consult refuses, and a later boundary after the window
-                // passes re-mints (the fall-through consult of the SAME
-                // turn only checks the gate). At the cap the goal
-                // finishes: the loop-killer for EVERY survival arm, not
-                // just the engine's error arm.
-                if self.counted_no_progress_turn_ms != Some(turn.timestamp) {
-                    self.counted_no_progress_turn_ms = Some(turn.timestamp);
-                    self.no_progress_streak += 1;
-                    self.no_progress_backoff_until_ms = now_millis()
-                        + CONTINUATION_NO_PROGRESS_BACKOFF_BASE_MS
-                            * 2u64.saturating_pow(self.no_progress_streak.saturating_sub(1));
-                    if self.no_progress_streak >= CONTINUATION_NO_PROGRESS_CAP {
-                        let reason =
-                            "Goal continuation cap reached: consecutive turns made no progress"
-                                .to_string();
+            // The gate's scope: only a turn THIS goal's lifetime produced
+            // can judge it. `last_loop_assistant_message` reads the live
+            // loop context's newest assistant row — after `/goal start`
+            // (or a mint that is not immediately after this goal's own
+            // turn) a leftover error corpse from BEFORE the goal began
+            // must not finish the fresh goal. The turn's timestamp
+            // against the goal's `created_at` bounds the check to the
+            // goal's own turns; a legacy state without `created_at` keeps
+            // the check (conservative for the resurrection class).
+            let turn_is_this_goals = self
+                .state
+                .created_at
+                .is_none_or(|created_at| turn.timestamp >= created_at as i64);
+            if turn_is_this_goals {
+                if let Some(error) = terminal_provider_failure(turn) {
+                    self.finish_for_terminal_message(
+                        session,
+                        pa_types::ai::StopReason::Error,
+                        Some(&error),
+                    )?;
+                    return Ok(None);
+                }
+                if turn.content.is_empty() {
+                    // The turn produced no output: a corpse that is not a
+                    // provider failure (an abort conversion, a degenerate
+                    // empty settle) still made no progress. Count the turn
+                    // once and arm the doubling backoff window — this
+                    // consult refuses, and a later boundary after the window
+                    // passes re-mints (the fall-through consult of the SAME
+                    // turn only checks the gate). At the cap the goal
+                    // finishes: the loop-killer for EVERY survival arm, not
+                    // just the engine's error arm.
+                    if self.counted_no_progress_turn_ms != Some(turn.timestamp) {
+                        self.counted_no_progress_turn_ms = Some(turn.timestamp);
+                        self.no_progress_streak += 1;
+                        self.no_progress_backoff_until_ms = now_millis()
+                            + CONTINUATION_NO_PROGRESS_BACKOFF_BASE_MS
+                                * 2u64.saturating_pow(self.no_progress_streak.saturating_sub(1));
+                        // The streak persists with the goal state (the cap
+                        // counter is durable: a worker restart cannot reset
+                        // it and un-cap a degenerate loop).
                         self.set_state(
                             session,
                             GoalState {
-                                active: false,
-                                status: GoalStatus::Error,
-                                last_reason: Some(reason.clone()),
-                                last_error: Some(reason),
+                                no_progress_streak: Some(self.no_progress_streak),
                                 ..self.state.clone()
                             },
                         )?;
+                        if self.no_progress_streak >= CONTINUATION_NO_PROGRESS_CAP {
+                            let reason =
+                                "Goal continuation cap reached: consecutive turns made no progress"
+                                    .to_string();
+                            self.set_state(
+                                session,
+                                GoalState {
+                                    active: false,
+                                    status: GoalStatus::Error,
+                                    no_progress_streak: Some(self.no_progress_streak),
+                                    last_reason: Some(reason.clone()),
+                                    last_error: Some(reason),
+                                    ..self.state.clone()
+                                },
+                            )?;
+                            return Ok(None);
+                        }
                         return Ok(None);
                     }
-                    return Ok(None);
+                    // An already-counted turn falls through to the backoff
+                    // gate below: once the window passes, the mint retries
+                    // (the retry's own turn counts again if it too makes no
+                    // progress).
+                } else {
+                    // The turn produced output: the streak resets and any
+                    // armed backoff window clears — and the reset persists
+                    // (a restart must not inherit a stale streak).
+                    if self.no_progress_streak != 0 {
+                        self.no_progress_streak = 0;
+                        self.no_progress_backoff_until_ms = 0;
+                        self.counted_no_progress_turn_ms = Some(turn.timestamp);
+                        self.set_state(
+                            session,
+                            GoalState {
+                                no_progress_streak: Some(0),
+                                ..self.state.clone()
+                            },
+                        )?;
+                    }
                 }
-                // An already-counted turn falls through to the backoff
-                // gate below: once the window passes, the mint retries
-                // (the retry's own turn counts again if it too makes no
-                // progress).
-            } else {
-                // The turn produced output: the streak resets and any
-                // armed backoff window clears.
-                self.no_progress_streak = 0;
-                self.no_progress_backoff_until_ms = 0;
-                self.counted_no_progress_turn_ms = Some(turn.timestamp);
             }
         }
         // The backoff gate: a consult inside the window mints nothing;
@@ -810,6 +880,25 @@ impl GoalDriver {
         rolled_back
     }
 
+    /// The current consecutive-no-output-turn streak (the durable cap
+    /// counter; tests read it directly).
+    #[must_use]
+    pub fn no_progress_streak(&self) -> u32 {
+        self.no_progress_streak
+    }
+
+    /// The armed no-progress backoff window's deadline, when the goal is
+    /// Active and the window is still open: the daemon's boundary sites
+    /// schedule a one-shot wake at this instant (the 402 diagnosis's (b)
+    /// — without it, the refusal would stall the goal until an unrelated
+    /// boundary event, and the advertised 10s/20s/40s retry would never
+    /// run).
+    #[must_use]
+    pub fn backoff_wake_at(&self) -> Option<u64> {
+        let until = self.no_progress_backoff_until_ms;
+        (self.state.status == GoalStatus::Active && until > now_millis()).then_some(until)
+    }
+
     /// Whether the goal drives session wake-ups.
     #[must_use]
     pub fn owns_continuation_wakeup(&self) -> bool {
@@ -855,6 +944,7 @@ mod tests {
         kind: &str,
         status: Option<u16>,
         error: &str,
+        timestamp: i64,
     ) -> pa_agent::types::AssistantMessage {
         pa_agent::types::AssistantMessage {
             content: Vec::new(),
@@ -876,7 +966,7 @@ mod tests {
             stop_reason: pa_agent::types::StopReason::Error,
             stop_reason_raw: None,
             error_message: Some(error.to_string()),
-            timestamp: 0,
+            timestamp,
         }
     }
 
@@ -1173,7 +1263,13 @@ mod tests {
         let mut session = persisted_session();
         let mut driver = GoalDriver::new();
         driver.start(&mut session, "work", None).unwrap();
-        let corpse = test_error_turn("server_error", None, "402 Payment required: wallet drained");
+        let created_at = driver.state().created_at.unwrap();
+        let corpse = test_error_turn(
+            "server_error",
+            None,
+            "402 Payment required: wallet drained",
+            created_at as i64 + 1,
+        );
         assert!(driver
             .next_continuation_message(&mut session, Some(&corpse))
             .unwrap()
@@ -1203,7 +1299,13 @@ mod tests {
         let mut session = persisted_session();
         let mut driver = GoalDriver::new();
         driver.start(&mut session, "work", None).unwrap();
-        let parked = test_error_turn("rate_limit", Some(429), "429 Too many concurrent requests");
+        let created_at = driver.state().created_at.unwrap();
+        let parked = test_error_turn(
+            "rate_limit",
+            Some(429),
+            "429 Too many concurrent requests",
+            created_at as i64 + 1,
+        );
         assert!(driver
             .next_continuation_message(&mut session, Some(&parked))
             .unwrap()
@@ -1211,7 +1313,7 @@ mod tests {
         assert_eq!(driver.state().status, GoalStatus::Active);
         assert!(driver.state().last_error.is_none());
         // The park's wake turn makes progress: the mint resumes.
-        let wake_progress = test_progress_turn(7);
+        let wake_progress = test_progress_turn(created_at as i64 + 2);
         assert!(driver
             .next_continuation_message(&mut session, Some(&wake_progress))
             .unwrap()
@@ -1229,38 +1331,53 @@ mod tests {
         let mut session = persisted_session();
         let mut driver = GoalDriver::new();
         driver.start(&mut session, "work", None).unwrap();
-        let empty_one = test_empty_turn(1);
-        // The first no-output turn: counted, refused, the goal lives.
+        let created_at = driver.state().created_at.unwrap();
+        let empty_one = test_empty_turn(created_at as i64 + 1);
+        // The first no-output turn: counted, refused, the goal lives —
+        // and the streak is DURABLE (the persisted row carries it, so a
+        // worker restart cannot reset the strikes).
         assert!(driver
             .next_continuation_message(&mut session, Some(&empty_one))
             .unwrap()
             .is_none());
         assert_eq!(driver.state().status, GoalStatus::Active);
         assert_eq!(driver.state().continuations_used, 0);
+        assert_eq!(driver.state().no_progress_streak, Some(1));
         // The same turn re-consulted inside the window: still refused,
-        // not re-counted.
+        // not re-counted (the counted-turn key dedups within the live
+        // process).
         assert!(driver
             .next_continuation_message(&mut session, Some(&empty_one))
             .unwrap()
             .is_none());
-        // A second distinct no-output turn: counted again.
-        let empty_two = test_empty_turn(2);
+        assert_eq!(driver.state().no_progress_streak, Some(1));
+        // A rebuilt driver (the worker restart) adopts the persisted
+        // strikes: the streak survives the restart.
+        let mut driver = GoalDriver::load_persisted(&session);
+        assert_eq!(driver.state().no_progress_streak, Some(1));
+        assert_eq!(driver.no_progress_streak(), 1);
+        // A second distinct no-output turn: counted again (the streak
+        // carried over the restart: strike two — a fresh corpse, the
+        // restart's own counted-turn key starting empty).
+        let empty_two = test_empty_turn(created_at as i64 + 2);
         assert!(driver
             .next_continuation_message(&mut session, Some(&empty_two))
             .unwrap()
             .is_none());
+        assert_eq!(driver.state().no_progress_streak, Some(2));
         assert_eq!(driver.state().status, GoalStatus::Active);
         // A progress turn resets the streak and mints.
-        let progress = test_progress_turn(3);
+        let progress = test_progress_turn(created_at as i64 + 3);
         assert!(driver
             .next_continuation_message(&mut session, Some(&progress))
             .unwrap()
             .is_some());
         assert_eq!(driver.state().continuations_used, 1);
+        assert_eq!(driver.state().no_progress_streak, Some(0));
         // Three consecutive no-output turns (the fresh streak): the
         // third hits the cap and finishes the goal.
-        for timestamp in 4..=6 {
-            let empty = test_empty_turn(timestamp);
+        for offset in 4..=6 {
+            let empty = test_empty_turn(created_at as i64 + offset);
             assert!(driver
                 .next_continuation_message(&mut session, Some(&empty))
                 .unwrap()
@@ -1275,6 +1392,87 @@ mod tests {
         assert_eq!(
             GoalDriver::load_persisted(&session).state().status,
             GoalStatus::Error
+        );
+    }
+
+    /// The progress check's scope (the review round's finding): a stale
+    /// pre-goal error corpse — the live loop's leftover from BEFORE
+    /// `/goal start` — must not finish the fresh goal. Only a turn the
+    /// goal's own lifetime produced can judge it (the turn's timestamp
+    /// against the goal's `created_at`).
+    #[test]
+    fn a_stale_pre_goal_corpse_never_finishes_the_new_goal() {
+        let mut session = persisted_session();
+        let mut driver = GoalDriver::new();
+        driver.start(&mut session, "work", None).unwrap();
+        let created_at = driver.state().created_at.unwrap();
+        let stale = test_error_turn(
+            "invalid_request",
+            Some(400),
+            "an old corpse from before the goal began",
+            created_at as i64 - 1000,
+        );
+        assert!(driver
+            .next_continuation_message(&mut session, Some(&stale))
+            .unwrap()
+            .is_some());
+        assert_eq!(driver.state().status, GoalStatus::Active);
+        assert_eq!(driver.state().continuations_used, 1);
+        // The minted continuation admits (the pending guard releases) —
+        // then a stale pre-goal EMPTY row does not count toward the cap
+        // either: the fresh goal's own three-strike budget is intact.
+        driver.continuation_consumed();
+        let stale_empty = test_empty_turn(created_at as i64 - 500);
+        assert!(driver
+            .next_continuation_message(&mut session, Some(&stale_empty))
+            .unwrap()
+            .is_some());
+        assert_eq!(driver.state().no_progress_streak, Some(0));
+    }
+
+    /// A replacement goal never inherits the terminal goal's strikes (the
+    /// review round's finding): `start` resets the streak, and the fresh
+    /// goal's row carries its own zero.
+    #[test]
+    fn a_replacement_goal_starts_with_a_fresh_streak() {
+        let mut session = persisted_session();
+        let mut driver = GoalDriver::new();
+        driver.start(&mut session, "first", None).unwrap();
+        let created_at = driver.state().created_at.unwrap();
+        let empty = test_empty_turn(created_at as i64 + 1);
+        assert!(driver
+            .next_continuation_message(&mut session, Some(&empty))
+            .unwrap()
+            .is_none());
+        assert_eq!(driver.state().no_progress_streak, Some(1));
+        driver
+            .finish_for_terminal_message(
+                &mut session,
+                pa_types::ai::StopReason::Error,
+                Some("provider exploded"),
+            )
+            .unwrap();
+        // A fresh goal on the same session: its own three-strike budget.
+        driver.start(&mut session, "second", None).unwrap();
+        assert_eq!(driver.state().no_progress_streak, Some(0));
+        let fresh_created = driver.state().created_at.unwrap();
+        let first_empty = test_empty_turn(fresh_created as i64 + 1);
+        let second_empty = test_empty_turn(fresh_created as i64 + 2);
+        for empty in [first_empty, second_empty] {
+            assert!(driver
+                .next_continuation_message(&mut session, Some(&empty))
+                .unwrap()
+                .is_none());
+        }
+        assert_eq!(driver.state().status, GoalStatus::Active);
+        assert_eq!(driver.state().no_progress_streak, Some(2));
+        // The reload adopts the fresh goal's own streak, not the dead
+        // goal's.
+        assert_eq!(
+            GoalDriver::load_persisted(&session)
+                .state()
+                .no_progress_streak,
+            Some(2)
         );
     }
 
@@ -1475,6 +1673,7 @@ mod tests {
             time_used_seconds: 12,
             continuations_used: 2,
             created_at: Some(1),
+            no_progress_streak: Some(2),
             updated_at: Some(2),
             last_reason: None,
             last_error: None,
@@ -1484,6 +1683,9 @@ mod tests {
         assert_eq!(driver.state().objective.as_deref(), Some("ship the port"));
         assert_eq!(driver.state().tokens_used, 340);
         assert_eq!(driver.state().continuations_used, 2);
+        // The durable no-progress streak adopts with the state (the
+        // review round's finding: a restart cannot reset the strikes).
+        assert_eq!(driver.no_progress_streak(), 2);
         assert!(driver.owns_continuation_wakeup());
         assert_eq!(driver.active_objective().as_deref(), Some("ship the port"));
         // A budget_limited state stays inactive: no wakeup, no anchor.

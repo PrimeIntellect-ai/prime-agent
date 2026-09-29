@@ -166,6 +166,7 @@ impl AgentSessionEngine {
             bash_completion_sink: std::sync::Mutex::new(None),
             bash_consumed_sink: std::sync::Mutex::new(None),
             goal_queue_purge: std::sync::Mutex::new(None),
+            goal_backoff_wake_job_id: std::sync::Mutex::new(None),
             turn_agent: std::sync::Mutex::new(None),
             queue_modes,
             autonomous_boundary: std::sync::Mutex::new(None),
@@ -479,7 +480,7 @@ impl AgentSessionEngine {
                 shared_branch = branch;
             }
         }
-        if let Some(mut state) = seed {
+        if let Some(state) = seed {
             // The restore-resurrection guard (the 402 diagnosis's (d)):
             // an active seed whose trailing turn settled as a terminal
             // provider failure adopts the failure as the goal's terminal
@@ -490,6 +491,7 @@ impl AgentSessionEngine {
             // keep delivering continuations into the dead provider (the
             // operator's ~84s restart cadence, 64 cycles in 1.5h). The
             // scan reads the SAME artifact the seed came from.
+            let mut stale_error = None;
             if state.status == pa_core::goals::GoalStatus::Active {
                 let scan: Option<Vec<pa_types::session::FileEntry>> = pending_branch
                     .clone()
@@ -501,13 +503,7 @@ impl AgentSessionEngine {
                     });
                 if let Some(entries) = scan {
                     if let Some(error) = pa_core::goals::stale_active_goal_failure(&entries) {
-                        state = pa_core::goals::GoalState {
-                            active: false,
-                            status: pa_core::goals::GoalStatus::Error,
-                            last_reason: Some(error.clone()),
-                            last_error: Some(error),
-                            ..state
-                        };
+                        stale_error = Some(error);
                     }
                 }
             }
@@ -515,8 +511,36 @@ impl AgentSessionEngine {
             if let Some(handles) = handles {
                 let mut driver = handles.driver.lock().await;
                 driver.restore_from_persisted(state.clone());
+                if let Some(error) = stale_error {
+                    // The stale-row guard's adoption is DURABLE: the driver
+                    // restored the stale ACTIVE row (the scan's verdict is
+                    // re-derived through the driver's own terminal finish,
+                    // which PERSISTS the error row) — the session file
+                    // itself stops advertising the stale active goal (the
+                    // interrupted settle's missing write lands here), and
+                    // a later reload adopts the terminal state directly.
+                    let mut session = handles.session.lock().await;
+                    if let Err(persist_error) = driver.finish_for_terminal_message(
+                        &mut session,
+                        pa_types::ai::StopReason::Error,
+                        Some(&error),
+                    ) {
+                        // Best effort: the in-memory adoption stands; the
+                        // stale-row scan re-adopts on the next rebuild.
+                        eprintln!(
+                            "pa-daemon: stale goal terminal persist failed: {persist_error:#}"
+                        );
+                    }
+                    let adopted = driver.state().clone();
+                    drop(driver);
+                    *self.published_goal.lock().expect("published goal lock") = Some(adopted);
+                } else {
+                    drop(driver);
+                    *self.published_goal.lock().expect("published goal lock") = Some(state);
+                }
+            } else {
+                *self.published_goal.lock().expect("published goal lock") = Some(state);
             }
-            *self.published_goal.lock().expect("published goal lock") = Some(state);
         }
         if let Some(entries) = pending_branch {
             built.session.rebuild_branch_context(entries).await?;

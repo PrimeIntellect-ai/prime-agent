@@ -198,7 +198,15 @@ impl AgentSessionEngine {
             Ok(Some(message)) => message,
             Ok(None) => {
                 // An inactive goal drops the deferral without minting (TS:
-                // "drops the deferral for inactive goals").
+                // "drops the deferral for inactive goals"). A live goal in
+                // the no-progress backoff keeps the deferral (the take
+                // restored it) and arms the one-shot wake so the
+                // advertised retry actually runs.
+                let wake_at = driver.backoff_wake_at();
+                drop(driver);
+                if let Some(wake_at) = wake_at {
+                    self.schedule_goal_backoff_wake(wake_at).await;
+                }
                 return;
             }
             Err(error) => {
@@ -374,8 +382,21 @@ impl AgentSessionEngine {
                 }
             };
             if message.is_none() {
+                // The no-progress backoff's wake: a refused mint with the
+                // window still armed schedules the one-shot retry (the
+                // advertised 10s/20s/40s backoff actually runs — without
+                // a wake the refusal would stall the goal until an
+                // unrelated boundary event).
+                let wake_at = driver.backoff_wake_at();
+                drop(driver);
+                if let Some(wake_at) = wake_at {
+                    self.schedule_goal_backoff_wake(wake_at).await;
+                }
                 return GoalBoundary::End;
             }
+            // The mint succeeded: the streak reset retires any stale
+            // wake instead of firing one more marker turn.
+            self.cancel_goal_backoff_wake();
             // This mint's own guard handle, captured under the driver
             // lock: the admission sink and the drop paths release exactly
             // this mint's guard, never the mutable mirror (a rebuild may
