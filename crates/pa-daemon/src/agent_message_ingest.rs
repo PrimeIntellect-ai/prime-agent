@@ -162,7 +162,7 @@ impl Worker {
             }
         }
         core.follow_up = retained_follow_up;
-        let snapshot = self.snapshot_locked(&core);
+        let snapshot = Self::snapshot_locked(&core);
         drop(core);
         // The sweep removed queued agent messages: the verdict follows the
         // remaining lanes (a swept-out last item settles the session).

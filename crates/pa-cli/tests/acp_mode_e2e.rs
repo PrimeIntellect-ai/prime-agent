@@ -1,3 +1,22 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
+// by design on hot paths (boxing 130 fns is allocation-churn with zero
+// correctness gain); the fn-length threshold is a style gate, not
+// correctness (the harness fns are intentionally linear); 64-bit targets -
+// the narrowing sits at OS/protocol boundaries where the values are
+// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
+// guarded parses), and checked conversions would add panic paths where
+// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
+// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
+// dossier for the conductor).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! End-to-end ACP-mode verification: the real binary speaks the ACP
 //! JSON-RPC surface over stdio, driven by the scripted faux provider, and
 //! the emitted frames are checked against the TS capture corpus
@@ -95,22 +114,22 @@ impl AcpChild {
         }
     }
 
-    fn send(&mut self, frame: Value) {
+    fn send(&mut self, frame: &Value) {
         let mut line = serde_json::to_string(&frame).unwrap();
         line.push('\n');
         self.stdin.write_all(line.as_bytes()).unwrap();
         self.stdin.flush().unwrap();
     }
 
-    fn request(&mut self, method: &str, params: Value) -> u64 {
+    fn request(&mut self, method: &str, params: &Value) -> u64 {
         self.next_id += 1;
         let id = self.next_id;
-        self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
+        self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
         id
     }
 
-    fn notify(&mut self, method: &str, params: Value) {
-        self.send(json!({ "jsonrpc": "2.0", "method": method, "params": params }));
+    fn notify(&mut self, method: &str, params: &Value) {
+        self.send(&json!({ "jsonrpc": "2.0", "method": method, "params": params }));
     }
 
     /// Read frames until the request `id` answers; returns the answer with
@@ -137,7 +156,9 @@ impl AcpChild {
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     panic!("timed out waiting for response {id}")
                 }
-                Err(_) => panic!("ACP server closed stdout"),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("ACP server closed stdout")
+                }
             }
         }
     }
@@ -174,7 +195,7 @@ const TIMEOUT: Duration = Duration::from_mins(1);
 fn acp_initialize_matches_the_ts_golden() {
     let script = json!({ "responses": ["unused"] });
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
-    let id = client.request("initialize", initialize_params());
+    let id = client.request("initialize", &initialize_params());
     let (response, notifications) = client.wait_response(id, TIMEOUT);
     assert!(notifications.is_empty(), "nothing precedes initialize");
     let result = &response["result"];
@@ -202,9 +223,9 @@ fn acp_initialize_matches_the_ts_golden() {
 fn acp_second_initialize_is_served() {
     let script = json!({ "responses": ["unused"] });
     let mut client = AcpChild::spawn(&["--mode", "acp"], &script);
-    let first = client.request("initialize", initialize_params());
+    let first = client.request("initialize", &initialize_params());
     let _ = client.wait_response(first, TIMEOUT);
-    let second = client.request("initialize", initialize_params());
+    let second = client.request("initialize", &initialize_params());
     let (response, _) = client.wait_response(second, TIMEOUT);
     assert_eq!(response["result"]["protocolVersion"], 1);
 }
@@ -213,9 +234,9 @@ fn acp_second_initialize_is_served() {
 fn acp_prompt_stream_completion_envelope_and_stop_reason_match_ts() {
     let script = json!({ "responses": ["ACP-OK"] });
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let session_id = new_response["result"]["sessionId"]
         .as_str()
@@ -224,7 +245,7 @@ fn acp_prompt_stream_completion_envelope_and_stop_reason_match_ts() {
 
     let prompt = client.request(
         "session/prompt",
-        json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "Reply with exactly: ACP-OK" }] }),
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "Reply with exactly: ACP-OK" }] }),
     );
     let (prompt_response, updates) = client.wait_response(prompt, TIMEOUT);
 
@@ -291,7 +312,7 @@ fn acp_prompt_stream_completion_envelope_and_stop_reason_match_ts() {
     sorted.dedup();
     assert_eq!(sequences, sorted, "eventSequence strictly increases");
 
-    let close = client.request("session/close", json!({ "sessionId": session_id }));
+    let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, TIMEOUT);
     assert_eq!(close_response["result"], json!({}));
 }
@@ -300,9 +321,9 @@ fn acp_prompt_stream_completion_envelope_and_stop_reason_match_ts() {
 fn acp_prompt_chunk_carries_the_assistant_message_id() {
     let script = json!({ "responses": ["ACP-OK"] });
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let session_id = new_response["result"]["sessionId"]
         .as_str()
@@ -311,7 +332,7 @@ fn acp_prompt_chunk_carries_the_assistant_message_id() {
 
     let prompt = client.request(
         "session/prompt",
-        json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "hello" }] }),
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "hello" }] }),
     );
     let (_, updates) = client.wait_response(prompt, TIMEOUT);
     let chunk = updates
@@ -336,9 +357,9 @@ fn acp_prompt_chunk_carries_the_assistant_message_id() {
 fn acp_cwd_mismatch_is_reported_not_adopted() {
     let script = json!({ "responses": ["unused"] });
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "cwd": "/tmp", "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "cwd": "/tmp", "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let meta = &new_response["result"]["_meta"]["ai.primeintellect.prime-agent"]["cwd"];
     assert_eq!(meta["requested"], "/tmp");
@@ -353,13 +374,13 @@ fn acp_cwd_mismatch_is_reported_not_adopted() {
 fn acp_error_shapes_match_the_ts_goldens() {
     let script = json!({ "responses": ["unused"] });
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
 
     // Unknown session (ts-errors.jsonl): -32603 with the details string.
     let prompt = client.request(
         "session/prompt",
-        json!({ "sessionId": "bogus-session", "prompt": [{ "type": "text", "text": "hi" }] }),
+        &json!({ "sessionId": "bogus-session", "prompt": [{ "type": "text", "text": "hi" }] }),
     );
     let (response, _) = client.wait_response(prompt, TIMEOUT);
     assert_eq!(response["error"]["code"], -32603);
@@ -369,14 +390,14 @@ fn acp_error_shapes_match_the_ts_goldens() {
         "Unknown ACP session: bogus-session"
     );
 
-    let close = client.request("session/close", json!({ "sessionId": "bogus-session" }));
+    let close = client.request("session/close", &json!({ "sessionId": "bogus-session" }));
     let (response, _) = client.wait_response(close, TIMEOUT);
     assert_eq!(
         response["error"]["data"]["details"],
         "Unknown ACP session: bogus-session"
     );
 
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let session_id = new_response["result"]["sessionId"]
         .as_str()
@@ -384,7 +405,7 @@ fn acp_error_shapes_match_the_ts_goldens() {
         .to_string();
 
     // Second session/new on a live connection (ts-errors.jsonl).
-    let again = client.request("session/new", json!({ "mcpServers": [] }));
+    let again = client.request("session/new", &json!({ "mcpServers": [] }));
     let (response, _) = client.wait_response(again, TIMEOUT);
     assert_eq!(response["error"]["code"], -32603);
     assert_eq!(
@@ -393,7 +414,7 @@ fn acp_error_shapes_match_the_ts_goldens() {
     );
 
     // Unknown method (ts-errors.jsonl): -32601 with the observed message.
-    let unknown = client.request("unknown/method", json!({}));
+    let unknown = client.request("unknown/method", &json!({}));
     let (response, _) = client.wait_response(unknown, TIMEOUT);
     assert_eq!(response["error"]["code"], -32601);
     assert_eq!(
@@ -402,7 +423,7 @@ fn acp_error_shapes_match_the_ts_goldens() {
     );
     assert_eq!(response["error"]["data"]["method"], "unknown/method");
 
-    let close = client.request("session/close", json!({ "sessionId": session_id }));
+    let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (response, _) = client.wait_response(close, TIMEOUT);
     assert_eq!(response["result"], json!({}));
 }
@@ -413,7 +434,7 @@ fn acp_initialize_with_string_protocol_version_is_invalid_params() {
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
     let id = client.request(
         "initialize",
-        json!({ "protocolVersion": "1", "clientCapabilities": {} }),
+        &json!({ "protocolVersion": "1", "clientCapabilities": {} }),
     );
     let (response, _) = client.wait_response(id, TIMEOUT);
     assert_eq!(response["error"]["code"], -32602);
@@ -428,9 +449,9 @@ fn acp_initialize_with_string_protocol_version_is_invalid_params() {
 fn acp_image_block_without_mime_type_is_invalid_params() {
     let script = json!({ "responses": ["unused"] });
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let session_id = new_response["result"]["sessionId"]
         .as_str()
@@ -439,7 +460,7 @@ fn acp_image_block_without_mime_type_is_invalid_params() {
 
     let prompt = client.request(
         "session/prompt",
-        json!({ "sessionId": session_id, "prompt": [{ "type": "image", "data": "AAAA" }] }),
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "image", "data": "AAAA" }] }),
     );
     let (response, _) = client.wait_response(prompt, TIMEOUT);
     assert_eq!(response["error"]["code"], -32602);
@@ -454,18 +475,18 @@ fn acp_image_block_without_mime_type_is_invalid_params() {
 fn acp_cancel_without_an_active_turn_is_a_noop() {
     let script = json!({ "responses": ["unused"] });
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let session_id = new_response["result"]["sessionId"]
         .as_str()
         .unwrap()
         .to_string();
 
-    client.notify("session/cancel", json!({ "sessionId": session_id }));
+    client.notify("session/cancel", &json!({ "sessionId": session_id }));
     // The no-op cancel answers nothing; the session still closes cleanly.
-    let close = client.request("session/close", json!({ "sessionId": session_id }));
+    let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, notifications) = client.wait_response(close, TIMEOUT);
     assert!(notifications.is_empty(), "a no-op cancel publishes nothing");
     assert_eq!(close_response["result"], json!({}));
@@ -475,7 +496,7 @@ fn acp_cancel_without_an_active_turn_is_a_noop() {
 fn acp_initialize_advertises_mcp_capabilities() {
     let script = json!({ "responses": ["unused"] });
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let (response, _) = client.wait_response(init, TIMEOUT);
     assert_eq!(
         response["result"]["agentCapabilities"]["mcpCapabilities"],
@@ -487,11 +508,11 @@ fn acp_initialize_advertises_mcp_capabilities() {
 fn acp_mcp_admission_accepts_valid_servers_and_close_releases() {
     let script = json!({ "responses": ["unused"] });
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
     let new = client.request(
         "session/new",
-        json!({ "mcpServers": [
+        &json!({ "mcpServers": [
             { "name": "capture-stdio", "type": "stdio", "command": "cat", "args": [], "env": [{"name": "A", "value": "1"}] },
             { "name": "capture-http", "type": "http", "url": "https://mcp.invalid/capture", "headers": [{"name": "X-A", "value": "yes"}] },
         ]}),
@@ -501,7 +522,7 @@ fn acp_mcp_admission_accepts_valid_servers_and_close_releases() {
         .as_str()
         .expect("admission succeeds")
         .to_string();
-    let close = client.request("session/close", json!({ "sessionId": session_id }));
+    let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, TIMEOUT);
     assert_eq!(close_response["result"], json!({}));
 }
@@ -510,11 +531,11 @@ fn acp_mcp_admission_accepts_valid_servers_and_close_releases() {
 fn acp_mcp_admission_rejects_a_second_session_only_when_open() {
     let script = json!({ "responses": ["unused"] });
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
     let new = client.request(
         "session/new",
-        json!({ "mcpServers": [
+        &json!({ "mcpServers": [
             { "name": "first", "type": "stdio", "command": "cat", "args": [], "env": [] },
         ]}),
     );
@@ -527,7 +548,7 @@ fn acp_mcp_admission_rejects_a_second_session_only_when_open() {
     // internal with the raw details, exactly like the TS host.
     let second = client.request(
         "session/new",
-        json!({ "mcpServers": [
+        &json!({ "mcpServers": [
             { "name": "second", "type": "stdio", "command": "cat", "args": [], "env": [] },
         ]}),
     );
@@ -539,12 +560,12 @@ fn acp_mcp_admission_rejects_a_second_session_only_when_open() {
         "prime-agent ACP mode hosts one session per connection; start another prime-agent process for a second session"
     );
     // Close, then a replacement admission with a different server list.
-    let close = client.request("session/close", json!({ "sessionId": session_id }));
+    let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, TIMEOUT);
     assert_eq!(close_response["result"], json!({}));
     let replacement = client.request(
         "session/new",
-        json!({ "mcpServers": [
+        &json!({ "mcpServers": [
             { "name": "replacement", "type": "stdio", "command": "cat", "args": [], "env": [] },
         ]}),
     );
@@ -597,9 +618,9 @@ fn acp_mcp_admission_rejects_invalid_params_with_the_ts_reasons() {
     ];
     for (servers, reason) in cases {
         let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
-        let init = client.request("initialize", initialize_params());
+        let init = client.request("initialize", &initialize_params());
         let _ = client.wait_response(init, TIMEOUT);
-        let new = client.request("session/new", json!({ "mcpServers": servers }));
+        let new = client.request("session/new", &json!({ "mcpServers": servers }));
         let (response, _) = client.wait_response(new, TIMEOUT);
         assert_eq!(response["error"]["code"], -32602, "case {reason}");
         assert_eq!(response["error"]["message"], "Invalid params");
@@ -614,12 +635,12 @@ fn acp_mcp_schema_invalid_entries_are_dropped_like_the_sdk() {
     // surviving list — the live TS behavior.
     let script = json!({ "responses": ["unused"] });
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
     let new = client.request(
         "session/new",
         // No `env` (required), invalid env item, http without headers.
-        json!({ "mcpServers": [
+        &json!({ "mcpServers": [
             { "name": "no-env", "type": "stdio", "command": "cat", "args": [] },
             { "name": "bad-item", "type": "stdio", "command": "cat", "args": [], "env": [{"name": 1, "value": "x"}] },
             { "name": "no-headers", "type": "http", "url": "https://mcp.invalid/x" },
@@ -636,12 +657,12 @@ fn acp_mcp_schema_invalid_entries_are_dropped_like_the_sdk() {
 fn acp_mcp_long_names_fail_at_tool_derivation_with_internal_error() {
     let script = json!({ "responses": ["unused"] });
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
     let long = format!("a{}", "b".repeat(50));
     let new = client.request(
         "session/new",
-        json!({ "mcpServers": [
+        &json!({ "mcpServers": [
             { "name": long, "type": "stdio", "command": "cat", "args": [], "env": [] },
         ]}),
     );
@@ -692,9 +713,9 @@ fn acp_daemon_attached_serves_a_client_owned_session() {
         .spawn()
         .expect("binary present");
     let mut client = AcpChild::adopt(child);
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, Duration::from_mins(1));
     assert!(
         new_response["result"]["sessionId"].is_string(),
@@ -706,7 +727,7 @@ fn acp_daemon_attached_serves_a_client_owned_session() {
         .to_string();
     let prompt = client.request(
         "session/prompt",
-        json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "Name a river." }] }),
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "Name a river." }] }),
     );
     let (prompt_response, updates) = client.wait_response(prompt, Duration::from_mins(2));
     assert_eq!(prompt_response["result"]["stopReason"], "end_turn");
@@ -714,7 +735,7 @@ fn acp_daemon_attached_serves_a_client_owned_session() {
         .iter()
         .find(|update| update["params"]["update"]["sessionUpdate"] == "agent_message_chunk");
     assert!(chunk.is_some(), "the daemon stream maps to ACP chunks");
-    let close = client.request("session/close", json!({ "sessionId": session_id }));
+    let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, Duration::from_mins(1));
     assert_eq!(close_response["result"], json!({}));
     drop(client);
@@ -756,13 +777,13 @@ fn acp_daemon_attached_admits_mcp_servers_through_the_wire() {
         .spawn()
         .expect("binary present");
     let mut client = AcpChild::adopt(child);
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
     // The admission validation runs in the transport; the servers ride
     // the replace_acp_mcp_servers wire command to the worker.
     let new = client.request(
         "session/new",
-        json!({ "mcpServers": [
+        &json!({ "mcpServers": [
             { "name": "capture-stdio", "type": "stdio", "command": "cat", "args": [], "env": [] },
         ]}),
     );
@@ -778,7 +799,7 @@ fn acp_daemon_attached_admits_mcp_servers_through_the_wire() {
         .as_str()
         .unwrap()
         .to_string();
-    let close = client.request("session/close", json!({ "sessionId": close_id }));
+    let close = client.request("session/close", &json!({ "sessionId": close_id }));
     let (close_response, _) = client.wait_response(close, Duration::from_mins(1));
     assert_eq!(close_response["result"], json!({}));
     drop(client);
@@ -827,9 +848,9 @@ fn acp_daemon_attached_cancels_mid_turn() {
         .spawn()
         .expect("binary present");
     let mut client = AcpChild::adopt(child);
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, Duration::from_mins(1));
     let session_id = new_response["result"]["sessionId"]
         .as_str()
@@ -837,17 +858,17 @@ fn acp_daemon_attached_cancels_mid_turn() {
         .to_string();
     let prompt = client.request(
             "session/prompt",
-            json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "a slow question" }] }),
+            &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "a slow question" }] }),
         );
     // The turn is mid-delay: cancel, then wait for the prompt response.
-    client.notify("session/cancel", json!({ "sessionId": session_id }));
+    client.notify("session/cancel", &json!({ "sessionId": session_id }));
     let (prompt_response, updates) = client.wait_response(prompt, Duration::from_mins(1));
     assert_eq!(prompt_response["result"]["stopReason"], "cancelled");
     assert!(
         updates.is_empty(),
         "a cancelled turn publishes no boundary frames after the cancel"
     );
-    let close = client.request("session/close", json!({ "sessionId": session_id }));
+    let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, Duration::from_mins(1));
     assert_eq!(close_response["result"], json!({}));
     drop(client);
@@ -878,9 +899,9 @@ fn acp_compact_command_publishes_the_compaction_meta_and_end_turn() {
     // `compaction: {}` namespaced update and the normal end_turn response.
     let script = json!({ "responses": ["one answer"] });
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let session_id = new_response["result"]["sessionId"]
         .as_str()
@@ -889,7 +910,7 @@ fn acp_compact_command_publishes_the_compaction_meta_and_end_turn() {
 
     let prompt = client.request(
         "session/prompt",
-        json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "/compact" }] }),
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "/compact" }] }),
     );
     let (prompt_response, updates) = client.wait_response(prompt, TIMEOUT);
 
@@ -932,9 +953,9 @@ fn acp_goal_command_publishes_goal_meta_and_runs_the_continuation() {
     // prompt with end_turn instead of looping forever.
     let script = json!({ "responses": ["GOAL-PROGRESS", "WRAP-UP"] });
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let session_id = new_response["result"]["sessionId"]
         .as_str()
@@ -943,7 +964,7 @@ fn acp_goal_command_publishes_goal_meta_and_runs_the_continuation() {
 
     let prompt = client.request(
         "session/prompt",
-        json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "/goal --budget 5 reply with exactly: GOAL-PROGRESS" }] }),
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "/goal --budget 5 reply with exactly: GOAL-PROGRESS" }] }),
     );
     let (prompt_response, updates) = client.wait_response(prompt, TIMEOUT);
 
@@ -1001,9 +1022,9 @@ fn acp_autonomous_token_limit_maps_to_max_tokens_stop_reason() {
         ],
         &script,
     );
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let session_id = new_response["result"]["sessionId"]
         .as_str()
@@ -1012,7 +1033,7 @@ fn acp_autonomous_token_limit_maps_to_max_tokens_stop_reason() {
 
     let prompt = client.request(
         "session/prompt",
-        json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "do the thing" }] }),
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "do the thing" }] }),
     );
     let (prompt_response, updates) = client.wait_response(prompt, TIMEOUT);
 
@@ -1043,9 +1064,9 @@ fn acp_autonomous_disabled_reports_end_turn_without_accounting() {
     // meta and the stop reason is end_turn.
     let script = json!({ "responses": ["an answer"] });
     let mut client = AcpChild::spawn(&["--mode", "acp", "--no-session"], &script);
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let session_id = new_response["result"]["sessionId"]
         .as_str()
@@ -1054,7 +1075,7 @@ fn acp_autonomous_disabled_reports_end_turn_without_accounting() {
 
     let prompt = client.request(
         "session/prompt",
-        json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "hi" }] }),
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "hi" }] }),
     );
     let (prompt_response, updates) = client.wait_response(prompt, TIMEOUT);
     for update in &updates {
@@ -1112,9 +1133,9 @@ fn acp_daemon_attached_publishes_the_goal_update_meta() {
         .spawn()
         .expect("binary present");
     let mut client = AcpChild::adopt(child);
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, Duration::from_mins(1));
     assert!(
         new_response["result"]["sessionId"].is_string(),
@@ -1126,7 +1147,7 @@ fn acp_daemon_attached_publishes_the_goal_update_meta() {
         .to_string();
     let prompt = client.request(
         "session/prompt",
-        json!({
+        &json!({
             "sessionId": session_id,
             "prompt": [{ "type": "text", "text": "/goal --budget 500 make the daemon publish goal state" }],
         }),
@@ -1142,7 +1163,7 @@ fn acp_daemon_attached_publishes_the_goal_update_meta() {
     assert_eq!(goal["objective"], "make the daemon publish goal state");
     assert_eq!(goal["tokenBudget"], 500);
     assert_eq!(goal["tokensUsed"], 0);
-    let close = client.request("session/close", json!({ "sessionId": session_id }));
+    let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, Duration::from_mins(1));
     assert_eq!(close_response["result"], json!({}));
     drop(client);
@@ -1192,9 +1213,9 @@ fn acp_daemon_attached_reports_autonomous_accounting_and_limit_stop_reason() {
         .spawn()
         .expect("binary present");
     let mut client = AcpChild::adopt(child);
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, Duration::from_mins(1));
     assert!(
         new_response["result"]["sessionId"].is_string(),
@@ -1207,7 +1228,7 @@ fn acp_daemon_attached_reports_autonomous_accounting_and_limit_stop_reason() {
     // Turn on the run with a one-turn budget.
     let enable = client.request(
         "session/prompt",
-        json!({
+        &json!({
             "sessionId": session_id,
             "prompt": [{ "type": "text", "text": "/autonomous on --max-turns 1" }],
         }),
@@ -1226,7 +1247,7 @@ fn acp_daemon_attached_reports_autonomous_accounting_and_limit_stop_reason() {
     // The model turn: one turn runs, the max-turns limit stops the run.
     let prompt = client.request(
         "session/prompt",
-        json!({
+        &json!({
             "sessionId": session_id,
             "prompt": [{ "type": "text", "text": "say something" }],
         }),
@@ -1259,7 +1280,7 @@ fn acp_daemon_attached_reports_autonomous_accounting_and_limit_stop_reason() {
         Some(json!(9_007_199_254_740_991u64)),
         "the run's unlimited continuation budget minus used"
     );
-    let close = client.request("session/close", json!({ "sessionId": session_id }));
+    let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, Duration::from_mins(1));
     assert_eq!(close_response["result"], json!({}));
     drop(client);
@@ -1368,9 +1389,9 @@ fn acp_threshold_auto_compaction_publishes_the_compaction_meta() {
         128_000 - 4_096 - 500,
         10,
     );
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let session_id = new_response["result"]["sessionId"]
         .as_str()
@@ -1381,7 +1402,7 @@ fn acp_threshold_auto_compaction_publishes_the_compaction_meta() {
     // single-turn skip published the empty payload.
     let prompt = client.request(
         "session/prompt",
-        json!({
+        &json!({
             "sessionId": session_id,
             "prompt": [{ "type": "text", "text": format!("turn one {}", "x".repeat(8_000)) }],
         }),
@@ -1401,7 +1422,7 @@ fn acp_threshold_auto_compaction_publishes_the_compaction_meta() {
     // publishes its result.
     let prompt = client.request(
         "session/prompt",
-        json!({
+        &json!({
             "sessionId": session_id,
             "prompt": [{ "type": "text", "text": "turn two" }],
         }),
@@ -1441,9 +1462,9 @@ fn acp_overflow_recovery_compacts_and_retries_the_turn() {
     });
     let mut client =
         spawn_with_compaction_settings(&["--mode", "acp", "--no-session"], &script, 1, 10);
-    let init = client.request("initialize", initialize_params());
+    let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
-    let new = client.request("session/new", json!({ "mcpServers": [] }));
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
     let (new_response, _) = client.wait_response(new, TIMEOUT);
     let session_id = new_response["result"]["sessionId"]
         .as_str()
@@ -1453,7 +1474,7 @@ fn acp_overflow_recovery_compacts_and_retries_the_turn() {
     // The seed turn: nothing fires (context far below the headroom).
     let prompt = client.request(
         "session/prompt",
-        json!({
+        &json!({
             "sessionId": session_id,
             "prompt": [{ "type": "text", "text": format!("seed turn {}", "x".repeat(48_000)) }],
         }),
@@ -1476,7 +1497,7 @@ fn acp_overflow_recovery_compacts_and_retries_the_turn() {
         probe_attempts += 1;
         let prompt = client.request(
             "session/prompt",
-            json!({
+            &json!({
                 "sessionId": session_id,
                 "prompt": [{ "type": "text", "text": format!("overflow probe {}", "x".repeat(2_000)) }],
             }),

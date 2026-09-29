@@ -135,7 +135,7 @@ impl Client {
         self.writer.flush().expect("flush");
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         self.send(&json!({
             "type": "command",
             "id": id,
@@ -180,7 +180,7 @@ impl Client {
 }
 
 /// One faux-engine session script written to disk.
-fn write_faux_script(dir: &Path, name: &str, responses: Value) -> PathBuf {
+fn write_faux_script(dir: &Path, name: &str, responses: &Value) -> PathBuf {
     let path = dir.join(format!("{name}.json"));
     std::fs::write(
         &path,
@@ -217,7 +217,7 @@ fn create_session(
 ) -> Session {
     client.send_command(
         id,
-        json!({
+        &json!({
             "type": "create",
             "name": name,
             "config": {
@@ -246,7 +246,7 @@ fn create_session(
 fn prompt(client: &mut Client, id: &str, active_session_id: &str, text: &str) {
     client.send_command(
         id,
-        json!({ "type": "prompt", "activeSessionId": active_session_id, "message": text }),
+        &json!({ "type": "prompt", "activeSessionId": active_session_id, "message": text }),
     );
     let response = client.read_response(id);
     assert_eq!(response["success"], true, "prompt failed: {response}");
@@ -255,7 +255,7 @@ fn prompt(client: &mut Client, id: &str, active_session_id: &str, text: &str) {
 fn wait_idle(client: &mut Client, id: &str, active_session_id: &str) {
     client.send_command(
         id,
-        json!({ "type": "wait_for_idle", "activeSessionId": active_session_id }),
+        &json!({ "type": "wait_for_idle", "activeSessionId": active_session_id }),
     );
     let response = client.read_response(id);
     assert_eq!(
@@ -268,7 +268,7 @@ fn wait_idle(client: &mut Client, id: &str, active_session_id: &str) {
 fn messages(client: &mut Client, id: &str, active_session_id: &str) -> String {
     client.send_command(
         id,
-        json!({ "type": "get_messages", "activeSessionId": active_session_id }),
+        &json!({ "type": "get_messages", "activeSessionId": active_session_id }),
     );
     let response = client.read_response(id);
     assert_eq!(response["success"], true, "get_messages failed: {response}");
@@ -342,12 +342,12 @@ fn setup_messaging() -> Option<Messaging> {
 
     let receipts_dir = dir.path().join("receipts");
     std::fs::create_dir_all(&receipts_dir).expect("receipts dir");
-    let alpha_path = write_faux_script(dir.path(), "alpha", alpha_responses(&receipts_dir));
+    let alpha_path = write_faux_script(dir.path(), "alpha", &alpha_responses(&receipts_dir));
     // One reply per delivered prompt (two turns arrive over the session).
     let beta_path = write_faux_script(
         dir.path(),
         "beta",
-        json!([ { "text": "beta reply" }, { "text": "beta reply" } ]),
+        &json!([ { "text": "beta reply" }, { "text": "beta reply" } ]),
     );
 
     let receipts = receipts_dir;
@@ -493,14 +493,14 @@ fn attached_client_to_client_send_completes_without_route_starvation() {
     let (mut client_a, _hello_a) = Client::connect(socket);
     client_a.send_command(
         "attach-a",
-        json!({ "type": "attach", "activeSessionId": alpha.active_session_id }),
+        &json!({ "type": "attach", "activeSessionId": alpha.active_session_id }),
     );
     let attached_a = client_a.read_response("attach-a");
     assert_eq!(attached_a["success"], true, "attach A failed: {attached_a}");
     let (mut client_b, _hello_b) = Client::connect(socket);
     client_b.send_command(
         "attach-b",
-        json!({ "type": "attach", "activeSessionId": beta.active_session_id }),
+        &json!({ "type": "attach", "activeSessionId": beta.active_session_id }),
     );
     let attached_b = client_b.read_response("attach-b");
     assert_eq!(attached_b["success"], true, "attach B failed: {attached_b}");
@@ -546,7 +546,7 @@ fn attached_client_to_client_send_completes_without_route_starvation() {
     let served_by = Instant::now();
     client_a.send_command(
         "state-a",
-        json!({ "type": "get_state", "activeSessionId": alpha.active_session_id }),
+        &json!({ "type": "get_state", "activeSessionId": alpha.active_session_id }),
     );
     let state_a = client_a.read_response("state-a");
     assert_eq!(
@@ -555,7 +555,7 @@ fn attached_client_to_client_send_completes_without_route_starvation() {
     );
     client_b.send_command(
         "state-b",
-        json!({ "type": "get_state", "activeSessionId": beta.active_session_id }),
+        &json!({ "type": "get_state", "activeSessionId": beta.active_session_id }),
     );
     let state_b = client_b.read_response("state-b");
     assert_eq!(
@@ -610,7 +610,7 @@ fn supervisor_death_mid_conversation_still_delivers_after_re_registration() {
             started.elapsed() < Duration::from_secs(30),
             "workers did not re-register after the restart"
         );
-        client.send_command("list", json!({ "type": "list" }));
+        client.send_command("list", &json!({ "type": "list" }));
         let response = client.read_response("list");
         let sessions = response["data"]["sessions"]
             .as_array()

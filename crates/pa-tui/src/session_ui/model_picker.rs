@@ -2,6 +2,7 @@
 //! and landed-catalog fold, the picker's open/key handling, and the
 //! model/thinking-level application paths.
 use super::*;
+use serde_json::Value;
 
 /// How long a fetched model catalog stays fresh (TS
 /// `MODEL_CATALOG_REFRESH_TTL_MS`); a `/model` open past it refreshes
@@ -156,7 +157,7 @@ impl SessionUi {
                 }
             }
         }
-        self.update_fast_filter(view);
+        self.update_model_eligibility_filters(view);
         Ok(())
     }
 
@@ -243,7 +244,7 @@ impl SessionUi {
                 self.model_configured_providers.clone(),
             );
         }
-        self.update_fast_filter(view);
+        self.update_model_eligibility_filters(view);
         self.dirty = true;
     }
 

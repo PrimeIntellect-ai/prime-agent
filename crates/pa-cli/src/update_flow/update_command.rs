@@ -220,7 +220,7 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
         &agent_dir,
         &socket_path.to_string_lossy(),
         &update_id,
-        child.id() as u64,
+        u64::from(child.id()),
         &status_path,
     )?;
     drop(child);

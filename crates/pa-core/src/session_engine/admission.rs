@@ -50,6 +50,11 @@ impl AgentSession {
         prompt_messages.extend(self.take_next_turn_rows().await);
         let custom_row = session_message_to_loop(&SessionAgentMessage::Custom(message.clone()))
             .ok_or_else(|| anyhow::anyhow!("injected custom message conversion failed"))?;
+        // The dispatch-time routing decision fires for every dispatched
+        // turn (TS `_startPreparedTurnActions` runs it per prepared turn
+        // action): an injected row never carries images, so it clears a
+        // route left behind by the previous dispatched turn.
+        self.apply_image_model_routing(&[], &[]).await?;
         prompt_messages.push(custom_row);
         self.agent
             .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
@@ -146,6 +151,13 @@ impl AgentSession {
                 None => unreachable!("busy without a streaming behavior errors above"),
             }
         } else {
+            // The dispatch-time image-model routing decision (TS
+            // `_imageModelOverrideForTurns` at commit): an image-attaching
+            // batch routes to the host's configured image model or fails
+            // with the actionable refusal, never silently downgrading the
+            // images to placeholders.
+            self.apply_image_model_routing(&images, &options.batch)
+                .await?;
             // The turn's prompt messages (TS preparedMessages): the deferred
             // first-turn harness digest rides first when one is due, so the
             // loop streams its message pair ahead of the user prompt and
@@ -173,16 +185,47 @@ impl AgentSession {
             }
             if options.return_after_accepted {
                 // TS `returnAfterAccepted: true` — the connection's prompt
-                // returns once the admitted turn delivers.
-                self.agent
+                // returns once the admitted turn delivers. The failure
+                // path unwinds the route exactly like the plain prompt
+                // branch below: this prompt never started, so its route
+                // must not survive (while no winner streams).
+                if let Err(error) = self
+                    .agent
                     .prompt_until_accepted(pa_agent::agent::AgentPromptInput::Messages(
                         prompt_messages,
                     ))
-                    .await?;
-            } else {
-                self.agent
-                    .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
-                    .await?;
+                    .await
+                {
+                    if !self.agent.state().await.is_streaming {
+                        if let Some(router) = self.image_model_router.as_ref() {
+                            (router.swap_target)(None);
+                            self.agent.set_model_override(None);
+                        }
+                    }
+                    return Err(error);
+                }
+            } else if let Err(error) = self
+                .agent
+                .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
+                .await
+            {
+                // A concurrent admission won the agent's run slot: this
+                // prompt never started, so its route must not survive. The
+                // unwind only happens while NO run streams - the winner's
+                // live run keeps its own serving target (an idle slot means
+                // our route never served a request; a streaming one belongs
+                // to the winner). TS decides per prepared action inside the
+                // same commit fence, so its single-threaded commit cannot
+                // observe this race at all; the headless surfaces serialize
+                // prompt admissions (one ACP prompt turn per session, the
+                // print loop's sequential awaits) besides.
+                if !self.agent.state().await.is_streaming {
+                    if let Some(router) = self.image_model_router.as_ref() {
+                        (router.swap_target)(None);
+                        self.agent.set_model_override(None);
+                    }
+                }
+                return Err(error);
             }
         }
         Ok(PromptOutcome::Prompt)

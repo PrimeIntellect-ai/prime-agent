@@ -23,6 +23,7 @@ pub mod goal_driver;
 pub mod harness_digest;
 pub mod headless;
 pub mod host_requests;
+pub mod image_model_routing;
 pub mod ipython_state;
 pub mod messages;
 pub mod provider_adapter;
@@ -186,6 +187,10 @@ pub struct AgentSession {
     /// The telemetry handle for the `skill used` adoption event the
     /// prompt path owns (`None` in sessions without telemetry).
     skill_telemetry: Option<std::sync::Arc<telemetry::SessionTelemetry>>,
+    /// The image-model routing host seam (`None` keeps the session model on
+    /// image turns: verification harnesses, and the daemon worker whose
+    /// turn dispatch owns routing itself).
+    image_model_router: Option<image_model_routing::ImageModelRouter>,
     /// The live compaction summary-delta sink
     /// ([`compaction_exec::SummaryDeltaSink`]): every summarizer text
     /// delta the session's compactions stream reaches it, in arrival
@@ -261,6 +266,7 @@ impl AgentSession {
             pending_next_turn_rows: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             skills: Vec::new(),
             skill_telemetry: None,
+            image_model_router: None,
             compaction_summary_sink: std::sync::Mutex::new(None),
         };
         this.ensure_harness_digest_context().await?;
@@ -446,6 +452,17 @@ fn user_prompt_message(text: &str, images: &[pa_agent::types::ImageContent]) -> 
 /// out of the provider request).
 pub(crate) fn session_message_to_loop(message: &SessionAgentMessage) -> Option<AgentMessage> {
     serde_json::from_value(serde_json::to_value(message).ok()?).ok()
+}
+
+/// The live-context rebuild's conversion half: the rebuilt session
+/// messages converted to the loop's shape row by row through the shared
+/// wire shape (rows that fail the shared-shape conversion drop, exactly
+/// like the inline closures this replaced).
+pub(crate) fn rebuilt_loop_messages(rebuilt: Vec<SessionAgentMessage>) -> Vec<AgentMessage> {
+    rebuilt
+        .into_iter()
+        .filter_map(|message| session_message_to_loop(&message))
+        .collect()
 }
 
 fn now_millis() -> u64 {

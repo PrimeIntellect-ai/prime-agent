@@ -2,6 +2,31 @@
 //! and 1,000 spawned children (each with a persisted session file in the
 //! artifacts tree, none resident) must surface the full 1,001-row roster
 //! from `list --all`, performance-bounded (TS: 1,001 rows in 0.78s).
+// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
+// the full rationale).
+// Stack-resident futures by design on the daemon's hot paths; boxing the
+// call sites for a lint tick is a perf regression with zero correctness gain.
+#![allow(clippy::large_futures)]
+// 64-bit-only targets; the narrowing casts sit at OS boundaries
+// (pid/fd/time/size) where the values are bounded by the kernel - the
+// dead-guard expect()s would add panic paths where silent wrap was
+// deliberate.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// The fn-length threshold is a style gate, not correctness; the structure
+// campaign owns the god-fn splits as a follow-up.
+#![allow(clippy::too_many_lines)]
+// API-shape opinions, not defects; the surfaces are deliberate.
+#![allow(
+    clippy::unnecessary_wraps,
+    clippy::zero_sized_map_values,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names
+)]
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -89,7 +114,7 @@ impl Client {
         serde_json::from_str(line.trim()).expect("parse supervisor line")
     }
 
-    fn send_command(&mut self, id: &str, command: Value) -> Value {
+    fn send_command(&mut self, id: &str, command: &Value) -> Value {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -228,7 +253,7 @@ fn list_all_returns_the_full_synthetic_thousand_child_roster() {
     assert_eq!(hello["type"], "daemon_hello");
 
     let started = Instant::now();
-    let response = client.send_command("l1", json!({ "type": "list", "all": true }));
+    let response = client.send_command("l1", &json!({ "type": "list", "all": true }));
     let elapsed = started.elapsed();
     assert_eq!(
         response["success"], true,
@@ -300,7 +325,7 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
     .expect("write script");
     let created = client.send_command(
         "c1",
-        json!({
+        &json!({
             "type": "create",
             "config": {
                 "cwd": dir.path().to_string_lossy(),
@@ -361,7 +386,7 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
     let deadline = Instant::now() + Duration::from_secs(15);
     let child_active_id = loop {
         assert!(Instant::now() < deadline, "list never showed the child");
-        let list = client.send_command("l2", json!({ "type": "list" }));
+        let list = client.send_command("l2", &json!({ "type": "list" }));
         if let Some(active_id) = list["data"]["sessions"].as_array().and_then(|sessions| {
             sessions
                 .iter()
@@ -375,7 +400,7 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
     };
 
     // Subscribe after the spawn: the snapshot carries the resident family.
-    let subscribed = client.send_command("r1", json!({ "type": "roster_subscribe" }));
+    let subscribed = client.send_command("r1", &json!({ "type": "roster_subscribe" }));
     assert_eq!(
         subscribed["success"], true,
         "subscribe failed: {subscribed}"
@@ -460,7 +485,7 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
     // A fresh subscriber sees the full family immediately: the seeded
     // child plus the still-resident parent.
     let (mut client_b, _hello_b) = Client::connect(&socket);
-    let resubscribed = client_b.send_command("r2", json!({ "type": "roster_subscribe" }));
+    let resubscribed = client_b.send_command("r2", &json!({ "type": "roster_subscribe" }));
     assert_eq!(
         resubscribed["success"], true,
         "second subscribe failed: {resubscribed}"

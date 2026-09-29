@@ -109,20 +109,6 @@ impl CompactionManager {
                 })
         };
 
-        {
-            let mut core = self.core.lock().unwrap();
-            core.compacting = false;
-        }
-        // Every settle-waiting flag clear must wake the waits parked on
-        // it: `await_session_work_settled` and the replacement teardown
-        // register their `idle_notify` permit BEFORE checking the flags,
-        // so a clear without a `notify_waiters` parks them forever. A
-        // shutdown arriving mid-compaction (the refused-registration
-        // self-heal's graceful close aborts the live run) would
-        // otherwise never observe the cleared `compacting` and the
-        // worker stays alive as the invisible lease-holder this PR
-        // exists to retire.
-        idle_notify.notify_waiters();
         if let CompactionOutcome::Compacted { run } = &outcome {
             pa_core::session_engine::compaction_trace::trace(
                 "manual.compact_returned",
@@ -151,6 +137,29 @@ impl CompactionManager {
             "manual.end_emitted",
             serde_json::Value::Null,
         );
+        // TS clears `_compactionAbortController` in `compact()`'s
+        // `finally` - AFTER the durable entry (appended inside
+        // `_performCompaction`) and the `compaction_end` emit - so
+        // `isCompacting` spans the whole window the summarizer's context
+        // rebuild and its durable commit own. Clearing earlier would
+        // open a sliver where the runner admits a racing turn between
+        // the summarizer's return and the compaction entry's durable
+        // append, interleaving the file (a user row durable before the
+        // compaction entry that summarizes it).
+        {
+            let mut core = self.core.lock().unwrap();
+            core.compacting = false;
+        }
+        // Every settle-waiting flag clear must wake the waits parked on
+        // it: `await_session_work_settled` and the replacement teardown
+        // register their `idle_notify` permit BEFORE checking the flags,
+        // so a clear without a `notify_waiters` parks them forever. A
+        // shutdown arriving mid-compaction (the refused-registration
+        // self-heal's graceful close aborts the live run) would
+        // otherwise never observe the cleared `compacting` and the
+        // worker stays alive as the invisible lease-holder this PR
+        // exists to retire.
+        idle_notify.notify_waiters();
         {
             let mut slot = self.abort.lock().unwrap();
             if slot

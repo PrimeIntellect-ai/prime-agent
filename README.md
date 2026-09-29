@@ -13,7 +13,7 @@ Prime Agent: A Self-Improving RLM Harness
 </h3>
 
 <p align="center">
-  <a href="docs/RUST_QUICKSTART.md">Documentation</a> &bull;
+  <a href="#install">Documentation</a> &bull;
   <a href="https://github.com/PrimeIntellect-ai/verifiers">Verifiers</a> &bull;
   <a href="https://github.com/PrimeIntellect-ai/prime-rl">PRIME-RL</a>
 </p>
@@ -45,8 +45,6 @@ Install the latest build with the repo's one-command installer (every push to th
 ```bash
 curl -fsSL https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent/rust/install-rust.sh | sh
 ```
-
-The script verifies the artifact against its `SHA256SUMS`, installs the payload under `~/.local/share/prime-agent/` (`PRIME_AGENT_RUST_PREFIX` moves both paths), and writes the `~/.local/bin/prime-agent` launcher — the same keyword the TypeScript product used, so an existing TypeScript install is taken over: its daemon is stopped cleanly, its files are preserved, and the shared session store is never touched. Workflow-artifact downloads need GitHub authentication, so sign in with `gh` or set `GITHUB_TOKEN`. The inspect-first path, the manual steps, and the platform matrix are in [docs/RUST_QUICKSTART.md](docs/RUST_QUICKSTART.md).
 
 ## Why Prime Agent
 
@@ -95,12 +93,6 @@ Prime Agent is built for long-running work, especially for evaluations in resear
 - **Heartbeats and schedules:** `/heartbeat`, `rlm_heartbeat`, and `prime-agent schedule` can re-enter a session periodically or at a specific time.
 - **Persistent goals:** `/goal` keeps an objective and its progress active across turns until it is completed, paused, or cleared.
 - **Bounded autonomous mode:** `/autonomous` continues within configured turn, token, and time budgets and can run user-defined quality gates. A passed gate checks only what that gate verifies; reaching a limit does not imply task success.
-
-## Documentation
-
-- [Quickstart](docs/RUST_QUICKSTART.md) — install, authenticate, and run a first session; the side-by-side rules when the TypeScript build is installed on the same machine
-- [Keybindings](docs/keybindings.md) — every keyboard shortcut and how to customize them
-- [Telemetry events](docs/telemetry-events.md) — the versioned catalog of every telemetry event and its properties
 
 ## Contributing
 

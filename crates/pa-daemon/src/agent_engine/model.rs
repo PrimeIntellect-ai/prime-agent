@@ -3,7 +3,9 @@
 //! session's live-model and thinking-level surfaces, the request API-key
 //! seam, and the persisted max-depth read.
 
-use super::*;
+use super::{
+    AgentSessionEngine, EngineModelSelection, Model, RestoredSessionModel, SessionEngine, Value,
+};
 
 impl AgentSessionEngine {
     /// The TS `createAgentSession` startup chain (the no-flagged-model
@@ -335,7 +337,7 @@ impl AgentSessionEngine {
     /// flagged create); a model that cannot be resolved degrades to
     /// "off". Resolved once at the create/restore seam and cached so
     /// summary/state calls stay side-effect-free while turns run.
-    pub(super) fn effective_thinking(&self) -> pa_types::ai::ModelThinkingLevel {
+    pub(crate) fn effective_thinking(&self) -> pa_types::ai::ModelThinkingLevel {
         if let Some(level) = *self
             .effective_thinking
             .read()
