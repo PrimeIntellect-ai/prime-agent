@@ -224,7 +224,8 @@ jobs:
           # advances. beta.json is still recorded (the compute step reads
           # its shape when present, for the counter-restart check only).
           ledger_version="$(gh api "repos/${GITHUB_REPOSITORY}/tags?per_page=100" \
-            | jq -r '[.[].name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+-beta\\.[0-9]+$"))] | sort -V | last // empty' || true)"
+            | jq -r '.[].name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+-beta\\.[0-9]+$"))' \
+            | sort -V | tail -1 || true)"
           if [ -n "${ledger_version}" ]; then
             printf '%s\n' "${ledger_version}" > "${out}/beta-ledger-version"
             echo "beta tag ledger: newest ${ledger_version}"

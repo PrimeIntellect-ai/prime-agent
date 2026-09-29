@@ -602,7 +602,7 @@ ROW_PY
   asset_name="$(printf '%s' "$row_json" | "$UVPY" -c 'import json,sys; print(json.load(sys.stdin)["file"])')"
   manifest_sha="$(printf '%s' "$row_json" | "$UVPY" -c 'import json,sys; print(json.load(sys.stdin)["sha256"])')"
   case "$manifest_sha" in
-    *[!0-9a-f]*|??) die "the channel manifest's sha256 for ${asset_name} is malformed" ;;
+    ""|?|??|*[!0-9a-f]*) die "the channel manifest's sha256 for ${asset_name} is malformed" ;;
   esac
   break
 done

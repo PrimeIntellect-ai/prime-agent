@@ -590,12 +590,18 @@ jobs:
               --endpoint-url "$R2_ENDPOINT_URL" \
               --content-type text/plain \
               --cache-control no-cache
-            # THE HEAL: read the channel back; if a racing promotion moved
-            # it backwards (the last writer lost), rewrite ours forward.
+            # THE HEAL: read the PAIR back (the manifest AND the pointer —
+            # an older job can lose the manifest race and still write its
+            # pointer after ours, leaving the pointer naming a version the
+            # manifest no longer carries); if either is behind, rewrite
+            # ours forward.
             attempt=1
             while [ "$attempt" -le 3 ]; do
               readback="$(aws s3 cp "s3://${R2_BUCKET}/${manifest_name}" - --endpoint-url "$R2_ENDPOINT_URL" 2>/dev/null | jq -r '.version // empty' || true)"
-              if [ -z "$readback" ] || version_gt "$RELEASE_VERSION" "$readback"; then
+              pointer_readback="$(aws s3 cp "s3://${R2_BUCKET}/${pointer_name}" - --endpoint-url "$R2_ENDPOINT_URL" 2>/dev/null | tr -d '[:space:]' || true)"
+              if [ -z "$readback" ] || [ -z "$pointer_readback" ] \
+                 || version_gt "$RELEASE_VERSION" "$readback" \
+                 || version_gt "$RELEASE_VERSION" "$pointer_readback"; then
                 aws s3 cp "$manifest_src" "s3://${R2_BUCKET}/${manifest_name}" \
                   --endpoint-url "$R2_ENDPOINT_URL" \
                   --content-type application/json \

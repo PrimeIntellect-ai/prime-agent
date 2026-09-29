@@ -285,7 +285,11 @@ pub async fn run_installer_from(
 pub fn installed_channel(prefix: &Path) -> Option<&'static str> {
     let marker =
         std::fs::read_to_string(prefix.join("share/prime-agent/.prime-agent-install")).ok()?;
-    let channel = marker.lines().next()?.strip_prefix("channel ")?;
+    // The marker's first line is the installer's own write shape —
+    // "install-rust.sh channel <name>" — so the channel is the tail after
+    // the LAST "channel " marker token, not a line-prefix (a bare
+    // "channel <name>" line reads the same way).
+    let channel = marker.lines().next()?.rsplit_once("channel ")?.1.trim();
     match channel {
         "stable" => Some("stable"),
         "beta" => Some("beta"),
@@ -472,18 +476,19 @@ mod tests {
         let prefix = dir.path().join("prefix");
         // No marker at all: no channel (the script's default rides).
         assert_eq!(installed_channel(&prefix), None);
-        // The current marker shape: "channel <name>" then "version <v>".
+        // The installer's ACTUAL write shape: "install-rust.sh channel
+        // <name>" then "version <v>" (the publish's printf).
         let share = prefix.join("share/prime-agent");
         std::fs::create_dir_all(&share).unwrap();
         std::fs::write(
             share.join(".prime-agent-install"),
-            "channel beta\nversion 0.10.0\n",
+            "install-rust.sh channel beta\nversion 0.10.0\n",
         )
         .unwrap();
         assert_eq!(installed_channel(&prefix), Some("beta"));
         std::fs::write(
             share.join(".prime-agent-install"),
-            "channel stable\nversion 0.10.0\n",
+            "install-rust.sh channel stable\nversion 0.10.0\n",
         )
         .unwrap();
         assert_eq!(installed_channel(&prefix), Some("stable"));
