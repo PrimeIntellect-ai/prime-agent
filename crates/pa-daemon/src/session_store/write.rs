@@ -9,7 +9,7 @@ impl SessionEntry {
     fn new(
         type_: &str,
         parent_id: Option<String>,
-        used: &HashMap<String, ()>,
+        used: &HashMap<String, usize>,
         fields: Value,
         timestamp: &str,
     ) -> Self {
@@ -46,7 +46,7 @@ impl SessionFile {
         let mut entry = SessionEntry::new(
             type_,
             parent_id,
-            &self.index_map(),
+            &self.by_id,
             fields,
             &crate::util::now_iso(),
         );
@@ -173,7 +173,7 @@ impl SessionFile {
         let mut entry = SessionEntry::new(
             entry_type,
             self.leaf_id.clone(),
-            &self.index_map(),
+            &self.by_id,
             fields,
             timestamp,
         );

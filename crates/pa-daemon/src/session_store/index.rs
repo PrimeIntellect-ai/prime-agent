@@ -5,7 +5,7 @@
 
 use super::*;
 
-pub(crate) fn new_entry_id(used: &HashMap<String, ()>) -> String {
+pub(crate) fn new_entry_id(used: &HashMap<String, usize>) -> String {
     for _ in 0..100 {
         let id: String = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
         if !used.contains_key(&id) {
@@ -147,9 +147,5 @@ impl SessionFile {
                 object.insert("usage".to_string(), aggregate.clone());
             }
         }
-    }
-
-    pub(super) fn index_map(&self) -> HashMap<String, ()> {
-        self.entries.iter().map(|e| (e.id.clone(), ())).collect()
     }
 }
