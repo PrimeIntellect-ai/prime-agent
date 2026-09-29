@@ -109,45 +109,53 @@
 # install if any computed path (prefix, bin, share, stage, rollback)
 # falls under the store.
 #
-# Config (env with defaults; the PRIME_AGENT_RUST_* names are unchanged
-# from previous releases so existing users' env keeps working — they now
-# address the prime-agent bin/dir names):
-#   PRIME_AGENT_RUST_REPO    the <org>/<repo> to install from
-#                            (default: PrimeIntellect-ai/prime-agent)
-#   PRIME_AGENT_RUST_RUN     the continuous workflow run id to install
-#                            (default: "latest" — the newest successful
-#                            run on the `rust` branch)
-#   PRIME_AGENT_RUST_PREFIX  install prefix (default: ~/.local; the
-#                            launcher lands at $PREFIX/bin/prime-agent,
-#                            the payload at $PREFIX/share/prime-agent/)
+# Config (env with defaults):
+#   PRIME_AGENT_DOWNLOAD_BASE_URL  the R2-backed download base (default:
+#                                  the official domain, the same base the
+#                                  release pipeline renders into the
+#                                  published copy of this script)
+#   PRIME_AGENT_RELEASE_CHANNEL   stable | beta (default: stable)
+#   PRIME_AGENT_VERSION           pin an exact version instead of reading
+#                                  the channel pointer
+#   PRIME_AGENT_RUST_PREFIX       install prefix (default: ~/.local; the
+#                                  launcher lands at $PREFIX/bin/prime-agent,
+#                                  the payload at $PREFIX/share/prime-agent/)
 #
-# Usage: install-rust.sh [--update] — both entry points install the newest
-# successful continuous run; the script is idempotent (a re-run replaces
+# THE CHANNEL (the R2 form, the TS install.sh parity): the script reads
+# the channel pointer (<base>/stable or <base>/beta) for the version,
+# reads the channel manifest (<base>/latest.json or <base>/beta.json) for
+# this platform's artifact row, fetches the tarball + SHA256SUMS from
+# <base>/releases/v<version>/, and verifies the checksum before
+# extraction. NO GITHUB SURFACE anywhere in the user path: no gh, no
+# GITHUB_TOKEN, no workflow-artifact API — the download base is the
+# R2-backed domain, and everything the installer reads comes from it.
+#
+# Usage: install-rust.sh [--update] — both entry points install the
+# channel's current version; the script is idempotent (a re-run replaces
 # the payload, keeps one .old rollback generation, and re-runs the
 # takeover steps as no-ops when there is nothing left to take over).
 #
 # PREREQUISITES: curl + sh (+ the network for the download). The installer
 # needs a Python for its own scripting steps (the store guard's realpath,
-# the artifact's JSON parsing and zip extraction, the daemon probe) — but
-# it does NOT need one installed: it bootstraps uv first (a static binary
-# whose installer needs only curl + sh) and resolves its Python THROUGH
-# uv (an existing interpreter when there is one, else uv's own managed
-# 3.11 — no system python3 anywhere). Offline without uv, a system
-# python3 is the fallback; with neither, the installer names the one
-# missing prerequisite and exits.
-#
-# Authentication is mandatory even though the repo is public: GitHub's
-# workflow-artifact DOWNLOAD API requires an authenticated principal (an
-# anonymous request answers 401). `gh` is used when on PATH; otherwise
-# GITHUB_TOKEN must be set and the REST API is called with curl (the
-# uv-resolved Python unzips the artifact — POSIX sh has no unzip).
+# the channel manifest's JSON parsing, the daemon probe) — but it does
+# NOT need one installed: it bootstraps uv first (a static binary whose
+# installer needs only curl + sh) and resolves its Python THROUGH uv (an
+# existing interpreter when there is one, else uv's own managed 3.11 —
+# no system python3 anywhere). Offline without uv, a system python3 is
+# the fallback; with neither, the installer names the one missing
+# prerequisite and exits.
 set -eu
 
-REPO="${PRIME_AGENT_RUST_REPO:-PrimeIntellect-ai/prime-agent}"
-RUN="${PRIME_AGENT_RUST_RUN:-latest}"
+# The publish-rendered defaults: the release pipeline copies this script
+# to <base>/install.sh with DOWNLOAD_BASE_URL_DEFAULT set to
+# vars.R2_PUBLIC_BASE_URL, and to <base>/install-beta.sh with the channel
+# default set to beta — the repo-file default IS the official domain, so
+# the raw repo copy installs out of the box too.
+DOWNLOAD_BASE_URL_DEFAULT="https://app.primeintellect.ai/prime-agent"
+RELEASE_CHANNEL_DEFAULT="stable"
+BASE_URL="${PRIME_AGENT_DOWNLOAD_BASE_URL:-$DOWNLOAD_BASE_URL_DEFAULT}"
+CHANNEL="${PRIME_AGENT_RELEASE_CHANNEL:-$RELEASE_CHANNEL_DEFAULT}"
 PREFIX="${PRIME_AGENT_RUST_PREFIX:-$HOME/.local}"
-WORKFLOW="continuous"
-BRANCH="rust"
 
 die() { echo "install-rust.sh: $1" >&2; exit 1; }
 
@@ -180,11 +188,14 @@ Output:
   stderr      warnings and diagnostics (a curl | sh run keeps them)
 
 Environment:
-  PRIME_AGENT_RUST_REPO     <org>/<repo> to install from
-  PRIME_AGENT_RUST_RUN      continuous workflow run id ("latest" by default)
-  PRIME_AGENT_RUST_PREFIX   install prefix (~/.local by default)
-  PRIME_AGENT_RUST_VERBOSE  1 = the --verbose output mode
-  GITHUB_TOKEN              artifact authentication when gh is not on PATH
+  PRIME_AGENT_DOWNLOAD_BASE_URL  the R2-backed download base (the official
+                                 domain by default)
+  PRIME_AGENT_RELEASE_CHANNEL    stable | beta (stable by default)
+  PRIME_AGENT_VERSION            pin an exact version (skips the channel
+                                 pointer read; the manifest + SHA256SUMS
+                                 checks still run)
+  PRIME_AGENT_RUST_PREFIX        install prefix (~/.local by default)
+  PRIME_AGENT_RUST_VERBOSE       1 = the --verbose output mode
 USAGE
 }
 
@@ -346,7 +357,7 @@ if [ -n "$uv_bin" ]; then
   # .python-version demanding a newer Python can shadow the exact 3.11
   # this bootstrap just installed) and its venv discovery can hand back
   # a checkout's .venv interpreter — code this installer would then
-  # EXECUTE with GITHUB_TOKEN in its environment, before any artifact
+  # EXECUTE with the downloaded artifact's bytes as input, before any
   # validation. The flag restricts the resolution to system-level
   # interpreters (uv's own managed installs count).
   # UV_PYTHON_INSTALL_DIR is cleared on EVERY uv call in this
@@ -442,14 +453,17 @@ guard_preserved "$share_dir" "$launcher" "$old_layout_dir" "$legacy_dir" "$lock_
 # gets the x86_64 build, which is the correct build for that runtime.
 OS="$(uname -s)"
 ARCH="$(uname -m)"
+# CHANNEL_PLATFORM is the channel manifest's platform alias (the TS
+# NATIVE_PLATFORMS spelling pa-core::update::install::current_platform_alias
+# reads); TARGET stays the rust triple the payload names its targets by.
 case "$OS:$ARCH" in
-  Darwin:arm64) TARGET=aarch64-apple-darwin ;;
-  Darwin:x86_64) TARGET=x86_64-apple-darwin ;;
-  Linux:x86_64) TARGET=x86_64-unknown-linux-gnu ;;
-  Linux:aarch64) TARGET=aarch64-unknown-linux-gnu ;;
+  Darwin:arm64) TARGET=aarch64-apple-darwin; CHANNEL_PLATFORM=darwin-arm64 ;;
+  Darwin:x86_64) TARGET=x86_64-apple-darwin; CHANNEL_PLATFORM=darwin-x64 ;;
+  Linux:x86_64) TARGET=x86_64-unknown-linux-gnu; CHANNEL_PLATFORM=linux-x64 ;;
+  Linux:aarch64) TARGET=aarch64-unknown-linux-gnu; CHANNEL_PLATFORM=linux-arm64 ;;
   *)
     die "no rust build is published for ${OS} ${ARCH} (detected via uname);
-the continuous workflow builds aarch64-apple-darwin, x86_64-apple-darwin,
+the release channel builds aarch64-apple-darwin, x86_64-apple-darwin,
 aarch64-unknown-linux-gnu, and x86_64-unknown-linux-gnu"
     ;;
 esac
@@ -482,87 +496,100 @@ compiled against glibc 2.35 (Ubuntu 22.04) and will not start here"
   say "glibc ${glibc} >= 2.35: supported"
 fi
 
-# --- auth (workflow-artifact downloads require a principal) ----------------
-if command -v gh >/dev/null 2>&1; then
-  HAVE_GH=1
-else
-  HAVE_GH=0
-  [ -n "${GITHUB_TOKEN:-}" ] \
-    || die "workflow-artifact downloads need authentication; install/use gh or set GITHUB_TOKEN"
-fi
+# --- the R2 channel (the user path never touches GitHub) --------------------
+# THE CHANNEL RESOLUTION (the TS install.sh parity): the channel pointer
+# file gives the version, the channel manifest gives this platform's
+# artifact row, and the versioned release prefix serves the tarball +
+# SHA256SUMS. No gh, no GITHUB_TOKEN, no workflow-artifact API — the
+# download base is the R2-backed domain and everything comes from it.
+case "$CHANNEL" in
+  stable) CHANNEL_MANIFEST="latest.json" ;;
+  beta) CHANNEL_MANIFEST="beta.json" ;;
+  *) die "unknown release channel: ${CHANNEL} (stable or beta)" ;;
+esac
+case "$BASE_URL" in
+  https://*) ;;
+  *) die "the download base URL must be an https URL: ${BASE_URL}" ;;
+esac
+BASE_URL="${BASE_URL%/}"
 
-# --- resolve the continuous run --------------------------------------------
-# The default takes the newest SUCCESSFUL run of the continuous workflow
-# on the rust branch — the run whose artifacts carry the freshest commit
-# that passed the build. PRIME_AGENT_RUST_RUN pins an exact run instead
-# (the id from the run page URL).
-if [ "$HAVE_GH" = 1 ]; then
-  if [ "$RUN" = "latest" ]; then
-    # An empty run list makes jq print the literal "null" - refuse it
-    # here instead of passing a bogus id to the download.
-    RUN="$(gh run list --repo "$REPO" --workflow "$WORKFLOW" --branch "$BRANCH" \
-      --status success --limit 1 --json databaseId \
-      --jq '.[0].databaseId')" \
-      || die "could not list ${WORKFLOW} runs in ${REPO} (is gh authenticated?)"
-  fi
-  [ -n "$RUN" ] && [ "$RUN" != "null" ] \
-    || die "no successful ${WORKFLOW} run found on ${BRANCH} in ${REPO}"
+if [ -n "${PRIME_AGENT_VERSION:-}" ]; then
+  VERSION="${PRIME_AGENT_VERSION#v}"
 else
-  api() {
-    curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-      -H "Accept: application/vnd.github+json" "$@"
-  }
-  if [ "$RUN" = "latest" ]; then
-    RUN="$(api "https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW}.yml/runs?branch=${BRANCH}&status=success&per_page=1" \
-      | "$UVPY" -c 'import json, sys; print(json.load(sys.stdin)["workflow_runs"][0]["id"])')" \
-      || die "could not list ${WORKFLOW} runs in ${REPO} (check GITHUB_TOKEN)"
-  fi
+  VERSION="$(curl -fsSL "${BASE_URL}/${CHANNEL}" 2>/dev/null || true)"
 fi
-say "installing the ${WORKFLOW} run ${RUN} ${TARGET} artifact from ${REPO}"
+case "$VERSION" in
+  ""|v)
+    die "could not resolve the latest ${CHANNEL} version from ${BASE_URL}/${CHANNEL}
+(set PRIME_AGENT_VERSION to pin an exact version, or check the network)"
+    ;;
+  *[!0-9A-Za-z.-]*)
+    die "invalid version from the ${CHANNEL} channel pointer: ${VERSION}"
+    ;;
+esac
+say "installing prime-agent ${VERSION} from the ${CHANNEL} channel (${CHANNEL_PLATFORM})"
 
-# --- download the platform artifact -----------------------------------------
-# The artifact zip is flat (the build job uploads the assembled dist tree),
-# so the download carries the platform tarball, its SHA256SUMS line, and
-# the run's manifest.json (with the exact commit).
+# --- the channel manifest: this platform's artifact row ---------------------
+# The manifest carries the version plus the per-platform rows; the row's
+# file must be the exact channel naming and its sha256 the 64-hex shape —
+# the same validation pa-core::update::release::latest_release applies, so
+# a lying manifest refuses here instead of staging a wrong tarball.
+# The row reader rides a FILE, not a heredoc inside a command substitution
+# (the probe-py pattern: macOS ships bash 3.2 as /bin/sh, and its
+# POSIX-mode parser cannot close a $( ) that spans a heredoc body).
 dl="$(mktemp -d "${TMPDIR:-/tmp}/prime-agent-download.XXXXXX")"
-if [ "$HAVE_GH" = 1 ]; then
-  gh run download "$RUN" --repo "$REPO" \
-    --name "artifacts-${TARGET}" --dir "$dl" \
-    || die "artifact artifacts-${TARGET} not found in run ${RUN} (is the build matrix up?)"
-else
-  artifact_id="$(api "https://api.github.com/repos/${REPO}/actions/runs/${RUN}/artifacts?per_page=100" \
-    | "$UVPY" -c '
+curl -fsSL "${BASE_URL}/${CHANNEL_MANIFEST}" -o "$dl/${CHANNEL_MANIFEST}" \
+  || die "could not read the ${CHANNEL} channel manifest: ${BASE_URL}/${CHANNEL_MANIFEST}"
+row_py="$dl/channel_row.py"
+cat > "$row_py" <<'ROW_PY'
 import json, sys
-name = "artifacts-" + sys.argv[1]
-for artifact in json.load(sys.stdin).get("artifacts", []):
-    if artifact["name"] == name:
-        print(artifact["id"])
-        break' "$TARGET")"
-  [ -n "${artifact_id:-}" ] \
-    || die "artifact artifacts-${TARGET} not found in run ${RUN}"
-  curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-    -o "${dl}/artifact.zip" \
-    "https://api.github.com/repos/${REPO}/actions/artifacts/${artifact_id}/zip" \
-    || die "could not download artifact ${artifact_id} from run ${RUN}"
-  "$UVPY" -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' \
-    "${dl}/artifact.zip" "$dl"
-  rm -f "${dl}/artifact.zip"
-fi
-asset="$(printf '%s\n' "$dl"/*.tar.gz 2>/dev/null | head -n 1)"
-[ -n "$asset" ] \
-  || die "the ${TARGET} artifact of run ${RUN} carried no platform tarball"
-asset_name="${asset##*/}"
-[ -f "$dl/SHA256SUMS" ] \
-  || die "the ${TARGET} artifact of run ${RUN} carried no SHA256SUMS"
+manifest_path, version, platform = sys.argv[1], sys.argv[2], sys.argv[3]
+manifest = json.load(open(manifest_path))
+manifest_version = manifest.get("version", "")
+if manifest_version.lstrip("v") != version.lstrip("v"):
+    sys.exit(f"manifest version {manifest_version} != channel version {version}")
+rows = manifest.get("binaries_v2") or manifest.get("binaries") or []
+expected = f"prime-agent-{version.lstrip('v')}-{platform}.tar.gz"
+for row in rows:
+    if row.get("platform") != platform:
+        continue
+    if row.get("file") != expected:
+        sys.exit(f"artifact row file {row.get('file')} != the channel naming {expected}")
+    print(json.dumps({"file": row["file"], "sha256": row.get("sha256", "")}))
+    break
+else:
+    sys.exit(f"no artifact row for platform {platform} in the channel manifest")
+ROW_PY
+row_json="$("$UVPY" "$row_py" "$dl/${CHANNEL_MANIFEST}" "$VERSION" "$CHANNEL_PLATFORM")" \
+  || die "the ${CHANNEL} channel manifest is not usable: ${BASE_URL}/${CHANNEL_MANIFEST} ($("$UVPY" "$row_py" "$dl/${CHANNEL_MANIFEST}" "$VERSION" "$CHANNEL_PLATFORM" 2>&1 | head -n 1))"
+asset_name="$(printf '%s' "$row_json" | "$UVPY" -c 'import json,sys; print(json.load(sys.stdin)["file"])')"
+manifest_sha="$(printf '%s' "$row_json" | "$UVPY" -c 'import json,sys; print(json.load(sys.stdin)["sha256"])')"
+case "$manifest_sha" in
+  *[!0-9a-f]*|??) die "the channel manifest's sha256 for ${asset_name} is malformed" ;;
+esac
+
+# --- the tarball + SHA256SUMS from the versioned release prefix -------------
+RELEASE_PREFIX="releases/v${VERSION#v}"
+curl -fsSL "${BASE_URL}/${RELEASE_PREFIX}/${asset_name}" -o "$dl/${asset_name}" \
+  || die "could not download ${asset_name} from ${BASE_URL}/${RELEASE_PREFIX}/"
+curl -fsSL "${BASE_URL}/${RELEASE_PREFIX}/SHA256SUMS" -o "$dl/SHA256SUMS" \
+  || die "could not download SHA256SUMS from ${BASE_URL}/${RELEASE_PREFIX}/"
+asset="$dl/${asset_name}"
 
 # --- verify the checksum -------------------------------------------------------
-# The artifact's own SHA256SUMS covers the tarball the build produced; the
-# verification happens before extraction, so a truncated or tampered
-# download refuses to install. (The checksum rides the same channel as the
-# tarball — the known same-channel limitation; the signed-asset design is
-# the graduation path in RELEASE_SECURITY.md.)
+# The release prefix's SHA256SUMS covers the tarball; the verification
+# happens before extraction, so a truncated or tampered download refuses
+# to install. The channel manifest's row sha256 is cross-checked against
+# the SHA256SUMS line first — two independent reads of the same digest
+# from the same release prefix — so a lying manifest refuses as loudly as
+# a corrupt tarball. (The checksum rides the same channel as the tarball —
+# the known same-channel limitation; the signed-asset design is the
+# graduation path in RELEASE_SECURITY.md.)
 line="$(grep "  ${asset_name}\$" "$dl/SHA256SUMS" || true)"
-[ -n "$line" ] || die "SHA256SUMS in run ${RUN} has no line for ${asset_name}"
+[ -n "$line" ] || die "SHA256SUMS in ${RELEASE_PREFIX} has no line for ${asset_name}"
+sums_sha="${line%% *}"
+[ "$sums_sha" = "$manifest_sha" ] \
+  || die "checksum mismatch between the channel manifest and SHA256SUMS for ${asset_name}: the channel is inconsistent; re-run the installer"
 printf '%s\n' "$line" > "$dl/SHA256SUMS.check"
 if command -v sha256sum >/dev/null 2>&1; then
   (cd "$dl" && sha256sum -c SHA256SUMS.check 2>&1 >&3) 1>&3 \
@@ -573,8 +600,7 @@ elif command -v shasum >/dev/null 2>&1; then
 else
   die "no sha256 tool found (sha256sum or shasum is required to verify the download)"
 fi
-commit="$("$UVPY" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("commit", ""))' "$dl/manifest.json" 2>/dev/null || true)"
-say "checksum verified: ${asset_name} (built from ${commit:-unknown commit})"
+say "checksum verified: ${asset_name} (${VERSION}, the ${CHANNEL} channel)"
 
 # --- the TypeScript takeover, step 1: stop BOTH daemons ALWAYS ----------------
 # THE ALWAYS-STOP CONTRACT (PR1's field ruling, hardened + the second
@@ -1159,7 +1185,7 @@ tar -xzf "$asset" -C "$stage"
 # unrelated directory that happens to contain a `prime-agent` entry is never
 # adopted, moved aside, or swept (the refusal below sends it back to the
 # user instead).
-printf 'install-rust.sh continuous run %s\ncommit %s\n' "$RUN" "${commit:-unknown}" \
+printf 'install-rust.sh channel %s\nversion %s\n' "$CHANNEL" "$VERSION" \
   > "${stage}/.prime-agent-install"
 
 # A lock left by the pre-takeover installer (name .prime-agent-rust-install.lock):
@@ -1603,7 +1629,7 @@ elif [ -d "$old" ]; then
   echo "rollback:  ${old} (the migrated pre-takeover tree; kept — remove it by hand"
   echo "            once you no longer need the rollback)"
 fi
-echo "source:    ${WORKFLOW} run ${RUN} (commit ${commit:-unknown})"
+echo "source:    the ${CHANNEL} channel at ${BASE_URL} (prime-agent ${VERSION})"
 if [ -n "$ts_stop_summary" ]; then
   printf '%s' "$ts_stop_summary"
 elif [ -z "$ts_stop_found_any" ] && [ -z "$ts_stop_refused" ]; then

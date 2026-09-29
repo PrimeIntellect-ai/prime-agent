@@ -459,6 +459,141 @@ jobs:
           out.write_text(json.dumps(document, indent=2) + "\n")
           print(f"channel manifest {out.name}: {document['version']}, {len(rows)} artifacts")
           PY
+      # THE R2 PUBLISH PHASE (the operator's distribution-model ruling: the
+      # user path is curl <domain>/install.sh and everything it reads comes
+      # from the same R2-backed base — nobody fetches a GitHub URL).
+      #
+      # THE SECURITY MODEL, in one block for every future reader:
+      #   - SEPARATION: the build jobs (build-gnu/build-darwin) produce and
+      #     attest the artifacts and hold NO R2 credentials; this promote job
+      #     — the protected 'release' environment, gated by the operator's
+      #     approval click — is the ONLY job that ever holds the R2 secrets.
+      #     The build is not the release: the approval gate IS the release
+      #     decision, and every s3 cp below runs only after it.
+      #   - CHECKSUM FIRST: sha256sum --check SHA256SUMS passes before any
+      #     upload — a corrupt or mismatched artifact never reaches the
+      #     bucket.
+      #   - HEADER FORM (TS parity): the version-prefixed artifacts
+      #     (releases/v<version>/) are immutable (1y) with their content
+      #     types; the root pointers (latest.json, stable, beta, beta.json,
+      #     install.sh, install-beta.sh) are no-cache — the user path is
+      #     always fresh.
+      #   - NO PATS, NO LEAKS: the GitHub side uses the workflow's own
+      #     identity (github.token); the R2 keys are environment secrets
+      #     scoped to this job; nothing is echoed.
+      #   - BETA SUPERSEDE: only the LATEST green commit gets a beta cut;
+      #     a newer rust push landing while this beta built means a newer
+      #     cut is coming — this publish keeps its versioned artifacts but
+      #     skips the beta channel pointers (beta.json/beta/install-beta.sh),
+      #     so the channel only ever advances forward.
+      #   - AUDIT SURFACE: the GitHub release below still attaches every
+      #     artifact (the TS order: the R2 publish first, GitHub second).
+      - name: Publish the R2 channel (the user path never touches GitHub)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test -n "$R2_BUCKET"
+          test -n "$R2_ENDPOINT_URL"
+          test -n "$R2_PUBLIC_BASE_URL"
+          INSTALL_BASE_URL="${R2_PUBLIC_BASE_URL%/}"
+          test -n "$INSTALL_BASE_URL"
+
+          # THE CHECKSUM GATE FIRST: the merged SHA256SUMS covers every
+          # tarball the build jobs produced; a mismatch never uploads.
+          (cd release-out && sha256sum --check SHA256SUMS)
+
+          RELEASE_PREFIX="releases/${RELEASE_VERSION}"
+          for artifact in release-out/prime-agent-*.tar.gz; do
+            aws s3 cp "$artifact" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$artifact")" \
+              --endpoint-url "$R2_ENDPOINT_URL" \
+              --content-type application/gzip \
+              --cache-control 'public, max-age=31536000, immutable'
+          done
+          aws s3 cp release-out/SHA256SUMS "s3://${R2_BUCKET}/${RELEASE_PREFIX}/SHA256SUMS" \
+            --endpoint-url "$R2_ENDPOINT_URL" \
+            --content-type text/plain \
+            --cache-control 'public, max-age=31536000, immutable'
+
+          # The rendered installer pair: the repo file's defaults ARE the
+          # official domain, so the publish render only stamps the build's
+          # R2 base + channel default into the served copies. Both renders
+          # publish on every cut (TS parity: a changed installer ships with
+          # whichever channel publishes, so the served scripts never go
+          # stale between releases).
+          render_installer() {
+            channel="$1"
+            sed -e "s|^DOWNLOAD_BASE_URL_DEFAULT=.*|DOWNLOAD_BASE_URL_DEFAULT=\"${INSTALL_BASE_URL}\"|" \
+                -e "s|^RELEASE_CHANNEL_DEFAULT=.*|RELEASE_CHANNEL_DEFAULT=${channel}|" \
+                "verification-source/install-rust.sh" > "/tmp/install-${channel}.sh"
+            grep -q "^DOWNLOAD_BASE_URL_DEFAULT=\"${INSTALL_BASE_URL}\"" "/tmp/install-${channel}.sh"
+            grep -q "^RELEASE_CHANNEL_DEFAULT=${channel}$" "/tmp/install-${channel}.sh"
+          }
+
+          if [[ "$RELEASE_VERSION" == *-beta* ]]; then
+            # THE BETA CHANNEL: the rolling per-push cut. The supersede
+            # rule — only the newest proven commit advances the channel: a
+            # newer rust push landing while this beta built means a newer
+            # cut is already coming; this one keeps its versioned
+            # artifacts (immutable, still served to pinned installs) but
+            # leaves the channel pointers alone.
+            built_parent="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${GITHUB_SHA}" --jq '.parents[0].sha')"
+            branch_head="$(gh api "repos/${GITHUB_REPOSITORY}/commits/rust" --jq '.sha')"
+            if [ "$built_parent" != "$branch_head" ]; then
+              echo "superseded: this beta built ${built_parent} but rust is at ${branch_head}; a newer cut is coming — the versioned artifacts publish, the beta channel pointers do not"
+            else
+              render_installer beta
+              aws s3 cp release-out/beta.json "s3://${R2_BUCKET}/beta.json" \
+                --endpoint-url "$R2_ENDPOINT_URL" \
+                --content-type application/json \
+                --cache-control no-cache
+              printf '%s\n' "${RELEASE_VERSION#v}" > /tmp/beta-pointer
+              aws s3 cp /tmp/beta-pointer "s3://${R2_BUCKET}/beta" \
+                --endpoint-url "$R2_ENDPOINT_URL" \
+                --content-type text/plain \
+                --cache-control no-cache
+              aws s3 cp /tmp/install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
+                --endpoint-url "$R2_ENDPOINT_URL" \
+                --content-type text/x-shellscript \
+                --cache-control no-cache
+              render_installer stable
+              aws s3 cp /tmp/install-stable.sh "s3://${R2_BUCKET}/install.sh" \
+                --endpoint-url "$R2_ENDPOINT_URL" \
+                --content-type text/x-shellscript \
+                --cache-control no-cache
+              echo "beta channel advanced to ${RELEASE_VERSION} at ${INSTALL_BASE_URL}"
+            fi
+          else
+            # THE STABLE CHANNEL: the operator's release act is the
+            # approval click that opened this job; the publish is
+            # unconditional.
+            render_installer stable
+            aws s3 cp release-out/latest.json "s3://${R2_BUCKET}/latest.json" \
+              --endpoint-url "$R2_ENDPOINT_URL" \
+              --content-type application/json \
+              --cache-control no-cache
+            printf '%s\n' "${RELEASE_VERSION#v}" > /tmp/stable-pointer
+            aws s3 cp /tmp/stable-pointer "s3://${R2_BUCKET}/stable" \
+              --endpoint-url "$R2_ENDPOINT_URL" \
+              --content-type text/plain \
+              --cache-control no-cache
+            aws s3 cp /tmp/install-stable.sh "s3://${R2_BUCKET}/install.sh" \
+              --endpoint-url "$R2_ENDPOINT_URL" \
+              --content-type text/x-shellscript \
+              --cache-control no-cache
+            render_installer beta
+            aws s3 cp /tmp/install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
+              --endpoint-url "$R2_ENDPOINT_URL" \
+              --content-type text/x-shellscript \
+              --cache-control no-cache
+            echo "stable channel advanced to ${RELEASE_VERSION} at ${INSTALL_BASE_URL}"
+          fi
       - name: Install syft
         uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
       - name: Generate SPDX SBOM per target (unpacked artifact tree)
