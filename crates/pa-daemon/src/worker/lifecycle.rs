@@ -81,6 +81,12 @@ impl Worker {
         self.side_questions
             .abort_all_and_settle(SIDE_QUESTION_SETTLE_TIMEOUT)
             .await;
+        // The running user bash goes with the stop (the orphan
+        // protection's home - the bots' finding class: the passivation
+        // stop must never leave the user's process running after the
+        // worker exits; the abort is the same kill switch the
+        // `abort_bash` command pulls).
+        self.user_bash.abort().await;
         {
             let mut core = self.core.lock().unwrap();
             core.shutdown_requested = true;

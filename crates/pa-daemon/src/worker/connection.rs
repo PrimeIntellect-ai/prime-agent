@@ -965,7 +965,20 @@ impl Worker {
             self.release_session_attachments(token);
         }
         let mut core = self.core.lock().unwrap();
-        core.attached_client_ids.retain(|id| id != &client_id);
+        // The belt is scoped (the fresh bots' sibling-hold finding): the
+        // explicit detach removes the id only when no other live
+        // connection still retains it (a reconnect sharing the client
+        // id keeps its own hold - the same set-membership rule the
+        // registry's release applies).
+        let held_elsewhere = self
+            .session_attachments
+            .lock()
+            .unwrap()
+            .values()
+            .any(|other| other.iter().any(|entry| entry == &client_id));
+        if !held_elsewhere {
+            core.attached_client_ids.retain(|id| id != &client_id);
+        }
         drop(core);
         // The detach wake: the runner's park computed its idle-passivation
         // window while this client held the attach; the notify re-arms it

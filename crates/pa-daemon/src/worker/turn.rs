@@ -340,12 +340,17 @@ impl TurnRunner {
         }
         // The post-await revalidation (the fresh bots' race findings):
         // the engine gate's await opened a window - a bash admitted, a
-        // prompt parked in a lane, or a replay prefix restored during it
-        // must cancel the stop, and a bash that started in the window
-        // keeps the worker resident exactly like the pre-gate check.
+        // prompt parked in a lane, a replay prefix restored, a manual
+        // compaction started, or a CLIENT ATTACHED during it must all
+        // cancel the stop (the shutdown would cancel the compaction and
+        // disconnect the new client); the bash that started in the
+        // window keeps the worker resident exactly like the pre-gate
+        // check.
         {
             let core = self.core.lock().unwrap();
-            if !core.steering.is_empty()
+            if core.compacting
+                || !core.attached_client_ids.is_empty()
+                || !core.steering.is_empty()
                 || !core.follow_up.is_empty()
                 || !core.pending_next_turn.is_empty()
             {

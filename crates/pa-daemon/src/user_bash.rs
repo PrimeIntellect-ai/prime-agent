@@ -523,11 +523,6 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
         .args(&shell.args)
         .arg(&resolved)
         .current_dir(run.cwd)
-        // The orphan belt: a passivation stop that slips past the bash
-        // gate's windows must never leave the user's process running
-        // after the worker exits (kill_on_drop makes the handle's
-        // teardown kill the child even when no abort lands first).
-        .kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
