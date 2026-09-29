@@ -123,6 +123,14 @@ pub struct Worker {
     roster_delta_sequence: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub(crate) work_notify: Arc<Notify>,
     idle_notify: Arc<Notify>,
+    /// The per-connection session-attach registry (the fresh bots'
+    /// release findings): connection tokens -> the client ids their
+    /// `attach` retained. The release is connection-scoped on EVERY
+    /// return path (the guard's Drop), and a shared client id leaves the
+    /// core only when the LAST live connection holding it goes (the
+    /// reconnect shape).
+    pub(crate) session_attachments:
+        std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
     pub(crate) events: Arc<EventPump>,
     /// The `/model` catalog background-refresh coalescing gate: at most
     /// one refresh runs per worker with one queued trailing re-arm, so a
@@ -758,6 +766,7 @@ impl Worker {
             roster_delta_sequence,
             work_notify,
             idle_notify,
+            session_attachments: std::sync::Mutex::new(std::collections::HashMap::new()),
             events,
             model_catalog_refresh_gate: std::sync::Arc::new(
                 crate::model_catalog::RefreshGate::default(),

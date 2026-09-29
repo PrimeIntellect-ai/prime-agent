@@ -1099,12 +1099,20 @@ impl Supervisor {
         if let Some(resident) = self.registry.find_by_session_file(&session_file).await {
             return Some(crate::messaging::WakeOutcome::Woken(resident));
         }
-        match self.launch_worker(&create, None).await {
-            Ok((resident, _create_summary)) => {
+        // The caller's route budget bounds the launch (see the ledger
+        // wake's arm): the background launch continues; this caller
+        // answers within its own budget.
+        let launched = tokio::time::timeout(
+            std::time::Duration::from_millis(ROUTE_TIMEOUT_MS),
+            self.launch_worker(&create, None),
+        )
+        .await;
+        match launched {
+            Ok(Ok((resident, _create_summary))) => {
                 self.refresh_roster_entry(&resident).await;
                 Some(crate::messaging::WakeOutcome::Woken(resident))
             }
-            Err(error) => {
+            Ok(Err(error)) => {
                 // The check-and-launch race (two concurrent prompt/
                 // attach wakes for the same passivated row): the rival
                 // wins the session lease while this launch runs, so the
@@ -1117,6 +1125,9 @@ impl Supervisor {
                 }
                 Some(crate::messaging::WakeOutcome::Failed(format!("{error:#}")))
             }
+            Err(_budget) => Some(crate::messaging::WakeOutcome::Failed(
+                "the revival launch exceeded the route budget; retry the command".to_string(),
+            )),
         }
     }
 
@@ -1143,15 +1154,44 @@ impl Supervisor {
         let edges = ledger
             .live_edges()
             .with_context(|| "read the spawn ledger edges".to_string())?;
+        // The resolution (the fresh bots' never-matches finding): an
+        // explicit `rlmChildId` is the durable key, and the routed
+        // selector is the child's LIVE id - NOT the file stem - so the
+        // stem==selector arm alone never fired. The order: (1a) the edge
+        // matching BOTH the stem and the id (a stem-shaped caller never
+        // tombstones an unrelated edge sharing the id); (1b) the LAST
+        // live edge carrying the id (the live-id callers; a replaced
+        // child's newest edge wins); (2) without the id, the
+        // stem-matching edge (the ledger-edge fallback).
         let mut resolved: Option<(String, String)> = None;
-        for edge in &edges {
-            let stem = std::path::Path::new(&edge.child)
-                .file_stem()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_default();
-            if stem == selector && child_id.is_some_and(|id| edge.child_id == id) {
-                resolved = Some((edge.child_id.clone(), edge.child.clone()));
-                break;
+        if let Some(id) = child_id {
+            for edge in &edges {
+                let stem = std::path::Path::new(&edge.child)
+                    .file_stem()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if stem == selector && edge.child_id == id {
+                    resolved = Some((edge.child_id.clone(), edge.child.clone()));
+                    break;
+                }
+            }
+            if resolved.is_none() {
+                for edge in &edges {
+                    if edge.child_id == id {
+                        resolved = Some((edge.child_id.clone(), edge.child.clone()));
+                    }
+                }
+            }
+        } else {
+            for edge in &edges {
+                let stem = std::path::Path::new(&edge.child)
+                    .file_stem()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if stem == selector {
+                    resolved = Some((edge.child_id.clone(), edge.child.clone()));
+                    break;
+                }
             }
         }
         let Some((child_id, session_file)) = resolved else {
@@ -1167,7 +1207,23 @@ impl Supervisor {
         // sweep must land the way a live child's kill route leaves them.
         let sessions_dir = crate::paths::sessions_dir(&self.options.agent_dir)
             .with_context(|| "resolve the sessions dir for the delete finalize".to_string())?;
+        // The live coverage captured AFTER the tombstone append: a wake
+        // that registered a resident for this child between the append
+        // and the finalize must be visible here (the revived worker's
+        // tree is covered - the archive/sweep skips it exactly like the
+        // resident delete's covered-tree belt).
         let live = self.live_session_files().await;
+        if self
+            .registry
+            .find_by_session_file(&session_file)
+            .await
+            .is_some()
+        {
+            // A revival raced the delete: the tombstone stands as the
+            // durable boundary, but the revived worker's session stays
+            // live - no archive, no artifact sweep.
+            return Ok(());
+        }
         crate::stop_cleanup::finalize_archived_stop(
             &self.options.agent_dir,
             &sessions_dir,

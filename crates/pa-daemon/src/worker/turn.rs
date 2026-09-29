@@ -251,8 +251,13 @@ impl TurnRunner {
                 // paused pump holding items in the lanes (a parked steer
                 // or follow-up) keeps the session active — the queued
                 // work lives only on this resident worker, so the
-                // passivation must never discard it.
-                !core.steering.is_empty() || !core.follow_up.is_empty(),
+                // passivation must never discard it. The replay's
+                // restored `pending_next_turn` prefix rows live here
+                // too (restore_next_turn parks them in the worker, not
+                // the lanes) - both surfaces are checked.
+                !core.steering.is_empty()
+                    || !core.follow_up.is_empty()
+                    || !core.pending_next_turn.is_empty(),
                 core.last_activity_ms,
                 core.cwd.clone(),
             )
@@ -298,8 +303,12 @@ impl TurnRunner {
                 core.shutdown_requested,
                 // The fresh-snapshot fence's queued-input arm: a wake that
                 // raced the timer leaves its item in the lanes — the
-                // passivation cancels instead of discarding it.
-                !core.steering.is_empty() || !core.follow_up.is_empty(),
+                // passivation cancels instead of discarding it. The
+                // restored `pending_next_turn` prefix rows hold here
+                // too.
+                !core.steering.is_empty()
+                    || !core.follow_up.is_empty()
+                    || !core.pending_next_turn.is_empty(),
                 core.last_activity_ms,
                 core.cwd.clone(),
             )
@@ -327,6 +336,23 @@ impl TurnRunner {
         // active-or-paused scheduled job): a parked child with either
         // stays resident.
         if !self.engine.can_passivate_settled_session().await {
+            return;
+        }
+        // The post-await revalidation (the fresh bots' race findings):
+        // the engine gate's await opened a window - a bash admitted, a
+        // prompt parked in a lane, or a replay prefix restored during it
+        // must cancel the stop, and a bash that started in the window
+        // keeps the worker resident exactly like the pre-gate check.
+        {
+            let core = self.core.lock().unwrap();
+            if !core.steering.is_empty()
+                || !core.follow_up.is_empty()
+                || !core.pending_next_turn.is_empty()
+            {
+                return;
+            }
+        }
+        if self.user_bash.is_running() {
             return;
         }
         let command = serde_json::json!({

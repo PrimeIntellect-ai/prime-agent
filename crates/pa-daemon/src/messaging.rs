@@ -281,12 +281,20 @@ impl Supervisor {
             launch_env: None,
             rest: Map::default(),
         };
-        match self.launch_worker(&create, None).await {
-            Ok((resident, _create_summary)) => {
+        // The caller's route budget bounds the launch (see the ledger
+        // wake's arm): a slow boot fails THIS caller fast; the background
+        // launch keeps going and a retry reuses it.
+        let launched = tokio::time::timeout(
+            std::time::Duration::from_millis(crate::supervisor::ROUTE_TIMEOUT_MS),
+            self.launch_worker(&create, None),
+        )
+        .await;
+        match launched {
+            Ok(Ok((resident, _create_summary))) => {
                 self.refresh_roster_entry(&resident).await;
                 WakeOutcome::Woken(resident)
             }
-            Err(error) => {
+            Ok(Err(error)) => {
                 // The check-and-launch race (two concurrent wakes for the
                 // same saved file): the rival wins the session lease while
                 // this launch runs — join its resident instead of failing
@@ -296,6 +304,9 @@ impl Supervisor {
                 }
                 WakeOutcome::Failed(format!("{error:#}"))
             }
+            Err(_budget) => WakeOutcome::Failed(
+                "the revival launch exceeded the route budget; retry the command".to_string(),
+            ),
         }
     }
 }
@@ -389,12 +400,22 @@ impl Supervisor {
             launch_env: None,
             rest: Map::default(),
         };
-        match self.launch_worker(&create, None).await {
-            Ok((resident, _create_summary)) => {
+        // The launch bounded by the caller's route budget (the fresh
+        // bots' finding: an unbounded wake makes a 30s Prompt block up
+        // to the 600s boot budget): the launch keeps running in the
+        // background - a later prompt reuses the resident - but THIS
+        // caller answers within its own budget.
+        let launched = tokio::time::timeout(
+            std::time::Duration::from_millis(crate::supervisor::ROUTE_TIMEOUT_MS),
+            self.launch_worker(&create, None),
+        )
+        .await;
+        match launched {
+            Ok(Ok((resident, _create_summary))) => {
                 self.refresh_roster_entry(&resident).await;
                 WakeOutcome::Woken(resident)
             }
-            Err(error) => {
+            Ok(Err(error)) => {
                 // The check-and-launch race: the rival wins the session
                 // lease while this launch runs — join its resident (TS's
                 // in-flight-join revival semantics).
@@ -403,6 +424,10 @@ impl Supervisor {
                 }
                 WakeOutcome::Failed(format!("{error:#}"))
             }
+            Err(_budget) => WakeOutcome::Failed(format!(
+                "the revival launch exceeded the route budget ({ROUTE_BUDGET_MS}ms); retry the command",
+                ROUTE_BUDGET_MS = crate::supervisor::ROUTE_TIMEOUT_MS
+            )),
         }
     }
 }
