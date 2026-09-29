@@ -168,9 +168,8 @@ mod tests {
                                         aborted,
                                         error,
                                     };
-                                    // The render fills the cache first, so
-                                    // the count exercises its warm replay
-                                    // (the "" and dim tags' hits).
+                                    // Render first so the count also runs
+                                    // the warm-cache path.
                                     let mut cache =
                                         crate::markdown::MarkdownBlockCache::default();
                                     let rendered = super::super::render_assistant(

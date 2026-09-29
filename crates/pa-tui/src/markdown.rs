@@ -151,8 +151,8 @@ pub fn render_markdown_tagged(
 /// are never pruned within a message: the cache is shared by the entry's
 /// text and thinking renders, so TS's per-render `nextCache` swap would
 /// evict the other block's entries every frame. Size stays bounded
-/// without it — the entries are the message's settled blocks (raw text
-/// that no later append can change), the whole map drops when the
+/// without it — entries are keyed by settled (non-final) blocks (raw
+/// text that no later append can change), the whole map drops when the
 /// message settles (`view.rs`) or the layout width or render options
 /// change (`prepare_layout`), and the final block is never cached:
 /// while streaming, appended text can reinterpret an open block

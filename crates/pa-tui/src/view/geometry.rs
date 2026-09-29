@@ -30,9 +30,7 @@ impl AgentView {
                     )
             }
             ChatEntry::Assistant(message) => {
-                // The entry's own render cache, warmed by the frames that
-                // painted it: the settled blocks replay their painted row
-                // counts (the cache is only read here).
+                // Settled blocks replay from the entry's render cache.
                 let caches = self.md_caches.borrow();
                 let empty = crate::markdown::MarkdownBlockCache::default();
                 crate::chat::assistant_row_count(

@@ -413,9 +413,7 @@ fn quiet_style_renders_python_fences_uniform() {
 
 /// The TS-parity cacheability rule: a streaming frame caches the
 /// SETTLED blocks (every block but the final one) and never the
-/// changing final block. On the pre-fix inversion (only the final
-/// block keyed) the map instead grows one entry per frame (`be`,
-/// then `beta`) while `alpha` renders fresh every time.
+/// changing final block.
 #[test]
 fn streaming_frames_cache_only_settled_blocks() {
     let style = MarkdownStyle::default();
