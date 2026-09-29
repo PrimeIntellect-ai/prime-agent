@@ -257,14 +257,21 @@ note() { printf '%s\n' "$*" >&2; }
 # expansion alone (no dirname/basename: the bare-machine PATH of the
 # installer's own support matrix carries neither).
 physical_path() {
-  case "$1" in
-    */*) phys_parent="${1%/*}" phys_base="${1##*/}" ;;
-    *)   phys_parent="." phys_base="$1" ;;
+  # Trailing slashes normalize first (a PREFIX spelled with one must not
+  # abort the ancestor walk): "/x/" resolves like "/x", never as an
+  # empty-basename dead end.
+  phys_input="$1"
+  while [ "$phys_input" != "/" ] && [ "$phys_input" != "${phys_input%/}" ]; do
+    phys_input="${phys_input%/}"
+  done
+  case "$phys_input" in
+    */*) phys_parent="${phys_input%/*}" phys_base="${phys_input##*/}" ;;
+    *)   phys_parent="." phys_base="$phys_input" ;;
   esac
-  if [ -d "$1" ]; then
-    ( cd "$1" 2>/dev/null && pwd -P ) || printf '%s' "$1"
-  elif [ -z "$phys_base" ]; then
-    printf '%s' "$1"
+  if [ -d "$phys_input" ]; then
+    ( cd "$phys_input" 2>/dev/null && pwd -P ) || printf '%s' "$phys_input"
+  elif [ -z "$phys_base" ] || [ "$phys_parent" = "$phys_input" ]; then
+    printf '%s' "$phys_input"
   else
     printf '%s/%s' "$(physical_path "$phys_parent")" "$phys_base"
   fi
@@ -787,14 +794,45 @@ def envelope(request_id, body):
         "command": dict(body, id=request_id),
     }) + "\n"
 
+def classify_hello(value):
+    # The classification ladder, factored so every NEW connection
+    # re-verifies it (the bots' finding: the probe classifies once and
+    # then sends list/shutdown over FRESH connections — a daemon
+    # replaced between them would receive commands without ever being
+    # classified; the replacement check below aborts the ladder on any
+    # owner change).
+    runtime = value.get("runtime")
+    build_id = runtime.get("buildId") if isinstance(runtime, dict) else None
+    schema = value.get("schemaId")
+    if isinstance(build_id, str) and build_id.startswith(RUST_BUILD_ID_PREFIX):
+        return "rust"
+    if schema == RUST_SCHEMA_ID:
+        return "rust"
+    if isinstance(schema, str) and schema.startswith(TS_SCHEMA_FAMILY):
+        return "ts"
+    return None
+
+request_replaced = False
+
 def request(body):
+    global request_replaced
     request_id = "installer-" + body["type"] + ("-force" if body.get("force") else "")
     try:
         sock = connect()
     except OSError:
         return None
-    if wait_hello(sock) is None:
+    hello = wait_hello(sock)
+    if hello is None:
         sock.close()
+        return None
+    # A TS-classified candidate re-classifies every connection: the
+    # owner that answered the hello must be the owner the ladder
+    # classified, or a REPLACEMENT daemon took the socket (an
+    # unrecognized one at that — the replacement check refuses to send
+    # it any command; never killed blind, never commanded blind).
+    if owner == "ts" and classify_hello(hello) != "ts":
+        sock.close()
+        request_replaced = True
         return None
     sock.sendall(envelope(request_id, body).encode())
     buf = bytearray()
@@ -870,6 +908,9 @@ if list_response is not None and list_response.get("success"):
     if isinstance(sessions, list):
         count = len(sessions)
 count_label = "?" if count is None else str(count)
+if request_replaced:
+    print("%s:replaced:%s" % (owner, count_label))
+    sys.exit(0)
 
 # THE ESCALATING LADDER (the always-stop contract, for BOTH daemons —
 # still no signal to any pid at any step):
@@ -890,10 +931,16 @@ def drain_confirm_timeout_s():
     return min(STOP_DRAIN_MINIMUM_S + STOP_DRAIN_PER_SESSION_S * count, STOP_DRAIN_CAP_S)
 
 request({"type": "shutdown", "force": False})
+if request_replaced:
+    print("%s:replaced:%s" % (owner, count_label))
+    sys.exit(0)
 if stopped_within(STOP_CONFIRM_TIMEOUT_S):
     print("%s:stopped:%s" % (owner, count_label))
     sys.exit(0)
 request({"type": "shutdown", "force": True})
+if request_replaced:
+    print("%s:replaced:%s" % (owner, count_label))
+    sys.exit(0)
 if stopped_within(drain_confirm_timeout_s()):
     print("%s:stopped-forced:%s" % (owner, count_label))
     sys.exit(0)
@@ -920,7 +967,13 @@ stop_daemon_candidate() {
   # explicit override is set (a deliberate in-daemon update). The refusal
   # is loud and lands in the summary: a skipped live daemon is a fact the
   # operator must see, never a silent skip.
-  if [ -n "$live_daemon_socket" ] && [ "$socket_path" = "$live_daemon_socket" ] \
+  # The equivalence goes BEYOND the raw string: a socket reached through
+  # a symlinked spelling is still the driving daemon (macOS /tmp ->
+  # /private/tmp is the canonical field case), so the same-file test
+  # guards the refusal too (the bots' finding).
+  if [ -n "$live_daemon_socket" ] \
+     && { [ "$socket_path" = "$live_daemon_socket" ] \
+          || [ "$socket_path" -ef "$live_daemon_socket" ]; } \
      && [ "${PRIME_AGENT_STOP_LIVE_DAEMON:-}" != "1" ]; then
     note "note: ${socket_path} is the daemon this install runs under — it is"
     note "  never probed (stopping it would cut the branch this installer"
@@ -991,6 +1044,19 @@ stop_daemon_candidate() {
       say "the Rust daemon on ${socket_path} stopped for the update (${sessions} session(s)"
       say "  were live; forced after the graceful request; no signal sent)"
       ts_stop_summary="${ts_stop_summary}rust daemon: stopped for the update on ${socket_path} (serving ${sessions} session(s); forced after the graceful request; verified down)
+"
+      ;;
+    ts:replaced:*|rust:replaced:*)
+      sessions="${verdict##*:}"
+      owner="the TypeScript daemon"
+      case "$verdict" in rust:*) owner="the Rust daemon" ;; esac
+      ts_stop_found_any="yes"
+      note "WARNING: a DIFFERENT daemon took ${socket_path} between the"
+      note "  classification and the stop (${owner} was classified there;"
+      note "  the new one was never identified): nothing was stopped, and no"
+      note "  command was sent to the replacement. Stop it by hand:"
+      note "  prime-agent shutdown --force"
+      ts_stop_summary="${ts_stop_summary}daemon: WARNING replaced on ${socket_path} (the classified ${owner} was swapped mid-stop; the replacement was never commanded; stop it by hand: prime-agent shutdown --force)
 "
       ;;
     ts:stop-failed:*|rust:stop-failed:*)
