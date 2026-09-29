@@ -24,6 +24,13 @@ use pa_tui::interactive::{
     HeadlessPlan, HeadlessStep, InteractiveOptions, ModelSelection, SessionSelection, UiMode,
 };
 
+/// The layout handoff store is process-wide: the two round-trip tests
+/// serialize through this lock so one test's stash is never adopted (or
+/// overwritten) by the other's - the unit tests' HANDOFF_TEST_LOCK
+/// discipline applied to the e2e pair (the slot lives inside pa-tui and
+/// cannot be reset from this crate's tests).
+static HANDOFF_E2E_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 struct Supervisor {
     child: Child,
     socket: PathBuf,
@@ -189,6 +196,7 @@ fn chat_options(socket: PathBuf, cwd: PathBuf) -> InteractiveOptions {
 /// content, the unit tests prove the packs were the source).
 #[tokio::test]
 async fn the_roundtrip_reentry_renders_the_same_transcript() {
+    let _handoff_guard = HANDOFF_E2E_LOCK.lock().await;
     let dir = tempfile::TempDir::new().expect("temp dir");
     let session_dir = dir.path().join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");
@@ -334,6 +342,7 @@ async fn the_roundtrip_reentry_renders_the_same_transcript() {
 /// observable the byte-identical frames cannot prove on their own).
 #[tokio::test]
 async fn a_post_turn_sojourn_reentry_still_serves_the_held_packs() {
+    let _handoff_guard = HANDOFF_E2E_LOCK.lock().await;
     let dir = tempfile::TempDir::new().expect("temp dir");
     let session_dir = dir.path().join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");

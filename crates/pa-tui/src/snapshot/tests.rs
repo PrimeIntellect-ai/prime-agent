@@ -849,14 +849,20 @@ fn reconstructs_slim_attach() {
 #[test]
 fn a_cursorless_attach_reconstructs_as_unkeyed_for_the_layout_handoff() {
     let mut attach = slim_attach();
-    attach["snapshot"]
-        .as_object_mut()
+    // The cursor rides both the snapshot block AND the attach's top-level
+    // optional fields: a cursor-less attach omits it in BOTH places.
+    let snapshot = attach
+        .get_mut("snapshot")
         .expect("the slim attach carries a snapshot")
-        .remove("lastEventSequence");
-    attach["snapshot"]
         .as_object_mut()
-        .expect("the slim attach carries a snapshot")
-        .remove("lastEventCursor");
+        .expect("the snapshot is a map");
+    snapshot.remove("lastEventSequence");
+    snapshot.remove("lastEventCursor");
+    let top = attach
+        .as_object_mut()
+        .expect("the slim attach is a map");
+    top.remove("lastEventSequence");
+    top.remove("lastEventCursor");
     let data = attach_data_from_response(attach).unwrap();
     let view = reconstruct(&data);
     assert!(!view.cursor_present, "no cursor means no handoff key");
