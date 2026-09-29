@@ -226,6 +226,7 @@ impl AgentSession {
                     harness_digest: digest_inputs,
                     auxiliary: self.auxiliary_model.as_ref(),
                     summary_delta,
+                    semantic_edges: self.semantic_edges(),
                 },
             )
             .await?

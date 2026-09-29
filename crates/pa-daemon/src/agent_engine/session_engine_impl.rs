@@ -989,6 +989,46 @@ impl SessionEngine for AgentSessionEngine {
             })
             .unwrap_or((u64::from(DEFAULT_RLM_MAX_DEPTH), "default"));
         *self.rlm_max_depth_source.lock().expect("depth source lock") = source;
+        // The semantic-edge identity (TS `semanticEdgeLedgerPath` +
+        // provenance): a spawned child's ledger lives in its rlm session
+        // dir (the session file's parent), a top-level session's in its
+        // artifact dir; the durable session id is the ledger identity
+        // (the in-memory engine manager's id is per-build). A session
+        // without a durable id records nothing.
+        let semantic_identity = identity.session_id.clone().map(|session_id| {
+            let rlm_session_dir = match &identity.semantic_spawn {
+                Some(_) => identity
+                    .session_file
+                    .as_deref()
+                    .map(std::path::Path::new)
+                    .and_then(std::path::Path::parent),
+                None => None,
+            };
+            let artifact_dir = identity
+                .session_file
+                .as_deref()
+                .map(std::path::Path::new)
+                .and_then(pa_core::session_engine::harness_digest::session_artifact_dir_for_log);
+            pa_core::session_engine::semantic_edges::SemanticEdgeIdentity {
+                session_id,
+                ledger_path: pa_core::session_engine::semantic_edges::semantic_edge_ledger_path(
+                    rlm_session_dir,
+                    artifact_dir.as_deref(),
+                ),
+                parent_session_id: identity
+                    .semantic_spawn
+                    .as_ref()
+                    .and_then(|spawn| spawn.parent_session_id.clone()),
+                spawned_by_request_id: identity
+                    .semantic_spawn
+                    .as_ref()
+                    .and_then(|spawn| spawn.spawned_by_request_id.clone()),
+            }
+        });
+        *self
+            .semantic_identity
+            .lock()
+            .expect("semantic identity lock") = semantic_identity;
         if let Some(children) = &self.children {
             let parent = ParentIdentity {
                 rlm_depth: identity.rlm_depth,
@@ -1058,10 +1098,28 @@ impl SessionEngine for AgentSessionEngine {
         let question = request.question.clone();
         let previous_turns = request.previous_turns;
         let retry_policy = pa_core::session_engine::provider_retry::DEFAULT_PROVIDER_RETRY_POLICY;
+        // TS `unwrapSemanticEdgeStreamFn`: the side call runs on the
+        // session's pre-semantic stream fn, so it carries no request id
+        // and the ledger records nothing. The engine build always wires
+        // it; no fallback to the agent's own fn, which would leak the
+        // id-carrying wrapper into the side call.
+        let side_stream_fn = {
+            let guard = self.session.blocking_lock();
+            guard
+                .as_deref()
+                .and_then(|engine| engine.session.side_question_stream_fn())
+        };
+        let Some(side_stream_fn) = side_stream_fn else {
+            return SideQuestionOutcome::Failed {
+                answer: String::new(),
+                error: "Select a model before asking a side question".to_string(),
+            };
+        };
         let result =
             self.runtime
                 .block_on(pa_core::session_engine::side_question::run_side_question(
                     &agent,
+                    side_stream_fn,
                     &question,
                     &previous_turns,
                     &retry_policy,

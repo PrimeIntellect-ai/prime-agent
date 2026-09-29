@@ -1,6 +1,6 @@
 use super::{
     auxiliary_model, compaction, compaction_exec, image_model_routing, ipython_state,
-    provider_adapter, refine, telemetry, AgentSession, PromptBatchRow,
+    provider_adapter, refine, semantic_edges, telemetry, AgentSession, PromptBatchRow,
 };
 
 impl AgentSession {
@@ -195,5 +195,48 @@ impl AgentSession {
             .compaction
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Install the session's semantic-edge recorder (the engine build's
+    /// handoff; the daemon's child registry and retry park read it back
+    /// through [`AgentSession::semantic_edges`]).
+    pub fn set_semantic_edges(
+        &self,
+        recorder: Option<std::sync::Arc<semantic_edges::SemanticEdgeRecorder>>,
+    ) {
+        *self
+            .semantic_edges
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = recorder;
+    }
+
+    /// The session's semantic-edge recorder, when the engine built the
+    /// session with a semantic identity.
+    #[must_use]
+    pub fn semantic_edges(&self) -> Option<std::sync::Arc<semantic_edges::SemanticEdgeRecorder>> {
+        self.semantic_edges
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Install the pre-semantic stream fn calls outside session history run
+    /// on (TS `unwrapSemanticEdgeStreamFn`; the engine wires the
+    /// timing-instrumented fn it wrapped semantic edges around).
+    pub fn set_side_question_stream_fn(&self, stream_fn: pa_agent::stream::StreamFn) {
+        *self
+            .side_question_stream_fn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(stream_fn);
+    }
+
+    /// The pre-semantic stream fn for calls outside session history (side
+    /// questions carry no request id).
+    #[must_use]
+    pub fn side_question_stream_fn(&self) -> Option<pa_agent::stream::StreamFn> {
+        self.side_question_stream_fn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }

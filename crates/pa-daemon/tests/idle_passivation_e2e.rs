@@ -278,6 +278,7 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_prompt() {
             model: None,
             thinking: None,
             cell_source_code: None,
+            spawned_by_request_id: None,
         })
         .await
         .expect("spawn the child");

@@ -470,6 +470,7 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
             model: None,
             thinking: None,
             cell_source_code: None,
+            spawned_by_request_id: None,
         })
         .await
         .expect("spawn the child");
@@ -856,6 +857,7 @@ async fn family_edges_never_cross_families_end_to_end() {
                 model: None,
                 thinking: None,
                 cell_source_code: None,
+                spawned_by_request_id: None,
             })
             .await
             .expect("spawn the child");
@@ -913,7 +915,12 @@ async fn family_edges_never_cross_families_end_to_end() {
         )
         .expect("kid artifact dir")
         .flatten()
-        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
+        // The semantic-edge ledger rides the same dir (TS: the child's
+        // rlm session dir owns it); only the durable session row counts.
+        .filter(|entry| {
+            entry.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+                && entry.file_name().to_string_lossy() != "semantic-edges.jsonl"
+        })
         .collect();
         assert_eq!(kid_files.len(), 1, "one kid session file: {kid_files:?}");
         kids.push((
@@ -1013,6 +1020,7 @@ async fn family_edges_never_cross_families_end_to_end() {
             model: None,
             thinking: None,
             cell_source_code: None,
+            spawned_by_request_id: None,
         })
         .await
         .expect("spawn the grandchild");

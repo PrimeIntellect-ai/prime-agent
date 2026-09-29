@@ -582,9 +582,25 @@ async fn build_headless_engine_with(
         .map_err(|error| format!("MCP manager construction failed: {error}"))?;
         std::sync::Arc::new(std::sync::Mutex::new(manager))
     };
+    // TS print mode records too (`semanticEdgeLedgerPath`): the durable
+    // session id names the ledger, which lives under the session artifact
+    // dir (`--no-session` keeps the identity ledger-less but the request
+    // ids still go on the wire).
+    let semantic_edges = session_manager.as_ref().map(|manager| {
+        pa_core::session_engine::semantic_edges::SemanticEdgeIdentity {
+            session_id: manager.get_session_id().to_string(),
+            ledger_path: pa_core::session_engine::semantic_edges::semantic_edge_ledger_path(
+                None,
+                manager.get_session_artifact_dir().as_deref(),
+            ),
+            parent_session_id: None,
+            spawned_by_request_id: None,
+        }
+    });
     let engine = pa_core::session_engine::engine::create_session(
         pa_core::session_engine::engine::SessionEngineConfig {
             cron_store: None,
+            semantic_edges,
             telemetry,
             steering_mode,
             follow_up_mode,
@@ -1640,6 +1656,7 @@ async fn build_faux_engine_with(
         pa_core::session_engine::engine::SessionEngineConfig {
             cron_store: None,
             // Faux verification harness: no product telemetry.
+            semantic_edges: None,
             steering_mode: None,
             follow_up_mode: None,
             telemetry: None,

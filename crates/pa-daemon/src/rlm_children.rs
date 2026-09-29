@@ -354,6 +354,13 @@ struct SupervisorChildSessionsInner {
     /// `/context` children immediately, not ride out the next background
     /// refresh.
     delete_notifier: std::sync::Mutex<Option<DeleteNotifier>>,
+    /// The parent session's semantic-edge recorder (wired once the session
+    /// engine is built; the settle watcher records a returned child's last
+    /// committed request into it). `None` until the build or for sessions
+    /// without a semantic identity.
+    semantic_edges: std::sync::Mutex<
+        Option<std::sync::Arc<pa_core::session_engine::semantic_edges::SemanticEdgeRecorder>>,
+    >,
 }
 
 impl Clone for SupervisorChildSessions {
@@ -387,6 +394,7 @@ impl SupervisorChildSessions {
                 model_refusal_telemetry,
                 usage_sink: std::sync::Mutex::new(None),
                 delete_notifier: std::sync::Mutex::new(None),
+                semantic_edges: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -439,6 +447,26 @@ impl SupervisorChildSessions {
     /// while holding the lock).
     pub fn set_usage_sink(&self, sink: Arc<dyn RlmChildUsageSink>) {
         *self.inner.usage_sink.lock().expect("usage sink lock") = Some(sink);
+    }
+
+    /// Wire the parent session's semantic-edge recorder (the per-build
+    /// handoff beside the usage sink): the settle watcher records a
+    /// returned child's last committed request into it.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the semantic-edges mutex is poisoned.
+    pub fn set_semantic_edges(
+        &self,
+        recorder: Option<
+            std::sync::Arc<pa_core::session_engine::semantic_edges::SemanticEdgeRecorder>,
+        >,
+    ) {
+        *self
+            .inner
+            .semantic_edges
+            .lock()
+            .expect("semantic edges lock") = recorder;
     }
 
     /// Whether a spawn-name reservation currently holds `name` (the TS

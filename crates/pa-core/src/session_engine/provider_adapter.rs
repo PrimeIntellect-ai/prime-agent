@@ -180,8 +180,19 @@ pub fn stream_once(
             on_payload: options.on_payload.map(agent_payload_hook_to_ai),
             on_response: options.on_response.map(agent_response_hook_to_ai),
             // StreamOptions carries a plain map; the target's ordered
-            // (BTreeMap) resolution converts here.
-            headers: headers.map(|headers| headers.into_iter().collect()),
+            // (BTreeMap) resolution converts here, with the request's own
+            // headers (the semantic request id) merged over it — TS
+            // providers' `mergeHeaders(..., optionsHeaders)` order, the
+            // options win.
+            headers: {
+                let mut merged = headers;
+                if let Some(request_headers) = options.headers.clone() {
+                    merged
+                        .get_or_insert_with(std::collections::BTreeMap::new)
+                        .extend(request_headers);
+                }
+                merged.map(|headers| headers.into_iter().collect())
+            },
             metadata: None,
             timeout_ms: None,
         },

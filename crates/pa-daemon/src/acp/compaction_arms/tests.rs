@@ -68,6 +68,7 @@ async fn acp_test_bed(
     let stream_fn = real_stream_fn(None, model.clone());
     let engine = std::sync::Arc::new(
         create_session(SessionEngineConfig {
+            semantic_edges: None,
             cron_store: None,
             queued_steering_probe: None,
             image_model_router: None,
