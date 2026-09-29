@@ -123,7 +123,8 @@ jobs:
           if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/nightly" \
                | jq -e '[.assets[] | select(.name == "beta.json")][0].browser_download_url // empty' \
                > "${out}/beta-url" 2>/dev/null && [ -s "${out}/beta-url" ]; then
-            curl -fsSL "$(tr -d '"' < "${out}/beta-url")" -o "${out}/beta.json"
+            curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+              "$(tr -d '"' < "${out}/beta-url")" -o "${out}/beta.json"
             echo "rolling nightly beta.json: $(jq -c . "${out}/beta.json")"
           else
             echo "no rolling nightly release yet: the first cut starts the counter at 1"

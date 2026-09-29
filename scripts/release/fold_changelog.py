@@ -48,7 +48,13 @@ import time
 from pathlib import Path
 
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
-UNRELEASED_RE = re.compile(r"## \[Unreleased\]\n([\s\S]*?)(?=\n## \[|$)")
+UNRELEASED_RE = re.compile(
+    # Line-anchored (^ or after a newline, so prose or a fenced example
+    # quoting the literal heading mid-line cannot match) and tolerant of a
+    # missing trailing newline (the stranded-EOF-heading case). Group 1
+    # carries the preceding newline so the replacement keeps the section
+    # on its own line.
+    r"(^|\n)## \[Unreleased\][ \t]*\n?([\s\S]*?)(?=\n## \[|$)")
 SECTION_START_RE = re.compile(r"^## \[", re.M)
 
 # The seed header: written when CHANGELOG.md does not exist yet. The rust
@@ -112,9 +118,10 @@ def fold(repo: Path, changes_dir: Path, changelog: Path, version: str,
 
     unreleased = UNRELEASED_RE.search(content)
     section = build_section(version, date, [texts[p] for p in consumed],
-                            unreleased.group(1) if unreleased else None)
+                            unreleased.group(2) if unreleased else None)
     if unreleased:
-        content = UNRELEASED_RE.sub(section, content, count=1)
+        content = UNRELEASED_RE.sub(
+            lambda m: (m.group(1) or "") + section, content, count=1)
     else:
         first = SECTION_START_RE.search(content)
         if first:
@@ -137,14 +144,16 @@ def fold(repo: Path, changes_dir: Path, changelog: Path, version: str,
     changelog.write_text(content)
     if consumed:
         # A fragment that is folded must be gone when the fold returns,
-        # tracked or not: `git rm` fails outright on an untracked path and
-        # would leave the fold half-applied (CHANGELOG.md written, the
-        # fragment still present, and a retry refused by the section guard).
-        # --ignore-unmatch drops the tracked ones; the unlink sweep removes
-        # any untracked remainder so no half-fold can exist.
-        subprocess.run(["git", "rm", "-q", "--ignore-unmatch", "--",
+        # whatever its git state: `git rm` refuses untracked paths outright
+        # and modified ones without -f, and any refusal would leave the fold
+        # half-applied (CHANGELOG.md written, the fragment still present,
+        # and a retry refused by the section guard). -f +
+        # --ignore-unmatch removes tracked fragments despite local edits;
+        # the unlink sweep then removes whatever git cannot, so no
+        # half-fold can exist in any working-tree state.
+        subprocess.run(["git", "rm", "-q", "-f", "--ignore-unmatch", "--",
                         *[p.name for p in consumed]],
-                       cwd=changes_dir, check=True)
+                       cwd=changes_dir, check=False)
         for path in consumed:
             if path.is_file():
                 path.unlink()
