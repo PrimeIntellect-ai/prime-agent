@@ -694,6 +694,6 @@ mod tests {
         );
         // The u64 flags accept the same value.
         let parsed = parse(&["--autonomous-timeout-ms", "4294967296"]);
-        assert_eq!(parsed.autonomous_timeout_ms, Some(4294967296));
+        assert_eq!(parsed.autonomous_timeout_ms, Some(4_294_967_296));
     }
 }
