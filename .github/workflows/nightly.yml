@@ -92,7 +92,11 @@ jobs:
   cut:
     name: "cut the nightly beta tag (tag-only commit, never a branch change)"
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # THE WAIT'S BUDGET: the pushed commit's continuous run must conclude
+    # (the CI-green wait polls up to 75 minutes for a busy queue), and the
+    # tag machinery after it is minutes — 90 covers both; the old
+    # midnight-cron 15 was sized for a dispatch-shaped walk only.
+    timeout-minutes: 90
     permissions: {}
     steps:
       - name: Guard (the release bot App gates the whole nightly flow)
@@ -164,6 +168,11 @@ jobs:
                | [(map(select(.conclusion == "success")) | length), length] | @tsv')
             if [ "${total}" -lt 1 ] || [ "${built}" != "${total}" ]; then
               echo "::notice::the continuous run for ${target_sha} did not run its builds to green (${built}/${total}: a superseded push); the newer push's cut takes the channel"
+              # THE GREEN NO-OP: mark the run skipped for every LATER
+              # step (a step-level exit 0 lets the job continue, and the
+              # compute/tag steps would fail reading the missing state
+              # files — the guard env is the job-wide stop signal).
+              echo "CUT_SKIP=true" >> "${GITHUB_ENV}"
               exit 0
             fi
             echo "rolling beta parent: ${target_sha} (continuous run ${run_id}: all ${total} build jobs green)"
@@ -204,7 +213,26 @@ jobs:
           # ${RUNNER_TEMP}/nightly, never shell memory) - the selection above
           # validates it, this write persists it.
           printf '%s\n' "${target_sha}" > "${out}/target-sha"
-          # The rolling nightly release's beta.json: the published counter.
+          # THE TAG LEDGER is the counter's truth, NOT beta.json: a
+          # superseded cut publishes its versioned artifacts but leaves
+          # the channel pointers alone, so a channel-derived counter would
+          # recompute the SAME next tag forever (the exists-guard would
+          # skip every subsequent cut — the beta channel would deadlock).
+          # The -beta* tags themselves are the append-only ledger: every
+          # cut's tag exists whether or not its channel publish ran, so
+          # the counter derived from the newest matching tag always
+          # advances. beta.json is still recorded (the compute step reads
+          # its shape when present, for the counter-restart check only).
+          ledger_version="$(gh api "repos/${GITHUB_REPOSITORY}/tags?per_page=100" \
+            | jq -r '[.[].name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+-beta\\.[0-9]+$"))] | sort -V | last // empty' || true)"
+          if [ -n "${ledger_version}" ]; then
+            printf '%s\n' "${ledger_version}" > "${out}/beta-ledger-version"
+            echo "beta tag ledger: newest ${ledger_version}"
+          else
+            echo "no -beta* tags yet: the first cut starts the counter at 1"
+          fi
+          # The rolling nightly release's beta.json (informational: the
+          # published channel state; the counter comes from the ledger).
           if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/nightly" \
                | jq -e '[.assets[] | select(.name == "beta.json")][0].browser_download_url // empty' \
                > "${out}/beta-url" 2>/dev/null && [ -s "${out}/beta-url" ]; then
@@ -212,7 +240,7 @@ jobs:
               "$(tr -d '"' < "${out}/beta-url")" -o "${out}/beta.json"
             echo "rolling nightly beta.json: $(jq -c . "${out}/beta.json")"
           else
-            echo "no rolling nightly release yet: the first cut starts the counter at 1"
+            echo "no rolling nightly release yet: the channel starts empty"
           fi
           # The latest stable release (may predate the rust line - the TS
           # product's releases share this repo; the version math below takes
@@ -229,7 +257,7 @@ jobs:
           gh api "repos/${GITHUB_REPOSITORY}/contents/Cargo.lock?ref=${target_sha}" --jq .content | base64 -d > "${out}/Cargo.lock"
           gh api "repos/${GITHUB_REPOSITORY}/git/commits/${target_sha}" --jq .tree.sha > "${out}/base-tree-sha"
       - name: Compute the nightly version + rewrite the version rows
-        if: env.HAS_RELEASE_BOT == 'true'
+        if: env.HAS_RELEASE_BOT == 'true' && env.CUT_SKIP != 'true'
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -263,15 +291,25 @@ jobs:
                   x, y, z = parse_semver(tag)
                   stable_key = (x, y, z + 1)
 
+          # THE TAG LEDGER (the counter's truth): the newest -beta* tag,
+          # NOT beta.json — a superseded cut leaves the channel pointers
+          # alone, so a channel-derived counter would recompute the same
+          # next tag forever and the exists-guard would deadlock the
+          # channel. Every cut's tag exists whether or not its publish
+          # ran, so the ledger always advances.
           beta_key = None
           cb_n = 0
-          beta_file = out / "beta.json"
-          if beta_file.is_file():
-              doc = json.loads(beta_file.read_text())
-              beta_key, cb_n = parse_beta(doc["version"])
+          ledger_file = out / "beta-ledger-version"
+          if ledger_file.is_file():
+              beta_key, cb_n = parse_beta(ledger_file.read_text().strip())
+          else:
+              beta_file = out / "beta.json"
+              if beta_file.is_file():
+                  doc = json.loads(beta_file.read_text())
+                  beta_key, cb_n = parse_beta(doc["version"])
 
           # base = max(workspace version, latest stable + one patch, the
-          # published nightly's base). The floor matters: `releases/latest`
+          # ledger's newest beta base). The floor matters: `releases/latest`
           # serves the newest non-prerelease by created_at, not the highest
           # semver, and a workspace-version revert could otherwise derive a
           # base BELOW the published nightly - the rolling refresh's
@@ -350,8 +388,8 @@ jobs:
           }))
           print(f"tag-only commit prepared: {tag} from parent {target_sha}")
           PY
-      - name: Idempotency guard (the published counter is the truth)
-        if: env.HAS_RELEASE_BOT == 'true'
+      - name: Idempotency guard (the tag ledger is the truth)
+        if: env.HAS_RELEASE_BOT == 'true' && env.CUT_SKIP != 'true'
         id: guard
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -366,7 +404,7 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
       - name: Create the tag-only commit + annotated tag (GitHub API, the release bot)
-        if: env.HAS_RELEASE_BOT == 'true' && steps.guard.outputs.skip == 'false'
+        if: env.HAS_RELEASE_BOT == 'true' && env.CUT_SKIP != 'true' && steps.guard.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |

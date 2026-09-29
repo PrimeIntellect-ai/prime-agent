@@ -513,10 +513,24 @@ case "$BASE_URL" in
 esac
 BASE_URL="${BASE_URL%/}"
 
+VERSION_PINNED="no"
 if [ -n "${PRIME_AGENT_VERSION:-}" ]; then
   VERSION="${PRIME_AGENT_VERSION#v}"
+  VERSION_PINNED="yes"
 else
-  VERSION="$(curl -fsSL "${BASE_URL}/${CHANNEL}" 2>/dev/null || true)"
+  # THE RETRY (the publish's consistency window): the channel pointers
+  # flip one after the other (the manifest, then the version pointer), so
+  # a read landing between them sees the old pointer with the new
+  # manifest — a transient mismatch, not a broken channel. One re-read of
+  # the PAIR resolves it; a second refusal is a real error.
+  version_attempt=1
+  while :; do
+    VERSION="$(curl -fsSL "${BASE_URL}/${CHANNEL}" 2>/dev/null || true)"
+    [ -n "$VERSION" ] && break
+    version_attempt=$((version_attempt + 1))
+    [ "$version_attempt" -le 2 ] || break
+    sleep 1
+  done
 fi
 case "$VERSION" in
   ""|v)
@@ -534,14 +548,25 @@ say "installing prime-agent ${VERSION} from the ${CHANNEL} channel (${CHANNEL_PL
 # file must be the exact channel naming and its sha256 the 64-hex shape —
 # the same validation pa-core::update::release::latest_release applies, so
 # a lying manifest refuses here instead of staging a wrong tarball.
+# A PINNED version (PRIME_AGENT_VERSION) skips the channel manifest
+# entirely — the channel manifest describes the channel's CURRENT
+# release, and a historical pin must install from its own versioned
+# prefix (the release's SHA256SUMS carries the row's digest; the
+# channel-naming contract gives the file name).
 # The row reader rides a FILE, not a heredoc inside a command substitution
 # (the probe-py pattern: macOS ships bash 3.2 as /bin/sh, and its
 # POSIX-mode parser cannot close a $( ) that spans a heredoc body).
 dl="$(mktemp -d "${TMPDIR:-/tmp}/prime-agent-download.XXXXXX")"
-curl -fsSL "${BASE_URL}/${CHANNEL_MANIFEST}" -o "$dl/${CHANNEL_MANIFEST}" \
-  || die "could not read the ${CHANNEL} channel manifest: ${BASE_URL}/${CHANNEL_MANIFEST}"
-row_py="$dl/channel_row.py"
-cat > "$row_py" <<'ROW_PY'
+if [ "$VERSION_PINNED" = "yes" ]; then
+  asset_name="prime-agent-${VERSION}-${CHANNEL_PLATFORM}.tar.gz"
+  manifest_sha=""
+else
+manifest_attempt=1
+while :; do
+  curl -fsSL "${BASE_URL}/${CHANNEL_MANIFEST}" -o "$dl/${CHANNEL_MANIFEST}" \
+    || die "could not read the ${CHANNEL} channel manifest: ${BASE_URL}/${CHANNEL_MANIFEST}"
+  row_py="$dl/channel_row.py"
+  cat > "$row_py" <<'ROW_PY'
 import json, sys
 manifest_path, version, platform = sys.argv[1], sys.argv[2], sys.argv[3]
 manifest = json.load(open(manifest_path))
@@ -560,13 +585,28 @@ for row in rows:
 else:
     sys.exit(f"no artifact row for platform {platform} in the channel manifest")
 ROW_PY
-row_json="$("$UVPY" "$row_py" "$dl/${CHANNEL_MANIFEST}" "$VERSION" "$CHANNEL_PLATFORM")" \
-  || die "the ${CHANNEL} channel manifest is not usable: ${BASE_URL}/${CHANNEL_MANIFEST} ($("$UVPY" "$row_py" "$dl/${CHANNEL_MANIFEST}" "$VERSION" "$CHANNEL_PLATFORM" 2>&1 | head -n 1))"
-asset_name="$(printf '%s' "$row_json" | "$UVPY" -c 'import json,sys; print(json.load(sys.stdin)["file"])')"
-manifest_sha="$(printf '%s' "$row_json" | "$UVPY" -c 'import json,sys; print(json.load(sys.stdin)["sha256"])')"
-case "$manifest_sha" in
-  *[!0-9a-f]*|??) die "the channel manifest's sha256 for ${asset_name} is malformed" ;;
-esac
+  row_json="$("$UVPY" "$row_py" "$dl/${CHANNEL_MANIFEST}" "$VERSION" "$CHANNEL_PLATFORM")" \
+    || { manifest_err="$("$UVPY" "$row_py" "$dl/${CHANNEL_MANIFEST}" "$VERSION" "$CHANNEL_PLATFORM" 2>&1 | head -n 1)"
+         manifest_attempt=$((manifest_attempt + 1))
+         if [ "$manifest_attempt" -le 2 ] && printf '%s' "$manifest_err" | grep -q '!= channel version'; then
+           # THE CONSISTENCY-WINDOW RETRY: the manifest flipped before the
+           # pointer (the publish writes the manifest first) — re-read the
+           # PAIR once before refusing.
+           sleep 1
+           VERSION="$(curl -fsSL "${BASE_URL}/${CHANNEL}" 2>/dev/null || true)"
+           [ -n "$VERSION" ] || die "could not resolve the latest ${CHANNEL} version from ${BASE_URL}/${CHANNEL}"
+           say "installing prime-agent ${VERSION} from the ${CHANNEL} channel (${CHANNEL_PLATFORM})"
+           continue
+         fi
+         die "the ${CHANNEL} channel manifest is not usable: ${BASE_URL}/${CHANNEL_MANIFEST} (${manifest_err})"; }
+  asset_name="$(printf '%s' "$row_json" | "$UVPY" -c 'import json,sys; print(json.load(sys.stdin)["file"])')"
+  manifest_sha="$(printf '%s' "$row_json" | "$UVPY" -c 'import json,sys; print(json.load(sys.stdin)["sha256"])')"
+  case "$manifest_sha" in
+    *[!0-9a-f]*|??) die "the channel manifest's sha256 for ${asset_name} is malformed" ;;
+  esac
+  break
+done
+fi
 
 # --- the tarball + SHA256SUMS from the versioned release prefix -------------
 RELEASE_PREFIX="releases/v${VERSION#v}"
@@ -588,8 +628,10 @@ asset="$dl/${asset_name}"
 line="$(grep "  ${asset_name}\$" "$dl/SHA256SUMS" || true)"
 [ -n "$line" ] || die "SHA256SUMS in ${RELEASE_PREFIX} has no line for ${asset_name}"
 sums_sha="${line%% *}"
-[ "$sums_sha" = "$manifest_sha" ] \
-  || die "checksum mismatch between the channel manifest and SHA256SUMS for ${asset_name}: the channel is inconsistent; re-run the installer"
+if [ -n "$manifest_sha" ]; then
+  [ "$sums_sha" = "$manifest_sha" ] \
+    || die "checksum mismatch between the channel manifest and SHA256SUMS for ${asset_name}: the channel is inconsistent; re-run the installer"
+fi
 printf '%s\n' "$line" > "$dl/SHA256SUMS.check"
 if command -v sha256sum >/dev/null 2>&1; then
   (cd "$dl" && sha256sum -c SHA256SUMS.check 2>&1 >&3) 1>&3 \
