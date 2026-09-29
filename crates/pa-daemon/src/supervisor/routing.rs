@@ -1073,7 +1073,7 @@ impl Supervisor {
                 .file_stem()
                 .map(|name| name.to_string_lossy().to_string())
                 .unwrap_or_default();
-            if stem == selector || edge.child_id == child_id.unwrap_or("") {
+            if stem == selector && child_id.is_some_and(|id| edge.child_id == id) {
                 resolved = Some((edge.child_id.clone(), edge.child.clone()));
                 break;
             }
@@ -1084,6 +1084,25 @@ impl Supervisor {
         ledger
             .append_delete(&child_id, &session_file, reason)
             .with_context(|| format!("tombstone RLM subagent {child_id}"))?;
+        // The stopped child's teardown mirrors the resident delete's end
+        // state (the second bot round's leftover-partition finding): no
+        // worker to finalize — the tombstone is the deletion boundary —
+        // but the usage capture, the archived state, and the artifact
+        // sweep must land the way a live child's kill route leaves them.
+        let sessions_dir = crate::paths::sessions_dir(&self.options.agent_dir)
+            .with_context(|| "resolve the sessions dir for the delete finalize".to_string())?;
+        let live = self.live_session_files().await;
+        crate::stop_cleanup::finalize_archived_stop(
+            &self.options.agent_dir,
+            &sessions_dir,
+            std::path::Path::new(&session_file),
+            &live,
+        );
+        self.capture_deleted_child_usage(&session_file, &child_id, "rlm_delete")
+            .await;
+        crate::saved_session_commands::remove_session_artifacts(std::path::Path::new(
+            &session_file,
+        ));
         Ok(())
     }
 }

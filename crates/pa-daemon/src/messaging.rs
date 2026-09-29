@@ -263,7 +263,7 @@ impl Supervisor {
         // resume path), carrying the session's own cwd.
         let create = DaemonCommand::Create {
             id: None,
-            session_path: Some(session_path),
+            session_path: Some(session_path.clone()),
             continue_recent: Some(false),
             no_session: None,
             name: None,
@@ -282,7 +282,16 @@ impl Supervisor {
                 self.refresh_roster_entry(&resident).await;
                 WakeOutcome::Woken(resident)
             }
-            Err(error) => WakeOutcome::Failed(format!("{error:#}")),
+            Err(error) => {
+                // The check-and-launch race (two concurrent wakes for the
+                // same saved file): the rival wins the session lease while
+                // this launch runs — join its resident instead of failing
+                // the command (TS's in-flight-join revival semantics).
+                if let Some(resident) = self.registry.find_by_session_file(&session_path).await {
+                    return WakeOutcome::Woken(resident);
+                }
+                WakeOutcome::Failed(format!("{error:#}"))
+            }
         }
     }
 }
@@ -332,12 +341,21 @@ impl Supervisor {
     }
 
     /// Spawn one worker over a ledger child's session file (the same
-    /// create the saved-session wake uses).
+    /// create the saved-session wake uses), with the same concurrent-wake
+    /// protections the roster wake carries: reuse before launch, and a
+    /// launch refusal joins the rival's registered resident instead of
+    /// failing the command (the second bot round's finding: the durable-id
+    /// path is the revival children actually take).
     async fn launch_ledger_child_wake(
         self: &Arc<Self>,
         session_file: &str,
         cwd: String,
     ) -> WakeOutcome {
+        // Reuse before spawning (TS `createOrReuseWorker`): a concurrent
+        // revival may already host the file.
+        if let Some(resident) = self.registry.find_by_session_file(session_file).await {
+            return WakeOutcome::Woken(resident);
+        }
         let create = DaemonCommand::Create {
             id: None,
             session_path: Some(session_file.to_string()),
@@ -357,7 +375,15 @@ impl Supervisor {
                 self.refresh_roster_entry(&resident).await;
                 WakeOutcome::Woken(resident)
             }
-            Err(error) => WakeOutcome::Failed(format!("{error:#}")),
+            Err(error) => {
+                // The check-and-launch race: the rival wins the session
+                // lease while this launch runs — join its resident (TS's
+                // in-flight-join revival semantics).
+                if let Some(resident) = self.registry.find_by_session_file(session_file).await {
+                    return WakeOutcome::Woken(resident);
+                }
+                WakeOutcome::Failed(format!("{error:#}"))
+            }
         }
     }
 }

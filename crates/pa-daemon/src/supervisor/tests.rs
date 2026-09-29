@@ -1046,6 +1046,11 @@ async fn a_ledger_delete_of_a_stopped_child_tombstones_without_a_worker() {
         "{\"type\":\"session\",\"version\":3,\"id\":\"child-gone\",\"timestamp\":\"t\",\"cwd\":\"/c\"}\n",
     )
     .unwrap();
+    // The child's artifact partition exists (the stopped child's leftover):
+    // the delete must sweep it exactly like a live child's kill route.
+    let artifacts = agent_dir.join("session-artifacts").join("child-gone");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    std::fs::write(artifacts.join("scheduled-jobs.json"), "{}").unwrap();
     let parent_file = sessions_dir.join("parent.jsonl");
     std::fs::write(&parent_file, "{\"type\":\"session\",\"id\":\"p\"}\n").unwrap();
     let ledger = supervisor
@@ -1098,4 +1103,195 @@ async fn a_ledger_delete_of_a_stopped_child_tombstones_without_a_worker() {
         )
         .await;
     assert!(miss.is_err(), "a selector with no edge must not delete");
+    // The stopped child's delete teardown mirrors the resident delete's
+    // end state (the second bot round's leftover-partition finding): the
+    // artifact partition is swept and the session file carries the
+    // archived state.
+    assert!(
+        !artifacts.exists(),
+        "the deleted child's artifact partition must be swept"
+    );
+    assert!(
+        std::fs::read_to_string(&child_file)
+            .expect("the child file survives (archived, not unlinked)")
+            .contains("archived"),
+        "the stopped child's delete must archive the session file"
+    );
+}
+
+/// The delete's edge resolution must match BOTH the selector's stem and
+/// the explicit child id on the SAME edge (Macroscope's shared-id
+/// finding): two live edges sharing a child id never let a delete
+/// tombstone the unrelated one.
+#[tokio::test]
+async fn a_ledger_delete_never_tombstones_an_unrelated_edge_sharing_the_child_id() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let sessions_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: agent_dir.clone(),
+        })
+        .expect("supervisor"),
+    );
+    let seed = |stem: &str| {
+        let file = sessions_dir.join(format!("{stem}.jsonl"));
+        std::fs::write(
+            &file,
+            format!("{{\"type\":\"session\",\"version\":3,\"id\":\"{stem}\",\"timestamp\":\"t\",\"cwd\":\"/c\"}}\n"),
+        )
+        .unwrap();
+        file.to_string_lossy().into_owned()
+    };
+    let file_a = seed("child-a");
+    let file_b = seed("child-b");
+    let parent = seed("parent");
+    let ledger = supervisor
+        .rlm_spawn_ledger_for(None)
+        .await
+        .expect("the spawn ledger resolves");
+    for (child, stem) in [(&file_a, "child-a"), (&file_b, "child-b")] {
+        ledger
+            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
+                child_id: "sub-shared".to_string(),
+                parent: parent.clone(),
+                child: child.clone(),
+                depth: 1,
+                name: stem.to_string(),
+            })
+            .expect("the spawn edge appends");
+    }
+    assert_eq!(ledger.live_edges().expect("edges").len(), 2);
+    // The delete targets child-a by its stem WITH the shared id: only
+    // child-a's edge may retire.
+    supervisor
+        .tombstone_saved_rlm_child(
+            "child-a",
+            Some("sub-shared"),
+            crate::rlm_ledger::RlmLedgerDeleteReason::User,
+        )
+        .await
+        .expect("the delete resolves the stem-matching edge");
+    let live = ledger.live_edges().expect("edges after");
+    assert_eq!(
+        live.len(),
+        1,
+        "the unrelated edge sharing the child id must stay live: {live:?}"
+    );
+    assert_eq!(live[0].child, file_b, "the survivor is child-b's edge");
+}
+
+/// The durable-id wake's reuse arm (the second bot round's finding: the
+/// join lived only on the roster path): a revival for a ledger child
+/// whose file a concurrent wake already hosts must join the resident
+/// through the LEDGER path — the path children actually revive by.
+#[tokio::test]
+async fn a_ledger_child_wake_joins_an_already_hosting_resident() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let artifacts = agent_dir.join("session-artifacts").join("kid-1");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let session_file = artifacts.join("kid-1.jsonl");
+    std::fs::write(
+        &session_file,
+        "{\"type\":\"session\",\"version\":3,\"id\":\"kid-1\",\"timestamp\":\"t\",\"cwd\":\"/c\",\"rlmDepth\":1}\n",
+    )
+    .unwrap();
+    let sessions_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    let parent_file = sessions_dir.join("parent.jsonl");
+    std::fs::write(&parent_file, "{\"type\":\"session\",\"id\":\"p\"}\n").unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: agent_dir.clone(),
+        })
+        .expect("supervisor"),
+    );
+    supervisor.roster.lock().unwrap().write_seeded(
+        json!({
+            "agentId": "sub-kid-1",
+            "type": "subagent",
+            "name": "kid-1",
+            "activeSessionId": "kid-routing-1",
+            "sessionFile": session_file.to_string_lossy(),
+            "status": "done",
+        }),
+        false,
+    );
+    let ledger = supervisor
+        .rlm_spawn_ledger_for(None)
+        .await
+        .expect("the spawn ledger resolves");
+    ledger
+        .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
+            child_id: "sub-kid-1".to_string(),
+            parent: parent_file.to_string_lossy().into_owned(),
+            child: session_file.to_string_lossy().into_owned(),
+            depth: 1,
+            name: "kid-1".to_string(),
+        })
+        .expect("the spawn edge appends");
+    // The concurrent revival's resident already hosting the child's file.
+    let descriptor = pa_types::daemon::DaemonWorkerDescriptor {
+        version: 1,
+        worker_id: "w-kid".to_string(),
+        pid: 4244,
+        process_start_id: None,
+        socket_path: "/tmp/none.sock".to_string(),
+        recovery_journal_path: "/tmp/none.jsonl".to_string(),
+        orphan_process_journal_path: None,
+        supervisor_socket_path: "/tmp/none.sock".to_string(),
+        authentication_token: "token".to_string(),
+        worker_instance_id: None,
+        root_active_session_id: "w-kid".to_string(),
+        owner_client_id: None,
+        root_session_id: Some("kid-1".to_string()),
+        session_file: Some(session_file.to_string_lossy().into_owned()),
+        session_dir: Some(artifacts.to_string_lossy().into_owned()),
+        telemetry_disabled: None,
+        created_at: "t".to_string(),
+        updated_at: "t".to_string(),
+        lifecycle: DaemonWorkerLifecycle::Ready,
+        create_command: pa_types::daemon::DurableDaemonCreateCommand {
+            session_path: None,
+            no_session: None,
+            rest: Map::default(),
+        },
+        consecutive_failures: 0,
+        stop_requested_at: None,
+        archive_on_stop: None,
+        last_failure_at: None,
+        last_error: None,
+        rest: Map::default(),
+    };
+    let resident = ResidentWorker::new("w-kid".to_string(), descriptor, artifacts.join("w.d"));
+    supervisor
+        .registry
+        .insert(std::sync::Arc::clone(&resident))
+        .await;
+    let before = supervisor.registry.list().await.len();
+    // The wake by the child's NAME (the ledger edge's live resolution):
+    // the catalog misses (the artifacts tree), the ledger matches, and
+    // the REUSE arm joins — no second launch.
+    let route = supervisor.wake_saved_session("kid-1").await;
+    match route {
+        super::routing::WakeRoute::Woken(woken) => {
+            assert!(
+                std::sync::Arc::ptr_eq(&woken, &resident),
+                "the ledger wake must join the already-hosting resident"
+            );
+        }
+        super::routing::WakeRoute::Fallthrough(message) => {
+            panic!("expected a woken resident, got the fallthrough: {message}");
+        }
+    }
+    assert_eq!(
+        supervisor.registry.list().await.len(),
+        before,
+        "the ledger wake's reuse arm must not launch a second worker"
+    );
 }
