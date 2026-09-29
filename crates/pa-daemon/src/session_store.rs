@@ -131,17 +131,14 @@ pub struct SessionEntry {
 }
 
 /// The windowed message sequence's summary scalars (TS
-/// `summaryForActiveSession`): the newest message timestamp, the summed
-/// assistant usage, and the window's message count. Produced by
+/// `summaryForActiveSession`): the newest message timestamp and the
+/// window's message count. Produced by
 /// [`SessionFile::scan_message_scalars`] without materializing the fold.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct MessageWindowScalars {
     /// The timestamp of the last windowed message that carries one (the
     /// fold's reverse `find_map`, preserved in walk order).
     pub last_timestamp_ms: Option<u64>,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cost: f64,
     pub message_count: usize,
 }
 

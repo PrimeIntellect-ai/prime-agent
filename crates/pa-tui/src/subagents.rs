@@ -30,6 +30,24 @@ impl SessionIdentity {
             session_file,
         }
     }
+
+    /// The keys this session is referenced by as a parent, in the one
+    /// format `summary_parent_keys`/`summary_identity_keys` build (the
+    /// same `active:`/`session:`/`file:` vocabulary the roster rows and
+    /// the agents-view records speak).
+    pub(crate) fn keys(&self) -> Vec<String> {
+        let mut keys = Vec::new();
+        if let Some(id) = self.active_session_id.as_deref() {
+            keys.push(format!("active:{id}"));
+        }
+        if let Some(id) = self.session_id.as_deref() {
+            keys.push(format!("session:{id}"));
+        }
+        if let Some(path) = self.session_file.as_deref() {
+            keys.push(format!("file:{path}"));
+        }
+        keys
+    }
 }
 
 /// Live descendant counts of one session's subtree (TS
@@ -106,16 +124,7 @@ pub fn descendant_positions_with_depth(
             by_parent_key.entry(key).or_default().push(position);
         }
     }
-    let mut queue: Vec<(String, usize)> = Vec::new();
-    if let Some(id) = &parent.active_session_id {
-        queue.push((format!("active:{id}"), 0));
-    }
-    if let Some(id) = &parent.session_id {
-        queue.push((format!("session:{id}"), 0));
-    }
-    if let Some(path) = &parent.session_file {
-        queue.push((format!("file:{path}"), 0));
-    }
+    let mut queue: Vec<(String, usize)> = parent.keys().into_iter().map(|key| (key, 0)).collect();
     let mut positions: Vec<(usize, usize)> = Vec::new();
     let mut linked: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut index = 0;
@@ -242,6 +251,24 @@ pub fn count_descendants(roster: &[Value], parent: &SessionIdentity) -> Subagent
     counts
 }
 
+/// The session's whole-family spend: the `compute_rollups` total the
+/// agents view bills the session's row. `None` when the roster holds no
+/// record for the session.
+pub(crate) fn family_cost(roster: &[Value], session: &SessionIdentity) -> Option<f64> {
+    let records = crate::agents_view_state::reconcile_unified_sessions(roster, &[]);
+    let rollups = crate::agents_view_forest::compute_rollups(&records);
+    let keys = session.keys();
+    records
+        .iter()
+        .find(|record| {
+            summary_identity_keys(&crate::agents_view_state::summary_for_record(record))
+                .iter()
+                .any(|key| keys.contains(key))
+        })
+        .and_then(|record| rollups.get(&record.identity))
+        .map(|rollup| rollup.cost)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,6 +359,75 @@ mod tests {
         assert_eq!(
             counts.running,
             counts.running_direct + counts.running_nested
+        );
+    }
+
+    /// The title bills the same family rollup as the agents-view row:
+    /// the root's own spend plus every descendant's, recursively.
+    #[test]
+    fn family_cost_is_the_agents_view_row_rollup() {
+        let summary = |id: &str, depth: u32, usage_cost: f64| {
+            json!({
+                "sessionId": id,
+                "lifecycle": "live",
+                "activeSessionId": format!("{id}-live"),
+                "sessionFile": format!("/sessions/{id}.jsonl"),
+                "runtimeKind": "top-level",
+                "rlmDepth": depth,
+                "usage": { "cost": usage_cost },
+            })
+        };
+        let root = summary("root", 0, 1.75);
+        let mut child = summary("child", 1, 0.30);
+        child["runtimeKind"] = json!("subagent");
+        child["rlmChildId"] = json!("child-a");
+        child["parentActiveSessionId"] = json!("root-live");
+        child["parentSessionId"] = json!("root");
+        // The grandchild links by its durable session id alone (its
+        // parent is no longer live), the shape a ledger-seeded row has.
+        let mut grandchild = summary("grand", 2, 0.25);
+        grandchild["runtimeKind"] = json!("subagent");
+        grandchild["rlmChildId"] = json!("child-b");
+        grandchild["parentSessionId"] = json!("child");
+        grandchild["parentSessionPath"] = json!("/sessions/child.jsonl");
+        let roster = vec![
+            entry("root", &root, "idle"),
+            entry("child", &child, "running"),
+            entry("grand", &grandchild, "idle"),
+        ];
+        let identity = SessionIdentity::new(
+            Some("root-live".to_string()),
+            Some("root".to_string()),
+            Some("/sessions/root.jsonl".to_string()),
+        );
+        assert_eq!(family_cost(&roster, &identity), Some(2.30));
+        // The same number the agents view bills the root's row — pinned
+        // against the row itself, not a second copy of the formula.
+        let records = crate::agents_view_state::reconcile_unified_sessions(&roster, &[]);
+        let rollups = crate::agents_view_forest::compute_rollups(&records);
+        let rows = crate::agents_view_forest::build_rows(
+            &records,
+            None,
+            &std::collections::HashSet::new(),
+            &rollups,
+            None,
+        );
+        let row = rows
+            .iter()
+            .find(|row| row.kind == crate::agents_view_forest::RowKind::Agent)
+            .expect("the root's agent row");
+        assert_eq!(
+            family_cost(&roster, &identity),
+            Some(row.cost),
+            "the title and the agents-view row agree"
+        );
+        // An identity the roster holds no record for renders nothing.
+        assert_eq!(
+            family_cost(
+                &roster,
+                &SessionIdentity::new(None, Some("missing".to_string()), None)
+            ),
+            None
         );
     }
 

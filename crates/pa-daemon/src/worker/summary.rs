@@ -388,14 +388,18 @@ pub(crate) fn session_summary(
         .map(crate::util::iso_from_unix_ms)
         .or_else(|| modified.clone())
         .or_else(|| store.map(|store| store.header.timestamp.clone()));
-    // Usage: summed assistant usage (`sessionUsageSummaryFrom`), absent
-    // when everything is zero.
-    let input_tokens = scalars.input_tokens;
-    let output_tokens = scalars.output_tokens;
-    let cost = scalars.cost;
-    let usage = (input_tokens > 0 || output_tokens > 0 || cost > 0.0).then(
-        || json!({ "inputTokens": input_tokens, "outputTokens": output_tokens, "cost": cost }),
-    );
+    // Usage: the whole-file own-usage fold the saved row publishes (TS
+    // `getOwnUsageSummary`). A pathless `--no-session` store runs the
+    // same fold over its in-memory entries.
+    let usage = store
+        .and_then(|store| {
+            if store.path.as_os_str().is_empty() {
+                crate::session_usage::own_usage_summary_of(store.entries())
+            } else {
+                crate::session_store::read_session_info(&store.path).and_then(|info| info.usage)
+            }
+        })
+        .map(|usage| json!(usage));
     SessionSummary {
         id: core.active_session_id.clone(),
         lifecycle: active_lifecycle(&core.runtime_kind, scalars.message_count == 0, streaming)

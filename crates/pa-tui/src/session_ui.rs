@@ -281,13 +281,8 @@ pub(crate) struct SessionUi {
     /// The parked-message browse state (TS `QueueSelection`): which queued
     /// row alt+up/alt+down selected, and its stashed editor draft.
     queue_selection: crate::queued::QueueSelection,
-    /// Context usage + cost refreshed from `get_session_stats`.
+    /// Context usage refreshed from `get_session_stats`.
     context: Option<crate::chrome::ContextUsage>,
-    cost_usd: Option<f64>,
-    /// The aggregate descendant-subagent spend from the same stats (the
-    /// title's `+ $X (subagents)` suffix; `None` on daemons without the
-    /// split fields).
-    subagents_cost_usd: Option<f64>,
     /// Rows of the most recent `/list` (for `/switch <n>`).
     list_rows: Vec<Value>,
     pub(crate) turn_active: bool,

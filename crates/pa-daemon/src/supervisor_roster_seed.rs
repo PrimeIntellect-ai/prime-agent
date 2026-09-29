@@ -478,8 +478,9 @@ impl SeededRosterEntry {
 
 /// The one lazy display read behind both hydration paths (TS
 /// `hydratedSeedEntry`): the child file's durable rows - the cwd, the
-/// persisted model selector, and the persisted thinking level, the same
-/// rows a live worker's summary reports (so a passivated subagent keeps
+/// persisted model selector, the persisted thinking level, and its
+/// own-usage summary (the one `read_session_info` fold), the same rows
+/// a live worker's summary reports (so a passivated subagent keeps
 /// rendering "model:level" in the agents view) - and nothing else.
 /// Returns whether the file read. The transcript parse runs on the
 /// blocking pool so a large child JSONL never parks a Tokio worker.
@@ -501,6 +502,11 @@ async fn hydrate_summary_display(summary: &mut Value, file: PathBuf) -> bool {
         }
         if let Some(level) = &info.thinking_level {
             object.insert("thinkingLevel".to_string(), json!(level));
+        }
+        // The own-usage summary rides the seeded row: the family rollup
+        // must not bill a passive child as zero.
+        if let Some(usage) = &info.usage {
+            object.insert("usage".to_string(), json!(usage));
         }
     }
     true

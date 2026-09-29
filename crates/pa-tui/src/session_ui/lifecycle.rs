@@ -98,8 +98,6 @@ impl SessionUi {
             pending_queue: None,
             queue_selection: crate::queued::QueueSelection::default(),
             context: None,
-            cost_usd: None,
-            subagents_cost_usd: None,
             list_rows: Vec::new(),
             turn_active: false,
             turn_ends_seen: 0,
@@ -665,8 +663,6 @@ impl SessionUi {
         view.queue_selected = None;
         view.chrome.chat_name = self.session_display();
         view.chrome.context = self.context;
-        view.chrome.cost_usd = self.cost_usd;
-        view.chrome.subagents_cost_usd = self.subagents_cost_usd;
         self.update_subagent_summary(view);
         // The rebuilt transcript invalidates the announcement row tracking;
         // the goal state itself carries over (seeded at attach).
@@ -768,9 +764,10 @@ impl SessionUi {
         self.dirty = true;
     }
 
-    /// Refresh context usage and session spend from `get_session_stats`
-    /// (the TS tray's connection refresh): tokens, context window, percent,
-    /// and the branch total cost.
+    /// Refresh context usage from `get_session_stats` (the TS tray's
+    /// connection refresh): tokens, context window, and percent. The
+    /// title's spend never comes from here — the roster pushes that
+    /// `update_subagent_summary` folds keep it live.
     pub(crate) async fn refresh_stats(&mut self) {
         let Ok(data) = self
             .bounded_request(
@@ -797,24 +794,6 @@ impl SessionUi {
                 context_window: window,
             })
         });
-        // The title shows the session's own spend plus the aggregate of
-        // its subagents (`ownCost`/`subagentsCost`, the split of the
-        // full session+subagents total): the TS active-region `cost`
-        // drops pre-compaction spend, which reads as an inaccurate
-        // title after every compaction. The split lands together; a
-        // daemon without `ownCost` serves the combined `totalCost`
-        // (or the TS `cost`), and a subagent suffix next to that would
-        // double-count — the suffix only rides the split's own half.
-        if let Some(own) = data.get("ownCost").and_then(Value::as_f64) {
-            self.cost_usd = Some(own);
-            self.subagents_cost_usd = data.get("subagentsCost").and_then(Value::as_f64);
-        } else {
-            self.cost_usd = data
-                .get("totalCost")
-                .and_then(Value::as_f64)
-                .or_else(|| data.get("cost").and_then(Value::as_f64));
-            self.subagents_cost_usd = None;
-        }
         self.dirty = true;
     }
 

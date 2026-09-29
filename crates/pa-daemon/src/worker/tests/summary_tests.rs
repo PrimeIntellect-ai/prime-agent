@@ -165,6 +165,117 @@ fn summary_lifecycle_is_message_based() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The live row's `usage` is the whole-file own-usage fold the saved
+/// row publishes, including spend before the latest compaction and the
+/// compaction's own call.
+#[test]
+fn live_summary_usage_is_the_catalog_fold() {
+    let dir = std::env::temp_dir().join(format!("pa-worker-usage-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("live-usage.jsonl");
+    let usage = |input: u64, output: u64, cost: f64| {
+        json!({
+            "input": input, "output": output, "cacheRead": 0, "cacheWrite": 0,
+            "totalTokens": input + output,
+            "cost": { "input": 0.0, "output": cost, "cacheRead": 0.0, "cacheWrite": 0.0, "total": cost },
+        })
+    };
+    let assistant = |id: &str, parent: &str, cost: f64| {
+        json!({
+            "type": "message", "id": id, "parentId": parent,
+            "timestamp": "2026-09-23T00:00:00.000Z",
+            "message": {
+                "role": "assistant", "provider": "prime-inference",
+                "model": "internal/glm-5.3-fast", "content": [], "stopReason": "stop",
+                "usage": usage(100, 10, cost),
+            },
+        })
+        .to_string()
+    };
+    let user = |id: &str, parent: Option<&str>| {
+        json!({
+            "type": "message", "id": id, "parentId": parent,
+            "timestamp": "2026-09-23T00:00:00.000Z",
+            "message": { "role": "user", "content": "hi" },
+        })
+        .to_string()
+    };
+    let lines = [
+        json!({"type": "session", "version": 3, "id": "s1", "timestamp": "2026-09-23T00:00:00.000Z", "cwd": "/tmp"}).to_string(),
+        user("u1", None),
+        assistant("a1", "u1", 1.0),
+        json!({
+            "type": "compaction", "id": "c1", "parentId": "a1",
+            "timestamp": "2026-09-23T00:00:00.000Z",
+            "summary": "s", "firstKeptEntryId": "u2", "tokensBefore": 100,
+            "usage": usage(20, 2, 0.25),
+        })
+        .to_string(),
+        user("u2", Some("c1")),
+        assistant("a2", "u2", 0.5),
+    ];
+    std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+    let store = crate::session_store::SessionFile::open_windowed(&path).unwrap();
+    assert!(
+        store.window.is_some(),
+        "the fixture must serve a windowed open"
+    );
+    let core = SessionCore::test_core(Some(store), "/tmp".to_string());
+    let summary = session_summary(
+        &core, "default", None, None, /*bash_running=*/ false, /*quota_parked=*/ false,
+    );
+    // The live row equals the saved row, whole-object.
+    let catalog = crate::session_store::read_session_info(&path)
+        .unwrap()
+        .usage
+        .expect("the catalog fold bills the whole file");
+    assert_eq!(
+        json!(summary.usage),
+        json!(catalog),
+        "live and catalog rows agree"
+    );
+    // And that one number is the whole file's own spend: the pre-cut
+    // turn ($1.00) + the summarizer ($0.25) + the kept turn ($0.50) —
+    // with both turns' and the summarizer's tokens folded in.
+    assert_eq!(
+        json!(summary.usage),
+        json!({ "inputTokens": 220, "outputTokens": 22, "cost": 1.75 })
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A pathless `--no-session` store has no file to scan, so the same
+/// own-usage fold runs over its in-memory entries (TS
+/// `getOwnUsageSummary` over `sessionManager.getEntries()`): the live
+/// row bills the turn's own spend instead of reporting nothing.
+#[test]
+fn pathless_summary_usage_folds_the_in_memory_entries() {
+    let mut store = crate::session_store::SessionFile::create("/tmp", None, 0);
+    assert!(store.path.as_os_str().is_empty(), "the store is pathless");
+    store.append_message(&json!({
+        "role": "user", "content": "hi", "timestamp": 1u64,
+    }));
+    store.append_message(&json!({
+        "role": "assistant",
+        "content": [{ "type": "text", "text": "done" }],
+        "provider": "p", "model": "m", "stopReason": "stop",
+        "timestamp": 2u64,
+        "usage": {
+            "input": 100, "output": 10, "cacheRead": 0, "cacheWrite": 0,
+            "totalTokens": 110,
+            "cost": { "input": 0.0, "output": 0.5, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.5 },
+        },
+    }));
+    let core = SessionCore::test_core(Some(store), "/tmp".to_string());
+    let summary = session_summary(
+        &core, "default", None, None, /*bash_running=*/ false, /*quota_parked=*/ false,
+    );
+    assert_eq!(
+        json!(summary.usage),
+        json!({ "inputTokens": 100, "outputTokens": 10, "cost": 0.5 })
+    );
+}
+
 #[test]
 fn display_ids_are_twelve_hex() {
     let id = crate::util::new_display_id();
