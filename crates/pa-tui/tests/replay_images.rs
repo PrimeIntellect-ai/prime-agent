@@ -66,7 +66,10 @@ fn replayed_images_hidden_setting_swaps_the_placeholder_form() {
     let rows = frame_text(&session, 100, 30, /* show_images */ false);
     let flat = rows.join("\n");
     // Hidden images contribute the `[Image: ...]` text through the
-    // output preview, not the metadata row.
-    assert!(flat.contains("[Image: [image/png] 64x32]"), "got: {flat}");
+    // output preview, not the metadata row. TS renders the hidden text
+    // WITHOUT dimensions (includeImageDimensions: false at both
+    // interactive mount sites; the export renderer is the
+    // dims-including consumer).
+    assert!(flat.contains("[Image: [image/png]]"), "got: {flat}");
     assert!(!flat.contains("\u{2570}\u{2500} [image/png"), "got: {flat}");
 }
