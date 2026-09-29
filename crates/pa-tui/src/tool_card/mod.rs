@@ -328,9 +328,13 @@ fn eligible_image_blocks(
         .iter()
         .flat_map(|result| result.content.iter())
         .filter(move |block| {
+            // The paint eligibility mirrors the geometry count's
+            // (`eligible_images`): a block whose `data` is not a string
+            // renders no row on either path, so a `data: null` block can
+            // never make the cached card heights diverge from rendering.
             show_images
                 && block.get("type").and_then(Value::as_str) == Some("image")
-                && block.get("data").is_some()
+                && block.get("data").and_then(Value::as_str).is_some()
                 && block.get("mimeType").and_then(Value::as_str).is_some()
         })
 }
@@ -478,6 +482,37 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(elided.text_output(false), "[Image: [image/jpeg]]");
+    }
+
+    #[test]
+    fn non_string_data_blocks_render_no_rows_on_either_path() {
+        // A `data: null` image block is not an image row: the paint
+        // eligibility mirrors the geometry count's, so the cached card
+        // heights cannot diverge from rendering (the Macroscope finding).
+        let result = Some(ToolResultView {
+            content: vec![serde_json::json!({
+                "type": "image",
+                "data": null,
+                "mimeType": "image/png"
+            })],
+            details: serde_json::Value::Null,
+            is_error: false,
+        });
+        assert!(image_rows(&result, true, &theme()).is_empty());
+        assert_eq!(eligible_images(&result, true).count(), 0);
+        // The elided marker (data: "") stays a real row on both paths.
+        let elided = Some(ToolResultView {
+            content: vec![serde_json::json!({
+                "type": "image",
+                "data": "",
+                "mimeType": "image/png",
+                "elidedBytes": 500 * 1024
+            })],
+            details: serde_json::Value::Null,
+            is_error: false,
+        });
+        assert_eq!(image_rows(&elided, true, &theme()).len(), 1);
+        assert_eq!(eligible_images(&elided, true).count(), 1);
     }
 
     #[test]

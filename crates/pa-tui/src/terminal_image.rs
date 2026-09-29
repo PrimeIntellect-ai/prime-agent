@@ -155,13 +155,20 @@ pub fn get_image_dimensions_prefix(
     max_decoded_bytes: usize,
 ) -> Option<ImageDimensions> {
     use base64::Engine;
-    let trimmed = base64_data.trim();
+    // The bounded window comes first and the trim stays INSIDE it: a
+    // payload padded with megabytes of trailing whitespace never pays a
+    // full-suffix scan (the read stays bounded by the window, never the
+    // payload's length). `get` returns `None` when a cut lands inside a
+    // multi-byte character (a non-ASCII payload is not decodable base64
+    // anyway).
+    let window = base64_data.trim_start();
+    let take = (max_decoded_bytes.div_ceil(3) * 4).min(window.len());
+    let window = window.get(..take)?.trim_end();
     // Keep the prefix at a multiple of 4 base64 characters so the slice
-    // decodes as a complete unpadded sequence; `get` returns `None` when
-    // the cut lands inside a multi-byte character (a non-ASCII payload is
-    // not decodable base64 anyway).
-    let take = (max_decoded_bytes.div_ceil(3) * 4).min(trimmed.len());
-    let prefix = trimmed.get(..take)?;
+    // decodes as a complete unpadded sequence (the dimension headers all
+    // live well inside the first quantum).
+    let aligned = window.len() - window.len() % 4;
+    let prefix = window.get(..aligned)?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(prefix)
         .ok()?;
@@ -273,6 +280,40 @@ mod tests {
                 width_px: 100,
                 height_px: 80
             })
+        );
+    }
+
+    #[test]
+    fn the_prefix_read_stays_bounded_around_whitespace_padding() {
+        // A valid header followed by megabytes of trailing whitespace: the
+        // window trim stays inside the budget, and the dimensions still
+        // parse (the bounded window carries only base64).
+        let padded = format!("{}{}", tiny_png(64, 32), " ".repeat(1 << 20));
+        assert_eq!(
+            get_image_dimensions_prefix(&padded, "image/png", IMAGE_DIMENSIONS_PREFIX_BYTES),
+            Some(ImageDimensions {
+                width_px: 64,
+                height_px: 32
+            })
+        );
+        // A small payload with a trailing line return: the window's own
+        // trim drops it and the decode still succeeds.
+        let newline = format!("{}\n", tiny_png(64, 32));
+        assert_eq!(
+            get_image_dimensions_prefix(&newline, "image/png", IMAGE_DIMENSIONS_PREFIX_BYTES),
+            Some(ImageDimensions {
+                width_px: 64,
+                height_px: 32
+            })
+        );
+        // Whitespace-only payloads report no dimensions.
+        assert_eq!(
+            get_image_dimensions_prefix(
+                &" ".repeat(4096),
+                "image/png",
+                IMAGE_DIMENSIONS_PREFIX_BYTES
+            ),
+            None
         );
     }
 
