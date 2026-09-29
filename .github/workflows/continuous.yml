@@ -26,6 +26,34 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  # Superseded-push gate (TS #2567): with `cancel-in-progress: false`, every
+  # push to main/rust queues a full 4-target build, so a burst of merges
+  # leaves older runs building artifacts for a commit that is no longer the
+  # tip. The gate checks the live branch tip first: when the workflow commit
+  # is superseded, the expensive build jobs skip (neutral exit) and the
+  # newest push's run produces the artifacts. Fail-open: a failed tip lookup
+  # builds as before. PR runs and tag-driven releases (release.yml) are
+  # unaffected — this workflow only fires on branch pushes.
+  staleness:
+    name: Superseded push check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      superseded: ${{ steps.tip.outputs.superseded }}
+    steps:
+      - name: Compare the workflow commit with the live branch tip
+        id: tip
+        run: |
+          set -eu
+          tip="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" "refs/heads/${GITHUB_REF_NAME}" | cut -f1 || true)"
+          if [ -n "${tip}" ] && [ "${tip}" != "${GITHUB_SHA}" ]; then
+            echo "superseded=true" >> "${GITHUB_OUTPUT}"
+            echo "superseded: ${GITHUB_SHA} is no longer the tip of ${GITHUB_REF_NAME} (tip ${tip}); the build jobs skip"
+          else
+            echo "superseded=false" >> "${GITHUB_OUTPUT}"
+          fi
+
   # The dependency audit gate (RELEASE_SECURITY pragmatic baseline): the
   # same advisories + licenses check as `make deny` (deny.toml), on every
   # tree the branch channel builds binaries from. Advisories that are
@@ -51,7 +79,8 @@ jobs:
   # The audit gates every build: an unaudited tree must not produce
   # downloadable branch-channel binaries.
   build-gnu:
-    needs: deny
+    needs: [deny, staleness]
+    if: needs.staleness.outputs.superseded != 'true'
     name: build-${{ matrix.target }}
     runs-on: ${{ matrix.runs-on }}
     # GLIBC 2.35 build baseline: artifacts built on the ubuntu-24.04 runner
@@ -171,7 +200,8 @@ jobs:
           if-no-files-found: error
 
   build-darwin:
-    needs: deny
+    needs: [deny, staleness]
+    if: needs.staleness.outputs.superseded != 'true'
     name: build-${{ matrix.target }}
     runs-on: ${{ matrix.runs-on }}
     permissions:
