@@ -23,16 +23,11 @@ windows-cross:
 	cargo check --workspace --target x86_64-pc-windows-gnu --all-targets
 	cargo clippy --workspace --target x86_64-pc-windows-gnu --all-targets -- -D warnings
 
-# Lints the live workflow files (.github/workflows/; promoted from
-# ci/workflows/ via make activate-workflows) plus the still-staged
-# ci/workflows/ci.yml, which is clean under actionlint. The staged
-# benchmark.yml still carries pre-existing findings (the custom
-# self-hosted `prime-sandbox` label needs an actionlint.yaml labels
-# config; SC2012 info) and stays out of this gate until its lane owner
-# cleans it up.
+# Lints the live workflow files (.github/workflows/). The promotion-era
+# staging dir is gone; only the live set lints.
 actionlint:
 	@command -v actionlint >/dev/null 2>&1 || { echo "actionlint not installed (see rhysd/actionlint releases)"; exit 1; }
-	actionlint .github/workflows/ci.yml .github/workflows/continuous.yml .github/workflows/release.yml ci/workflows/ci.yml
+	actionlint .github/workflows/ci.yml .github/workflows/continuous.yml .github/workflows/release.yml
 
 # GLIBC baseline gate (the continuous.yml/release.yml build-gnu jobs): a
 # GNU/Linux artifact must not require symbols above GLIBC_2.35, the Ubuntu
@@ -163,17 +158,4 @@ package:
 catalog-assets-gates:
 	python3 scripts/release/test_catalog_assets.py
 
-# OPERATOR STEP (Kevin): promote the staged workflows to .github/workflows/.
-# Needs a push credential with the GitHub `workflow` scope — run from a
-# machine that has it (the dev box's token does NOT; a scoped-token push gets
-# remote-rejected). Requires a clean `main` checkout; pushes straight to main.
-activate-workflows:
-	@git rev-parse --abbrev-ref HEAD | grep -qx main || { echo "run on a main checkout (got $$(git rev-parse --abbrev-ref HEAD))"; exit 1; }
-	@git diff --quiet && git diff --cached --quiet || { echo "main has uncommitted changes; commit or stash first"; exit 1; }
-	git pull --ff-only
-	git mv ci/workflows/continuous.yml ci/workflows/release.yml .github/workflows/
-	git commit -m "ci: activate the continuous + release workflows (.github/workflows/)"
-	git push origin main
-	@echo "workflows live: verify with gh workflow list (continuous + release active)"
-
-.PHONY: check deny windows-cross actionlint perf-wave glibc-gate release-dry-run continuous-dry-run audit-build package activate-workflows catalog-assets catalog-assets-fixture catalog-assets-gates
+.PHONY: check deny windows-cross actionlint perf-wave glibc-gate release-dry-run continuous-dry-run audit-build package catalog-assets catalog-assets-fixture catalog-assets-gates
