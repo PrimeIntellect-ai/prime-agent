@@ -19,6 +19,7 @@ use super::protocol::{self, ResponseData};
 use super::session::{RpcEngineRequest, RpcSession};
 use super::session_commands;
 use super::LineWriter;
+use super::COMPACT_FRAME_FLUSH_BUDGET;
 
 /// The shared handler state: the live session plus the fixed identity and
 /// the session-scoped runtime pieces the handlers own.
@@ -433,6 +434,17 @@ async fn compact(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData,
             None,
         ))
         .await;
+    // Flush the queued `compaction_start` BEFORE the compaction enters
+    // its pre-summarizer CPU span (digest capture, cut scan, token
+    // estimation, details extraction): that span runs to the
+    // summarizer's `await` without an executor yield, and the writer
+    // task would hold the frame until the span ends — at a large
+    // session the client sees the compaction start only tens of
+    // milliseconds after it was published, where TS (a synchronous
+    // stdout write at the emit) shows it immediately. The wait is
+    // budgeted (see `COMPACT_FRAME_FLUSH_BUDGET`): a stalled reader
+    // never wedges the compaction.
+    state.writer.drain_within(COMPACT_FRAME_FLUSH_BUDGET).await;
     let outcome = engine
         .session
         .compact(instructions.as_deref(), &model, api_key, None)
