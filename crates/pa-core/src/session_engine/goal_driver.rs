@@ -65,6 +65,7 @@ fn now_millis() -> u64 {
 }
 
 impl GoalDriver {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             state: empty_goal_state(),
@@ -75,6 +76,7 @@ impl GoalDriver {
     }
 
     /// Rehydrate the driver from the session branch (latest persisted entry).
+    #[must_use]
     pub fn load_persisted(session: &SessionManager) -> Self {
         Self::restore_persisted(Self::latest_persisted_state(session))
     }
@@ -124,6 +126,7 @@ impl GoalDriver {
     /// `thread_goal_state` row already records it, and the accounting
     /// anchor restarts wall-clock attribution like the TS constructor's
     /// `_goalState = this._loadPersistedGoalState()`).
+    #[must_use]
     pub fn restore_persisted(state: GoalState) -> Self {
         let mut driver = Self::new();
         driver.restore_from_persisted(state);
@@ -141,12 +144,14 @@ impl GoalDriver {
             (self.state.status == GoalStatus::Active).then_some(AccountingStartedAt(now_millis()));
     }
 
+    #[must_use]
     pub fn state(&self) -> &GoalState {
         &self.state
     }
 
     /// Whether the branch may be seeded with an initial goal: only bootstrap
     /// entries (model/thinking changes) and no prior persisted goal.
+    #[must_use]
     pub fn is_branch_seedable(session: &SessionManager) -> bool {
         !session.has_non_bootstrap_entries()
     }
@@ -468,6 +473,7 @@ impl GoalDriver {
 
     /// Whether a continuation is currently owed behind descendant work
     /// (TS `_goalContinuationAwaitsRlmWork`).
+    #[must_use]
     pub fn owes_continuation(&self) -> bool {
         self.owed_continuation_for_rlm_work
     }
@@ -530,11 +536,13 @@ impl GoalDriver {
     }
 
     /// Whether the goal drives session wake-ups.
+    #[must_use]
     pub fn owns_continuation_wakeup(&self) -> bool {
         self.state.status == GoalStatus::Active && self.state.objective.is_some()
     }
 
     /// The active objective, when set and active.
+    #[must_use]
     pub fn active_objective(&self) -> Option<String> {
         (self.state.status == GoalStatus::Active)
             .then(|| self.state.objective.clone())

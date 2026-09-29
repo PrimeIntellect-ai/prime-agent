@@ -88,7 +88,7 @@ struct GitUpdateTarget {
     fetch_args: Vec<String>,
 }
 
-fn get_local_git_update_target(installed_path: &Path) -> Result<GitUpdateTarget> {
+fn get_local_git_update_target(installed_path: &Path) -> GitUpdateTarget {
     let upstream = run_command_capture(
         "git",
         &["rev-parse", "--abbrev-ref", "@{upstream}"],
@@ -99,7 +99,7 @@ fn get_local_git_update_target(installed_path: &Path) -> Result<GitUpdateTarget>
     let trimmed_upstream = upstream.unwrap_or_default();
     if let Some(branch) = trimmed_upstream.strip_prefix("origin/") {
         if !branch.is_empty() {
-            return Ok(GitUpdateTarget {
+            return GitUpdateTarget {
                 git_ref: "@{upstream}".to_string(),
                 fetch_args: vec![
                     "fetch".into(),
@@ -108,7 +108,7 @@ fn get_local_git_update_target(installed_path: &Path) -> Result<GitUpdateTarget>
                     "origin".into(),
                     format!("+refs/heads/{branch}:refs/remotes/origin/{branch}"),
                 ],
-            });
+            };
         }
     }
 
@@ -130,7 +130,7 @@ fn get_local_git_update_target(installed_path: &Path) -> Result<GitUpdateTarget>
         .trim()
         .trim_start_matches("refs/remotes/origin/");
     if !branch.is_empty() {
-        return Ok(GitUpdateTarget {
+        return GitUpdateTarget {
             git_ref: "origin/HEAD".to_string(),
             fetch_args: vec![
                 "fetch".into(),
@@ -139,9 +139,9 @@ fn get_local_git_update_target(installed_path: &Path) -> Result<GitUpdateTarget>
                 "origin".into(),
                 format!("+refs/heads/{branch}:refs/remotes/origin/{branch}"),
             ],
-        });
+        };
     }
-    Ok(GitUpdateTarget {
+    GitUpdateTarget {
         git_ref: "origin/HEAD".to_string(),
         fetch_args: vec![
             "fetch".into(),
@@ -150,7 +150,7 @@ fn get_local_git_update_target(installed_path: &Path) -> Result<GitUpdateTarget>
             "origin".into(),
             "+HEAD:refs/remotes/origin/HEAD".into(),
         ],
-    })
+    }
 }
 
 /// Update an installed git package: fetch the upstream target, hard-reset to
@@ -167,7 +167,7 @@ pub fn update_git(
         return install_git(source, scope, cwd, agent_dir, npm_command);
     }
 
-    let target = get_local_git_update_target(&target_dir)?;
+    let target = get_local_git_update_target(&target_dir);
 
     let fetch_args: Vec<String> = target.fetch_args;
     run_command(

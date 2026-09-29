@@ -1,3 +1,15 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
+// crate root: the same bounded-boundary disposition as src/lib.rs
+// (large_futures/too_many_lines/the cast family; details there).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! Verifier integration tests for the restore-path guards (TS #2471 + #2478):
 //!
 //! - a restored `__main__` function runs against the LIVE namespace: a
@@ -121,7 +133,7 @@ async fn restored_functions_run_against_live_namespace_globals() {
     assert_eq!(defined.status, ExecuteStatus::Ok);
     let snapshot = writer.snapshot_state().await.expect("snapshot");
     assert!(snapshot.saved.iter().any(|name| name == "reader"));
-    writer.kill().await;
+    writer.kill();
 
     // A fresh kernel on the same snapshot: the restore revives the saved
     // functions against the live namespace of THIS kernel.

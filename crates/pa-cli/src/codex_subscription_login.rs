@@ -377,7 +377,7 @@ mod tests {
             document["expires"] = serde_json::json!(1);
         }
         let mut expired = AuthStorage::in_memory_without_env(
-            data,
+            &data,
             Arc::new(pa_core::auth::ProviderOAuth::with_http(Arc::new(
                 token_http(&account_jwt("acct-2")),
             ))),

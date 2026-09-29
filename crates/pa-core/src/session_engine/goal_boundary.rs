@@ -33,6 +33,7 @@ use crate::goals::{create_goal_context_message, GoalContextKind, GoalStatus};
 /// same round-trip [`super::AgentSession`]'s injected-prompt path uses), for
 /// embeddings that admit minted goal rows through the loop's continuation
 /// hook instead of a prompt.
+#[must_use]
 pub fn custom_message_to_loop_row(
     message: &pa_types::session::CustomMessage,
 ) -> Option<pa_agent::types::AgentMessage> {
@@ -75,7 +76,7 @@ impl SessionEngine {
         drop(session);
         drop(driver);
         let context = create_goal_context_message(&state, GoalContextKind::Continuation)?;
-        self.session.queue_next_turn_row(context).await;
+        self.session.queue_next_turn_row(context);
         Ok(true)
     }
 

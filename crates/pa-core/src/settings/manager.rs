@@ -80,7 +80,8 @@ impl SettingsManager {
     }
 
     /// In-memory manager (tests, embedded hosts).
-    pub fn in_memory(initial: Settings) -> Self {
+    #[must_use]
+    pub fn in_memory(initial: &Settings) -> Self {
         let storage: Arc<dyn SettingsStorage> =
             Arc::new(super::storage::InMemorySettingsStorage::default());
         let content = serde_json::to_string_pretty(&initial).unwrap_or_default();
@@ -94,10 +95,12 @@ impl SettingsManager {
     }
 
     /// Effective (global + project) settings.
+    #[must_use]
     pub fn settings(&self) -> &Settings {
         &self.merged
     }
 
+    #[must_use]
     pub fn global_settings(&self) -> &Settings {
         &self.global
     }
@@ -105,14 +108,17 @@ impl SettingsManager {
     /// The raw global document (post-migration, pre-lenient-load value);
     /// `None` when the scope has no document or it failed to parse (the
     /// load error covers the latter).
+    #[must_use]
     pub fn global_raw(&self) -> Option<&serde_json::Value> {
         self.global_raw.as_ref()
     }
 
+    #[must_use]
     pub fn project_settings(&self) -> &Settings {
         &self.project
     }
 
+    #[must_use]
     pub fn errors(&self) -> &[SettingsError] {
         &self.errors
     }
@@ -194,20 +200,17 @@ impl SettingsManager {
     /// # Errors
     ///
     /// Returns an error when the global settings file cannot be written.
-    pub fn set_default_model_and_provider(
-        &mut self,
-        provider: String,
-        model: String,
-    ) -> Result<()> {
-        self.global.default_provider = Some(provider.clone());
-        self.global.default_model = Some(model.clone());
-        self.record_model_use(&provider, &model);
+    pub fn set_default_model_and_provider(&mut self, provider: &str, model: &str) -> Result<()> {
+        self.global.default_provider = Some(provider.to_string());
+        self.global.default_model = Some(model.to_string());
+        self.record_model_use(provider, model);
         self.save_global()
     }
 
     /// `markdown.codeBlockIndent` (TS `getCodeBlockIndent`): the string the
     /// chat markdown renderer indents fenced code blocks by; the default
     /// matches the TS default, two spaces.
+    #[must_use]
     pub fn get_code_block_indent(&self) -> String {
         self.settings()
             .markdown
@@ -219,6 +222,7 @@ impl SettingsManager {
     /// `terminal.fullscreenMouse` (TS `getFullscreenMouse`): whether the
     /// fullscreen transcript surface enables mouse tracking and wheel
     /// scrolling; the default matches the TS default, true.
+    #[must_use]
     pub fn get_fullscreen_mouse(&self) -> bool {
         self.settings()
             .terminal
@@ -230,6 +234,7 @@ impl SettingsManager {
     /// `terminal.showImages` (TS `getShowImages`): whether image blocks in
     /// tool results render their type/dimension metadata rows; the
     /// default matches the TS default, true.
+    #[must_use]
     pub fn get_show_images(&self) -> bool {
         self.settings()
             .terminal
@@ -241,6 +246,7 @@ impl SettingsManager {
     /// `treeFilterMode` (TS `getTreeFilterMode`): the `/tree` selector's
     /// initial filter; an unset or invalid value falls back to
     /// `user-only`, like the TS default.
+    #[must_use]
     pub fn get_tree_filter_mode(&self) -> String {
         let mode = self.settings().tree_filter_mode.clone().unwrap_or_default();
         let valid = ["default", "no-tools", "user-only", "labeled-only", "all"];
@@ -256,6 +262,7 @@ impl SettingsManager {
     /// `overview` (the collapse mode: every activity item renders as
     /// `details` does with only the thinking hidden - operator
     /// directive 2026-09-28).
+    #[must_use]
     pub fn get_chat_detail(&self) -> String {
         match self.settings().chat_detail.as_deref() {
             Some("details") => "details",
@@ -266,6 +273,7 @@ impl SettingsManager {
     }
 
     /// `branchSummary.skipPrompt` (TS `getBranchSummarySkipPrompt`).
+    #[must_use]
     pub fn get_branch_summary_skip_prompt(&self) -> bool {
         self.settings()
             .branch_summary
@@ -431,6 +439,7 @@ impl SettingsManager {
 
     /// TS `getOnboardingShown`: the shown flag with the legacy completed
     /// flag as fallback; first run is defined by the settings alone.
+    #[must_use]
     pub fn get_onboarding_shown(&self) -> bool {
         self.merged
             .onboarding_shown
@@ -440,6 +449,7 @@ impl SettingsManager {
 
     /// TS `getCompactionEnabled`: the auto-compaction toggle, on until the
     /// user opts out (the merged view, like every TS settings getter).
+    #[must_use]
     pub fn get_compaction_enabled(&self) -> bool {
         self.merged
             .compaction
@@ -452,6 +462,7 @@ impl SettingsManager {
     /// opt-in, exactly the TS default. The first-run onboarding question
     /// is the opt-in moment; `/traces` stays the change path, and the
     /// value persists only when a choice is made.
+    #[must_use]
     pub fn get_agent_traces_enabled(&self) -> bool {
         self.merged
             .agent_traces
@@ -466,6 +477,7 @@ impl SettingsManager {
     /// flow never asks such a home the trace question — the standing
     /// choice stands and the flow completes silently. Only a fresh home
     /// (no choice written) is asked, once.
+    #[must_use]
     pub fn agent_traces_choice_written(&self) -> bool {
         self.merged
             .agent_traces
@@ -494,7 +506,7 @@ impl SettingsManager {
         self.persist_scope_field(
             SettingsScope::Global,
             "packages",
-            serde_json::Value::Array(packages),
+            &serde_json::Value::Array(packages),
         );
         self.merged = deep_merge(&self.global, &self.project);
     }
@@ -505,7 +517,7 @@ impl SettingsManager {
         self.persist_scope_field(
             SettingsScope::Project,
             "packages",
-            serde_json::Value::Array(packages),
+            &serde_json::Value::Array(packages),
         );
         self.merged = deep_merge(&self.global, &self.project);
     }
@@ -525,7 +537,7 @@ impl SettingsManager {
         self.persist_scope_field(
             SettingsScope::Global,
             field,
-            serde_json::Value::Array(array),
+            &serde_json::Value::Array(array),
         );
         self.merged = deep_merge(&self.global, &self.project);
     }
@@ -545,7 +557,7 @@ impl SettingsManager {
         self.persist_scope_field(
             SettingsScope::Project,
             field,
-            serde_json::Value::Array(array),
+            &serde_json::Value::Array(array),
         );
         self.merged = deep_merge(&self.global, &self.project);
     }
@@ -553,7 +565,12 @@ impl SettingsManager {
     /// Write one field into a scope's file, merging with the current on-disk
     /// document so concurrently-added fields survive. Settings failures are
     /// recorded as warnings, never thrown (the TS save contract).
-    fn persist_scope_field(&mut self, scope: SettingsScope, field: &str, value: serde_json::Value) {
+    fn persist_scope_field(
+        &mut self,
+        scope: SettingsScope,
+        field: &str,
+        value: &serde_json::Value,
+    ) {
         let load_error = match scope {
             SettingsScope::Global => self.global_load_error.clone(),
             SettingsScope::Project => self.project_load_error.clone(),
@@ -595,15 +612,18 @@ impl SettingsManager {
 
     // -- getters with TS semantics ------------------------------------------
 
+    #[must_use]
     pub fn get_default_provider(&self) -> Option<&str> {
         self.merged.default_provider.as_deref()
     }
 
+    #[must_use]
     pub fn get_default_model(&self) -> Option<&str> {
         self.merged.default_model.as_deref()
     }
 
     /// Model for `rlm.spawn` without a pinned model; unset inherits parent.
+    #[must_use]
     pub fn get_subagent_default_model(&self) -> Option<String> {
         self.merged
             .subagent_default_model
@@ -612,6 +632,7 @@ impl SettingsManager {
             .filter(|m| !m.is_empty())
     }
 
+    #[must_use]
     pub fn get_auxiliary_model(&self) -> Option<&str> {
         self.merged.auxiliary_model.as_deref()
     }
@@ -620,6 +641,7 @@ impl SettingsManager {
     /// that serves turns attaching images on session models without image
     /// input. Same shape as `providerBackupModel`: malformed values behave
     /// as unset and the image-turn refusal names the setting instead.
+    #[must_use]
     pub fn get_image_model(&self) -> Option<String> {
         self.merged
             .image_model
@@ -636,6 +658,7 @@ impl SettingsManager {
     /// unrestricted. A daemon policy like `idleEvictionMinutes`: read from
     /// the global scope only, so a project cannot weaken a box-level pin.
     /// A list that trims to empty behaves as unset.
+    #[must_use]
     pub fn get_allowed_models(&self) -> Option<Vec<String>> {
         let patterns = self.global.allowed_models.as_ref()?;
         let patterns: Vec<String> = patterns
@@ -669,6 +692,7 @@ impl SettingsManager {
     /// Service tier a fresh session records as its preference (TS
     /// `getDefaultServiceTier`: the setting when present, else `default`).
     /// An unrecognized setting value falls back to the same `default`.
+    #[must_use]
     pub fn get_default_service_tier(&self) -> pa_types::ai::ServiceTier {
         use pa_types::ai::ServiceTier;
         self.merged
@@ -685,6 +709,7 @@ impl SettingsManager {
             .unwrap_or(ServiceTier::Default)
     }
 
+    #[must_use]
     pub fn get_recent_models(&self) -> Vec<String> {
         self.merged.recent_models.clone().unwrap_or_default()
     }
@@ -694,25 +719,30 @@ impl SettingsManager {
     /// at the next turn boundary; `one-at-a-time` delivers one per turn.
     /// The product default is `all`; both modes stay selectable through
     /// the setting surface.
+    #[must_use]
     pub fn get_steering_mode(&self) -> QueueModeSetting {
         self.merged.steering_mode.unwrap_or(QueueModeSetting::All)
     }
 
+    #[must_use]
     pub fn get_follow_up_mode(&self) -> QueueModeSetting {
         self.merged
             .follow_up_mode
             .unwrap_or(QueueModeSetting::OneAtATime)
     }
 
+    #[must_use]
     pub fn get_theme(&self) -> Option<&str> {
         self.merged.theme.as_deref()
     }
 
     /// Global-only read of the two known values; anything else is unset.
+    #[must_use]
     pub fn get_update_channel(&self) -> Option<UpdateChannel> {
         self.global.update_channel
     }
 
+    #[must_use]
     pub fn get_default_thinking_level(&self) -> Option<ThinkingLevelSetting> {
         self.merged.default_thinking_level
     }
@@ -721,6 +751,7 @@ impl SettingsManager {
     /// `getRetrySettings` and `getProviderRetrySettings` reads: the
     /// `retry.enabled`, `retry.maxRetries`, and `retry.baseDelayMs` knobs
     /// plus the `retry.provider.maxRetryDelayMs` cap.
+    #[must_use]
     pub fn get_provider_retry_policy(
         &self,
     ) -> crate::session_engine::provider_retry::ProviderRetryPolicy {
@@ -739,7 +770,7 @@ impl SettingsManager {
                 .map_or(
                     crate::session_engine::provider_retry::DEFAULT_PROVIDER_RETRY_POLICY
                         .max_retries,
-                    |retries| retries.min(u32::MAX as u64) as u32,
+                    |retries| retries.min(u64::from(u32::MAX)) as u32,
                 ),
             base_delay_ms: self
                 .merged
@@ -765,6 +796,7 @@ impl SettingsManager {
     }
 
     /// The provider-failover policy from settings (`retry.failover`).
+    #[must_use]
     pub fn get_provider_failover_policy(
         &self,
     ) -> crate::session_engine::provider_failover::ProviderFailoverPolicy {
@@ -781,7 +813,7 @@ impl SettingsManager {
             max_retries: failover
                 .and_then(|failover| failover.max_retries)
                 .map_or(defaults.max_retries, |retries| {
-                    retries.min(u32::MAX as u64) as u32
+                    retries.min(u64::from(u32::MAX)) as u32
                 }),
             base_delay_ms: failover
                 .and_then(|failover| failover.base_delay_ms)
@@ -797,6 +829,7 @@ impl SettingsManager {
     /// the bounded wait park the session, the per-park ceiling (clamped
     /// to one week), and the per-episode park budget. Only the park keys
     /// have a consumer until a wait-for-usage port lands.
+    #[must_use]
     pub fn get_provider_park_policy(
         &self,
     ) -> crate::session_engine::provider_park::ProviderParkPolicy {
@@ -817,17 +850,19 @@ impl SettingsManager {
             max_parks: wait
                 .and_then(|wait| wait.max_parks)
                 .map_or(defaults.max_parks, |parks| {
-                    parks.min(u32::MAX as u64) as u32
+                    parks.min(u64::from(u32::MAX)) as u32
                 }),
         }
     }
 
+    #[must_use]
     pub fn get_rlm_max_depth(&self) -> Option<u64> {
         self.global.rlm_max_depth
     }
 
     /// `number | "off" | "none"` -> finite minutes or Off; malformed falls
     /// back to the default (90).
+    #[must_use]
     pub fn get_idle_eviction(&self) -> IdleEviction {
         match &self.global.idle_eviction_minutes {
             Some(serde_json::Value::String(text)) if text == "off" || text == "none" => {
@@ -849,6 +884,7 @@ impl SettingsManager {
     /// sweep moves out of the sessions directory. Both rules are independent —
     /// a session is archived when EITHER fires. `None` on a field disables
     /// that rule.
+    #[must_use]
     pub fn get_session_archive_policy(&self) -> SessionArchivePolicy {
         let max_age_days = match &self.global.session_archive_max_age_days {
             Some(serde_json::Value::String(text)) if text == "off" || text == "none" => None,
@@ -874,11 +910,13 @@ impl SettingsManager {
         }
     }
 
+    #[must_use]
     pub fn get_transport(&self) -> TransportSetting {
         self.merged.transport.unwrap_or(TransportSetting::Auto)
     }
 
     /// Telemetry is enabled only when every scope says so (default true).
+    #[must_use]
     pub fn get_telemetry_enabled(&self) -> bool {
         [
             self.global.telemetry.as_ref(),
@@ -889,6 +927,7 @@ impl SettingsManager {
         .all(|scope| scope.and_then(|t| t.enabled).unwrap_or(true))
     }
 
+    #[must_use]
     pub fn get_telemetry_notice_shown(&self) -> bool {
         self.runtime_overrides
             .telemetry
@@ -900,10 +939,12 @@ impl SettingsManager {
 
     /// `requestTiming`: unset means OFF — the per-request timing timeline
     /// is opt-in, exactly the TS default (`getRequestTiming`).
+    #[must_use]
     pub fn get_request_timing(&self) -> bool {
         self.merged.request_timing.unwrap_or(false)
     }
 
+    #[must_use]
     pub fn get_session_dir(&self) -> Option<std::path::PathBuf> {
         let session_dir = self.merged.session_dir.as_ref()?;
         let home = pa_types::platform::home_dir()?;
@@ -1015,9 +1056,9 @@ mod tests {
 
     #[test]
     fn in_memory_loads_merges_and_saves() {
-        let mut manager = SettingsManager::in_memory(Settings::default());
+        let mut manager = SettingsManager::in_memory(&Settings::default());
         manager
-            .set_default_model_and_provider("prime-inference".into(), "z-ai/glm-5.3".into())
+            .set_default_model_and_provider("prime-inference", "z-ai/glm-5.3")
             .unwrap();
         assert_eq!(manager.get_default_provider(), Some("prime-inference"));
         assert_eq!(manager.get_default_model(), Some("z-ai/glm-5.3"));
@@ -1033,7 +1074,7 @@ mod tests {
     fn code_block_indent_reads_markdown_settings_with_ts_default() {
         // `markdown.codeBlockIndent` (TS getCodeBlockIndent): absent -> the
         // TS default two spaces; set -> the configured string.
-        let manager = SettingsManager::in_memory(Settings::default());
+        let manager = SettingsManager::in_memory(&Settings::default());
         assert_eq!(manager.get_code_block_indent(), "  ");
 
         let settings = Settings {
@@ -1043,7 +1084,7 @@ mod tests {
             }),
             ..Settings::default()
         };
-        let manager = SettingsManager::in_memory(settings);
+        let manager = SettingsManager::in_memory(&settings);
         assert_eq!(manager.get_code_block_indent(), "    ");
     }
 
@@ -1053,7 +1094,7 @@ mod tests {
     /// mode; operator directive 2026-09-28).
     #[test]
     fn chat_detail_persists_the_chosen_level_with_the_startup_fallback() {
-        let mut manager = SettingsManager::in_memory(Settings::default());
+        let mut manager = SettingsManager::in_memory(&Settings::default());
         assert_eq!(manager.get_chat_detail(), "overview");
         manager.set_chat_detail("all").unwrap();
         assert_eq!(manager.get_chat_detail(), "all");
@@ -1082,7 +1123,7 @@ mod tests {
     /// selectable; the follow-up default stays "one-at-a-time".
     #[test]
     fn steering_mode_defaults_to_all_follow_ups_stay_one_at_a_time() {
-        let mut manager = SettingsManager::in_memory(Settings::default());
+        let mut manager = SettingsManager::in_memory(&Settings::default());
         assert_eq!(manager.get_steering_mode(), QueueModeSetting::All);
         assert_eq!(manager.get_follow_up_mode(), QueueModeSetting::OneAtATime);
         manager
@@ -1125,7 +1166,7 @@ mod tests {
 
     #[test]
     fn idle_eviction_semantics() {
-        let mut manager = SettingsManager::in_memory(Settings::default());
+        let mut manager = SettingsManager::in_memory(&Settings::default());
         assert_eq!(
             manager.get_idle_eviction(),
             IdleEviction::Minutes(DEFAULT_IDLE_EVICTION_MINUTES)
@@ -1146,7 +1187,7 @@ mod tests {
         // Unset means OFF (sharing is opt-in): the first-run onboarding
         // question is the opt-in moment, and the answer writes the
         // global scope and survives a reload.
-        let mut manager = SettingsManager::in_memory(Settings::default());
+        let mut manager = SettingsManager::in_memory(&Settings::default());
         assert!(!manager.get_agent_traces_enabled());
         manager.set_agent_traces_enabled(true).unwrap();
         assert!(manager.get_agent_traces_enabled());
@@ -1163,7 +1204,7 @@ mod tests {
         // copied-config home (any standing choice — the flow completes
         // silently). Both answer values count: the predicate is about the
         // choice being made, not its direction.
-        let mut manager = SettingsManager::in_memory(Settings::default());
+        let mut manager = SettingsManager::in_memory(&Settings::default());
         assert!(!manager.agent_traces_choice_written());
         manager.set_agent_traces_enabled(false).unwrap();
         assert!(manager.agent_traces_choice_written());
@@ -1179,7 +1220,7 @@ mod tests {
         // until the user opts out); setCompactionEnabled writes the global
         // scope, so the value survives a reload (a restarted session
         // re-seeds its flag from it).
-        let mut manager = SettingsManager::in_memory(Settings::default());
+        let mut manager = SettingsManager::in_memory(&Settings::default());
         assert!(manager.get_compaction_enabled());
         manager.set_compaction_enabled(false).unwrap();
         assert!(!manager.get_compaction_enabled());
@@ -1190,7 +1231,7 @@ mod tests {
     #[test]
     fn session_archive_policy_semantics() {
         // Absent keys: both rules on with their defaults.
-        let mut manager = SettingsManager::in_memory(Settings::default());
+        let mut manager = SettingsManager::in_memory(&Settings::default());
         assert_eq!(
             manager.get_session_archive_policy(),
             SessionArchivePolicy {
@@ -1221,7 +1262,7 @@ mod tests {
     /// malformed values (empty/whitespace) behave as unset.
     #[test]
     fn image_model_reads_trimmed_or_unset() {
-        let manager = SettingsManager::in_memory(Settings {
+        let manager = SettingsManager::in_memory(&Settings {
             image_model: Some("  battery/mock-vision  ".to_string()),
             ..Settings::default()
         });
@@ -1229,12 +1270,12 @@ mod tests {
             manager.get_image_model().as_deref(),
             Some("battery/mock-vision")
         );
-        let manager = SettingsManager::in_memory(Settings {
+        let manager = SettingsManager::in_memory(&Settings {
             image_model: Some("   ".to_string()),
             ..Settings::default()
         });
         assert_eq!(manager.get_image_model(), None);
-        let manager = SettingsManager::in_memory(Settings::default());
+        let manager = SettingsManager::in_memory(&Settings::default());
         assert_eq!(manager.get_image_model(), None);
     }
 }

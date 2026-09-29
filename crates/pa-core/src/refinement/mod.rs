@@ -99,6 +99,7 @@ pub struct HarnessState {
     pub refinements: Vec<HarnessRefinementEvent>,
 }
 
+#[must_use]
 pub fn empty_harness_state() -> HarnessState {
     HarnessState {
         schema: 1,
@@ -123,14 +124,17 @@ fn kind_from_name(name: &str) -> RefinementKind {
     }
 }
 
+#[must_use]
 pub fn get_global_harness_state_dir(agent_dir: &Path) -> PathBuf {
     agent_dir.join(HARNESS_STATE_DIR_NAME)
 }
 
+#[must_use]
 pub fn get_local_harness_state_dir(session_artifact_dir: Option<&Path>) -> Option<PathBuf> {
     session_artifact_dir.map(|dir| dir.join(HARNESS_STATE_DIR_NAME))
 }
 
+#[must_use]
 pub fn get_harness_state_path(harness_state_dir: &Path) -> PathBuf {
     harness_state_dir.join("harness_state.json")
 }
@@ -197,6 +201,7 @@ pub fn load_harness_state(harness_state_dir: &Path, scope: HarnessScope) -> Harn
 ///
 /// The `get_mut(kind).unwrap()` on the per-kind entry maps cannot panic:
 /// the empty state pre-populates every kind map.
+#[must_use]
 pub fn merge_harness_states(
     global_state: &HarnessState,
     local_state: Option<&HarnessState>,
@@ -258,6 +263,7 @@ pub fn save_harness_state(
     Ok(state_path)
 }
 
+#[must_use]
 pub fn get_refinement_history_path(harness_state_dir: &Path) -> PathBuf {
     harness_state_dir.join(REFINEMENT_HISTORY_FILE_NAME)
 }
@@ -342,6 +348,7 @@ impl AppliedRefinementEdit {
 }
 
 /// Infer a result scope from its edits' before/after scopes.
+#[must_use]
 pub fn infer_refinement_result_scope(result: &RefinementResult) -> Option<HarnessScope> {
     if let Some(scope) = result.scope {
         return Some(scope);
@@ -387,6 +394,7 @@ pub fn append_global_refinement(
 }
 
 /// Load the global refinement history; malformed lines are skipped.
+#[must_use]
 pub fn load_global_refinement_history(harness_state_dir: &Path) -> Vec<RefinementResult> {
     let history_path = get_refinement_history_path(harness_state_dir);
     let Ok(content) = std::fs::read_to_string(&history_path) else {
@@ -410,6 +418,7 @@ pub fn load_global_refinement_history(harness_state_dir: &Path) -> Vec<Refinemen
 
 /// Merge global and session history by id; session entries win, inheriting an
 /// existing scope when they carry none.
+#[must_use]
 pub fn merge_refinement_history(
     global: &[RefinementResult],
     session: &[RefinementResult],
@@ -444,6 +453,7 @@ pub(crate) fn compact_text(text: &str, max_length: usize) -> String {
 }
 
 /// Digest-notation notice body for a refinement.
+#[must_use]
 pub fn format_refinement_notice_body(result: &RefinementResult) -> String {
     let mut lines = vec![compact_text(
         &result.summary,

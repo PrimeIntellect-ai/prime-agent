@@ -347,7 +347,7 @@ fn user_server_view(
     };
     let uses_oauth = *oauth == Some(true);
     let state = http_connection_status(
-        HttpStatusOptions {
+        &HttpStatusOptions {
             connection_id: name,
             endpoint: url,
             uses_oauth,
@@ -471,4 +471,496 @@ pub fn build_plugin_views(inputs: &BuildViewsInputs<'_>) -> Vec<McpPluginView> {
             .then_with(|| left.service_id.cmp(&right.service_id))
     });
     views
+}
+
+/// One row of the kernel connection inventory (TS `McpConnectionView`): the
+/// dispatch id `mcp.config` / `mcp.list_tools` / `mcp.call_tool` address,
+/// with its honestly-computed status. `setup_required` never appears — it
+/// maps to `not_connected` in the inventory rows.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpConnectionView {
+    /// The dispatch id: `mcp.config` + `list_tools`/`call_tool` address this.
+    pub connection_id: String,
+    pub service_id: Option<String>,
+    pub label: String,
+    pub status: McpConnectionStatus,
+    pub uses_oauth: bool,
+    /// The transport (`http` / `stdio`).
+    pub transport: String,
+    pub login_pending: Option<bool>,
+    pub source: ViewSource,
+    pub setup_hint: Option<String>,
+}
+
+/// The conflict hint of a reserved-ownership ruling (canonical and disabled
+/// carry none).
+fn ownership_setup_hint(ownership: &ReservedOwnership) -> Option<String> {
+    match ownership {
+        ReservedOwnership::Conflict(hint) => Some(hint.clone()),
+        _ => None,
+    }
+}
+
+/// An ACP session server for [`build_connection_views`]: name + transport.
+pub struct AcpServerRow {
+    pub name: String,
+    pub transport: String,
+}
+
+impl AcpServerRow {
+    pub fn from_configs(servers: &[super::AcpMcpServerConfig]) -> Vec<Self> {
+        servers
+            .iter()
+            .map(|server| AcpServerRow {
+                name: server.name().to_string(),
+                transport: match server {
+                    super::AcpMcpServerConfig::Stdio { .. } => "stdio".to_string(),
+                    super::AcpMcpServerConfig::Http { .. } => "http".to_string(),
+                },
+            })
+            .collect()
+    }
+}
+
+/// The kernel connection inventory (TS `buildConnectionViews`): one row per
+/// dispatchable account of every service and user-declared server (the same
+/// centralized status the plugin cards compute), plus the session-scoped ACP
+/// servers a catalog/user id does not already shadow. Sorted by connectionId.
+pub fn build_connection_views(
+    inputs: &BuildViewsInputs<'_>,
+    acp_servers: &[AcpServerRow],
+) -> Vec<McpConnectionView> {
+    let user_servers = inputs.user_servers;
+    let mut views: Vec<McpConnectionView> = Vec::new();
+    let reserved: std::collections::HashSet<&str> = inputs
+        .services
+        .iter()
+        .filter(|service| service.legacy_builtin)
+        .map(|service| service.service_id.as_str())
+        .collect();
+    let mut connected: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for service in inputs.services {
+        let ownership = reserved_mcp_ownership(
+            Some(service),
+            user_servers.and_then(|servers| servers.get(&service.service_id)),
+        );
+        let plugin = catalog_service_view(
+            service,
+            inputs.credentials,
+            inputs.records,
+            user_servers.and_then(|servers| servers.get(&service.service_id)),
+            inputs.catalog_available,
+        );
+        if plugin.connection_ids.is_empty() {
+            if !matches!(ownership, ReservedOwnership::Canonical) {
+                views.push(McpConnectionView {
+                    connection_id: service.service_id.clone(),
+                    service_id: Some(service.service_id.clone()),
+                    label: service.label.clone(),
+                    status: match ownership {
+                        ReservedOwnership::Disabled => McpConnectionStatus::Disabled,
+                        _ => McpConnectionStatus::Error,
+                    },
+                    uses_oauth: plugin.uses_oauth,
+                    transport: "http".to_string(),
+                    login_pending: None,
+                    source: ViewSource::Catalog,
+                    setup_hint: ownership_setup_hint(&ownership),
+                });
+            }
+            continue;
+        }
+        // One inventory row per account, each with the SAME centralized,
+        // honestly-computed status (credential binding + expiry + record) —
+        // never a raw record.status that could claim a stale Connected.
+        for account in account_states_for(service, inputs.credentials, inputs.records) {
+            connected.insert(account.connection_id.clone());
+            let label = if account.connection_id == service.service_id {
+                service.label.clone()
+            } else {
+                format!("{} ({})", service.label, account.connection_id)
+            };
+            views.push(McpConnectionView {
+                connection_id: account.connection_id.clone(),
+                service_id: Some(service.service_id.clone()),
+                label,
+                status: match ownership {
+                    ReservedOwnership::Disabled => McpConnectionStatus::Disabled,
+                    ReservedOwnership::Conflict(_) => McpConnectionStatus::Error,
+                    ReservedOwnership::Canonical => {
+                        if account.status == McpConnectionStatus::SetupRequired {
+                            McpConnectionStatus::NotConnected
+                        } else {
+                            account.status
+                        }
+                    }
+                },
+                login_pending: account.login_pending.then_some(true),
+                uses_oauth: plugin.uses_oauth,
+                transport: "http".to_string(),
+                source: ViewSource::Catalog,
+                setup_hint: ownership_setup_hint(&ownership).or_else(|| account.setup_hint.clone()),
+            });
+        }
+    }
+    for (name, config) in user_servers.iter().flat_map(|servers| servers.iter()) {
+        if reserved.contains(name.as_str()) {
+            continue;
+        }
+        let plugin = user_server_view(name, config, inputs.credentials, inputs.records);
+        if plugin.connection_ids.is_empty() {
+            continue;
+        }
+        connected.insert(name.clone());
+        views.push(McpConnectionView {
+            connection_id: name.clone(),
+            service_id: None,
+            label: name.clone(),
+            status: if plugin.connection_status == McpConnectionStatus::SetupRequired {
+                McpConnectionStatus::NotConnected
+            } else {
+                plugin.connection_status
+            },
+            uses_oauth: plugin.uses_oauth,
+            transport: config.server_type().to_string(),
+            login_pending: plugin.login_pending,
+            source: ViewSource::User,
+            setup_hint: plugin.setup_hint.clone(),
+        });
+    }
+    for server in acp_servers {
+        if connected.contains(&server.name) {
+            continue;
+        }
+        views.push(McpConnectionView {
+            connection_id: server.name.clone(),
+            service_id: None,
+            label: server.name.clone(),
+            status: McpConnectionStatus::Connected,
+            uses_oauth: false,
+            transport: server.transport.clone(),
+            login_pending: None,
+            source: ViewSource::Acp,
+            setup_hint: None,
+        });
+    }
+    views.sort_by(|left, right| left.connection_id.cmp(&right.connection_id));
+    views
+}
+
+/// Filter the plugin cards by an exact connection status (TS
+/// `filterPluginViewsByStatus`).
+pub fn filter_plugin_views_by_status(views: &[McpPluginView], status: &str) -> Vec<McpPluginView> {
+    views
+        .iter()
+        .filter(|view| view.connection_status.as_str() == status)
+        .cloned()
+        .collect()
+}
+
+/// Search the plugin cards by service ids, labels, aliases, account ids,
+/// descriptions, categories, publishers, and docs URLs (TS
+/// `searchPluginViews`); the page is bounded by `limit`.
+pub fn search_plugin_views(
+    views: &[McpPluginView],
+    query: &str,
+    limit: usize,
+) -> Vec<McpPluginView> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return views.iter().take(limit).cloned().collect();
+    }
+    let mut matches = Vec::new();
+    for view in views {
+        let mut fields: Vec<String> = vec![
+            view.service_id.clone(),
+            view.label.clone(),
+            view.category.clone().unwrap_or_default(),
+        ];
+        fields.push(view.description.clone().unwrap_or_default());
+        fields.push(view.publisher.clone().unwrap_or_default());
+        fields.push(view.docs_url.clone().unwrap_or_default());
+        fields.extend(view.aliases.iter().flatten().cloned());
+        fields.extend(view.connection_ids.iter().cloned());
+        if fields
+            .iter()
+            .any(|field| field.to_lowercase().contains(&needle))
+        {
+            matches.push(view.clone());
+            if matches.len() >= limit {
+                break;
+            }
+        }
+    }
+    matches
+}
+
+/// Decode one page cursor (TS `decodePluginCursor`): digits only, `None`
+/// for the first page.
+pub fn decode_plugin_cursor(cursor: Option<&str>) -> Result<usize, String> {
+    let Some(cursor) = cursor else {
+        return Ok(0);
+    };
+    if cursor.is_empty() {
+        return Ok(0);
+    }
+    if !cursor.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err("mcp.list_plugins received an invalid cursor".to_string());
+    }
+    cursor
+        .parse::<usize>()
+        .map_err(|_| "mcp.list_plugins received an invalid cursor".to_string())
+}
+
+/// Slice one bounded page out of the plugin cards (TS `pagePluginViews`).
+///
+/// A cursor at or past the end yields an empty page and no continuation —
+/// the TS float-arithmetic outcome for any oversized cursor, which `usize`
+/// addition would otherwise overflow on (`cursor + limit` panics checked
+/// builds and wraps in release to a bogus low cursor).
+pub fn page_plugin_views(
+    views: &[McpPluginView],
+    cursor: usize,
+    limit: usize,
+) -> (Vec<McpPluginView>, Option<String>) {
+    if cursor >= views.len() {
+        return (Vec::new(), None);
+    }
+    let page: Vec<McpPluginView> = views.iter().skip(cursor).take(limit).cloned().collect();
+    let next_cursor = (cursor + limit < views.len()).then(|| (cursor + limit).to_string());
+    (page, next_cursor)
+}
+
+#[cfg(test)]
+mod connection_view_tests {
+    use super::*;
+    use crate::mcp::service_catalog::McpServiceDescriptor;
+
+    fn http_descriptor(service_id: &str, legacy_builtin: bool) -> McpServiceDescriptor {
+        McpServiceDescriptor::from_entry(
+            &serde_json::from_value::<crate::mcp::catalog_schema::McpServiceEntry>(serde_json::json!({
+                "server": service_id, "service": service_id, "label": service_id,
+                "url": format!("https://{service_id}.example/mcp"),
+                "aliases": [],
+                "transport": { "type": "http", "url": format!("https://{service_id}.example/mcp") },
+                "auth": { "strategy": "oauth", "clientRegistration": "dynamic" },
+                "setup": { "status": "ready" },
+                "verification": { "status": "unverified" },
+                "legacyBuiltin": legacy_builtin,
+                "provenance": [{ "source": "prime" }]
+            }))
+            .expect("fixture entry parses"),
+            false,
+        )
+    }
+
+    fn connected_record(connection_id: &str, service_id: &str) -> McpConnectionRecord {
+        let mut record = crate::mcp::connection_store::new_pending_record(
+            connection_id,
+            service_id,
+            connection_id,
+            "https://alpha.example/mcp",
+        );
+        record.status = crate::mcp::connection_store::McpConnectionStatus::Connected;
+        record.verified_at = Some(1_700_000_000_000);
+        record
+    }
+
+    /// A usable OAuth grant bound to the service endpoint: what a Connected
+    /// row requires (the status machine refuses record-only claims).
+    fn bound_grant(connection_id: &str) -> crate::auth::types::AuthCredential {
+        crate::auth::types::AuthCredential::Oauth {
+            access: format!("access-{connection_id}"),
+            refresh: Some("refresh-token".to_string()),
+            expires: 4_102_444_800_000,
+            endpoint: Some("https://alpha.example/mcp".to_string()),
+            token_endpoint: None,
+            client_id: None,
+            resource: None,
+            issuer: None,
+            account_id: None,
+            enterprise_url: None,
+        }
+    }
+
+    fn credentials_with(
+        entries: &[(&str, crate::auth::types::AuthCredential)],
+    ) -> SnapshotCredentials {
+        let credentials: HashMap<String, crate::auth::types::AuthCredential> = entries
+            .iter()
+            .map(|(id, credential)| (format!("mcp:{id}"), credential.clone()))
+            .collect();
+        SnapshotCredentials { credentials }
+    }
+
+    fn inputs<'a>(
+        services: &'a [McpServiceDescriptor],
+        user_servers: Option<&'a HashMap<String, McpServerConfig>>,
+        credentials: &'a SnapshotCredentials,
+        records: &'a HashMap<String, McpConnectionRecord>,
+    ) -> BuildViewsInputs<'a> {
+        BuildViewsInputs {
+            services,
+            user_servers,
+            credentials,
+            records,
+            catalog_available: false,
+        }
+    }
+
+    fn empty_credentials() -> SnapshotCredentials {
+        SnapshotCredentials::empty()
+    }
+
+    /// The TS `buildConnectionViews` contract: one row per dispatchable
+    /// account (the verified record wins), user-declared stdio servers get
+    /// rows, unshadowed ACP servers get rows, a legacy-builtin shadow (a
+    /// conflicting user entry) surfaces as an error row, and the whole
+    /// inventory sorts by connectionId.
+    #[test]
+    fn connection_views_cover_accounts_user_and_acp_rows() {
+        let services = vec![
+            http_descriptor("alpha", false),
+            http_descriptor("linear", true),
+        ];
+        let mut records = HashMap::new();
+        records.insert("alpha".to_string(), connected_record("alpha", "alpha"));
+        // A per-account record: its own dispatchable row.
+        records.insert("alpha-2".to_string(), connected_record("alpha-2", "alpha"));
+        let mut user_servers = HashMap::new();
+        user_servers.insert(
+            "local-tool".to_string(),
+            McpServerConfig::Stdio {
+                command: "run".to_string(),
+                args: Some(vec!["tool".to_string()]),
+                cwd: None,
+                env: None,
+                enabled: None,
+                enabled_tools: None,
+                disabled_tools: None,
+                startup_timeout_ms: None,
+                call_timeout_ms: None,
+            },
+        );
+        // A conflicting user entry shadowing the legacy builtin: the
+        // inventory reports the ownership error row, not a dispatchable id.
+        user_servers.insert(
+            "linear".to_string(),
+            McpServerConfig::Http {
+                url: "https://evil.example/mcp".to_string(),
+                headers: None,
+                bearer_token_env_var: None,
+                oauth: Some(true),
+                enabled: None,
+                enabled_tools: None,
+                disabled_tools: None,
+                startup_timeout_ms: None,
+                call_timeout_ms: None,
+            },
+        );
+        let credentials = credentials_with(&[
+            ("alpha", bound_grant("alpha")),
+            ("alpha-2", bound_grant("alpha-2")),
+        ]);
+        let view_inputs = inputs(&services, Some(&user_servers), &credentials, &records);
+        let views = build_connection_views(
+            &view_inputs,
+            &[AcpServerRow {
+                name: "session-tool".to_string(),
+                transport: "stdio".to_string(),
+            }],
+        );
+        let ids: Vec<&str> = views
+            .iter()
+            .map(|view| view.connection_id.as_str())
+            .collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted, "rows sort by connectionId");
+        assert_eq!(
+            ids,
+            vec!["alpha", "alpha-2", "linear", "local-tool", "session-tool"]
+        );
+        let alpha = &views[0];
+        assert_eq!(alpha.status, McpConnectionStatus::Connected);
+        assert_eq!(alpha.transport, "http");
+        assert_eq!(alpha.source, ViewSource::Catalog);
+        assert_eq!(alpha.service_id.as_deref(), Some("alpha"));
+        // The per-account row carries the account-suffixed label.
+        let alpha_two = &views[1];
+        assert_eq!(alpha_two.label, "alpha (alpha-2)");
+        assert_eq!(alpha_two.status, McpConnectionStatus::Connected);
+        // The conflicted legacy builtin: an error row with the hint, never a
+        // dispatchable connection id beyond the id itself.
+        let shadow = views.iter().find(|v| v.connection_id == "linear").unwrap();
+        assert_eq!(shadow.status, McpConnectionStatus::Error);
+        assert!(shadow.setup_hint.is_some());
+        // The user stdio server reports connected with its transport.
+        let local = views
+            .iter()
+            .find(|v| v.connection_id == "local-tool")
+            .unwrap();
+        assert_eq!(local.status, McpConnectionStatus::Connected);
+        assert_eq!(local.transport, "stdio");
+        assert_eq!(local.source, ViewSource::User);
+        // The ACP server joins as its own connected row.
+        let acp = views
+            .iter()
+            .find(|v| v.connection_id == "session-tool")
+            .unwrap();
+        assert_eq!(acp.status, McpConnectionStatus::Connected);
+        assert_eq!(acp.source, ViewSource::Acp);
+    }
+
+    /// An oversized cursor pages to an empty page with NO continuation
+    /// instead of overflowing `cursor + limit` (the TS float outcome; the
+    /// registered Macroscope finding on the review of the first push).
+    #[test]
+    fn oversized_cursor_yields_empty_page_without_overflow() {
+        let views: Vec<McpPluginView> = (0..4)
+            .map(|i| McpPluginView {
+                service_id: format!("s{i}"),
+                label: format!("s{i}"),
+                connection_status: McpConnectionStatus::NotConnected,
+                connectable: false,
+                add_account_allowed: None,
+                login_pending: None,
+                uses_oauth: false,
+                source: ViewSource::Catalog,
+                connection_ids: Vec::new(),
+                paste_token: None,
+                aliases: None,
+                description: None,
+                category: None,
+                publisher: None,
+                docs_url: None,
+                setup_hint: None,
+                unverified: None,
+                verified_at: None,
+                tool_count: None,
+            })
+            .collect();
+        let (page, next) = page_plugin_views(&views, 0, 2);
+        assert_eq!(page.len(), 2);
+        assert_eq!(next.as_deref(), Some("2"));
+        // A cursor past the end (incl. usize::MAX): empty page, no cursor.
+        for cursor in [views.len(), usize::MAX] {
+            let (page, next) = page_plugin_views(&views, cursor, 50);
+            assert!(page.is_empty(), "cursor {cursor} must page empty");
+            assert_eq!(next, None, "cursor {cursor} must end paging");
+        }
+    }
+
+    /// A service with no dispatchable accounts and no reserved conflict
+    /// produces NO row (TS skips the empty connectionIds path silently).
+    #[test]
+    fn connection_views_skip_undispatchable_services() {
+        let services = vec![http_descriptor("beta", false)];
+        let user_servers: HashMap<String, McpServerConfig> = HashMap::new();
+        let records: HashMap<String, McpConnectionRecord> = HashMap::new();
+        let credentials = empty_credentials();
+        let view_inputs = inputs(&services, Some(&user_servers), &credentials, &records);
+        assert!(build_connection_views(&view_inputs, &[]).is_empty());
+    }
 }

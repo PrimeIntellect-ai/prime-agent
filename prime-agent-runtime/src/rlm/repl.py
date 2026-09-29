@@ -14,6 +14,7 @@ import contextvars
 import ctypes
 import inspect
 import io
+import itertools
 import json
 import linecache
 import os
@@ -26,10 +27,11 @@ import time
 import traceback
 import types
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Generator
 from typing import Any
 
-from .bash import _kill_live_handles
+from . import autobg
+from .bash import _kill_live_handles, active_guard_race_deadline
 
 PROTOCOL_VERSION = 3
 
@@ -72,6 +74,458 @@ class _CellExecution:
     def __init__(self) -> None:
         self.finished = asyncio.Event()
         self.owner: asyncio.Task[Any] | None = None
+
+
+# Per-cell bounded tails of Python-level writes, armed only while the auto-bg
+# guard is on: a degraded execution's result note previews the output so far.
+_AUTOBG_TAIL_CAP = 4096
+_AUTOBG_NOTE_PREVIEW_CAP = 2048
+_bg_counter = itertools.count(1)
+_autobg_tails: dict[str, "_TailBuffer"] = {}
+
+
+def _pop_tail(cell_id: str, tail: "_TailBuffer | None") -> None:
+    """Drop this execution's tail entry: request ids are reusable, so a bare
+    keyed pop could delete a later execution's buffer - only the entry that IS
+    this execution's buffer is removed."""
+    if tail is not None and _autobg_tails.get(cell_id) is tail:
+        _autobg_tails.pop(cell_id, None)
+
+
+class _TailBuffer:
+    """Bounded newest-last text tail for one running cell's Python-level writes."""
+
+    def __init__(self, cap: int = _AUTOBG_TAIL_CAP) -> None:
+        self._cap = cap
+        self._text = ""
+        self._lock = threading.Lock()
+
+    def append(self, text: str) -> None:
+        with self._lock:
+            self._text = (self._text + text)[-self._cap :]
+
+    def text(self, max_chars: int | None = None) -> str:
+        with self._lock:
+            text = self._text
+        return text if max_chars is None else text[-max_chars:]
+
+
+class _SyncCellRunner:
+    """Runs a sync-only cell's codes in a worker thread over the shared namespace.
+
+    The serving loop stays free (a CPU-bound cell would otherwise hold the whole
+    runtime hostage and the auto-bg guard could never fire). Python-level
+    writes keep their cell attribution through the copied context, and the
+    kernel loop stays this thread's default loop so asyncio.get_event_loop()
+    in a cell resolves it exactly like a loop-thread cell did.
+    """
+
+    def __init__(
+        self, codes: list[types.CodeType], ns: dict[str, Any], cell_id: str, tail: "_TailBuffer | None"
+    ) -> None:
+        self._codes = codes
+        self._ns = ns
+        self._cell_id = cell_id
+        self._tail = tail
+        self._done = threading.Event()
+        self._cb_lock = threading.Lock()
+        self._cb: Callable[[], None] | None = None
+        self._value: Any = None
+        self._exc: BaseException | None = None
+        self.thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        # The copied context carries the cell's id and execution state, so
+        # stdout attribution and bash handles keep their creating-cell ties.
+        context = contextvars.copy_context()
+        self.thread = threading.Thread(
+            target=context.run, args=(self._run,), name=f"rlm-cell-{self._cell_id}", daemon=True
+        )
+        self.thread.start()
+
+    def _run(self) -> None:
+        # The kernel loop is this thread's default loop: asyncio.get_event_loop()
+        # in the cell resolves it exactly like a loop-thread cell did, and the
+        # compat shims route create_task/get_running_loop/signal for this cell.
+        asyncio.set_event_loop(_loop)
+        _sync_cell_worker.in_cell = True
+        try:
+            value: Any = None
+            for code_obj in self._codes:
+                value = eval(code_obj, self._ns)  # noqa: S307 - executing the model's cell is the runtime's job
+            self._value = value
+        except BaseException as exc:  # noqa: BLE001 - surfaces inline or at poll, never silently dropped
+            self._exc = exc
+        finally:
+            with self._cb_lock:
+                self._done.set()
+                callback, self._cb = self._cb, None
+            _sync_cell_worker.in_cell = False
+            _pop_tail(self._cell_id, self._tail)
+            if callback is not None:
+                callback()
+
+    def on_done(self, callback: Callable[[], None]) -> None:
+        """Register the completion callback; fires inline when already done."""
+        fire = False
+        with self._cb_lock:
+            if self._done.is_set():
+                fire = True
+            else:
+                self._cb = callback
+        if fire:
+            callback()
+
+    def done(self) -> bool:
+        return self._done.is_set()
+
+    def outcome(self) -> Any:
+        """The cell's value; raises its exception (inline or at poll)."""
+        if self._exc is not None:
+            raise self._exc
+        return self._value
+
+    def request_stop(self) -> None:
+        """Best-effort KeyboardInterrupt into the worker: Python-level code
+        stops at its next bytecode; a C-blocked call runs to its return."""
+        thread = self.thread
+        if thread is None or not thread.is_alive() or thread.ident is None:
+            return
+        try:
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                ctypes.c_long(thread.ident), ctypes.py_object(KeyboardInterrupt)
+            )
+        except (OSError, SystemError, ValueError):
+            pass
+
+
+class _KernelFuture:
+    """Handle to a cell execution that outlived the auto-bg threshold.
+
+    The execution keeps running (the worker thread for sync cells, the serving
+    loop's task for async ones) and shares the kernel namespace: poll the
+    handle before relying on shared state. Exceptions surface at poll(),
+    never silently.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        started: float,
+        runner: _SyncCellRunner | None = None,
+        task: asyncio.Task[Any] | None = None,
+        tail: "_TailBuffer | None" = None,
+    ) -> None:
+        self.name = name
+        self.started = started
+        self._runner = runner
+        self._task = task
+        self._tail = tail
+
+    def done(self) -> bool:
+        """True once the execution finished (with a value or an exception)."""
+        if self._runner is not None:
+            return self._runner.done()
+        assert self._task is not None
+        return self._task.done()
+
+    @property
+    def running(self) -> bool:
+        return not self.done()
+
+    def poll(self) -> Any:
+        """The execution's value once done (None while running); raises its
+        exception when it failed - failures are never silent."""
+        if not self.done():
+            return None
+        if self._runner is not None:
+            return self._runner.outcome()
+        assert self._task is not None
+        return self._task.result()
+
+    def exception(self) -> BaseException | None:
+        if not self.done():
+            return None
+        if self._runner is not None:
+            return self._runner._exc
+        assert self._task is not None
+        if self._task.cancelled():
+            return asyncio.CancelledError()
+        return self._task.exception()
+
+    def cancel(self) -> bool:
+        """Stop the execution: cancels the loop task, or requests the worker's
+        best-effort KeyboardInterrupt (a C-blocked call runs to its return)."""
+        if self.done():
+            return False
+        if self._runner is not None:
+            self._runner.request_stop()
+            return True
+        assert self._task is not None
+        # Task.cancel from a foreign thread races the serving loop (and raises
+        # in asyncio debug mode): marshal the cancellation onto the loop.
+        self._task.get_loop().call_soon_threadsafe(self._task.cancel)
+        return True
+
+    def stdout_tail(self, max_chars: int = _AUTOBG_NOTE_PREVIEW_CAP) -> str:
+        """The execution's Python-level writes so far, newest last (raw fd
+        output keeps flowing as stream events)."""
+        if self._tail is None:
+            return ""
+        return self._tail.text(max_chars)
+
+    async def _wait(self) -> Any:
+        while not self.done():
+            await asyncio.sleep(0.05)
+        return self.poll()
+
+    def __await__(self) -> Generator[Any, Any, Any]:
+        return self._wait().__await__()
+
+    def __repr__(self) -> str:
+        state = "running" if self.running else ("error" if self.exception() is not None else "done")
+        return f"<KernelFuture {self.name} {state} ({time.monotonic() - self.started:.1f}s)>"
+
+
+# The sync-cell worker thread flag: the compat shims below route only calls
+# made from inside a sync cell's worker thread.
+_sync_cell_worker = threading.local()
+
+_orig_create_task = asyncio.create_task
+# The serving loop's original bound create_task, captured when the loop-level
+# worker bridge installs (main() owns the loop's lifetime).
+_orig_loop_create_task: Any = None
+_orig_get_running_loop = asyncio.get_running_loop
+_orig_signal_signal = signal.signal
+
+# The compat bridge's bound on waiting for the serving loop: a sync cell leaves
+# the loop free, so a healthy kernel answers instantly; a wedged loop fails the
+# cell loudly instead of hanging the worker forever.
+_COMPAT_BRIDGE_TIMEOUT = 5.0
+
+
+def _worker_in_cell() -> bool:
+    return getattr(_sync_cell_worker, "in_cell", False)
+
+
+def _bridge_to_loop(spawn: Callable[[], None]) -> None:
+    """Run `spawn` on the serving loop and wait for it (the loop is free while
+    a sync cell holds its worker thread)."""
+    done = threading.Event()
+
+    def run() -> None:
+        try:
+            spawn()
+        finally:
+            done.set()
+
+    _loop.call_soon_threadsafe(run)
+    if not done.wait(_COMPAT_BRIDGE_TIMEOUT):
+        raise RuntimeError(
+            f"compat bridge: the kernel loop did not run within {_COMPAT_BRIDGE_TIMEOUT}s"
+        )
+
+
+def _create_task_from_worker(coro: Any, *, name: Any = None, context: Any = None, **kwargs: Any) -> Any:
+    box: dict[str, Any] = {}
+
+    def spawn() -> None:
+        try:
+            box["task"] = _orig_loop_create_task(coro, name=name, context=context, **kwargs)
+        except BaseException as exc:  # noqa: BLE001 - surfaced to the caller below
+            box["exc"] = exc
+
+    _bridge_to_loop(spawn)
+    if "exc" in box:
+        raise box["exc"]
+    return box["task"]
+
+
+def _signal_from_worker(sig: Any, handler: Any) -> Any:
+    box: dict[str, Any] = {}
+
+    def spawn() -> None:
+        try:
+            box["previous"] = _orig_signal_signal(sig, handler)
+        except BaseException as exc:  # noqa: BLE001 - surfaced to the caller below
+            box["exc"] = exc
+
+    _bridge_to_loop(spawn)
+    if "exc" in box:
+        raise box["exc"]
+    return box["previous"]
+
+
+def _install_loop_create_task_compat() -> None:
+    """Make the serving loop's create_task safe from sync-cell worker threads.
+
+    A worker cell reaches the serving loop through the get_event_loop/
+    get_running_loop shims and can call loop.create_task directly (bash
+    completion notices, spawned tasks): from a foreign thread that call is
+    not thread-safe (asyncio debug mode raises; without the debug check the
+    queued task never wakes the loop, so an idle kernel would miss bash
+    notices). The wrapper keeps the original on the loop's own thread and
+    bridges every other caller, preserving the cell's context.
+    """
+    global _orig_loop_create_task
+    assert _loop is not None
+    _orig_loop_create_task = _loop.create_task
+
+    def create_task(coro: Any, *, name: Any = None, context: Any = None, **kwargs: Any) -> Any:
+        if not _worker_in_cell():
+            return _orig_loop_create_task(coro, name=name, context=context, **kwargs)
+        if context is None:
+            context = contextvars.copy_context()
+        box: dict[str, Any] = {}
+
+        def spawn() -> None:
+            try:
+                box["task"] = _orig_loop_create_task(coro, name=name, context=context, **kwargs)
+            except BaseException as exc:  # noqa: BLE001 - surfaced to the caller below
+                box["exc"] = exc
+
+        _bridge_to_loop(spawn)
+        if "exc" in box:
+            raise box["exc"]
+        return box["task"]
+
+    _loop.create_task = create_task  # type: ignore[method-assign]
+    _install_loop_schedule_compat()
+
+
+def _install_loop_schedule_compat() -> None:
+    """Bridge the serving loop's plain scheduling entry points for workers.
+
+    call_soon/call_later/call_at from a sync-cell worker thread are not
+    thread-safe (debug mode raises; otherwise the wakeup is missing), so a
+    worker's direct scheduling rides call_soon_threadsafe / the loop bridge;
+    the loop's own thread keeps the originals. Timer handles round-trip so
+    cell-held cancel() keeps working.
+    """
+    assert _loop is not None
+    orig_call_soon = _loop.call_soon
+    orig_call_later = _loop.call_later
+    orig_call_at = _loop.call_at
+
+    def call_soon(callback: Any, *args: Any, context: Any = None) -> Any:
+        if not _worker_in_cell():
+            return orig_call_soon(callback, *args, context=context)
+        return _loop.call_soon_threadsafe(callback, *args, context=context)
+
+    def call_later(delay: Any, callback: Any, *args: Any, context: Any = None) -> Any:
+        if not _worker_in_cell():
+            return orig_call_later(delay, callback, *args, context=context)
+        if context is None:
+            context = contextvars.copy_context()
+        box: dict[str, Any] = {}
+
+        def spawn() -> None:
+            try:
+                box["handle"] = orig_call_later(delay, callback, *args, context=context)
+            except BaseException as exc:  # noqa: BLE001 - surfaced to the caller below
+                box["exc"] = exc
+
+        _bridge_to_loop(spawn)
+        if "exc" in box:
+            raise box["exc"]
+        return box.get("handle")
+
+    def call_at(when: Any, callback: Any, *args: Any, context: Any = None) -> Any:
+        if not _worker_in_cell():
+            return orig_call_at(when, callback, *args, context=context)
+        if context is None:
+            context = contextvars.copy_context()
+        box: dict[str, Any] = {}
+
+        def spawn() -> None:
+            try:
+                box["handle"] = orig_call_at(when, callback, *args, context=context)
+            except BaseException as exc:  # noqa: BLE001 - surfaced to the caller below
+                box["exc"] = exc
+
+        _bridge_to_loop(spawn)
+        if "exc" in box:
+            raise box["exc"]
+        return box.get("handle")
+
+    _loop.call_soon = call_soon  # type: ignore[method-assign]
+    _loop.call_later = call_later  # type: ignore[method-assign]
+    _loop.call_at = call_at  # type: ignore[method-assign]
+
+
+def _install_sync_cell_compat() -> None:
+    """Keep loop-thread and main-thread APIs working from sync-cell workers.
+
+    The auto-bg guard runs sync-only cells off the serving loop so the kernel
+    stays responsive; the serving loop and the signal handlers still belong to
+    the main thread. A cell expects `asyncio.create_task`,
+    `asyncio.get_running_loop()`, and `signal.signal()` to behave like a
+    loop-thread cell, so inside a sync cell those three marshal to the loop
+    thread (create_task carries the cell's context, so spawned tasks keep
+    their cell attribution and persist across cells on the serving loop).
+    Every other caller gets the original function untouched.
+    """
+
+    def create_task(coro: Any, *, name: Any = None, context: Any = None, **kwargs: Any) -> Any:
+        if not _worker_in_cell():
+            return _orig_create_task(coro, name=name, context=context, **kwargs)
+        if context is None:
+            context = contextvars.copy_context()
+        return _create_task_from_worker(coro, name=name, context=context, **kwargs)
+
+    def get_running_loop() -> asyncio.AbstractEventLoop:
+        if not _worker_in_cell():
+            return _orig_get_running_loop()
+        assert _loop is not None
+        return _loop
+
+    def signal_signal(sig: Any, handler: Any) -> Any:
+        if not _worker_in_cell():
+            return _orig_signal_signal(sig, handler)
+        return _signal_from_worker(sig, handler)
+
+    asyncio.create_task = create_task  # type: ignore[assignment]
+    asyncio.get_running_loop = get_running_loop  # type: ignore[assignment]
+    signal.signal = signal_signal  # type: ignore[assignment]
+
+
+async def _await_sync_cell(runner: _SyncCellRunner) -> Any:
+    """Bridge the worker thread's completion onto the serving loop."""
+    # The thread starts on this task's first step, AFTER _run_guarded has
+    # registered it as the active task: a fast cell's worker must never win
+    # that race (result reads through _live_cell_owner would misattribute).
+    runner.start()
+    loop = asyncio.get_running_loop()
+    finished: asyncio.Future[None] = loop.create_future()
+
+    def _thread_done() -> None:
+        loop.call_soon_threadsafe(lambda: finished.done() or finished.set_result(None))
+
+    runner.on_done(_thread_done)
+    try:
+        await finished
+    except asyncio.CancelledError:
+        # An interrupt cannot kill a thread: request the best-effort stop,
+        # report the interrupt, and let the thread's outcome land on the runner.
+        runner.request_stop()
+        raise
+    return runner.outcome()
+
+
+def _autobg_degrade_note(name: str, threshold: float, tail: _TailBuffer | None) -> str:
+    lines = [
+        f"python execution auto-backgrounded after {threshold:.1f}s "
+        "(PRIME_AGENT_AUTOBG_MS); the execution is still running",
+        "backgrounded execution shares the kernel namespace "
+        "- poll the handle before relying on shared state",
+        f"handle: {name}  (poll() -> the value or raises its exception; "
+        "stdout_tail(); cancel(); await)",
+    ]
+    if tail is not None:
+        preview = tail.text(_AUTOBG_NOTE_PREVIEW_CAP)
+        if preview.strip():
+            lines.append(f"partial stdout (last {_AUTOBG_NOTE_PREVIEW_CAP} chars):\n{preview}")
+    return "\n".join(lines)
 
 
 # Asyncio tasks copy cell context at creation, so detached tasks retain their
@@ -332,6 +786,9 @@ class _TaggedWriter(io.TextIOBase):
             raise TypeError(f"write() argument must be str, not {type(text).__name__}")
         if text:
             cell_id = _current_cell.get()
+            tail = _autobg_tails.get(cell_id)
+            if tail is not None:
+                tail.append(text)
             with self._frame_lock:
                 for start in range(0, len(text), _STREAM_FRAME_TEXT_CAP):
                     _send(
@@ -602,8 +1059,15 @@ async def _run_codes(codes: list[types.CodeType], ns: dict[str, Any]) -> Any:
     return value
 
 
-async def _run_guarded(task: asyncio.Task[Any], rid: str) -> tuple[str, Any, dict[str, Any] | None]:
-    """Await a request task; returns (status, value, error event or None)."""
+async def _run_guarded(
+    task: asyncio.Task[Any], rid: str, autobg_threshold: float = 0.0
+) -> tuple[str, Any, dict[str, Any] | None]:
+    """Await a request task; returns (status, value, error event or None).
+
+    With a positive auto-bg threshold the race degrades: a task still running
+    past the threshold is left running and reported as "degraded" — the
+    execution slot frees and the caller hands back a pollable future handle.
+    """
     with _interrupt_lock:
         _active["interrupted"] = False
         _active["rid"] = rid
@@ -613,6 +1077,23 @@ async def _run_guarded(task: asyncio.Task[Any], rid: str) -> tuple[str, Any, dic
             _active["interrupted"] = True
             task.cancel()
     try:
+        if autobg_threshold > 0.0:
+            deadline = time.monotonic() + autobg_threshold
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    # The threshold passed: defer only while the cell is
+                    # suspended inside an actively-guarded bash await - that
+                    # await degrades on its own (the cell resumes with the
+                    # bash handle), so the cell is not degraded too.
+                    bash_deadline = active_guard_race_deadline(task)
+                    if bash_deadline is None:
+                        return "degraded", None, None
+                    remaining = max(bash_deadline - time.monotonic(), 0.0) + 0.05
+                    deadline = time.monotonic() + remaining
+                done, _pending = await asyncio.wait({task}, timeout=remaining)
+                if done:
+                    break
         value = await task
         return "ok", value, None
     except asyncio.CancelledError as exc:
@@ -641,19 +1122,76 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
     execution = _CellExecution()
     cell_token = _current_cell.set(cell_id)
     execution_token = _current_cell_execution.set(execution)
+    threshold = autobg.threshold_seconds()
+    tail: _TailBuffer | None = None
+    runner: _SyncCellRunner | None = None
+    # True once a degraded async task owns its own tail cleanup.
+    tail_detached = False
+    # Bound before the try so the finally can read it on early failures
+    # (e.g. a compile error) - only _run_guarded ever sets "degraded".
+    status: str | None = None
     try:
         codes, has_trailing = _compile_cell(req["code"], filename)
         assert _loop is not None
-        task = _loop.create_task(_run_codes(codes, ns))
+        if threshold > 0.0:
+            tail = _TailBuffer()
+            _autobg_tails[cell_id] = tail
+            if any(code_obj.co_flags & inspect.CO_COROUTINE for code_obj in codes):
+                task = _loop.create_task(_run_codes(codes, ns))
+            else:
+                # Sync-only cell: a worker thread keeps the loop free so the
+                # guard can fire even while the cell holds the GIL.
+                runner = _SyncCellRunner(codes, ns, cell_id, tail)
+                task = _loop.create_task(_await_sync_cell(runner))
+        else:
+            task = _loop.create_task(_run_codes(codes, ns))
         execution.owner = task
-        status, value, error = await _run_guarded(task, cell_id)
+        status, value, error = await _run_guarded(task, cell_id, threshold)
         result_text: str | None = None
         try:
-            if _consume_handoff_interrupt() and status == "ok":
+            if _consume_handoff_interrupt() and status in ("ok", "degraded"):
+                if status == "degraded":
+                    # The interrupt targets the request's remaining work - the
+                    # still-running execution: stop it best-effort and keep its
+                    # late outcome on the runner/task instead of loop logs.
+                    if runner is not None:
+                        runner.request_stop()
+                    else:
+                        task.cancel()
+                    task.add_done_callback(_consume_task_exception)
+                    _pop_tail(cell_id, tail)
                 # SIGINT landed between the task's completion and the finishing
                 # phase: it targeted this request, so cancel its remaining work.
                 status, error = "error", _error_event(cell_id, KeyboardInterrupt())
-            if status == "ok" and has_trailing and value is not None:
+            if status == "degraded":
+                # The cell outlived the auto-bg threshold: bind a pollable
+                # future handle, keep the execution running, free the slot.
+                name = f"_bg_{next(_bg_counter)}"
+                while name in ns:
+                    name = f"_bg_{next(_bg_counter)}"
+                future = _KernelFuture(
+                    name=name,
+                    started=time.monotonic(),
+                    runner=runner,
+                    task=None if runner is not None else task,
+                    tail=tail,
+                )
+                ns[name] = future
+                # The abandoned task keeps running to completion; its late
+                # exception belongs to poll() (the future surfaces it), so it
+                # must never become loop noise at garbage collection.
+                task.add_done_callback(_consume_task_exception)
+                if runner is None:
+                    # The async task keeps writing after this request ends; it
+                    # owns the tail's cleanup now (identity-guarded: the
+                    # request id may be reused by a later execution).
+                    tail_detached = True
+                    task.add_done_callback(
+                        lambda _done_task, _cell_id=cell_id, _tail=tail: _pop_tail(_cell_id, _tail)
+                    )
+                result_text = _cap_text(_autobg_degrade_note(name, threshold, tail))
+                status = "ok"
+            elif status == "ok" and has_trailing and value is not None:
                 try:
                     ns["_"] = value
                     result_text = repr(value)
@@ -672,6 +1210,23 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
             _send(error)
         _send({"event": "done", "id": cell_id, "status": status})
     finally:
+        # status is still "degraded" only when the degrade bookkeeping never
+        # completed - a finishing-window KeyboardInterrupt unwound through it.
+        # The interrupt targeted this request, so its remaining work (the
+        # still-running execution) stops here, mirroring the handoff branch.
+        if status == "degraded":
+            if runner is not None:
+                runner.request_stop()
+            else:
+                task.cancel()
+            task.add_done_callback(_consume_task_exception)
+            _pop_tail(cell_id, tail)
+        # A started sync cell's runner pops its own tail at thread completion;
+        # a degraded async task's done-callback owns its tail. A runner whose
+        # task was cancelled before its first step never starts, so its entry
+        # would otherwise leak; every other armed cell ends here.
+        if tail is not None and not tail_detached and (runner is None or runner.thread is None):
+            _pop_tail(cell_id, tail)
         execution.owner = None
         execution.finished.set()
         _current_cell_execution.reset(execution_token)
@@ -1570,6 +2125,7 @@ def main() -> None:
     global _loop, _serve_task
     stdin_fd = _setup_fds()
     _start_owner_watchdog()
+    _install_sync_cell_compat()
 
     # Alias the executing module so an in-cell `from rlm.repl import emit`
     # binds the live module, not a second copy.
@@ -1581,6 +2137,7 @@ def main() -> None:
 
     _loop = asyncio.new_event_loop()
     asyncio.set_event_loop(_loop)
+    _install_loop_create_task_compat()
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
     signal.signal(signal.SIGINT, _sigint_handler)
     threading.Thread(target=_read_requests, args=(stdin_fd, queue), daemon=True).start()

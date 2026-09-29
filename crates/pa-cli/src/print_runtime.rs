@@ -643,9 +643,9 @@ fn route_authoritative_stream_fn(
                 service_tier,
                 headers,
             } = target;
-            Box::pin(
-                async move { stream_once(model, api_key, service_tier, headers, context, options) },
-            )
+            Box::pin(async move {
+                stream_once(&model, api_key, service_tier, headers, context, options)
+            })
         },
     )
 }
@@ -1792,15 +1792,16 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let mut manager = crate::mcp_login::cli_mcp_manager(&cwd, &agent_dir);
+        let built_manager = crate::mcp_login::cli_mcp_manager(&cwd, &agent_dir);
         assert_eq!(
-            manager.get_enabled_persistent_generic_servers(),
+            built_manager.get_enabled_persistent_generic_servers(),
             vec!["fixture-echo".to_string()]
         );
+        let manager = std::sync::Arc::new(std::sync::Mutex::new(built_manager));
         // The kernel's config host request serves the declared server with
         // the declared stdio config (registration-time integrations).
         let mut handlers = pa_core::kernel::shared::HostRequestHandlers::default();
-        manager.register_host_handlers(&mut handlers);
+        pa_core::mcp::McpManager::register_host_handlers(&manager, &mut handlers);
         let config = handlers.get("mcp.config").unwrap().clone();
         let result = config(pa_core::kernel::shared::HostRequestPayload {
             data: serde_json::json!({ "server": "fixture-echo" }),
@@ -1827,11 +1828,14 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        manager.refresh();
-        assert_eq!(
-            manager.get_enabled_persistent_generic_servers(),
-            vec!["second-echo".to_string()]
-        );
+        {
+            let mut manager = manager.lock().unwrap();
+            manager.refresh();
+            assert_eq!(
+                manager.get_enabled_persistent_generic_servers(),
+                vec!["second-echo".to_string()]
+            );
+        }
         // The already-registered handler keeps its registration-time
         // integrations — the registration shape a live session dispatches.
         let result = config(pa_core::kernel::shared::HostRequestPayload {

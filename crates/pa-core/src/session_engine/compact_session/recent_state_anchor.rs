@@ -1,7 +1,7 @@
 //! Compact-session recent-state-anchor selection (moved with its concern):
 //! the newest kept-tail assistant text the history summary anchors on,
 //! tail-truncated to the bound.
-use super::*;
+use super::{message_from_entry, AgentMessage, FileEntry};
 
 /// Maximum characters kept from the retained tail for the recency anchor
 /// (TS #2385 `RECENT_STATE_ANCHOR_MAX_CHARS`). The end of a message holds

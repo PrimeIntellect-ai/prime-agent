@@ -68,7 +68,7 @@ mod tests {
     #[tokio::test]
     async fn restore_requires_a_registered_model_with_configured_auth() {
         let auth = crate::auth::AuthStorage::in_memory_without_env(
-            crate::auth::AuthStorageData::default(),
+            &crate::auth::AuthStorageData::default(),
             std::sync::Arc::new(crate::auth::NoOAuth),
         );
         let mut registry = ModelRegistry::in_memory(auth);

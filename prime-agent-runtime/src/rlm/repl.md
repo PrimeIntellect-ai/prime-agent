@@ -48,9 +48,11 @@ runtime keeps serving. Closing stdin is equivalent to `shutdown`.
   the handshake. No banner precedes it.
 - `{"event":"stdout"|"stderr","id":str|null,"text":str}` — captured output.
   `id` is the cell whose Python execution context performed the write; asyncio
-  tasks inherit the spawning cell's id (even after that cell finished). `null`
-  for user threads, raw fd writes (`os.write`, C extensions, subprocesses),
-  and anything else without provable ownership — bytes read from the fd pipes
+  tasks inherit the spawning cell's id (even after that cell finished), and
+  the auto-bg guard's sync-cell worker thread copies the cell context, so its
+  writes keep the cell's attribution. `null` for threads a cell spawns itself,
+  raw fd writes (`os.write`, C extensions, subprocesses), and anything else
+  without provable ownership — bytes read from the fd pipes
   are never attributed to a cell. A Python-level write ships at most 64 Ki
   characters per frame; a larger write arrives as multiple events in order.
 - `{"event":"result","id":str,"text":str}` — `repr` of the cell's trailing
@@ -103,6 +105,52 @@ created by a cell keep running between cells. Each cell's source is registered
 in `linecache` under `<cell-N>`, so tracebacks show the offending source line.
 Tracebacks are plain `traceback` formatting with the runtime's own frames
 stripped, keeping cell and library frames; no colors, no decoration.
+
+## Auto-backgrounding
+
+Blocking usage beyond the auto-bg threshold degrades to non-blocking with a
+handle. `PRIME_AGENT_AUTOBG_MS` (milliseconds; default `10000`; `0` disables
+both guards) is read per call, so a cell can flip it live via `os.environ`.
+The two guards:
+
+- **bash awaits**: awaiting a `BashHandle` past the threshold returns a
+  `BashAutoBackgrounded` wrapping the live handle instead of the
+  `BashResult` — the command keeps running (the existing background-handle
+  registry and completion-notice machinery are untouched; the notice still
+  reaches the model, because the await never completed). The wrapper
+  delegates `poll()`/`output()`/`tail()`/`kill()`/`await` to the handle, and
+  its `repr` carries the partial output plus `the command is still running
+  (pid N) - poll or await later`. One-shot cancel semantics are unchanged
+  below the threshold.
+- **python cells**: a cell still executing past the threshold is left
+  running and the request settles `ok` with a result text naming a
+  `_bg_<n>` handle bound into the namespace — a `KernelFuture` with
+  `poll()` (the cell's value once done, raising its exception when it
+  failed), `exception()`, `stdout_tail()` (the cell's Python-level writes so
+  far), `cancel()`, and `await`. The result text carries the loud contract
+  note: *backgrounded execution shares the kernel namespace - poll the
+  handle before relying on shared state*, plus the partial stdout preview.
+
+With the knob on, sync-only cells (no top-level await) execute in a worker
+thread over the shared namespace — the serving loop stays free, so the guard
+can fire even while the cell holds the GIL, and output stays cell-attributed
+through the copied cell context (a thread the *cell* spawns still emits
+`id: null`). Cells with top-level await keep the loop-task path with its
+native `host_request`/bash-await semantics. The guards compose: while a cell
+is suspended inside an actively-guarded bash await, that await's own degrade
+owns the blocking — the cell resumes with the bash handle, not a future.
+
+The GIL honesty of the python surface: I/O and subprocess-bound code releases
+the GIL (the common agent case — it backgrounds cleanly); CPU-bound Python
+interleaves with the serving loop (slower, but the kernel stays responsive);
+the exceptions of a backgrounded execution surface at `poll()`, never
+silently. Two known gaps, accepted for the thread path: `signal.signal()` in a
+sync cell raises `ValueError` (worker threads are not the main thread), and a
+sync-blocked section *inside* an async cell still monopolizes the loop thread
+exactly as before (the guard cannot fire through it). An interrupt of a
+thread cell reports `KeyboardInterrupt` as before, but the thread itself can
+only be stopped best-effort: Python-level code stops at its next bytecode,
+while a C-blocked call runs to its return; its outcome stays on the runner.
 
 ## Interrupt
 

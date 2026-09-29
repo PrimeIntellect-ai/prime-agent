@@ -48,6 +48,7 @@ pub enum Request {
 }
 
 impl Request {
+    #[must_use]
     pub fn type_name(&self) -> &'static str {
         match self {
             Request::Execute { .. } => "execute",
@@ -61,6 +62,7 @@ impl Request {
         }
     }
 
+    #[must_use]
     pub fn to_json(&self) -> Value {
         match self {
             Request::Execute { code } => json!({ "type": "execute", "code": code }),
@@ -143,6 +145,7 @@ pub enum Event {
 }
 
 impl Event {
+    #[must_use]
     pub fn kind(&self) -> &'static str {
         match self {
             Event::Ready { .. } => "ready",
@@ -273,6 +276,7 @@ fn clip(line: &str) -> &str {
 }
 
 /// A late agent-message display payload observed outside its owning cell.
+#[must_use]
 pub fn late_sent_agent_message(id: Option<&str>, data: &Value) -> Option<KernelSentAgentMessage> {
     let payload = data.get(crate::kernel::shared::AGENT_MESSAGE_DISPLAY_MIME)?;
     let message = parse_sent_agent_message(payload)?;
@@ -626,8 +630,9 @@ mod tests {
                 }
                 let elapsed = start.elapsed();
                 let per_frame = elapsed / iters;
-                let throughput =
-                    frame.len() as f64 * iters as f64 / elapsed.as_secs_f64() / (1024.0 * 1024.0);
+                let throughput = frame.len() as f64 * f64::from(iters)
+                    / elapsed.as_secs_f64()
+                    / (1024.0 * 1024.0);
                 println!(
                     "{label} {kind:>12} frame={frame_len:>9} bytes iters={iters:>6} per-frame={per_frame_us:>12.1} µs throughput={throughput:8.1} MiB/s",
                     frame_len = frame.len(),

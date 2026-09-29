@@ -21,6 +21,7 @@ pub type UnavailablePythonSkills = Vec<(String, String)>;
 /// `None` when it printed none: the marker must be followed by a JSON
 /// object of `{import name: error}` with at least one non-empty string
 /// value (TS `parseUnavailablePythonSkills`).
+#[must_use]
 pub fn parse_unavailable_python_skills(stdout: &str) -> Option<UnavailablePythonSkills> {
     let at = stdout.find(PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER)?;
     let raw = stdout[at + PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER.len()..].trim();
@@ -83,6 +84,7 @@ except Exception as _prime_agent_rlm_error:
 /// when any import failed — ends by printing
 /// [`PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER`] plus the errors as JSON so
 /// the host can tell the model, matching the TS `buildRlmBootstrapCode`.
+#[must_use]
 pub fn build_rlm_bootstrap_code(python_skills: &[KernelPythonSkill]) -> String {
     let base_code = format!("{RLM_BOOTSTRAP_HEADER_CODE}\n\n{RLM_BOOTSTRAP_RUNTIME_CODE}");
     // TS: `[...new Set(pythonSkills.map(...))]` — first-seen order, so the

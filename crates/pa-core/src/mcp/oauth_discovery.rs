@@ -144,7 +144,7 @@ fn authorization_server_metadata(
 }
 
 /// A JSON metadata document: 200 with an `application/json` body.
-async fn json_metadata(
+fn json_metadata(
     response: &super::oauth_http::OAuthHttpResponse,
     url: &str,
 ) -> Result<serde_json::Value> {
@@ -183,7 +183,7 @@ async fn discover_authorization_server(
                 if response.status == 404 {
                     continue;
                 }
-                match json_metadata(&response, candidate).await.and_then(|value| {
+                match json_metadata(&response, candidate).and_then(|value| {
                     authorization_server_metadata(&value, issuer, require_exact_issuer)
                 }) {
                     Ok(metadata) => return Ok(metadata),
@@ -353,7 +353,7 @@ async fn try_protected_resource_metadata(
         return Ok(None);
     }
     let resource = canonical_resource(resource_url);
-    let metadata = resource_metadata(&json_metadata(&response, &candidate).await?, &resource)?;
+    let metadata = resource_metadata(&json_metadata(&response, &candidate)?, &resource)?;
     let issuer = metadata.authorization_servers[0].clone();
     let server = discover_authorization_server(http, &issuer, true).await?;
     Ok(Some((server, metadata.resource, issuer)))

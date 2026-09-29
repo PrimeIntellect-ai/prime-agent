@@ -92,8 +92,8 @@ impl McpEndpointProbeImpl for ReqwestMcpProbe {
 }
 
 /// One JSON-RPC request body for the handshake.
-fn rpc(method: &str, id: i64, params: serde_json::Value) -> serde_json::Value {
-    serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })
+fn rpc(method: &str, id: i64, params: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params.clone() })
 }
 
 fn auth_headers(token: &str) -> reqwest::header::HeaderMap {
@@ -194,7 +194,7 @@ async fn probe_endpoint(
     let initialize = rpc(
         "initialize",
         1,
-        serde_json::json!({
+        &serde_json::json!({
             "protocolVersion": "2025-06-18",
             "capabilities": {},
             "clientInfo": { "name": "prime-agent", "version": "mcp-verify" }
@@ -234,7 +234,7 @@ async fn probe_endpoint(
         return Err(PROBE_ERROR_UNAUTHORIZED);
     }
     // tools/list
-    let list = rpc("tools/list", 2, serde_json::json!({ "cursor": null }));
+    let list = rpc("tools/list", 2, &serde_json::json!({ "cursor": null }));
     let (status, _, value) =
         post_json_rpc(client, url, token, session_id.as_deref(), list, timeout).await?;
     if status == 401 || status == 403 {

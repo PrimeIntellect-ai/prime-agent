@@ -1,7 +1,13 @@
 //! Execution bookkeeping: request writes, interrupts, abort forcing, and
 //! active-execution resolution plus late-sent agent message handlers.
 
-use super::*;
+use super::{
+    anyhow, json, lock, parse_sent_agent_message, AbortSignal, ActiveExecution, Arc, AsyncWriteExt,
+    Duration, ExecuteResult, ExecuteStatus, Inner, Instant, InternalExecuteResult, KernelState,
+    LateSentAgentMessageCallback, Value, AGENT_MESSAGE_DISPLAY_MIME,
+    KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE, KERNEL_BUSY_INTERRUPT_INTERVAL_MS,
+    KERNEL_BUSY_REUSE_WAIT_MS, MAX_BACKGROUND_OUTPUT_CHARS, MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS,
+};
 use std::fmt::Write as _;
 
 impl Inner {
@@ -143,7 +149,25 @@ impl Inner {
         let mut buffers = lock(&execution.buffers);
         if !buffers.settled {
             buffers.settled = true;
-            lock(&self.guarded).completed_executions += 1;
+            {
+                let mut g = lock(&self.guarded);
+                g.completed_executions += 1;
+                if !execution.opts.internal {
+                    g.user_executions += 1;
+                }
+                // The freshness memo describes the namespace as of its
+                // commit. A settled request that runs user-namespace code
+                // (an execute — the bootstrap class included, internal or
+                // not) or replaces the namespace wholesale (a restore) ends
+                // that description: the next capture must re-dump. The
+                // state reads (the listing) and the captures themselves do
+                // not clear it — the captures re-arm the memo at their own
+                // commits.
+                if execution.namespace_code || execution.restores_namespace {
+                    g.capture_freshness = None;
+                    g.freshness_epoch += 1;
+                }
+            }
             if let Some(callback) = execution.opts.on_late_sent_agent_message.clone() {
                 self.register_late_sent_agent_message_handler(&execution.request_id, callback);
             }
