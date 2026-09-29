@@ -60,10 +60,11 @@ use pa_tui::interactive::{
 };
 
 /// The SGR tracking sequences the seam writes (the exact byte order of
-/// `mouse_tracking`: enable is `?1002h` then `?1006h`, disable the
-/// reverse).
-const MOUSE_ENABLE: &str = "\x1b[?1002h\x1b[?1006h";
-const MOUSE_DISABLE: &str = "\x1b[?1006l\x1b[?1002l";
+/// `mouse_tracking`: enable is `?1002h` + `?1003h` + `?1006h` — the
+/// hover affordance's any-event pair rides with the button-event mode —
+/// disable the reverse).
+const MOUSE_ENABLE: &str = "\x1b[?1002h\x1b[?1003h\x1b[?1006h";
+const MOUSE_DISABLE: &str = "\x1b[?1006l\x1b[?1003l\x1b[?1002l";
 
 /// The kitty capability query crossterm's support check writes (`\x1b[?u`
 /// then the primary-device-attributes query in one write). The port runs
@@ -80,8 +81,9 @@ const CHILD_SOCKET_ENV: &str = "PA_SUSPEND_CHILD_SOCKET";
 
 /// The child half of the e2e: runs the real interactive loop in terminal
 /// mode against the parent's mock supervisor. A plain `cargo test` run
-/// (no `CHILD_SOCKET_ENV`) passes trivially — only the parent test
-/// drives the real path.
+/// (no `CHILD_SOCKET_ENV`) passes trivially — only the parent harnesses
+/// drive the real path; the ctrl+z and ctrl+g harnesses both re-exec it
+/// (ctrl+g passes VISUAL through the env).
 #[test]
 fn suspend_child_mode() {
     let Ok(socket) = std::env::var(CHILD_SOCKET_ENV) else {
@@ -118,17 +120,31 @@ fn sigtstp_session_runner() -> bool {
     if foreground < 0 {
         eprintln!(
             "no controlling-terminal session on the runner (tcgetpgrp(fd 0) \
-             failed); skipping the suspend signal e2e — it needs a \
-             controlling-terminal session to drive the stop/continue cycle"
+             failed); skipping the tests that need one to drive the \
+             stop/continue signal cycle"
         );
         return false;
     }
     true
 }
 
+/// Whether the runner had a controlling-terminal session, sampled once
+/// before this test process's single setsid (`get_or_init` blocks the
+/// other harness threads until the session change has landed).
+fn lead_fresh_session() -> bool {
+    static HAD_CTTY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HAD_CTTY.get_or_init(|| {
+        let had = sigtstp_session_runner();
+        if let Err(error) = nix::unistd::setsid() {
+            panic!("the harness could not start a fresh session: {error}");
+        }
+        had
+    })
+}
+
 #[test]
 fn ctrl_z_releases_tracking_stops_and_sigcont_re_applies() {
-    if !sigtstp_session_runner() {
+    if !lead_fresh_session() {
         return;
     }
     // The runner leads a fresh session with no controlling terminal (a
@@ -137,15 +153,11 @@ fn ctrl_z_releases_tracking_stops_and_sigcont_re_applies() {
     // the harness contract: the stop/continue cycle needs the child's
     // group parented inside its session, and the renderer needs the
     // child's terminal to be the harness pty alone.
-    match nix::unistd::setsid() {
-        Ok(_) => {}
-        Err(error) => panic!("the harness could not start a fresh session: {error}"),
-    }
     let _lock = match HARNESS_LOCK.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let mut harness = SuspendHarness::start();
+    let mut harness = SuspendHarness::start(/*editor*/ None);
 
     // The startup contract: the fullscreen surface enables SGR mouse
     // tracking (the seam bytes) before any input is handled.
@@ -154,6 +166,12 @@ fn ctrl_z_releases_tracking_stops_and_sigcont_re_applies() {
     // The first mount runs the kitty capability query once (the
     // once-per-process contract's positive side: the probe exists).
     harness.wait_from_start(KITTY_QUERY, "the first mount's kitty query");
+    // The prompt row is derived from the frame's final caret park (the
+    // frame's layout is environment-dependent, see the ctrl+g harness
+    // method): the typed-text park below keys off it, never off a
+    // hard-coded row.
+    harness.wait_from_start(" >  ", "the first frame's prompt row rendered");
+    let prompt_row = harness.wait_caret_row_from(0, 5, "the first frame's empty editor rendered");
 
     // Ctrl+Z: the app.suspend binding. The renderer releases tracking
     // before the process group stops, so the disable bytes arrive while
@@ -194,8 +212,8 @@ fn ctrl_z_releases_tracking_stops_and_sigcont_re_applies() {
     // Ratatui's diff renderer repaints only the changed cells, so the
     // typed text never appears as a contiguous "> hi" byte string: the
     // editor draws the typed cells at their positions and parks the
-    // cursor right after them — row 22 (the prompt dock line of the
-    // fixed 24-row frame), column 7 ("hi" after the "> " prompt).
+    // cursor right after them — the prompt row, column 7 ("hi" after
+    // the "> " prompt).
     //
     // The wait is bounded tight: a resume that re-queried kitty leaves
     // the app reader starved behind crossterm's support check for the
@@ -207,7 +225,7 @@ fn ctrl_z_releases_tracking_stops_and_sigcont_re_applies() {
     harness.write(b"hi");
     harness.wait_from_bounded(
         mark_typed,
-        "\x1b[22;7H",
+        &format!("\x1b[{prompt_row};7H"),
         "the resumed editor renders the typed text",
         Duration::from_millis(1500),
     );
@@ -229,6 +247,94 @@ fn ctrl_z_releases_tracking_stops_and_sigcont_re_applies() {
     harness.finish();
 }
 
+/// Real-tty e2e for `app.editor.external` (TS `openExternalEditor`,
+/// default ctrl+g): ctrl+g hands the terminal to `$VISUAL`, the editor
+/// child writes the temp file, and the resumed surface replaces the
+/// editor draft with the saved text — one trailing newline stripped, so
+/// the caret parks on the edited line (a missed strip parks it on the
+/// wrapped second line).
+#[test]
+fn ctrl_g_hands_the_terminal_to_the_external_editor() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // The same harness contract as the suspend cycle (see
+    // `lead_fresh_session`): the child's raw-mode enable must land on
+    // the harness pty alone, never on a session controlling terminal.
+    lead_fresh_session();
+    let _lock = match HARNESS_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    // The editor stand-in: writes one line (with the editor-world trailing
+    // newline) to the temp file it is handed. It first SIGINTs its own
+    // process group — what a cooked-mode editor wrapper (code --wait,
+    // subl -w) does on Ctrl+C — proving the TUI's SIGINT shield: without
+    // it the product child dies and the edit never lands. The script
+    // ignores the signal itself; the product child runs in its own group,
+    // so the runner never sees it.
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let editor = dir.path().join("editor.sh");
+    std::fs::write(
+        &editor,
+        "#!/bin/sh\ntrap '' INT\nkill -INT 0\nprintf 'edited externally\n' > \"$1\"\n",
+    )
+    .expect("write editor script");
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod editor script");
+    let mut harness = SuspendHarness::start(Some(&editor));
+
+    harness.wait_from_start(MOUSE_ENABLE, "startup mouse enable");
+
+    // The first content frame is the readiness marker: keystrokes that
+    // arrive earlier race the child's kitty capability probe, which
+    // still owns the event reader in the startup window. The frame's
+    // layout is environment-dependent (CI runs this harness without a
+    // controlling terminal and renders one more row than a
+    // terminal-attached run), so the prompt row is DERIVED from the
+    // frame's final caret park and the assertions below key off it —
+    // never off a hard-coded row.
+    harness.wait_from_start(" >  ", "the first frame's prompt row rendered");
+    let prompt_row = harness.wait_caret_row_from(0, 5, "the first frame's empty editor rendered");
+
+    // A draft in the editor, painted at the prompt row: each typed key
+    // paints its own cell, so the draft's arrival is the caret's park
+    // position after its five characters (the same position-escape
+    // marker the suspend test pins its typed "hi" with).
+    let mark_draft = harness.mark();
+    harness.write(b"draft");
+    harness.wait_from(
+        mark_draft,
+        &format!("\x1b[{prompt_row};10H"),
+        "the draft rendered in the editor",
+    );
+
+    // ctrl+g: the editor child runs on the handed-over terminal and the
+    // resumed repaint shows the saved text.
+    let mark_edit = harness.mark();
+    harness.write(&[0x07]);
+    harness.wait_from(
+        mark_edit,
+        "edited externally",
+        "the editor child's text replaced the draft",
+    );
+
+    // The strip proof: one trailing newline was removed, so the caret
+    // parks at the end of the edited line (the prompt row, column after
+    // the 17-char text — the same col-5 text start the suspend test's
+    // typed "hi" parks at column 7 from). A leftover newline parks it
+    // on the wrapped second line and this wait misses its bound.
+    let mark_typed = harness.mark();
+    harness.write(b"x");
+    harness.wait_from_bounded(
+        mark_typed,
+        &format!("\x1b[{prompt_row};22H"),
+        "the editor parked the caret after the single-line edit",
+        Duration::from_secs(10),
+    );
+
+    harness.finish();
+}
+
 /// One pty-backed product child plus the mock supervisor it attaches to.
 struct SuspendHarness {
     child: Child,
@@ -239,7 +345,7 @@ struct SuspendHarness {
 }
 
 impl SuspendHarness {
-    fn start() -> SuspendHarness {
+    fn start(editor: Option<&std::path::Path>) -> SuspendHarness {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let socket = dir.path().join("tui.sock");
         let supervisor = MockSupervisor::bind(&socket);
@@ -256,7 +362,7 @@ impl SuspendHarness {
         )
         .expect("open pty");
 
-        let child = spawn_child(&socket, &pty.slave);
+        let child = spawn_child(&socket, &pty.slave, editor);
         // Leak the temp dir's socket path on purpose: the child needs the
         // socket for the lifetime of the test, and the whole tree dies
         // with the child at teardown.
@@ -290,6 +396,14 @@ impl SuspendHarness {
 
     fn wait_from_bounded(&mut self, mark: usize, needle: &str, what: &str, bound: Duration) {
         self.master.wait_from_bounded(mark, needle, what, bound);
+    }
+
+    /// Wait until the stream parks a caret at `column` and return the row
+    /// it painted on: the frame's layout is environment-dependent (a
+    /// detached CI run renders more rows than a terminal-attached one),
+    /// so cursor assertions DERIVE the prompt row instead of assuming it.
+    fn wait_caret_row_from(&mut self, mark: usize, column: u16, what: &str) -> String {
+        self.master.wait_caret_row_from(mark, column, what)
     }
 
     fn region_since(&self, mark: usize) -> Vec<u8> {
@@ -410,12 +524,60 @@ impl PtyReader {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+
+    /// Wait (the plain wait's 30s bound) until a caret paints at `column`
+    /// and return its row: the harness method above states the why.
+    fn wait_caret_row_from(&mut self, mark: usize, column: u16, what: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(row) = caret_row_at_column(&self.output[mark..], column) {
+                return row;
+            }
+            let mut buffer = [0u8; 8192];
+            let result = self.file.read(&mut buffer);
+            match result {
+                Ok(0) | Err(_) => {}
+                Ok(n) => self.output.extend_from_slice(&buffer[..n]),
+            }
+            if Instant::now() > deadline {
+                let text = String::from_utf8_lossy(&self.output[mark..]);
+                panic!(
+                    "timeout waiting for {what} (a caret at column {column}); \
+                     pty tail since mark:\n{text}"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
+}
+
+/// The row of the LAST caret the stream parks at `column`, as the
+/// digits of its `ESC[<row>;<column>H` escape: startup paints transient
+/// carets, and the frame's final park is the editor's.
+fn caret_row_at_column(stream: &[u8], column: u16) -> Option<String> {
+    let suffix = format!(";{column}H").into_bytes();
+    let mut from = 0;
+    let mut row = None;
+    while let Some(at) = find_subsequence(&stream[from..], &suffix) {
+        let head = &stream[from..from + at];
+        let digits_start = head
+            .iter()
+            .rposition(|byte| !byte.is_ascii_digit())
+            .map_or(0, |last_non_digit| last_non_digit + 1);
+        let digits = &head[digits_start..];
+        let esc = head[..digits_start].ends_with(b"\x1b[");
+        if esc && !digits.is_empty() {
+            row = Some(String::from_utf8_lossy(digits).into_owned());
+        }
+        from += at + suffix.len();
+    }
+    row
 }
 
 /// A child process group of this very binary, re-executed in child mode
@@ -427,7 +589,11 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// session. The child's terminal is the harness pty, never a
 /// controlling terminal, so no background-group arbitration
 /// (SIGTTIN/SIGTTOU) applies to its I/O across the stop/continue cycle.
-fn spawn_child(socket: &std::path::Path, slave: &OwnedFd) -> Child {
+fn spawn_child(
+    socket: &std::path::Path,
+    slave: &OwnedFd,
+    editor: Option<&std::path::Path>,
+) -> Child {
     // Runs between fork and exec in the child: setpgid moves it into its
     // own process group, inside the runner's session.
     fn make_process_group() -> std::io::Result<()> {
@@ -439,7 +605,11 @@ fn spawn_child(socket: &std::path::Path, slave: &OwnedFd) -> Child {
         .arg("--exact")
         .arg("suspend_child_mode")
         .env(CHILD_SOCKET_ENV, socket)
-        .env_remove("TMUX")
+        .env_remove("TMUX");
+    if let Some(editor) = editor {
+        command.env("VISUAL", editor);
+    }
+    command
         .stdin(slave_as_stdio(slave))
         .stdout(slave_as_stdio(slave))
         .stderr(slave_as_stdio(slave));

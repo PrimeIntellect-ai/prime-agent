@@ -175,6 +175,7 @@ impl SessionUi {
             side_bash_discarded: None,
             side_bash_counter: 0,
             suspend_requested: false,
+            external_editor_request: None,
             pending_mcp_auth: None,
             picker_restored_draft: false,
             suspend_adoption_emitted: false,

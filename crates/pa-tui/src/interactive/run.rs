@@ -4,11 +4,12 @@
 
 use super::{
     apply_startup_chrome, arm_shutdown_recovery, check_tmux_keyboard_setup, mpsc,
-    run_onboarding_phase, AgentView, DaemonClient, Duration, ExitGuard, HeadlessSettle, Instant,
-    InteractiveOptions, InteractiveOutcome, PaneDrive, ReconnectConnect, ReconnectLoop,
-    RecoveryKind, Renderer, Result, SessionReconnect, SessionSelection, SessionUi, TerminalHandoff,
-    UiInput, UiMode, VecDeque, SESSION_RECONNECT_ATTEMPT_TIMEOUT_S,
+    run_onboarding_phase, spawn_session_reader, AgentView, DaemonClient, Duration, ExitGuard,
+    HeadlessSettle, Instant, InteractiveOptions, InteractiveOutcome, PaneDrive, ReconnectConnect,
+    ReconnectLoop, RecoveryKind, Renderer, Result, SessionReconnect, SessionSelection, SessionUi,
+    TerminalHandoff, UiInput, UiMode, VecDeque, SESSION_RECONNECT_ATTEMPT_TIMEOUT_S,
 };
+use crate::suspend::SuspendTerminal;
 use anyhow::Context;
 
 /// Cap on the exit-path telemetry flush: the `PostHog` sink alone allows up
@@ -855,6 +856,85 @@ async fn run_interactive_surface(
                                     // draw below surfaces the broken frame.
                                     let _ = renderer.resume();
                                 }
+                            }
+                        }
+                        // TS `app.editor.external` (default ctrl+g,
+                        // `openExternalEditor`): hand the terminal to the
+                        // configured editor child and resume the surface
+                        // after it exits. Unlike the suspend cycle
+                        // (SIGTSTP stops the whole process), the reader
+                        // thread keeps polling the tty while the editor
+                        // runs and would steal its keystrokes and
+                        // terminal query replies: the reader stops (flag
+                        // + join, bounded by one 10ms poll tick) and
+                        // respawns from the renderer's channel/guard
+                        // clones after the resume. Headless runs keep no
+                        // terminal renderer (TS never registers the
+                        // action without one), so the request is observed
+                        // and dropped — the no-editor warning still
+                        // rendered at dispatch.
+                        if let Some(command) = session.take_external_editor_request() {
+                            let reader = match &renderer {
+                                Renderer::Terminal {
+                                    ui_tx, exit_guard, ..
+                                } => Some((ui_tx.clone(), exit_guard.clone())),
+                                Renderer::Headless { .. } => None,
+                            };
+                            if let Some((ui_tx, exit_guard)) = reader {
+                                crate::input::stop_reader();
+                                // The suspend path's SIGINT shield: the
+                                // handoff restores cooked mode (ISIG), and
+                                // a cooked-mode editor wrapper (`code
+                                // --wait`, `subl -w`) turns Ctrl+C into
+                                // SIGINT for the shared foreground group —
+                                // the default disposition would kill the
+                                // TUI mid-edit. The no-op handler (never
+                                // SIG_IGN) keeps the child's own Ctrl+C:
+                                // handled signals reset to the default
+                                // across exec.
+                                let mut signals = crate::suspend::ProcessSignals;
+                                let shielded = if crate::suspend::supported() {
+                                    use crate::suspend::SuspendSignals;
+                                    signals.ignore_sigint()
+                                } else {
+                                    Ok(())
+                                };
+                                let stopped = shielded.and_then(|()| {
+                                    TerminalHandoff {
+                                        renderer: &mut renderer,
+                                        view: &mut view,
+                                    }
+                                    .stop()
+                                });
+                                let outcome = match stopped {
+                                    Ok(()) => {
+                                        crate::external_editor::edit(
+                                            &command,
+                                            &view.editor.get_expanded_text(),
+                                        )
+                                        .await
+                                    }
+                                    Err(error) => Err(error),
+                                };
+                                // The suspend cycle's order: SIGINT is
+                                // back to the default before the surface
+                                // takes the terminal.
+                                if crate::suspend::supported() {
+                                    use crate::suspend::SuspendSignals;
+                                    let _ = signals.restore_sigint();
+                                }
+                                // TS resumes in a `finally`: the surface
+                                // returns even when the editor run failed.
+                                let resumed = TerminalHandoff {
+                                    renderer: &mut renderer,
+                                    view: &mut view,
+                                }
+                                .resume();
+                                if let Err(error) = resumed {
+                                    session.error_row(&format!("{error:#}"), &mut view);
+                                }
+                                spawn_session_reader(ui_tx, exit_guard);
+                                session.apply_external_editor_outcome(outcome, &mut view);
                             }
                         }
                         // The `/mcp` view resolved to an auth request (its

@@ -1752,6 +1752,21 @@ async fn tui_model_picker_applies_and_effort_reports() {
             pa_tui::interactive::HeadlessStep::Type("mock".to_string()),
             pa_tui::interactive::HeadlessStep::Type("\n".to_string()),
             pa_tui::interactive::HeadlessStep::Submit("/effort".to_string()),
+            // ctrl+l opens the picker over the user's own text: the pick
+            // must keep it (TS's selector never touches the editor).
+            pa_tui::interactive::HeadlessStep::Type("keep me".to_string()),
+            pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('l'),
+                crossterm::event::KeyModifiers::CONTROL,
+            )),
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "Search models".to_string(),
+                timeout_ms: 30_000,
+            },
+            pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            )),
         ],
         width: 120,
         height: 36,
@@ -1794,6 +1809,13 @@ async fn tui_model_picker_applies_and_effort_reports() {
     assert!(
         model_changes >= 2,
         "the set_model switch persisted its model_change row (saw {model_changes})"
+    );
+    // The ctrl+l pick kept the editor's own text: the final frame's prompt
+    // row still carries it (an apply-side clear would leave it empty).
+    let last = outcome.frames.last().expect("a final frame");
+    assert!(
+        last.contains("keep me"),
+        "the ctrl+l pick kept the editor's own text:\n{last}"
     );
     drop(supervisor);
 }
@@ -4678,6 +4700,116 @@ async fn tui_ctrl_s_during_queue_browse_stashes_the_draft_and_keeps_the_parked_m
         "the restored draft submitted after the browse round-trip"
     );
     client.close();
+    drop(supervisor);
+}
+
+/// The declared chat-editor keybindings dispatch (Phase A of the audit
+/// table): ctrl+l opens the model picker, and the no-default-key actions
+/// (`app.interrupt`, `app.session.new`) fire from a user keybindings.json.
+/// Both were declared (ctrl+l also advertised in `/hotkeys`) without a
+/// dispatch site on the base — the test fails there at the first render
+/// barrier. ctrl+s's own dispatch landed upstream with its own e2e
+/// (see `tui_ctrl_s_stashes_and_restores_the_prompt_draft`).
+#[tokio::test]
+async fn tui_dispatches_declared_editor_keybindings() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    std::fs::write(
+        agent_dir.join("keybindings.json"),
+        r#"{ "app.session.new": "ctrl+alt+n", "app.interrupt": "ctrl+alt+i" }"#,
+    )
+    .expect("write keybindings.json");
+    let supervisor = spawn_supervisor(dir.path());
+    // The second response keeps the turn alive on a visible marker while
+    // the interrupt key lands (the pacing the menu-over-turn verifiers
+    // use; the turn aborts long before its final answer).
+    let script = serde_json::json!({
+        "engine": "faux",
+        "tokensPerSecond": 4,
+        "responses": [
+            { "text": "quick reply", "delayMs": 10 },
+            { "content": [
+                { "type": "text", "text": "the slow turn is streaming" },
+                { "type": "thinking",
+                  "thinking": "a long slow thinking pass keeps the turn alive while the interrupt key lands" },
+                { "type": "text", "text": "the final answer that the abort must never deliver" },
+            ] },
+        ],
+    });
+    std::fs::write(dir.path().join("script.json"), script.to_string()).expect("write script");
+    let mut options = base_options(&supervisor, dir.path(), &session_dir);
+    // The exact load path the CLI uses: the fixture binds the two
+    // no-default-key actions.
+    options.keybindings = pa_tui::keybindings::KeybindingsManager::create(&agent_dir);
+    let key = |code: KeyCode, modifiers: KeyModifiers| {
+        pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(code, modifiers))
+    };
+    let wait_render = |needle: &str| pa_tui::interactive::HeadlessStep::WaitRender {
+        needle: needle.to_string(),
+        timeout_ms: 30_000,
+    };
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            // The script's quick reply plays first so the slow turn below
+            // streams while the interrupt key lands.
+            pa_tui::interactive::HeadlessStep::Submit("hello".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+            // ctrl+l opens the /model surface.
+            key(KeyCode::Char('l'), KeyModifiers::CONTROL),
+            wait_render("Search models"),
+            key(KeyCode::Esc, KeyModifiers::NONE),
+            // The slow turn runs so the interrupt key lands mid-turn.
+            pa_tui::interactive::HeadlessStep::Submit("start the slow turn".to_string()),
+            wait_render("the slow turn is streaming"),
+            key(
+                KeyCode::Char('i'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+            wait_render("Press Ctrl+C again to exit"),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+            // A draft in the editor when the new-session key lands: TS
+            // `handleClearCommand` discards it (`resetCurrentSessionRenderState`),
+            // it must not ride into the new session.
+            pa_tui::interactive::HeadlessStep::Type("stale draft".to_string()),
+            // The fixture binding runs the /new flow.
+            key(
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+            wait_render("started session"),
+        ],
+        width: 120,
+        height: 36,
+    };
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
+    let rendered = outcome.frames.join("\n");
+    for status in ["Press Ctrl+C again to exit", "started session"] {
+        assert!(
+            rendered.contains(status),
+            "the {status:?} row rendered:\n{rendered}"
+        );
+    }
+    assert!(
+        rendered.contains("Search models"),
+        "ctrl+l opened the model picker:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("the final answer that the abort must never deliver"),
+        "the interrupt aborted the turn before its final answer:\n{rendered}"
+    );
+    // The new session started with no draft: the stale text the editor
+    // held at the keypress never rendered into the new session's frames.
+    let last = outcome.frames.last().expect("a final frame");
+    assert!(
+        !last.contains("stale draft"),
+        "the new session discarded the editor draft:\n{last}"
+    );
     drop(supervisor);
 }
 

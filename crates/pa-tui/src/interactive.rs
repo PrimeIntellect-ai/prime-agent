@@ -57,7 +57,10 @@ mod render;
 pub use headless::{HeadlessPlan, HeadlessStep, UiMode};
 pub use onboarding::{ModelReadiness, OnboardingSink, OnboardingTask};
 pub(crate) use render::write_flush_rows;
-use render::{apply_startup_chrome, check_tmux_keyboard_setup, Renderer, TerminalHandoff};
+use render::{
+    apply_startup_chrome, check_tmux_keyboard_setup, spawn_session_reader, Renderer,
+    TerminalHandoff,
+};
 
 // The reconnect machinery (the update-restart resume window, the
 // unexpected-loss hiccup loop, and the announced shutdown's bounded
@@ -189,7 +192,7 @@ pub trait InteractionTelemetry: Send + Sync {
     /// command — `context`, `session`, `system-prompt`, `logs`,
     /// `changelog`, `hotkeys`, `traces`, `list`), `source` how it opened
     /// (`command` — the bare slash submission, `tab` — a typed partial +
-    /// Tab).
+    /// Tab, `shortcut` — a keybinding action).
     fn menu_opened(
         &self,
         menu: &'static str,
@@ -254,6 +257,15 @@ pub trait InteractionTelemetry: Send + Sync {
         &self,
         action: &'static str,
         had_images: bool,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    /// The external editor ran (`tui external editor used`): `outcome` is
+    /// `applied` (the saved text replaced the draft), `unchanged` (the
+    /// editor exited non-zero, the draft kept), `failed` (an IO/spawn
+    /// failure, the error row surfaced), or `no_editor` (neither `$VISUAL`
+    /// nor `$EDITOR` is set; the warning row rendered).
+    fn external_editor_used(
+        &self,
+        outcome: &'static str,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
 }
 

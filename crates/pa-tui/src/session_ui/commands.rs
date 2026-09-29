@@ -113,6 +113,28 @@ impl SessionUi {
         }
     }
 
+    /// TS `handleClearCommand` (the `/new` flow, interactive-mode.ts:4703,
+    /// :12486): create a fresh session and rebind the view to it. The
+    /// `/new` command and the `app.session.new` action share it.
+    pub(super) async fn start_new_session(&mut self, view: &mut AgentView) -> Result<()> {
+        let id = create_session(&self.client, &self.create_options(), None).await?;
+        self.attach_session(&id, DockFold::Fresh).await?;
+        // The title's pair is session-scoped: fetch the new session's
+        // stats before the rebuild copies them into the chrome, or the
+        // rebind would ride the session being left's own cost and
+        // subagent aggregate.
+        self.refresh_stats().await;
+        self.rebuild_view(view, &RebuildKind::Rebind);
+        // TS `resetCurrentSessionRenderState`: a new session starts with
+        // no draft and no prompt history (the submitted `/new` drains the
+        // draft already, so only the history clear changes there).
+        view.editor.clear_history();
+        view.editor.set_text("");
+        self.note(&format!("started session {id}"), view);
+        self.track_feature_outcome("new", "completed", None);
+        Ok(())
+    }
+
     /// A builtin client command. Only the implemented subset runs locally;
     /// commands whose UI does not exist yet report unavailability. `text` is
     /// the typed submission (the client echo rows render it verbatim).
@@ -129,16 +151,7 @@ impl SessionUi {
                 self.note("Usage: /clear", view);
             }
             "new" => {
-                let id = create_session(&self.client, &self.create_options(), None).await?;
-                self.attach_session(&id, DockFold::Fresh).await?;
-                // The title's pair is session-scoped: fetch the new
-                // session's stats before the rebuild copies them into
-                // the chrome, or the rebind would ride the session being
-                // left's own cost and subagent aggregate.
-                self.refresh_stats().await;
-                self.rebuild_view(view, &RebuildKind::Rebind);
-                self.note(&format!("started session {id}"), view);
-                self.track_feature_outcome("new", "completed", None);
+                self.start_new_session(view).await?;
             }
             // TS `/quit` shuts the client down; this build's exit detaches
             // and exits (the session keeps running in the daemon).
