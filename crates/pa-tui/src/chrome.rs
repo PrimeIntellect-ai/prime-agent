@@ -87,7 +87,9 @@ pub struct ChromeState {
     /// Tray override label (TS `getTrayOverrideLabel`): while the Ctrl+C
     /// exit hint is armed, it replaces the tray's location label.
     pub tray_override: Option<String>,
-    /// Compact, borderless activity dock under the editor.
+    /// The compact, borderless activity dock under the editor: a live
+    /// session always mounts it; `None` means no session owns this
+    /// view (the replay and app surfaces).
     pub activity: Option<ActivityDock>,
     /// The footer's tok/sec readout (TS `FooterComponent` under `/speed`):
     /// the dim bottom row's text; `None` renders no row. The client keeps
@@ -125,6 +127,10 @@ pub enum ActivityDirection {
     Next,
 }
 
+/// The bottom activity dock: it renders in every session, the all-zero
+/// row included (the operator's 2026-09-28 directive; TS
+/// `SubagentSummaryLine` renders nothing at zero, a sanctioned
+/// divergence).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActivityDock {
     /// The directly-running children right now (one addend of the
@@ -134,11 +140,6 @@ pub struct ActivityDock {
     /// subagents): the total's other addend. Idle and dead registry
     /// rows never count — they render in the scoped agents view.
     pub subagents_running_nested: usize,
-    /// Every descendant, finished ones included: this keeps the dock
-    /// mounted while any subagent history remains browsable (the
-    /// rendered count stays live-only; the group stays traversable at
-    /// zero).
-    pub subagents_total: usize,
     /// The CURRENT session's heartbeats (nested sessions' jobs do not
     /// surface here, operator scoping).
     pub heartbeats: usize,
@@ -148,10 +149,6 @@ pub struct ActivityDock {
     /// kernel registry only): finished runs never inflate the indicator
     /// — they stay as rows inside the bash view.
     pub bash_running: usize,
-    /// Every catalogued kernel-bash run, finished ones included: this
-    /// keeps the dock (and so the bash view's history) reachable when no
-    /// run is live; the rendered indicator count stays `bash_running`.
-    pub bash_total: usize,
     /// The active goal's dock label — `Pursuing goal (12m 05s)`-style,
     /// the elapsed-time form (the operator's 2026-09-24 directive: the
     /// row reads the time, the token budget lives inside the goal
@@ -163,13 +160,6 @@ pub struct ActivityDock {
 }
 
 impl ActivityDock {
-    pub fn visible(&self) -> bool {
-        self.subagents_total > 0
-            || self.heartbeats > 0
-            || self.bash_total > 0
-            || self.goal_label.is_some()
-    }
-
     /// The groups this dock renders, left to right — the arrow
     /// traversal order. The subagents, heartbeats, and shells groups
     /// always render (an empty one reads its zero count and stays
@@ -696,7 +686,8 @@ fn land_marker(out: &mut Vec<crate::Span>, width: usize) {
 }
 
 /// The framed activity dock: a muted separator rule above one row of
-/// the actionable groups. The TS summary line wraps its content in an
+/// the actionable groups — the row renders in every session, all-zero
+/// included. The TS summary line wraps its content in an
 /// accent-colored box (`╭─ subagents ─╮`); the inline design language
 /// keeps the separation with the same muted `─` rule that frames the
 /// pickers' search fields, not an accent box.
@@ -707,8 +698,9 @@ fn land_marker(out: &mut Vec<crate::Span>, width: usize) {
 /// stays neutral at zero. The subagents segment is one consolidated
 /// item — `◆ x subagents` (the operator's 2026-09-25 consolidation:
 /// the separate running cluster was redundant).
-pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) -> Option<Vec<Line>> {
-    render_activity_dock_segments(dock, theme, width).map(|(frame, _)| frame)
+#[must_use]
+pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) -> Vec<Line> {
+    render_activity_dock_segments(dock, theme, width).0
 }
 
 /// One rendered group segment's column span on the dock's row (the
@@ -731,10 +723,7 @@ pub fn render_activity_dock_segments(
     dock: &ActivityDock,
     theme: &Theme,
     width: usize,
-) -> Option<(Vec<Line>, Vec<ActivityDockSegment>)> {
-    if !dock.visible() || width == 0 {
-        return None;
-    }
+) -> (Vec<Line>, Vec<ActivityDockSegment>) {
     // The status-dot vocabulary rides the remaining count cluster (TS
     // `subagent-summary-line`'s `● running / ◐ idle / ○ inactive`): the
     // half circle marks waiting work. Only the heartbeat pause keeps a
@@ -865,11 +854,13 @@ pub fn render_activity_dock_segments(
             segment
         })
         .collect();
-    let frame = vec![
-        vec![theme.fg_span(ThemeColor::BorderMuted, "─".repeat(width))],
-        row,
-    ];
-    Some((frame, segments))
+    (
+        vec![
+            vec![theme.fg_span(ThemeColor::BorderMuted, "─".repeat(width))],
+            row,
+        ],
+        segments,
+    )
 }
 
 /// The footer's tok/sec row (TS `FooterComponent::render` under `/speed`):

@@ -245,20 +245,13 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                 .and_then(|summary| summary.as_array_mut())
                                 .and_then(|parts| parts.last_mut());
                             if let Some(last_part) = last_part {
-                                if let Some(text) = last_part
+                                if let Some(Value::String(text)) = last_part
                                     .as_object_mut()
                                     .expect("part is an object")
                                     .get_mut("text")
                                 {
-                                    if let Some(text) = text.as_str() {
-                                        let joined = format!("{text}{delta}");
-                                        *last_part
-                                            .as_object_mut()
-                                            .expect("part is an object")
-                                            .get_mut("text")
-                                            .expect("text exists") = json!(joined);
-                                        append = true;
-                                    }
+                                    text.push_str(delta);
+                                    append = true;
                                 }
                             }
                         }
@@ -291,14 +284,11 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                 .entry("summary".to_string())
                                 .or_insert_with(|| json!([]));
                             if let Some(array) = summary.as_array_mut() {
-                                if let Some(last_part) = array.last_mut() {
-                                    if let Some(text) = last_part.get_mut("text") {
-                                        if let Some(text) = text.as_str() {
-                                            let joined = format!("{text}\n\n");
-                                            *last_part.get_mut("text").expect("text exists") =
-                                                json!(joined);
-                                        }
-                                    }
+                                if let Some(Value::String(text)) = array
+                                    .last_mut()
+                                    .and_then(|last_part| last_part.get_mut("text"))
+                                {
+                                    text.push_str("\n\n");
                                 }
                             }
                         }
@@ -381,12 +371,8 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                 if last_part.get("type").and_then(|value| value.as_str())
                                     == Some("output_text")
                                 {
-                                    if let Some(text) =
-                                        last_part.get_mut("text").and_then(|value| value.as_str())
-                                    {
-                                        let joined = format!("{text}{delta}");
-                                        *last_part.get_mut("text").expect("text exists") =
-                                            json!(joined);
+                                    if let Some(Value::String(text)) = last_part.get_mut("text") {
+                                        text.push_str(delta);
                                         append = true;
                                     }
                                 }
@@ -428,13 +414,10 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                 if last_part.get("type").and_then(|value| value.as_str())
                                     == Some("refusal")
                                 {
-                                    if let Some(refusal) = last_part
-                                        .get_mut("refusal")
-                                        .and_then(|value| value.as_str())
+                                    if let Some(Value::String(refusal)) =
+                                        last_part.get_mut("refusal")
                                     {
-                                        let joined = format!("{refusal}{delta}");
-                                        *last_part.get_mut("refusal").expect("refusal exists") =
-                                            json!(joined);
+                                        refusal.push_str(delta);
                                         append = true;
                                     }
                                 }

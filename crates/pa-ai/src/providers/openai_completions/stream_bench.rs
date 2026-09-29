@@ -87,6 +87,49 @@ fn stream_event_snapshots() {
     }
 }
 
+#[test]
+fn reasoning_details_merge_by_index() {
+    let model: Model = serde_json::from_value(json!({
+        "id": "parity", "name": "parity", "api": "openai-completions",
+        "provider": "parity", "baseUrl": "http://localhost", "reasoning": true,
+        "input": ["text"],
+        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+        "contextWindow": 128_000, "maxTokens": 8192
+    }))
+    .unwrap();
+    let output =
+        crate::event_stream::initial_assistant_message("openai-completions", "parity", "parity");
+    let mut state = StreamingState::new(output);
+    let (writer, _reader) = create_assistant_message_event_stream();
+    for details in [
+        json!([{"type":"reasoning.text","text":"a","format":"unknown","index":0}]),
+        json!([{"type":"reasoning.summary","summary":"s","text":"x","index":1}, {"text":"b","signature":null,"index":0}]),
+        json!([{"text":7,"index":1}, {"text":"c","index":0}]),
+        json!([{"summary":" t","text":"y","index":1}]),
+        json!([{"type":"reasoning.encrypted","data":"e"}]),
+    ] {
+        handle_chunk(
+            &json!({"choices":[{"delta":{"reasoning_details": details}}]}),
+            &model,
+            None,
+            &mut state,
+            &writer,
+        );
+    }
+    encode_reasoning_details_signature(&mut state);
+    let Some(AssistantContent::Thinking(block)) = state.output.content.last() else {
+        panic!("expected the redacted thinking block");
+    };
+    assert_eq!(
+        block.thinking_signature,
+        Some(encode_reasoning_details(&[
+            json!({"type":"reasoning.text","text":"abc","format":"unknown","index":0,"signature":null}),
+            json!({"type":"reasoning.summary","summary":"s t","text":"y","index":1}),
+            json!({"type":"reasoning.encrypted","data":"e"}),
+        ]))
+    );
+}
+
 #[tokio::test]
 async fn abort_after_partial_preserves_content() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

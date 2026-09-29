@@ -327,10 +327,11 @@ impl SessionEngine for AgentSessionEngine {
     fn restore_session_model(
         &self,
         session_path: &std::path::Path,
+        saved: Option<crate::engine::SavedSessionContext>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         let path = session_path.to_path_buf();
         Box::pin(async move {
-            self.restore_session_model_at(&path).await;
+            self.restore_session_model_at(&path, saved).await;
         })
     }
 
@@ -1393,6 +1394,20 @@ impl SessionEngine for AgentSessionEngine {
         if request.message.starts_with("/skill:") {
             request.message = self.expand_skill_submission(&request.message);
         }
+        // The batched rows expand the same way, rewritten in place BEFORE
+        // the accepted rows emit and the turn runs: the core's batch
+        // admission re-expands each row itself (TS normalizes every
+        // submission at queue time), so the raw command must never reach
+        // it — a bare batched invocation would admit the model turn on
+        // the protocol without the floor's instruction while the emitted
+        // row already carries it (the transcript and the model would
+        // disagree). The expansion is idempotent over the block, so the
+        // admitted turn sees the same text the accepted row persists.
+        for row in &mut request.batch {
+            if row.text.starts_with("/skill:") {
+                row.text = self.expand_skill_submission(&row.text);
+            }
+        }
         // Session commands (compact/refine/goal/autonomous) never admit a
         // model turn and never record a user-message row: the durable echo
         // row replaces it. Execute before admission so the idle-wait loop
@@ -1487,16 +1502,13 @@ impl SessionEngine for AgentSessionEngine {
         // user row per batched message, in delivery order, persisted and
         // rendered like the primary. The batch only ever rides a plain user
         // turn (the injected-custom turns deliver solo — the queue never
-        // batches a row that replaces the user row). Each row expands a
-        // leading `/skill:` the same way the primary does, so the accepted
-        // row persists and renders the expanded submission (TS normalizes
-        // every submission at queue time).
+        // batches a row that replaces the user row). Each row's text was
+        // already expanded (the seam above rewrites every `/skill:` row in
+        // place), so the accepted row persists and renders exactly what the
+        // admitted turn receives (TS normalizes every submission at queue
+        // time).
         for row in &request.batch {
-            let text = if row.text.starts_with("/skill:") {
-                self.expand_skill_submission(&row.text)
-            } else {
-                row.text.clone()
-            };
+            let text = row.text.clone();
             let mut content = vec![json!({ "type": "text", "text": text })];
             for image in &row.images {
                 let mut block = match serde_json::to_value(image) {

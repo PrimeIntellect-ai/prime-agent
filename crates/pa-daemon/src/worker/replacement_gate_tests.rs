@@ -15,6 +15,7 @@ impl SessionEngine for RecordingEngine {
     fn restore_session_model(
         &self,
         session_path: &std::path::Path,
+        _saved: Option<crate::engine::SavedSessionContext>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         let events = std::sync::Arc::clone(&self.events);
         let path = session_path.display().to_string();

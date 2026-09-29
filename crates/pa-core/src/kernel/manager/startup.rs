@@ -320,6 +320,11 @@ impl Inner {
                             if poisoned {
                                 continue;
                             }
+                            // `buffered` keeps only the newline-free tail of
+                            // earlier reads, so only the new bytes can hold a
+                            // newline: a multi-MiB line arriving in 64 KiB reads
+                            // is scanned once, not once per read.
+                            let mut scan_from = buffered.len();
                             buffered.extend_from_slice(&chunk[..n]);
                             if buffered.len() > MAX_PROTOCOL_LINE_BYTES {
                                 poisoned = true;
@@ -341,9 +346,9 @@ impl Inner {
                             // frames in one chunk).
                             let mut consumed = 0;
                             while let Some(rel) =
-                                buffered[consumed..].iter().position(|&b| b == b'\n')
+                                buffered[scan_from..].iter().position(|&b| b == b'\n')
                             {
-                                let end = consumed + rel;
+                                let end = scan_from + rel;
                                 // An invalid-UTF-8 stream ends the reader, like
                                 // read_line's decode error did before.
                                 let Ok(trimmed) = std::str::from_utf8(&buffered[consumed..end])
@@ -351,6 +356,7 @@ impl Inner {
                                     return;
                                 };
                                 consumed = end + 1;
+                                scan_from = consumed;
                                 if trimmed.trim().is_empty() {
                                     continue;
                                 }

@@ -86,6 +86,19 @@ pub(super) struct RestoredSessionModel {
     pub(super) fallback_message: Option<String>,
 }
 
+/// A create command's session flags, under the TS `AgentSessionRuntimeConfig` names.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct CreateSessionResources {
+    pub(crate) system_prompt: Option<String>,
+    pub(crate) append_system_prompt: Vec<String>,
+    pub(crate) skills: Vec<String>,
+    pub(crate) prompt_templates: Vec<String>,
+    pub(crate) extensions: Vec<String>,
+    pub(crate) tools: Option<Vec<String>>,
+    pub(crate) autonomous: Option<pa_core::autonomous::AgentAutonomousConfig>,
+}
+
 /// The daemon-side adapter onto the engine's attribution producer: the
 /// children registry's observation sites deliver per-origin batches
 /// through this sink (pa-core owns the target row and the durable

@@ -27,6 +27,9 @@ mod stream;
 
 pub use stream::stream_anthropic;
 
+#[cfg(test)]
+mod stream_tests;
+
 pub const API_ANTHROPIC_MESSAGES: &str = "anthropic-messages";
 
 /// Claude Code version mimicked in OAuth mode. The API gates newer models

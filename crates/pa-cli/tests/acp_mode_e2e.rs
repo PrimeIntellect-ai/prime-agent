@@ -1287,6 +1287,95 @@ fn acp_daemon_attached_reports_autonomous_accounting_and_limit_stop_reason() {
     shutdown_sandboxed_daemon(&socket);
 }
 
+/// One raw daemon command on a fresh connection (the hello frame is skipped by the id match).
+fn daemon_request(socket: &std::path::Path, id: &str, command: &Value) -> Value {
+    use std::io::{BufRead as _, BufReader, Write as _};
+    let mut writer =
+        pa_types::platform::transport::connect_blocking(socket).expect("daemon socket");
+    let reader = writer.try_clone_box().expect("daemon socket clone");
+    let _ = reader.set_read_timeout(Duration::from_mins(2));
+    let protocol = json!({ "name": "prime-agent.daemon", "version": pa_types::daemon::DAEMON_PROTOCOL_VERSION });
+    let frame = json!({ "type": "command", "id": id, "protocol": protocol, "command": command });
+    writeln!(writer, "{frame}").expect("daemon frame");
+    writer.flush().expect("daemon flush");
+    BufReader::new(reader)
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(&line.expect("daemon line")).expect("daemon JSON")
+        })
+        .find(|frame| frame["id"] == json!(id))
+        .unwrap_or_else(|| panic!("the daemon closed without answering {id}"))
+}
+
+#[test]
+fn acp_daemon_attached_forwards_cli_session_options() {
+    // --append-system-prompt and --skill land in the daemon worker's system
+    // prompt, and --autonomous-max-turns 1 stops the run.
+    let home = tempfile::TempDir::new().unwrap();
+    let socket = home.path().join("daemon.sock");
+    let script_path = home.path().join("worker-script.json");
+    let script = json!({ "engine": "faux", "responses": ["one turn, then the limit stops"] });
+    std::fs::write(&script_path, script.to_string()).unwrap();
+    // Outside the agent dir: only --skill loads it.
+    let skill_dir = home.path().join("argv-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: acp-argv-probe\ndescription: probe\n---",
+    )
+    .unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_prime-agent"))
+        .args(["--mode", "acp", "--no-session", "--daemon-socket"])
+        .arg(&socket)
+        .args(["--append-system-prompt", "ACP_ARGV_MARKER", "--skill"])
+        .arg(&skill_dir)
+        .args(["--autonomous", "--autonomous-max-turns", "1"])
+        .env("HOME", home.path())
+        .env("PRIME_AGENT_AGENT_DIR", home.path().join("agent"))
+        .env("PRIME_AGENT_ACP_DAEMON_SCRIPT", &script_path)
+        .env(
+            pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
+            "15000",
+        )
+        .current_dir(home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("binary present");
+    let mut client = AcpChild::adopt(child);
+    let init = client.request("initialize", &initialize_params());
+    let _ = client.wait_response(init, TIMEOUT);
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
+    let (new_response, _) = client.wait_response(new, TIMEOUT);
+    let list = daemon_request(&socket, "argv-list", &json!({ "type": "list" }));
+    let active_session_id = &list["data"]["sessions"][0]["activeSessionId"];
+    let get_prompt = json!({ "type": "get_system_prompt", "activeSessionId": active_session_id });
+    let reply = daemon_request(&socket, "argv-prompt", &get_prompt);
+    let system_prompt = reply["data"]["systemPrompt"].as_str().unwrap_or_else(|| {
+        panic!("the worker's system prompt: {reply} (list: {list}, new: {new_response})")
+    });
+    assert!(
+        system_prompt.contains("ACP_ARGV_MARKER"),
+        "--append-system-prompt reaches the worker"
+    );
+    assert!(
+        system_prompt.contains("<name>acp-argv-probe</name>"),
+        "--skill reaches the worker"
+    );
+    let turn = client.request(
+        "session/prompt",
+        &json!({ "sessionId": new_response["result"]["sessionId"], "prompt": [{ "type": "text", "text": "say something" }] }),
+    );
+    let (turn_response, _) = client.wait_response(turn, Duration::from_mins(2));
+    assert_eq!(
+        turn_response["result"],
+        json!({ "stopReason": "max_turn_requests" })
+    );
+    drop(client);
+    shutdown_sandboxed_daemon(&socket);
+}
+
 /// Spawn with compaction settings written into the agent dir (the
 /// in-process session resolves them at session assembly).
 fn spawn_with_compaction_settings(

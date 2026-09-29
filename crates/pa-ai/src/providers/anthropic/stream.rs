@@ -85,9 +85,9 @@ fn anthropic_sse_error(data: &str, request_id: Option<&str>) -> StreamFailureErr
 /// Marker error for an unhandled Anthropic stop reason.
 struct StopReasonError(String);
 
-/// Streaming block with its wire index.
+/// Per-block streaming state kept outside the output: the wire index and
+/// the tool-JSON scratch, parallel to `output.content` by position.
 struct IndexedBlocks {
-    blocks: Vec<AssistantContent>,
     indices: Vec<u64>,
     partial_json: Vec<StreamingJsonAccumulator>,
 }
@@ -95,7 +95,6 @@ struct IndexedBlocks {
 impl IndexedBlocks {
     fn new() -> Self {
         Self {
-            blocks: Vec::new(),
             indices: Vec::new(),
             partial_json: Vec::new(),
         }
@@ -107,17 +106,13 @@ impl IndexedBlocks {
 
     /// Port of the TS catch settle: finalize tool-call blocks whose parsed
     /// preview may lag the accumulated text under the growth throttle.
-    fn settle_partial_tool_calls(&mut self) {
-        let Self {
-            blocks,
-            partial_json,
-            ..
-        } = self;
-        for (position, block) in blocks.iter_mut().enumerate() {
+    fn settle_partial_tool_calls(&mut self, content: &mut [AssistantContent]) {
+        for (position, block) in content.iter_mut().enumerate() {
             let AssistantContent::ToolCall(tool_call) = block else {
                 continue;
             };
-            let Some(parsed) = partial_json
+            let Some(parsed) = self
+                .partial_json
                 .get_mut(position)
                 .and_then(StreamingJsonAccumulator::flush)
             else {
@@ -350,7 +345,7 @@ async fn run_stream(
                             .unwrap_or("")
                         {
                             "text" => {
-                                blocks.blocks.push(AssistantContent::Text(TextContent {
+                                output.content.push(AssistantContent::Text(TextContent {
                                     text: String::new(),
                                     text_signature: None,
                                     rest: Map::default(),
@@ -359,15 +354,14 @@ async fn run_stream(
                                 blocks
                                     .partial_json
                                     .push(StreamingJsonAccumulator::default());
-                                sync_blocks(output, &blocks);
                                 writer.push(AssistantMessageEvent::TextStart {
-                                    content_index: (blocks.blocks.len() - 1) as u64,
+                                    content_index: (output.content.len() - 1) as u64,
                                     partial: output.clone(),
                                 });
                             }
                             "thinking" => {
-                                blocks
-                                    .blocks
+                                output
+                                    .content
                                     .push(AssistantContent::Thinking(ThinkingContent {
                                         thinking: String::new(),
                                         thinking_signature: Some(String::new()),
@@ -378,15 +372,14 @@ async fn run_stream(
                                 blocks
                                     .partial_json
                                     .push(StreamingJsonAccumulator::default());
-                                sync_blocks(output, &blocks);
                                 writer.push(AssistantMessageEvent::ThinkingStart {
-                                    content_index: (blocks.blocks.len() - 1) as u64,
+                                    content_index: (output.content.len() - 1) as u64,
                                     partial: output.clone(),
                                 });
                             }
                             "redacted_thinking" => {
-                                blocks
-                                    .blocks
+                                output
+                                    .content
                                     .push(AssistantContent::Thinking(ThinkingContent {
                                         thinking: "[Reasoning redacted]".to_string(),
                                         thinking_signature: Some(
@@ -403,14 +396,13 @@ async fn run_stream(
                                 blocks
                                     .partial_json
                                     .push(StreamingJsonAccumulator::default());
-                                sync_blocks(output, &blocks);
                                 writer.push(AssistantMessageEvent::ThinkingStart {
-                                    content_index: (blocks.blocks.len() - 1) as u64,
+                                    content_index: (output.content.len() - 1) as u64,
                                     partial: output.clone(),
                                 });
                             }
                             "tool_use" => {
-                                blocks.blocks.push(AssistantContent::ToolCall(ToolCall {
+                                output.content.push(AssistantContent::ToolCall(ToolCall {
                                     id: content_block
                                         .get("id")
                                         .and_then(|value| value.as_str())
@@ -443,9 +435,8 @@ async fn run_stream(
                                 blocks
                                     .partial_json
                                     .push(StreamingJsonAccumulator::default());
-                                sync_blocks(output, &blocks);
                                 writer.push(AssistantMessageEvent::ToolcallStart {
-                                    content_index: (blocks.blocks.len() - 1) as u64,
+                                    content_index: (output.content.len() - 1) as u64,
                                     partial: output.clone(),
                                 });
                             }
@@ -470,11 +461,10 @@ async fn run_stream(
                                         .and_then(|value| value.as_str())
                                         .unwrap_or("");
                                     if let Some(AssistantContent::Text(block)) =
-                                        blocks.blocks.get_mut(position)
+                                        output.content.get_mut(position)
                                     {
                                         block.text.push_str(text);
                                     }
-                                    sync_blocks(output, &blocks);
                                     writer.push(AssistantMessageEvent::TextDelta {
                                         content_index: position as u64,
                                         delta: text.to_string(),
@@ -487,11 +477,10 @@ async fn run_stream(
                                         .and_then(|value| value.as_str())
                                         .unwrap_or("");
                                     if let Some(AssistantContent::Thinking(block)) =
-                                        blocks.blocks.get_mut(position)
+                                        output.content.get_mut(position)
                                     {
                                         block.thinking.push_str(thinking);
                                     }
-                                    sync_blocks(output, &blocks);
                                     writer.push(AssistantMessageEvent::ThinkingDelta {
                                         content_index: position as u64,
                                         delta: thinking.to_string(),
@@ -510,12 +499,11 @@ async fn run_stream(
                                     if let (
                                         Some(parsed),
                                         Some(AssistantContent::ToolCall(tool_call)),
-                                    ) = (parsed, blocks.blocks.get_mut(position))
+                                    ) = (parsed, output.content.get_mut(position))
                                     {
                                         tool_call.arguments =
                                             parsed.as_object().cloned().unwrap_or_default();
                                     }
-                                    sync_blocks(output, &blocks);
                                     writer.push(AssistantMessageEvent::ToolcallDelta {
                                         content_index: position as u64,
                                         delta: partial_json.to_string(),
@@ -528,7 +516,7 @@ async fn run_stream(
                                         .and_then(|value| value.as_str())
                                         .unwrap_or("");
                                     if let Some(AssistantContent::Thinking(block)) =
-                                        blocks.blocks.get_mut(position)
+                                        output.content.get_mut(position)
                                     {
                                         let existing = block
                                             .thinking_signature
@@ -546,7 +534,7 @@ async fn run_stream(
                             .and_then(|value| value.as_u64())
                             .unwrap_or(0);
                         if let Some(position) = blocks.position(index) {
-                            match &blocks.blocks[position] {
+                            match &output.content[position] {
                                 AssistantContent::Text(text) => {
                                     writer.push(AssistantMessageEvent::TextEnd {
                                         content_index: position as u64,
@@ -568,13 +556,12 @@ async fn run_stream(
                                         .map(|scratch| parse_streaming_json(Some(scratch.text())))
                                         .unwrap_or_else(|| json!({}));
                                     if let Some(AssistantContent::ToolCall(tool_call)) =
-                                        blocks.blocks.get_mut(position)
+                                        output.content.get_mut(position)
                                     {
                                         tool_call.arguments =
                                             parsed.as_object().cloned().unwrap_or_default();
                                     }
-                                    sync_blocks(output, &blocks);
-                                    let tool_call = match &blocks.blocks[position] {
+                                    let tool_call = match &output.content[position] {
                                         AssistantContent::ToolCall(tool_call) => tool_call.clone(),
                                         _ => unreachable!("position points at a tool call"),
                                     };
@@ -685,8 +672,6 @@ async fn run_stream(
             }));
         }
 
-        sync_blocks(output, &blocks);
-
         if base_options
             .signal
             .as_ref()
@@ -711,16 +696,11 @@ async fn run_stream(
     .await;
 
     if let Err(error) = stream_result {
-        blocks.settle_partial_tool_calls();
-        sync_blocks(output, &blocks);
+        blocks.settle_partial_tool_calls(&mut output.content);
         return Err(error);
     }
 
     Ok(())
-}
-
-fn sync_blocks(output: &mut AssistantMessage, blocks: &IndexedBlocks) {
-    output.content.clone_from(&blocks.blocks);
 }
 
 fn recalculate_cost(model: &Model, output: &mut AssistantMessage, cache_write_cost: Option<f64>) {

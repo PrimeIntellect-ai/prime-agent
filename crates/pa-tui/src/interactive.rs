@@ -177,7 +177,7 @@ pub trait InteractionTelemetry: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// The subagent summary line opened the scoped agents view (`tui
     /// subagents open`): `children_total` is the live descendant count at
-    /// open time.
+    /// open time (zero when opened from a dock with no subagents).
     fn subagents_view_opened(
         &self,
         children_total: u64,
@@ -447,6 +447,12 @@ pub struct InteractiveOutcome {
     /// notice seeds the view's status line instead of the pane dying to
     /// the shell.
     pub agents_view_notice: Option<String>,
+    /// How many first-draw windows this run served from an adopted
+    /// cross-view layout handoff (`view::handoff`): the served-path
+    /// observable for the verifiers — the re-entry's frames are
+    /// byte-identical either way (the frozen-surface property), so a
+    /// zero here is the re-render and a nonzero is the reuse.
+    pub handoff_seeds: u32,
 }
 
 /// Inputs consumed by the UI loop. Terminal keys arrive one event at a time;

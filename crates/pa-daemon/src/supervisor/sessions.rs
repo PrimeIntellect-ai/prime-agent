@@ -841,7 +841,15 @@ pub(super) fn saved_session_summary(info: &crate::session_store::SessionInfo) ->
         "created": info.created,
         "modified": info.modified,
         "firstMessage": info.first_message,
+        "rlmDepth": info.rlm_depth,
     });
+    // TS `summaryForInactiveSession` publishes the header binding: the
+    // parent path only when one is recorded (TS's `undefined` is omitted).
+    if let Some(parent) = &info.parent_session_path {
+        if let Some(object) = row.as_object_mut() {
+            object.insert("parentSessionPath".to_string(), json!(parent));
+        }
+    }
     // The persisted thinking level rides every saved-session summary row
     // (the durable `thinking_level_change` entry): the agents-view Model
     // column renders "model:level" for sessions without a live worker,

@@ -12,6 +12,12 @@ use super::{
     SupervisorChildSessions, Value,
 };
 
+/// The harness-owned instruction the engine floor appends to a bare
+/// skill invocation (no task text): the model receives the skill's
+/// protocol, but as an instruction to ask what the user wants first —
+/// never as an imperative to execute (the floor's whole point).
+pub(crate) const BARE_SKILL_INVOCATION_INSTRUCTION: &str = "The user invoked this skill with no task text - ask what they want before executing any protocol inside it.";
+
 impl AgentSessionEngine {
     /// Build the engine: the shared async runtime, the model selection
     /// (create config, else the process env pair), the supervisor link, the
@@ -186,6 +192,7 @@ impl AgentSessionEngine {
             provider_target: std::sync::Arc::new(std::sync::RwLock::new(None)),
             image_route: std::sync::Mutex::new(None),
             own_summary: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            create_resources: std::sync::RwLock::default(),
             autonomous: std::sync::Arc::new(tokio::sync::Mutex::new(
                 pa_core::autonomous::create_autonomous_runtime_state(None, None),
             )),
@@ -247,7 +254,28 @@ impl AgentSessionEngine {
     /// inventory), then expand against it. Non-skill inputs and build
     /// failures pass the text through unchanged — the turn then surfaces
     /// the failure it would have surfaced anyway.
+    ///
+    /// A bare invocation (the expanded block parses without a trailing
+    /// user message) carries no task text: the model would receive the
+    /// skill's imperative protocol as its only user message and
+    /// confabulate a task. The engine floor appends the harness-owned
+    /// [`BARE_SKILL_INVOCATION_INSTRUCTION`] as the block's trailing user
+    /// message — the same `\n\n` tail the with-args shape uses, so the
+    /// row's shape is unchanged (every surface parses and renders it
+    /// exactly like the with-args invocation) and the turn admits with
+    /// the model asked what the user wants.
     pub(crate) fn expand_skill_submission(&self, text: &str) -> String {
+        // The floor keys on the ORIGINAL invocation's shape (a `/skill:`
+        // command with no argument text), not on the expanded block's
+        // parse: a skill body can itself contain a close tag plus a
+        // `\n\n` tail that parses as a trailing user message
+        // (`parse_skill_block`'s non-greedy body scan), which would
+        // misread the bare invocation as carrying args. The parse below
+        // then only answers whether the expansion produced a block at
+        // all — an unknown skill or a build failure keeps the raw
+        // command text, and a with-args invocation keeps the user's args.
+        let bare_invocation = pa_types::slash_commands::parse_slash_command(text)
+            .is_some_and(|(name, args)| name.starts_with("skill:") && args.trim().is_empty());
         let Ok(model) = self.resolve_model() else {
             return text.to_string();
         };
@@ -255,13 +283,17 @@ impl AgentSessionEngine {
             eprintln!("skill submission expansion skipped: session build failed: {error:#}");
             return text.to_string();
         }
-        self.runtime.block_on(async {
+        let expanded = self.runtime.block_on(async {
             let guard = self.session.lock().await;
             match guard.as_deref() {
                 Some(engine) => engine.expand_skill_submission(text),
                 None => text.to_string(),
             }
-        })
+        });
+        if bare_invocation && pa_types::skill_blocks::parse_skill_block(&expanded).is_some() {
+            return format!("{expanded}\n\n{BARE_SKILL_INVOCATION_INSTRUCTION}");
+        }
+        expanded
     }
 
     /// The async build of the core session (the same funnel as
@@ -979,6 +1011,11 @@ impl AgentSessionEngine {
                 delivery_modes.1.as_deref().and_then(Self::queue_mode),
             )
         };
+        let create_resources = self
+            .create_resources
+            .read()
+            .expect("create resources lock")
+            .clone();
 
         // The session's stream reads its target from the engine's live slot:
         // `set_model` swaps the slot so the built session follows without a
@@ -1088,26 +1125,24 @@ impl AgentSessionEngine {
             // Model tools: `ipython` only (kernel-resident bash/edit parity);
             // the engine adds the kernel-backed `ipython` tool itself.
             tools: vec![],
-            custom_system_prompt: None,
-            prompt_guidelines: vec![],
+            custom_system_prompt: create_resources.system_prompt,
+            prompt_guidelines: create_resources.append_system_prompt,
             generic_mcp_servers: vec![],
             allow_recursion: None,
             session_manager: Some(session_manager),
             extra_host_handlers: self.extra_host_handlers(),
             conversation_log_path: session_file,
-            additional_skill_paths: vec![],
-            additional_prompt_paths: vec![],
+            additional_skill_paths: create_resources.skills,
+            additional_prompt_paths: create_resources.prompt_templates,
             extra_builtin_skill_overrides: vec![],
             rlm_subagent_host: self.children.clone().map(|children| {
                 children as Arc<dyn pa_core::session_engine::rlm_host::RlmSubagentHost>
             }),
             rlm_depth: Some(self.rlm_depth.load(std::sync::atomic::Ordering::Relaxed)),
             model_info: Some(model.clone()),
-            // The daemon worker has no CLI extension sources: sessions
-            // load configured/discovered extensions only (the attached
-            // TUI/ACP surfaces do not carry `-e` flags today).
-            cli_extension_sources: vec![],
-            extension_tool_allow_list: None,
+            // Without `-e`/`--tools` flags, sessions load configured/discovered extensions only.
+            cli_extension_sources: create_resources.extensions,
+            extension_tool_allow_list: create_resources.tools,
             // TS main.ts `createDefaultRuntimeFactory` passes
             // `prewarmIpythonKernel: true` for every session it hosts; the
             // engine's depth gate keeps subagent workers (rlmDepth > 0) on

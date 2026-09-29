@@ -43,6 +43,32 @@ impl Supervisor {
             let guard = resident.cmd_tx.lock().await;
             guard.clone().ok_or_else(|| anyhow!(WORKER_NOT_CONNECTED))?
         };
+        self.route_command_on(
+            resident,
+            cmd_tx,
+            command_type,
+            payload,
+            timeout_ms,
+            admission,
+        )
+        .await
+    }
+
+    /// Route one command over an explicit worker channel: the handshake's
+    /// own private channel (a connect holds its channel until the auth
+    /// answer installs it for routing — see `connect_worker`), or the
+    /// resident's installed channel via [`Self::route_command`]. The
+    /// admission, enqueue, and reply-wait semantics are one
+    /// implementation: only the channel differs.
+    pub(crate) async fn route_command_on(
+        &self,
+        resident: &Arc<ResidentWorker>,
+        cmd_tx: mpsc::Sender<WorkerRequest>,
+        command_type: &str,
+        payload: Value,
+        timeout_ms: u64,
+        admission: RouteAdmission,
+    ) -> Result<WorkerReply> {
         // Bounded admission (the Codex request/await split): a client's
         // request-shaped command answers the explicit overload refusal
         // the moment the worker's in-flight bound is full — nothing is
@@ -224,6 +250,29 @@ impl Supervisor {
         self.route_command(resident, command_type, payload, timeout_ms, admission)
             .await?
             .typed()
+    }
+
+    /// The typed [`Self::route_command_on`]: the handshake's private-channel
+    /// route with the response tree parsed back.
+    pub(crate) async fn route_command_on_typed(
+        &self,
+        resident: &Arc<ResidentWorker>,
+        cmd_tx: mpsc::Sender<WorkerRequest>,
+        command_type: &str,
+        payload: Value,
+        timeout_ms: u64,
+        admission: RouteAdmission,
+    ) -> Result<DaemonResponse> {
+        self.route_command_on(
+            resident,
+            cmd_tx,
+            command_type,
+            payload,
+            timeout_ms,
+            admission,
+        )
+        .await?
+        .typed()
     }
 
     /// The typed [`Self::route_command_ready`]: the replacement-aware route

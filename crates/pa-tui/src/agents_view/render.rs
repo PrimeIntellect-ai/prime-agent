@@ -965,6 +965,14 @@ impl Renderer {
                 // hidden for the surface taking the screen over. The
                 // real-exit arm ends shown for the shell either way.
                 drop(term);
+                // The view's input reader stands down before the pane is
+                // handed on (TS tears its listener down with the view):
+                // the adopting session's mount joins this reader through
+                // the registry, and a parked reader would hold crossterm's
+                // global event-reader lock indefinitely — the wake makes
+                // the flagged reader exit now instead of parking the
+                // switch on the join.
+                crate::input::request_reader_stop();
                 if preserve_alt_screen {
                     // The enhanced-key modes release with the raw-mode
                     // bracket (TS `stop` on every exit, handoffs included).

@@ -43,32 +43,47 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 struct Reader {
     handle: std::thread::JoinHandle<()>,
     stop: Arc<AtomicBool>,
+    /// The event source's wake handle: `None` only when the source failed
+    /// to initialize (no controlling tty) — the reader keeps a bounded
+    /// poll then, because nothing can break its park.
+    waker: Option<crossterm::event::Waker>,
 }
 
 /// The reader of the previous TUI surface in this process, if any.
 static PREVIOUS_READER: Mutex<Option<Reader>> = Mutex::new(None);
 
-/// TS's event loop reads stdin edge-driven (a single `poll`-like wait per
-/// event); the Rust reader polls at this tick instead. The tick is also
-/// the worst-case latency of the reader handoff: a surface switch stops
-/// the previous reader's poll flag and joins it, and the join can only
-/// return when the in-flight poll expires — so 100ms here read as a
-/// ~50-100ms lag on every chat->agents switch. 10ms keeps idle wakeups
-/// cheap (one `poll` syscall per tick) while bounding the handoff.
+/// The bounded-poll cadence for the windows where the reader must share
+/// crossterm's process-global event-reader lock with another bounded
+/// poller: the kitty probe's 250ms answer window slices its polls at
+/// this tick (the vendored crossterm patch), so the reader keeps the
+/// same slice while that window is open — an indefinite park would hold
+/// the lock and starve the probe's slices. Also the fallback cadence
+/// when no wake handle exists (a source that failed to open the tty).
 const POLL_TIMEOUT_MS: u64 = 10;
 
-/// Ask the previous surface's reader to stop without joining it: the
-/// handoff path flags the reader at teardown, so the flag is already set
-/// (and the thread usually gone) by the time the next surface's
-/// [`spawn_terminal_reader`] joins it. This keeps the switch off the
-/// join's worst-case poll-tick wait and closes the window where a dying
-/// reader could still steal a keypress aimed at the new surface.
+/// Flag the previous surface's reader for stop and break its park: the
+/// flagged reader observes the flag at its loop top, so the wake is what
+/// turns a parked (indefinite) poll into a prompt exit. The teardown
+/// paths call this BEFORE any drain that polls crossterm directly (the
+/// drain must own the reader lock), and the next surface's
+/// [`spawn_terminal_reader`] joins the already-exited thread, so a
+/// surface switch never waits on a poll tick and a dying reader cannot
+/// steal a keypress aimed at the new surface.
 pub(crate) fn request_reader_stop() {
     let guard = PREVIOUS_READER
         .lock()
         .expect("the input-reader registry lock is poisoned");
     if let Some(reader) = guard.as_ref() {
-        reader.stop.store(true, Ordering::Relaxed);
+        // The flag is released before the wake: the reader's drain of
+        // the wake pipe is a kernel round-trip whose completion
+        // orders the reader's subsequent (acquire) flag load after
+        // this store — the loop-top check right after the drain
+        // observes the stop even though the wake itself carried no
+        // payload, so the park that follows can never miss it.
+        reader.stop.store(true, Ordering::Release);
+        if let Some(waker) = reader.waker.as_ref() {
+            let _ = waker.wake();
+        }
     }
 }
 
@@ -129,22 +144,46 @@ where
         .lock()
         .expect("the input-reader registry lock is poisoned");
     if let Some(reader) = previous.take() {
-        reader.stop.store(true, Ordering::Relaxed);
+        // The same release-before-wake protocol as
+        // [`request_reader_stop`]: the join below returns within one
+        // loop-top check of the drained wake.
+        reader.stop.store(true, Ordering::Release);
+        if let Some(waker) = reader.waker.as_ref() {
+            let _ = waker.wake();
+        }
         let _ = reader.handle.join();
     }
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
+    let waker = crossterm::event::waker();
+    let thread_waker = waker.clone();
     let handle = std::thread::spawn(move || {
         let mut guard = SequenceGuard::default();
         loop {
-            if thread_stop.load(Ordering::Relaxed) {
+            if thread_stop.load(Ordering::Acquire) {
                 break;
             }
             // The wait never runs past a held escape sequence's deadline:
-            // the guard flushes on the next wake.
-            let timeout =
-                guard.poll_timeout(Duration::from_millis(POLL_TIMEOUT_MS), Instant::now());
-            match crossterm::event::poll(timeout) {
+            // the guard flushes on the next wake. Otherwise the reader
+            // parks edge-driven on real input — TS's stdin is a `data`
+            // event stream with no idle tick, and with a wake handle the
+            // stop flag needs no poll tick to be observed either (the
+            // teardown wakes the park), so an idle surface costs no
+            // wakeups at all. Two bounded exceptions: a held sequence's
+            // own flush deadline, and the kitty probe's answer window
+            // (`query_in_flight`), whose slices must interleave with this
+            // reader through crossterm's process-global event-reader lock —
+            // a park would hold it and starve the probe. Without a wake
+            // handle (a source that failed to open the tty) the tick
+            // bounds the stop latency instead.
+            let timeout = guard.poll_deadline(Instant::now()).or_else(|| {
+                if thread_waker.is_none() || crate::enhanced_keys::query_in_flight() {
+                    Some(Duration::from_millis(POLL_TIMEOUT_MS))
+                } else {
+                    None
+                }
+            });
+            match crossterm::event::poll_opt(timeout) {
                 Ok(false) => {
                     if !forward(
                         guard.flush_expired(Instant::now()),
@@ -165,7 +204,7 @@ where
                     // `join()` waiting for this loop to end.
                     let mut events = Vec::new();
                     loop {
-                        if thread_stop.load(Ordering::Relaxed) {
+                        if thread_stop.load(Ordering::Acquire) {
                             break;
                         }
                         match crossterm::event::read() {
@@ -203,7 +242,11 @@ where
             }
         }
     });
-    *previous = Some(Reader { handle, stop });
+    *previous = Some(Reader {
+        handle,
+        stop,
+        waker,
+    });
 }
 
 /// Deliver one drained round to the surface: a whole-write burst that

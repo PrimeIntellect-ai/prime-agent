@@ -67,6 +67,7 @@ use turn_types::{
 mod model;
 
 use model::persisted_rlm_max_depth;
+pub(crate) use model::saved_session_context_from_parts;
 
 // The header config types (the create-command contract, the supervisor
 // link, the autonomous admission sink, and the private goal/restore/usage
@@ -87,6 +88,7 @@ pub(crate) use artifacts::{artifact_reference, now_millis};
 
 pub use config::AgentEngineConfig;
 pub(crate) use config::AutonomousAdmission;
+pub(crate) use config::CreateSessionResources;
 pub use config::SupervisorLinkConfig;
 use config::{GoalRuntimeHandles, ProducerUsageSink, RestoredSessionModel};
 
@@ -351,6 +353,9 @@ pub struct AgentSessionEngine {
     /// This worker's own session summary (worker-pushed at create/rename),
     /// read by the kernel messaging controller to render sender identity.
     own_summary: std::sync::Arc<std::sync::Mutex<Option<Value>>>,
+    /// The create command's session flags (TS `sessionConfig`): set once at
+    /// create, read by every session build, so a replacement session keeps them.
+    pub(crate) create_resources: std::sync::RwLock<CreateSessionResources>,
     /// The session's autonomous runtime state (limits, usage accounting).
     /// Shared with the agent-loop subscription so per-message accounting can
     /// run on every settled assistant message.

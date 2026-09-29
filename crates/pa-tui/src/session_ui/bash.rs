@@ -205,8 +205,11 @@ impl SessionUi {
     }
 
     /// Whether the daemon advertises the kernel-bash registry (older
-    /// daemons never see the list requests).
-    fn kernel_bash_supported(&self) -> bool {
+    /// daemons never see the list requests). The run loop's 2s activity
+    /// poll keys on the same capability [`spawn_bash_activity_refresh`]
+    /// applies — without it every fire is a no-op, so the arm parks and
+    /// an idle surface spends no wakeups on it.
+    pub(crate) fn kernel_bash_supported(&self) -> bool {
         self.client
             .hello()
             .get("serverCapabilities")

@@ -309,6 +309,13 @@ impl SessionUi {
         self.selection_auto_scroll = None;
     }
 
+    /// Whether the selection auto-scroll driver is armed: the run loop's
+    /// quiet tick keys on it (an idle surface parks the tick, so this is
+    /// what tells it a drag is actually holding the edge).
+    pub(crate) fn selection_auto_scroll_armed(&self) -> bool {
+        self.selection_auto_scroll.is_some()
+    }
+
     /// One idle tick of the selection auto-scroll (the run loop's 50 ms arm
     /// stands in for TS's timer): after the 150 ms hold window, each tick
     /// scrolls one line set and re-aims the head onto the edge row; the
@@ -739,7 +746,7 @@ impl SessionUi {
             return Ok(());
         }
         // TS `app.subagents.focus` (default alt+a): the dock takes focus
-        // while it renders (an unmounted dock keeps the editor's focus).
+        // (it renders in every session).
         if view
             .editor
             .keybindings()

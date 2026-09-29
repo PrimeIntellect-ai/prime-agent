@@ -199,9 +199,8 @@ pub struct DaemonAcpOptions {
     pub socket_path: PathBuf,
     pub actual_cwd: PathBuf,
     pub product_version: String,
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub api_key: Option<String>,
+    /// The daemon create config built from the CLI flags (TS `defaultSessionConfig`).
+    pub create_config: Value,
 }
 
 /// The hosted daemon session: the ACP identity, the daemon routing id, the
@@ -535,23 +534,13 @@ async fn handle_session_new(
         return;
     }
 
-    // The client-owned daemon session: `--no-session` semantics, the same
-    // model selection the process resolved.
-    let mut config = json!({ "cwd": options.actual_cwd.display().to_string() });
+    // The client-owned daemon session: `--no-session` semantics.
+    let mut config = options.create_config.clone();
     // Verification seam: a scripted daemon session (the same `{"engine":
     // "faux", ...}` form the in-process e2e rides). The product never sets
     // it; the supervisor turns the path into the worker's script env.
     if let Some(script) = std::env::var_os("PRIME_AGENT_ACP_DAEMON_SCRIPT") {
         config["script"] = Value::String(script.to_string_lossy().to_string());
-    }
-    if let Some(provider) = &options.provider {
-        config["provider"] = json!(provider);
-    }
-    if let Some(model) = &options.model {
-        config["model"] = json!(model);
-    }
-    if let Some(api_key) = &options.api_key {
-        config["apiKey"] = json!(api_key);
     }
     let create = DaemonCommand::Create {
         id: None,

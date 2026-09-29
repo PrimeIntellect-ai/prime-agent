@@ -39,6 +39,14 @@ impl InternalEventReader {
         self.source.as_ref().expect("reader source not set").waker()
     }
 
+    /// The source's wake handle when the source initialized: `None` on a
+    /// source that failed to open (a process without a controlling tty) —
+    /// a parking caller must keep a bounded poll in that case.
+    #[cfg(feature = "event-stream")]
+    pub(crate) fn try_waker(&self) -> Option<Waker> {
+        self.source.as_ref().map(|source| source.waker())
+    }
+
     pub(crate) fn poll<F>(&mut self, timeout: Option<Duration>, filter: &F) -> io::Result<bool>
     where
         F: Filter,

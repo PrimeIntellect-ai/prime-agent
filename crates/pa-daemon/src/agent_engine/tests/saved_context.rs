@@ -4,7 +4,7 @@ use super::*;
 /// The full-parse reference the differential oracle compares against.
 fn full_parse_saved_session_context(
     path: &std::path::Path,
-) -> Option<super::super::model::SavedSessionContext> {
+) -> Option<crate::engine::SavedSessionContext> {
     let store = crate::session_store::SessionFile::open(path).ok()?;
     let entries = store.branch_file_entries();
     let leaf = store.leaf_id().map(str::to_string);
@@ -13,7 +13,7 @@ fn full_parse_saved_session_context(
         .has_thinking_level()
         .then(|| pa_ai::models::thinking_level_from_str(&context.thinking_level))
         .flatten();
-    Some(super::super::model::SavedSessionContext {
+    Some(crate::engine::SavedSessionContext {
         model: context.model,
         thinking,
     })
@@ -166,4 +166,53 @@ fn saved_context_windowed_falls_back_to_the_full_open_on_a_malformed_retained_ro
     lines[2] = "{not json}";
     std::fs::write(&path, lines.join("\n") + "\n").unwrap();
     assert_saved_context_equals_reference("malformed retained row fallback", &path);
+}
+
+/// The from-store reader (the create-path reuse) answers the same saved
+/// context the file-read path answers — the full-parse reference oracle
+/// covers both entry points, so the create's pre-read context is the
+/// restore's file read by construction.
+#[test]
+fn saved_context_from_the_open_store_matches_the_file_read_and_the_reference() {
+    let (mut file, path, _dir) = oracle_session();
+    file.append_entry(
+        "model_change",
+        json!({"provider":"battery","modelId":"mock-1"}),
+    );
+    let mut kept = String::new();
+    for i in 0..12 {
+        let id = file
+            .append_message(&json!({"role":"user","content":format!("message {i}"),"timestamp":i}));
+        if i == 4 {
+            kept = id;
+        }
+    }
+    file.append_entry(
+        "compaction",
+        json!({"summary":"summary","firstKeptEntryId":kept,"tokensBefore":1000}),
+    );
+    file.append_entry("thinking_level_change", json!({"thinkingLevel":"high"}));
+    file.rewrite().unwrap();
+
+    let store = crate::session_store::SessionFile::open_windowed(&path).unwrap();
+    let from_store = super::super::model::saved_session_context_from_parts(
+        &store.restored_settings(),
+        store.has_thinking_level(),
+    );
+    let file_read = super::super::model::saved_session_context(&path)
+        .unwrap_or_else(|| panic!("the file-read path must answer"));
+    let reference = full_parse_saved_session_context(&path)
+        .unwrap_or_else(|| panic!("the reference reader must answer"));
+    assert_eq!(
+        from_store, file_read,
+        "the from-store reader is the file read"
+    );
+    assert_eq!(
+        from_store.model, reference.model,
+        "the from-store saved (provider, model) must match the reference"
+    );
+    assert_eq!(
+        from_store.thinking, reference.thinking,
+        "the from-store saved thinking level must match the reference"
+    );
 }

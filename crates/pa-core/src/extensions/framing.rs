@@ -72,23 +72,36 @@ impl LineDecoder {
     /// # Errors
     ///
     /// Returns an error when a completed line is not valid UTF-8, or when the
-    /// unterminated buffered bytes exceed `limits.max_line_bytes`.
+    /// unterminated buffered bytes exceed `limits.max_line_bytes`. An error
+    /// means the stream is corrupt: the decoder is not fed again.
     pub fn feed(&mut self, chunk: &[u8]) -> Result<Vec<String>> {
+        // The buffer keeps only the newline-free tail of earlier feeds, so only
+        // the new bytes can hold a newline: a long line arriving in small
+        // chunks is scanned once, not once per chunk.
+        let mut scan_from = self.buffer.len();
         self.buffer.extend_from_slice(chunk);
         let mut lines = Vec::new();
-        while let Some(pos) = self.buffer.iter().position(|&b| b == b'\n') {
-            let mut line: Vec<u8> = self.buffer.drain(..=pos).collect();
-            line.pop(); // the newline
-            if line.last() == Some(&b'\r') {
-                line.pop();
-            }
+        // Consume by offset and drain once per feed: a drain per line would
+        // shift the remaining bytes each time.
+        let mut consumed = 0;
+        while let Some(rel) = self.buffer[scan_from..].iter().position(|&b| b == b'\n') {
+            let end = scan_from + rel;
+            let line = &self.buffer[consumed..end];
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            consumed = end + 1;
+            scan_from = consumed;
             if line.is_empty() {
                 continue;
             }
-            let line = String::from_utf8(line)
-                .map_err(|err| anyhow!("extension RPC line is not valid UTF-8: {err}"))?;
-            lines.push(line);
+            match std::str::from_utf8(line) {
+                Ok(line) => lines.push(line.to_owned()),
+                Err(err) => {
+                    self.buffer.drain(..consumed);
+                    return Err(anyhow!("extension RPC line is not valid UTF-8: {err}"));
+                }
+            }
         }
+        self.buffer.drain(..consumed);
         if self.buffer.len() > self.limits.max_line_bytes {
             return Err(anyhow!(
                 "extension RPC line exceeds the line limit: {} bytes without a newline",
@@ -153,5 +166,26 @@ mod tests {
         let mut dec = LineDecoder::new(LineLimits::default());
         let err = dec.feed(&[0xff, b'\n']).unwrap_err();
         assert!(err.to_string().contains("UTF-8"));
+    }
+
+    #[test]
+    fn decoder_scans_a_long_line_once_across_small_chunks() {
+        // 4 MiB in 1 KiB feeds: rescanning the buffered prefix per feed scans
+        // ~8.6 GB (~14 s in a debug build); one pass scans 4 MiB.
+        let line = "x".repeat(4 * 1024 * 1024);
+        let payload = format!("{line}\r\n{{\"id\":2}}\n");
+        let mut dec = LineDecoder::new(LineLimits::default());
+        let started = std::time::Instant::now();
+        let mut lines = Vec::new();
+        for chunk in payload.as_bytes().chunks(1024) {
+            lines.extend(dec.feed(chunk).unwrap());
+        }
+        let elapsed = started.elapsed();
+        assert_eq!(lines, vec![line, "{\"id\":2}".to_string()]);
+        assert_eq!(dec.buffered_bytes(), 0);
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "4 MiB line took {elapsed:?}"
+        );
     }
 }

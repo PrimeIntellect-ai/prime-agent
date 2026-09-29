@@ -18,12 +18,16 @@ use serde_json::{json, Value};
 
 struct MockSupervisor {
     listener: UnixListener,
+    /// Every recorded `prompt` request payload (the bare-skill guard
+    /// proof: a blocked submission never reaches the wire).
+    prompt_requests: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
 }
 
 impl MockSupervisor {
     fn bind(socket: &std::path::Path) -> Self {
         MockSupervisor {
             listener: UnixListener::bind(socket).expect("bind mock socket"),
+            prompt_requests: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -137,6 +141,44 @@ impl MockSupervisor {
                         }),
                     );
                 }
+                "prompt" => {
+                    {
+                        let mut requests = self.prompt_requests.lock().expect("prompt recorder");
+                        requests.push(command.clone());
+                    }
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response",
+                            "id": id,
+                            "command": "prompt",
+                            "success": true,
+                        }),
+                    );
+                    // A minimal streamed turn: a wrongly-sent prompt
+                    // still settles (a regression fails on the
+                    // recorder, not on a wedged settle gate).
+                    write_session_event(&mut writer, &json!({ "type": "turn_start" }));
+                    write_session_event(
+                        &mut writer,
+                        &json!({
+                            "type": "message_start",
+                            "message": { "role": "user", "content": "asked" },
+                        }),
+                    );
+                    write_session_event(
+                        &mut writer,
+                        &json!({
+                            "type": "message_end",
+                            "message": {
+                                "role": "assistant",
+                                "stopReason": "stop",
+                                "content": [{ "type": "text", "text": "the streamed answer" }],
+                            },
+                        }),
+                    );
+                    write_session_event(&mut writer, &json!({ "type": "turn_end" }));
+                }
                 _ => {
                     write_json(
                         &mut writer,
@@ -159,6 +201,17 @@ fn write_json(writer: &mut UnixStream, value: &Value) {
     line.push('\n');
     writer.write_all(line.as_bytes()).expect("write mock frame");
     writer.flush().expect("flush mock frame");
+}
+
+fn write_session_event(writer: &mut UnixStream, event: &Value) {
+    write_json(
+        writer,
+        &json!({
+            "type": "session_event",
+            "activeSessionId": "s1",
+            "event": event,
+        }),
+    );
 }
 
 /// The slim attach result: one empty session.
@@ -404,6 +457,37 @@ fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
     outcome.frames
 }
 
+/// The same plan run with the mock's prompt recorder: the frames plus
+/// every `prompt` request that reached the daemon (the guard's wire
+/// proof — a blocked submission stays off the wire).
+fn run_plan_with_prompts(steps: Vec<HeadlessStep>) -> (Vec<String>, Vec<Value>) {
+    std::env::remove_var("TMUX");
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("tui.sock");
+    let supervisor = MockSupervisor::bind(&socket);
+    let prompt_requests = std::sync::Arc::clone(&supervisor.prompt_requests);
+    let handle = std::thread::spawn(move || supervisor.serve());
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let plan = HeadlessPlan {
+        steps,
+        width: 100,
+        height: 30,
+    };
+    let outcome = runtime
+        .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
+        .expect("interactive run");
+    handle.join().expect("mock supervisor finished");
+    let prompts = prompt_requests
+        .lock()
+        .expect("prompt recorder lock")
+        .clone();
+    (outcome.frames, prompts)
+}
+
 /// Typing `/skill:<prefix>` surfaces the installed skill as a slash
 /// command: the menu row names it (`skill:web-search`), carries its
 /// description, and shows the source label from the source info
@@ -509,5 +593,111 @@ fn disabled_skill_commands_stay_out_of_the_menu() {
     assert!(
         !all.contains("skill:web-search"),
         "the setting hides the skill commands: {all}"
+    );
+}
+
+/// One plain Enter key event (the completion apply, then the submit).
+fn enter() -> crossterm::event::KeyEvent {
+    crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Enter,
+        crossterm::event::KeyModifiers::NONE,
+    )
+}
+
+/// A bare `/skill:<name>` submission (the Tab-Enter completion flow)
+/// never reaches the daemon: the guard restores the draft into the
+/// editor, the notice names the fix, and the prompt recorder stays
+/// empty (the incident class — a bare invocation expanding into the
+/// skill's protocol with no task — is blocked at the client).
+#[test]
+fn a_bare_skill_submit_shows_the_notice_and_never_sends() {
+    let (frames, prompts) = run_plan_with_prompts(vec![
+        HeadlessStep::WaitMs(300),
+        HeadlessStep::Type("/skill:web".to_string()),
+        HeadlessStep::SettleIdle,
+        // Enter applies the completion (into the argument position), the
+        // second Enter submits the bare command — the incident flow.
+        HeadlessStep::Key(enter()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitMs(200),
+    ]);
+    assert!(
+        prompts.is_empty(),
+        "the bare submission never reached the daemon: {prompts:?}"
+    );
+    let all = frames.join("\n");
+    assert!(
+        all.contains("add your request after the skill"),
+        "the notice renders: {all}"
+    );
+    assert!(
+        all.contains("make a release of PR #2731"),
+        "the notice carries the worked example: {all}"
+    );
+    let last = frames.last().expect("a frame was captured");
+    assert!(
+        last.contains("skill:web-search"),
+        "the draft restores into the editor: {last}"
+    );
+}
+
+/// The recovery is ONE step (the restored draft keeps the argument
+/// position): after the guard's notice, typing the request and
+/// submitting sends the command WITH the request — the trailing space
+/// survives, so the keystrokes become args instead of gluing onto the
+/// command name.
+#[test]
+fn the_bare_skill_guard_restores_into_the_argument_position() {
+    let (frames, prompts) = run_plan_with_prompts(vec![
+        HeadlessStep::WaitMs(300),
+        HeadlessStep::Type("/skill:web".to_string()),
+        HeadlessStep::SettleIdle,
+        HeadlessStep::Key(enter()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitMs(150),
+        // The notice showed; the user types the request straight into the
+        // restored draft and submits.
+        HeadlessStep::Type("find rust tuis".to_string()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitMs(300),
+    ]);
+    assert_eq!(prompts.len(), 1, "one prompt dispatched: {prompts:?}");
+    assert_eq!(
+        prompts[0].get("message").and_then(Value::as_str),
+        Some("/skill:web-search find rust tuis"),
+        "the typed request became the command's args: {prompts:?}"
+    );
+    let all = frames.join("\n");
+    assert!(
+        all.contains("add your request after the skill"),
+        "the notice rendered before the recovery: {all}"
+    );
+}
+
+/// A completed skill invocation with the request typed after it sends
+/// normally: the completion lands in the argument position (the
+/// trailing space), the typed request follows, and the daemon receives
+/// the command with its args — the with-args path is unchanged.
+#[test]
+fn a_completed_skill_with_args_sends_the_command_and_request() {
+    let (frames, prompts) = run_plan_with_prompts(vec![
+        HeadlessStep::WaitMs(300),
+        HeadlessStep::Type("/skill:web".to_string()),
+        HeadlessStep::SettleIdle,
+        HeadlessStep::Key(enter()),
+        HeadlessStep::Type("find rust tuis".to_string()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitMs(300),
+    ]);
+    assert_eq!(prompts.len(), 1, "one prompt dispatched: {prompts:?}");
+    assert_eq!(
+        prompts[0].get("message").and_then(Value::as_str),
+        Some("/skill:web-search find rust tuis"),
+        "the command and the request travel together: {prompts:?}"
+    );
+    let all = frames.join("\n");
+    assert!(
+        !all.contains("add your request after the skill"),
+        "the with-args submit shows no notice: {all}"
     );
 }
