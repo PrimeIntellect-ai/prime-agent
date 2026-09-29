@@ -1,8 +1,7 @@
 # CI gates for the prime-agent Rust port: the tip-compiles-tests guarantee
 # plus PR gating, in one workflow (the shape of the TS product's ci.yml).
 #
-# Promoted from ci/workflows/ci.yml (see ci/workflows/README.md; promotion
-# needs a push credential with the `workflow` scope). Two triggers, one
+# Two triggers, one
 # gate set mirroring `make check` exactly (fmt --all --check, clippy --workspace
 # --all-targets -- -D warnings, cargo test --workspace) on the pinned
 # toolchain (1.98.1) and runner image the continuous/release builds use:
@@ -38,9 +37,8 @@
 # naming the failing binaries; the gate is green only when all shards are.
 #
 # Strictly read-only: contents: read, persist-credentials: false, no secrets.
-# The windows-cross/windows/deny jobs remain staged at ci/workflows/ci.yml
-# until windows-readiness lands and a deny policy decision is made (see
-# ci/workflows/README.md).
+# Windows coverage runs via the on-demand windows-runtime-triage.yml battery
+# (any ref); there is no windows or deny job in this workflow.
 #
 name: ci
 
@@ -187,6 +185,5 @@ jobs:
       - name: Audit the shards and merge their failure reports
         run: python3 scripts/ci_test_shard_summary.py --total 4 --dir manifests
 
-  # windows-cross runs here once validated green at the tip (the staged
-  # ci/workflows/ci.yml carries it until then); the real windows-latest test
-  # job and cargo-deny stay staged as well — see ci/workflows/README.md.
+  # Windows coverage: the on-demand windows-runtime-triage.yml battery (any
+  # ref); no windows job runs in this workflow.

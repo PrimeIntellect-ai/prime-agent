@@ -6,6 +6,14 @@ use super::{
     wants_chunked, Arc, DaemonCommand, DaemonResponse, Duration, Outbound, ResidentWorker, Result,
     RouteAdmission, SnapshotPurpose, Supervisor, Value, WorkerReply, WorkerRequest,
 };
+use anyhow::Context as _;
+
+/// The route-level wake outcome: a woken resident, or the fallthrough
+/// error the caller answers (no saved session matched).
+pub(super) enum WakeRoute {
+    Woken(Arc<ResidentWorker>),
+    Fallthrough(String),
+}
 
 pub(crate) const ROUTE_TIMEOUT_MS: u64 = 30_000;
 /// The route failure for a worker whose command channel is gone (never
@@ -404,18 +412,123 @@ impl Supervisor {
                             Some(self.rebind_connection(&selector, &resident, attached).await);
                         resident
                     } else {
-                        let message = self
-                            .restore_failure_for(&selector)
-                            .unwrap_or_else(|| format!("Unknown active session: {selector}"));
-                        return (
-                            vec![response_line(&response_failure(
-                                Some(&command_id),
-                                &type_name,
-                                &message,
-                                None,
-                            ))],
-                            false,
-                        );
+                        // The passivated-session surfaces (TS's
+                        // whole-worker idle eviction: the worker is gone,
+                        // the session file survives). A prompt-family
+                        // command (or an attach) aimed at a session whose
+                        // worker stopped resolves the SAVED session and
+                        // wakes it (reuse a resident host, otherwise launch
+                        // a fresh worker over the file — TS's tier-2
+                        // relaunch); a delete's kill marker resolves the
+                        // ledger edge and tombstones without a worker.
+                        if matches!(
+                            command,
+                            DaemonCommand::Prompt { .. }
+                                | DaemonCommand::PromptAndWait { .. }
+                                | DaemonCommand::Steer { .. }
+                                | DaemonCommand::FollowUp { .. }
+                                | DaemonCommand::Attach { .. }
+                                | DaemonCommand::Reattach { .. }
+                                | DaemonCommand::WaitForIdle { .. }
+                        ) {
+                            match self.wake_saved_session(&selector).await {
+                                WakeRoute::Woken(resident) => {
+                                    rebound_to = Some(
+                                        self.rebind_connection(&selector, &resident, attached)
+                                            .await,
+                                    );
+                                    resident
+                                }
+                                WakeRoute::Fallthrough(message) => {
+                                    return (
+                                        vec![response_line(&response_failure(
+                                            Some(&command_id),
+                                            &type_name,
+                                            &message,
+                                            None,
+                                        ))],
+                                        false,
+                                    );
+                                }
+                            }
+                        } else if let DaemonCommand::Kill { rest, .. } = command {
+                            if let Some(reason) = rest
+                                .get("rlmLedgerDelete")
+                                .and_then(Value::as_str)
+                                .and_then(crate::rlm_ledger::RlmLedgerDeleteReason::from_wire)
+                            {
+                                // The delete of a stopped child: no worker
+                                // to kill — the ledger tombstone IS the
+                                // deletion boundary (TS
+                                // `recordRlmSubagentDeletion` without a
+                                // stop).
+                                let child_id = rest
+                                    .get("rlmChildId")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string);
+                                match self
+                                    .tombstone_saved_rlm_child(
+                                        &selector,
+                                        child_id.as_deref(),
+                                        reason,
+                                    )
+                                    .await
+                                {
+                                    Ok(()) => {
+                                        return (
+                                            vec![response_line(&response_success(
+                                                Some(&command_id),
+                                                &type_name,
+                                                None,
+                                            ))],
+                                            false,
+                                        );
+                                    }
+                                    Err(error) => {
+                                        return (
+                                            vec![response_line(&response_failure(
+                                                Some(&command_id),
+                                                &type_name,
+                                                &format!(
+                                                    "Failed to delete RLM subagent: {error:#}"
+                                                ),
+                                                None,
+                                            ))],
+                                            false,
+                                        );
+                                    }
+                                }
+                            }
+                            // The fallthrough (no delete marker): the plain
+                            // unknown-session error — a kill of a stopped
+                            // session without the marker stays an error,
+                            // nothing to kill.
+                            let message = self
+                                .restore_failure_for(&selector)
+                                .unwrap_or_else(|| format!("Unknown active session: {selector}"));
+                            return (
+                                vec![response_line(&response_failure(
+                                    Some(&command_id),
+                                    &type_name,
+                                    &message,
+                                    None,
+                                ))],
+                                false,
+                            );
+                        } else {
+                            let message = self
+                                .restore_failure_for(&selector)
+                                .unwrap_or_else(|| format!("Unknown active session: {selector}"));
+                            return (
+                                vec![response_line(&response_failure(
+                                    Some(&command_id),
+                                    &type_name,
+                                    &message,
+                                    None,
+                                ))],
+                                false,
+                            );
+                        }
                     }
                 }
             }
@@ -872,6 +985,269 @@ impl Supervisor {
                 )
             }
         }
+    }
+
+    /// The saved-session wake for a passivated (worker-stopped) session
+    /// (TS's tier-2 relaunch: `matchWorkers` misses -> resolve the
+    /// session path -> `launchWorker` over the file). Reuses the
+    /// messaging wake's resolution and reuse-or-launch; a selector that
+    /// resolves to no saved session (or a ledger miss) falls through to
+    /// the caller's unknown-session error, so only resolvable sessions
+    /// ever wake.
+    pub(super) async fn wake_saved_session(self: &Arc<Self>, selector: &str) -> WakeRoute {
+        let resolve_error = anyhow!("Unknown active session: {selector}");
+        match self.wake_saved_target(&resolve_error, selector, None).await {
+            crate::messaging::WakeOutcome::Woken(resident) => WakeRoute::Woken(resident),
+            crate::messaging::WakeOutcome::Unknown => {
+                // The routing selector is the session's ACTIVE id (the
+                // registry key), which the saved-session catalog and the
+                // ledger edges do not carry — the ROSTER row does (the
+                // passive row keeps the durable fields, `sessionFile`
+                // included): resolve the active id through the roster
+                // and launch a worker over the row's session file.
+                match self.wake_roster_session(selector).await {
+                    Some(crate::messaging::WakeOutcome::Woken(resident)) => {
+                        WakeRoute::Woken(resident)
+                    }
+                    Some(crate::messaging::WakeOutcome::Failed(message)) => {
+                        WakeRoute::Fallthrough(message)
+                    }
+                    Some(crate::messaging::WakeOutcome::Unknown) | None => WakeRoute::Fallthrough(
+                        self.restore_failure_for(selector)
+                            .unwrap_or_else(|| format!("Unknown active session: {selector}")),
+                    ),
+                }
+            }
+            crate::messaging::WakeOutcome::Failed(message) => WakeRoute::Fallthrough(message),
+        }
+        // The command itself is untouched: the caller rebinds and routes
+        // it to the woken resident (the create replay restored the
+        // session; the prompt lands as the next turn on the replayed
+        // file, exactly like TS).
+    }
+
+    /// The roster-row wake: one passive (or live-but-unregistered) row
+    /// carrying this active session id names the session file to launch
+    /// a worker over (the passivated child's revival path).
+    async fn wake_roster_session(
+        self: &Arc<Self>,
+        selector: &str,
+    ) -> Option<crate::messaging::WakeOutcome> {
+        let mut files: Vec<String> = {
+            let roster = self.roster.lock().unwrap();
+            roster
+                .by_active_session_id(selector)
+                .map(|row| {
+                    row.summary
+                        .get("sessionFile")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .into_iter()
+                .flatten()
+                .collect()
+        };
+        files.sort();
+        files.dedup();
+        let session_file = files.first()?.clone();
+        // The passive row's durable summary carries the child identity:
+        // the depth + the agent id ride the create's rest so the revived
+        // worker keeps them (the supervisor's parent-owned passivation
+        // fence reads `rest.rlmDepth` - without it the revived child
+        // never re-passivates).
+        let (depth, child_id) = {
+            let roster = self.roster.lock().unwrap();
+            roster
+                .by_active_session_id(selector)
+                .map_or((0, String::new()), |row| {
+                    (
+                        row.summary
+                            .get("rlmDepth")
+                            .and_then(Value::as_u64)
+                            .unwrap_or_default(),
+                        row.summary
+                            .get("agentId")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    )
+                })
+        };
+        let cwd = crate::session_store::read_session_info(std::path::Path::new(&session_file))
+            .map_or_else(|| "/".to_string(), |info| info.cwd);
+        // The identity rides `config.rlmDepth` + `runtime_metadata.rlmChildId`
+        // - the keys launch_worker copies into the DURABLE create command's
+        // rest (the parent-owned passivation fence reads that rest; a bare
+        // create `rest` is never read on this path).
+        let create = DaemonCommand::Create {
+            id: None,
+            session_path: Some(session_file.clone()),
+            continue_recent: Some(false),
+            no_session: None,
+            name: None,
+            config: Some(json!({ "cwd": cwd, "rlmDepth": depth })),
+            telemetry_disabled: None,
+            runtime_metadata: Some(json!({ "rlmChildId": child_id })),
+            lifecycle: None,
+            env: None,
+            launch_env: None,
+            rest: serde_json::Map::default(),
+        };
+        // Reuse before launching (TS `createOrReuseWorker`): a concurrent
+        // revival — or the resident the previous wake launched — may
+        // already host the file.
+        if let Some(resident) = self.registry.find_by_session_file(&session_file).await {
+            return Some(crate::messaging::WakeOutcome::Woken(resident));
+        }
+        // The caller's route budget bounds the WAIT, not the launch
+        // (the round-7 bots' finding: dropping the future skipped the
+        // launch's own cleanup): the launch detaches and runs to
+        // completion; a timeout tries the join lookup first and answers
+        // with the retryable budget note otherwise.
+        let launch = tokio::spawn({
+            let supervisor = Arc::clone(self);
+            let create = create;
+            async move { supervisor.launch_worker(&create, None).await }
+        });
+        let launched =
+            tokio::time::timeout(std::time::Duration::from_millis(ROUTE_TIMEOUT_MS), launch).await;
+        match launched {
+            Ok(Ok(Ok((resident, _create_summary)))) => {
+                self.refresh_roster_entry(&resident).await;
+                Some(crate::messaging::WakeOutcome::Woken(resident))
+            }
+            Ok(Ok(Err(error))) => {
+                // The check-and-launch race (two concurrent prompt/
+                // attach wakes for the same passivated row): the rival
+                // wins the session lease while this launch runs, so the
+                // loser joins the rival's registered resident instead
+                // of failing its command (TS's in-flight-join revival
+                // semantics, `hydratePassiveRlmSubagent`'s single-flight
+                // outcome).
+                if let Some(resident) = self.registry.find_by_session_file(&session_file).await {
+                    return Some(crate::messaging::WakeOutcome::Woken(resident));
+                }
+                Some(crate::messaging::WakeOutcome::Failed(format!("{error:#}")))
+            }
+            Ok(Err(join_error)) => Some(crate::messaging::WakeOutcome::Failed(format!(
+                "the revival launch task: {join_error}"
+            ))),
+            Err(_budget) => {
+                if let Some(resident) = self.registry.find_by_session_file(&session_file).await {
+                    return Some(crate::messaging::WakeOutcome::Woken(resident));
+                }
+                Some(crate::messaging::WakeOutcome::Failed(
+                    "the revival launch exceeded the route budget; retry the command".to_string(),
+                ))
+            }
+        }
+    }
+
+    /// The ledger tombstone for a delete aimed at a STOPPED child (the
+    /// passivation-aware delete: no worker to kill, the tombstone IS the
+    /// deletion boundary). Resolves the child's session file and identity
+    /// from the spawn ledger's live edges (the same resolution the
+    /// messaging wake uses for child selectors), then appends the delete
+    /// tombstone - the durable boundary TS `recordRlmSubagentDeletion`
+    /// persists before any teardown.
+    pub(super) async fn tombstone_saved_rlm_child(
+        self: &Arc<Self>,
+        selector: &str,
+        child_id: Option<&str>,
+        reason: crate::rlm_ledger::RlmLedgerDeleteReason,
+    ) -> anyhow::Result<()> {
+        let ledger = self
+            .rlm_spawn_ledger_for(None)
+            .await
+            .with_context(|| "resolve the spawn ledger sessions dir".to_string())?;
+        // The child's identity: the explicit id the parent's delete
+        // carries, else the live ledger edge matching the selector (the
+        // child's session id is the edge's child path stem).
+        let edges = ledger
+            .live_edges()
+            .with_context(|| "read the spawn ledger edges".to_string())?;
+        // The resolution (the fresh bots' never-matches finding): an
+        // explicit `rlmChildId` is the durable key, and the routed
+        // selector is the child's LIVE id - NOT the file stem - so the
+        // stem==selector arm alone never fired. The order: (1a) the edge
+        // matching BOTH the stem and the id (a stem-shaped caller never
+        // tombstones an unrelated edge sharing the id); (1b) the LAST
+        // live edge carrying the id (the live-id callers; a replaced
+        // child's newest edge wins); (2) without the id, the
+        // stem-matching edge (the ledger-edge fallback).
+        let mut resolved: Option<(String, String)> = None;
+        if let Some(id) = child_id {
+            for edge in &edges {
+                let stem = std::path::Path::new(&edge.child)
+                    .file_stem()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if stem == selector && edge.child_id == id {
+                    resolved = Some((edge.child_id.clone(), edge.child.clone()));
+                    break;
+                }
+            }
+            if resolved.is_none() {
+                for edge in &edges {
+                    if edge.child_id == id {
+                        resolved = Some((edge.child_id.clone(), edge.child.clone()));
+                    }
+                }
+            }
+        } else {
+            for edge in &edges {
+                let stem = std::path::Path::new(&edge.child)
+                    .file_stem()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if stem == selector {
+                    resolved = Some((edge.child_id.clone(), edge.child.clone()));
+                    break;
+                }
+            }
+        }
+        let Some((child_id, session_file)) = resolved else {
+            anyhow::bail!("stopped RLM subagent \"{selector}\" is not in the spawn ledger");
+        };
+        ledger
+            .append_delete(&child_id, &session_file, reason)
+            .with_context(|| format!("tombstone RLM subagent {child_id}"))?;
+        // The stopped child's teardown mirrors the resident delete's end
+        // state (the second bot round's leftover-partition finding): no
+        // worker to finalize — the tombstone is the deletion boundary —
+        // but the usage capture, the archived state, and the artifact
+        // sweep must land the way a live child's kill route leaves them.
+        let sessions_dir = crate::paths::sessions_dir(&self.options.agent_dir)
+            .with_context(|| "resolve the sessions dir for the delete finalize".to_string())?;
+        // The live coverage captured AFTER the tombstone append: a wake
+        // that registered a resident for this child between the append
+        // and the finalize must be visible here (the revived worker's
+        // tree is covered - the archive/sweep skips it exactly like the
+        // resident delete's covered-tree belt).
+        let live = self.live_session_files().await;
+        if self
+            .registry
+            .find_by_session_file(&session_file)
+            .await
+            .is_some()
+        {
+            // A revival raced the delete: the tombstone stands as the
+            // durable boundary, but the revived worker's session stays
+            // live - no archive, no artifact sweep.
+            return Ok(());
+        }
+        crate::stop_cleanup::finalize_archived_stop(
+            &self.options.agent_dir,
+            &sessions_dir,
+            std::path::Path::new(&session_file),
+            &live,
+        );
+        self.capture_deleted_child_usage(&session_file, &child_id, "rlm_delete")
+            .await;
+        crate::saved_session_commands::remove_session_artifacts(std::path::Path::new(
+            &session_file,
+        ));
+        Ok(())
     }
 }
 

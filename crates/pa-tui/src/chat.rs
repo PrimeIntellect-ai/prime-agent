@@ -494,8 +494,13 @@ fn render_thinking_block(
 ) -> Vec<Line> {
     let md = geometry::thinking_style(md, theme);
     let content_width = width.saturating_sub(2).max(1);
-    let rendered =
-        crate::markdown::render_markdown_tagged(text.trim(), content_width, &md, "dim", cache);
+    let rendered = crate::markdown::render_markdown_tagged(
+        text.trim(),
+        content_width,
+        &md,
+        geometry::THINKING_CACHE_TAG,
+        cache,
+    );
     let mut out = Vec::new();
     for line in rendered {
         // The markdown margin sits outside the styled content (default fg).

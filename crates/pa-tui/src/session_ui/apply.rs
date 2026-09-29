@@ -141,8 +141,10 @@ impl SessionUi {
     /// fetch keeps the pushed outcome row instead of an empty transcript.
     pub(crate) async fn rebuild_transcript(&mut self, view: &mut AgentView) {
         self.transcript_stale = false;
-        // The rebuilt transcript invalidates the tracked status row.
+        // The rebuilt transcript invalidates the tracked status row and
+        // a pending click's entry index.
         self.last_status_index = None;
+        self.pressed_click = None;
         let Ok(data) = self
             .bounded_request(
                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS),

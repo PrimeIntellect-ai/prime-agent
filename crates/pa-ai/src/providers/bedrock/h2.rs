@@ -545,12 +545,21 @@ mod h2_wire_tests {
         let addr_http1 = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buf = vec![0u8; 24];
-            socket.read_exact(&mut buf).await.unwrap();
+            // The shared frame-draining helper (its settings ACK is
+            // harmless: the answer below still fails the h2 parse).
+            read_client_preface(&mut socket).await;
             socket
                 .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\n\r\n{}")
                 .await
                 .unwrap();
+            socket.shutdown().await.ok();
+            // The readiness event is the client's EOF, not elapsed time:
+            // the read consumes the request DATA (a close over unread
+            // data resets, and Windows would discard the queued answer
+            // on the reset) and holds the socket until the client -
+            // which closes once the parse fails - has the answer.
+            let mut rest = Vec::new();
+            let _ = socket.read_to_end(&mut rest).await;
         });
         let url = format!("http://{addr_http1}/model/m/converse-stream");
         let error = match send_h2(options(url.clone())).await {

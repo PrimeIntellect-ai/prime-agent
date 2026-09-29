@@ -619,8 +619,10 @@ impl SessionUi {
             view.chrome.speed_text = None;
         }
         view.clear_chat();
-        // The rebuilt transcript invalidates the tracked status row.
+        // The rebuilt transcript invalidates the tracked status row and
+        // a pending click's entry index.
         self.last_status_index = None;
+        self.pressed_click = None;
         // The rebuild drops the previous run's pending-tool map (TS
         // `resetPendingToolState` at the rebuild boundary).
         self.pending_tools.clear();

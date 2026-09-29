@@ -119,7 +119,10 @@ impl AnthropicCallbackServer {
         // `SO_REUSEADDR`: a closed listener's recent connections linger
         // in TIME_WAIT on the registered port (the browser race drives
         // real sockets); the next login's bind must not fail on them
-        // (the plain `TcpListener::bind` leaves the flag unset).
+        // (the plain `TcpListener::bind` leaves the flag unset). Unix
+        // only: on Windows the same flag instead lets a second socket
+        // bind over a live listener (the port-sharing hijack class), so
+        // the plain bind keeps the accurate in-use failure.
         let addr: std::net::SocketAddr = (host, port)
             .to_socket_addrs()
             .map_err(|error| format!("port {port}: {error}"))?
@@ -131,6 +134,7 @@ impl AnthropicCallbackServer {
             tokio::net::TcpSocket::new_v6()
         }
         .map_err(|error| format!("port {port}: {error}"))?;
+        #[cfg(unix)]
         socket
             .set_reuseaddr(true)
             .map_err(|error| format!("port {port}: {error}"))?;
@@ -501,7 +505,15 @@ mod tests {
         };
         let error = AnthropicCallbackServer::start("the-state").unwrap_err();
         assert!(error.contains("port 53692"), "{error}");
+        // The in-use failure is OS-phrased: EADDRINUSE names the address
+        // class on Unix, WSAEADDRINUSE on Windows.
+        #[cfg(unix)]
         assert!(error.contains("Address already in use"), "{error}");
+        #[cfg(windows)]
+        assert!(
+            error.contains("Only one usage of each socket address"),
+            "{error}"
+        );
         drop(blocker);
     }
 

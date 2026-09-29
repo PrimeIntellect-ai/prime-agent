@@ -321,7 +321,7 @@ impl AgentView {
             | ChatEntry::SlashCommand { .. }
             | ChatEntry::CompactionSummary { .. } => !first,
             ChatEntry::AgentMessage(_) | ChatEntry::ShellCompletion(_) | ChatEntry::Tool(_) => {
-                self.conversation_leading(index, self.detail.tool_output_expanded())
+                self.conversation_leading(index, self.entry_detail(index).tool_output_expanded())
             }
             // The bash card's own mount rule (TS `Spacer(1)` unless the
             // chat's last child is an agent message, captured on the card

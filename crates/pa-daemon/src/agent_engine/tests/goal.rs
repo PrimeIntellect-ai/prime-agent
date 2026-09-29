@@ -1131,13 +1131,14 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
             EngineEvent::AssistantUpdate {
                 message,
                 stream_event,
-            } => (message.get("stopReason").and_then(Value::as_str) == Some("aborted")
-                && stream_event
-                    .as_ref()
-                    .and_then(|event| event.get("type"))
-                    .and_then(Value::as_str)
-                    == Some("start"))
-            .then_some(message.clone()),
+            } => message.clone().into_wire().filter(|message| {
+                message.get("stopReason").and_then(Value::as_str) == Some("aborted")
+                    && stream_event
+                        .as_ref()
+                        .and_then(|event| event.get("type"))
+                        .and_then(Value::as_str)
+                        == Some("start")
+            }),
             _ => None,
         })
         .expect("the aborted row's start frame broadcast");

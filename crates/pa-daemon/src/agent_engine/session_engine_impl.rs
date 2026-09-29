@@ -26,26 +26,34 @@ impl SessionEngine for AgentSessionEngine {
         }
     }
 
-    /// TS #2483's `_passivateSettledRlmChildRuntime` inline arm,
-    /// worker-side: the turn runner's park arm proved the parent-owned,
-    /// unattached, unqueued idle state; the remaining
-    /// `canPassivateSettledSession` gates run here. A settled child
-    /// releases its kernel with a final snapshot flush (the revivable
-    /// stop: the next kernel use boots fresh from the flushed snapshot)
-    /// while staying listable, inspectable, collectable, and deletable
-    /// — the roster and collect surfaces are untouched by design.
-    fn release_settled_child_kernel(
+    /// The engine-side gate mirror of the whole-worker idle
+    /// passivation (TS `canPassivateSession`, session-action-store
+    /// :411-419): `true` only when no non-passive descendants hold work
+    /// and no active-or-paused scheduled job is registered (the shared
+    /// store covers crons AND armed heartbeats — the wake-blind
+    /// substitution). This method only answers the gate; the caller
+    /// owns the residency decision (the kernel release and the
+    /// whole-worker stop each consume it separately).
+    fn can_passivate_settled_session(
         &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
         Box::pin(async move {
             // `hasNonPassiveDescendants`: a busy descendant keeps the
-            // child's kernel resident (the TS policy).
+            // child resident (the TS policy).
             if self.has_unsettled_rlm_work().await {
-                return;
+                return false;
             }
             // `hasRegisteredCronJob`: an active or paused scheduled job
-            // keeps the kernel resident (its next run needs it); an
-            // unwired probe stays open (a store-less embedding).
+            // keeps the worker resident — for the whole-worker idle
+            // passivation this gate covers plain cron jobs AND armed
+            // heartbeats alike (the shared scheduled-jobs store holds
+            // both): the port has no relaunch-on-fire for a stopped
+            // worker's jobs, so unlike TS's tier-2 (which evicts
+            // cron-armed workers and lets the fire relaunch) the port
+            // BLOCKS while any job is armed — the wake-blind
+            // substitution, a disclosed deliberate divergence until a
+            // relaunch-on-fire port exists. An unwired probe stays open
+            // (a store-less embedding never passes the gate).
             let probe = self
                 .registered_jobs_probe
                 .lock()
@@ -53,8 +61,19 @@ impl SessionEngine for AgentSessionEngine {
                 .clone();
             if let Some(probe) = probe {
                 if probe() {
-                    return;
+                    return false;
                 }
+            }
+            true
+        })
+    }
+
+    fn release_settled_child_kernel(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            if !self.can_passivate_settled_session().await {
+                return;
             }
             // The release itself: best-effort (a failed stop leaves
             // the kernel resident); a retired or never-built runtime
@@ -97,6 +116,16 @@ impl SessionEngine for AgentSessionEngine {
             .lock()
             .expect("goal runtime lock")
             .clone()?;
+        // The progress check's input (the 402 diagnosis's (a)) + the
+        // failed pair's drop ((c)), read before the driver lock.
+        // The progress check's input, read before the driver lock. The
+        // trailing failed continuation pair's DROP happens INSIDE, only
+        // after the quiescence gate — the same ordering discipline as the
+        // natural boundary (an early drop, when the deferral then returns
+        // without taking, hides the no-progress corpse from the later owed
+        // consult, which would read the previous progress row, reset the
+        // streak, and remint — the drop-resets-the-cap hole).
+        let last_turn = self.last_loop_assistant_message();
         let continuation = self.runtime.block_on(async {
             let mut driver = handles.driver.lock().await;
             // TS `resumeQueuedWork()`'s quiescence arm: unsettled RLM
@@ -106,6 +135,21 @@ impl SessionEngine for AgentSessionEngine {
             if self.has_unsettled_rlm_work().await || self.has_live_background_bash_handles() {
                 driver.mark_continuation_owed();
                 return None;
+            }
+            // The consult is about to examine the just-settled turn: now
+            // the trailing failed continuation pair can leave the live
+            // loop (the captured `last_turn` still carries the corpse's
+            // verdict for the check the take runs).
+            if last_turn
+                .as_ref()
+                .is_some_and(|turn: &pa_agent::types::AssistantMessage| {
+                    turn.stop_reason == pa_agent::types::StopReason::Error
+                        || pa_core::session_engine::goal_driver::turn_produced_no_output(turn)
+                })
+            {
+                drop(driver);
+                self.drop_failed_goal_continuation_pair().await;
+                driver = handles.driver.lock().await;
             }
             let mut session = handles.session.lock().await;
             // TS `compact()`'s didCompact branch is the OWED delivery, not
@@ -121,20 +165,44 @@ impl SessionEngine for AgentSessionEngine {
             // or objective-less goal drops the deferral without minting. A
             // failed persist ends the boundary without a continuation (TS
             // `_maybeResumeGoalContinuationAfterRlmWork`'s catch: the hook
-            // must not reject; the unchanged count retries).
+            // must not reject; the unchanged count retries). The taken
+            // continuation still passes the just-settled turn through the
+            // 402 diagnosis's progress check.
             driver.mark_continuation_owed();
-            let message = match driver.take_owed_continuation(&mut session) {
+            let message = match driver.take_owed_continuation(&mut session, last_turn.as_ref()) {
                 Ok(message) => message,
                 Err(error) => {
                     eprintln!("pa-daemon: goal continuation mint persist failed: {error:#}");
                     None
                 }
-            }?;
+            };
+            if message.is_none() {
+                // A refused mint (the progress check's terminal finish or
+                // the backoff window) still changed the durable goal
+                // state: publish it so connected clients see the error or
+                // the backoff transition instead of a stale active read —
+                // and arm the no-progress backoff's one-shot wake (the
+                // advertised 10s/20s/40s retry must run from this mint
+                // site too, not only the natural boundary).
+                let state = driver.state_with_creation_elapsed();
+                let wake_at = driver.backoff_wake_at();
+                drop(driver);
+                self.publish_goal_state(&state);
+                if let Some(wake_at) = wake_at {
+                    self.schedule_goal_backoff_wake(wake_at).await;
+                }
+                return None;
+            }
+            let message = message?;
             // This mint's own guard handle, captured under the driver
             // lock: the worker's admission sink releases exactly this
             // mint's guard, never the mutable mirror.
             let pending_handle = Some(driver.pending_continuation_handle());
             let goal_update = self.publish_goal_state(&driver.state_with_creation_elapsed());
+            // The mint succeeded: the progress turn reset any armed
+            // streak — retire the pending wake.
+            drop(driver);
+            self.cancel_goal_backoff_wake();
             Some((
                 crate::engine::PromptRequest {
                     batch: Vec::new(),

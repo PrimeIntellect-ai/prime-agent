@@ -36,6 +36,7 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         shutdown_requested: false,
         compacting: false,
         auto_compaction_enabled: true,
+        last_activity_ms: 0,
         last_action_snapshot: Some(SessionActionSnapshot::default()),
         rlm_depth: 0,
         runtime_kind: "top-level".to_string(),
@@ -66,6 +67,14 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         recovery: Arc::new(Mutex::new(None)),
         active_session_id: "burst-session".to_string(),
         roster_pushes: crate::roster_activity::RosterPushQueue::disabled(),
+        user_bash: std::sync::Arc::new(crate::user_bash::UserBash::new()),
+        passivation: crate::worker::turn::PassivationContext {
+            agent_dir: std::path::PathBuf::from("/tmp"),
+            link: std::sync::Arc::new(crate::supervisor_link::SupervisorLink::new(
+                std::path::PathBuf::from("/nonexistent-supervisor.sock"),
+            )),
+            worker_token: String::new(),
+        },
     }
 }
 

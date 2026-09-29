@@ -2,10 +2,10 @@
 //! engine, and settles the result.
 use super::{
     checkpoint_queue_recovery, compact_action_label, create_daemon_event_meta, emit_refinement_row,
-    gather_delivery_batch, json, oneshot, session_snapshot, DaemonOutbound, EngineEvent, EventPump,
-    Lane, Map, Notify, OutboundFrame, PromptRequest, QueueCheckpoint, QueuedItem, Result,
-    SessionActionSnapshot, SessionCore, SessionEngine, TurnSettle, Value, WorkerRecoveryJournal,
-    ABORTED_TURN_SETTLE_ERROR,
+    gather_delivery_batch, json, oneshot, session_snapshot, AssistantSnapshot, DaemonOutbound,
+    EngineEvent, EventPump, Lane, Map, Notify, OutboundFrame, PromptRequest, QueueCheckpoint,
+    QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine, TurnSettle, Value,
+    WorkerRecoveryJournal, ABORTED_TURN_SETTLE_ERROR,
 };
 
 use std::sync::{Arc, Mutex};
@@ -28,6 +28,20 @@ pub(super) struct TurnRunner {
     /// the queue's consumer composes and ships the summary (the
     /// event-driven arm lives in [`crate::roster_activity`]).
     pub(super) roster_pushes: crate::roster_activity::RosterPushQueue,
+    /// The user-bash handle: the idle passivation's live-bash gate.
+    pub(super) user_bash: std::sync::Arc<crate::user_bash::UserBash>,
+    /// The worker config slice the idle passivation needs (agent dir,
+    /// supervisor link coordinates).
+    pub(super) passivation: PassivationContext,
+}
+
+/// The idle-passivation context on the turn runner: the settings source
+/// (the agent dir), the supervisor link, and the worker token for the
+/// graceful-stop request.
+pub(super) struct PassivationContext {
+    pub(super) agent_dir: std::path::PathBuf,
+    pub(super) link: std::sync::Arc<crate::supervisor_link::SupervisorLink>,
+    pub(super) worker_token: String,
 }
 
 impl TurnRunner {
@@ -152,6 +166,13 @@ impl TurnRunner {
                 self.run_turn(engine, items).await;
             } else {
                 self.idle_notify.notify_waiters();
+                // The idle clock (TS `lastActivityAt`): every park after
+                // work re-stamps the activity end, so the idle-eviction
+                // window below measures from the TRUE last activity.
+                {
+                    let mut core = self.core.lock().unwrap();
+                    core.last_activity_ms = crate::util::now_ms();
+                }
                 // TS #2483's settled-child kernel release (the inline arm): a
                 // parent-owned child that parks with no lane work releases its
                 // kernel with a snapshot flush; the next kernel use revives it
@@ -159,7 +180,25 @@ impl TurnRunner {
                 // the kernel resident, and the roster/collect surfaces stay
                 // untouched by design.
                 self.maybe_release_settled_child_kernel().await;
-                self.work_notify.notified().await;
+                // The whole-worker idle passivation (TS's
+                // `idleEvictionMinutes` tier, worker-driven): the same park
+                // state the kernel release proved, plus the idle clock. The
+                // window arms only for parent-owned children under a live
+                // threshold; the select's notified arm is the wake path — a
+                // queued delivery wins the race and the next park re-arms.
+                match self.idle_passivation_window() {
+                    Some(remaining) => {
+                        tokio::select! {
+                            () = self.work_notify.notified() => {}
+                            () = tokio::time::sleep(remaining) => {
+                                self.maybe_request_idle_passivation().await;
+                            }
+                        }
+                    }
+                    None => {
+                        self.work_notify.notified().await;
+                    }
+                }
             }
         }
     }
@@ -185,6 +224,168 @@ impl TurnRunner {
         if release {
             self.engine.release_settled_child_kernel().await;
         }
+    }
+
+    /// The idle-eviction window for a parent-owned child (TS's
+    /// `idleEvictionMinutes` consumer, worker-side): `Some(remaining)`
+    /// when the park state holds (parent-owned, unattached, not
+    /// compacting, not shutting down, no live background bash, no
+    /// queued input in the lanes — TS `isSessionActive`'s
+    /// pending-prompt-admissions arm) and the setting is a live
+    /// threshold; `None` otherwise (roots, attached children, `"off"`,
+    /// and any state the engine gates would reject stay parked without
+    /// a timer). The engine-side passivation gates
+    /// (unsettled descendants, registered active-or-paused scheduled
+    /// jobs) are re-checked at the fire inside
+    /// [`Self::maybe_request_idle_passivation`] — the fresh-snapshot
+    /// fence — so this window only decides whether to arm.
+    pub(super) fn idle_passivation_window(&self) -> Option<std::time::Duration> {
+        let (rlm_depth, attached, compacting, shutdown, queued, last_activity, cwd) = {
+            let core = self.core.lock().unwrap();
+            (
+                core.rlm_depth,
+                core.attached_client_ids.is_empty(),
+                core.compacting,
+                core.shutdown_requested,
+                // TS `isSessionActive`'s pending-prompt-admissions arm: a
+                // paused pump holding items in the lanes (a parked steer
+                // or follow-up) keeps the session active — the queued
+                // work lives only on this resident worker, so the
+                // passivation must never discard it. The replay's
+                // restored `pending_next_turn` prefix rows live here
+                // too (restore_next_turn parks them in the worker, not
+                // the lanes) - both surfaces are checked.
+                !core.steering.is_empty()
+                    || !core.follow_up.is_empty()
+                    || !core.pending_next_turn.is_empty()
+                    // The suspension holds (the round-8 bots' finding):
+                    // a paused pump or an input pause lease keeps the
+                    // session resident - the revival would otherwise
+                    // lose the suspension state (the fresh core starts
+                    // un-suspended) and accept a post-abort prompt.
+                    || core.queued_input_suspended
+                    || self.input_pauses.paused(),
+                core.last_activity_ms,
+                core.cwd.clone(),
+            )
+        };
+        if rlm_depth == 0 || !attached || compacting || shutdown || queued {
+            return None;
+        }
+        // A live background bash handle keeps the worker resident (the
+        // kernel snapshot cannot resurrect a live process; TS never
+        // passivates a bash-running session).
+        if self.user_bash.is_running() {
+            return None;
+        }
+        let settings =
+            pa_core::settings::SettingsManager::create(&cwd, &self.passivation.agent_dir);
+        let minutes = match settings.get_idle_eviction() {
+            pa_core::settings::IdleEviction::Off => return None,
+            pa_core::settings::IdleEviction::Minutes(minutes) => minutes,
+        };
+        let now = crate::util::now_ms();
+        let idle_ms = now.saturating_sub(last_activity);
+        let threshold_ms = minutes.saturating_mul(60_000);
+        Some(std::time::Duration::from_millis(
+            threshold_ms.saturating_sub(idle_ms),
+        ))
+    }
+
+    /// The fire: re-check the full gate set on a fresh snapshot (the
+    /// TS `passivateSession` fresh-snapshot fence), then ask the
+    /// supervisor for the graceful stop over the worker's supervisor
+    /// link. The request carries the worker token; the supervisor
+    /// verifies it against the resident worker before stopping. A
+    /// rejected or failed request leaves the worker resident — the
+    /// next park re-arms, exactly like the kernel release's best-effort
+    /// arm.
+    pub(super) async fn maybe_request_idle_passivation(&self) {
+        let (rlm_depth, attached, compacting, shutdown, queued, last_activity, cwd) = {
+            let core = self.core.lock().unwrap();
+            (
+                core.rlm_depth,
+                core.attached_client_ids.is_empty(),
+                core.compacting,
+                core.shutdown_requested,
+                // The fresh-snapshot fence's queued-input arm: a wake that
+                // raced the timer leaves its item in the lanes — the
+                // passivation cancels instead of discarding it. The
+                // restored `pending_next_turn` prefix rows hold here
+                // too.
+                !core.steering.is_empty()
+                    || !core.follow_up.is_empty()
+                    || !core.pending_next_turn.is_empty()
+                    || core.queued_input_suspended
+                    || self.input_pauses.paused(),
+                core.last_activity_ms,
+                core.cwd.clone(),
+            )
+        };
+        // The fresh-snapshot fence: the wake that raced the timer must
+        // find the worker resident, so any state change since the window
+        // armed cancels the passivation.
+        if rlm_depth == 0 || !attached || compacting || shutdown || queued {
+            return;
+        }
+        if self.user_bash.is_running() {
+            return;
+        }
+        let settings =
+            pa_core::settings::SettingsManager::create(&cwd, &self.passivation.agent_dir);
+        let minutes = match settings.get_idle_eviction() {
+            pa_core::settings::IdleEviction::Off => return,
+            pa_core::settings::IdleEviction::Minutes(minutes) => minutes,
+        };
+        // The idle threshold still holds on the fresh clock.
+        if crate::util::now_ms().saturating_sub(last_activity) < minutes.saturating_mul(60_000) {
+            return;
+        }
+        // The engine-side gates (no unsettled descendants, no registered
+        // active-or-paused scheduled job): a parked child with either
+        // stays resident.
+        if !self.engine.can_passivate_settled_session().await {
+            return;
+        }
+        // The post-await revalidation (the fresh bots' race findings):
+        // the engine gate's await opened a window - a bash admitted, a
+        // prompt parked in a lane, a replay prefix restored, a manual
+        // compaction started, or a CLIENT ATTACHED during it must all
+        // cancel the stop (the shutdown would cancel the compaction and
+        // disconnect the new client); the bash that started in the
+        // window keeps the worker resident exactly like the pre-gate
+        // check.
+        {
+            let core = self.core.lock().unwrap();
+            if core.compacting
+                || core.queued_input_suspended
+                || !core.attached_client_ids.is_empty()
+                || !core.steering.is_empty()
+                || !core.follow_up.is_empty()
+                || !core.pending_next_turn.is_empty()
+            {
+                return;
+            }
+        }
+        if self.input_pauses.paused() {
+            return;
+        }
+        if self.user_bash.is_running() {
+            return;
+        }
+        let command = serde_json::json!({
+            "type": "worker_idle_passivation",
+            "workerToken": self.passivation.worker_token,
+            "idleMinutes": minutes,
+        });
+        // The bounded ask: the supervisor's stop path runs the routed
+        // shutdown back into this worker (the graceful flush), so the
+        // timeout only bounds the ask, not the stop.
+        let _ = self
+            .passivation
+            .link
+            .request(command, std::time::Duration::from_secs(30))
+            .await;
     }
 
     /// Push one roster delta to the supervisor (the Rust-native form of
@@ -380,9 +581,18 @@ impl TurnRunner {
                 let aborted_row = matches!(
                     &event,
                     EngineEvent::AssistantMessage(message)
-                        | EngineEvent::AssistantUpdate { message, .. }
+                        | EngineEvent::AssistantUpdate { message: AssistantSnapshot::Wire(message), .. }
                         | EngineEvent::TurnEnd { message, .. }
                         if message.get("stopReason").and_then(Value::as_str) == Some("aborted")
+                ) || matches!(
+                    &event,
+                    EngineEvent::AssistantUpdate { message: AssistantSnapshot::Loop(message), .. }
+                        if matches!(
+                            &**message,
+                            pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::Assistant(
+                                assistant,
+                            )) if assistant.stop_reason == pa_agent::types::StopReason::Aborted
+                        )
                 ) || matches!(
                     &event,
                     EngineEvent::AgentEnd { messages }
@@ -590,19 +800,78 @@ impl TurnRunner {
                         // A provider `start` begins a new assistant message;
                         // later stream events update it (TS message_start vs
                         // message_update).
-                        let starts_message = stream_event
+                        let stream_kind = stream_event
                             .as_ref()
                             .and_then(|event| event.get("type"))
-                            .and_then(Value::as_str)
-                            == Some("start");
-                        let mut event = json!({
-                            "type": if starts_message { "message_start" } else { "message_update" },
-                            "message": message,
-                        });
-                        if let Some(stream_event) = stream_event {
-                            event["assistantMessageEvent"] = stream_event;
+                            .and_then(Value::as_str);
+                        let starts_message = stream_kind == Some("start");
+                        // A block-end stream event (`text_end` and friends)
+                        // settles the parked delta run: it must supersede
+                        // nothing, so it travels direct (flushing the
+                        // parked update first, in order).
+                        let settles_run = matches!(
+                            stream_kind,
+                            Some("text_end" | "thinking_end" | "toolcall_end")
+                        );
+                        if !starts_message && !settles_run {
+                            // Streaming updates park in the coalescer (the
+                            // newest full-partial snapshot wins, the delta
+                            // run merges); `park_update` only returns false
+                            // after the turn joined, which cannot race this
+                            // closure. The debug dump keeps its per-update
+                            // line, paid only while the variable is set.
+                            if let Ok(path) = std::env::var("PA_DAEMON_EVENT_LOG") {
+                                use std::io::Write;
+                                if let Some(value) = message.clone().into_wire() {
+                                    if let Ok(mut file) = std::fs::OpenOptions::new()
+                                        .create(true)
+                                        .append(true)
+                                        .open(&path)
+                                    {
+                                        let mut event = json!({
+                                            "type": "message_update",
+                                            "message": value,
+                                        });
+                                        if let Some(stream_event) = &stream_event {
+                                            event["assistantMessageEvent"] = stream_event.clone();
+                                        }
+                                        let _ = writeln!(file, "{event}");
+                                    }
+                                }
+                            }
+                            let sequence = core.last_event_sequence + 1;
+                            core.last_event_sequence = sequence;
+                            let delta = stream_event
+                                .as_ref()
+                                .and_then(|event| event.get("delta"))
+                                .and_then(Value::as_str)
+                                .unwrap_or_default();
+                            if !turn_coalescer.park_update(
+                                message,
+                                stream_kind.unwrap_or_default(),
+                                delta,
+                                sequence,
+                            ) {
+                                return false;
+                            }
+                            Vec::new()
+                        } else {
+                            match message.into_wire() {
+                                Some(value) => {
+                                    let mut event = json!({
+                                        "type": if starts_message { "message_start" } else { "message_update" },
+                                        "message": value,
+                                    });
+                                    if let Some(stream_event) = stream_event {
+                                        event["assistantMessageEvent"] = stream_event;
+                                    }
+                                    vec![event]
+                                }
+                                // Unreachable for streamed partials; a
+                                // failed conversion frames nothing.
+                                None => Vec::new(),
+                            }
                         }
-                        vec![event]
                     }
                     EngineEvent::AssistantMessage(message) => {
                         vec![json!({ "type": "message_end", "message": message })]
@@ -797,43 +1066,6 @@ impl TurnRunner {
                 }
                 let mut direct_payloads: Vec<Vec<u8>> = Vec::new();
                 for event_json in frames {
-                    let is_stream_update =
-                        event_json.get("type").and_then(Value::as_str) == Some("message_update");
-                    // A block-end stream event (`text_end` and friends)
-                    // settles the parked delta run: it must supersede
-                    // nothing, so it travels direct (flushing the parked
-                    // update first, in order).
-                    let stream_kind = event_json
-                        .get("assistantMessageEvent")
-                        .and_then(|event| event.get("type"))
-                        .and_then(Value::as_str);
-                    let flushes_pending = matches!(
-                        stream_kind,
-                        Some("text_end" | "thinking_end" | "toolcall_end")
-                    );
-                    if is_stream_update && !flushes_pending {
-                        let sequence = core.last_event_sequence + 1;
-                        core.last_event_sequence = sequence;
-                        // Streaming updates park in the coalescer (the
-                        // newest full-partial snapshot wins, the delta run
-                        // merges); `park_update` only returns false after
-                        // the turn joined, which cannot race this closure.
-                        let delta = event_json
-                            .get("assistantMessageEvent")
-                            .and_then(|event| event.get("delta"))
-                            .and_then(Value::as_str)
-                            .unwrap_or_default();
-                        let parked = turn_coalescer.park_update(
-                            event_json.get("message").cloned().unwrap_or(Value::Null),
-                            stream_kind.unwrap_or_default(),
-                            delta,
-                            sequence,
-                        );
-                        if !parked {
-                            return false;
-                        }
-                        continue;
-                    }
                     let sequence = core.last_event_sequence + 1;
                     core.last_event_sequence = sequence;
                     let meta = create_daemon_event_meta(

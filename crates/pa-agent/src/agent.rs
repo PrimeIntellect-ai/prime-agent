@@ -126,7 +126,7 @@ struct MutableAgentState {
     tools: Vec<Arc<dyn AgentTool>>,
     messages: Vec<AgentMessage>,
     is_streaming: bool,
-    streaming_message: Option<AgentMessage>,
+    streaming_message: Option<Arc<AgentMessage>>,
     pending_tool_calls: HashSet<String>,
     error_message: Option<String>,
 }
@@ -385,8 +385,11 @@ impl AgentInner {
         let mut shared = self.shared.lock().await;
 
         match &event {
-            AgentEvent::MessageStart { message } | AgentEvent::MessageUpdate { message, .. } => {
-                shared.state.streaming_message = Some(message.clone());
+            AgentEvent::MessageStart { message } => {
+                shared.state.streaming_message = Some(Arc::new(message.clone()));
+            }
+            AgentEvent::MessageUpdate { message, .. } => {
+                shared.state.streaming_message = Some(Arc::clone(message));
             }
             AgentEvent::MessageEnd { message } => {
                 shared.state.streaming_message = None;
@@ -870,7 +873,7 @@ impl Agent {
             tools: shared.state.tools.clone(),
             messages: shared.state.messages.clone(),
             is_streaming: shared.state.is_streaming,
-            streaming_message: shared.state.streaming_message.clone(),
+            streaming_message: shared.state.streaming_message.as_deref().cloned(),
             pending_tool_calls: shared.state.pending_tool_calls.clone(),
             error_message: shared.state.error_message.clone(),
         }
@@ -938,6 +941,14 @@ impl Agent {
             .state
             .messages
             .extend(messages);
+    }
+
+    /// Mutate the transcript under ONE state lock: the atomic form of the
+    /// `state()` + `set_messages` read-modify-write the removal arms use,
+    /// so a concurrent writer's rows cannot be dropped between the two
+    /// locks (the snapshot-then-replace race the stateless setters carry).
+    pub async fn mutate_messages(&self, mutate: impl FnOnce(&mut Vec<AgentMessage>)) {
+        mutate(&mut self.inner.shared.lock().await.state.messages);
     }
 
     /// The steering queue's mode.

@@ -57,13 +57,35 @@ pub(super) async fn mint_goal_continuation(
     mode: &AcpModeState,
     session: &AcpSession,
 ) -> Option<CustomMessage> {
+    // The progress check's input (the 402 diagnosis's (a)) + the failed
+    // pair's drop ((c)), read before the driver lock.
+    let last_turn =
+        mode.engine
+            .session
+            .last_assistant_message()
+            .await
+            .and_then(|wire| match wire {
+                pa_types::session::AgentMessage::Assistant(assistant) => {
+                    pa_core::session_engine::provider_adapter::json_round_trip(&assistant)
+                }
+                _ => None,
+            });
+    if last_turn
+        .as_ref()
+        .is_some_and(|turn: &pa_agent::types::AssistantMessage| {
+            turn.stop_reason == pa_agent::types::StopReason::Error
+                || pa_core::session_engine::goal_driver::turn_produced_no_output(turn)
+        })
+    {
+        mode.engine.session.drop_failed_goal_continuation().await;
+    }
     let persistence = mode.engine.session.shared_persistence();
     let mut driver = mode.engine.goal_driver.lock().await;
     if !driver.owns_continuation_wakeup() {
         return None;
     }
     let mut persistence = persistence.lock().await;
-    let message = match driver.next_continuation_message(&mut persistence) {
+    let message = match driver.next_continuation_message(&mut persistence, last_turn.as_ref()) {
         Ok(message) => message,
         Err(error) => {
             // TS `_getGoalContinuationMessages`'s catch arm: a failed

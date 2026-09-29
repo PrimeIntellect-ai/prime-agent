@@ -207,6 +207,20 @@ impl Worker {
                 None,
             ));
         }
+        // The shutdown admission gate (the round-8 bots' finding): a
+        // command dispatched while the graceful stop is closing must not
+        // start new work the exit would orphan - an execute_bash racing
+        // the shutdown's user-bash abort would otherwise clear the
+        // abort request and spawn a child the worker's exit leaves
+        // running.
+        if core.shutdown_requested {
+            return Err(response_failure(
+                None,
+                command_type,
+                "Session is shutting down",
+                None,
+            ));
+        }
         Ok(())
     }
 

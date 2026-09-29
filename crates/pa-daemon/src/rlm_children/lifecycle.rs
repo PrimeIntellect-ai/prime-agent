@@ -210,9 +210,9 @@ impl SupervisorChildSessionsInner {
     }
 
     pub(super) async fn prompt_child(&self, active_session_id: &str, prompt: &str) -> Result<()> {
-        let command = DaemonCommand::Prompt {
+        let make_command = |selector: &str| DaemonCommand::Prompt {
             id: None,
-            active_session_id: active_session_id.to_string(),
+            active_session_id: selector.to_string(),
             message: prompt.to_string(),
             input: PromptInput {
                 content: None,
@@ -230,10 +230,49 @@ impl SupervisorChildSessionsInner {
             },
             rest: Map::default(),
         };
-        self.command(&command, PROMPT_TIMEOUT_MS)
-            .await
-            .with_context(|| format!("prompt RLM child session {active_session_id}"))?;
-        Ok(())
+        let command = make_command(active_session_id);
+        match self.command(&command, PROMPT_TIMEOUT_MS).await {
+            Ok(_) => Ok(()),
+            // The passivation-aware wake (TS's tier-2 revival): the
+            // child's worker was idle-evicted, so its ROUTING id no
+            // longer resolves. Retry once by the child's DURABLE selector
+            // (its session id — the session-file stem the supervisor's
+            // wake resolves through the spawn ledger, then the child id)
+            // — the daemon's wake arm launches a fresh worker over the
+            // child's session file and the prompt lands on the replay.
+            Err(error) => {
+                let rendered = format!("{error:#}");
+                if !rendered.starts_with("Unknown active session:") {
+                    return Err(error)
+                        .with_context(|| format!("prompt RLM child session {active_session_id}"));
+                }
+                let mut durable: Option<String> = None;
+                {
+                    let children = self.children.lock().await;
+                    for record in children.iter() {
+                        let record = record.lock().await;
+                        if record.active_session_id == active_session_id {
+                            durable = record
+                                .session_id
+                                .clone()
+                                .or_else(|| Some(record.rlm_child_id.clone()));
+                            break;
+                        }
+                    }
+                }
+                let Some(durable) = durable else {
+                    return Err(error)
+                        .with_context(|| format!("prompt RLM child session {active_session_id}"));
+                };
+                let retry = make_command(&durable);
+                self.command(&retry, PROMPT_TIMEOUT_MS)
+                    .await
+                    .with_context(|| {
+                        format!("prompt RLM child session {active_session_id} (woken by {durable})")
+                    })?;
+                Ok(())
+            }
+        }
     }
 
     pub(super) async fn kill_child(
@@ -407,7 +446,7 @@ impl SupervisorChildSessionsInner {
                 if unreachable_polls >= WATCH_MAX_UNREACHABLE_POLLS {
                     {
                         let mut state = record.lock().await;
-                        if state.closed_by_parent || state.notice_delivered {
+                        if !should_mark_unreachable_error(&state) {
                             return;
                         }
                         state.settled_status = Some("error");
@@ -490,4 +529,14 @@ impl SupervisorChildSessionsInner {
             );
         }
     }
+}
+
+/// Whether the unreachable-poller may re-score a child as an error: a
+/// parent-closed child, a noticed child, or an ALREADY-SETTLED child
+/// keeps its POSITIVE verdict — its worker leaving afterward (the idle
+/// passivation's graceful stop, a crash after settle, or a give-up) is
+/// residency churn, not a settle verdict change. The settle state is
+/// durable and the passive roster row stays the representation.
+pub(super) fn should_mark_unreachable_error(state: &ChildRecord) -> bool {
+    !(state.closed_by_parent || state.notice_delivered || state.settled_status.is_some())
 }

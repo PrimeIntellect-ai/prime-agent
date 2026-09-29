@@ -15,24 +15,19 @@ deny:
 	cargo deny --all-features --workspace check advisories licenses
 
 # Windows cfg-hygiene gate: cross-target check +
-# clippy at -D warnings for every crate and test, the local mirror of the
-# staged ci.yml windows-cross job. Fails loudly when the target is missing
-# instead of silently skipping the gate.
+# clippy at -D warnings for every crate and test. Fails loudly when the
+# target is missing instead of silently skipping the gate.
 windows-cross:
 	@rustup target list --installed | grep -q x86_64-pc-windows-gnu || { echo "x86_64-pc-windows-gnu target not installed (rustup target add x86_64-pc-windows-gnu)"; exit 1; }
 	cargo check --workspace --target x86_64-pc-windows-gnu --all-targets
 	cargo clippy --workspace --target x86_64-pc-windows-gnu --all-targets -- -D warnings
 
-# Lints the live workflow files (.github/workflows/; promoted from
-# ci/workflows/ via make activate-workflows) plus the still-staged
-# ci/workflows/ci.yml, which is clean under actionlint. The staged
-# benchmark.yml still carries pre-existing findings (the custom
-# self-hosted `prime-sandbox` label needs an actionlint.yaml labels
-# config; SC2012 info) and stays out of this gate until its lane owner
-# cleans it up.
+# Lints the live workflow files (.github/workflows/).
 actionlint:
 	@command -v actionlint >/dev/null 2>&1 || { echo "actionlint not installed (see rhysd/actionlint releases)"; exit 1; }
-	actionlint .github/workflows/ci.yml .github/workflows/continuous.yml .github/workflows/release.yml ci/workflows/ci.yml
+	actionlint .github/workflows/ci.yml .github/workflows/continuous.yml \
+		.github/workflows/release.yml .github/workflows/windows-runtime-triage.yml \
+		.github/workflows/release-prepare.yml .github/workflows/nightly.yml
 
 # GLIBC baseline gate (the continuous.yml/release.yml build-gnu jobs): a
 # GNU/Linux artifact must not require symbols above GLIBC_2.35, the Ubuntu
@@ -163,17 +158,11 @@ package:
 catalog-assets-gates:
 	python3 scripts/release/test_catalog_assets.py
 
-# OPERATOR STEP (Kevin): promote the staged workflows to .github/workflows/.
-# Needs a push credential with the GitHub `workflow` scope — run from a
-# machine that has it (the dev box's token does NOT; a scoped-token push gets
-# remote-rejected). Requires a clean `main` checkout; pushes straight to main.
-activate-workflows:
-	@git rev-parse --abbrev-ref HEAD | grep -qx main || { echo "run on a main checkout (got $$(git rev-parse --abbrev-ref HEAD))"; exit 1; }
-	@git diff --quiet && git diff --cached --quiet || { echo "main has uncommitted changes; commit or stash first"; exit 1; }
-	git pull --ff-only
-	git mv ci/workflows/continuous.yml ci/workflows/release.yml .github/workflows/
-	git commit -m "ci: activate the continuous + release workflows (.github/workflows/)"
-	git push origin main
-	@echo "workflows live: verify with gh workflow list (continuous + release active)"
+# The changelog fold's contract battery (RELEASE-FLOW-PROPOSAL.md §8): the
+# fold is the release-PR's changelog half, and the pathspec security case is
+# first - a fragment NAME is data, never a git pathspec, so no root-level
+# markdown file can ever become a fold deletion candidate.
+fold-gates:
+	python3 scripts/release/test_fold_changelog.py
 
-.PHONY: check deny windows-cross actionlint perf-wave glibc-gate release-dry-run continuous-dry-run audit-build package activate-workflows catalog-assets catalog-assets-fixture catalog-assets-gates
+.PHONY: check deny windows-cross actionlint perf-wave glibc-gate release-dry-run continuous-dry-run audit-build package catalog-assets catalog-assets-fixture catalog-assets-gates fold-gates

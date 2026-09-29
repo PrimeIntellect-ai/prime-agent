@@ -57,6 +57,22 @@ fn classifies_provider_error_types() {
         classify_stream_failure(Some("weird"), None),
         StreamFailureKind::Unknown
     );
+    // A 402 classifies by status, before any body-text pattern: the
+    // same wallet drain must not fork on the response body's
+    // `error.type` text (the silent-arm diagnosis — variant A
+    // retried 13-15s on a dead wallet, variant B settled silently).
+    assert_eq!(
+        classify_stream_failure(Some("insufficient_credits"), Some(402)),
+        StreamFailureKind::PaymentRequired
+    );
+    assert_eq!(
+        classify_stream_failure(Some("invalid_request_error"), Some(402)),
+        StreamFailureKind::PaymentRequired
+    );
+    assert_eq!(
+        classify_stream_failure(None, Some(402)),
+        StreamFailureKind::PaymentRequired
+    );
 }
 
 #[test]

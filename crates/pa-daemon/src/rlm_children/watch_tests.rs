@@ -479,3 +479,49 @@ async fn collect_answers_the_cancelled_envelope_after_an_inactive_delete() {
         Some("Deleted by parent orchestrator")
     );
 }
+
+/// The unreachable-poller's POSITIVE-status guard: a child that already
+/// settled (`done` — the idle passivation's prerequisite) never re-scores
+/// as an error when its worker leaves afterward; a still-RUNNING child
+/// does (the crash class the error verdict exists for).
+#[test]
+fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
+    let base = || ChildRecord {
+        rlm_child_id: "child-id".to_string(),
+        session_name: "lane".to_string(),
+        active_session_id: "child-live".to_string(),
+        session_id: Some("child-file".to_string()),
+        session_dir: "/tmp".to_string(),
+        label: "task".to_string(),
+        started_at_ms: 0,
+        settled_status: None,
+        answer_preview: None,
+        answer_captured: false,
+        replied_since_task: false,
+        notice_delivered: false,
+        prompt_admitted: true,
+        error: None,
+        closed_by_parent: false,
+        session_file: None,
+        attributed_rows: 0,
+        usage_watch_live: false,
+        usage_rearm: false,
+        emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+    };
+    // A running child that goes unreachable is the error class.
+    assert!(super::lifecycle::should_mark_unreachable_error(&base()));
+    // A settled child keeps its positive verdict.
+    let mut settled = base();
+    settled.settled_status = Some("done");
+    assert!(
+        !super::lifecycle::should_mark_unreachable_error(&settled),
+        "an idle-passivated (or post-settle crashed) child keeps its settled verdict"
+    );
+    // A parent-closed child and a noticed child never re-score.
+    let mut closed = base();
+    closed.closed_by_parent = true;
+    assert!(!super::lifecycle::should_mark_unreachable_error(&closed));
+    let mut noticed = base();
+    noticed.notice_delivered = true;
+    assert!(!super::lifecycle::should_mark_unreachable_error(&noticed));
+}

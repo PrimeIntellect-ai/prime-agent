@@ -152,6 +152,12 @@ impl AgentView {
         let mut packs: std::collections::BTreeMap<usize, HeldSlots> =
             std::collections::BTreeMap::new();
         for section in &self.click.window_sections {
+            // A clicked card's slot holds its flipped rows, but the
+            // re-entry mounts every card at the level (the toggles live
+            // in this view), so its pack must not serve there.
+            if self.toggled_cards.contains(&section.entry) {
+                continue;
+            }
             if let Some(slots) = self.entry_layout.get(section.entry) {
                 if slots.iter().any(Option::is_some) {
                     packs.insert(section.entry, slots.clone());
