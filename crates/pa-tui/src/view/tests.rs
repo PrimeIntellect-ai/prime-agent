@@ -1,8 +1,12 @@
+use super::frame::{composite_follow_hint, indicator_row};
 use super::*;
 use crate::chat::{AssistantMessage, MessageBlock};
 use crate::osc133::RowMarkers;
 use crate::theme::{ColorMode, Theme, ThemeBg, ThemeColor};
 use crate::tool_card::{ToolCallCard, ToolResultView};
+use crate::width::str_width;
+use crate::Line;
+use ratatui::style::Modifier;
 
 fn view() -> AgentView {
     AgentView::new(Theme::builtin("prime", ColorMode::TrueColor))
