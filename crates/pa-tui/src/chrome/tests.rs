@@ -581,7 +581,6 @@ fn speed_footer_is_one_dim_row_truncated_to_width() {
 
 use super::*;
 use crate::theme::{ColorMode, Theme};
-use ratatui::style::Color;
 use serde_json::json;
 
 fn theme() -> Theme {
