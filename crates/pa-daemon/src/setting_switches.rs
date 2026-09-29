@@ -906,6 +906,70 @@ mod tests {
         );
     }
 
+    /// A fresh, file-backed `--models` create persists the SCOPED startup
+    /// pick in its creation prefix: the file's `model_change` and
+    /// `thinking_level_change` entries must resolve through the registered
+    /// scope (the scoped entry's `:thinking` level included), because a
+    /// resume, a worker respawn, and every session-file reader restore
+    /// from the file — an unscoped prefix would reopen the session on the
+    /// default model instead of the scoped one. The create also must not
+    /// treat its brand-new `sessionPath` as a continuing session (the
+    /// pre-create existence check the scope reads), or the scope would be
+    /// skipped for the startup model entirely.
+    #[tokio::test]
+    async fn a_fresh_scoped_create_persists_the_scoped_startup_pick_in_its_file() {
+        let dir =
+            std::env::temp_dir().join(format!("pa-worker-scope-file-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        models_fixture(&dir, 2);
+        let mut config = worker_config(&dir);
+        config.script = None;
+        let worker = Arc::new(Worker::new(config, None));
+        // A session path that does NOT exist yet: the fresh file-backed
+        // arm (the exact path class the review flagged — a post-create
+        // existence check would see the file this create just wrote).
+        let session_path = dir.join("fresh-scoped-session.jsonl");
+        let created = worker
+            .dispatch(
+                "create",
+                &json!({
+                    "sessionPath": session_path,
+                    "cwd": dir,
+                    "models": ["prime-inference/mock-2:high", "prime-inference/mock-1"],
+                }),
+            )
+            .await;
+        assert!(created.success, "create failed: {created:?}");
+        // The live startup state starts scoped (the same pick the
+        // in-memory test pins): mock-2 with its `:high` entry.
+        let state = worker
+            .dispatch(
+                "get_connection_state",
+                &json!({ "activeSessionId": "switch-session" }),
+            )
+            .await;
+        let data = state.data.expect("state data");
+        assert_eq!(data["model"]["id"], "mock-2", "the state's model: {data}");
+        assert_eq!(
+            data["thinkingLevel"], "high",
+            "the state's thinking: {data}"
+        );
+        // The FILE agrees: the creation prefix's entries carry the scoped
+        // pick, so the session restores scoped after a reopen or respawn.
+        let file = std::fs::read_to_string(&session_path).expect("the session file");
+        assert!(
+            file.contains("\"type\":\"model_change\"")
+                && file.contains("\"provider\":\"prime-inference\"")
+                && file.contains("\"modelId\":\"mock-2\""),
+            "the prefix's model_change carries the scoped pick: {file}"
+        );
+        assert!(
+            file.contains("\"type\":\"thinking_level_change\"")
+                && file.contains("\"thinkingLevel\":\"high\""),
+            "the prefix's thinking_level_change carries the scoped level: {file}"
+        );
+    }
+
     /// `set_scoped_models` stores the list (visible on the connection
     /// state) and rejects malformed entries with daemon-level failures.
     #[tokio::test]
