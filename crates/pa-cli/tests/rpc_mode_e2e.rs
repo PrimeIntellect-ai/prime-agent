@@ -27,10 +27,10 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 /// The child plus the tempdir it runs in: the tempdir must outlive the
 /// child process (its cwd), so it is held on the struct.

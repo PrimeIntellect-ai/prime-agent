@@ -6,15 +6,15 @@ use std::sync::Arc;
 
 use pa_agent::types::Model as AgentModel;
 use pa_core::session::discovery::{
-    ResolvedSession, SessionSelectorError, find_most_recent_session_for_cwd, resolve_session_path,
+    find_most_recent_session_for_cwd, resolve_session_path, ResolvedSession, SessionSelectorError,
 };
 use pa_types::ai::Model;
 
-use crate::headless_autonomous::{HeadlessAutonomous, autonomous_runtime_config};
+use crate::headless_autonomous::{autonomous_runtime_config, HeadlessAutonomous};
 use crate::mode::{AppMode, MissingSubsystem, RunOptions};
 use pa_agent::stream::{LlmContext, StreamFn, StreamRequestOptions};
 use pa_core::session_engine::provider_adapter::{
-    ProviderTarget, json_round_trip, map_thinking_level, stream_once, switchable_stream_fn,
+    json_round_trip, map_thinking_level, stream_once, switchable_stream_fn, ProviderTarget,
 };
 use pa_core::session_engine::session_events::agent_event_json;
 
@@ -678,7 +678,7 @@ fn headless_image_model_router(
     // still holds the route from one a mid-run `/model` switch rewrote.
     let armed_to = armed_target;
     let decide_agent_dir = agent_dir.clone();
-    let decide_provider_target = std::sync::Arc::clone(&provider_target);
+    let decide_provider_target = std::sync::Arc::clone(provider_target);
     let decide_armed_from = std::sync::Arc::clone(&armed_from);
     let decide = std::sync::Arc::new(
         move |carries_images: bool,
@@ -759,7 +759,7 @@ fn headless_image_model_router(
         },
     );
     let swap_target = {
-        let provider_target = std::sync::Arc::clone(&provider_target);
+        let provider_target = std::sync::Arc::clone(provider_target);
         let armed_to = std::sync::Arc::clone(&armed_to);
         std::sync::Arc::new(move |route: Option<&pa_core::models::ResolvedImageModel>| {
             if let Some(resolved) = route {
@@ -1723,7 +1723,7 @@ mod tests {
             std::sync::Mutex<Option<pa_core::session_engine::provider_adapter::ProviderTarget>>,
         > = std::sync::Arc::new(std::sync::Mutex::new(None));
         let router = super::headless_image_model_router(
-            std::sync::Arc::clone(&provider_target),
+            &provider_target,
             std::sync::Arc::clone(&armed_target),
             home.path().to_path_buf(),
             agent_dir,
