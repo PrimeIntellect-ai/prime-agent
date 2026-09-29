@@ -326,11 +326,11 @@ fn scan_file(path: &Path) -> Option<UsageScan> {
 }
 
 /// Whole-file own usage (the saved-row summary) for the one-off readers
-/// outside the resumable scan: the spawn ledger's tombstone fallback
-/// (`rlm_ledger`) and the saved-delete capture
-/// (`saved_session_commands`). The listing surfaces (and the worker's
-/// live row) read the resumable `session_store::read_session_info`
-/// instead.
+/// outside the resumable scan: the saved-delete capture
+/// (`saved_session_commands`), which reads the file once while it is
+/// still alive. The listing surfaces, the worker's live row, and the
+/// spawn ledger's tombstone fallback (`rlm_ledger`) all read the
+/// resumable `session_store::read_session_info` instead.
 #[must_use]
 pub fn read_own_usage_summary(path: &Path) -> Option<SessionUsageSummary> {
     scan_file(path).and_then(|scan| scan.summary())

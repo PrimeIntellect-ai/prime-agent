@@ -402,13 +402,16 @@ impl RlmSpawnLedger {
     /// anywhere, so nothing re-adds its spend once the tombstone drops its
     /// row - this folds the captured spend back per family so cost rollups
     /// bill it to the parent that spent it. Live paths never contribute
-    /// (their own rows carry their spend); the first tombstoned edge claims
-    /// a path (a raced ledger must not bill one child to two parents); the
-    /// fold is an iterative post-order walk (a pathological chain must not
-    /// overflow the stack) that reads each tombstoned child's captured own
-    /// usage first and falls back to the whole-file scan for legacy
-    /// tombstones that predate the capture - a path with neither a snapshot
-    /// nor a readable transcript is the documented historical gap (no
+    /// (their own rows carry their spend); a tombstoned path that still
+    /// has a catalog row bills through that row instead (see the skip
+    /// below); the first tombstoned edge claims a path (a raced ledger
+    /// must not bill one child to two parents); the fold is an iterative
+    /// post-order walk (a pathological chain must not overflow the
+    /// stack) that reads each tombstoned child's captured own usage
+    /// first and falls back to the transcript's own-usage fold (the
+    /// resumable `read_session_info` scan) for legacy tombstones that
+    /// predate the capture - a path with neither a snapshot nor a
+    /// readable transcript is the documented historical gap (no
     /// fabricated backfill: zero).
     ///
     /// # Errors
@@ -443,13 +446,19 @@ impl RlmSpawnLedger {
             if live_paths.contains(&child) || snapshot_by_path.contains_key(&child) {
                 continue;
             }
-            // A tombstoned path whose transcript still exists bills
-            // through its own archived row (the RLM delete keeps the
-            // file; the rollup sums the child row AND the parent
-            // bucket, so reading both would double the spend): the
-            // bucket is for files that are gone — the capture rides the
-            // tombstone for the day the transcript dies.
-            if Path::new(&edge.child).is_file() {
+            // A tombstoned path that still has a catalog row bills
+            // through that row instead (the rollup sums the child row
+            // AND the parent bucket, so billing both would double the
+            // spend): the flat catalog scans this ledger's sessions dir,
+            // so the row exists exactly while the file sits directly in
+            // it. Real RLM children persist under session-artifacts,
+            // where the flat catalog never lists them - the RLM delete
+            // keeps that transcript and no row anywhere bills it, so the
+            // bucket is the only surface that keeps its spend.
+            let child_file = Path::new(&child);
+            if child_file.is_file()
+                && child_file.parent() == Some(self.canonical_sessions_dir.as_path())
+            {
                 continue;
             }
             let parent = canonical(&edge.parent);
@@ -473,7 +482,11 @@ impl RlmSpawnLedger {
         let tombstone_usage = |path: &str| -> SessionUsageSummary {
             match snapshot_by_path.get(path).cloned().flatten() {
                 Some(snapshot) => snapshot,
-                None => crate::session_usage::read_own_usage_summary(Path::new(path))
+                // The legacy fallback is the same own-usage fold, read
+                // through the resumable scan: a repeat bucket fold on a
+                // surviving legacy transcript is one stat per child.
+                None => crate::session_store::read_session_info(Path::new(path))
+                    .and_then(|info| info.usage)
                     .unwrap_or_else(zero),
             }
         };

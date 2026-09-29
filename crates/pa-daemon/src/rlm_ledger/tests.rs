@@ -795,6 +795,114 @@ fn bucket_legacy_tombstones_fall_back_then_gap_to_zero() {
     );
 }
 
+/// A tombstoned child whose transcript lives under session-artifacts
+/// (every real RLM child: the flat catalog scans only the sessions dir,
+/// so no archived row bills it) has no catalog row: the bucket bills its
+/// captured snapshot, and a legacy tombstone that predates the capture
+/// falls back to the transcript's own-usage fold. A transcript directly
+/// in the sessions dir keeps its catalog row and stays skipped (the
+/// flat-dir tests above pin that half).
+#[test]
+fn bucket_bills_tombstoned_children_without_catalog_rows() {
+    let dir = temp_dir("bucket-no-row");
+    let ledger = ledger_for(&dir);
+    let sessions = dir.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let parent = sessions.join("p.jsonl");
+    fs::write(&parent, "{}").unwrap();
+    // The real RLM child locations: under the agent dir's
+    // session-artifacts tree, one per child id.
+    let snapshot_child = dir
+        .join("session-artifacts")
+        .join("p")
+        .join("sub-1")
+        .join("sub-1.jsonl");
+    let legacy_child = dir
+        .join("session-artifacts")
+        .join("p")
+        .join("sub-2")
+        .join("sub-2.jsonl");
+    for child in [&snapshot_child, &legacy_child] {
+        fs::create_dir_all(child.parent().unwrap()).unwrap();
+    }
+    fs::write(&snapshot_child, assistant_usage_row("m1", 0.30)).unwrap();
+    // The legacy child's transcript predates the capture: its own fold
+    // is the only record of its spend. Its rows carry the persisted
+    // shape - the top-level timestamp every real entry has, which the
+    // resumable scan's fold reads.
+    let mut legacy = String::from(
+        "{\"type\":\"session\",\"version\":3,\"id\":\"sub-2\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"/tmp\"}\n",
+    );
+    legacy.push_str(
+        &serde_json::json!({
+            "type": "message",
+            "id": "m1",
+            "timestamp": "2024-01-01T00:00:01.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [{ "type": "text", "text": "work complete" }],
+                "stopReason": "stop",
+                "timestamp": 1000,
+                "usage": {
+                    "input": 1_000,
+                    "output": 100,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                    "totalTokens": 1_100,
+                    "cost": { "input": 0.0, "output": 0.25, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.25 }
+                }
+            }
+        })
+        .to_string(),
+    );
+    legacy.push('\n');
+    fs::write(&legacy_child, legacy).unwrap();
+    let spawn = |child_id: &str, child: &Path| {
+        ledger
+            .append_spawn(&RlmSpawnInput {
+                child_id: child_id.into(),
+                parent: parent.to_string_lossy().into(),
+                child: child.to_string_lossy().into(),
+                depth: 1,
+                name: "w".into(),
+            })
+            .unwrap();
+    };
+    spawn("sub-1", &snapshot_child);
+    spawn("sub-2", &legacy_child);
+    // The captured delete, and the legacy (snapshot-less) delete.
+    ledger
+        .append_delete_with_usage(
+            "sub-1",
+            &snapshot_child.to_string_lossy(),
+            RlmLedgerDeleteReason::User,
+            &usage_summary(0.30),
+        )
+        .unwrap();
+    ledger
+        .append_delete(
+            "sub-2",
+            &legacy_child.to_string_lossy(),
+            RlmLedgerDeleteReason::User,
+        )
+        .unwrap();
+    let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
+    let parent_key = crate::lease::canonical_session_path(&parent)
+        .to_string_lossy()
+        .to_string();
+    let deleted = bucket
+        .get(&parent_key)
+        .expect("the parent bills its tombstoned children without catalog rows");
+    assert_eq!(deleted.input_tokens, 2_000);
+    assert_eq!(deleted.output_tokens, 200);
+    assert!(
+        (deleted.cost - 0.55).abs() < 1e-9,
+        "the captured snapshot 0.30 + the legacy transcript's own fold 0.25, got {}",
+        deleted.cost
+    );
+    assert_eq!(bucket.len(), 1, "only the parent bills");
+}
+
 /// A raced ledger claims each tombstoned path once (first writer wins):
 /// one child path billed to two parents would double the spend.
 #[test]
