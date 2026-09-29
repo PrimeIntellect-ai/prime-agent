@@ -43,17 +43,16 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: windows-triage
-      - name: Strip the fleet's hostile-env vars (the gate-env contract)
-        shell: pwsh
-        run: |
-          Get-ChildItem Env: | Where-Object { $_.Name -like 'PRIME_AGENT_*' } |
-            ForEach-Object { Remove-Item -Path ("Env:" + $_.Name) -ErrorAction SilentlyContinue }
-          "env stripped"
+      # The strip rides INSIDE each battery step: a step is its own
+      # process, so a strip in a prior step never reaches the test
+      # process (Macroscope's finding).
       - name: pa-types battery
         id: pa_types
         continue-on-error: true
         shell: pwsh
         run: |
+          Get-ChildItem Env: | Where-Object { $_.Name -like 'PRIME_AGENT_*' } |
+            ForEach-Object { Remove-Item -Path ("Env:" + $_.Name) -ErrorAction SilentlyContinue }
           cargo test --locked -p pa-types 2>&1 | Tee-Object -FilePath pa-types_win.log
           exit $LASTEXITCODE
       - name: pa-core battery
@@ -61,6 +60,8 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: |
+          Get-ChildItem Env: | Where-Object { $_.Name -like 'PRIME_AGENT_*' } |
+            ForEach-Object { Remove-Item -Path ("Env:" + $_.Name) -ErrorAction SilentlyContinue }
           cargo test --locked -p pa-core 2>&1 | Tee-Object -FilePath pa-core_win.log
           exit $LASTEXITCODE
       - name: pa-daemon battery
@@ -68,6 +69,8 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: |
+          Get-ChildItem Env: | Where-Object { $_.Name -like 'PRIME_AGENT_*' } |
+            ForEach-Object { Remove-Item -Path ("Env:" + $_.Name) -ErrorAction SilentlyContinue }
           cargo test --locked -p pa-daemon 2>&1 | Tee-Object -FilePath pa-daemon_win.log
           exit $LASTEXITCODE
       - name: pa-tui battery
@@ -75,6 +78,8 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: |
+          Get-ChildItem Env: | Where-Object { $_.Name -like 'PRIME_AGENT_*' } |
+            ForEach-Object { Remove-Item -Path ("Env:" + $_.Name) -ErrorAction SilentlyContinue }
           cargo test --locked -p pa-tui 2>&1 | Tee-Object -FilePath pa-tui_win.log
           exit $LASTEXITCODE
       - name: pa-cli battery (unit + the e2e set)
@@ -82,15 +87,17 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: |
+          Get-ChildItem Env: | Where-Object { $_.Name -like 'PRIME_AGENT_*' } |
+            ForEach-Object { Remove-Item -Path ("Env:" + $_.Name) -ErrorAction SilentlyContinue }
           cargo test --locked -p pa-cli 2>&1 | Tee-Object -FilePath pa-cli_win.log
           exit $LASTEXITCODE
       - name: Summary + the overall verdict
         shell: pwsh
         run: |
-          $summary = "WIN_BATTERY pa-types=$(steps.pa_types.outcome) pa-core=$(steps.pa_core.outcome) pa-daemon=$(steps.pa_daemon.outcome) pa-tui=$(steps.pa_tui.outcome) pa-cli=$(steps.pa_cli.outcome)"
+          $summary = "WIN_BATTERY pa-types=${{ steps.pa_types.outcome }} pa-core=${{ steps.pa_core.outcome }} pa-daemon=${{ steps.pa_daemon.outcome }} pa-tui=${{ steps.pa_tui.outcome }} pa-cli=${{ steps.pa_cli.outcome }}"
           Add-Content -Path win_battery_summary.log -Value $summary
           Write-Output $summary
-          if (@(steps.pa_types.outcome, steps.pa_core.outcome, steps.pa_daemon.outcome, steps.pa_tui.outcome, steps.pa_cli.outcome) -contains 'failure') { exit 1 }
+          if (@("${{ steps.pa_types.outcome }}", "${{ steps.pa_core.outcome }}", "${{ steps.pa_daemon.outcome }}", "${{ steps.pa_tui.outcome }}", "${{ steps.pa_cli.outcome }}") -contains 'failure') { exit 1 }
       - name: Upload the per-crate logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
