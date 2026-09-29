@@ -104,8 +104,8 @@ impl AgentView {
         self.selection_restyle = SelectionRestyle {
             start,
             base,
-            spans,
             styled,
+            spans,
         };
         self.selection_restyle.styled.clone()
     }

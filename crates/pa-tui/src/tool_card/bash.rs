@@ -18,6 +18,7 @@ use crate::{Line, Span};
 /// Collapsed preview length in visual lines (TS `BASH_PREVIEW_LINES`).
 const BASH_PREVIEW_LINES: usize = 5;
 
+#[must_use]
 pub fn render(
     card: &ToolCallCard,
     frame: usize,
@@ -28,7 +29,7 @@ pub fn render(
 ) -> Vec<Line> {
     let mut rows = RowOutput::paint();
     visit(card, detail, theme, width, &mut rows);
-    rows.images(&card.result, show_images, theme);
+    rows.images(card.result.as_ref(), show_images, theme);
     rows.panel(card, frame, theme, width);
     rows.into_lines()
 }
@@ -43,7 +44,7 @@ pub(crate) fn count(
 ) -> usize {
     let mut rows = RowOutput::count();
     visit(card, detail, theme, width, &mut rows);
-    rows.images(&card.result, show_images, theme);
+    rows.images(card.result.as_ref(), show_images, theme);
     rows.panel(card, frame, theme, width);
     rows.len()
 }

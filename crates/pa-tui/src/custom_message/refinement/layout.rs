@@ -1,5 +1,9 @@
 //! Shared refinement rendering traversal and count-only geometry.
-use super::*;
+use super::{
+    line_diff, pad_with, spacer, str_width, text_rows, truncate_line, wrap_line, wrap_text,
+    ColorMode, Detail, DiffOp, Line, RefinementEditRow, RefinementOutcomeRow, Span, Theme, ThemeBg,
+    ThemeColor,
+};
 
 enum Output {
     Paint(Vec<Line>),
@@ -27,7 +31,7 @@ impl Output {
                         None => Span::raw(text),
                     })
                     .collect();
-                rows.extend(text_rows(line, width));
+                rows.extend(text_rows(&line, width));
             }
             Self::Count(count) => {
                 let runs: Vec<_> = parts.into_iter().map(|(text, _)| text).collect();
@@ -61,7 +65,7 @@ impl Output {
                         None => Span::raw(text),
                     })
                     .collect();
-                rows.extend(crate::branch::branch_block(line, theme, width));
+                rows.extend(crate::branch::branch_block(&line, theme, width));
             }
             Self::Count(count) => {
                 let joined = parts

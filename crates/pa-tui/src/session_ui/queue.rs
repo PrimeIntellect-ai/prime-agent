@@ -4,7 +4,10 @@
 //! but the reorder/apply gates are user-origin only (operator directive
 //! 2026-09-28: internal prompts render read-only — the system owns
 //! them); see [`crate::queued::QueueSelectionItem::internal`].
-use super::*;
+use super::{
+    anyhow, AgentView, DaemonCommand, Duration, Map, QueueBrowseDirection, QueueLane, Result,
+    SessionUi, Value, UI_REQUEST_TIMEOUT_MS,
+};
 
 impl SessionUi {
     /// Project the browse selection to the view: the dim header row above

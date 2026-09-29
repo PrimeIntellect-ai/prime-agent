@@ -10,6 +10,29 @@
 //! band), and the openrouter same-id row is NOT selected — the id-only
 //! catalog find previously adopted openrouter's row as the current model.
 #![cfg(unix)]
+// Pedantic-gate exceptions (every other pedantic warning in this crate is
+// fixed in place; each exception carries its one-line justification):
+// - the casts: terminal-layout arithmetic narrows structurally bounded
+//   values (screen coordinates, byte counts, timestamps); guarded
+//   conversions would add panic paths the bounds guarantee away.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// - the render routes are flat tables (one arm per route); splitting them
+//   would add indirection without changing the flow.
+#![allow(clippy::too_many_lines)]
+// - widget state structs carry independent flag bits; a nested struct
+//   would add indirection without changing the shape.
+#![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
+// - the futures are bounded by the surface's lifetime; boxing them would
+//   add an allocation to the steady-state loop.
+#![allow(clippy::large_futures)]
+// - the wrappers preserve a uniform Result-returning API surface; unwrap
+//   removals would ripple through the callers without changing behavior.
+#![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -118,7 +141,7 @@ impl MockSupervisor {
                     );
                 }
                 "attach" => {
-                    write_json(&mut writer, &self.attach_data(id));
+                    write_json(&mut writer, &Self::attach_data(id));
                 }
                 "get_model_catalog" => {
                     write_json(
@@ -136,7 +159,7 @@ impl MockSupervisor {
                     );
                 }
                 "get_state" | "get_connection_state" => {
-                    write_json(&mut writer, &self.state_data(id, &command_type));
+                    write_json(&mut writer, &Self::state_data(id, &command_type));
                 }
                 "prompt" => {
                     write_json(
@@ -180,7 +203,7 @@ impl MockSupervisor {
     /// current model identity the daemon reports — the id AND the
     /// provider (`state.model.provider`), exactly as the onboarding's
     /// Prime Inference login leaves the session.
-    fn attach_data(&self, id: &str) -> Value {
+    fn attach_data(id: &str) -> Value {
         json!({
             "type": "response",
             "id": id,
@@ -214,7 +237,7 @@ impl MockSupervisor {
     }
 
     /// The live session state: the same prime-inference model identity.
-    fn state_data(&self, id: &str, command: &str) -> Value {
+    fn state_data(id: &str, command: &str) -> Value {
         json!({
             "type": "response",
             "id": id,

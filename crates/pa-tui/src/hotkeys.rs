@@ -16,6 +16,7 @@ fn key_display(kb: &KeybindingsManager, id: &str) -> String {
 /// The `/hotkeys` reference. Keys render from the effective binding set;
 /// a disabled binding (an empty user override) omits its conditional row,
 /// like TS (`${interrupt ? ...}`).
+#[must_use]
 pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
     let cursor_up = key_display(kb, "tui.editor.cursorUp");
     let cursor_down = key_display(kb, "tui.editor.cursorDown");

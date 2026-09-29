@@ -66,8 +66,8 @@ fn jpeg_dimensions(bytes: &[u8]) -> Option<ImageDimensions> {
             let height = u16::from_be_bytes([bytes[offset + 5], bytes[offset + 6]]);
             let width = u16::from_be_bytes([bytes[offset + 7], bytes[offset + 8]]);
             return Some(ImageDimensions {
-                width_px: width as u32,
-                height_px: height as u32,
+                width_px: u32::from(width),
+                height_px: u32::from(height),
             });
         }
         if offset + 3 >= bytes.len() {
@@ -93,8 +93,8 @@ fn gif_dimensions(bytes: &[u8]) -> Option<ImageDimensions> {
     let width = u16::from_le_bytes([bytes[6], bytes[7]]);
     let height = u16::from_le_bytes([bytes[8], bytes[9]]);
     Some(ImageDimensions {
-        width_px: width as u32,
-        height_px: height as u32,
+        width_px: u32::from(width),
+        height_px: u32::from(height),
     })
 }
 
@@ -110,8 +110,8 @@ fn webp_dimensions(bytes: &[u8]) -> Option<ImageDimensions> {
         let width = u16::from_le_bytes([bytes[26], bytes[27]]) & 0x3fff;
         let height = u16::from_le_bytes([bytes[28], bytes[29]]) & 0x3fff;
         Some(ImageDimensions {
-            width_px: width as u32,
-            height_px: height as u32,
+            width_px: u32::from(width),
+            height_px: u32::from(height),
         })
     } else if chunk == b"VP8L" {
         if bytes.len() < 25 {
@@ -125,8 +125,10 @@ fn webp_dimensions(bytes: &[u8]) -> Option<ImageDimensions> {
             height_px: height,
         })
     } else if chunk == b"VP8X" {
-        let width = (bytes[24] as u32 | (bytes[25] as u32) << 8 | (bytes[26] as u32) << 16) + 1;
-        let height = (bytes[27] as u32 | (bytes[28] as u32) << 8 | (bytes[29] as u32) << 16) + 1;
+        let width =
+            (u32::from(bytes[24]) | u32::from(bytes[25]) << 8 | u32::from(bytes[26]) << 16) + 1;
+        let height =
+            (u32::from(bytes[27]) | u32::from(bytes[28]) << 8 | u32::from(bytes[29]) << 16) + 1;
         Some(ImageDimensions {
             width_px: width,
             height_px: height,

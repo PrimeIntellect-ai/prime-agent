@@ -1,7 +1,11 @@
 //! The model-picker concern: the `/model` catalog's TTL-gated refresh
 //! and landed-catalog fold, the picker's open/key handling, and the
 //! model/thinking-level application paths.
-use super::*;
+use super::{
+    key_event_to_id, streaming_tray_hint, AgentView, ChatEntry, CurrentModel, DaemonCommand,
+    Duration, KeyEvent, Map, ModelPicker, ModelPickerAction, ModelPickerOptions, Result, SessionUi,
+    SetModelOutcome, StatusKind, UI_REQUEST_TIMEOUT_MS,
+};
 use serde_json::Value;
 
 /// How long a fetched model catalog stays fresh (TS

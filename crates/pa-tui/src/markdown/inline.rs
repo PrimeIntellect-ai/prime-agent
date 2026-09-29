@@ -2,6 +2,7 @@ use super::MarkdownStyle;
 use crate::{Line, Span};
 use ratatui::style::Modifier;
 /// Inline rendering: bold, italic, strikethrough, code, links.
+#[must_use]
 pub fn render_inline(text: &str, style: &MarkdownStyle) -> Line {
     render_inline_ctx(text, style, false)
 }
@@ -33,17 +34,20 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
     macro_rules! flush {
         () => {
             if !buf.is_empty() {
-                let mut m = Modifier::empty();
+                let mut modifier = Modifier::empty();
                 if bold {
-                    m |= style.bold;
+                    modifier |= style.bold;
                 }
                 if italic {
-                    m |= style.italic;
+                    modifier |= style.italic;
                 }
                 if strike {
-                    m |= style.strikethrough;
+                    modifier |= style.strikethrough;
                 }
-                spans.push(Span::styled(std::mem::take(&mut buf), base.add_modifier(m)));
+                spans.push(Span::styled(
+                    std::mem::take(&mut buf),
+                    base.add_modifier(modifier),
+                ));
             }
         };
     }
@@ -82,22 +86,22 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
                 }
                 if k < bytes.len() {
                     flush!();
-                    let mut m = Modifier::empty();
+                    let mut modifier = Modifier::empty();
                     if bold {
-                        m |= style.bold;
+                        modifier |= style.bold;
                     }
                     if italic {
-                        m |= style.italic;
+                        modifier |= style.italic;
                     }
                     // The observed TS binary output (0.9.5, the parity ground
                     // truth) renders the link label with the body color only:
                     // the link color is shadowed by the body color applied
                     // inside the label, and the underline wrapper never
-                    // reaches the wire. `m` carries the emphasis context.
+                    // reaches the wire. `modifier` carries the emphasis context.
                     let href = crate::hyperlinks::resolve_link_href(&url);
                     let mut label_spans = render_inline_ctx(&label, style, true);
                     for s in &mut label_spans {
-                        s.style = s.style.add_modifier(m);
+                        s.style = s.style.add_modifier(modifier);
                     }
                     if crate::hyperlinks::hyperlinks_enabled() {
                         // OSC 8: the label is clickable, the URL never

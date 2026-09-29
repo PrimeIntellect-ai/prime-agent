@@ -60,8 +60,8 @@ fn pending_ancestors_expand_and_selection_restores_after_reentry() {
         incident_notice_state: None,
     });
     mode.roster = vec![
-        roster_entry("p", "idle", parent_summary("p")),
-        roster_entry("c", "running", child_summary("c", "p", "worker one")),
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("c", "running", &child_summary("c", "p", "worker one")),
     ];
     mode.rebuild_rows();
     // The ancestor expansion opened the parent's list and the child
@@ -95,8 +95,8 @@ fn scoped_left_returns_the_root_and_pops_the_scope() {
         incident_notice_state: None,
     });
     mode.roster = vec![
-        roster_entry("p", "idle", parent_summary("p")),
-        roster_entry("c", "running", child_summary("c", "p", "worker one")),
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("c", "running", &child_summary("c", "p", "worker one")),
     ];
     mode.rebuild_rows();
     // The scoped view lists the direct child as a top-level row.
@@ -134,7 +134,7 @@ fn unattachable_child_opens_its_root_with_a_status() {
         "messageCount": 1,
     });
     mode.roster
-        .push(roster_entry("gc", "inactive", unattachable));
+        .push(roster_entry("gc", "inactive", &unattachable));
     // The grandchild is roster-inactive under the running child: the
     // ONE merged group nests it under the child's own line — expand
     // the parent's line first, then the child's (whose identity is

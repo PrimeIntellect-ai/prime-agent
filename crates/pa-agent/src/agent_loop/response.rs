@@ -3,6 +3,8 @@
 //! the aborted-message finalize path. Section of the port of
 //! `packages/agent/src/agent-loop.ts`.
 
+use std::sync::Arc;
+
 use crate::abort::{is_abort_error, AbortSignal};
 use crate::stream::{LlmContext, StreamFn, StreamRequestOptions, ToolDefinition};
 use crate::types::{AgentContext, AgentEvent, AgentMessage, AssistantMessage};
@@ -22,14 +24,17 @@ pub(crate) async fn stream_assistant_response(
     emit: &AgentEventSink,
     stream_fn: Option<&StreamFn>,
 ) -> anyhow::Result<AssistantMessage> {
-    let mut partial_message: Option<AssistantMessage> = None;
+    let mut partial_event: Option<Arc<crate::stream::AssistantMessageEvent>> = None;
     let mut added_partial = false;
 
     // The TS closure captures `partialMessage`/`addedPartial` by reference;
     // here the finish helper runs inline in the abort path below.
     macro_rules! finish_aborted_message {
         () => {{
-            let final_message = create_aborted_assistant_message(config, partial_message.as_ref());
+            let final_message = create_aborted_assistant_message(
+                config,
+                partial_event.as_deref().and_then(event_partial),
+            );
             if added_partial {
                 *context.messages.last_mut().unwrap() = AgentMessage::from(final_message.clone());
             } else {
@@ -55,7 +60,7 @@ pub(crate) async fn stream_assistant_response(
         signal,
         emit,
         stream_fn,
-        &mut partial_message,
+        &mut partial_event,
         &mut added_partial,
     )
     .await;
@@ -81,7 +86,7 @@ async fn stream_assistant_response_inner(
     signal: Option<&AbortSignal>,
     emit: &AgentEventSink,
     stream_fn: Option<&StreamFn>,
-    partial_message: &mut Option<AssistantMessage>,
+    partial_event: &mut Option<Arc<crate::stream::AssistantMessageEvent>>,
     added_partial: &mut bool,
 ) -> anyhow::Result<AssistantMessage> {
     crate::abort::throw_if_aborted_signal(signal)?;
@@ -171,28 +176,28 @@ async fn stream_assistant_response_inner(
             break;
         };
 
-        match &event {
+        match event {
             crate::stream::AssistantMessageEvent::Start { partial } => {
-                *partial_message = Some(partial.clone());
-                context.messages.push(AgentMessage::from(partial.clone()));
+                let message = AgentMessage::from(partial.clone());
                 *added_partial = true;
-                emit(AgentEvent::MessageStart {
-                    message: AgentMessage::from(partial.clone()),
-                })
-                .await?;
+                context.messages.push(message.clone());
+                *partial_event = Some(Arc::new(crate::stream::AssistantMessageEvent::Start {
+                    partial,
+                }));
+                emit(AgentEvent::MessageStart { message }).await?;
             }
             event if event.is_delta() => {
-                if let Some(partial) = event_partial(event) {
-                    *partial_message = Some(partial.clone());
-                    *context.messages.last_mut().unwrap() = AgentMessage::from(partial.clone());
+                let event = Arc::new(event);
+                if let Some(partial) = event_partial(&event) {
+                    *partial_event = Some(Arc::clone(&event));
                     emit(AgentEvent::MessageUpdate {
-                        message: AgentMessage::from(partial.clone()),
-                        assistant_message_event: Box::new(event.clone()),
+                        message: Arc::new(AgentMessage::from(partial.clone())),
+                        assistant_message_event: event,
                     })
                     .await?;
                 }
             }
-            event if event.terminal_message().is_some() => {
+            ref event if event.terminal_message().is_some() => {
                 let mut final_message = event.terminal_message().unwrap().clone();
                 match race_with_abort(response.result(), signal).await {
                     Ok(result_message) => final_message = result_message,

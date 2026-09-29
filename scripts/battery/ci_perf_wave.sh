@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CI entry for the perf wave (driven by ci/workflows/benchmark.yml).
+# CI entry for the perf wave (driven by the benchmark workflow on main's tree).
 #
 # Creates an ephemeral Prime sandbox (4 CPU / 16 GB, the same spec class the
 # baseline was recorded on), installs the deployed TS binary plus a fresh

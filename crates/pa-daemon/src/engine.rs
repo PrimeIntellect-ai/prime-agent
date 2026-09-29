@@ -6,8 +6,11 @@
 //! used by the integration harness and headless checks; the agent-loop crate
 //! plugs into the same trait without touching any daemon mechanics.
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use pa_agent::abort::AbortSignal;
+use pa_core::session_engine::provider_adapter::json_round_trip;
 use pa_core::session_engine::provider_retry::{ProviderRetryPolicy, UNBOUNDED_BACKOFF_MS};
 use pa_core::session_engine::side_question::{SideQuestionSink, SideQuestionTurn};
 use serde_json::{json, Value};
@@ -77,11 +80,12 @@ pub struct EngineModelSelection {
 pub enum EngineEvent {
     /// The user message that was accepted (recorded into the session store).
     UserMessage(Value),
-    /// An assistant message update (streaming); the payload is the full
-    /// message, plus the provider stream event that produced it (the TS wire
+    /// An assistant message update (streaming); the message is the loop's
+    /// shared snapshot ([`AssistantSnapshot`]: wire form at frame build),
+    /// plus the provider stream event that produced it (the TS wire
     /// carries `assistantMessageEvent` so clients can track activity).
     AssistantUpdate {
-        message: Value,
+        message: AssistantSnapshot,
         stream_event: Option<Value>,
     },
     /// The final assistant message (recorded into the session store).
@@ -186,6 +190,52 @@ pub enum EngineEvent {
         final_error: Option<String>,
         restored_model: Option<String>,
     },
+}
+
+/// A streamed assistant message: already in wire form, or the loop's typed
+/// partial, converted only when a frame is built.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AssistantSnapshot {
+    Wire(Value),
+    Loop(Arc<pa_agent::types::AgentMessage>),
+}
+
+impl AssistantSnapshot {
+    pub(crate) fn into_wire(self) -> Option<Value> {
+        match self {
+            Self::Wire(value) => Some(value),
+            Self::Loop(message) => session_wire_value(&message),
+        }
+    }
+}
+
+/// Serialize a pa-agent message through the session wire shape (adds `role`).
+pub(crate) fn session_wire_value(agent_message: &pa_agent::types::AgentMessage) -> Option<Value> {
+    use pa_agent::types::Message as LoopMessage;
+    let session_message = match agent_message {
+        pa_agent::types::AgentMessage::Standard(LoopMessage::User(user)) => {
+            pa_types::session::AgentMessage::User(json_round_trip(user)?)
+        }
+        pa_agent::types::AgentMessage::Standard(LoopMessage::Assistant(assistant)) => {
+            pa_types::session::AgentMessage::Assistant(json_round_trip(assistant)?)
+        }
+        pa_agent::types::AgentMessage::Standard(LoopMessage::ToolResult(tool_result)) => {
+            pa_types::session::AgentMessage::ToolResult(json_round_trip(tool_result)?)
+        }
+        // A custom row (the harness digest, a goal-context row): the
+        // payload is the session-shape custom message and the wire form is
+        // the tagged session message — the payload plus the row's role
+        // (TS `agent_end.messages` carries custom rows in this shape).
+        pa_agent::types::AgentMessage::Custom(custom) => {
+            let mut value = custom.payload.clone();
+            let object = value.as_object_mut()?;
+            object
+                .entry("role".to_string())
+                .or_insert_with(|| Value::String(custom.role.clone()));
+            return Some(value);
+        }
+    };
+    serde_json::to_value(&session_message).ok()
 }
 
 /// The post-compaction goal continuation (TS `compact()`'s `didCompact` +
@@ -1402,7 +1452,9 @@ impl SessionEngine for ScriptedEngine {
         }
         let usage = scripted_usage();
         if !emit(EngineEvent::AssistantUpdate {
-            message: json!({"role": "assistant", "content": "", "provider": "scripted", "model": "faux-1", "usage": usage, "timestamp": crate::util::now_ms()}),
+            message: AssistantSnapshot::Wire(
+                json!({"role": "assistant", "content": "", "provider": "scripted", "model": "faux-1", "usage": usage, "timestamp": crate::util::now_ms()}),
+            ),
             stream_event: None,
         }) {
             emit(cancelled());

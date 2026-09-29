@@ -12,7 +12,7 @@ use super::*;
 fn streamed_catalog_rows_land_progressively_and_settle_the_anchor() {
     let mut mode = mode_with_anchor(
         Some("s2"),
-        vec![roster_entry("s1", "idle", parent_summary("s1"))],
+        vec![roster_entry("s1", "idle", &parent_summary("s1"))],
     );
     assert!(mode.anchor_selection_pending, "the anchor waits on its row");
     mode.buffer_saved_stream_item(saved_catalog_row("/x/s2.jsonl", "s2", "second chat"));

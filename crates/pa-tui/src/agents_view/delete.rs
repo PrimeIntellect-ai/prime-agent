@@ -1,7 +1,9 @@
 //! The stop-or-delete flow: the armed confirm (TS `pendingDeleteAgent` /
 //! `pendingKillSubagent`), the wire dispatch the confirm executes, and
 //! the no-effect outcome summary (moved with its concern).
-use super::*;
+use super::{
+    mpsc, AgentsViewMode, AgentsViewRow, DaemonClient, DaemonCommand, RowKind, UiInput, Value,
+};
 
 /// The armed stop-or-delete row (TS `pendingDeleteAgent` /
 /// `pendingKillSubagent`): which row waits on the second press, and the
@@ -204,7 +206,7 @@ pub(super) fn spawn_delete_dispatch(
 impl AgentsViewMode {
     pub(super) fn delete_arm_target(&self) -> Option<PendingDelete> {
         let row = self.rows.get(self.selected)?;
-        let stop = self.delete_arm_word(row);
+        let stop = Self::delete_arm_word(row);
         match row.kind {
             RowKind::SubagentSummary => None,
             // An agent with a live session stops (TS `stopAgentForDeletion`
@@ -303,7 +305,7 @@ impl AgentsViewMode {
     /// shared derivation): true while the row rides a live session or
     /// the running section (TS `hasLiveWork`), false for a saved-only
     /// row.
-    pub(super) fn delete_arm_word(&self, row: &AgentsViewRow) -> bool {
+    pub(super) fn delete_arm_word(row: &AgentsViewRow) -> bool {
         if row.summary.get("rlmChildId").is_some() {
             // A child rides its own activity (TS `hasLiveWork` over the
             // child): the running section is its live work, an idle
@@ -347,7 +349,7 @@ impl AgentsViewMode {
             // summary's own parentActiveSessionId carries the parent
             // session; the nested child walks its parent row.
             let active_session_id = self.child_parent_session_key(row)?;
-            if self.delete_arm_word(row) {
+            if Self::delete_arm_word(row) {
                 return Some(DeleteAction::StopSubagent {
                     active_session_id,
                     child_id,

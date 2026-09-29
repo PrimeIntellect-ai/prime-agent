@@ -1,7 +1,10 @@
 //! The status-row concern: the note/toast/error-row rendering family
 //! (TS `showStatus`/`showError`), the tray rebuild, the goal-tray
 //! glue, and the anthropic-subscription warning pair that rides it.
-use super::*;
+use super::{
+    format_goal_status, terminal_columns, AgentView, ChatEntry, SessionUi, StatusKind, Value,
+    ANTHROPIC_SUBSCRIPTION_AUTH_WARNING,
+};
 
 impl SessionUi {
     /// One `goal_update` session event (TS `handleGoalUpdate`): store the

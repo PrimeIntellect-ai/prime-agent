@@ -2,7 +2,10 @@
 //! renderer, the startup chrome seeding, the tmux keyboard check, the
 //! suspend-cycle terminal handoff, and the exit flush rows.
 
-use super::*;
+use super::{
+    mpsc, terminal, AgentView, Duration, ExitGuard, HeadlessStep, InteractiveOptions, KeyEvent,
+    Result, SessionUi, Terminal, UiInput, UiMode,
+};
 
 /// One typed string as key events: characters become `Char` presses, `\n`
 /// becomes Enter, and `\t` becomes Tab (the keys autocomplete reacts to).
@@ -204,7 +207,7 @@ impl Renderer {
                         crossterm::event::Event::Mouse(mouse) => {
                             if !crate::mouse_tracking::active() {
                                 true
-                            } else if let Some(event) = crate::mouse::from_crossterm(&mouse) {
+                            } else if let Some(event) = crate::mouse::from_crossterm(mouse) {
                                 ui_tx.send(UiInput::Mouse(event)).is_ok()
                             } else {
                                 true

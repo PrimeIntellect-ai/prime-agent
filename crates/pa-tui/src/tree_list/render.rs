@@ -8,6 +8,7 @@ use ratatui::style::{Modifier, Style};
 
 impl TreeList {
     /// Render the visible rows plus the counter (TS `TreeList.render`).
+    #[must_use]
     pub fn render(&self, theme: &Theme, width: usize) -> Vec<Line> {
         let mut lines: Vec<Line> = Vec::new();
         if self.filtered.is_empty() {

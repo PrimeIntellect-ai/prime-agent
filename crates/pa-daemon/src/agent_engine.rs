@@ -32,9 +32,9 @@ use pa_types::ai::Model;
 
 use crate::auto_compaction::AutoCompactionRun;
 use crate::engine::{
-    BranchSummaryOutcome, BranchSummaryRequest, BranchSummaryRun, CompactionOutcome,
-    CompactionRequest, CompactionRun, EngineEvent, EngineModelSelection, PromptRequest,
-    SessionEngine, SideQuestionOutcome, SideQuestionRequest,
+    session_wire_value, AssistantSnapshot, BranchSummaryOutcome, BranchSummaryRequest,
+    BranchSummaryRun, CompactionOutcome, CompactionRequest, CompactionRun, EngineEvent,
+    EngineModelSelection, PromptRequest, SessionEngine, SideQuestionOutcome, SideQuestionRequest,
 };
 use crate::goal_continuation::GoalBoundary;
 use crate::image_route::ImageRoute;

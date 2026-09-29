@@ -248,9 +248,6 @@ impl AgentView {
             let command = (scroll_offset + index == 0)
                 .then(|| command_token(text))
                 .flatten();
-            let command_takes_argument = command
-                .as_ref()
-                .is_some_and(|token| registry.takes_argument(&token.name));
             let highlights = editor_chunk_highlights(
                 text,
                 arg_token_spans
@@ -258,7 +255,6 @@ impl AgentView {
                     .map_or(&[][..], |spans| spans),
                 line.source_start,
                 command.as_ref(),
-                command_takes_argument,
                 cursor_pos,
             );
             row.extend(editor_text_spans(

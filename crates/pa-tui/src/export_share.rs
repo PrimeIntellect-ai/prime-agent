@@ -35,6 +35,7 @@ pub fn path_command_argument(text: &str, command: &str) -> Option<String> {
 /// The default URL and the env var are the TS product's wire identifiers
 /// (the viewer service the exported page integrates with); they stay
 /// byte-identical until the product renames them.
+#[must_use]
 pub fn share_viewer_url(gist_id: &str) -> String {
     let base = std::env::var("PI_SHARE_VIEWER_URL")
         .ok()
@@ -48,6 +49,7 @@ const DEFAULT_SHARE_VIEWER_URL: &str = "https://pi.dev/session/";
 /// The gist id from the URL `gh gist create` prints (the last path
 /// segment, TS `gistUrl.split("/").pop()`): an empty segment (a trailing
 /// slash) is no gist id.
+#[must_use]
 pub fn gist_id_from_url(url: &str) -> Option<&str> {
     let url = url.trim();
     let segment = url.rsplit('/').next()?;
@@ -68,6 +70,7 @@ pub enum GhAuthStatus {
 /// Probe the GitHub CLI (TS `spawnSyncHidden("gh", ["auth", "status"])`):
 /// a non-zero exit means not logged in, a spawn failure means not
 /// installed. The probe never opens a window (hidden spawn).
+#[must_use]
 pub fn probe_gh_auth() -> GhAuthStatus {
     // No inherited fds: a probe must never hold the terminal the TUI owns
     // (the fd-set audit's rule — no child holds /dev/tty).

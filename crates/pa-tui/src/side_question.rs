@@ -25,6 +25,7 @@ pub struct SideQuestionTurn {
 
 /// Whether the turn can seed a follow-up side question (TS `sideQuestionTurns`
 /// collects answered turns; local notices never join it).
+#[must_use]
 pub fn turn_seeds_follow_up(turn: &SideQuestionTurn) -> bool {
     !turn.local && !turn.answer.is_empty()
 }
@@ -53,6 +54,7 @@ pub struct PaneBash {
 impl PaneBash {
     /// A running pane-mounted run for one command (TS the component's
     /// constructor: the `$ command` header with its running loader).
+    #[must_use]
     pub fn new_running(command: &str, excluded: bool) -> Self {
         Self {
             command: command.to_string(),
@@ -70,6 +72,7 @@ impl PaneBash {
     /// The card the pane renders (TS `addBash` appends the same
     /// `BashExecutionComponent` the main thread mounts, so the pane's
     /// rows come from the shared card renderer).
+    #[must_use]
     pub fn execution_card(&self) -> crate::bash_card::BashExecutionCard {
         let mut card =
             crate::bash_card::BashExecutionCard::new_running("", &self.command, self.excluded);
@@ -114,6 +117,7 @@ impl SideQuestionPane {
     /// pane-mounted bash runs the `!` variant contributed (TS
     /// `finishSideQuestionBash` pushes the same `question`/`answer`
     /// shape onto the seed list).
+    #[must_use]
     pub fn seed_turns(&self) -> Vec<(String, String)> {
         self.turns
             .iter()
@@ -125,6 +129,7 @@ impl SideQuestionPane {
 
     /// Whether any turn or bash run is still running (the hint row's
     /// condition; a completed notice can sit below a running turn).
+    #[must_use]
     pub fn running(&self) -> bool {
         self.turns.iter().any(|turn| turn.status == "running")
             || self.bash.as_ref().is_some_and(|bash| bash.running)
@@ -144,6 +149,7 @@ impl SideQuestionPane {
 
     /// The running turn the escape key cancels (TS `sideQuestionEvent` —
     /// the latest turn the pane tracks).
+    #[must_use]
     pub fn active_turn(&self) -> Option<&SideQuestionTurn> {
         self.turns
             .iter()
@@ -157,6 +163,7 @@ impl SideQuestionPane {
     /// `BashExecutionCard` rows (TS `addBash` appends the same component
     /// the main thread mounts), so the pane passes the card renderer its
     /// frame, expansion flag, and cancel hint.
+    #[must_use]
     pub fn render(
         &self,
         theme: &Theme,

@@ -3,7 +3,13 @@
 //! field, the team picker rows, and the auth-actions row the provider
 //! selector's API-key prompt reuses.
 
-use super::*;
+use super::{
+    hint_row, key_hint, login_field_row, menu_row, no_match_row, osc8_open, scroll_row,
+    scrub_controls, search_field_lines, search_field_plain_row, AuthPanel, CopyStatus,
+    KeybindingsManager, Line, MenuSegment, Modifier, PanelInput, PanelSurface, PastePromptTone,
+    PasteStyle, PickerSegment, Span, Theme, ThemeColor, BROWSER_DEFAULT_INSTRUCTIONS, OSC8_CLOSE,
+    PASTE_PLACEHOLDER, PREFERRED_VISIBLE_TEAMS, TEAM_SEARCH_PLACEHOLDER, TOKEN_PLACEHOLDER,
+};
 
 impl AuthPanel {
     /// The panel's rendered rows (TS `MenuPanel`'s per-surface chrome over

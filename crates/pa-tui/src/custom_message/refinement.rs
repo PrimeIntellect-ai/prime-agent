@@ -513,13 +513,13 @@ mod tests {
         row.iter().map(|s| s.content.as_str()).collect()
     }
 
-    fn decoded(message: serde_json::Value) -> Vec<ChatEntry> {
-        crate::custom_message::custom_message_entries(&message)
+    fn decoded(message: &serde_json::Value) -> Vec<ChatEntry> {
+        crate::custom_message::custom_message_entries(message)
     }
 
     #[test]
     fn refinement_outcome_decodes_header_and_edits() {
-        let entries = decoded(json!({
+        let entries = decoded(&json!({
             "role": "custom",
             "customType": REFINEMENT_OUTCOME_CUSTOM_TYPE,
             "content": "Refinement complete: add a memory",
@@ -566,7 +566,7 @@ mod tests {
         // TS `isRefinementOutcomeMessage` runs `edits.every(isAppliedRefinementEdit)`,
         // which passes on an empty list: an outcome with no edits is valid
         // and renders the `Harness unchanged` row.
-        let empty = decoded(json!({
+        let empty = decoded(&json!({
             "role": "custom",
             "customType": REFINEMENT_OUTCOME_CUSTOM_TYPE,
             "content": "Refinement complete: ?",
@@ -579,7 +579,7 @@ mod tests {
         assert_eq!(row.header, "Harness unchanged \u{b7} no edits applied");
 
         // An unknown scope fails the TS envelope check and renders the notice.
-        let malformed = decoded(json!({
+        let malformed = decoded(&json!({
             "role": "custom",
             "customType": REFINEMENT_OUTCOME_CUSTOM_TYPE,
             "content": "Refinement complete: ?",

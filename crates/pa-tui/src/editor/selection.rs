@@ -9,7 +9,9 @@
 //! (view.rs), edits delete it before inserting, and undo/redo carry it.
 
 use super::text_utils::{char_at, char_prefix, char_suffix};
-use super::*;
+#[cfg(test)]
+use super::PasteDisposition;
+use super::{Editor, EditorEvent, LastAction};
 
 impl Editor {
     /// A selection is active: the anchor plus cursor produce a non-empty
@@ -17,6 +19,7 @@ impl Editor {
     /// floors away (a cursor parked inside the bang prefix) is a phantom
     /// the editor treats as no selection at all — every consumer gates on
     /// this, so no stale anchor can wedge Backspace or the insert path.
+    #[must_use]
     pub fn has_selection(&self) -> bool {
         self.selection_anchor.is_some_and(|anchor| {
             anchor != (self.cursor_line, self.cursor_col) && self.selection_range().is_some()
@@ -32,6 +35,7 @@ impl Editor {
     /// The selection as a normalized (start, end) pair of (line, col)
     /// positions, `None` when nothing is selected. Positions compare as
     /// tuples, so `start` is always the earlier one.
+    #[must_use]
     pub fn selection_range(&self) -> Option<((usize, usize), (usize, usize))> {
         let anchor = self.selection_anchor?;
         let cursor = (self.cursor_line, self.cursor_col);
@@ -54,6 +58,7 @@ impl Editor {
     }
 
     /// The selected text, lines joined with `\n`.
+    #[must_use]
     pub fn selection_text(&self) -> Option<String> {
         let ((start_line, start_col), (end_line, end_col)) = self.selection_range()?;
         if start_line == end_line {

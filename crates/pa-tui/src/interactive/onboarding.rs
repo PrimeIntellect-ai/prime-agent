@@ -2,7 +2,10 @@
 //! readiness seams, the flow task, the pane drive over the mounted onboarding
 //! screens, and the phase that runs the flow before the session screen.
 
-use super::*;
+use super::{
+    mpsc, AgentView, Duration, ExitGuard, Instant, KeybindingsManager, Renderer, Result, SessionUi,
+    UiInput,
+};
 
 /// Persistence for the first-run onboarding answers. The TUI crate owns
 /// only the surface; the composition root (pa-cli) implements the sink

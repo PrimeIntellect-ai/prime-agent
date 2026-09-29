@@ -35,6 +35,7 @@ pub enum BashBang {
 /// characters of the typed line stay hidden behind it (the leading
 /// whitespace plus the prefix, one wider when the user typed its
 /// trailing space).
+#[must_use]
 pub fn bash_prompt_info(line: &str) -> Option<(&'static str, usize)> {
     let trimmed = line.trim_start();
     let leading = line.chars().count() - trimmed.chars().count();
@@ -51,6 +52,7 @@ pub fn bash_prompt_info(line: &str) -> Option<(&'static str, usize)> {
 
 /// Parse a submitted text through the bash shortcut (TS `text.startsWith("!")`
 /// ladder). `None` for submissions that do not start with `!`.
+#[must_use]
 pub fn parse_bash_bang(text: &str) -> Option<BashBang> {
     let rest = match text.strip_prefix("!!") {
         Some(rest) => rest,
@@ -72,6 +74,7 @@ pub fn parse_bash_bang(text: &str) -> Option<BashBang> {
 /// the fenced output (the fence outgrows any backtick run in it so
 /// command output cannot terminate it early), then the cancellation or
 /// exit-code suffix and the truncation notice.
+#[must_use]
 pub fn bash_output_to_text(
     output: &str,
     exit_code: Option<i64>,
@@ -114,6 +117,7 @@ pub fn bash_output_to_text(
 /// The tail truncation the side pane applies to a run's raw output before
 /// seeding a follow-up (TS `truncateTail`): the last `TAIL_MAX_LINES`
 /// lines within `TAIL_MAX_BYTES` win.
+#[must_use]
 pub fn truncate_tail(content: &str) -> (String, bool) {
     let total_bytes = content.len();
     let lines: Vec<&str> = content.split('\n').collect();

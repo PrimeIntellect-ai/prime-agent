@@ -6,7 +6,7 @@
 //! segments snap by their visible-width midpoint — a click past the
 //! middle of a wide cell or an atomic paste marker lands after it.
 
-use super::*;
+use super::{Editor, Segment};
 use crate::width::str_width;
 
 /// One source-line char span, `[from, to)`.

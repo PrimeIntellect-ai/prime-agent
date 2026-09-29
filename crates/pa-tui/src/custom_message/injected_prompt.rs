@@ -198,7 +198,7 @@ pub(crate) fn render_injected_prompt(
 ) -> Vec<Line> {
     let mut out = vec![spacer()];
     let header = prompt_header(row, detail, theme);
-    out.extend(text_rows(header, width));
+    out.extend(text_rows(&header, width));
     if let Some(body) = expanded_prompt_body(row, detail) {
         out.extend(markdown_rows(
             body,
@@ -226,7 +226,7 @@ fn prompt_header(row: &InjectedPromptRow, detail: Detail, theme: &Theme) -> Line
             Span::raw(" "),
             Span::styled("Heartbeat prompt".to_string(), muted),
             Span::styled(" \u{b7} ".to_string(), dim),
-            Span::styled(heartbeat_schedule(schedule), muted),
+            Span::styled(heartbeat_schedule(schedule.as_deref()), muted),
         ],
         InjectedPromptKind::Goal { kind, objective } => {
             let mut spans: Line = vec![Span::styled(goal_label(kind.as_deref()), muted)];
@@ -318,8 +318,8 @@ fn expanded_prompt_body(row: &InjectedPromptRow, detail: Detail) -> Option<&str>
 /// schedule shows as `scheduled` (the `prompt` compact form), every other
 /// expression as `every <expression>` (a leading case-insensitive `every`
 /// plus whitespace stripped from the stored expression first).
-fn heartbeat_schedule(schedule: &Option<String>) -> String {
-    let trimmed = schedule.as_deref().map_or("", str::trim);
+fn heartbeat_schedule(schedule: Option<&str>) -> String {
+    let trimmed = schedule.map_or("", str::trim);
     let compact = if trimmed.is_empty() {
         "prompt"
     } else if trimmed.get(..5).is_some_and(|prefix| {
@@ -415,8 +415,8 @@ mod tests {
         row.iter().map(|s| s.content.as_str()).collect()
     }
 
-    fn decoded_row(value: serde_json::Value) -> InjectedPromptRow {
-        let entry = super::super::custom_message_entries(&value)
+    fn decoded_row(value: &serde_json::Value) -> InjectedPromptRow {
+        let entry = super::super::custom_message_entries(value)
             .pop()
             .expect("one entry");
         match entry {
@@ -427,24 +427,15 @@ mod tests {
 
     #[test]
     fn heartbeat_header_and_schedule_forms() {
-        assert_eq!(
-            heartbeat_schedule(&Some("every 10m".to_string())),
-            "every 10m"
-        );
-        assert_eq!(heartbeat_schedule(&Some("10m".to_string())), "every 10m");
+        assert_eq!(heartbeat_schedule(Some("every 10m")), "every 10m");
+        assert_eq!(heartbeat_schedule(Some("10m")), "every 10m");
         // TS `/^every\s+/i`: case-insensitive with any whitespace run;
         // `every` without whitespace stays part of the expression.
-        assert_eq!(
-            heartbeat_schedule(&Some("EVERY  10m".to_string())),
-            "every 10m"
-        );
-        assert_eq!(
-            heartbeat_schedule(&Some("every10m".to_string())),
-            "every every10m"
-        );
-        assert_eq!(heartbeat_schedule(&Some("prompt".to_string())), "scheduled");
-        assert_eq!(heartbeat_schedule(&Some("  ".to_string())), "scheduled");
-        assert_eq!(heartbeat_schedule(&None), "scheduled");
+        assert_eq!(heartbeat_schedule(Some("EVERY  10m")), "every 10m");
+        assert_eq!(heartbeat_schedule(Some("every10m")), "every every10m");
+        assert_eq!(heartbeat_schedule(Some("prompt")), "scheduled");
+        assert_eq!(heartbeat_schedule(Some("  ")), "scheduled");
+        assert_eq!(heartbeat_schedule(None), "scheduled");
         let row = InjectedPromptRow {
             kind: InjectedPromptKind::Heartbeat {
                 schedule: Some("every 10m".to_string()),
@@ -589,7 +580,7 @@ mod tests {
     #[test]
     fn rlm_child_rows_decode_the_outcome_and_name() {
         // The failure row: Failed outcome, the error as the body.
-        let row = decoded_row(serde_json::json!({
+        let row = decoded_row(&serde_json::json!({
             "role": "custom",
             "customType": RLM_CHILD_FAILURE_CUSTOM_TYPE,
             "content": "[child-failed child:boom-worker]\n\nthe model stream died",
@@ -605,7 +596,7 @@ mod tests {
         );
         assert_eq!(row.body.as_deref(), Some("the model stream died"));
         // The cancelled terminal notice: Warning outcome, the reason body.
-        let row = decoded_row(serde_json::json!({
+        let row = decoded_row(&serde_json::json!({
             "role": "custom",
             "customType": RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
             "content": "[child-exited: cancelled child:cancel-worker]\n\nDeleted by parent",
@@ -625,7 +616,7 @@ mod tests {
         assert_eq!(row.body.as_deref(), Some("Deleted by parent"));
         // The finished terminal notice: no body, no reply preview (the
         // last-assistant-text preview stays out of the row).
-        let row = decoded_row(serde_json::json!({
+        let row = decoded_row(&serde_json::json!({
             "role": "custom",
             "customType": RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
             "content": "[child-exited: no-reply child:lane]\n\nLast assistant text: done",
@@ -644,7 +635,7 @@ mod tests {
         );
         assert_eq!(row.body, None);
         // A cancellation without a reason stays header-only.
-        let row = decoded_row(serde_json::json!({
+        let row = decoded_row(&serde_json::json!({
             "role": "custom",
             "customType": RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
             "content": "[child-exited: cancelled child:quiet]",
@@ -660,7 +651,7 @@ mod tests {
     fn rlm_child_rows_fall_back_to_the_content_header() {
         // Pre-details wire rows: the name comes from the `child:<name>]`
         // content token, the reason from the content after the header.
-        let row = decoded_row(serde_json::json!({
+        let row = decoded_row(&serde_json::json!({
             "role": "custom",
             "customType": RLM_CHILD_FAILURE_CUSTOM_TYPE,
             "content": "[child-failed child:legacy-worker]\n\nspawn failed",

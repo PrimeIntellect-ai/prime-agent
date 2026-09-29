@@ -2,7 +2,10 @@
 //! shapes), the `event_to_update` fold (one `session_event` frame's event ->
 //! the transcript update), the loader-note partial decode, and the custom/
 //! text message helpers (moved with their concern).
-use super::*;
+use super::{
+    assistant_value_to_entries, queue_lane, queue_lane_indices, starting_from_actions, ChatEntry,
+    Value,
+};
 
 /// One live session event decoded for the transcript (the `event` field of
 /// `session_event` frames, matching the worker's event vocabulary).
@@ -463,6 +466,7 @@ fn custom_row_update(message: &Value) -> Option<TurnUpdate> {
 /// The transcript entries for one `custom`-role message: the custom-type
 /// dispatch lives in [`crate::custom_message::custom_message_entries`]
 /// (every entry type maps to its TS component).
+#[must_use]
 pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
     crate::custom_message::custom_message_entries(message)
 }
@@ -471,6 +475,7 @@ pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
 /// branch): the text blocks joined, or the `[image]` placeholder when the
 /// message carries content but no text (an image-only prompt), or `None`
 /// for a message with nothing to show.
+#[must_use]
 pub fn user_display_text(message: &Value) -> Option<String> {
     let text = message_text(message);
     if !text.is_empty() {

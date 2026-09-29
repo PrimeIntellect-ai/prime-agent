@@ -222,6 +222,7 @@ impl FlowCancel {
     }
 
     /// `true` once the driving pane exited.
+    #[must_use]
     pub fn cancelled(&self) -> bool {
         self.flag.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -270,6 +271,7 @@ pub struct AuthPanelHandle {
 impl AuthPanelHandle {
     /// Build the handle over one run's request channel (the session
     /// creates the pair; the loop owns the receiver).
+    #[must_use]
     pub fn new(tx: mpsc::UnboundedSender<AuthPanelRequest>) -> Self {
         AuthPanelHandle {
             tx,
@@ -278,18 +280,21 @@ impl AuthPanelHandle {
     }
 
     /// The flow's cancel state: `true` once the driving surface exited.
+    #[must_use]
     pub fn cancelled(&self) -> bool {
         self.cancel.cancelled()
     }
 
     /// The flow's cancel signal for the driving side (the pane marks it
     /// on exit; every handle clone shares it).
+    #[must_use]
     pub fn cancel_signal(&self) -> FlowCancel {
         self.cancel.clone()
     }
 
     /// The bare cancel flag (the #2790 codex login's shape): the
     /// same storage the [`FlowCancel`] arms — loads observe every mark.
+    #[must_use]
     pub fn cancel_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
         self.cancel.flag_arc()
     }
@@ -581,6 +586,7 @@ impl AuthPanel {
     /// Whether the team picker owns the panel (TS the selector is its own
     /// component: its Esc answers the picker and keeps the dialog
     /// mounted, so a session cancel unmounts every other state only).
+    #[must_use]
     pub fn team_picker_mounted(&self) -> bool {
         matches!(self.input, PanelInput::Teams { .. })
     }
@@ -588,23 +594,23 @@ impl AuthPanel {
     /// TS `showProgress`: the first line lands under the section title
     /// (the title renders only when the panel was still empty).
     /// One request-fold entry (the session's channel arm calls it).
-    pub fn push_progress(&mut self, message: String) {
+    pub fn push_progress(&mut self, message: &str) {
         if !self.content_open() {
             self.progress_open = true;
         }
         // The flow's lines can quote provider text: the same control
         // character hygiene every daemon-supplied row carries.
-        self.progress.push(scrub_controls(&message));
+        self.progress.push(scrub_controls(message));
     }
 
     /// TS `showWaiting` (the polling device flow's status): the accent
     /// line replaces any earlier waiting status — one line, the flow's
     /// current state. One request-fold entry (the session's channel arm
     /// calls it).
-    pub fn push_waiting(&mut self, message: String) {
+    pub fn push_waiting(&mut self, message: &str) {
         // The flow's line can quote provider text: the same control
         // character hygiene every daemon-supplied row carries.
-        self.waiting = Some(scrub_controls(&message));
+        self.waiting = Some(scrub_controls(message));
     }
 
     /// Whether any content block has landed (TS `contentContainer.children
@@ -639,14 +645,14 @@ impl AuthPanel {
     /// entry (the session's channel arm calls it).
     pub fn mount_paste(
         &mut self,
-        prompt: String,
+        prompt: &str,
         tone: PastePromptTone,
         style: PasteStyle,
         allow_empty: bool,
         reply: oneshot::Sender<Option<String>>,
     ) {
         self.input = PanelInput::Paste {
-            prompt: scrub_controls(&prompt),
+            prompt: scrub_controls(prompt),
             tone,
             style,
             allow_empty,

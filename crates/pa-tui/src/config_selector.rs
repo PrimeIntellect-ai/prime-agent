@@ -91,12 +91,14 @@ pub struct ConfigSelector {
 impl ConfigSelector {
     /// Build the resource-configuration selector from flat rows (group,
     /// subgroup, item order).
+    #[must_use]
     pub fn new(rows: Vec<SelectorRow>) -> Self {
         Self::with_kind(rows, SelectorKind::ResourceConfig)
     }
 
     /// Build the selector for a specific surface (`/effort` uses
     /// [`SelectorKind::Effort`]).
+    #[must_use]
     pub fn with_kind(rows: Vec<SelectorRow>, kind: SelectorKind) -> Self {
         let filtered = (0..rows.len()).collect();
         let mut selector = ConfigSelector {
@@ -111,11 +113,13 @@ impl ConfigSelector {
     }
 
     /// The selector's frame kind.
+    #[must_use]
     pub fn kind(&self) -> SelectorKind {
         self.kind
     }
 
     /// The current filter query.
+    #[must_use]
     pub fn query(&self) -> &str {
         &self.query
     }
@@ -129,6 +133,7 @@ impl ConfigSelector {
     }
 
     /// The checked state of one item row.
+    #[must_use]
     pub fn checked(&self, key: &str) -> Option<bool> {
         self.rows.iter().find_map(|row| match row {
             SelectorRow::Item {
@@ -170,6 +175,7 @@ impl ConfigSelector {
 
     /// The filtered positions the list window renders (`list_rows` walks
     /// exactly this window; the click surface's item-row span).
+    #[must_use]
     pub fn visible_window(&self) -> (usize, usize) {
         if self.filtered.is_empty() {
             return (0, 0);
@@ -444,6 +450,7 @@ impl ConfigSelector {
 
     /// The full modal frame: the title, the shared bordered search field,
     /// the grouped list, and the key hint (the shared menu-panel grammar).
+    #[must_use]
     pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         let mut lines: Vec<Line> = vec![Vec::new(), self.header_line(theme), Vec::new()];
         lines.extend(crate::menu_panel::search_field_lines(
@@ -526,6 +533,7 @@ pub struct ConfigSelectorOptions {
 }
 
 impl ConfigSelectorOptions {
+    #[must_use]
     pub fn new(theme: Theme, keybindings: KeybindingsManager) -> Self {
         ConfigSelectorOptions {
             theme,

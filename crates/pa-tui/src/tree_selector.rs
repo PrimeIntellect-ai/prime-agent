@@ -79,7 +79,7 @@ impl TreeSelector {
             .and_then(Value::as_str)
             .map(str::to_string);
         let max_visible_lines = (terminal_rows as usize / 2).max(5);
-        let list = TreeList::new(tree, leaf_id, max_visible_lines, None, initial_filter_mode);
+        let list = TreeList::new(&tree, leaf_id, max_visible_lines, None, initial_filter_mode);
         Some(TreeSelector {
             list,
             mode: Mode::Tree,
@@ -89,6 +89,7 @@ impl TreeSelector {
 
     /// The current leaf id (the caller needs it for the "already at this
     /// point" no-op check).
+    #[must_use]
     pub fn current_leaf_id(&self) -> Option<&str> {
         self.list.current_leaf_id()
     }
@@ -239,6 +240,7 @@ impl TreeSelector {
 
     /// The full pane (TS `TreeSelectorComponent.render`): spacers, borders,
     /// title, hints, search line, the tree, and any active input.
+    #[must_use]
     pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         let border = || vec![theme.fg_span(ThemeColor::Border, "─".repeat(width.max(1)))];
         let mut lines: Vec<Line> = Vec::new();
@@ -325,7 +327,7 @@ impl TreeSelector {
                 match &self.mode {
                     Mode::Summarize { selected, .. } => {
                         lines.push(Vec::new());
-                        lines.extend(render_choice(theme, width, kb, selected));
+                        lines.extend(render_choice(theme, width, kb, *selected));
                     }
                     Mode::CustomPrompt { input, .. } => {
                         lines.push(Vec::new());
@@ -406,7 +408,7 @@ fn render_choice(
     theme: &Theme,
     width: usize,
     kb: &KeybindingsManager,
-    selected: &usize,
+    selected: usize,
 ) -> Vec<Line> {
     let mut lines = vec![truncate_line(
         &vec![theme.fg_span(ThemeColor::Muted, "  Summarize branch?".to_string())],
@@ -414,7 +416,7 @@ fn render_choice(
         "",
     )];
     for (index, option) in SUMMARIZE_OPTIONS.iter().enumerate() {
-        let row = if index == *selected {
+        let row = if index == selected {
             vec![
                 theme.fg_span(ThemeColor::Accent, "› ".to_string()),
                 crate::Span::raw(option.to_string()),

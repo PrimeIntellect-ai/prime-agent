@@ -2,7 +2,15 @@
 //! (the session selection's open, the §10 reattach, the attach fold,
 //! and the transcript rebuild it feeds), the stats refresh, and the
 //! detach/exit request helpers.
-use super::*;
+use super::{
+    attach_data_from_response, create_session, mpsc, reconstruct, resume_hint_from_stats,
+    ActivityUpdates, AgentView, BTreeMap, ChatEntry, CompactionAbortNote, Context, DaemonClient,
+    DaemonCommand, DockFold, Duration, GoalView, HashSet, InteractiveOptions, LoaderTokenTracker,
+    Map, MessageBlock, ModelCatalogUpdate, PromptOrder, PromptSubmitNote, ReattachOutcome,
+    RebuildKind, RecoveryKind, ReloadNote, Result, ResyncBash, SessionSelection, SessionUi,
+    ShareNote, UpdateNote, Value, EXIT_DETACH_TIMEOUT_MS, EXIT_STATS_TIMEOUT_MS,
+    UI_REQUEST_TIMEOUT_MS,
+};
 
 impl SessionUi {
     /// Create/attach per the session selection and return the live state.
@@ -268,7 +276,7 @@ impl SessionUi {
         // Flush the attach snapshot BEFORE the banner lands: `rebuild_view`
         // replaces the transcript from the snapshot, so the banner must come
         // after it to survive the rebuild (§10.5's visible end state).
-        self.rebuild_view(view, RebuildKind::Resync);
+        self.rebuild_view(view, &RebuildKind::Resync);
         match kind {
             RecoveryKind::Update => match complete {
                 Some(false) => view.push_entry(crate::chat::ChatEntry::Status {
@@ -582,7 +590,7 @@ impl SessionUi {
 
     /// Fold the pending snapshot into the view (fresh transcript, footer
     /// labels). Called after attach and after every session switch.
-    pub(crate) fn rebuild_view(&mut self, view: &mut AgentView, kind: RebuildKind) {
+    pub(crate) fn rebuild_view(&mut self, view: &mut AgentView, kind: &RebuildKind) {
         let resync_bash = self.resync_bash.take();
         // The held cards' fate diverges by rebuild: a rebind drops them
         // with the old transcript (TS `resetCurrentSessionRenderState`), a
@@ -702,7 +710,7 @@ impl SessionUi {
                             // TS flushes inside the active-component branch:
                             // a side run (no mounted card) never flushes.
                             if !resync.snap_streaming {
-                                self.flush_pending_bash(view);
+                                Self::flush_pending_bash(view);
                             }
                         }
                         if self.side_bash.take().is_some() {

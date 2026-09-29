@@ -42,6 +42,7 @@ impl std::error::Error for RequestRejected {}
 
 /// Whether the error is (or wraps) a daemon refusal, not a transport
 /// failure: the daemon answered and refused the request itself.
+#[must_use]
 pub fn is_daemon_rejection(error: &anyhow::Error) -> bool {
     error
         .chain()
@@ -52,6 +53,7 @@ pub fn is_daemon_rejection(error: &anyhow::Error) -> bool {
 /// `isDaemonUpdateRestartingError`): a typed `update_restarting`
 /// rejection from a current daemon, or the exact-message fallback that
 /// also recognizes older daemons rejecting with the same plain string.
+#[must_use]
 pub fn is_update_restarting_rejection(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause
@@ -69,6 +71,7 @@ pub fn is_update_restarting_rejection(error: &anyhow::Error) -> bool {
 /// Nms waiting for the Prime Agent daemon (response|handshake)"): a
 /// transient under-load failure, not a protocol error — the caller
 /// degrades (retry or surface the queued state) instead of exiting.
+#[must_use]
 pub fn is_daemon_timeout(error: &anyhow::Error) -> bool {
     // Case-insensitive: the TUI's own bounded requests say
     // "timed out after Nms ...", the daemon client's hello/connect paths
@@ -90,6 +93,7 @@ pub fn is_daemon_timeout(error: &anyhow::Error) -> bool {
 /// request at all (a timeout, or a closed connection): a transient the
 /// submit path surfaces without exiting — the pane stays mounted for the
 /// reconnect driver to restore the connection.
+#[must_use]
 pub fn is_daemon_unreachable(error: &anyhow::Error) -> bool {
     is_daemon_timeout(error)
         || error.chain().any(|cause| {
@@ -121,6 +125,7 @@ pub(super) fn response_data_or_error(name: &str, response: DaemonResponse) -> Re
 /// daemon's `set_model` on a model whose provider is not signed in): the
 /// provider id the client's sign-in flow should serve. `None` for every
 /// other refusal and transport failure.
+#[must_use]
 pub fn rejected_provider_unauthenticated(error: &anyhow::Error) -> Option<String> {
     error
         .chain()

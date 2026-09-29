@@ -11,7 +11,7 @@ fn forest_roster(count: usize) -> Vec<serde_json::Value> {
             roster_entry(
                 &format!("s{n}"),
                 "idle",
-                serde_json::json!({
+                &serde_json::json!({
                     "sessionId": format!("s{n}"), "lifecycle": "live",
                     "activeSessionId": format!("s{n}-live"),
                     "sessionFile": format!("/x/s{n}.jsonl"),
@@ -81,8 +81,8 @@ fn edge_jump_ends_the_entry_anchor_wait() {
     let mut mode = mode_with_anchor(
         Some("nowhere"),
         vec![
-            roster_entry("s1", "idle", parent_summary("s1")),
-            roster_entry("s2", "idle", parent_summary("s2")),
+            roster_entry("s1", "idle", &parent_summary("s1")),
+            roster_entry("s2", "idle", &parent_summary("s2")),
         ],
     );
     assert!(mode.anchor_selection_pending);

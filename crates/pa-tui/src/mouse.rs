@@ -113,7 +113,7 @@ const WHEEL_SCROLL_LINES: isize = 3;
 /// classes the TS dispatch and the hover branch reason about. `None`
 /// for other buttons: those reports are consumed at the source without a
 /// dispatch.
-pub(crate) fn from_crossterm(event: &crossterm::event::MouseEvent) -> Option<MouseEvent> {
+pub(crate) fn from_crossterm(event: crossterm::event::MouseEvent) -> Option<MouseEvent> {
     let (button, press, motion) = match event.kind {
         crossterm::event::MouseEventKind::ScrollUp => (WHEEL_UP, true, false),
         crossterm::event::MouseEventKind::ScrollDown => (WHEEL_DOWN, true, false),
@@ -165,7 +165,7 @@ mod tests {
             row: 8,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
-        let report = from_crossterm(&event).expect("the hover motion maps through");
+        let report = from_crossterm(event).expect("the hover motion maps through");
         assert_eq!(report.button, BUTTON_NONE);
         assert!(report.motion);
         assert!(report.press);
@@ -260,7 +260,7 @@ mod tests {
             row: 4,
             modifiers: crossterm::event::KeyModifiers::SHIFT,
         };
-        let event = from_crossterm(&up).expect("wheel-up event");
+        let event = from_crossterm(up).expect("wheel-up event");
         assert_eq!(event.button, WHEEL_UP);
         assert_eq!((event.x, event.y), (20, 5));
         assert!(event.press);
@@ -273,7 +273,7 @@ mod tests {
             row: 0,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
-        let event = from_crossterm(&down).expect("wheel-down event");
+        let event = from_crossterm(down).expect("wheel-down event");
         assert_eq!(event.button, WHEEL_DOWN);
         assert_eq!(wheel_scroll_delta(&event), Some(3));
     }
@@ -286,7 +286,7 @@ mod tests {
             row: 2,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
-        let event = from_crossterm(&click).expect("left press");
+        let event = from_crossterm(click).expect("left press");
         assert_eq!(event.button, BUTTON_LEFT);
         assert!(event.press);
         assert!(!event.motion);
@@ -298,7 +298,7 @@ mod tests {
             row: 2,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
-        let event = from_crossterm(&drag).expect("left drag");
+        let event = from_crossterm(drag).expect("left drag");
         assert!(event.motion);
 
         let release = crossterm::event::MouseEvent {
@@ -307,7 +307,7 @@ mod tests {
             row: 2,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
-        let event = from_crossterm(&release).expect("left release");
+        let event = from_crossterm(release).expect("left release");
         assert!(!event.press);
 
         let other = crossterm::event::MouseEvent {
@@ -316,7 +316,7 @@ mod tests {
             row: 1,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
-        assert_eq!(from_crossterm(&other), None);
+        assert_eq!(from_crossterm(other), None);
     }
 
     #[test]

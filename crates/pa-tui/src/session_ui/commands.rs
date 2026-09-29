@@ -2,7 +2,12 @@
 //! (`handle_slash`), the builtin client-command dispatch tail, the
 //! command-catalog refresh/fold, and the connection-state read the
 //! commands share.
-use super::*;
+use super::{
+    create_session, effort_picker, info_commands, terminal_columns, AgentView, AuthSelectorKind,
+    ChatEntry, CommandCatalogUpdate, DaemonCommand, DockFold, Duration, InfoContent, Map,
+    PendingConfirm, RebuildKind, Result, SessionUi, SlashCommandExecution, SlashCommandRegistry,
+    StatusKind, SubmitBehavior, Value, UI_REQUEST_TIMEOUT_MS,
+};
 
 impl SessionUi {
     /// Slash-command dispatch (the TS interactive submission ladder reduced
@@ -81,7 +86,7 @@ impl SessionUi {
             // bails out before fuzzy matching). Close typos get the exact TS
             // error; everything else passes through to the model.
             if name.chars().count() > 64 {
-                return self.send_prompt(text, behavior, view).await;
+                return self.send_prompt(text, behavior, view);
             }
             let candidates = registry.suggestion_candidates();
             return match pa_types::slash_commands::find_slash_command_suggestion(&name, &candidates)
@@ -93,7 +98,7 @@ impl SessionUi {
                     );
                     Ok(())
                 }
-                None => self.send_prompt(text, behavior, view).await,
+                None => self.send_prompt(text, behavior, view),
             };
         };
 
@@ -101,7 +106,7 @@ impl SessionUi {
             .get(resolved.name)
             .expect("resolved name is builtin");
         match command.execution {
-            SlashCommandExecution::Session => self.send_prompt(text, behavior, view).await,
+            SlashCommandExecution::Session => self.send_prompt(text, behavior, view),
             SlashCommandExecution::Client => {
                 self.dispatch_client_command(&resolved, text, view).await
             }
@@ -131,7 +136,7 @@ impl SessionUi {
                 // the chrome, or the rebind would ride the session being
                 // left's own cost and subagent aggregate.
                 self.refresh_stats().await;
-                self.rebuild_view(view, RebuildKind::Rebind);
+                self.rebuild_view(view, &RebuildKind::Rebind);
                 self.note(&format!("started session {id}"), view);
                 self.track_feature_outcome("new", "completed", None);
             }
@@ -808,7 +813,7 @@ impl SessionUi {
                     );
                     return Ok(());
                 }
-                self.handle_reload_command(view).await?;
+                self.handle_reload_command(view)?;
             }
             // `/heartbeats` (TS `showHeartbeatManager`): the inline
             // management view over the session-scoped heartbeat catalog —

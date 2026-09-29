@@ -4,10 +4,10 @@
 //! queue-mode mapping, and the session-agent constructor.
 use super::{
     aborted_message, drop_trailing_assistant, json, json_round_trip, map_thinking_level,
-    retry_event_to_engine_event, AbortController, AgentSessionEngine, AutoCompactionRun,
-    BoundaryRun, DaemonAllowlist, EngineEvent, GoalBoundary, Model, OverflowArmRun, ProviderTarget,
-    QuotaParkState, StopReason, TurnAdmission, TurnOnce, TurnPrompt, TurnResult, Value,
-    QUOTA_WAKE_MAX_RETRIES, QUOTA_WAKE_RETRY_DELAY_MS,
+    retry_event_to_engine_event, session_wire_value, AbortController, AgentSessionEngine,
+    AssistantSnapshot, AutoCompactionRun, BoundaryRun, DaemonAllowlist, EngineEvent, GoalBoundary,
+    Model, OverflowArmRun, ProviderTarget, QuotaParkState, StopReason, TurnAdmission, TurnOnce,
+    TurnPrompt, TurnResult, Value, QUOTA_WAKE_MAX_RETRIES, QUOTA_WAKE_RETRY_DELAY_MS,
 };
 
 // The turn state machine split into its concern children at the same tree

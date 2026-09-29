@@ -3,7 +3,12 @@
 //! fold-back), the prompt stash's capture and restore, the side-question
 //! turns, and the pasted-image registry.
 
-use super::*;
+use super::{
+    anyhow, collect_marked_images, evict_images_to_budget, format_image_marker, image_marker_ids,
+    mpsc, AgentView, DaemonClient, DaemonCommand, DockFold, Duration, LoadedImage, Map,
+    PromptStash, RebuildKind, Result, SessionUi, SlashCommandRegistry, StatusKind, Value,
+    UI_REQUEST_TIMEOUT_MS,
+};
 /// How a submitted prompt travels to the session (TS `streamingBehavior`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SubmitBehavior {
@@ -506,7 +511,7 @@ impl SessionUi {
         if text.starts_with('/') {
             return self.handle_slash(text, behavior, view).await;
         }
-        self.send_prompt(text, behavior, view).await
+        self.send_prompt(text, behavior, view)
     }
 
     // ------------------------------------------------------------------
@@ -628,7 +633,7 @@ impl SessionUi {
     /// Close the side-question pane (TS `clearSideQuestion`): the active
     /// run aborts fire-and-forget (the daemon emits the cancelled event,
     /// which finds the pane already gone).
-    pub(super) async fn clear_side_question(&mut self, abort: bool, view: &mut AgentView) {
+    pub(super) fn clear_side_question(&mut self, abort: bool, view: &mut AgentView) {
         // A side-conversation bash run dies with its pane: its `bash_*`
         // events may still be in flight (even bash_start), so they are
         // swallowed until its bash_end, and a run we observed starting
@@ -722,7 +727,7 @@ impl SessionUi {
         self.dirty = true;
     }
 
-    pub(super) async fn send_prompt(
+    pub(super) fn send_prompt(
         &mut self,
         text: &str,
         behavior: SubmitBehavior,
@@ -731,7 +736,7 @@ impl SessionUi {
         // A new prompt settles the held bash cards into the transcript
         // first (TS `onSubmit` flushes `pendingBashComponents` before the
         // prompt travels).
-        self.flush_pending_bash(view);
+        Self::flush_pending_bash(view);
         if let Some(error) = self.reconnection_failed.clone() {
             // The re-attach window expired (TS terminal close): the session
             // connection is closed, so nothing dispatches. The error row
@@ -1020,7 +1025,7 @@ impl SessionUi {
                         // the replayed prompt renders on top of it. The
                         // replay keeps the submit's generation and spends
                         // the rebind budget.
-                        self.rebuild_view(view, RebuildKind::Rebind);
+                        self.rebuild_view(view, &RebuildKind::Rebind);
                         self.order_prompt_request(
                             note.text.clone(),
                             note.behavior,
