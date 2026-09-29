@@ -15,7 +15,6 @@
 // async test futures are stack-resident by shape - boxing a test
 // future for a lint tick is churn with no correctness gain.
 #![allow(clippy::large_futures, clippy::too_many_lines)]
-
 #![cfg(unix)]
 
 use std::fmt::Write as _;
