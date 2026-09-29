@@ -262,6 +262,17 @@ impl AgentSessionEngine {
     /// exactly like the with-args invocation) and the turn admits with
     /// the model asked what the user wants.
     pub(crate) fn expand_skill_submission(&self, text: &str) -> String {
+        // The floor keys on the ORIGINAL invocation's shape (a `/skill:`
+        // command with no argument text), not on the expanded block's
+        // parse: a skill body can itself contain a close tag plus a
+        // `\n\n` tail that parses as a trailing user message
+        // (`parse_skill_block`'s non-greedy body scan), which would
+        // misread the bare invocation as carrying args. The parse below
+        // then only answers whether the expansion produced a block at
+        // all — an unknown skill or a build failure keeps the raw
+        // command text, and a with-args invocation keeps the user's args.
+        let bare_invocation = pa_types::slash_commands::parse_slash_command(text)
+            .is_some_and(|(name, args)| name.starts_with("skill:") && args.trim().is_empty());
         let Ok(model) = self.resolve_model() else {
             return text.to_string();
         };
@@ -276,15 +287,10 @@ impl AgentSessionEngine {
                 None => text.to_string(),
             }
         });
-        // The floor applies only to a parsed skill block without a user
-        // message: an unknown skill or a build failure keeps the raw
-        // command text, and a with-args invocation keeps the user's args.
-        match pa_types::skill_blocks::parse_skill_block(&expanded) {
-            Some(block) if block.user_message.is_none() => {
-                format!("{expanded}\n\n{BARE_SKILL_INVOCATION_INSTRUCTION}")
-            }
-            _ => expanded,
+        if bare_invocation && pa_types::skill_blocks::parse_skill_block(&expanded).is_some() {
+            return format!("{expanded}\n\n{BARE_SKILL_INVOCATION_INSTRUCTION}");
         }
+        expanded
     }
 
     /// The async build of the core session (the same funnel as

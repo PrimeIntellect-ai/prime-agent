@@ -641,6 +641,34 @@ fn a_bare_skill_submit_shows_the_notice_and_never_sends() {
     );
 }
 
+/// The recovery is ONE step (the restored draft keeps the argument
+/// position): after the guard's notice, typing the request and
+/// submitting sends the command WITH the request — the trailing space
+/// survives, so the keystrokes become args instead of gluing onto the
+/// command name.
+#[test]
+fn the_bare_skill_guard_restores_into_the_argument_position() {
+    let (frames, prompts) = run_plan_with_prompts(vec![
+        HeadlessStep::WaitMs(300),
+        HeadlessStep::Type("/skill:web".to_string()),
+        HeadlessStep::SettleIdle,
+        HeadlessStep::Key(enter()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitMs(150),
+        // The notice showed; the user types the request straight into the
+        // restored draft and submits.
+        HeadlessStep::Type("find rust tuis".to_string()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitMs(300),
+    ]);
+    assert_eq!(prompts.len(), 1, "one prompt dispatched: {prompts:?}");
+    assert_eq!(
+        prompts[0].get("message").and_then(Value::as_str),
+        Some("/skill:web-search find rust tuis"),
+        "the typed request became the command's args: {prompts:?}"
+    );
+}
+
 /// A completed skill invocation with the request typed after it sends
 /// normally: the completion lands in the argument position (the
 /// trailing space), the typed request follows, and the daemon receives

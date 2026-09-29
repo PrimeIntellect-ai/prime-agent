@@ -36,7 +36,11 @@ impl SessionUi {
         // starting). The draft restores into the editor, the notice
         // names the fix, and the user stays put to type the request.
         if name.starts_with("skill:") && args.trim().is_empty() {
-            view.editor.set_text(text);
+            // The draft restores INTO THE ARGUMENT POSITION (the trailing
+            // space the completion added survives the round trip): the
+            // next keystrokes become the request instead of gluing onto
+            // the command name, so the recovery flow is one step.
+            view.editor.set_text(&format!("{text} "));
             self.note(
                 "add your request after the skill, e.g. /skill:prime-agent-release make a release of PR #2731",
                 view,
