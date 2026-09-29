@@ -111,7 +111,7 @@ impl AgentView {
     ) -> Vec<Line> {
         #[cfg(test)]
         layout::ENTRY_RENDERS.with(|count| count.set(count.get() + 1));
-        let detail = self.detail;
+        let detail = self.entry_detail(index);
         match entry {
             ChatEntry::Status { text, kind } => {
                 let style = match kind {

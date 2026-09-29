@@ -228,7 +228,7 @@ impl AgentView {
         // the state is a screen coordinate, the layout moves).
         if let Some((row, col)) = self.hover_pos {
             match self.click_target_at(row, col) {
-                Some(click::ClickAction::ToggleCardExpansion) => {
+                Some(click::ClickAction::ToggleCardExpansion(_)) => {
                     if let Some(line) = frame.get_mut(row) {
                         apply_hover_affordance(line, &self.theme);
                     }
