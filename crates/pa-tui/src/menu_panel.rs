@@ -275,6 +275,12 @@ pub(crate) fn fill_row(row: Line, selected: bool, width: usize, style: Style) ->
         .collect()
 }
 
+/// The full-width horizontal rule (TS `MenuSearchInput`'s inline-mode
+/// border rows): the subtle border grammar every menu bar carries.
+pub(crate) fn rule_row(theme: &Theme, width: usize) -> Line {
+    vec![theme.fg_span(ThemeColor::BorderMuted, "\u{2500}".repeat(width.max(1)))]
+}
+
 /// The inline search field (TS `MenuSearchInput.render`, inline mode): a
 /// full-width border rule, the field row, a border rule. The field is the
 /// single-line input with its `"> "` prompt; an empty field shows the dim
@@ -287,9 +293,8 @@ pub(crate) fn search_field_lines(
     focused: bool,
     placeholder: &str,
 ) -> Vec<Line> {
-    let border = || vec![theme.fg_span(ThemeColor::BorderMuted, "\u{2500}".repeat(width.max(1)))];
     let field = render_input_field(theme, width, value, cursor, focused, placeholder);
-    vec![border(), field, border()]
+    vec![rule_row(theme, width), field, rule_row(theme, width)]
 }
 
 /// The field row: `" " + "> " + <input render at width-2>` (TS
