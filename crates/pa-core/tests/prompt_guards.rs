@@ -171,7 +171,12 @@ fn prompt_token_for_host_request(request: &str) -> Option<String> {
 /// Kernel-side programmatic tools implemented by the vendored
 /// `prime-agent-runtime` package (generic MCP calls). Update together with
 /// the runtime sidecar.
-const KERNEL_LOCAL_TOKENS: &[&str] = &["mcp.list_tools", "mcp.call_tool"];
+const KERNEL_LOCAL_TOKENS: &[&str] = &[
+    "mcp.list_tools",
+    "mcp.call_tool",
+    "mcp.search_tools",
+    "mcp.describe_tool",
+];
 
 /// The harness-state API of the vendored runtime (`rlm.harness` CRUD and
 /// `rlm.get_harness_state`). Update together with the runtime sidecar.
@@ -489,4 +494,103 @@ fn core_layer_documents_the_real_tool_surface() {
              document it: update prompts/layers/core.md"
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// Packaged-set parity (TS packages/coding-agent/skills)
+// ---------------------------------------------------------------------
+
+/// The packaged skill set at TS tip `f62dae4d0`
+/// (`packages/coding-agent/skills/`): 12 skills — the generic `mcp` doc
+/// skill in, the per-service linear/notion pair out (TS removed theirs
+/// when the generic MCP surface landed).
+const TS_PACKAGED_SKILL_SET: &[&str] = &[
+    "agent-message",
+    "agent-observe",
+    "attach-image",
+    "compact",
+    "edit",
+    "goal",
+    "mcp",
+    "prime-intellect",
+    "refine",
+    "rlm-heartbeat",
+    "skill-creator",
+    "websearch",
+];
+
+/// The bundled skills directory matches the TS packaged set name-for-name:
+/// the generic `mcp` skill is present and markdown-only, and the retired
+/// per-service pair (linear/notion) is gone.
+#[test]
+fn bundled_skills_match_the_ts_packaged_set() {
+    let skills = sorted_bundled_skills();
+    let names: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
+    let mut expected = TS_PACKAGED_SKILL_SET.to_vec();
+    expected.sort_unstable();
+    assert_eq!(
+        names, expected,
+        "the packaged skill set must match the TS packaged set"
+    );
+    assert!(
+        !names.contains(&"linear") && !names.contains(&"notion"),
+        "the per-service MCP skills retired with the generic mcp skill"
+    );
+    let mcp_skill = skills
+        .iter()
+        .find(|skill| skill.name == "mcp")
+        .expect("the generic mcp skill is packaged");
+    assert!(
+        mcp_skill.python.is_none(),
+        "the mcp skill is documentation for the pre-imported runtime module, not a Python package"
+    );
+    assert_eq!(
+        mcp_skill.description,
+        "Use external MCP services generically from Python - search the supported-service catalog, inspect the user's connections, discover live tool schemas, and call tools on any connection (Notion, Linear, Slack, and the rest of the catalog) without per-service packages."
+    );
+}
+
+/// The generic mcp skill loads through the normal markdown discovery and
+/// renders in the `<available_skills>` inventory exactly like any other
+/// markdown skill: the `[skill name location]`-style XML the TS
+/// `formatSkillsForPrompt` emits, without a `python_import` line.
+#[test]
+fn generic_mcp_skill_renders_in_the_prompt_inventory() {
+    let mut options = BuildSystemPromptOptions {
+        cwd: "/w".to_string(),
+        messages_path: Some("/log.jsonl".to_string()),
+        model: Some("mock/mock-1"),
+        skills: sorted_bundled_skills(),
+        selected_tools: Some(vec!["ipython"]),
+        ..Default::default()
+    };
+    let breakdown = system_prompt_breakdown(&options);
+    let inventory = breakdown
+        .segments
+        .iter()
+        .find(|segment| {
+            matches!(segment.kind, SegmentKind::Dynamic)
+                && segment.text.contains("<available_skills>")
+        })
+        .map(|segment| segment.text.clone())
+        .expect("the skills inventory segment renders");
+    assert!(inventory.contains("<name>mcp</name>"));
+    assert!(inventory.contains("<type>markdown</type>"));
+    let mcp_block_start = inventory
+        .find("<name>mcp</name>")
+        .expect("the mcp skill block");
+    let mcp_block_end = inventory[mcp_block_start..]
+        .find("</skill>")
+        .map_or(inventory.len(), |end| mcp_block_start + end);
+    let mcp_block = &inventory[mcp_block_start..mcp_block_end];
+    assert!(
+        !mcp_block.contains("python_import"),
+        "a markdown skill never carries a python_import line"
+    );
+    // The prompt documents the discovery surface the skill describes.
+    options.generic_mcp_servers = vec!["notion".into()];
+    let second = system_prompt_breakdown(&options);
+    assert!(second
+        .assembled
+        .contains("await mcp.list_tools(\"notion\")"));
 }
