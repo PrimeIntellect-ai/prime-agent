@@ -147,6 +147,11 @@ jobs:
             echo "::error::no continuous run on rust with a green 4-target build in the last 100 runs; refusing to cut a nightly off an unbuilt tip"
             exit 1
           fi
+          # The handoff contract: the compute step reads the resolved parent
+          # from this file (the steps exchange state through
+          # ${RUNNER_TEMP}/nightly, never shell memory) - the selection above
+          # validates it, this write persists it.
+          printf '%s\n' "${target_sha}" > "${out}/target-sha"
           # The rolling nightly release's beta.json: the published counter.
           if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/nightly" \
                | jq -e '[.assets[] | select(.name == "beta.json")][0].browser_download_url // empty' \
