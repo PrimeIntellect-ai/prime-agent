@@ -111,7 +111,10 @@ fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
             chunk(json!({}), Some("tool_calls")),
         ],
         1 => [
-            chunk(json!({"role": "assistant", "content": "turn complete"}), None),
+            chunk(
+                json!({"role": "assistant", "content": "turn complete"}),
+                None,
+            ),
             chunk(json!({}), Some("stop")),
         ],
         _ => [
@@ -389,7 +392,10 @@ fn a_blocking_bash_await_degrades_and_the_turn_completes_while_it_runs() {
 
     // Teardown: stop the session through the live supervisor so the worker
     // (and its kernel + the 9s sleeper) do not leak past the test.
-    client.request("k1", json!({ "type": "kill", "activeSessionId": active_id }));
+    client.request(
+        "k1",
+        json!({ "type": "kill", "activeSessionId": active_id }),
+    );
     drop(client);
     drop(supervisor);
 }
