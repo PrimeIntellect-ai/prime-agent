@@ -109,18 +109,44 @@ jobs:
           set -euo pipefail
           out="${RUNNER_TEMP}/nightly"
           mkdir -p "${out}"
-          # The newest SUCCESSFUL continuous run on the rust branch: its head
-          # commit is the nightly's parent (proof-by-construction that the
-          # parent built green; a red or in-flight tip is never shipped).
+          # The newest continuous run on rust whose BUILD actually ran green -
+          # not merely a successful conclusion. The staleness gate
+          # (continuous.yml, TS #2567) skips the build jobs on superseded
+          # pushes and the run still concludes success: such a commit was
+          # never built, and a nightly cut from it would tag an unproven tree
+          # (if release.yml's build then failed, the beta tag would exist
+          # with no promote and the exists-guard would stick the train). The
+          # parent selection therefore walks the successful runs newest
+          # first and accepts the first whose build-* jobs all completed
+          # green; run-level success is necessary but not sufficient
+          # evidence.
           if ! gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/continuous.yml/runs?branch=rust&per_page=100" \
-               | jq -e '[.workflow_runs[]
-                        | select(.status == "completed" and .conclusion == "success")][0].head_sha // empty' \
-               > "${out}/target-sha" 2>/dev/null || [ ! -s "${out}/target-sha" ]; then
+               | jq -e -r '[.workflow_runs[]
+                           | select(.status == "completed" and .conclusion == "success")]
+                          | sort_by(.run_number) | reverse | .[]
+                          | [.id, .head_sha] | @tsv' \
+               > "${out}/candidate-runs" 2>/dev/null || [ ! -s "${out}/candidate-runs" ]; then
             echo "::error::no successful continuous run on rust in the last 100 runs; refusing to cut a nightly off an unproven tip"
             exit 1
           fi
-          target_sha="$(tr -d '"' < "${out}/target-sha")"
-          echo "nightly parent: ${target_sha} (the newest successful continuous build on rust)"
+          target_sha=""
+          while IFS="$(printf '\t')" read -r run_id candidate_sha; do
+            [ -n "${run_id}" ] && [ -n "${candidate_sha}" ] || continue
+            jobs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs" 2>/dev/null || echo '{"jobs":[]}')"
+            read -r built total < <(printf '%s\n' "${jobs_json}" | jq -r \
+              '[.jobs[] | select(.name | startswith("build-"))]
+               | [(map(select(.conclusion == "success")) | length), length] | @tsv')
+            if [ "${total}" -ge 1 ] && [ "${built}" = "${total}" ]; then
+              target_sha="${candidate_sha}"
+              echo "nightly parent: ${target_sha} (continuous run ${run_id}: all ${total} build jobs green)"
+              break
+            fi
+            echo "continuous run ${run_id} (${candidate_sha}) concluded success but its builds did not run to green (${built}/${total}); looking further back"
+          done < "${out}/candidate-runs"
+          if [ -z "${target_sha}" ]; then
+            echo "::error::no continuous run on rust with a green 4-target build in the last 100 runs; refusing to cut a nightly off an unbuilt tip"
+            exit 1
+          fi
           # The rolling nightly release's beta.json: the published counter.
           if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/nightly" \
                | jq -e '[.assets[] | select(.name == "beta.json")][0].browser_download_url // empty' \
