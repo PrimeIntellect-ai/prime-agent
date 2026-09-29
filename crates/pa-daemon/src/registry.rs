@@ -291,10 +291,16 @@ impl ResidentWorker {
         epoch: u64,
         cmd_tx: tokio::sync::mpsc::Sender<WorkerRequest>,
     ) {
+        // The epoch recheck runs UNDER the channel lock: a stale connect
+        // that passed the pre-lock check while a newer connection was
+        // installing must never overwrite the newer channel (the
+        // check-then-act window between the liveness read and the mutex
+        // acquisition is exactly the race the guard exists for).
+        let mut guard = self.cmd_tx.lock().await;
         if !self.connection_is_current(epoch) {
             return;
         }
-        *self.cmd_tx.lock().await = Some(cmd_tx);
+        *guard = Some(cmd_tx);
     }
 
     /// A connection's pumps ended (worker death or socket close). Stale

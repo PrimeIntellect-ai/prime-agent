@@ -11,6 +11,9 @@ use super::*;
 /// the oracles can hold the handshake at exact points and read exactly
 /// what the supervisor put on the wire.
 struct FakeWorkerSocket {
+    // The listener is held (never used again) so the bound socket path
+    // stays owned by the test for the connection's whole lifetime; the
+    // listener itself is never read after the accept.
     #[allow(dead_code)]
     listener: Box<dyn pa_types::platform::transport::TransportListener>,
     read_half: Box<dyn pa_types::platform::transport::AsyncReadHalf>,
@@ -264,4 +267,77 @@ async fn a_mid_handshake_registration_cannot_kill_the_handshake() {
         resident.cmd_tx.lock().await.is_some(),
         "the answered handshake installs the channel for routing"
     );
+}
+
+/// The install guard's TOCTOU pin (the Macroscope HIGH finding on the
+/// first PR head): a stale connect that passed its epoch check before a
+/// newer connection installed must never overwrite the newer channel —
+/// the recheck happens under the channel lock, so the stale install is
+/// dropped and the newer channel stays routable.
+#[tokio::test]
+async fn a_stale_epoch_never_overwrites_the_installed_channel() {
+    let dir = std::env::temp_dir().join(format!("pa-install-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
+        "version": 2,
+        "workerId": "w-install",
+        "pid": 0,
+        "socketPath": "/tmp/none.sock",
+        "recoveryJournalPath": "/tmp/none.jsonl",
+        "supervisorSocketPath": "/tmp/none.sock",
+        "authenticationToken": "install-token",
+        "rootActiveSessionId": "none",
+        "createdAt": "2026-09-23T00:00:00Z",
+        "updatedAt": "2026-09-23T00:00:00Z",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    let resident = ResidentWorker::new(
+        "w-install".to_string(),
+        descriptor,
+        dir.join("w-install.json"),
+    );
+    let (newer_tx, mut newer_rx) =
+        mpsc::channel::<WorkerRequest>(crate::backpressure::WORKER_INFLIGHT_CAPACITY);
+    let (stale_tx, _stale_rx) =
+        mpsc::channel::<WorkerRequest>(crate::backpressure::WORKER_INFLIGHT_CAPACITY);
+
+    // The newer connection installs first; the stale connect's epoch is
+    // now superseded.
+    let newer_epoch = resident.note_connection_live();
+    let stale_epoch = newer_epoch - 1;
+    resident
+        .install_command_channel(newer_epoch, newer_tx)
+        .await;
+    assert!(
+        resident.cmd_tx.lock().await.is_some(),
+        "the newer connection installs"
+    );
+
+    // The stale connect installs last (the TOCTOU window: its pre-lock
+    // epoch check passed before the newer install) — under the lock the
+    // recheck drops it, and the newer channel stays the routable one.
+    resident.install_command_channel(stale_epoch, stale_tx).await;
+    let routed = {
+        let cmd_tx = resident.cmd_tx.lock().await;
+        cmd_tx
+            .as_ref()
+            .expect("the channel stays installed")
+            .clone()
+    };
+    routed
+        .send(WorkerRequest {
+            request_id: "r1".to_string(),
+            command_type: "get_state".to_string(),
+            payload: json!({}),
+        })
+        .await
+        .expect("the newer channel routes");
+    let frame = tokio::time::timeout(Duration::from_secs(2), newer_rx.recv())
+        .await
+        .expect("the newer channel answers")
+        .expect("the channel stays open");
+    assert_eq!(frame.command_type, "get_state");
 }
