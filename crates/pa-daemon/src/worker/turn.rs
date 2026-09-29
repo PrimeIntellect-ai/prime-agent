@@ -257,7 +257,14 @@ impl TurnRunner {
                 // the lanes) - both surfaces are checked.
                 !core.steering.is_empty()
                     || !core.follow_up.is_empty()
-                    || !core.pending_next_turn.is_empty(),
+                    || !core.pending_next_turn.is_empty()
+                    // The suspension holds (the round-8 bots' finding):
+                    // a paused pump or an input pause lease keeps the
+                    // session resident - the revival would otherwise
+                    // lose the suspension state (the fresh core starts
+                    // un-suspended) and accept a post-abort prompt.
+                    || core.queued_input_suspended
+                    || self.input_pauses.paused(),
                 core.last_activity_ms,
                 core.cwd.clone(),
             )
@@ -308,7 +315,9 @@ impl TurnRunner {
                 // too.
                 !core.steering.is_empty()
                     || !core.follow_up.is_empty()
-                    || !core.pending_next_turn.is_empty(),
+                    || !core.pending_next_turn.is_empty()
+                    || core.queued_input_suspended
+                    || self.input_pauses.paused(),
                 core.last_activity_ms,
                 core.cwd.clone(),
             )

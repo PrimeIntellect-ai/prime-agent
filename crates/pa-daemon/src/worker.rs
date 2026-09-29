@@ -131,6 +131,11 @@ pub struct Worker {
     /// reconnect shape).
     pub(crate) session_attachments:
         std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
+    /// The connection tokens whose attach guard already released (the
+    /// round-8 race belt): a late registration from a detached attach
+    /// handler racing the close is rejected instead of recreating an
+    /// unowned attachment.
+    pub(crate) released_attach_tokens: std::sync::Mutex<std::collections::HashSet<String>>,
     pub(crate) events: Arc<EventPump>,
     /// The `/model` catalog background-refresh coalescing gate: at most
     /// one refresh runs per worker with one queued trailing re-arm, so a
@@ -767,6 +772,7 @@ impl Worker {
             work_notify,
             idle_notify,
             session_attachments: std::sync::Mutex::new(std::collections::HashMap::new()),
+            released_attach_tokens: std::sync::Mutex::new(std::collections::HashSet::new()),
             events,
             model_catalog_refresh_gate: std::sync::Arc::new(
                 crate::model_catalog::RefreshGate::default(),

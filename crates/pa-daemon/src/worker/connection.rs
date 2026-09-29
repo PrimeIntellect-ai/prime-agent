@@ -906,9 +906,16 @@ impl Worker {
     /// Register one connection's retained attach (the per-connection
     /// registry's insert arm; the connection token keys it - a shared
     /// client id across two connections is held by BOTH entries and the
-    /// core keeps it until the last one releases).
+    /// core keeps it until the last one releases). A token the guard
+    /// already released is REJECTED (the round-8 bots' finding: the
+    /// attach dispatch is detached, so the connection's close can beat
+    /// the handler's registration - a late registration would recreate
+    /// an unowned attachment that leaks the hold forever).
     pub(crate) fn register_session_attach(&self, token: &str, client_id: &str) {
         let mut attachments = self.session_attachments.lock().unwrap();
+        if self.released_attach_tokens.lock().unwrap().contains(token) {
+            return;
+        }
         let ids = attachments.entry(token.to_string()).or_default();
         if !ids.iter().any(|id| id == client_id) {
             ids.push(client_id.to_string());
@@ -920,6 +927,10 @@ impl Worker {
     /// path AND the explicit detach command): a shared id leaves the
     /// core only when no other live connection holds it.
     pub(crate) fn release_session_attachments(&self, token: &str) {
+        self.released_attach_tokens
+            .lock()
+            .unwrap()
+            .insert(token.to_string());
         let mut core = self.core.lock().unwrap();
         let ids = {
             // The attachments' lock nests INSIDE the core lock (the
