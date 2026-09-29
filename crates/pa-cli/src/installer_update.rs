@@ -33,9 +33,13 @@ pub fn run(options: &UpdateOptions) -> i32 {
     if options.check {
         return runtime.block_on(run_check());
     }
+    // The RESOLVED URL, not the const: a PRIME_AGENT_RUST_INSTALLER_URL
+    // pin (a test or a pinned install) changes where the funnel actually
+    // fetches from, and the banner must not claim a source the run will
+    // not use.
     println!(
-        "Updating to the latest Rust build — fetching the installer from the official endpoint ({}):",
-        installer::OFFICIAL_INSTALLER_URL
+        "Updating to the latest Rust build — fetching the installer from {}:",
+        installer::installer_script_url()
     );
     match runtime.block_on(installer::run_installer(InstallerOutput::Inherit)) {
         Ok(installed) => {
@@ -72,9 +76,12 @@ async fn run_check() -> i32 {
     };
     println!("Platform: {target}");
     println!("Running:  {running}");
+    // The resolved source (the official endpoint unless the override
+    // pins one): --check must verify the script the funnel will execute,
+    // so its Source line can never disagree with the actual fetch.
     println!(
-        "Source:  {} (the official install endpoint — `prime-agent update` fetches the installer from there)",
-        installer::OFFICIAL_INSTALLER_URL
+        "Source:  {} (the endpoint `prime-agent update` fetches the installer from)",
+        installer::installer_script_url()
     );
     match installer::latest_continuous_run().await {
         Ok(latest) => {

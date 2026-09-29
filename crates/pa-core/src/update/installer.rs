@@ -4,9 +4,7 @@
 //! source of truth for the whole move — it resolves and downloads the
 //! latest build, uninstalls the TypeScript version, publishes the payload,
 //! and never touches `~/.prime/agent` (the sessions and configuration the
-//! products share). The domain serves the TypeScript product's official
-//! installer today and will serve the Rust installer when the operator
-//! ships it there; the command's contract is "fetch from the official
+//! products share). The command's contract is "fetch from the official
 //! source, run it". This module only fetches and execs the script, then
 //! reports what landed; every install/uninstall decision stays in the
 //! script the installer-takeover lane owns, so the two surfaces can never
@@ -34,10 +32,8 @@ pub const ENV_INSTALLER_URL: &str = "PRIME_AGENT_RUST_INSTALLER_URL";
 pub const ENV_GITHUB_TOKEN: &str = "GITHUB_TOKEN";
 
 /// The official domain's install endpoint — the one source the funnel
-/// fetches the installer from (the TypeScript product's official install
-/// endpoint today; the operator ships the Rust installer through this
-/// domain itself, so the command never points at a GitHub raw or workflow
-/// URL).
+/// fetches the installer from; never a GitHub raw or workflow URL (the
+/// override env var stays for tests and pinned installs).
 pub const OFFICIAL_INSTALLER_URL: &str = "https://app.primeintellect.ai/prime-agent/install.sh";
 /// The repo the run report resolves from (the run-list query's owner; the
 /// installer fetch itself never derives from it).
@@ -553,6 +549,11 @@ echo "installed: 9.9.8-continuous.fedcba9876543210"
     /// and pinned installs).
     #[test]
     fn the_default_installer_url_is_the_official_domain_endpoint() {
+        // The override is SAVED and RESTORED around the probe: the test
+        // asserts the default resolution, but a pinned value in the
+        // surrounding environment (a test or a pinned install) must
+        // survive it (the env is process-global — leave it as found).
+        let prior_override = std::env::var(ENV_INSTALLER_URL).ok();
         std::env::remove_var(ENV_INSTALLER_URL);
         assert_eq!(installer_script_url(), OFFICIAL_INSTALLER_URL);
         assert_eq!(
@@ -563,6 +564,9 @@ echo "installed: 9.9.8-continuous.fedcba9876543210"
             !OFFICIAL_INSTALLER_URL.contains("github"),
             "the official endpoint never points at GitHub"
         );
+        if let Some(value) = prior_override {
+            std::env::set_var(ENV_INSTALLER_URL, value);
+        }
     }
 
     #[test]
