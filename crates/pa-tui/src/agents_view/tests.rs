@@ -15,6 +15,7 @@ mod drill_down;
 mod edge_jumps;
 mod entry_anchor;
 mod hints_render;
+mod hover_band;
 mod key_bindings;
 mod notices;
 mod render_pulse;

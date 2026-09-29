@@ -42,6 +42,7 @@ pub type JsonMap = serde_json::Map<String, serde_json::Value>;
 pub struct JsNumber(pub f64);
 
 impl JsNumber {
+    #[must_use]
     pub fn as_f64(self) -> f64 {
         self.0
     }
@@ -54,12 +55,16 @@ impl From<f64> for JsNumber {
 }
 
 impl From<i64> for JsNumber {
+    // TS number parity: JavaScript numbers are f64 by definition.
+    #[allow(clippy::cast_precision_loss)]
     fn from(v: i64) -> Self {
         JsNumber(v as f64)
     }
 }
 
 impl From<u64> for JsNumber {
+    // TS number parity: JavaScript numbers are f64 by definition.
+    #[allow(clippy::cast_precision_loss)]
     fn from(v: u64) -> Self {
         JsNumber(v as f64)
     }
@@ -69,7 +74,10 @@ impl Serialize for JsNumber {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let v = self.0;
         if v.is_finite() && v.fract() == 0.0 && v.abs() < 9.007_199_254_740_992e15 {
-            serializer.serialize_i64(v as i64)
+            // The guard proves the conversion exact: whole value, |v| < 2^53.
+            #[allow(clippy::cast_possible_truncation)]
+            let whole = v as i64;
+            serializer.serialize_i64(whole)
         } else {
             serializer.serialize_f64(v)
         }
@@ -79,6 +87,9 @@ impl Serialize for JsNumber {
 impl<'de> Deserialize<'de> for JsNumber {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct V;
+        // TS number parity: u64/i64 JSON numbers deserialize as f64, the
+        // single JavaScript number type.
+        #[allow(clippy::cast_precision_loss)]
         impl serde::de::Visitor<'_> for V {
             type Value = JsNumber;
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

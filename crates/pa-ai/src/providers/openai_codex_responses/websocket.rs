@@ -103,8 +103,8 @@ fn next_connection_id() -> u64 {
 /// socket-level failures, `Expected 101 status code` for a non-101 answer,
 /// `Mismatch websocket accept header` for a bad accept key, and
 /// `TLS handshake failed` for TLS failures.
-fn bun_connect_failure(url: &str, error: WsError) -> WebSocketTransportError {
-    let cause = match &error {
+fn bun_connect_failure(url: &str, error: &WsError) -> WebSocketTransportError {
+    let cause = match error {
         WsError::Io(io) => {
             // tokio-tungstenite surfaces the rustls handshake failure as a
             // plain io error, so on wss URLs any socket failure after the
@@ -145,8 +145,8 @@ fn bun_connect_failure(url: &str, error: WsError) -> WebSocketTransportError {
 /// reserved opcodes, 1011 `Compression not implemented yet` for reserved
 /// bits). Unprobed violations compose the runtime's protocol-error envelope
 /// with the transport's own detail text.
-fn bun_read_failure(error: WsError) -> WebSocketTransportError {
-    match &error {
+fn bun_read_failure(error: &WsError) -> WebSocketTransportError {
+    match error {
         // The transport's EOF-without-close-frame error is the same socket
         // death the runtime reports as the 1006 close event.
         WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake) => {
@@ -233,7 +233,7 @@ async fn spawn_connection_worker(
         }
         None => connect.await,
     }
-    .map_err(|error| CodexStreamError::Transport(bun_connect_failure(url, error)))?;
+    .map_err(|error| CodexStreamError::Transport(bun_connect_failure(url, &error)))?;
 
     let connection_id = next_connection_id();
     let (command_tx, command_rx) = mpsc::channel::<WorkerCommand>(4);
@@ -278,7 +278,7 @@ async fn connection_worker(
                     let _ = sink.close().await;
                     return;
                 }
-                let terminal = read_request_events(&mut stream, &events, &signal).await;
+                let terminal = read_request_events(&mut stream, &events, signal.as_ref()).await;
                 if terminal.is_err() {
                     let _ = events.send(WorkerEvent::Terminal(terminal)).await;
                     let _ = sink.close().await;
@@ -294,18 +294,15 @@ async fn connection_worker(
 async fn read_request_events(
     stream: &mut SplitStream<WsStream>,
     events: &mpsc::Sender<WorkerEvent>,
-    signal: &Option<CancellationToken>,
+    signal: Option<&CancellationToken>,
 ) -> Result<(), CodexStreamError> {
     let mut saw_completion = false;
     loop {
-        if signal
-            .as_ref()
-            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
-        {
+        if signal.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
             return Err(CodexStreamError::Aborted);
         }
         let next = stream.next();
-        let message = match signal.as_ref() {
+        let message = match signal {
             Some(signal) => {
                 tokio::select! {
                     () = signal.cancelled() => return Err(CodexStreamError::Aborted),
@@ -390,7 +387,7 @@ async fn read_request_events(
             }
             Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {}
             Some(Err(error)) => {
-                return Err(CodexStreamError::Transport(bun_read_failure(error)));
+                return Err(CodexStreamError::Transport(bun_read_failure(&error)));
             }
         }
     }
@@ -760,6 +757,8 @@ mod ws_wire_tests {
     fn ws_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
         let mut frame = vec![0x80 | opcode];
         assert!(payload.len() < 126, "mock frames are small");
+        // The assert bounds the mock frame (< 126); the wire's small-frame length field is u8.
+        #[allow(clippy::cast_possible_truncation)]
         frame.push(payload.len() as u8);
         frame.extend_from_slice(payload);
         frame

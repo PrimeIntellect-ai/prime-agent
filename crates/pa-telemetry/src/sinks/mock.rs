@@ -24,11 +24,13 @@ pub struct MockSink {
 }
 
 impl MockSink {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Report every batch as dropped (failure-injection for drop-policy tests).
+    #[must_use]
     pub fn failing() -> Self {
         Self {
             batches: Mutex::new(Vec::new()),

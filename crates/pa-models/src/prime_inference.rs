@@ -101,6 +101,7 @@ const REASONING_EFFORT_LEVELS: [ModelThinkingLevel; 6] = [
 /// declares. Returns `None` when the route does not report parameter
 /// support; callers then keep their bundled template compat instead of
 /// guessing.
+#[must_use]
 pub fn prime_inference_reasoning_controls(
     entry: &PrimeInferenceEntry,
 ) -> Option<PrimeInferenceReasoningControls> {
@@ -172,6 +173,7 @@ pub struct PrimeInferenceCredentials {
 }
 
 /// Whether a model id is private (internal/, dev/, or alias-qualified with `:`).
+#[must_use]
 pub fn is_private_prime_inference_model_id(model_id: &str) -> bool {
     let normalized = model_id.to_ascii_lowercase();
     normalized.starts_with("internal/")
@@ -188,6 +190,7 @@ pub fn is_private_prime_inference_model_id(model_id: &str) -> bool {
 ///
 /// Never for any input: `Hmac::<Sha256>::new_from_slice` accepts api keys of
 /// every length, so the context construction is infallible.
+#[must_use]
 pub fn scope_key(api_key: &str, team_id: &str) -> String {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(api_key.as_bytes()).expect("HMAC accepts any key length");
@@ -217,6 +220,9 @@ struct WireItem {
     reasoning: Option<serde_json::Value>,
 }
 
+// Wire contract: the field names mirror the Prime Inference `/models`
+// pricing keys (`*_usd_per_mtok`), so the shared postfix is not renamable.
+#[allow(clippy::struct_field_names)]
 #[derive(Debug, Default, Deserialize)]
 struct WirePricing {
     #[serde(default)]
@@ -281,6 +287,9 @@ fn parse_string_array(value: Option<&serde_json::Value>) -> Option<Vec<String>> 
 ///
 /// Fails when the payload carries no `data` array, on a duplicate model
 /// id, or when every entry was dropped and `allow_empty` is false.
+// TS-parity parser: entry sanitization stays one pass over each item;
+// extraction is out of scope for the zero-behavior-change sweep.
+#[allow(clippy::too_many_lines)]
 pub fn parse_prime_inference_model_catalog(
     value: &serde_json::Value,
     allow_empty: bool,
@@ -289,7 +298,7 @@ pub fn parse_prime_inference_model_catalog(
         return Err("Invalid Prime Inference model catalog".into());
     };
     let mut entries = Vec::with_capacity(items.len());
-    let mut seen: std::collections::BTreeMap<String, ()> = std::collections::BTreeMap::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for item in items {
         let wire: WireItem = match serde_json::from_value(item.clone()) {
             Ok(wire) => wire,
@@ -319,7 +328,7 @@ pub fn parse_prime_inference_model_catalog(
         else {
             continue;
         };
-        if seen.insert(wire.id.clone(), ()).is_some() {
+        if !seen.insert(wire.id.clone()) {
             return Err(format!("Duplicate Prime Inference model {}", wire.id));
         }
         let supported_parameters = parse_string_array(wire.supported_parameters.as_ref());
@@ -423,6 +432,9 @@ fn default_compat() -> ModelCompat {
 ///
 /// Panics if a `ThinkingFormat` fails to serialize into JSON; the format
 /// is a plain string enum, so this cannot happen.
+// Entry merge/coverage is one pass over the bundled templates; extraction
+// is out of scope for the zero-behavior-change sweep.
+#[allow(clippy::too_many_lines)]
 pub fn build_prime_inference_models(
     bundled: &[Model],
     entries: &[PrimeInferenceEntry],
@@ -548,6 +560,14 @@ pub fn build_prime_inference_models(
             compat: Some(compat),
         });
     }
+    // Coverage gate: `ceil()` of a non-negative `len * ratio` product is
+    // exact and fits `usize` for any real catalog; the float round-trip is
+    // the intended computation.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss
+    )]
     let minimum_models = minimum_models
         .unwrap_or_else(|| ((bundled.len() as f64) * MIN_CATALOG_COVERAGE).ceil() as usize);
     let covered = models
@@ -558,6 +578,7 @@ pub fn build_prime_inference_models(
 }
 
 /// Replace the base list's prime-inference section with the live models.
+#[must_use]
 pub fn merge_prime_inference_models(bundled: &[Model], live: Option<&[Model]>) -> Vec<Model> {
     match live {
         None => bundled.to_vec(),
@@ -583,6 +604,7 @@ impl PrimeInferenceCatalog {
     /// A catalog persisted beside `models_dir` (cache file
     /// `prime-inference-models-cache.json`), using the compiled entries as
     /// templates.
+    #[must_use]
     pub fn new(models_dir: Option<PathBuf>) -> Self {
         let templates = Arc::new(transports::prime_inference_offline_entries());
         let cache_path = models_dir.map(|dir| dir.join(CACHE_FILE));
@@ -607,6 +629,7 @@ impl PrimeInferenceCatalog {
 
     /// [`PrimeInferenceCatalog::new`] with an explicit API base URL (test
     /// seam for running the credentialed flow against a local server).
+    #[must_use]
     pub fn with_base_url(models_dir: Option<PathBuf>, base_url: &str) -> Self {
         let templates = Arc::new(transports::prime_inference_offline_entries());
         let cache_path = models_dir.map(|dir| dir.join(CACHE_FILE));

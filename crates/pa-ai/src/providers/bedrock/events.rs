@@ -68,7 +68,7 @@ pub(crate) fn handle_event(
     output: &mut AssistantMessage,
     writer: &AssistantMessageEventWriter,
     state: &mut BedrockStreamState,
-    request_id: &Option<String>,
+    request_id: Option<&String>,
 ) -> Result<(), ProviderError> {
     let payload = String::from_utf8_lossy(&message.payload);
     let parsed: Value = serde_json::from_str(payload.trim()).unwrap_or(Value::Null);
@@ -89,7 +89,7 @@ pub(crate) fn handle_event(
                 status: None,
                 body: None,
                 headers: HashMap::default(),
-                request_id: request_id.clone(),
+                request_id: request_id.cloned(),
                 sdk_name: Some(exception_type.clone()),
                 retry_after_ms: None,
                 provider_error_type: None,
@@ -124,7 +124,7 @@ pub(crate) fn handle_event(
     }
 
     if let Some(content_block_stop) = parsed.get("contentBlockStop") {
-        handle_content_block_stop(content_block_stop, output, writer, state)?;
+        handle_content_block_stop(content_block_stop, output, writer, state);
         return Ok(());
     }
 
@@ -188,6 +188,8 @@ fn handle_content_block_start(
     }
 }
 
+// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+#[allow(clippy::too_many_lines)]
 fn handle_content_block_delta(
     event: &Value,
     _model: &Model,
@@ -328,13 +330,13 @@ fn handle_content_block_stop(
     output: &mut AssistantMessage,
     writer: &AssistantMessageEventWriter,
     state: &mut BedrockStreamState,
-) -> Result<(), ProviderError> {
+) {
     let content_block_index = event
         .get("contentBlockIndex")
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let Some(slot) = state.slots.remove(&content_block_index) else {
-        return Ok(());
+        return;
     };
     match slot {
         BlockSlot::Text { index } => {
@@ -370,7 +372,7 @@ fn handle_content_block_stop(
                 }
                 block.clone()
             } else {
-                return Ok(());
+                return;
             };
             writer.push(AssistantMessageEvent::ToolcallEnd {
                 content_index: index as u64,
@@ -379,14 +381,13 @@ fn handle_content_block_stop(
             });
         }
     }
-    Ok(())
 }
 
 fn handle_metadata(
     event: &Value,
     model: &Model,
     output: &mut AssistantMessage,
-    request_id: &Option<String>,
+    request_id: Option<&String>,
 ) {
     let _ = request_id;
     if let Some(usage) = event.get("usage") {
@@ -458,7 +459,7 @@ mod tests {
             &json!({"usage": {"inputTokens": 10, "outputTokens": 5, "totalTokens": 0}}),
             &model,
             &mut output,
-            &request_id,
+            request_id.as_ref(),
         );
         assert_eq!(
             output.usage,
@@ -474,7 +475,7 @@ mod tests {
             &json!({"usage": {"inputTokens": 10, "outputTokens": 5, "totalTokens": 99}}),
             &model,
             &mut output,
-            &request_id,
+            request_id.as_ref(),
         );
         assert_eq!(output.usage.total_tokens, 99);
 
@@ -482,7 +483,7 @@ mod tests {
             &json!({"usage": {"inputTokens": 10, "outputTokens": 5}}),
             &model,
             &mut output,
-            &request_id,
+            request_id.as_ref(),
         );
         assert_eq!(output.usage.total_tokens, 15);
     }

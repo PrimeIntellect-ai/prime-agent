@@ -45,6 +45,7 @@ pub struct FauxModelDefinition {
     pub max_tokens: Option<u64>,
 }
 
+#[must_use]
 pub fn faux_text(text: &str) -> AssistantContent {
     AssistantContent::Text(TextContent {
         text: text.to_string(),
@@ -53,6 +54,7 @@ pub fn faux_text(text: &str) -> AssistantContent {
     })
 }
 
+#[must_use]
 pub fn faux_thinking(thinking: &str) -> AssistantContent {
     AssistantContent::Thinking(ThinkingContent {
         thinking: thinking.to_string(),
@@ -64,7 +66,7 @@ pub fn faux_thinking(thinking: &str) -> AssistantContent {
 
 pub fn faux_tool_call(
     name: &str,
-    arguments: serde_json::Value,
+    arguments: &serde_json::Value,
     id: Option<&str>,
 ) -> AssistantContent {
     AssistantContent::ToolCall(ToolCall {
@@ -76,17 +78,18 @@ pub fn faux_tool_call(
     })
 }
 
-fn normalize_faux_assistant_content(content: String) -> Vec<AssistantContent> {
-    vec![faux_text(&content)]
+fn normalize_faux_assistant_content(content: &str) -> Vec<AssistantContent> {
+    vec![faux_text(content)]
 }
 
 /// Build a faux assistant message from plain text (mirrors the TS
 /// `fauxAssistantMessage` string overload).
+#[must_use]
 pub fn faux_assistant_text_message(
     text: &str,
     options: FauxAssistantMessageOptions,
 ) -> AssistantMessage {
-    faux_assistant_message(normalize_faux_assistant_content(text.to_string()), options)
+    faux_assistant_message(normalize_faux_assistant_content(text), options)
 }
 
 /// Build a faux assistant message (helper mirroring `fauxAssistantMessage`).
@@ -197,11 +200,13 @@ impl FauxSharedState {
 
 impl FauxProviderRegistration {
     /// Default (first) model.
+    #[must_use]
     pub fn get_model(&self) -> Model {
         self.models[0].clone()
     }
 
     /// Look up a model by id.
+    #[must_use]
     pub fn get_model_by_id(&self, model_id: &str) -> Option<Model> {
         self.models
             .iter()
@@ -215,6 +220,7 @@ impl FauxProviderRegistration {
     ///
     /// Panics if the counter `Mutex` is poisoned (a thread panicked while
     /// holding the lock).
+    #[must_use]
     pub fn call_count(&self) -> u64 {
         *self.state.call_count.lock().unwrap()
     }
@@ -226,6 +232,7 @@ impl FauxProviderRegistration {
     ///
     /// Panics if the recorded-keys `Mutex` is poisoned (a thread panicked
     /// while holding the lock).
+    #[must_use]
     pub fn received_api_keys(&self) -> Vec<Option<String>> {
         self.state.received_api_keys.lock().unwrap().clone()
     }
@@ -256,6 +263,7 @@ impl FauxProviderRegistration {
     ///
     /// Panics if the pending `Mutex` is poisoned (a thread panicked while
     /// holding the lock).
+    #[must_use]
     pub fn get_pending_response_count(&self) -> usize {
         self.state.pending.lock().unwrap().len()
     }
@@ -286,9 +294,17 @@ impl FauxProviderRegistration {
 }
 
 fn estimate_tokens(text: &str) -> u64 {
-    (text.chars().count() as f64 / 4.0).ceil() as u64
+    // The faux token estimate is f64 math by design (chars/4, rounded up); ceil() makes it integral and non-negative.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let tokens = (text.chars().count() as f64 / 4.0).ceil() as u64;
+    tokens
 }
 
+#[must_use]
 pub fn random_id(prefix: &str) -> String {
     let mut rng = rand::thread_rng();
     let random: u32 = rng.gen();
@@ -505,13 +521,18 @@ fn create_aborted_message(partial: &AssistantMessage) -> AssistantMessage {
 async fn schedule_chunk(chunk: &str, tokens_per_second: Option<f64>) {
     if let Some(rate) = tokens_per_second {
         if rate > 0.0 {
+            // The streaming rate delay is f64 math (tokens / rate -> ms); Duration's unit is u64 ms.
+            #[allow(clippy::cast_precision_loss)]
             let delay_ms = (estimate_tokens(chunk) as f64 / rate) * 1000.0;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms as u64)).await;
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
+// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+#[allow(clippy::too_many_lines)]
 async fn stream_with_deltas(
     writer: &AssistantMessageEventWriter,
     message: &AssistantMessage,
@@ -705,6 +726,9 @@ pub struct RegisterFauxProviderOptions {
 }
 
 /// Register a faux provider and return its handle.
+#[must_use]
+// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+#[allow(clippy::too_many_lines)]
 pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProviderRegistration {
     struct FauxStream {
         api: String,
@@ -720,6 +744,8 @@ pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProvi
             &self.api
         }
 
+        // Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+        #[allow(clippy::too_many_lines)]
         fn stream(
             &self,
             model: &Model,
@@ -956,6 +982,7 @@ impl PopFront for Vec<FauxResponseStep> {
 }
 
 /// Helper: build an image content block (kept next to the other faux helpers).
+#[must_use]
 pub fn faux_image(data: &str, mime_type: &str) -> ImageContent {
     ImageContent {
         data: data.to_string(),

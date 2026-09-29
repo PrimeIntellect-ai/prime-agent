@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 /// Compact duration for spans and gaps (TS `formatIncidentDuration`):
 /// seconds, then minutes+seconds, then hours+minutes.
+#[must_use]
 pub fn format_incident_duration(ms: i64) -> String {
     // `Math.round(ms / 1000)` with at least one second (a zero-span gap
     // still reads as 1s, never 0s).
@@ -68,6 +69,7 @@ fn densest_window_run(items: &[IncidentEvent], window_ms: i64) -> (usize, usize)
 
 /// Compute stall, error-burst, and event-gap anomaly lines from classified
 /// events (TS `computeIncidentAnomalies`).
+#[must_use]
 pub fn compute_incident_anomalies(events: &[IncidentEvent]) -> Vec<IncidentEvent> {
     // Grouped in insertion order, like the TS `Map` iteration the
     // anomalies are pushed under.
@@ -185,6 +187,7 @@ fn anomaly(
 /// The agents-view notice anchors its dismissal horizon there, so the
 /// notice, its horizon, and the reported cluster always describe the same
 /// incident, even when the window holds several stalls on one subject.
+#[must_use]
 pub fn latest_incident_stall_timeout_by_subject(events: &[IncidentEvent]) -> HashMap<String, i64> {
     // Grouped in insertion order, like the TS `Map` iteration below.
     let mut timeouts_by_subject: Vec<(String, Vec<IncidentEvent>)> = Vec::new();

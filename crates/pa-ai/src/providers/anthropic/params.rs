@@ -11,6 +11,8 @@ use crate::providers::anthropic::{
 use crate::types::{Context, Model};
 use crate::utils_inner::sanitize_unicode::sanitize_surrogates;
 
+// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn build_params(
     model: &Model,
     context: &Context,

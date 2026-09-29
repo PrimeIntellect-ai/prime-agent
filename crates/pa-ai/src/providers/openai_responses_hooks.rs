@@ -55,6 +55,8 @@ pub fn get_service_tier_cost_multiplier(model_id: &str, service_tier: Option<&st
 /// Apply service-tier pricing multipliers to a usage block.
 pub fn apply_service_tier_pricing(usage: &mut Usage, service_tier: Option<&str>, model_id: &str) {
     let multiplier = get_service_tier_cost_multiplier(model_id, service_tier);
+    // The multiplier table is discrete; equality with the 1.0 sentinel is the no-op contract.
+    #[allow(clippy::float_cmp)]
     if multiplier == 1.0 {
         return;
     }

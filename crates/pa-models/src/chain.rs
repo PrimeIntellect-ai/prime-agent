@@ -56,6 +56,7 @@ pub enum RefreshTrigger {
 impl RefreshTrigger {
     /// Forced triggers skip the hourly gating window (startup and auth
     /// change; the hourly and picker-open triggers stay gated).
+    #[must_use]
     pub fn forced(self) -> bool {
         matches!(self, RefreshTrigger::Startup | RefreshTrigger::AuthChange)
     }
@@ -96,12 +97,16 @@ pub struct ModelCatalog {
     /// stored scope seeds it, so a login or logout that predates this
     /// process's first request is still detected), then the live scope
     /// (`Some(None)` = no credentials).
+    // Both levels carry meaning (the documented three states), so nesting
+    // is the contract, not an accidental Option<Option>.
+    #[allow(clippy::option_option)]
     pi_scope_seen: Mutex<Option<Option<String>>>,
 }
 
 impl ModelCatalog {
     /// The production catalog: caches beside `models_dir` (None = in-memory
     /// registry use), bundled assets at the package root.
+    #[must_use]
     pub fn new(models_dir: Option<PathBuf>) -> Self {
         Self::with_urls(
             models_dir,
@@ -113,6 +118,7 @@ impl ModelCatalog {
 
     /// [`ModelCatalog::new`] with an explicit bundled-asset directory
     /// (tests, staged installs).
+    #[must_use]
     pub fn with_bundled_dir(models_dir: Option<PathBuf>, bundled_dir: Option<PathBuf>) -> Self {
         Self::with_urls(
             models_dir,

@@ -63,6 +63,7 @@ pub fn register_api_provider(provider: Arc<dyn Provider>, source_id: Option<&str
 ///
 /// Panics if the registry `RwLock` is poisoned (a thread panicked while
 /// holding it).
+#[must_use]
 pub fn get_api_provider(api: &str) -> Option<Arc<dyn Provider>> {
     registry()
         .read()
@@ -77,6 +78,7 @@ pub fn get_api_provider(api: &str) -> Option<Arc<dyn Provider>> {
 ///
 /// Panics if the registry `RwLock` is poisoned (a thread panicked while
 /// holding it).
+#[must_use]
 pub fn get_api_providers() -> Vec<Arc<dyn Provider>> {
     registry()
         .read()
@@ -164,11 +166,13 @@ impl ProviderRegistry {
     }
 
     /// Look up the provider for an api identifier.
+    #[must_use]
     pub fn get(&self, api: &str) -> Option<Arc<dyn Provider>> {
         get_api_provider(api)
     }
 
     /// All registered providers.
+    #[must_use]
     pub fn all(&self) -> Vec<Arc<dyn Provider>> {
         get_api_providers()
     }
