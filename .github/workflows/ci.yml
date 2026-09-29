@@ -66,14 +66,20 @@ env:
   # THE shard-count knob: the one declared value of the test phase's shard
   # count. Both manifest tools read it as their --total (the shard legs and
   # the summary audit below), so the audit re-derives exactly the partition
-  # the legs ran. A bump (4 -> 8, say) is the two adjacent edits: this
-  # value + the test-shard matrix leg list; the strategy context cannot
-  # read the workflow env, so the count cannot be declared in one place
-  # for both. A partial bump cannot pass silently: too few legs leaves
-  # units unassigned and the summary audit goes red; too many leaves dead
-  # 0-unit legs visible in the summary report (the partition that ran is
-  # still audited complete - waste, never a coverage hole).
-  SHARD_COUNT: "4"
+  # the legs ran. A bump is the two adjacent edits: this value + the
+  # test-shard matrix leg list; the strategy context cannot read the
+  # workflow env, so the count cannot be declared in one place for both.
+  # A partial bump cannot pass silently: too few legs leaves units
+  # unassigned and the summary audit goes red; too many leaves dead 0-unit
+  # legs visible in the summary report (the partition that ran is still
+  # audited complete - waste, never a coverage hole).
+  # THE ATTRIBUTION RULE (the conductor's 2026-09-29 ruling, 4 -> 8): bump
+  # only in powers of two — crc32 % 8 is a bit-refinement of crc32 % 4, so
+  # an 8-way shard s contains only units whose 4-way home was
+  # ((s-1) % 4) + 1; the flake history stays interpretable and every old
+  # manifest stays derivable (measured at the flip: 0/186 units left
+  # their 4-way parent).
+  SHARD_COUNT: "8"
 
 jobs:
   fmt:
@@ -143,7 +149,7 @@ jobs:
         # The leg list is the partition's other half: it must stay in
         # lockstep with SHARD_COUNT (see the env block for why one value
         # cannot drive both, and what a partial bump does).
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
