@@ -295,7 +295,7 @@ fn child_run(route: &str, socket: PathBuf) {
                 auto_exit_ms: Some(1_200),
                 ..Default::default()
             };
-            pa_tui::app::run_app(Box::new(stream), options, Box::new(|_text| {}))
+            pa_tui::app::run_app(Box::new(stream), &options, Box::new(|_text| {}))
                 .expect("the replay surface ran");
         }
         "replay_panic" => {
@@ -308,7 +308,7 @@ fn child_run(route: &str, socket: PathBuf) {
             // route under test. The panic escapes into libtest, which
             // fails the child test with exit 101 — the parent asserts
             // the restore bytes on the stream either way.
-            let _ = pa_tui::app::run_app(Box::new(stream), options, Box::new(|_text| {}));
+            let _ = pa_tui::app::run_app(Box::new(stream), &options, Box::new(|_text| {}));
         }
         other => panic!("unknown route {other}"),
     }

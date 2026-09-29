@@ -710,7 +710,7 @@ fn rollups_sum_costs_over_descendants_only() {
     let records = reconcile_unified_sessions(&roster, &[]);
     let rollups = compute_rollups(&records);
     let parent = rollups.get("file:/x/p.jsonl").expect("parent rollup");
-    assert_eq!(parent.cost, 0.75);
+    assert!((parent.cost - 0.75).abs() < f64::EPSILON);
     assert_eq!(parent.descendant_count, 1);
 
     // The numeric fixture (TS #2506): own $0 + deleted child $0.40 +
@@ -791,7 +791,7 @@ fn rollups_sum_costs_over_descendants_only() {
     let rows = rows_for(&roster, None, &[]);
     // The parent's Cost column shows the recursive total (TS
     // `recursiveCost`), and the details layout carries it.
-    assert_eq!(rows[0].cost, 0.75);
+    assert!((rows[0].cost - 0.75).abs() < f64::EPSILON);
     let empty: HashMap<String, Rollup> = HashMap::new();
     let rows = build_rows(
         &records,
@@ -801,7 +801,7 @@ fn rollups_sum_costs_over_descendants_only() {
         None,
     );
     // Without rollups the per-pass walk fills the same totals.
-    assert_eq!(rows[0].cost, 0.75);
+    assert!((rows[0].cost - 0.75).abs() < f64::EPSILON);
     assert_eq!(rows[0].descendant_count, 1);
 }
 
@@ -974,8 +974,8 @@ fn the_summary_line_bills_every_descendant_status() {
         roster_entry("x1", "inactive", &inactive_child),
     ];
     let rows = rows_for(&roster, None, &[]);
-    assert_eq!(
-        rows[0].cost, 5.0,
+    assert!(
+        (rows[0].cost - 5.0).abs() < f64::EPSILON,
         "the parent row keeps own 0.25 + descendants 4.75"
     );
     let summary = rows
@@ -983,8 +983,8 @@ fn the_summary_line_bills_every_descendant_status() {
         .find(|row| row.identity == "subagents:file:/x/p.jsonl")
         .expect("the ONE line");
     assert_eq!(summary.title, "4 subagents (2 running)");
-    assert_eq!(
-        summary.cost, 4.75,
+    assert!(
+        (summary.cost - 4.75).abs() < f64::EPSILON,
         "runner subtree 1.50 + idle 2.50 + inactive 0.75 — every status bills"
     );
 }
@@ -1012,12 +1012,14 @@ fn the_summary_line_bills_the_deleted_descendant_bucket() {
     ];
     let records = reconcile_unified_sessions(&roster, std::slice::from_ref(&saved_parent));
     let rollups = compute_rollups(&records);
-    assert_eq!(
-        rollups
+    assert!(
+        (rollups
             .get("file:/x/p.jsonl")
             .expect("parent rollup")
-            .descendants,
-        0.75,
+            .descendants
+            - 0.75)
+            .abs()
+            < f64::EPSILON,
         "live child 0.25 + deleted bucket 0.50"
     );
     let rows = build_rows(&records, None, &HashSet::new(), &rollups, None);
@@ -1025,8 +1027,8 @@ fn the_summary_line_bills_the_deleted_descendant_bucket() {
         .iter()
         .find(|row| row.identity == "subagents:file:/x/p.jsonl")
         .expect("the ONE line");
-    assert_eq!(summary.cost, 0.75);
-    assert_eq!(rows[0].cost, 1.0, "own 0.25 + aggregate 0.75");
+    assert!((summary.cost - 0.75).abs() < f64::EPSILON);
+    assert!((rows[0].cost - 1.0).abs() < f64::EPSILON, "own 0.25 + aggregate 0.75");
 }
 
 /// A tree that spends nothing bills its `$0.00` cell — the cost cell
@@ -1047,7 +1049,7 @@ fn the_summary_line_cost_is_zero_when_nothing_bills() {
         .find(|row| row.identity == "subagents:file:/x/p.jsonl")
         .expect("the ONE line");
     assert_eq!(summary.title, "2 subagents (2 running)");
-    assert_eq!(summary.cost, 0.0);
+    assert!((summary.cost - 0.0).abs() < f64::EPSILON);
     // No subagents: no summary row renders — there is no collapsed
     // row to bill.
     let lone = rows_for(
@@ -1092,13 +1094,13 @@ fn a_nested_line_bills_its_own_subtree() {
         .find(|row| row.identity == format!("{SUMMARY_ROW_PREFIX}{child_identity}"))
         .expect("the child's own line");
     assert_eq!(nested.title, "1 subagents (1 running)");
-    assert_eq!(nested.cost, 0.25, "only the grandchild's spend");
+    assert!((nested.cost - 0.25).abs() < f64::EPSILON, "only the grandchild's spend");
     let root = rows
         .iter()
         .find(|row| row.identity == "subagents:file:/x/p.jsonl")
         .expect("the root's line");
     assert_eq!(root.title, "3 subagents (2 running)");
-    assert_eq!(root.cost, 4.0, "runner subtree 1.50 + idle 2.50");
+    assert!((root.cost - 4.0).abs() < f64::EPSILON, "runner subtree 1.50 + idle 2.50");
 }
 
 /// The operator's acceptance line: a fleet-scale roster — 331

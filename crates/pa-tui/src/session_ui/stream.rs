@@ -375,9 +375,9 @@ mod loader_token_tests {
             duration_ms: 1500,
             samples: 1,
         };
-        assert_eq!(stats.average_rate(), 200.0);
+        assert!((stats.average_rate() - 200.0).abs() < f64::EPSILON);
         stats.tokens += 100;
         stats.duration_ms += 500;
-        assert_eq!(stats.average_rate(), 200.0);
+        assert!((stats.average_rate() - 200.0).abs() < f64::EPSILON);
     }
 }
