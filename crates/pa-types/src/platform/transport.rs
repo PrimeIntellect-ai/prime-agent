@@ -203,14 +203,40 @@ impl TransportStream for tokio::net::windows::named_pipe::NamedPipeClient {
     }
 }
 
-/// The pipe name handed to `CreateNamedPipe`/`CreateFile`: the `\.\pipe\`
+/// The pipe name handed to `CreateNamedPipe`/`CreateFile`: the `\\.\pipe\`
 /// names from `pa-daemon::platform` pass through unchanged (they must be
-/// UTF-8 for the Windows APIs).
+/// UTF-8 for the Windows APIs). Any other explicit path - a unix-style
+/// socket file path from `--daemon-socket` or `PRIME_AGENT_DAEMON_SOCKET`
+/// - is derived into the pipe namespace deterministically: bind and
+/// connect run the same derivation, so the explicit path names the same
+/// endpoint on every platform the way a socket file does on Unix.
+/// Without the derivation the listener dies at `CreateNamedPipe` (a file
+/// path is not a valid pipe name) and the client waits out its startup
+/// timeout - the windows-latest ACP fixture failure, where the CLI fell
+/// back to the in-process engine and the pickers answered with the
+/// bundled catalog instead of the scripted fixture family.
 #[cfg(windows)]
 fn pipe_name(path: &Path) -> Result<String> {
-    path.to_str()
-        .map(str::to_string)
-        .with_context(|| format!("pipe name is not UTF-8: {}", path.display()))
+    let raw = path
+        .to_str()
+        .with_context(|| format!("pipe name is not UTF-8: {}", path.display()))?;
+    if raw.starts_with(r"\\.\pipe\") || raw.starts_with(r"\\?\pipe\") {
+        return Ok(raw.to_string());
+    }
+    Ok(format!(
+        r"\\.\pipe\prime-agent-explicit-{:016x}",
+        fnv1a64(raw)
+    ))
+}
+
+/// FNV-1a over the raw path bytes: the derivation key for [`pipe_name`]
+/// (dependency-free and stable, so the same explicit path names the same
+/// pipe in every process, on the bind and the connect side alike).
+#[cfg(windows)]
+fn fnv1a64(bytes: &str) -> u64 {
+    bytes.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 /// Bind a listening endpoint at `path` (a named pipe on Windows).
@@ -393,5 +419,44 @@ mod tests {
             .expect("no short address exists");
         assert!(error.to_string().contains("exceeds"), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod pipe_name_tests {
+    use super::{fnv1a64, pipe_name};
+    use std::path::Path;
+
+    #[test]
+    fn pipe_namespace_names_pass_through_unchanged() {
+        let fixed = Path::new(r"\\.\pipe\prime-agent-daemon");
+        assert_eq!(pipe_name(fixed).unwrap(), r"\\.\pipe\prime-agent-daemon");
+        let worker = Path::new(r"\\.\pipe\prime-agent-worker-abc123-0123456789ab");
+        assert_eq!(
+            pipe_name(worker).unwrap(),
+            r"\\.\pipe\prime-agent-worker-abc123-0123456789ab"
+        );
+    }
+
+    #[test]
+    fn explicit_file_paths_derive_the_same_pipe_on_both_sides() {
+        let socket = Path::new(r"C:\Users\runner\AppData\Local\Temp\.tmpacp\daemon.sock");
+        let a = pipe_name(socket).expect("derives");
+        let b = pipe_name(socket).expect("derives again");
+        assert_eq!(a, b, "the derivation is deterministic");
+        assert!(a.starts_with(r"\\.\pipe\prime-agent-explicit-"), "{a}");
+    }
+
+    #[test]
+    fn distinct_paths_derive_distinct_pipes() {
+        let a = pipe_name(Path::new(r"C:\tmp\one\daemon.sock")).expect("derives");
+        let b = pipe_name(Path::new(r"C:\tmp\two\daemon.sock")).expect("derives");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn fnv1a64_is_stable() {
+        // FNV-1a("a") with the 64-bit offset basis and prime, for the record.
+        assert_eq!(fnv1a64("a"), 0xaf63_dc4c_8601_ec8c);
     }
 }
