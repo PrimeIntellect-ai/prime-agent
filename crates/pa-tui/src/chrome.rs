@@ -60,12 +60,10 @@ pub struct ChromeState {
     pub extra_metadata: Vec<(String, String)>,
     /// Top-bar chat name (session name or the cwd basename).
     pub chat_name: String,
-    /// Session spend (USD) beside the chat name.
+    /// Session spend (USD) beside the chat name: the family rollup
+    /// (the session's own whole-file spend plus every subagent
+    /// descendant's — the same number the agents view bills the row).
     pub cost_usd: Option<f64>,
-    /// The aggregate descendant-subagent spend (USD) rendered after the
-    /// own cost as ` + $X (subagents)` (the title split; `None` or zero
-    /// omits the suffix).
-    pub subagents_cost_usd: Option<f64>,
     /// Context usage: tokens, window, percent (tray right label).
     pub context: Option<ContextUsage>,
     /// `← manage` hint: shown for persisted (attachable) sessions.
@@ -319,18 +317,6 @@ pub fn render_top_bar(state: &ChromeState, theme: &Theme, width: usize) -> Line 
     if let Some(cost) = state.cost_usd.filter(|cost| *cost >= 0.0) {
         line.push(Span::styled("  ".to_string(), Style::default()));
         line.push(Span::styled(format!("${cost:.2}"), dim));
-        // The subagent aggregate rides the own cost as a labeled pair
-        // (the operator's ask): rendered only when known and strictly
-        // positive — zero (no subagents, or subagents that spent
-        // nothing) adds no information, exactly like the own-cost span
-        // omits unknown spend. No TS precedent (TS `TopBar`'s single
-        // `getCostUsd` is the combined total); sanctioned divergence.
-        if let Some(aggregate) = state
-            .subagents_cost_usd
-            .filter(|aggregate| *aggregate > 0.0)
-        {
-            line.push(Span::styled(format!(" + ${aggregate:.2} (subagents)"), dim));
-        }
     }
     line
 }

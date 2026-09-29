@@ -83,6 +83,14 @@ impl SessionNavigation {
     async fn replace_session(&self, file: SessionFile) -> Result<(), String> {
         let branch_entries = file.branch_file_entries();
         let new_path = file.path.clone();
+        // Prime the new store's usage fold before it enters the core: the
+        // summaries the swap's roster pushes read resume from this cache
+        // and fold only the appended tail (off the runtime, like the
+        // create prime; an empty path fails fast).
+        let primed = new_path.clone();
+        let _ =
+            tokio::task::spawn_blocking(move || crate::session_store::read_session_info(&primed))
+                .await;
         {
             let mut core = self.core.lock().unwrap();
             core.store = Some(file);

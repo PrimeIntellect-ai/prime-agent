@@ -197,6 +197,9 @@ impl Worker {
                     tokio::task::spawn_blocking(move || {
                         let lease = crate::lease::acquire_runtime_session_lease(&path, &agent_dir)?;
                         let mut store = SessionFile::open_windowed(&path)?;
+                        // Prime the usage fold outside the core lock, so
+                        // summaries under the lock fold only the appended tail.
+                        let _ = crate::session_store::read_session_info(&path);
                         store.lease = Some(Arc::new(lease));
                         Ok(store)
                     })

@@ -72,7 +72,9 @@ impl SessionUi {
         }
     }
 
-    /// Refresh the one-line activity dock from the existing session feeds.
+    /// Refresh the one-line activity dock and the title's cost (the
+    /// only writer of `chrome.cost_usd`) from the existing session
+    /// feeds.
     pub(super) fn update_subagent_summary(&mut self, view: &mut AgentView) {
         let identity = crate::subagents::SessionIdentity::new(
             (!self.active_session_id.is_empty()).then(|| self.active_session_id.clone()),
@@ -80,6 +82,9 @@ impl SessionUi {
             self.session_file.clone(),
         );
         self.subagent_counts = crate::subagents::count_descendants(&self.roster, &identity);
+        // The title's spend is the family rollup the agents view bills
+        // the session's row, refreshed on every roster push.
+        view.chrome.cost_usd = crate::subagents::family_cost(&self.roster, &identity);
         let dock = self.activity_dock_state();
         // A focused selection must stay on a rendered group: only the
         // goal group can leave the row (its goal ended), and the

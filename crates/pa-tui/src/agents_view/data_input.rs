@@ -71,7 +71,10 @@ impl AgentsViewMode {
             let parsed = parse_search_query(self.query.trim());
             filter_unified_sessions(&filtered, &parsed)
         };
-        let rollups = compute_rollups(&filtered);
+        // TS `computeRecursiveRollups(this.unifiedRecords)`: the rollup
+        // runs over the full reconciled set, so a filter never changes a
+        // row's total.
+        let rollups = compute_rollups(&records);
         let mut rows = build_rows(
             &filtered,
             self.options.scope.as_ref(),

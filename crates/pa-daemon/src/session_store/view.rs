@@ -266,10 +266,10 @@ impl SessionFile {
     /// The summary scalars the TS `summaryForActiveSession` fold derives
     /// from the windowed message sequence — the newest message timestamp
     /// (the last message in fold order that carries one, matching the
-    /// fold's reverse scan), the summed assistant usage, and the window's
-    /// message count — without materializing the transcript. One borrowed
-    /// walk of the same sequence [`Self::messages`] folds, so the scan can
-    /// never disagree with the materialized fold.
+    /// fold's reverse scan) and the window's message count — without
+    /// materializing the transcript. One borrowed walk of the same
+    /// sequence [`Self::messages`] folds, so the scan can never disagree
+    /// with the materialized fold.
     #[must_use]
     pub fn scan_message_scalars(&self) -> MessageWindowScalars {
         let mut scalars = MessageWindowScalars::default();
@@ -277,31 +277,6 @@ impl SessionFile {
             scalars.message_count += 1;
             if let Some(timestamp) = crate::types::message_timestamp_ms(&message) {
                 scalars.last_timestamp_ms = Some(timestamp);
-            }
-            if crate::types::message_role(&message) == Some("assistant") {
-                if let Some(usage) = message.get("usage") {
-                    scalars.input_tokens += usage
-                        .get("input")
-                        .and_then(Value::as_u64)
-                        .unwrap_or_default();
-                    scalars.input_tokens += usage
-                        .get("cacheRead")
-                        .and_then(Value::as_u64)
-                        .unwrap_or_default();
-                    scalars.input_tokens += usage
-                        .get("cacheWrite")
-                        .and_then(Value::as_u64)
-                        .unwrap_or_default();
-                    scalars.output_tokens += usage
-                        .get("output")
-                        .and_then(Value::as_u64)
-                        .unwrap_or_default();
-                    scalars.cost += usage
-                        .get("cost")
-                        .and_then(|cost| cost.get("total"))
-                        .and_then(Value::as_f64)
-                        .unwrap_or_default();
-                }
             }
         });
         scalars

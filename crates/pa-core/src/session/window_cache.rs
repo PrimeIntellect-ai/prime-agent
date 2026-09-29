@@ -56,7 +56,11 @@ impl Generation {
 /// `summarization_cost` (v4 sidecars deserialize it as zero and
 /// undercount the discarded prefix's summarizer bill — they must not
 /// serve). 4: the older-path stats fold child usage attributions (v3
-/// sidecars carry pre-fold totals and must not serve).
+/// sidecars carry pre-fold totals and must not serve). The two v5/v7
+/// fields were later removed with their only consumer (the title's
+/// daemon cost fold); the version stays 7 because the sidecar is plain
+/// serde JSON — a v7 snapshot carrying the removed keys still
+/// deserializes, and one written without them serves identically.
 pub(super) const SNAPSHOT_VERSION: u32 = 7;
 // `retained_whole_file` (added after v7) is `#[serde(default)]` false:
 // older sidecars deserialize it as false and simply skip the

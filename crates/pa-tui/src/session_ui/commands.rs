@@ -131,10 +131,10 @@ impl SessionUi {
             "new" => {
                 let id = create_session(&self.client, &self.create_options(), None).await?;
                 self.attach_session(&id, DockFold::Fresh).await?;
-                // The title's pair is session-scoped: fetch the new
+                // The context usage is session-scoped: fetch the new
                 // session's stats before the rebuild copies them into
                 // the chrome, or the rebind would ride the session being
-                // left's own cost and subagent aggregate.
+                // left's usage.
                 self.refresh_stats().await;
                 self.rebuild_view(view, &RebuildKind::Rebind);
                 self.note(&format!("started session {id}"), view);
