@@ -19,6 +19,12 @@ use crate::utils::diagnostics::{
 pub enum StreamFailureKind {
     Refusal,
     Safety,
+    /// A payment/balance rejection (HTTP 402): the account or team wallet
+    /// cannot fund the request. Deterministic by status — a wallet drain
+    /// does not refill inside a retry ladder, so the status classifies
+    /// before any body-text pattern (the 402 diagnosis: the same incident
+    /// must not fork on the response body's `error.type` text).
+    PaymentRequired,
     Overloaded,
     RateLimit,
     ServerError,
@@ -506,6 +512,10 @@ const KIND_MESSAGES: &[(StreamFailureKind, &str)] = &[
         StreamFailureKind::MalformedResponse,
         "Provider returned a malformed response",
     ),
+    (
+        StreamFailureKind::PaymentRequired,
+        "Provider requires payment",
+    ),
     (StreamFailureKind::Unknown, "Provider stream failed"),
 ];
 
@@ -549,6 +559,16 @@ pub fn classify_stream_failure(
     status: Option<u16>,
 ) -> StreamFailureKind {
     let type_lower = provider_error_type.unwrap_or("").to_lowercase();
+    // A 402 is a payment failure regardless of the body's `error.type`
+    // text: gateways surface wallet drains as `insufficient_credits`,
+    // `insufficient_balance`, `invalid_request_error`, or bare numeric
+    // codes, and the pre-fix classification forked on exactly that text
+    // (the same 402 retried as `unknown` or settled permanently as
+    // `invalid_request` — the silent-arm diagnosis). The status wins:
+    // credits do not refill inside a retry ladder.
+    if status == Some(402) {
+        return StreamFailureKind::PaymentRequired;
+    }
     if type_lower == "refusal" {
         return StreamFailureKind::Refusal;
     }
@@ -1007,6 +1027,22 @@ mod tests {
         assert_eq!(
             classify_stream_failure(Some("weird"), None),
             StreamFailureKind::Unknown
+        );
+        // A 402 classifies by status, before any body-text pattern: the
+        // same wallet drain must not fork on the response body's
+        // `error.type` text (the silent-arm diagnosis — variant A
+        // retried 13-15s on a dead wallet, variant B settled silently).
+        assert_eq!(
+            classify_stream_failure(Some("insufficient_credits"), Some(402)),
+            StreamFailureKind::PaymentRequired
+        );
+        assert_eq!(
+            classify_stream_failure(Some("invalid_request_error"), Some(402)),
+            StreamFailureKind::PaymentRequired
+        );
+        assert_eq!(
+            classify_stream_failure(None, Some(402)),
+            StreamFailureKind::PaymentRequired
         );
     }
 

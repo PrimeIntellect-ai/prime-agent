@@ -41,9 +41,10 @@ use pa_types::ai::Model;
 use super::auto_retry::{run_turn_with_auto_retry, AutoRetryEvent, RetryStartReason};
 use super::provider_park::{is_quota_block_failure, ParkDecisionCallback};
 use super::provider_retry::{
-    is_agent_lifecycle_failure, is_context_overflow_failure, is_faux_provider_queue_exhausted,
-    is_permanent_provider_failure_kind, is_unsupported_tool_failure, jittered_delay_ms,
-    provider_retry_delay, provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
+    has_provider_stream_failure, is_agent_lifecycle_failure, is_context_overflow_failure,
+    is_faux_provider_queue_exhausted, is_permanent_provider_failure_kind,
+    is_unsupported_tool_failure, jittered_delay_ms, provider_retry_delay,
+    provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
     provider_stream_failure_status, retry_jitter_rand01, ProviderRetryDelay, ProviderRetryPolicy,
 };
 
@@ -232,7 +233,16 @@ where
             if switched {
                 let _ = restore().await?;
             }
-            if total_retries > 0 {
+            // SANCTIONED DIVERGENCE (the 402 diagnosis, operator ruling):
+            // the outcome row is FAILURE-scoped — a first-attempt
+            // provider failure (no candidate switch, no retry) still
+            // discloses at attempt 0; the self-managed arms (overflow
+            // recovery, lifecycle, faux) stay silent. The twin arm of
+            // `run_turn_with_auto_retry`'s zero-retry disclosure.
+            if total_retries > 0
+                || (has_provider_stream_failure(&message)
+                    && !is_context_overflow_failure(&message, context_window))
+            {
                 emit(AutoRetryEvent::End {
                     success: false,
                     attempt: total_retries,
@@ -793,8 +803,11 @@ mod tests {
         assert_eq!(quick_starts, 6);
     }
 
+    /// A permanent failure never walks the chain, but the failure-scoped
+    /// disclosure still emits at attempt 0 (the 402 diagnosis: no provider
+    /// failure settles silently).
     #[tokio::test]
-    async fn permanent_failures_never_walk_the_chain() {
+    async fn permanent_failures_never_walk_the_chain_but_disclose() {
         let candidates = vec![model("backup-a")];
         let script = vec![error_message(
             Some("invalid_request"),
@@ -804,7 +817,15 @@ mod tests {
         let harness = drive(&fast_failover(), &candidates, script).await;
         assert_eq!(harness.attempts, 1);
         assert!(harness.switches.is_empty());
-        assert!(harness.events.is_empty());
+        assert_eq!(
+            harness.events.as_slice(),
+            &[AutoRetryEvent::End {
+                success: false,
+                attempt: 0,
+                final_error: Some("bad request".to_string()),
+                restored_model: None,
+            }]
+        );
     }
 
     /// The router's tool-use 404 is permanent even though a plain 404 is
@@ -812,7 +833,7 @@ mod tests {
     /// model rejects tools identically, so walking the chain only stacks
     /// ~16 minutes of doomed retries (the dogfood incident).
     #[tokio::test]
-    async fn unsupported_tool_failures_never_walk_the_chain() {
+    async fn unsupported_tool_failures_never_walk_the_chain_but_disclose() {
         let candidates = vec![model("backup-a")];
         let script = vec![error_message(
             Some("invalid_request"),
@@ -822,7 +843,19 @@ mod tests {
         let harness = drive(&fast_failover(), &candidates, script).await;
         assert_eq!(harness.attempts, 1);
         assert!(harness.switches.is_empty());
-        assert!(harness.events.is_empty());
+        // The capability mismatch still discloses at attempt 0.
+        assert_eq!(
+            harness.events.as_slice(),
+            &[AutoRetryEvent::End {
+                success: false,
+                attempt: 0,
+                final_error: Some(
+                    "404 No endpoints found that support tool use. Try disabling \"ipython\"."
+                        .to_string(),
+                ),
+                restored_model: None,
+            }]
+        );
     }
 
     #[tokio::test]

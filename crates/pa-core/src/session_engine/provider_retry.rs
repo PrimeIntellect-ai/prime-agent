@@ -139,6 +139,16 @@ pub fn provider_stream_failure_status(message: &AssistantMessage) -> Option<u16>
         .and_then(|status| u16::try_from(status).ok())
 }
 
+/// Whether a failed turn recorded a provider stream failure (the
+/// `provider_stream_failure` diagnostic): the failure-scoped disclosure's
+/// gate. Agent-lifecycle failures and the faux test provider's queue
+/// exhaustion carry none, and an abort conversion is a user action, not a
+/// provider failure — those stay silent (the 402 diagnosis: only a real
+/// provider failure must never settle silently).
+pub fn has_provider_stream_failure(message: &AssistantMessage) -> bool {
+    !is_faux_provider_queue_exhausted(message) && provider_stream_failure_details(message).is_some()
+}
+
 /// Deterministic rejections never retry; auth gets one retry before it can be
 /// marked stale. A 404 is the exception: a live model briefly 404s on routing
 /// blips, so it counts as transient unavailability, not a permanent rejection.
@@ -152,6 +162,11 @@ pub fn is_permanent_provider_failure_kind(
     match kind {
         Some("invalid_request") if status == Some(404) => false,
         Some("invalid_request" | "refusal" | "permission" | "safety") => true,
+        // A payment failure (HTTP 402's deterministic kind) never
+        // reflills mid-ladder: no retry can succeed until the wallet is
+        // topped up, so it settles on the first attempt (the disclosure
+        // row still fires — the failure-scoped outcome).
+        Some("payment_required") => true,
         Some("auth") => retries_performed > 0,
         _ => false,
     }
@@ -464,6 +479,13 @@ mod tests {
             Some("invalid_request"),
             0,
             Some(404)
+        ));
+        // A 402's deterministic kind is permanent on the first attempt:
+        // a wallet drain does not refill inside the retry ladder.
+        assert!(is_permanent_provider_failure_kind(
+            Some("payment_required"),
+            0,
+            Some(402)
         ));
         assert!(!is_permanent_provider_failure_kind(
             Some("server_error"),
