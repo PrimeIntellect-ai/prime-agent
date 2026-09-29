@@ -82,7 +82,7 @@ fn side_questions_start_abort_and_events_scripted() {
     // Start a side question; the response acknowledges immediately.
     client.send_command(
         "sq1",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "start_side_question",
             "activeSessionId": session_id,
             "sideQuestionId": "q1",
@@ -114,7 +114,7 @@ fn side_questions_start_abort_and_events_scripted() {
     // hold: duplicate ids are rejected, and one run per client per session.
     client.send_command(
         "sq-dup",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "start_side_question",
             "activeSessionId": session_id,
             "sideQuestionId": "q1",
@@ -129,7 +129,7 @@ fn side_questions_start_abort_and_events_scripted() {
     );
     client.send_command(
         "sq-busy",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "start_side_question",
             "activeSessionId": session_id,
             "sideQuestionId": "q2",
@@ -146,7 +146,7 @@ fn side_questions_start_abort_and_events_scripted() {
     // Aborting an unknown id reports { aborted: false }.
     client.send_command(
         "ab-unknown",
-        serde_json::json!({
+        &serde_json::json!({
             "type": "abort_side_question",
             "activeSessionId": session_id,
             "sideQuestionId": "never-started",
