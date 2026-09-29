@@ -224,9 +224,15 @@ impl SessionUi {
 
     /// TS `snapshotPromptStash`: the editor draft plus the pasted images
     /// its markers still reference. `None` for a whitespace-only draft.
-    /// Both capture paths (the agents-view handoff, the in-place switch)
-    /// stash an auto-restore head (TS `restoreOnOpen`).
-    fn snapshot_prompt_stash(&self, view: &AgentView) -> Option<PromptStash> {
+    /// The two auto capture paths (the agents-view handoff, the in-place
+    /// switch) stash a restore-on-open head (TS `restoreOnOpen`); the
+    /// manual `app.prompt.stash` capture does not (TS `handlePromptStash`'s
+    /// plain assignment) — that draft returns only on its own key.
+    fn snapshot_prompt_stash(
+        &self,
+        view: &AgentView,
+        restore_on_open: bool,
+    ) -> Option<PromptStash> {
         let text = view.editor.get_text();
         if text.trim().is_empty() {
             return None;
@@ -245,7 +251,7 @@ impl SessionUi {
             text,
             paste_snapshot,
             images,
-            restore_on_open: true,
+            restore_on_open,
         })
     }
 
@@ -255,7 +261,7 @@ impl SessionUi {
     /// restore semantics. The editor dies with this view, so the draft
     /// lives on only in the store.
     pub(crate) fn stash_draft_for_agents_view(&mut self, view: &AgentView) {
-        let Some(draft) = self.snapshot_prompt_stash(view) else {
+        let Some(draft) = self.snapshot_prompt_stash(view, true) else {
             return;
         };
         if let Some(telemetry) = self.telemetry.clone() {
@@ -278,7 +284,7 @@ impl SessionUi {
     /// editor clears — the switched-to session starts from an empty prompt
     /// and the draft returns on a switch back.
     pub(super) fn stash_draft_for_switch(&mut self, view: &mut AgentView) {
-        let Some(draft) = self.snapshot_prompt_stash(view) else {
+        let Some(draft) = self.snapshot_prompt_stash(view, true) else {
             return;
         };
         if let Some(telemetry) = self.telemetry.clone() {
@@ -305,13 +311,23 @@ impl SessionUi {
     /// otherwise replace.
     pub(crate) fn restore_prompt_stash_on_open(&mut self, view: &mut AgentView) {
         self.last_status_index = None;
-        self.restore_prompt_stash_if_editor_empty(view);
+        self.restore_prompt_stash_if_editor_empty(view, true);
     }
 
     /// TS `restorePromptStashIfEditorEmpty`: the head draft returns to the
     /// editor only when the editor is empty; the next queued draft (if
     /// any) becomes the head. Returns whether a draft landed.
-    pub(super) fn restore_prompt_stash_if_editor_empty(&mut self, view: &mut AgentView) -> bool {
+    /// `auto_head_only` mirrors the two TS call shapes: the opening
+    /// restore (and this port's `/switch` landing, TS
+    /// `restorePromptStashOnOpen`'s gate) restores only an auto
+    /// restore-on-open head, while the manual `app.prompt.stash` key
+    /// restores whatever draft the session holds — a manual stash never
+    /// lands on an open or a switch, only on its own key.
+    pub(super) fn restore_prompt_stash_if_editor_empty(
+        &mut self,
+        view: &mut AgentView,
+        auto_head_only: bool,
+    ) -> bool {
         if !view.editor.get_text().trim().is_empty() {
             return false;
         }
@@ -320,9 +336,12 @@ impl SessionUi {
                 .prompt_stash
                 .lock()
                 .expect("prompt stash store poisoned");
-            store
-                .for_session(&self.stash_session_id)
-                .take_head_restore_on_open()
+            let state = store.for_session(&self.stash_session_id);
+            if auto_head_only {
+                state.take_head_restore_on_open()
+            } else {
+                state.take_head()
+            }
         };
         let Some(stash) = stash else {
             return false;
@@ -348,6 +367,51 @@ impl SessionUi {
         }
         self.note("Restored stashed prompt", view);
         true
+    }
+
+    /// TS `handlePromptStash` — the `app.prompt.stash` action (default
+    /// ctrl+s, `interactive-mode.ts`): with a draft in the editor the key
+    /// stashes it — the whole draft (text, collapsed pastes, pasted
+    /// images) moves to the session's stash and the editor clears; with
+    /// an empty editor the key restores the session's stashed draft.
+    /// A session that already holds a draft keeps it: the fresh draft
+    /// stays in the editor and the status says so (TS's no-overwrite
+    /// guard), which is the difference from the auto capture paths —
+    /// they queue an old stash behind the new head, the manual key never
+    /// clobbers one.
+    pub(super) fn handle_prompt_stash(&mut self, view: &mut AgentView) {
+        if view.editor.get_text().trim().is_empty() {
+            if !self.restore_prompt_stash_if_editor_empty(view, false) {
+                self.note("No prompt to stash", view);
+            }
+            return;
+        }
+        let holds_draft = {
+            let mut store = self
+                .prompt_stash
+                .lock()
+                .expect("prompt stash store poisoned");
+            store.for_session(&self.stash_session_id).stash.is_some()
+        };
+        if holds_draft {
+            self.note("Prompt stash already has a draft", view);
+            return;
+        }
+        let Some(draft) = self.snapshot_prompt_stash(view, false) else {
+            return;
+        };
+        {
+            let mut store = self
+                .prompt_stash
+                .lock()
+                .expect("prompt stash store poisoned");
+            store
+                .for_session(&self.stash_session_id)
+                .stash_draft_head(draft);
+        }
+        view.editor.set_text("");
+        self.dirty = true;
+        self.note("Stashed prompt", view);
     }
 
     /// Whether the current model takes image input (TS
