@@ -65,12 +65,14 @@ pub(crate) fn persist_info_sidecar(path: &Path) {
         // Buffered: the serialized state is megabytes of small map
         // entries, and an unbuffered file writer would turn every
         // serialized fragment into its own write syscall.
-        let mut file = io::BufWriter::new(
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temp)?,
-        );
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // The sidecar carries message text (the search corpus, the first
+        // message): the temp is owner-only like the session files
+        // (`persist.rs`'s writer), and the rename carries the mode onto
+        // the sidecar.
+        pa_core::platform::perms::set_private_mode(&mut options);
+        let mut file = io::BufWriter::new(options.open(&temp)?);
         serde_json::to_writer(
             &mut file,
             &InfoSidecar {

@@ -526,6 +526,12 @@ fn a_persisted_scan_state_resumes_like_the_full_fold() {
         path.with_extension("info-cache.json").is_file(),
         "the release write persists the state"
     );
+    // The sidecar carries message text (the search corpus, the first
+    // message): it is owner-only like the session files it derives from.
+    assert_eq!(
+        pa_core::platform::perms::file_mode(&path.with_extension("info-cache.json")),
+        Some(pa_core::platform::perms::PRIVATE_FILE_MODE)
+    );
     super::session_info_cache()
         .lock()
         .unwrap()
