@@ -15,7 +15,7 @@
 //!   long battery should chunk processes — the workers accumulate
 //!   engines and runtimes in-process past ~130 reps).
 //! - `PA_RACE_DELAY_MS`: the held turn's faux delay (default 3000; the
-//!   product-family test uses 600_000 — the delay's magnitude does not
+//!   product-family test uses `600_000` — the delay's magnitude does not
 //!   change the abort-vs-admission interleaving, only the miss cost).
 //! - `PA_RACE_IDLE_WINDOW_MS`: the wait-for-idle window the settle
 //!   latency report uses (default 300; an honored abort settles the
@@ -29,7 +29,7 @@
 //! - `lost_aborts` — the PRODUCT race this harness exists for: the abort
 //!   never reached the run, the held turn serves "held reply" as its OWN
 //!   reply (the first assistant row behind ONE user row), the pre-fix
-//!   dump shape (busy=true abort_requested=true steering_len=2
+//!   dump shape (busy=true `abort_requested=true` `steering_len=2`
 //!   `run_signal=live`). ANY occurrence fails the harness.
 //! - `fixture_leaks` — the expected post-fix artifact of the same
 //!   interleaving: the consult aborts the turn BEFORE its provider call,
