@@ -6,6 +6,7 @@ use crate::chat::Detail;
 use crate::theme::{Theme, ThemeColor};
 use crate::{Line, Span};
 
+#[must_use]
 pub fn render(
     card: &ToolCallCard,
     frame: usize,
@@ -66,7 +67,7 @@ fn traverse(
             out,
         );
     }
-    out.images(&card.result, show_images, theme);
+    out.images(card.result.as_ref(), show_images, theme);
 }
 
 /// Preview the first three source lines, not the first three wrapped rows.

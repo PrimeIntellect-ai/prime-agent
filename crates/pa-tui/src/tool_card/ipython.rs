@@ -102,6 +102,7 @@ fn cell_code(card: &ToolCallCard) -> &str {
 
 /// Render the ipython cell card: the fixed summary line, then the expanded
 /// code and output rows when conversation detail is `all`.
+#[must_use]
 pub fn render(
     card: &ToolCallCard,
     frame: usize,
@@ -173,7 +174,7 @@ fn layout(
     // Image blocks render below the card when shown (TS the
     // `N images rendered below` note refers to these rows, which
     // `tool-execution.ts` adds for every tool shell).
-    lines.images(&card.result, show_images, theme);
+    lines.images(card.result.as_ref(), show_images, theme);
 }
 
 /// The fixed marker + summary line (TS `collapsedLine`).
@@ -349,11 +350,11 @@ fn render_code(lines: &mut RowOutput, code: &str, theme: &Theme, width: usize) -
     if code.is_empty() {
         add_wrapped(
             lines,
-            vec![Span::styled(
+            &vec![Span::styled(
                 "\u{2570}\u{2500} ".to_string(),
                 theme.fg_style(ThemeColor::Dim),
             )],
-            vec![Span::styled(
+            &vec![Span::styled(
                 "waiting for code".to_string(),
                 theme.fg_style(ThemeColor::Muted),
             )],
@@ -398,7 +399,7 @@ fn render_code(lines: &mut RowOutput, code: &str, theme: &Theme, width: usize) -
         } else {
             body
         };
-        add_wrapped(lines, prefix, body, width);
+        add_wrapped(lines, &prefix, &body, width);
     }
     true
 }
@@ -462,14 +463,14 @@ fn render_sent_agent_messages(
 /// One indented card row (TS `addWrapped`): the first wrapped row carries
 /// `prefix`, continuation rows the matching indent; each row is truncated
 /// to the width so a narrow pane cannot overflow.
-fn add_wrapped(lines: &mut RowOutput, prefix: Line, body: Line, width: usize) {
+fn add_wrapped(lines: &mut RowOutput, prefix: &Line, body: &Line, width: usize) {
     let prefix_width: usize = prefix.iter().map(|s| str_width(&s.content)).sum();
     let available = width.saturating_sub(1 + prefix_width).max(1);
     if lines.is_counting() {
-        lines.add_count(crate::width::wrapped_line_count(&body, available).max(1));
+        lines.add_count(crate::width::wrapped_line_count(body, available).max(1));
         return;
     }
-    let wrapped = wrap_line(&body, available);
+    let wrapped = wrap_line(body, available);
     let mut rows: Vec<Line> = Vec::new();
     if wrapped.is_empty() {
         rows.push(Vec::new());

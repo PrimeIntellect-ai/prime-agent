@@ -30,6 +30,7 @@ pub enum AuthType {
 
 impl AuthType {
     /// The row's auth label (TS `authLabel`).
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             AuthType::Oauth => "subscription",
@@ -249,6 +250,7 @@ impl ProviderAuthSelector {
     /// Build the selector over the hook's rows. Login rows default to the
     /// Provider tab; the empty list still opens (TS renders the empty
     /// message in the panel).
+    #[must_use]
     pub fn new(kind: AuthSelectorKind, providers: Vec<ProviderRow>) -> Self {
         let mut selector = ProviderAuthSelector {
             kind,

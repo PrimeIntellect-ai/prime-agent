@@ -52,6 +52,7 @@ fn cron_day_name(value: u32) -> Option<&'static str> {
 /// `@hourly`/`@daily` aliases expand at creation into the five-field
 /// forms they mean), and anything the interpreter cannot cover falls
 /// back to the raw expression.
+#[must_use]
 pub fn human_schedule(expression: &str) -> String {
     let trimmed = expression.trim();
     match trimmed {

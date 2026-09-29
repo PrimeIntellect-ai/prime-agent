@@ -59,7 +59,7 @@ fn mount_paste_tone(tone: PastePromptTone) -> (AuthPanel, oneshot::Receiver<Opti
     let mut panel = AuthPanel::new("Login to Prime Inference");
     let (reply, answer) = oneshot::channel();
     panel.mount_paste(
-        "Paste a Prime API key below:".to_string(),
+        "Paste a Prime API key below:",
         tone,
         PasteStyle::Visible,
         false,
@@ -84,7 +84,7 @@ fn mount_teams(
 #[test]
 fn the_first_progress_line_lands_under_the_section_title() {
     let mut panel = AuthPanel::new("Login to Prime Inference");
-    panel.push_progress("Checking existing Prime CLI credentials...".to_string());
+    panel.push_progress("Checking existing Prime CLI credentials...");
     let rows = frame_text(&mut panel);
     assert!(rows
         .iter()
@@ -105,7 +105,7 @@ fn the_first_progress_line_lands_under_the_section_title() {
 fn the_auth_url_block_replaces_the_content() {
     let mut panel = AuthPanel::new("Login to Linear");
     panel.mount_paste(
-        "Paste the code below:".to_string(),
+        "Paste the code below:",
         PastePromptTone::Muted,
         PasteStyle::Visible,
         false,
@@ -203,7 +203,7 @@ fn an_empty_paste_submit_shows_the_notice_only_on_the_token_panel() {
     let mut panel = AuthPanel::new("Connect GitHub");
     let (reply, mut answer) = oneshot::channel();
     panel.mount_paste(
-        "Paste the token for github:".to_string(),
+        "Paste the token for github:",
         PastePromptTone::Text,
         PasteStyle::Masked,
         false,
@@ -279,7 +279,7 @@ fn an_allow_empty_paste_prompt_submits_the_blank_answer() {
     let mut panel = AuthPanel::new("Login to GitHub Copilot");
     let (reply, mut answer) = oneshot::channel();
     panel.mount_paste(
-        "GitHub Enterprise URL/domain (blank for github.com)".to_string(),
+        "GitHub Enterprise URL/domain (blank for github.com)",
         PastePromptTone::Text,
         PasteStyle::Visible,
         true,
@@ -302,7 +302,7 @@ fn an_allow_empty_paste_prompt_submits_the_blank_answer() {
 fn the_masked_field_renders_bullets_never_the_secret() {
     let mut panel = AuthPanel::new("Connect GitHub");
     panel.mount_paste(
-        "Paste the token for github:".to_string(),
+        "Paste the token for github:",
         PastePromptTone::Text,
         PasteStyle::Masked,
         false,
@@ -510,7 +510,7 @@ fn a_paste_payload_lands_in_the_mounted_field() {
 #[test]
 fn provider_text_is_scrubbed_never_a_terminal_sequence() {
     let mut panel = AuthPanel::new("Login to \u{1b}]8;;https://evil.example\u{7}Evil");
-    panel.push_progress("Loading\u{1b}[2J teams...".to_string());
+    panel.push_progress("Loading\u{1b}[2J teams...");
     panel.show_auth_url(
         "https://a.example/\u{1b}]8;;https://evil.example\u{7}link\u{1b}\\\u{1b}]8;;\u{1b}\\"
             .to_string(),
@@ -582,7 +582,7 @@ fn the_session_chrome_is_the_ts_inline_panel() {
         rows[1], " Login to Prime Inference",
         "the muted 1-space title"
     );
-    panel.push_progress("Opening the browser challenge...".to_string());
+    panel.push_progress("Opening the browser challenge...");
     let rows = frame_text(&mut panel);
     assert_eq!(rows[2], "", "the startContent blank opens the body");
     assert!(
@@ -704,7 +704,7 @@ fn multi_line_code_instructions_stay_provider_text() {
 fn the_waiting_line_joins_the_url_block_in_the_accent_colour() {
     let mut panel = AuthPanel::onboarding("Login to GitHub Copilot");
     panel.show_auth_url("https://fixture.example/device".to_string(), None);
-    panel.push_waiting("Waiting for browser authentication...".to_string());
+    panel.push_waiting("Waiting for browser authentication...");
     let rows = frame_text(&mut panel);
     let url = rows
         .iter()

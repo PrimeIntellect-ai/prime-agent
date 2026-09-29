@@ -117,8 +117,10 @@ fn user_message() -> AgentMessage {
 
 fn text_delta_event(message: &AssistantMessage) -> AgentEvent {
     AgentEvent::MessageUpdate {
-        message: AgentMessage::Standard(LoopMessage::Assistant(message.clone())),
-        assistant_message_event: Box::new(AssistantMessageEvent::TextDelta {
+        message: std::sync::Arc::new(AgentMessage::Standard(LoopMessage::Assistant(
+            message.clone(),
+        ))),
+        assistant_message_event: std::sync::Arc::new(AssistantMessageEvent::TextDelta {
             content_index: 0,
             delta: "private streamed text".to_string(),
             partial: message.clone(),

@@ -472,6 +472,7 @@ pub fn preview_python_code(code: &str) -> CodePreview {
 
 /// Preview an ipython cell: %%bash cells preview as bash, the rest as python.
 #[cfg_attr(not(test), allow(dead_code))]
+#[must_use]
 pub fn preview_ipython_code(code: &str) -> CodePreview {
     let trimmed = js_trim_end(code);
     if let Some(cell) = parse_ipython_bash_cell(trimmed) {

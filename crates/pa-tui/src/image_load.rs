@@ -28,6 +28,7 @@ pub struct LoadedImage {
 
 /// Detect the supported image mime type from leading bytes (the same
 /// magic signatures the `file-type` package matches for these formats).
+#[must_use]
 pub fn detect_supported_image_mime_from_bytes(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
         return Some("image/png");

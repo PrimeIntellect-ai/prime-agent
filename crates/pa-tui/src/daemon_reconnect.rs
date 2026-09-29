@@ -78,7 +78,7 @@ fn is_daemon_version_newer(daemon_version: &str, client_version: &str) -> bool {
 }
 
 /// TS `splitVersionSegments`: the dot- and dash-separated segments of a
-/// version ("1.2.3-beta.1" -> ["1", "2", "3", "beta", "1"]).
+/// version ("1.2.3-beta.1" -> `["1", "2", "3", "beta", "1"]`).
 fn split_version_segments(value: &str) -> Vec<&str> {
     value.split(['.', '-']).collect()
 }

@@ -222,6 +222,7 @@ fn hex_to_color(s: &str) -> Option<Color> {
 /// Quantize RGB to the xterm 256-color palette (TS `rgbTo256`): nearest cube
 /// level per channel, gray chosen by luma, gray wins only for near-neutral
 /// colors where it is the closer weighted distance.
+#[must_use]
 pub fn rgb_to_256(rgb: (u8, u8, u8)) -> u8 {
     const CUBE_VALUES: [u8; 6] = [0, 95, 135, 175, 215, 255];
     const GRAY_VALUES: [u8; 24] = {
@@ -289,6 +290,7 @@ pub enum ColorMode {
 /// TS `detectColorMode`: truecolor unless the terminal is truly limited.
 /// tmux reports `screen*` but forwards 24-bit color, so it stays truecolor;
 /// only genuine GNU screen (no `$TMUX`) falls back to the 256-color cube.
+#[must_use]
 pub fn detect_color_mode() -> ColorMode {
     let colorterm = std::env::var("COLORTERM").unwrap_or_default();
     if colorterm == "truecolor" || colorterm == "24bit" {
@@ -426,19 +428,23 @@ impl Theme {
         }
     }
 
+    #[must_use]
     pub fn builtin(name: &str, mode: ColorMode) -> Theme {
         let json = builtin_theme_json(name);
         Theme::from_json(&json, mode)
     }
 
+    #[must_use]
     pub fn fg_style(&self, color: ThemeColor) -> Style {
         self.fg.get(color.name()).copied().unwrap_or_default()
     }
 
+    #[must_use]
     pub fn bg_style(&self, color: ThemeBg) -> Style {
         self.bg.get(color.name()).copied().unwrap_or_default()
     }
 
+    #[must_use]
     pub fn bg_color(&self, color: ThemeBg) -> Option<Color> {
         self.bg_colors.get(color.name()).copied()
     }
@@ -460,23 +466,28 @@ impl Theme {
     }
 
     /// Bold helper (chalk.bold equivalent).
+    #[must_use]
     pub fn bold(&self, span: crate::Span) -> crate::Span {
         span_with(span, Modifier::BOLD)
     }
 
+    #[must_use]
     pub fn italic(&self, span: crate::Span) -> crate::Span {
         span_with(span, Modifier::ITALIC)
     }
 
+    #[must_use]
     pub fn underline(&self, span: crate::Span) -> crate::Span {
         span_with(span, Modifier::UNDERLINED)
     }
 
+    #[must_use]
     pub fn strikethrough(&self, span: crate::Span) -> crate::Span {
         span_with(span, Modifier::CROSSED_OUT)
     }
 
     /// Background-paint helper: apply a bg style to whole line content.
+    #[must_use]
     pub fn bg_paint(&self, color: ThemeBg, line: crate::Line) -> crate::Line {
         let style = self.bg_style(color);
         line.into_iter()
@@ -489,6 +500,7 @@ impl Theme {
 
     /// Editor surface background (userMessageBg) — in the TS theme the editor
     /// and user messages share the surface color.
+    #[must_use]
     pub fn editor_background(&self) -> Option<Style> {
         Some(self.bg_style(ThemeBg::UserMessageBg))
     }
@@ -498,6 +510,7 @@ impl Theme {
     /// pastel on light terminal backgrounds; the Rust theme does not yet
     /// detect the terminal background kind, so the dark pastel is the
     /// default-terminal match.
+    #[must_use]
     pub fn effort_square_style(&self) -> Style {
         const EFFORT_SQUARE_DARK_COLOR: Color = Color::Rgb(0xa7, 0x8b, 0xfa);
         Style::default().fg(to_terminal_color(EFFORT_SQUARE_DARK_COLOR, self.mode))
@@ -526,12 +539,13 @@ impl Theme {
     /// surfaces"). Candidates evaluate after [`Theme::mode`]
     /// quantization, so a 256-color terminal keeps a wash the palette
     /// actually separates from the surface.
+    #[must_use]
     pub fn soft_selection_style(&self) -> Style {
         let blend = |top: (u16, u16, u16), bottom: (u16, u16, u16), alpha: f32| {
             Color::Rgb(
-                (top.0 as f32 * alpha + bottom.0 as f32 * (1.0 - alpha)).round() as u8,
-                (top.1 as f32 * alpha + bottom.1 as f32 * (1.0 - alpha)).round() as u8,
-                (top.2 as f32 * alpha + bottom.2 as f32 * (1.0 - alpha)).round() as u8,
+                (f32::from(top.0) * alpha + f32::from(bottom.0) * (1.0 - alpha)).round() as u8,
+                (f32::from(top.1) * alpha + f32::from(bottom.1) * (1.0 - alpha)).round() as u8,
+                (f32::from(top.2) * alpha + f32::from(bottom.2) * (1.0 - alpha)).round() as u8,
             )
         };
         // The blend needs real RGB. A truecolor theme carries its
@@ -669,6 +683,7 @@ impl Theme {
     /// `Color::Reset`, which paints no band) falls through to the
     /// onboarding wash, so a selected row always reads as selected
     /// (Macroscope PR #2908's contract).
+    #[must_use]
     pub fn selection_row_style(&self) -> Style {
         let purple = self
             .fg_style(ThemeColor::Accent)
@@ -684,6 +699,7 @@ impl Theme {
     /// the `bg_paint` counterpart for the one selection style: each
     /// span keeps its own foreground, gains the purple band and the
     /// bold modifier.
+    #[must_use]
     pub fn selection_paint(&self, line: crate::Line) -> crate::Line {
         let style = self.selection_row_style();
         line.into_iter()
@@ -705,6 +721,7 @@ impl Theme {
     /// it clears the visibility bar over the surfaces it renders on
     /// and follows the theme in both color modes, so one style serves
     /// every surface instead of a per-surface copy.
+    #[must_use]
     pub fn hover_row_style(&self) -> Style {
         self.soft_selection_style()
     }
@@ -856,6 +873,7 @@ pub const LIGHT_JSON: &str = pa_types::themes::LIGHT_THEME_JSON;
 ///
 /// Panics only if the bundled `prime` theme JSON fails to parse (a
 /// build-time invariant the shipped constant satisfies).
+#[must_use]
 pub fn builtin_theme_json(name: &str) -> ThemeJson {
     let raw = pa_types::themes::builtin_theme_json(name).unwrap_or(PRIME_JSON);
     serde_json::from_str(raw)

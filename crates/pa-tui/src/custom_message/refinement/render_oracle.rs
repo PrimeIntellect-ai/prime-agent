@@ -13,7 +13,7 @@ pub(crate) fn render_refinement_outcome(
 ) -> Vec<Line> {
     let mut out = vec![spacer()];
     let header = text_rows(
-        vec![Span::styled(
+        &vec![Span::styled(
             format!("\u{25c6} {}", row.header),
             theme.fg_style(ThemeColor::RefinementHeader),
         )],
@@ -38,7 +38,7 @@ pub(crate) fn render_refinement_outcome(
     if detail.tool_output_expanded() {
         out.push(spacer());
         out.extend(continuation_rows_over(
-            vec![Span::styled(
+            &vec![Span::styled(
                 row.meta.clone(),
                 theme.fg_style(ThemeColor::Dim),
             )],
@@ -69,7 +69,7 @@ fn event_summary_rows(
     };
     if expanded {
         let rows = branch_rows_over(
-            vec![Span::styled(text, theme.fg_style(color))],
+            &vec![Span::styled(text, theme.fg_style(color))],
             theme,
             width,
         );
@@ -115,20 +115,20 @@ fn event_summary_rows(
 /// The expanded-content row set on the branch grammar: wrap at the branch
 /// content width, first row the dim `╰─ ` gutter, continuation rows the
 /// matching indent, truncated to the full width.
-fn branch_rows_over(line: Line, theme: &Theme, width: usize) -> Vec<Line> {
+fn branch_rows_over(line: &Line, theme: &Theme, width: usize) -> Vec<Line> {
     crate::branch::branch_block(line, theme, width)
 }
 
 /// The continuation row set on the branch depth: every row starts four
 /// plain spaces and wraps at the branch content width.
-fn continuation_rows_over(line: Line, width: usize) -> Vec<Line> {
+fn continuation_rows_over(line: &Line, width: usize) -> Vec<Line> {
     let flat: String = line.iter().map(|span| span.content.as_str()).collect();
     if flat.trim().is_empty() {
         return Vec::new();
     }
     let content_width = crate::branch::branch_content_width(width);
     let mut rows: Vec<Line> = Vec::new();
-    for source in crate::branch::split_line_on_newlines(&line) {
+    for source in crate::branch::split_line_on_newlines(line) {
         for wrapped in wrap_line(&source, content_width) {
             let mut row: Line = vec![Span::raw(crate::branch::BRANCH_INDENT.to_string())];
             row.extend(wrapped);
@@ -146,10 +146,10 @@ fn edit_section_rows(edit: &RefinementEditRow, theme: &Theme, width: usize) -> V
     for part in &edit.label {
         label.push(label_part(part, theme));
     }
-    let mut out = branch_rows_over(label, theme, width);
+    let mut out = branch_rows_over(&label, theme, width);
     for field in &edit.fields {
         out.extend(continuation_rows_over(
-            vec![Span::styled(
+            &vec![Span::styled(
                 field.label.clone(),
                 theme.fg_style(ThemeColor::Muted),
             )],
@@ -158,7 +158,7 @@ fn edit_section_rows(edit: &RefinementEditRow, theme: &Theme, width: usize) -> V
         match &field.change {
             None => {
                 out.extend(continuation_rows_over(
-                    vec![Span::raw(field.value.join("\n"))],
+                    &vec![Span::raw(field.value.join("\n"))],
                     width,
                 ));
             }
@@ -181,7 +181,7 @@ fn edit_section_rows(edit: &RefinementEditRow, theme: &Theme, width: usize) -> V
     }
     if let Some(reason) = &edit.reason {
         out.extend(continuation_rows_over(
-            vec![Span::styled(
+            &vec![Span::styled(
                 format!("Reason: {reason}"),
                 theme.fg_style(ThemeColor::Muted),
             )],

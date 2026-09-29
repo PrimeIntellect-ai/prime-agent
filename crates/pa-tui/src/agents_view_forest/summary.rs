@@ -32,6 +32,7 @@ pub(crate) fn session_model(summary: &Value) -> String {
     }
 }
 
+#[must_use]
 pub fn session_title(summary: &Value) -> String {
     let cwd_basename = get_str(summary, "cwd").map(|cwd| {
         std::path::Path::new(cwd)
@@ -81,6 +82,7 @@ pub(crate) fn is_subagent_summary(summary: &Value) -> bool {
 
 /// The stable row identity of one summary (TS `getAgentsViewSummaryIdentity`):
 /// the roster-qualified child id for subagents, else file, active, session.
+#[must_use]
 pub fn summary_identity(summary: &Value) -> String {
     let get = |field: &str| {
         summary
@@ -104,6 +106,7 @@ pub fn summary_identity(summary: &Value) -> String {
 }
 
 /// The selection key of one summary (TS `getAgentsViewSelectionKey`).
+#[must_use]
 pub fn selection_key(summary: &Value) -> SelectionKey {
     let get = |field: &str| {
         summary

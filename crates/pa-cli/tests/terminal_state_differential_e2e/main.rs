@@ -236,7 +236,7 @@ fn diff_replay_child_mode() {
         panic_after_frame,
         ..Default::default()
     };
-    let _ = pa_tui::app::run_app(Box::new(stream), options, Box::new(|_text| {}));
+    let _ = pa_tui::app::run_app(Box::new(stream), &options, Box::new(|_text| {}));
     quiet_child_epilogue();
 }
 

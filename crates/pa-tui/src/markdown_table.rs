@@ -420,7 +420,7 @@ mod tests {
     use super::*;
     use ratatui::style::Modifier;
 
-    fn rows(out: Vec<Line>) -> Vec<String> {
+    fn rows(out: &[Line]) -> Vec<String> {
         out.iter()
             .map(|l| l.iter().map(|s| s.content.as_str()).collect())
             .collect()
@@ -440,7 +440,7 @@ mod tests {
             &style,
             &mut out,
         );
-        rows(out)
+        rows(&out)
     }
 
     #[test]

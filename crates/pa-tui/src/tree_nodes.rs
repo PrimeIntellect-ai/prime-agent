@@ -66,14 +66,17 @@ impl Drop for TreeNode {
 }
 
 impl TreeNode {
+    #[must_use]
     pub fn id(&self) -> Option<&str> {
         self.data.entry.id()
     }
 
+    #[must_use]
     pub fn parent_id(&self) -> Option<&str> {
         self.data.entry.parent_id()
     }
 
+    #[must_use]
     pub fn timestamp(&self) -> &str {
         self.data.entry.timestamp()
     }

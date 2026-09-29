@@ -253,7 +253,7 @@ impl AgentView {
     /// settled entry keeps its layout while another message streams — the
     /// transcript-wide "any streaming" exclusion re-rendered every
     /// settled agent message per streaming delta, the dogfood CPU spin.
-    pub(super) fn entry_cacheable(&self, entry: &ChatEntry) -> bool {
+    pub(super) fn entry_cacheable(entry: &ChatEntry) -> bool {
         match entry {
             ChatEntry::Status { .. }
             | ChatEntry::User { .. }
@@ -360,7 +360,7 @@ impl AgentView {
         let mut preceded_by_tool_activity = false;
         for (index, entry) in self.chat.iter().enumerate() {
             let spacing = self.entry_spacing(index, entry, first, preceded_by_tool_activity);
-            let cacheable = self.entry_cacheable(entry);
+            let cacheable = Self::entry_cacheable(entry);
             let cached_height = self.entry_heights[index][detail]
                 .filter(|(cached_spacing, _)| cacheable && *cached_spacing == spacing)
                 .map(|(_, height)| height);
@@ -371,7 +371,7 @@ impl AgentView {
             offsets.push(offsets.last().copied().unwrap_or(0) + count);
             // TS `precededByToolActivity` = the compact set (tool calls,
             // agent messages, bash executions, shell completions).
-            preceded_by_tool_activity = self.is_compact_neighbor(entry);
+            preceded_by_tool_activity = Self::is_compact_neighbor(entry);
             first = false;
         }
         let tail = self.render_transcript_tail(width);

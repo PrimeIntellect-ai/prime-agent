@@ -238,7 +238,7 @@ impl ExitGuard {
             }
         }
         if !self.state.watchdog_spawned.swap(true, Ordering::SeqCst) {
-            spawn_watchdog(Arc::clone(&self.state));
+            spawn_watchdog(&Arc::clone(&self.state));
         }
     }
 
@@ -263,8 +263,8 @@ impl ExitGuard {
 /// The watchdog: one thread per guard, spawned on the first arming. Sleeps
 /// toward the deadline in [`WATCHDOG_POLL_MS`] slices (so a disarm or
 /// cancel lands promptly), then force-quits.
-fn spawn_watchdog(state: Arc<GuardState>) {
-    let thread_state = Arc::clone(&state);
+fn spawn_watchdog(state: &Arc<GuardState>) {
+    let thread_state = Arc::clone(state);
     let spawned = std::thread::Builder::new()
         .name(WATCHDOG_THREAD_NAME.to_string())
         .spawn(move || loop {

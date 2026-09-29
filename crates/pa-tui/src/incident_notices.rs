@@ -59,6 +59,7 @@ pub enum IncidentNoticeKind {
 
 impl IncidentNoticeKind {
     /// The dismissal-key prefix (TS `${kind}|`).
+    #[must_use]
     pub fn key_prefix(self) -> &'static str {
         match self {
             IncidentNoticeKind::WorkerCrash => "worker-crash",
@@ -104,6 +105,7 @@ pub struct IncidentNoticeState {
 
 impl IncidentNoticeState {
     /// A fresh state (TS `createIncidentNoticeState`).
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -118,6 +120,7 @@ impl IncidentNoticeState {
 /// The TS reads the wall clock in the local timezone; the Rust tree is
 /// UTC end-to-end (the daemon logs UTC and has no timezone layer), so
 /// the Rust notice reads UTC.
+#[must_use]
 pub fn format_incident_notice_time(time_ms: i64, now_ms: i64) -> String {
     let (time, (year, month, day)) = notice_parts(time_ms);
     let (_, (now_year, now_month, now_day)) = notice_parts(now_ms);
@@ -189,6 +192,7 @@ fn create_notice(
 /// re-surfaces the notice, instead of it staying hidden until the first
 /// timeout ages out of the window; an isolated stray timeout, or a
 /// separate later stall, never moves the anchor and never re-opens it.
+#[must_use]
 pub fn derive_incident_notices(entries: &[IncidentLogEntry], now_ms: i64) -> Vec<IncidentNotice> {
     let since_ms = now_ms - INCIDENT_NOTICE_WINDOW_MS;
     // CLI window parity: buildIncidentReport windows events by
@@ -278,6 +282,7 @@ pub fn derive_incident_notices(entries: &[IncidentLogEntry], now_ms: i64) -> Vec
 /// most severe wins (critical > error > warn > info), the most recent
 /// breaks ties. Repeated identical events aggregate here — the header
 /// never stacks copies (TS `selectIncidentNotice`).
+#[must_use]
 pub fn select_incident_notice(notices: &[IncidentNotice]) -> Option<IncidentNotice> {
     let mut best: Option<&IncidentNotice> = None;
     for notice in notices {
@@ -294,9 +299,10 @@ pub fn select_incident_notice(notices: &[IncidentNotice]) -> Option<IncidentNoti
 
 /// True when the notice sits at or before its key's dismissal horizon (TS
 /// `isIncidentNoticeDismissed`).
-pub fn is_incident_notice_dismissed(
+#[must_use]
+pub fn is_incident_notice_dismissed<S: std::hash::BuildHasher + Default>(
     notice: &IncidentNotice,
-    horizons: &HashMap<String, i64>,
+    horizons: &HashMap<String, i64, S>,
 ) -> bool {
     horizons
         .get(&notice.key)

@@ -2,7 +2,7 @@
 //! settle on execution start/end, the failed-frame sweep) and the assistant
 //! message decode family (the ordered visible parts, the error rows, the
 //! superseded-attempt ruling) - moved with their concern.
-use super::*;
+use super::{AssistantMessage, ChatEntry, MessageBlock, ToolCallCard, ToolResultView, Value};
 
 /// Fold one streamed tool call into the live transcript (TS
 /// `getOrCreatePendingToolComponent` without its async deferral).
@@ -55,10 +55,10 @@ pub fn apply_streamed_tool_card(
 /// settles with the failure text as an error result, and the card drops the
 /// tool's late result frames (`resetPendingToolState` cleared the pending
 /// map the same way — a late `tool_execution_end` finds no component there).
-pub fn settle_pending_tool_cards(
+pub fn settle_pending_tool_cards<S: std::hash::BuildHasher + Default>(
     view: &mut crate::view::AgentView,
-    pending: &mut std::collections::HashSet<String>,
-    aborted: &mut std::collections::HashSet<String>,
+    pending: &mut std::collections::HashSet<String, S>,
+    aborted: &mut std::collections::HashSet<String, S>,
     text: &str,
 ) {
     for tool_call_id in pending.drain() {
@@ -150,6 +150,7 @@ pub struct AssistantErrorRow {
 /// failed attempt): an error-only assistant entry, no blocks and no tool
 /// calls (their cards carry the failure), not an abort. The episode's
 /// `provider_retry_outcome` row replaces every superseded attempt.
+#[must_use]
 pub fn is_superseded_attempt_row(entry: &ChatEntry) -> bool {
     matches!(
         entry,
@@ -194,6 +195,7 @@ pub fn assistant_error_row(
 }
 
 /// Decode an assistant wire message into a message component plus tool cards.
+#[must_use]
 pub fn assistant_value_to_entries(message: &Value) -> Vec<ChatEntry> {
     let (blocks, tool_calls) = assistant_message_parts(message);
     // TS `AssistantMessageComponent.rebuild`: an abort renders its error row

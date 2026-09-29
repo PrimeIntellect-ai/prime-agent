@@ -6,6 +6,29 @@
 //! row selects and opens it — the Enter action — while a dragged
 //! release never opens.
 #![cfg(unix)]
+// Pedantic-gate exceptions (every other pedantic warning in this crate is
+// fixed in place; each exception carries its one-line justification):
+// - the casts: terminal-layout arithmetic narrows structurally bounded
+//   values (screen coordinates, byte counts, timestamps); guarded
+//   conversions would add panic paths the bounds guarantee away.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// - the render routes are flat tables (one arm per route); splitting them
+//   would add indirection without changing the flow.
+#![allow(clippy::too_many_lines)]
+// - widget state structs carry independent flag bits; a nested struct
+//   would add indirection without changing the shape.
+#![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
+// - the futures are bounded by the surface's lifetime; boxing them would
+//   add an allocation to the steady-state loop.
+#![allow(clippy::large_futures)]
+// - the wrappers preserve a uniform Result-returning API surface; unwrap
+//   removals would ripple through the callers without changing behavior.
+#![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -90,7 +113,7 @@ impl MockSupervisor {
                         &mut writer,
                         id,
                         "roster_subscribe",
-                        json!({
+                        &json!({
                             "roster": [
                                 roster_row("s1", "first one"),
                                 roster_row("s2", "second one"),
@@ -103,11 +126,11 @@ impl MockSupervisor {
                         &mut writer,
                         id,
                         "list_saved_sessions",
-                        json!({ "sessions": [] }),
+                        &json!({ "sessions": [] }),
                     );
                 }
                 "roster_unsubscribe" => {
-                    respond(&mut writer, id, "roster_unsubscribe", Value::Null);
+                    respond(&mut writer, id, "roster_unsubscribe", &Value::Null);
                 }
                 other => {
                     respond_failure(&mut writer, id, other, "not handled by the mock");
@@ -124,7 +147,7 @@ fn write_line(writer: &mut UnixStream, value: &Value) {
     writer.flush().expect("flush");
 }
 
-fn respond(writer: &mut UnixStream, id: &str, command: &str, data: Value) {
+fn respond(writer: &mut UnixStream, id: &str, command: &str, data: &Value) {
     write_line(
         writer,
         &json!({

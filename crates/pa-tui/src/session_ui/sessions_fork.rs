@@ -1,6 +1,11 @@
 //! The sessions concern: the `/tree` and `/fork` selectors and the tree
 //! navigation, `/clone`, and the session resume/list/switch surfaces.
-use super::*;
+use super::{
+    anyhow, info_commands, key_event_to_id, AgentView, DaemonClient, DaemonCommand, DockFold,
+    Duration, InfoContent, InteractiveOptions, KeyEvent, Map, RebuildKind, Result,
+    SessionSelection, SessionUi, TreeSelector, TreeSelectorAction, UserMessageSelector,
+    UserMessageSelectorAction, Value, UI_REQUEST_TIMEOUT_MS,
+};
 
 impl SessionUi {
     // ------------------------------------------------------------------
@@ -451,7 +456,7 @@ impl SessionUi {
                 // Session-scoped stats again: the rebuilt title must show
                 // the switched-to session's pair, not the one being left.
                 self.refresh_stats().await;
-                self.rebuild_view(view, RebuildKind::Rebind);
+                self.rebuild_view(view, &RebuildKind::Rebind);
                 self.note(&format!("switched to session {id}"), view);
                 // The switched-to session's own restore head (if one was
                 // stashed earlier) lands after the switch note, so the

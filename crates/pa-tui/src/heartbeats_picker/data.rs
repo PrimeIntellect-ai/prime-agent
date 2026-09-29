@@ -2,7 +2,7 @@
 //! rows, the scope/sort vocabulary, and the label/countdown helpers the view and the
 //! columns render from.
 
-use super::*;
+use super::Value;
 
 /// One cron job as the view needs it (TS `AgentCronJob`), parsed from the
 /// daemon's `heartbeats_list` wire shape.
@@ -114,6 +114,7 @@ pub fn parse_heartbeats(data: &Value) -> Vec<HeartbeatEntry> {
 /// TS `scopeHeartbeatsToSession`: a heartbeat is in scope when its durable
 /// session matches `session_id`, or its live session is the current one or
 /// one of the session's RLM children. No session identity shows nothing.
+#[must_use]
 pub fn scope_heartbeats(
     entries: Vec<HeartbeatEntry>,
     active_session_id: Option<&str>,
@@ -172,6 +173,7 @@ pub fn session_label(entry: &HeartbeatEntry) -> String {
 }
 
 /// TS `sourceLabel`.
+#[must_use]
 pub fn source_label(entry: &HeartbeatEntry) -> &'static str {
     if entry.job.is_user_created() {
         "Created by you"
@@ -181,6 +183,7 @@ pub fn source_label(entry: &HeartbeatEntry) -> &'static str {
 }
 
 /// TS `defaultHeartbeatName`.
+#[must_use]
 pub fn default_heartbeat_name(entry: &HeartbeatEntry) -> &'static str {
     if entry.job.is_user_created() {
         "Your heartbeat"
@@ -190,11 +193,13 @@ pub fn default_heartbeat_name(entry: &HeartbeatEntry) -> &'static str {
 }
 
 /// TS `singleLine`: collapse all whitespace runs to single spaces.
+#[must_use]
 pub fn single_line(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// TS `formatTimestamp`: ISO timestamps cut to `YYYY-MM-DD HH:MM`.
+#[must_use]
 pub fn format_timestamp(value: &str) -> String {
     let Some(cut) = value.get(..16) else {
         return value.to_string();
@@ -215,6 +220,7 @@ pub fn format_timestamp(value: &str) -> String {
 /// the bare countdown in its agents view and a raw timestamp in its
 /// manager, both superseded here. A missing next run keeps the `—`
 /// placeholder; a value the clock cannot parse renders raw.
+#[must_use]
 pub fn next_run_label(next_run_at: Option<&str>, now_ms: u64) -> String {
     let Some(value) = next_run_at else {
         return "\u{2014}".to_string();

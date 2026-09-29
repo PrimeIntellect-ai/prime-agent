@@ -26,6 +26,7 @@ pub enum CompactionReason {
 impl CompactionReason {
     /// Parse the wire `reason` field (unknown values fall back to the TS
     /// auto-compaction label shape's common ancestor: `manual`).
+    #[must_use]
     pub fn parse(reason: &str) -> Self {
         match reason {
             "requested" => CompactionReason::Requested,
@@ -38,6 +39,7 @@ impl CompactionReason {
     /// The loader label (TS `startCompactionLoader`): `focus` is the
     /// truncated custom instructions, `cancel_hint` the resolved
     /// `app.clear` key text.
+    #[must_use]
     pub fn loader_label(self, focus: Option<&str>, cancel_hint: &str) -> String {
         let focus = focus
             .map(|focus| format!(" (focus: {focus})"))
@@ -77,6 +79,7 @@ pub struct CompactionState {
 /// is TS `startCompactionLoader`'s: the reason text, the custom instructions
 /// truncated to 60 columns as the focus (`truncateToWidth(..., 60, "…")`),
 /// and the resolved `app.clear` cancel hint.
+#[must_use]
 pub fn render_compaction_loader(
     state: &CompactionState,
     frame: usize,
@@ -228,6 +231,7 @@ pub fn render_compaction_stream(
 /// Expanded (TS `setExpanded(true)`, the Ctrl+O `all` level): the full
 /// markdown summary, a `Spacer(1)`, then the dim `Compacted from N tokens`
 /// metadata row with the optional focus.
+#[must_use]
 pub fn render_compaction_summary(
     summary: &str,
     tokens_before: u64,

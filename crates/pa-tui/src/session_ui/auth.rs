@@ -1,6 +1,10 @@
 //! The auth concern: the provider login/logout selectors and the inline
 //! auth panel, the parked model sign-in, and the `/mcp` auth flow.
-use super::*;
+use super::{
+    key_event_to_id, picker_viewport_rows, AgentView, AuthSelectorAction, AuthSelectorKind,
+    DaemonCommand, Duration, KeyEvent, Map, ModelSelectionApplied, Result, SessionUi,
+    UI_REQUEST_TIMEOUT_MS,
+};
 
 /// The outcome of one daemon `set_model` attempt: the switch landed, the
 /// provider is not signed in (the typed refusal — the sign-in flow owns
@@ -210,7 +214,7 @@ impl SessionUi {
     /// One key press while the inline auth panel owns the frame (TS the
     /// login dialog's / team selector's `handleInput`): the panel answers
     /// its mounted input through the request's oneshot.
-    pub(crate) async fn handle_auth_panel_key(
+    pub(crate) fn handle_auth_panel_key(
         &mut self,
         key: KeyEvent,
         view: &mut AgentView,
@@ -324,12 +328,12 @@ impl SessionUi {
         match request {
             AuthPanelRequest::Progress { message, .. } => {
                 if let Some(panel) = view.auth_panel.as_mut() {
-                    panel.push_progress(message);
+                    panel.push_progress(&message);
                 }
             }
             AuthPanelRequest::Waiting { message } => {
                 if let Some(panel) = view.auth_panel.as_mut() {
-                    panel.push_waiting(message);
+                    panel.push_waiting(&message);
                 }
             }
             AuthPanelRequest::AuthUrl { url, instructions } => {
@@ -345,7 +349,7 @@ impl SessionUi {
                 reply,
             } => {
                 if let Some(panel) = view.auth_panel.as_mut() {
-                    panel.mount_paste(prompt, tone, style, allow_empty, reply);
+                    panel.mount_paste(&prompt, tone, style, allow_empty, reply);
                 }
             }
             AuthPanelRequest::SelectTeam {
@@ -486,7 +490,7 @@ impl SessionUi {
     /// connection by parking `pending_mcp_auth`, which the input loop
     /// mounts the inline auth panel for once the key handler returns;
     /// everything else navigates or edits the search field.
-    pub(crate) async fn handle_mcp_view_key(
+    pub(crate) fn handle_mcp_view_key(
         &mut self,
         key: KeyEvent,
         view: &mut AgentView,

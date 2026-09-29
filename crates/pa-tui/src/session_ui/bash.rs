@@ -1,6 +1,10 @@
 //! The bash concern: `!`/`!!` user-bash runs with their start/output/end
 //! application and flush, the kernel-bash registry, and the bash view.
-use super::*;
+use super::{
+    already_running_warning, key_event_to_id, picker_viewport_rows, AgentView, BashView,
+    BashViewAction, ChatEntry, DaemonCommand, Duration, KeyEvent, Map, Result, SessionUi,
+    StatusKind, Value, UI_REQUEST_TIMEOUT_MS,
+};
 
 /// Kernel-bash channel frames: list snapshots refresh the dock and the
 /// open bash view, a landed tail feeds the open view's detail row, and
@@ -120,7 +124,7 @@ impl SessionUi {
         if side_bash.is_none() {
             // Main-thread bash clears any side-question state first (TS
             // `clearSideQuestion({ abort: true })`).
-            self.clear_side_question(true, view).await;
+            self.clear_side_question(true, view);
         }
         view.editor.add_to_history(text);
         // Optimistic running flag (TS `patchConnectionState({
@@ -401,7 +405,7 @@ impl SessionUi {
     /// One key press while the bash view is open: the view owns the frame
     /// the same way as the heartbeats view; its actions run the kernel
     /// bash requests off the key loop.
-    pub(super) async fn handle_bash_view_key(
+    pub(super) fn handle_bash_view_key(
         &mut self,
         key: KeyEvent,
         view: &mut AgentView,
@@ -494,15 +498,15 @@ impl SessionUi {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_bash_start(
         &mut self,
-        command: String,
+        command: &str,
         exclude_from_context: bool,
         transient: bool,
-        run_id: Option<String>,
+        run_id: Option<&str>,
         view: &mut AgentView,
     ) {
         self.user_bash_running = true;
         if let Some(discarded) = self.side_bash_discarded.clone() {
-            if run_id.as_deref() == Some(&discarded) {
+            if run_id == Some(discarded.as_str()) {
                 // The discarded run now owns the bash slot: abort only
                 // after matching its identity, so a foreign run is never
                 // killed (TS aborts the same way).
@@ -516,7 +520,7 @@ impl SessionUi {
         let own_side_bash = self
             .side_bash
             .as_ref()
-            .is_some_and(|run| run_id.as_deref() == Some(run.run_id.as_str()));
+            .is_some_and(|run| run_id == Some(run.run_id.as_str()));
         if transient && !own_side_bash {
             // Another client's side-conversation run: it renders only in
             // that client's pane, never in this window's chat.
@@ -527,7 +531,7 @@ impl SessionUi {
             // pane (TS `sideQuestionComponent.addBash`).
             if let Some(pane) = view.side_pane.as_mut() {
                 pane.bash = Some(crate::side_question::PaneBash::new_running(
-                    &command,
+                    command,
                     exclude_from_context,
                 ));
             }
@@ -542,7 +546,7 @@ impl SessionUi {
         self.user_bash_counter += 1;
         let id = format!("user-bash-{}", self.user_bash_counter);
         let mut card =
-            crate::bash_card::BashExecutionCard::new_running(&id, &command, exclude_from_context);
+            crate::bash_card::BashExecutionCard::new_running(&id, command, exclude_from_context);
         card.suppress_leading_space = matches!(view.chat.last(), Some(ChatEntry::AgentMessage(_)));
         if self.turn_active {
             view.pending_bash.push(card);
@@ -611,12 +615,12 @@ impl SessionUi {
         full_output_path: Option<String>,
         error_message: Option<String>,
         transient: bool,
-        run_id: Option<String>,
+        run_id: Option<&str>,
         view: &mut AgentView,
     ) {
         self.user_bash_running = false;
         if let Some(discarded) = self.side_bash_discarded.clone() {
-            if run_id.as_deref() == Some(&discarded) {
+            if run_id == Some(discarded.as_str()) {
                 // Only the discarded run's own end consumes the marker
                 // (bash_start already cleared it for any other run that
                 // claimed the slot).
@@ -628,7 +632,7 @@ impl SessionUi {
         // An own side run: settle the pane's row and seed the follow-up
         // transcript (TS `finishSideQuestionBash`).
         if let Some(run) = self.side_bash.take() {
-            let own_run = run_id.as_deref() == Some(run.run_id.as_str());
+            let own_run = run_id == Some(run.run_id.as_str());
             let pane_mounted = view
                 .side_pane
                 .as_ref()
@@ -715,7 +719,7 @@ impl SessionUi {
     /// and the resync's bash-finished path): the in-flight bash cards
     /// held above the indicator while the turn streamed settle into the
     /// transcript.
-    pub(super) fn flush_pending_bash(&mut self, view: &mut AgentView) {
+    pub(super) fn flush_pending_bash(view: &mut AgentView) {
         let pending = std::mem::take(&mut view.pending_bash);
         for card in pending {
             view.push_entry(ChatEntry::BashExecution(Box::new(card)));

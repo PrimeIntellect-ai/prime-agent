@@ -22,6 +22,7 @@ pub enum Section {
 }
 
 /// The display heading of a section.
+#[must_use]
 pub fn section_title(section: Section) -> &'static str {
     match section {
         Section::Running => "Running",
@@ -464,6 +465,7 @@ fn parent_keys(record: &UnifiedRecord) -> Vec<String> {
 /// hit keeps its parent rows in the set). Catalog order decides nesting;
 /// hits carry their relevance score (`search_score`, lower is better) for
 /// the view's ranked rendering, retained ancestors keep `None`.
+#[must_use]
 pub fn filter_unified_sessions(
     records: &[UnifiedRecord],
     query: &ParsedSearchQuery,
@@ -619,6 +621,7 @@ fn pad_start(value: &str, width: usize) -> String {
 }
 
 /// Compute the compact column layout for the rows at `width`.
+#[must_use]
 pub fn build_layout(rows: &[crate::agents_view_forest::AgentsViewRow], width: usize) -> RowLayout {
     let cost_width = rows
         .iter()
@@ -677,7 +680,7 @@ mod tests {
     use crate::agents_view_forest::session_title;
     use serde_json::json;
 
-    fn roster_entry(agent: &str, status: &str, summary: Value) -> Value {
+    fn roster_entry(agent: &str, status: &str, summary: &Value) -> Value {
         json!({ "agentId": agent, "status": status, "summary": summary })
     }
 
@@ -686,7 +689,7 @@ mod tests {
         let roster = vec![roster_entry(
             "s1",
             "idle",
-            json!({ "sessionId": "s1", "lifecycle": "live", "activeSessionId": "a1", "sessionFile": "/x/s1.jsonl", "firstMessage": "fix the bug" }),
+            &json!({ "sessionId": "s1", "lifecycle": "live", "activeSessionId": "a1", "sessionFile": "/x/s1.jsonl", "firstMessage": "fix the bug" }),
         )];
         let saved = vec![json!({
             "id": "s1",
@@ -714,7 +717,7 @@ mod tests {
             roster_entry(
                 "draft",
                 "idle",
-                json!({
+                &json!({
                     "sessionId": "draft",
                     "lifecycle": "draft",
                     "activeSessionId": "d1",
@@ -724,7 +727,7 @@ mod tests {
             roster_entry(
                 "child",
                 "idle",
-                json!({
+                &json!({
                     "sessionId": "child",
                     "lifecycle": "live",
                     "runtimeKind": "subagent",
@@ -753,7 +756,7 @@ mod tests {
         let roster = vec![roster_entry(
             "s1",
             "idle",
-            json!({
+            &json!({
                 "sessionId": "s1", "lifecycle": "live", "activeSessionId": "a1",
                 "sessionFile": "/x/s1.jsonl",
                 "model": { "id": "mock-1", "provider": "battery" },
@@ -773,7 +776,7 @@ mod tests {
         let roster_with_level = vec![roster_entry(
             "s1",
             "idle",
-            json!({
+            &json!({
                 "sessionId": "s1", "lifecycle": "live", "activeSessionId": "a1",
                 "sessionFile": "/x/s1.jsonl",
                 "model": { "id": "mock-1", "provider": "battery" },
@@ -833,12 +836,12 @@ mod tests {
             roster_entry(
                 "idle-old",
                 "idle",
-                json!({ "sessionId": "i", "lifecycle": "live", "created": "2024-01-01T00:00:00.000Z" }),
+                &json!({ "sessionId": "i", "lifecycle": "live", "created": "2024-01-01T00:00:00.000Z" }),
             ),
             roster_entry(
                 "run",
                 "running",
-                json!({ "sessionId": "r", "lifecycle": "live" }),
+                &json!({ "sessionId": "r", "lifecycle": "live" }),
             ),
         ];
         let saved = vec![json!({
@@ -848,7 +851,7 @@ mod tests {
             "messageCount": 2,
         })];
         let records = reconcile_unified_sessions(&roster, &saved);
-        let rows = crate::agents_view_forest::build_rows(
+        let rows = crate::agents_view_forest::build_rows::<std::collections::hash_map::RandomState>(
             &records,
             None,
             &std::collections::HashSet::default(),
@@ -912,7 +915,7 @@ mod tests {
         let roster = vec![roster_entry(
             "s1",
             "idle",
-            json!({
+            &json!({
                 "sessionId": "s1",
                 "lifecycle": "live",
                 "activeSessionId": "a1",
@@ -1038,14 +1041,14 @@ mod tests {
         let roster = vec![roster_entry(
             "s1",
             "running",
-            json!({
+            &json!({
                 "sessionId": "s1",
                 "lifecycle": "live",
                 "usage": { "cost": 1.5 },
             }),
         )];
         let records = reconcile_unified_sessions(&roster, &[]);
-        let rows = crate::agents_view_forest::build_rows(
+        let rows = crate::agents_view_forest::build_rows::<std::collections::hash_map::RandomState>(
             &records,
             None,
             &std::collections::HashSet::default(),
@@ -1094,7 +1097,7 @@ mod tests {
             "modified": modified_minutes_ago,
         })];
         let records = reconcile_unified_sessions(&[], &saved);
-        let rows = crate::agents_view_forest::build_rows(
+        let rows = crate::agents_view_forest::build_rows::<std::collections::hash_map::RandomState>(
             &records,
             None,
             &std::collections::HashSet::default(),
@@ -1127,7 +1130,7 @@ mod tests {
         let roster = vec![roster_entry(
             "hey",
             "idle",
-            json!({
+            &json!({
                 "sessionId": "hey-01", "lifecycle": "live",
                 "sessionFile": "/x/hey-01.jsonl",
                 "firstMessage": "hey",
@@ -1162,7 +1165,7 @@ mod tests {
         let roster = vec![roster_entry(
             "sprawl",
             "idle",
-            json!({
+            &json!({
                 "sessionId": "sprawl-01", "lifecycle": "live",
                 "sessionFile": "/x/sprawl-01.jsonl",
                 "firstMessage": prompt,
@@ -1199,7 +1202,7 @@ mod tests {
             roster_entry(
                 "named",
                 "idle",
-                json!({
+                &json!({
                     "sessionId": "named-01", "lifecycle": "live",
                     "sessionFile": "/x/named-01.jsonl",
                     "sessionName": "gateway worker",
@@ -1208,7 +1211,7 @@ mod tests {
             roster_entry(
                 "prompted",
                 "idle",
-                json!({
+                &json!({
                     "sessionId": "prompted-01", "lifecycle": "live",
                     "sessionFile": "/x/prompted-01.jsonl",
                     "firstMessage": "deploy the gateway now",
@@ -1217,7 +1220,7 @@ mod tests {
             roster_entry(
                 "bare",
                 "idle",
-                json!({
+                &json!({
                     "sessionId": "bare-01", "lifecycle": "live",
                     "sessionFile": "/x/bare-01.jsonl",
                     "cwd": "/work/gateway",
@@ -1253,7 +1256,7 @@ mod tests {
         let roster = vec![roster_entry(
             "named",
             "idle",
-            json!({
+            &json!({
                 "sessionId": "named-01", "lifecycle": "live",
                 "sessionFile": "/x/named-01.jsonl",
                 "sessionName": "gateway worker",

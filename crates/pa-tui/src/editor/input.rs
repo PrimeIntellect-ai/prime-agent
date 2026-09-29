@@ -2,7 +2,7 @@
 //! user's keybindings.
 
 use super::text_utils::{char_at, decode_printable};
-use super::*;
+use super::{Editor, EditorEvent, JumpDirection};
 use crate::keybindings::TUI_KEYBINDINGS;
 
 impl Editor {

@@ -33,6 +33,7 @@ pub struct SkillInvocationRow {
 /// message after the block renders as its own user block below it
 /// (the TS component adds no spacer between them). `None` means the text
 /// is an ordinary user prompt.
+#[must_use]
 pub fn skill_invocation_entries(text: &str) -> Option<Vec<ChatEntry>> {
     let block = pa_types::skill_blocks::parse_skill_block(text)?;
     let mut entries = vec![ChatEntry::SkillInvocation(Box::new(SkillInvocationRow {
@@ -104,6 +105,7 @@ pub(crate) fn count_skill_invocation(
 /// and the skill name in `customMessageText` (the TS expand hint for
 /// `app.tools.expand` renders empty). Expanded: the label row above the
 /// `**<name>**\n\n<content>` markdown body in `customMessageText`.
+#[must_use]
 pub fn render_skill_invocation(
     row: &SkillInvocationRow,
     detail: Detail,

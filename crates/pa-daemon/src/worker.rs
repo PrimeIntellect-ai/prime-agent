@@ -80,8 +80,8 @@ use tokio::sync::{broadcast, oneshot, Notify};
 use crate::agent_engine::{AgentEngineConfig, AgentSessionEngine, SupervisorLinkConfig};
 use crate::autonomous_continuation::AUTONOMOUS_QUEUE_KEY;
 use crate::engine::{
-    EngineEvent, EngineModelSelection, PromptRequest, RlmSessionIdentity, ScriptedEngine,
-    SessionEngine,
+    AssistantSnapshot, EngineEvent, EngineModelSelection, PromptRequest, RlmSessionIdentity,
+    ScriptedEngine, SessionEngine,
 };
 use crate::framing::{write_frame, write_frame_segments, DEFAULT_PRIVATE_FRAME_LIMITS};
 use crate::journal::WorkerRecoveryJournal;

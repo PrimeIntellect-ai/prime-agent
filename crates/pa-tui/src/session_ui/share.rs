@@ -1,6 +1,10 @@
 //! The share concern: the `/update`, `/traces`, `/copy`, `/export`, and
 //! `/share` runs — the spawned one-way tasks and their note outcomes.
-use super::*;
+use super::{
+    export_share, key_event_to_id, AgentView, DaemonCommand, Duration, GhAuthStatus, GistOutcome,
+    InfoContent, KeyEvent, Map, Result, SessionUi, ShareLoader, StatusKind, Value,
+    UI_REQUEST_TIMEOUT_MS,
+};
 
 /// The `/share` upload task's report: the created gist or the failure
 /// message (TS resolves the same promise from the gh process result).
@@ -623,7 +627,7 @@ impl SessionUi {
     /// One key press while the `/share` loader is open (TS
     /// `CancellableLoader`): the cancel binding aborts the upload, every
     /// other key is the loader's.
-    pub(crate) async fn handle_share_loader_key(
+    pub(crate) fn handle_share_loader_key(
         &mut self,
         key: KeyEvent,
         view: &mut AgentView,

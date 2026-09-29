@@ -174,6 +174,7 @@ impl Default for OnboardingScreen {
 impl OnboardingScreen {
     /// The model-ready branch's splash (TS `immediate: true`): the trace
     /// question mounts directly under the brand mark.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -181,6 +182,7 @@ impl OnboardingScreen {
     /// The full flow's splash (TS the plain `showOnboardingSplash`): the
     /// welcome text and the single login action, until Enter starts the
     /// flow.
+    #[must_use]
     pub fn welcome() -> Self {
         Self {
             frame: 0,
@@ -256,7 +258,7 @@ impl OnboardingScreen {
                     return;
                 };
                 if !chatter {
-                    panel.push_progress(message);
+                    panel.push_progress(&message);
                 }
             }
             // TS `showWaiting`: the dialog's own method carries no
@@ -266,7 +268,7 @@ impl OnboardingScreen {
                 let Some(OnboardingPanel::Auth { panel, .. }) = self.panel.as_mut() else {
                     return;
                 };
-                panel.push_waiting(message);
+                panel.push_waiting(&message);
             }
             AuthPanelRequest::AuthUrl { url, instructions } => {
                 let Some(OnboardingPanel::Auth { panel, .. }) = self.panel.as_mut() else {
@@ -284,7 +286,7 @@ impl OnboardingScreen {
                 let Some(OnboardingPanel::Auth { panel, .. }) = self.panel.as_mut() else {
                     return;
                 };
-                panel.mount_paste(prompt, tone, style, allow_empty, reply);
+                panel.mount_paste(&prompt, tone, style, allow_empty, reply);
             }
             // TS `showPrimeTeamSelector`'s onboarding arm: the team
             // selection is a question in the onboarding selection
@@ -366,12 +368,12 @@ impl OnboardingScreen {
             ));
             return row;
         }
-        self.brand_line(theme)
+        Self::brand_line(theme)
     }
 
     /// "Welcome to **PRIME** *Agent*" (TS `renderBrandLine`), one column in
     /// from the pane edge.
-    fn brand_line(&self, theme: &Theme) -> Line {
+    fn brand_line(theme: &Theme) -> Line {
         let text = theme.fg_style(ThemeColor::Text);
         let mut row: Line = vec![Span::styled(" ".to_string(), Style::default())];
         row.push(Span::styled("Welcome to ".to_string(), text));
@@ -574,7 +576,7 @@ pub(crate) fn highlight_wash(theme: &Theme) -> Color {
         |(r, g, b)| (u16::from(r), u16::from(g), u16::from(b)),
     );
     let blend = |lift: u16, canvas: u16| -> u8 {
-        let value = lift as f64 * HIGHLIGHT_LIFT + canvas as f64 * (1.0 - HIGHLIGHT_LIFT);
+        let value = f64::from(lift) * HIGHLIGHT_LIFT + f64::from(canvas) * (1.0 - HIGHLIGHT_LIFT);
         value.round().clamp(0.0, 255.0) as u8
     };
     let washed = (

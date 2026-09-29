@@ -1,6 +1,10 @@
 //! Expanded cell output; painting and counting share the same output decisions.
 
-use super::*;
+use super::{
+    add_wrapped, is_agent_message_receipt, is_edit_confirmation, normalize_error_details,
+    str_width, summarize_error_details, IpythonDetails, IpythonError, Line, RowOutput, Span, Theme,
+    ThemeColor, ToolCallCard, Value, OUTPUT_INDENT,
+};
 
 /// `splitTraceback`: the lines before the traceback opener are ordinary
 /// output; the rest is the traceback proper.
@@ -122,7 +126,7 @@ pub(super) fn render_output(
             render_output_text(
                 lines,
                 &normalize_error_details(details.stdout.as_deref().unwrap_or_default()),
-                OutputLabel::Out,
+                &OutputLabel::Out,
                 &mut output_marker_pending,
                 theme,
                 width,
@@ -138,7 +142,7 @@ pub(super) fn render_output(
             render_output_text(
                 lines,
                 &normalize_error_details(details.stderr.as_deref().unwrap_or_default()),
-                OutputLabel::Err,
+                &OutputLabel::Err,
                 &mut output_marker_pending,
                 theme,
                 width,
@@ -157,7 +161,7 @@ pub(super) fn render_output(
                 render_output_text(
                     lines,
                     &normalize_error_details(result),
-                    OutputLabel::Out,
+                    &OutputLabel::Out,
                     &mut output_marker_pending,
                     theme,
                     width,
@@ -171,7 +175,7 @@ pub(super) fn render_output(
             render_output_text(
                 lines,
                 output,
-                OutputLabel::Out,
+                &OutputLabel::Out,
                 &mut output_marker_pending,
                 theme,
                 width,
@@ -190,7 +194,7 @@ pub(super) fn render_output(
         render_output_text(
             lines,
             &normalize_error_details(&text),
-            label,
+            &label,
             &mut output_marker_pending,
             theme,
             width,
@@ -216,8 +220,8 @@ pub(super) fn render_output(
         let prefix = output_prefix(&mut output_marker_pending);
         add_wrapped(
             lines,
-            prefix,
-            vec![Span::styled(
+            &prefix,
+            &vec![Span::styled(
                 "waiting for output...".to_string(),
                 theme.fg_style(ThemeColor::Muted),
             )],
@@ -235,8 +239,8 @@ pub(super) fn render_output(
         let prefix = output_prefix(&mut output_marker_pending);
         add_wrapped(
             lines,
-            prefix,
-            vec![Span::styled(
+            &prefix,
+            &vec![Span::styled(
                 "no output".to_string(),
                 theme.fg_style(ThemeColor::Muted),
             )],
@@ -254,7 +258,7 @@ pub(super) fn render_output(
         render_output_text(
             lines,
             &traceback_text,
-            OutputLabel::Err,
+            &OutputLabel::Err,
             &mut output_marker_pending,
             theme,
             width,
@@ -264,7 +268,7 @@ pub(super) fn render_output(
         render_output_text(
             lines,
             traceback,
-            OutputLabel::Err,
+            &OutputLabel::Err,
             &mut output_marker_pending,
             theme,
             width,
@@ -276,8 +280,8 @@ pub(super) fn render_output(
         let prefix = output_prefix(&mut output_marker_pending);
         add_wrapped(
             lines,
-            prefix,
-            vec![Span::styled(
+            &prefix,
+            &vec![Span::styled(
                 "background output (unattributed)".to_string(),
                 theme.fg_style(ThemeColor::Muted),
             )],
@@ -286,7 +290,7 @@ pub(super) fn render_output(
         render_output_text(
             lines,
             &normalize_error_details(background),
-            OutputLabel::Err,
+            &OutputLabel::Err,
             &mut output_marker_pending,
             theme,
             width,
@@ -304,8 +308,8 @@ pub(super) fn render_output(
         let prefix = output_prefix(&mut output_marker_pending);
         add_wrapped(
             lines,
-            prefix,
-            vec![Span::styled(text, theme.fg_style(ThemeColor::Muted))],
+            &prefix,
+            &vec![Span::styled(text, theme.fg_style(ThemeColor::Muted))],
             width,
         );
     }
@@ -321,7 +325,7 @@ enum OutputLabel {
 fn render_output_text(
     lines: &mut RowOutput,
     text: &str,
-    label: OutputLabel,
+    label: &OutputLabel,
     output_marker_pending: &mut bool,
     theme: &Theme,
     width: usize,
@@ -346,7 +350,7 @@ fn render_output_text(
             if line.is_empty() { " " } else { line }.to_string(),
             style,
         )];
-        add_wrapped(lines, prefix, body, width);
+        add_wrapped(lines, &prefix, &body, width);
     }
 }
 

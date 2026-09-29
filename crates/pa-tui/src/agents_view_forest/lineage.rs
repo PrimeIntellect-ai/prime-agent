@@ -268,6 +268,7 @@ fn scope_root_index(records: &[UnifiedRecord], scope: &AgentsViewScope) -> Optio
 /// `scopeToSessionSubtree`; the root itself is included — row building
 /// excludes it from the visible roots). `None` when the scope root is not
 /// in the record set.
+#[must_use]
 pub fn scope_to_subtree(
     records: &[UnifiedRecord],
     scope: &AgentsViewScope,
@@ -323,6 +324,7 @@ pub fn scope_ancestors(records: &[UnifiedRecord], scope: &AgentsViewScope) -> Ve
 
 /// Whether the session has direct children on the record set (TS
 /// `hasUnifiedSessionChildren`).
+#[must_use]
 pub fn has_session_children(records: &[UnifiedRecord], key: &SelectionKey) -> bool {
     let index = build_record_index(records);
     let root = records.iter().position(|record| {
@@ -345,6 +347,7 @@ pub fn has_session_children(records: &[UnifiedRecord], key: &SelectionKey) -> bo
 
 /// The scope root's depth label (TS `getAgentsViewDepth`:
 /// `rlmDepth + 1`); `None` when the root is not in the record set.
+#[must_use]
 pub fn scope_depth(records: &[UnifiedRecord], scope: &AgentsViewScope) -> Option<u32> {
     scope_root_index(records, scope).map(|root| {
         summary_for_record(&records[root])

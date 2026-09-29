@@ -120,6 +120,7 @@ pub(crate) fn image_block_bytes(block: &Value) -> usize {
 }
 
 /// The animated working icon glyph (TS `working-icon.ts`).
+#[must_use]
 pub fn working_icon(frame: usize) -> &'static str {
     crate::chat::working_icon_frame(frame)
 }
@@ -128,6 +129,7 @@ pub fn working_icon(frame: usize) -> &'static str {
 /// `terminal.showImages` setting (TS `showImages` on the tool component):
 /// image blocks render their metadata rows when set, their
 /// `[Image: ...]` text placeholders otherwise.
+#[must_use]
 pub fn render_tool_card(
     card: &ToolCallCard,
     frame: usize,
@@ -224,6 +226,7 @@ pub(crate) fn format_bash_duration(ms: u128) -> String {
 pub const DEFAULT_MAX_BYTES: usize = 50 * 1024;
 
 /// `formatSize` (TS `truncate.ts`): `512B`, `50.0KB`, `1.2MB`.
+#[must_use]
 pub fn format_size(bytes: usize) -> String {
     if bytes < 1024 {
         format!("{bytes}B")
@@ -254,7 +257,7 @@ pub fn format_size(bytes: usize) -> String {
 /// [`get_image_dimensions_prefix`]:
 /// crate::terminal_image::get_image_dimensions_prefix
 pub(crate) fn image_rows(
-    result: &Option<ToolResultView>,
+    result: Option<&ToolResultView>,
     show_images: bool,
     theme: &Theme,
 ) -> Vec<Line> {
@@ -321,11 +324,11 @@ pub(crate) fn image_block_dimensions(
 }
 
 fn eligible_image_blocks(
-    result: &Option<ToolResultView>,
+    result: Option<&ToolResultView>,
     show_images: bool,
 ) -> impl Iterator<Item = &Value> {
     result
-        .iter()
+        .into_iter()
         .flat_map(|result| result.content.iter())
         .filter(move |block| {
             // The paint eligibility mirrors the geometry count's
@@ -340,11 +343,11 @@ fn eligible_image_blocks(
 }
 
 fn eligible_images(
-    result: &Option<ToolResultView>,
+    result: Option<&ToolResultView>,
     show_images: bool,
 ) -> impl Iterator<Item = (&str, &str)> {
     result
-        .iter()
+        .into_iter()
         .flat_map(|result| &result.content)
         .filter_map(move |block| {
             if !show_images || block.get("type").and_then(Value::as_str) != Some("image") {
@@ -395,7 +398,7 @@ mod tests {
         base64::engine::general_purpose::STANDARD.encode(bytes)
     }
 
-    fn image_result(data: String, mime: &str) -> Option<ToolResultView> {
+    fn image_result(data: &str, mime: &str) -> Option<ToolResultView> {
         Some(ToolResultView {
             content: vec![
                 serde_json::json!({ "type": "text", "text": "done" }),
@@ -413,8 +416,8 @@ mod tests {
         // proving the payload was never decoded in full — a full decode
         // would have failed and rendered the size placeholder instead.
         let payload = format!("{}{}{}", tiny_png(64, 32), "A".repeat(4096), "!".repeat(64));
-        let result = image_result(payload, "image/png");
-        let rows = image_rows(&result, true, &theme());
+        let result = image_result(&payload, "image/png");
+        let rows = image_rows(result.as_ref(), true, &theme());
         let flat: Vec<String> = rows.iter().map(text_of).collect();
         assert_eq!(
             flat,
@@ -429,8 +432,8 @@ mod tests {
         // A payload whose dimensions do not parse from the bounded prefix
         // renders its size instead (the honest omission marker).
         let payload = "x".repeat(186_328);
-        let result = image_result(payload, "image/jpeg");
-        let rows = image_rows(&result, true, &theme());
+        let result = image_result(&payload, "image/jpeg");
+        let rows = image_rows(result.as_ref(), true, &theme());
         let flat: Vec<String> = rows.iter().map(text_of).collect();
         assert_eq!(
             flat,
@@ -452,7 +455,7 @@ mod tests {
             details: serde_json::Value::Null,
             is_error: false,
         });
-        let rows = image_rows(&result, true, &theme());
+        let rows = image_rows(result.as_ref(), true, &theme());
         let flat: Vec<String> = rows.iter().map(text_of).collect();
         assert_eq!(
             flat,
@@ -498,8 +501,8 @@ mod tests {
             details: serde_json::Value::Null,
             is_error: false,
         });
-        assert!(image_rows(&result, true, &theme()).is_empty());
-        assert_eq!(eligible_images(&result, true).count(), 0);
+        assert!(image_rows(result.as_ref(), true, &theme()).is_empty());
+        assert_eq!(eligible_images(result.as_ref(), true).count(), 0);
         // The elided marker (data: "") stays a real row on both paths.
         let elided = Some(ToolResultView {
             content: vec![serde_json::json!({
@@ -511,8 +514,8 @@ mod tests {
             details: serde_json::Value::Null,
             is_error: false,
         });
-        assert_eq!(image_rows(&elided, true, &theme()).len(), 1);
-        assert_eq!(eligible_images(&elided, true).count(), 1);
+        assert_eq!(image_rows(elided.as_ref(), true, &theme()).len(), 1);
+        assert_eq!(eligible_images(elided.as_ref(), true).count(), 1);
     }
 
     #[test]

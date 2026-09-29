@@ -119,6 +119,7 @@ pub struct SlashContext {
 /// Detect the active slash command context at the cursor. Line 0 with a
 /// slash at the trimmed start is the command position (name or argument);
 /// any other position completes a `/name` token mid-line (name only).
+#[must_use]
 pub fn get_slash_command_context(
     lines: &[String],
     cursor_line: usize,
@@ -319,6 +320,7 @@ pub struct AutocompleteState {
 }
 
 impl AutocompleteState {
+    #[must_use]
     pub fn new(
         items: Vec<CompletionItem>,
         max_visible: usize,
@@ -363,11 +365,13 @@ impl AutocompleteState {
         };
     }
 
+    #[must_use]
     pub fn selected_item(&self) -> Option<CompletionItem> {
         self.items.get(self.selected_index).cloned()
     }
 
     /// Best match index: exact value match, else first prefix match, else none.
+    #[must_use]
     pub fn best_match_index(&self, prefix: &str) -> Option<usize> {
         if prefix.is_empty() {
             return None;
@@ -390,6 +394,7 @@ impl AutocompleteState {
     /// indicator, the no-match row), and the selected slash command's
     /// description block — the same grammar the `/model` picker and the
     /// `/mcp` view render with.
+    #[must_use]
     pub fn render(&self, theme: &crate::theme::Theme, width: usize) -> Vec<Line> {
         if self.items.is_empty() {
             return vec![crate::menu_panel::no_match_row(
@@ -781,6 +786,7 @@ pub struct CombinedAutocompleteProvider {
 
 impl CombinedAutocompleteProvider {
     /// Build the provider from the shared builtin registry (pa-types).
+    #[must_use]
     pub fn from_registry(base: std::path::PathBuf) -> Self {
         let commands = SlashCommandRegistry::builtin()
             .all()

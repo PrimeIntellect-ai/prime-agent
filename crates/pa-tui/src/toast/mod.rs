@@ -109,6 +109,7 @@ impl Toasts {
     /// TTL wakeup on this so an idle surface still repaints the overlay
     /// away (a stale past deadline self-drains — the prune at that
     /// iteration empties it).
+    #[must_use]
     pub fn next_expiry(&self) -> Option<Instant> {
         self.entries.iter().map(|toast| toast.expires_at).min()
     }

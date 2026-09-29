@@ -84,6 +84,7 @@ pub struct InfoPanel {
 }
 
 impl InfoPanel {
+    #[must_use]
     pub fn new(title: Option<String>, content: InfoContent) -> Self {
         Self {
             title,

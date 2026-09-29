@@ -3,6 +3,7 @@
 // ---- helpers -------------------------------------------------------------
 
 /// Normalize CRLF/CR to LF and tabs to 4 spaces (TS normalizeText).
+#[must_use]
 pub fn normalize_text(text: &str) -> String {
     text.replace("\r\n", "\n")
         .replace('\r', "\n")

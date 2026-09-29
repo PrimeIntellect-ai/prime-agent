@@ -17,6 +17,7 @@ mod wrapping_tests;
 /// `width` columns — grapheme-aware (multi-codepoint clusters such as
 /// `\u{1f468}\u{200d}\u{1f469}...` measure as one cell through
 /// [`grapheme_width`], never per scalar): the table cells stay aligned.
+#[must_use]
 pub fn pad_cell(text: &str, width: usize) -> String {
     use unicode_segmentation::UnicodeSegmentation;
     let mut cell = String::new();
@@ -38,6 +39,7 @@ pub fn pad_cell(text: &str, width: usize) -> String {
 /// no ANSI and no pad). The kept grapheme prefix leaves room for the
 /// ellipsis; a budget too small for the ellipsis clips the ellipsis
 /// instead of emitting one past the budget.
+#[must_use]
 pub fn truncate_to_width(text: &str, max_width: usize, ellipsis: &str) -> String {
     use unicode_segmentation::UnicodeSegmentation;
     if max_width == 0 || text.is_empty() {
@@ -76,6 +78,7 @@ pub fn truncate_to_width(text: &str, max_width: usize, ellipsis: &str) -> String
 
 /// Width of one grapheme cluster approximated by its first char plus zero-width
 /// continuation chars. Good enough for the terminal layout we render.
+#[must_use]
 pub fn char_width(c: char) -> usize {
     match c {
         '\t' => 3,
@@ -169,6 +172,7 @@ pub(crate) fn escape_len(s: &str) -> Option<usize> {
 /// Panics when the width-cache mutex is poisoned (a thread panicked
 /// while holding it); the `expect` guards the loop condition and
 /// cannot fire.
+#[must_use]
 pub fn str_width(s: &str) -> usize {
     use unicode_segmentation::UnicodeSegmentation;
     if s.is_empty() {
@@ -373,14 +377,17 @@ fn is_rgi_emoji_cluster(first: char, g: &str) -> bool {
     // Emoji + skin tone modifier (no VS16, no ZWJ).
     first.is_emoji_char() && g.chars().skip(1).all(|c| skin_tone(c) || is_invisible(c))
 }
+#[must_use]
 pub fn spans_width(spans: &[Span]) -> usize {
     spans.iter().map(|s| str_width(&s.content)).sum()
 }
 
+#[must_use]
 pub fn line_width(line: &[Span]) -> usize {
     spans_width(line)
 }
 
+#[must_use]
 pub fn is_whitespace_char(c: char) -> bool {
     // TS `isWhitespaceChar` tests JS /\s/: same set as Unicode White_Space
     // except the BOM (U+FEFF) counts as whitespace and NEL (U+0085) does
@@ -391,6 +398,7 @@ pub fn is_whitespace_char(c: char) -> bool {
 
 const PUNCTUATION: &str = "(){}[]<>.,;:'\"!?+-=*/\\|&%^$#@~`";
 
+#[must_use]
 pub fn is_punctuation_char(c: char) -> bool {
     PUNCTUATION.contains(c)
 }
@@ -400,6 +408,7 @@ pub fn is_punctuation_char(c: char) -> bool {
 /// AM vowels inconsistently during differential repaint, and their
 /// compatibility decompositions have the same cell width but avoid
 /// stale-cell artifacts; tabs expand to three spaces at paint.
+#[must_use]
 pub fn normalize_terminal_output(s: &str) -> String {
     let has_thai_lao_am = s.contains('\u{0e33}') || s.contains('\u{0eb3}');
     if !has_thai_lao_am && !s.contains('\t') {
@@ -430,6 +439,7 @@ fn base_char_width(c: char) -> usize {
 }
 
 /// Pad a line with plain spaces to exactly `width` visible columns.
+#[must_use]
 pub fn pad_line(mut line: Line, width: usize) -> Line {
     let w = line_width(&line);
     if w < width {
@@ -445,6 +455,7 @@ pub fn pad_line(mut line: Line, width: usize) -> Line {
 ///
 /// Cannot panic: the `expect` guards the loop condition (`rest` is
 /// non-empty exactly when checked).
+#[must_use]
 pub fn truncate_line(line: &Line, max_width: usize, ellipsis: &str) -> Line {
     if line_width(line) <= max_width {
         return line.clone();
@@ -501,6 +512,7 @@ fn push_char(out: &mut Line, style: ratatui::style::Style, c: char) {
 /// `wrapSingleLine` in utils.ts: break long tokens at char level, trim
 /// trailing whitespace on each wrapped line, never start a line with
 /// whitespace.
+#[must_use]
 pub fn wrap_line(line: &Line, width: usize) -> Vec<Line> {
     wrapping::render(line, width)
 }
@@ -525,6 +537,7 @@ pub(crate) fn wrapped_text_count(text: &str, width: usize) -> usize {
 }
 
 /// Wrap plain text (may contain \n) into lines of styled raw spans.
+#[must_use]
 pub fn wrap_text(text: &str, width: usize) -> Vec<Line> {
     let mut out: Vec<Line> = Vec::new();
     for para in text.split('\n') {
@@ -541,6 +554,7 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<Line> {
 /// `sliceByColumn` default): whole grapheme clusters in or out — a cluster
 /// whose start column is in range is included even when it straddles the
 /// end boundary.
+#[must_use]
 pub fn slice_line_by_column(line: &Line, start: usize, length: usize) -> Line {
     slice_line_by_column_strict(line, start, length, false)
 }
@@ -553,6 +567,7 @@ pub fn slice_line_by_column(line: &Line, start: usize, length: usize) -> Line {
 ///
 /// Cannot panic: the `expect` guards the loop condition (`rest` is
 /// non-empty exactly when checked).
+#[must_use]
 pub fn slice_line_by_column_strict(line: &Line, start: usize, length: usize, strict: bool) -> Line {
     use unicode_segmentation::UnicodeSegmentation;
     let mut out: Line = Vec::new();
@@ -596,6 +611,7 @@ pub fn trim_trailing_empty(lines: &mut Vec<Line>) {
 }
 
 /// First char width of `s` for overflow checks.
+#[must_use]
 pub fn base_char_w(c: char) -> usize {
     base_char_width(c)
 }

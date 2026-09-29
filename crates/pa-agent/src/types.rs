@@ -542,10 +542,12 @@ pub enum AgentEvent {
     MessageStart {
         message: AgentMessage,
     },
-    /// Only emitted for assistant messages during streaming.
+    /// Only emitted for assistant messages during streaming. The message
+    /// and the delta event are shared snapshots: a listener clone bumps two
+    /// references instead of deep-copying the partial.
     MessageUpdate {
-        message: AgentMessage,
-        assistant_message_event: Box<crate::stream::AssistantMessageEvent>,
+        message: Arc<AgentMessage>,
+        assistant_message_event: Arc<crate::stream::AssistantMessageEvent>,
     },
     MessageEnd {
         message: AgentMessage,

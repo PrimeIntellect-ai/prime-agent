@@ -19,6 +19,7 @@ pub struct ToolCallInfo {
 }
 
 /// Collect tool calls from assistant message entries.
+#[must_use]
 pub fn collect_tool_calls(entries: &[TreeNodeData]) -> HashMap<String, ToolCallInfo> {
     let mut calls = HashMap::new();
     for node in entries {
@@ -64,6 +65,7 @@ fn extract_content(content: &pa_types::ai::UserContent) -> String {
 }
 
 /// Assistant text content (TS `hasTextContent`/`extractContent` pair).
+#[must_use]
 pub fn assistant_text(message: &pa_types::ai::AssistantMessage) -> String {
     message
         .content
@@ -76,11 +78,13 @@ pub fn assistant_text(message: &pa_types::ai::AssistantMessage) -> String {
 }
 
 /// Whether an assistant message carries text (the default filter keeps it).
+#[must_use]
 pub fn assistant_has_text(message: &pa_types::ai::AssistantMessage) -> bool {
     !assistant_text(message).trim().is_empty()
 }
 
 /// The user text of a message entry (TS `_extractUserMessageText`).
+#[must_use]
 pub fn user_entry_text(entry: &FileEntry) -> Option<String> {
     match entry {
         FileEntry::Message {
@@ -152,10 +156,10 @@ fn format_tool_call(theme: &Theme, name: &str, arguments: &Value) -> Line {
 }
 
 /// The flat row's content spans (TS `getEntryDisplayText`).
-pub fn entry_display_text(
+pub fn entry_display_text<S: std::hash::BuildHasher + Default>(
     theme: &Theme,
     node: &TreeNodeData,
-    tool_calls: &HashMap<String, ToolCallInfo>,
+    tool_calls: &HashMap<String, ToolCallInfo, S>,
 ) -> Line {
     let color = |color: ThemeColor, text: String| theme.fg_span(color, text);
     let plain = |text: String| crate::Span::raw(text);
@@ -253,7 +257,10 @@ pub fn entry_display_text(
             ThemeColor::Dim,
             format!(
                 "[service tier: {}]",
-                payload.service_tier.as_ref().map_or("default", tier_name)
+                payload
+                    .service_tier
+                    .as_ref()
+                    .map_or("default", |tier| tier_name(*tier))
             ),
         )],
         FileEntry::Custom { payload, .. } => vec![color(
@@ -296,7 +303,7 @@ pub fn entry_display_text(
     spans
 }
 
-fn tier_name(tier: &pa_types::ai::ServiceTier) -> &'static str {
+fn tier_name(tier: pa_types::ai::ServiceTier) -> &'static str {
     match tier {
         pa_types::ai::ServiceTier::Auto => "auto",
         pa_types::ai::ServiceTier::Default => "default",
@@ -307,6 +314,7 @@ fn tier_name(tier: &pa_types::ai::ServiceTier) -> &'static str {
 }
 
 /// The searchable text of one node (TS `getSearchableText`).
+#[must_use]
 pub fn searchable_text(node: &TreeNodeData) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(label) = &node.label {
@@ -359,7 +367,7 @@ pub fn searchable_text(node: &TreeNodeData) -> String {
                 payload
                     .service_tier
                     .as_ref()
-                    .map_or("default", tier_name)
+                    .map_or("default", |tier| tier_name(*tier))
                     .to_string(),
             );
         }

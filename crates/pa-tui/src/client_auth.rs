@@ -52,10 +52,10 @@ pub async fn run_mcp_auth_command(
     args: &str,
     panel: crate::auth_panel::AuthPanelHandle,
 ) -> String {
-    let argv: Vec<&str> = args.split_whitespace().collect();
-    let sub = argv.first().copied();
-    let server = argv.get(1).copied();
-    match (sub, server, argv.len() == 2) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied();
+    let server = parts.get(1).copied();
+    match (sub, server, parts.len() == 2) {
         (Some("login"), Some(server), true) => match auth.login(server, panel).await {
             Ok(status) => status,
             Err(error) => format!("{error:#}"),

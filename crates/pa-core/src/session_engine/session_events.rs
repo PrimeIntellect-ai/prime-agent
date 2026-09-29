@@ -122,9 +122,9 @@ fn thinking_block_text(
 }
 
 /// Serialize one loop event to the TS `session_event` wire shape.
-pub fn agent_event_json(event: &AgentEvent) -> Option<String> {
+pub fn agent_event_json(event: &AgentEvent) -> Option<serde_json::Value> {
     fn message_value(value: &pa_agent::types::AgentMessage) -> serde_json::Value {
-        json_round_trip(value).unwrap_or(serde_json::Value::Null)
+        serde_json::to_value(value).unwrap_or(serde_json::Value::Null)
     }
     let value = match event {
         AgentEvent::AgentStart => serde_json::json!({ "type": "agent_start" }),
@@ -196,7 +196,7 @@ pub fn agent_event_json(event: &AgentEvent) -> Option<String> {
             "result": json_round_trip(result).unwrap_or(serde_json::Value::Null),
         }),
     };
-    Some(value.to_string())
+    Some(value)
 }
 
 #[cfg(test)]
@@ -234,15 +234,16 @@ mod tests {
             text_signature: None,
         })]);
         let event = AgentEvent::MessageUpdate {
-            message: AgentMessage::Standard(pa_agent::types::Message::Assistant(message.clone())),
-            assistant_message_event: Box::new(AssistantMessageEvent::TextDelta {
+            message: std::sync::Arc::new(AgentMessage::Standard(
+                pa_agent::types::Message::Assistant(message.clone()),
+            )),
+            assistant_message_event: std::sync::Arc::new(AssistantMessageEvent::TextDelta {
                 content_index: 0,
                 delta: "first reply".to_string(),
                 partial: message,
             }),
         };
-        let json = agent_event_json(&event).expect("a message_update json line");
-        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let value = agent_event_json(&event).expect("a message_update json line");
         assert_eq!(value["type"], "message_update");
         assert_eq!(value["message"]["role"], "assistant");
         assert_eq!(value["message"]["content"][0]["text"], "first reply");

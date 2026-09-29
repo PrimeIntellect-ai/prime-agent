@@ -37,6 +37,7 @@ impl Default for AppOptions {
     }
 }
 
+#[must_use]
 pub fn load_theme(name: &str) -> Theme {
     let mode = crate::theme::detect_color_mode();
     // The default brand theme when the caller passes none (empty) or an
@@ -61,7 +62,7 @@ pub fn load_theme(name: &str) -> Theme {
 /// TUI-state terminal.
 pub fn run_app(
     stream: Box<dyn SessionStream>,
-    options: AppOptions,
+    options: &AppOptions,
     on_submit: Box<dyn FnMut(&str) + Send>,
 ) -> Result<()> {
     match run_app_surface(stream, options, on_submit) {
@@ -75,7 +76,7 @@ pub fn run_app(
 
 fn run_app_surface(
     mut stream: Box<dyn SessionStream>,
-    options: AppOptions,
+    options: &AppOptions,
     mut on_submit: Box<dyn FnMut(&str) + Send>,
 ) -> Result<()> {
     // The TS theme emits raw ANSI color codes regardless of NO_COLOR; match
