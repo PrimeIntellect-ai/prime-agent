@@ -3,9 +3,10 @@
 //! subagent summary box (TS `SubagentSummaryLine`) — plus the share
 //! loader and reload-box panels that replace the editor in flight.
 
+use super::chunk_selection;
 use super::click::EditorClickSurface;
+use super::flush::split_at_chars;
 use super::frame::{indicator_row, pad_row};
-use super::{chunk_selection, split_at_chars};
 use super::{AgentView, ShareLoader};
 use crate::chrome::{render_prompt_context, render_tray};
 use crate::prompt_highlight::{
