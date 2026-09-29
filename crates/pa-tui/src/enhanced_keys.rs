@@ -547,15 +547,15 @@ fn spawn_kitty_probe() {
                     // instead; the capability stays unresolved for this
                     // run, never poisoned.
                     //
-                    // The mode lock closes the check-suspend TOCTOU: the
-                    // suspend path's first terminal action is the
-                    // enhanced-keys release (which takes this lock), so
-                    // holding it across the guard and the whole check
-                    // means the app's raw bracket cannot come off while
-                    // the check runs — the check can only ever take its
-                    // raw-read path, never the implicit raw bracket. The
-                    // once-per-process cost: a suspend racing the first
-                    // mount's probe window stalls behind the check's
+                    // The check is bracket-free by construction: the
+                    // probe takes `supports_keyboard_enhancement_checked_raw`
+                    // (the vendored facade's raw-read path), so NOTHING in
+                    // this thread can re-arm raw mode, whatever races the
+                    // guard's read. The mode lock serializes the guard
+                    // with the suspend's mode releases (the same
+                    // serialization every mode transition takes); the
+                    // once-per-process cost is a suspend racing the first
+                    // mount's probe window stalling behind the check's
                     // 250ms bound before its teardown starts.
                     let modes = lock_modes();
                     let raw_bracket_on =
@@ -564,7 +564,8 @@ fn spawn_kitty_probe() {
                         let _ = answer_tx.send(Ok(false));
                         return;
                     }
-                    let _ = answer_tx.send(crossterm::terminal::supports_keyboard_enhancement());
+                    let _ = answer_tx
+                        .send(crossterm::terminal::supports_keyboard_enhancement_checked_raw());
                     // The guard releases at this scope's end; the answer
                     // path's `enable_kitty` takes the lock after it.
                     drop(modes);
