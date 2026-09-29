@@ -3,14 +3,13 @@
 
 use serde_json::{json, Map};
 
-use crate::event_stream::{AssistantMessageEvent, AssistantMessageEventExt};
+use crate::event_stream::AssistantMessageEventExt;
 use crate::providers::anthropic::{stream_anthropic, AnthropicOptions};
 use crate::types::{
     AssistantContent, Context, Model, StopReason, StreamOptions, ThinkingContent, ToolCall,
 };
 
 #[tokio::test]
-// inline SSE server + typed expected vector make one whole-value snapshot
 #[allow(clippy::too_many_lines)]
 async fn stream_events_snapshot_current_content() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -81,38 +80,31 @@ data: {"type":"message_stop"}"#,
         events.push(event);
     }
 
-    let empty: Vec<AssistantContent> = Vec::new();
-    let thinking_empty = AssistantContent::Thinking(ThinkingContent {
+    let thinking_base = ThinkingContent {
         thinking: String::new(),
         thinking_signature: Some(String::new()),
         redacted: None,
         rest: Map::default(),
-    });
+    };
     let thinking_delta = AssistantContent::Thinking(ThinkingContent {
         thinking: "think".into(),
-        thinking_signature: Some(String::new()),
-        redacted: None,
-        rest: Map::default(),
+        ..thinking_base.clone()
     });
     let thinking_signed = AssistantContent::Thinking(ThinkingContent {
         thinking: "think".into(),
         thinking_signature: Some("sig".into()),
-        redacted: None,
-        rest: Map::default(),
+        ..thinking_base.clone()
     });
-    let tool_call_start = AssistantContent::ToolCall(ToolCall {
+    let tool_call_base = ToolCall {
         id: "t1".into(),
         name: "lookup".into(),
         arguments: Map::default(),
         thought_signature: None,
         rest: Map::default(),
-    });
+    };
     let tool_call_args = AssistantContent::ToolCall(ToolCall {
-        id: "t1".into(),
-        name: "lookup".into(),
         arguments: json!({"a": 1}).as_object().cloned().unwrap(),
-        thought_signature: None,
-        rest: Map::default(),
+        ..tool_call_base.clone()
     });
     assert_eq!(
         events
@@ -120,13 +112,19 @@ data: {"type":"message_stop"}"#,
             .map(|event| (event.event_type(), event.partial().content.clone()))
             .collect::<Vec<_>>(),
         vec![
-            ("start", empty),
-            ("thinking_start", vec![thinking_empty]),
+            ("start", vec![]),
+            (
+                "thinking_start",
+                vec![AssistantContent::Thinking(thinking_base)]
+            ),
             ("thinking_delta", vec![thinking_delta]),
             ("thinking_end", vec![thinking_signed.clone()]),
             (
                 "toolcall_start",
-                vec![thinking_signed.clone(), tool_call_start]
+                vec![
+                    thinking_signed.clone(),
+                    AssistantContent::ToolCall(tool_call_base),
+                ],
             ),
             (
                 "toolcall_delta",
@@ -139,8 +137,8 @@ data: {"type":"message_stop"}"#,
             ("done", vec![thinking_signed, tool_call_args]),
         ]
     );
-    let AssistantMessageEvent::Done { message, .. } = events.last().expect("eight events") else {
-        panic!("expected the stream to end with a done event");
-    };
-    assert_eq!(message.stop_reason, StopReason::ToolUse);
+    assert_eq!(
+        events.last().unwrap().partial().stop_reason,
+        StopReason::ToolUse
+    );
 }
