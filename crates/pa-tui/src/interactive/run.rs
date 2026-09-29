@@ -1825,10 +1825,11 @@ async fn run_interactive_surface(
 
         // The Ctrl+C exit hint expires on a timer (TS
         // `showCtrlCExitHint`'s setTimeout requestRender): once the
-        // window passed, the hint row repaints away. The deadline arm
-        // lives AFTER the frame gate (a draw resets `render_deadline`,
-        // so an arm placed here would be wiped by the same iteration's
-        // paint and a fully idle loop would never wake at the expiry).
+        // window passed, the hint row repaints away. The expiry's
+        // wake arm lives in the pre-select inventory (see the frame-wake
+        // comment there): the wake fires at the expiry, this check marks
+        // the row dirty, and the same iteration's frame gate repaints
+        // it away.
         if session.ctrl_c_hint_expiry().is_some() {
             hint_painted = true;
         } else if hint_painted {
