@@ -390,6 +390,53 @@ def _install_loop_create_task_compat() -> None:
         return box["task"]
 
     _loop.create_task = create_task  # type: ignore[method-assign]
+    _install_loop_schedule_compat()
+
+
+def _install_loop_schedule_compat() -> None:
+    """Bridge the serving loop's plain scheduling entry points for workers.
+
+    call_soon/call_later/call_at from a sync-cell worker thread are not
+    thread-safe (debug mode raises; otherwise the wakeup is missing), so a
+    worker's direct scheduling rides call_soon_threadsafe / the loop bridge;
+    the loop's own thread keeps the originals. Timer handles round-trip so
+    cell-held cancel() keeps working.
+    """
+    assert _loop is not None
+    orig_call_soon = _loop.call_soon
+    orig_call_later = _loop.call_later
+    orig_call_at = _loop.call_at
+
+    def call_soon(callback: Any, *args: Any, context: Any = None) -> Any:
+        if not _worker_in_cell():
+            return orig_call_soon(callback, *args, context=context)
+        return _loop.call_soon_threadsafe(callback, *args, context=context)
+
+    def call_later(delay: Any, callback: Any, *args: Any, context: Any = None) -> Any:
+        if not _worker_in_cell():
+            return orig_call_later(delay, callback, *args, context=context)
+        box: dict[str, Any] = {}
+
+        def spawn() -> None:
+            box["handle"] = orig_call_later(delay, callback, *args, context=context)
+
+        _bridge_to_loop(spawn)
+        return box.get("handle")
+
+    def call_at(when: Any, callback: Any, *args: Any, context: Any = None) -> Any:
+        if not _worker_in_cell():
+            return orig_call_at(when, callback, *args, context=context)
+        box: dict[str, Any] = {}
+
+        def spawn() -> None:
+            box["handle"] = orig_call_at(when, callback, *args, context=context)
+
+        _bridge_to_loop(spawn)
+        return box.get("handle")
+
+    _loop.call_soon = call_soon  # type: ignore[method-assign]
+    _loop.call_later = call_later  # type: ignore[method-assign]
+    _loop.call_at = call_at  # type: ignore[method-assign]
 
 
 def _install_sync_cell_compat() -> None:
@@ -1086,6 +1133,16 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
         result_text: str | None = None
         try:
             if _consume_handoff_interrupt() and status in ("ok", "degraded"):
+                if status == "degraded":
+                    # The interrupt targets the request's remaining work - the
+                    # still-running execution: stop it best-effort and keep its
+                    # late outcome on the runner/task instead of loop logs.
+                    if runner is not None:
+                        runner.request_stop()
+                    else:
+                        task.cancel()
+                    task.add_done_callback(_consume_task_exception)
+                    _pop_tail(cell_id, tail)
                 # SIGINT landed between the task's completion and the finishing
                 # phase: it targeted this request, so cancel its remaining work.
                 status, error = "error", _error_event(cell_id, KeyboardInterrupt())

@@ -315,6 +315,31 @@ class ReplAutoBgTest(unittest.TestCase):
         stopped = self.repl.execute("stop", "_bg_1.cancel()")
         self.assertEqual(one(stopped, "done")["status"], "ok")
 
+    def test_worker_loop_scheduling_is_thread_safe(self):
+        # Direct loop scheduling from a sync-cell worker must ride the
+        # thread-safe path: the callback runs and the timer handle cancels.
+        events = self.repl.execute(
+            "sched",
+            "import asyncio\n"
+            "loop = asyncio.get_event_loop()\n"
+            "hit = []\n"
+            "loop.call_soon(lambda: hit.append('soon'))\n"
+            "handle = loop.call_later(0.05, lambda: hit.append('later'))\n"
+            "handle.cancel()\n"
+            "'armed'",
+        )
+        self.assertIn("armed", one(events, "result")["text"])
+        wait_started = time.monotonic()
+        while time.monotonic() - wait_started < 5:
+            probe = self.repl.execute("probe", "len(hit)")
+            if one(probe, "result")["text"] != "0":
+                break
+            time.sleep(0.2)
+        self.assertEqual(one(probe, "result")["text"], "1")
+        self.assertEqual(
+            one(self.repl.execute("check", "hit[0]"), "result")["text"], "'soon'"
+        )
+
     def test_fast_paths_inline_with_the_guard_armed(self):
         events = self.repl.execute("fast", "print('fast-print')\n6*7")
         self.assertEqual(one(events, "result")["text"], "42")
