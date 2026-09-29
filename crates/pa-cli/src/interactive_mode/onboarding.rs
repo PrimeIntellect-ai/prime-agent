@@ -139,6 +139,9 @@ pub(super) struct SettingsOnboardingSink {
     /// The flow's `onboarding_id` (#2117): pairs the `onboarding stage`
     /// events and the `onboarding completed` enrichment.
     pub(super) onboarding_id: String,
+    /// Whether the `ready` stage already fired (the mount-time snapshot);
+    /// a mid-flow sign-in's completion-time readiness emits it then, once.
+    pub(super) ready_emitted: std::sync::atomic::AtomicBool,
     /// The startup-model probe (the completion telemetry's category
     /// columns: the resolved startup model and its auth source).
     pub(super) probe: StartupModelProbe,
@@ -190,6 +193,26 @@ impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
             // marker's own stage event, paired by `onboarding_id`. The
             // final flush rides the client's drop (the worker drains once
             // every handle is gone - no missed fires).
+            // A sign-in during the flow makes the readiness land late:
+            // the `ready` stage fires at the completion moment when the
+            // probe resolves ready and it never fired at mount time (the
+            // stage facts carry no time data).
+            if !self.ready_emitted.load(std::sync::atomic::Ordering::SeqCst)
+                && self.probe.resolve().1
+            {
+                self.ready_emitted
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                pa_telemetry::OnboardingStage {
+                    onboarding_id: self.onboarding_id.clone(),
+                    stage: "ready",
+                    outcome: "configured",
+                    duration_ms: None,
+                    auth_category: Some("none"),
+                    entry_reason: Some("first_setup"),
+                    timing_scope: Some("system_work"),
+                }
+                .track(&client);
+            }
             pa_telemetry::OnboardingStage {
                 onboarding_id: self.onboarding_id.clone(),
                 stage: "exit",
@@ -251,6 +274,7 @@ pub(super) fn onboarding_task(
     // because THIS call runs before the interactive runtime exists (a
     // `TelemetryClient` spawned here is inert and the events would drop);
     // `run_interactive_mode` emits them inside its runtime.
+    let mount_ready = model_ready_now;
     let pending_stages = if crate::mode::telemetry_disabled(&settings) {
         Vec::new()
     } else {
@@ -263,7 +287,7 @@ pub(super) fn onboarding_task(
             entry_reason: Some("first_setup"),
             timing_scope: None,
         }];
-        if model_ready_now {
+        if mount_ready {
             stages.push(pa_telemetry::OnboardingStage {
                 onboarding_id: onboarding_id.clone(),
                 stage: "ready",
@@ -282,6 +306,7 @@ pub(super) fn onboarding_task(
             agent_dir: config.agent_dir.clone(),
             created_at: std::time::Instant::now(),
             onboarding_id,
+            ready_emitted: std::sync::atomic::AtomicBool::new(mount_ready),
             probe,
         }),
         model_ready: std::sync::Arc::new(move || readiness_probe.resolve().1),

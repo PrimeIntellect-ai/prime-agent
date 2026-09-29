@@ -97,6 +97,15 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
         // the `startup` event; the configuration stage covers the whole
         // options resolution (`build_tui_options` above), the attach
         // stage the daemon-socket resolution.
+        // The startup kind (#2117): a resume/continue launch is a `resumed`
+        // startup; every other selection is `cold` (the `warm_attach` value
+        // stays for the daemon-warmth seam, which does not exist yet).
+        let startup_kind: &'static str =
+            if options.session.resume.is_some() || options.session.continue_recent {
+                "resumed"
+            } else {
+                "cold"
+            };
         let startup_telemetry = (!options.config.telemetry_disabled).then(|| {
             let agent_dir = options.config.agent_dir.clone();
             let settings =
@@ -125,7 +134,7 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
                 stage: "configuration_load",
                 outcome: "completed",
                 duration_ms: Some(configuration_load_ms),
-                startup_kind: Some("cold"),
+                startup_kind: Some(startup_kind),
                 timing_scope: Some("system_work"),
             }
             .track(client);
@@ -137,7 +146,7 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
                 stage: "session_attach",
                 outcome: "completed",
                 duration_ms: Some(attach_started.elapsed().as_millis() as u64),
-                startup_kind: Some("cold"),
+                startup_kind: Some(startup_kind),
                 timing_scope: Some("system_work"),
             }
             .track(client);
@@ -158,7 +167,7 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
                 stage: "ui_ready",
                 outcome: "completed",
                 duration_ms: Some(daemon_ready_ms),
-                startup_kind: Some("cold"),
+                startup_kind: Some(startup_kind),
                 timing_scope: Some("system_work"),
             }
             .track(client);

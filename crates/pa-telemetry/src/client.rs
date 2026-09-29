@@ -431,7 +431,19 @@ impl Worker {
     async fn flush_final(&mut self) {
         for channel in &mut self.channels {
             while !channel.queue.is_empty() {
-                let take = channel.queue.len().min(self.config.batch_size);
+                // The final drain honors the same batch byte cap as the
+                // interval path: a shutdown batch never exceeds what the
+                // delivery contract allows.
+                let mut take = 0usize;
+                let mut bytes = 0usize;
+                for entry in channel.queue.iter().take(self.config.batch_size) {
+                    let size = entry.event.wire_size_estimate();
+                    if take > 0 && bytes + size > self.config.max_batch_bytes {
+                        break;
+                    }
+                    bytes += size;
+                    take += 1;
+                }
                 let mut events: Vec<TelemetryEvent> = Vec::with_capacity(take);
                 for _ in 0..take {
                     if let Some(entry) = channel.queue.pop_front() {

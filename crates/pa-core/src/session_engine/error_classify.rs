@@ -79,9 +79,9 @@ pub const ERROR_DIAGNOSTICS: &[(&str, &str)] = &[
 /// `TELEMETRY_SAFE_ERROR_MESSAGES`): a message that matches one of these
 /// exactly may ride the event as `error_message`.
 const REVIEWED_MESSAGES: &[(&str, &str)] = &[
-    ("request_aborted", "Request was aborted"),
-    ("request_aborted", "The operation was aborted."),
-    ("request_aborted", "The operation was aborted"),
+    ("cancelled", "Request was aborted"),
+    ("cancelled", "The operation was aborted."),
+    ("cancelled", "The operation was aborted"),
     ("network_error", "fetch failed"),
     ("provider_unavailable", "Provider overloaded"),
     ("rate_limited", "Provider rate limit exceeded"),
@@ -390,6 +390,11 @@ mod tests {
             classification.safe_message,
             Some(("reviewed_literal", "Provider rate limit exceeded"))
         );
+        // The abort literal's subtype is the catalog vocabulary
+        // (`cancelled`, never a message id that sanitize would rewrite).
+        let aborted = classify("Request was aborted");
+        assert_eq!(aborted.subtype, "cancelled");
+        assert!(pa_telemetry::ERROR_SUBTYPES.contains(&aborted.subtype));
         // A near-miss uploads nothing.
         let near_miss = classify("Provider rate limit exceeded for model glm-4.6");
         assert!(near_miss.safe_message.is_none());
