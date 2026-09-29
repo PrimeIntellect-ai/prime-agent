@@ -3,7 +3,7 @@
 //! store with its team selection, the team rebind, and the stored team
 //! read (TS setPrimeInferenceApiKey / setPrimeInferenceTeamSelection /
 //! getPrimeInferenceTeamSelection). The methods stay inherent on
-//! AuthStorage: the impl owns the private lock and reload machinery they
+//! `AuthStorage`: the impl owns the private lock and reload machinery they
 //! wrap.
 
 use super::*;

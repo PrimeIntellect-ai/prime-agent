@@ -2,7 +2,7 @@
 //! resolution walk over the candidate sources (runtime override, prime
 //! inference env-before-stored, stored, environment, fallback) with the
 //! staleness gate, the OAuth expiry refresh under the per-provider
-//! single-flight, and the passthrough get_api_key (TS getApiKey).
+//! single-flight, and the passthrough `get_api_key` (TS getApiKey).
 
 use super::*;
 

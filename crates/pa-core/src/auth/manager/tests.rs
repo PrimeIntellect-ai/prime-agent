@@ -1,7 +1,7 @@
-//! The AuthStorage unit battery (moved with its concern): the candidate
+//! The `AuthStorage` unit battery (moved with its concern): the candidate
 //! memo + staleness machinery, the runtime/stored/environment/fallback
 //! precedence, the OAuth refresh contract, and the Prime Inference
-//! credential + team writes (the hermetic ScriptedEnv seam against the
+//! credential + team writes (the hermetic `ScriptedEnv` seam against the
 //! ambient env).
 
 use super::*;
