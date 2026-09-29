@@ -496,6 +496,14 @@ pub(crate) struct SessionUi {
     /// "clear", taken by the second press inside the 500ms window.
     escape_repeat_action: Option<&'static str>,
     escape_repeat_until: Option<Instant>,
+    /// Whether the double-Escape tree shortcut already fired for this input
+    /// chain (the operator's 2026-09-29 Esc-overflow ruling: the repeat-opened
+    /// tree's dismissal must not re-enter the open cycle — the empty state's
+    /// pop loop terminates, and a pure stream of Escape presses converges to
+    /// the inert empty editor instead of reopening the tree every second
+    /// press). Any other input — a non-Escape key, a plain click — re-arms
+    /// the gesture.
+    escape_tree_shortcut_spent: bool,
     /// The `!`/`!!` user-bash lane (TS interactive-mode onSubmit): the
     /// client-side running flag (optimistic on submit, patched by the
     /// `bash_start`/`bash_end` events), the mounted transcript card id,

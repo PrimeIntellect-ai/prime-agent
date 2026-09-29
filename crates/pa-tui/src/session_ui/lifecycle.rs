@@ -164,6 +164,7 @@ impl SessionUi {
             exit_guard: crate::exit_guard::ExitGuard::new(),
             escape_repeat_action: None,
             escape_repeat_until: None,
+            escape_tree_shortcut_spent: false,
             user_bash_running: false,
             user_bash_card: None,
             user_bash_started_at: None,
