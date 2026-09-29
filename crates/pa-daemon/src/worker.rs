@@ -543,16 +543,16 @@ impl Worker {
                         &sink_notify,
                         work,
                     );
-                    let Some(engine) = sink_engine.upgrade() else {
+                    if sink_engine.upgrade().is_none() {
                         return;
-                    };
+                    }
                     // The queue admitted the minted continuation: the
                     // guard releases at the admission (the owed flag
                     // clears at the queue, TS `_admitSessionInput`'s
                     // follow-up), so the next boundary may mint again —
                     // the queued row's own wait is guarded by the
                     // session-input probe.
-                    engine.release_goal_continuation_handle(&pending_handle);
+                    AgentSessionEngine::release_goal_continuation_handle(pending_handle.as_ref());
                 });
                 // TS `_clearQueuedGoalContexts`: withdraw queued minted
                 // goal-context turns (the pause/clear/start commands and

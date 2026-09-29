@@ -130,12 +130,14 @@ impl AgentSessionEngine {
     /// it may have been re-swapped onto. An item that armed no guard (the
     /// budget steer, the quota-resume marker) falls back to the mirror
     /// clear (the historical behavior).
-    pub(crate) fn release_goal_work_continuation(&self, work: &crate::engine::GoalTurnEndWork) {
+    pub(crate) fn release_goal_work_continuation(work: &crate::engine::GoalTurnEndWork) {
         let handle = match work {
             crate::engine::GoalTurnEndWork::Continuation(item)
-            | crate::engine::GoalTurnEndWork::BudgetLimitSteer(item) => &item.pending_handle,
+            | crate::engine::GoalTurnEndWork::BudgetLimitSteer(item) => {
+                item.pending_handle.as_ref()
+            }
         };
-        self.release_goal_continuation_handle(handle);
+        Self::release_goal_continuation_handle(handle);
     }
 
     /// The handle form of [`release_goal_work_continuation`] for sinks that
@@ -145,8 +147,7 @@ impl AgentSessionEngine {
     /// mirror clear (an unrelated in-flight mint's armed guard must never
     /// be dropped by an admission that holds no handle).
     pub(crate) fn release_goal_continuation_handle(
-        &self,
-        handle: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        handle: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) {
         if let Some(pending) = handle {
             pending.store(false, std::sync::atomic::Ordering::SeqCst);

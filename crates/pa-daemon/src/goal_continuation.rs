@@ -238,7 +238,7 @@ impl AgentSessionEngine {
             // always arms the guard, so the handle is always `Some`
             // here; the release names it, and an item that armed no
             // guard would release nothing.
-            self.release_goal_continuation_handle(&pending_handle);
+            AgentSessionEngine::release_goal_continuation_handle(pending_handle.as_ref());
             return;
         }
         self.deliver_goal_work(GoalTurnEndWork::Continuation(GoalContinuation {
@@ -450,7 +450,7 @@ impl AgentSessionEngine {
         // never reaches a turn on this path, so the driver's pending guard
         // releases with it (a wedged guard would block every later mint).
         if self.session_is_closed() {
-            self.release_goal_work_continuation(&work);
+            AgentSessionEngine::release_goal_work_continuation(&work);
             return;
         }
         let sink = self
@@ -462,7 +462,7 @@ impl AgentSessionEngine {
             sink(work);
         } else {
             eprintln!("pa-daemon: goal follow-up dropped: no admission sink wired");
-            self.release_goal_work_continuation(&work);
+            AgentSessionEngine::release_goal_work_continuation(&work);
         }
     }
 }

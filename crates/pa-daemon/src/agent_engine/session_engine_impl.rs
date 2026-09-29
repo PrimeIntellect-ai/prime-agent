@@ -168,7 +168,7 @@ impl SessionEngine for AgentSessionEngine {
         &self,
         handle: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) {
-        AgentSessionEngine::release_goal_continuation_handle(self, handle);
+        AgentSessionEngine::release_goal_continuation_handle(handle.as_ref());
     }
 
     fn autonomous_status(

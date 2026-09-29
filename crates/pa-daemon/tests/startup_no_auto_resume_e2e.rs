@@ -77,7 +77,7 @@ fn spawn_mock(answer: &'static str) -> PathBuf /* url */ {
     PathBuf::from(url)
 }
 
-fn chunk(delta: Value, finish_reason: Option<&str>) -> String {
+fn chunk(delta: &Value, finish_reason: Option<&str>) -> String {
     json!({
         "id": "chatcmpl-dormant",
         "object": "chat.completion.chunk",
@@ -110,8 +110,8 @@ fn serve(mut stream: TcpStream, answer: &str) -> std::io::Result<()> {
     }
     let mut payload = String::new();
     for data in [
-        chunk(json!({"role": "assistant", "content": answer}), None),
-        chunk(json!({}), Some("stop")),
+        chunk(&json!({"role": "assistant", "content": answer}), None),
+        chunk(&json!({}), Some("stop")),
     ] {
         payload.push_str("data: ");
         payload.push_str(&data);
@@ -189,7 +189,7 @@ impl Client {
         (client, hello)
     }
 
-    fn send_command(&mut self, id: &str, command: Value) {
+    fn send_command(&mut self, id: &str, command: &Value) {
         let envelope = json!({
             "type": "command",
             "id": id,
@@ -238,7 +238,7 @@ impl Client {
 
     /// The live roster (`list`): every resident session's active id.
     fn listed_sessions(&mut self, poll_id: &str) -> Vec<String> {
-        self.send_command(poll_id, json!({ "type": "list" }));
+        self.send_command(poll_id, &json!({ "type": "list" }));
         let list = self.read_response(poll_id);
         assert_eq!(list["success"], true, "list failed: {list}");
         list["data"]["sessions"]
@@ -256,7 +256,7 @@ impl Client {
     }
 
     fn shutdown(&mut self) {
-        self.send_command("sd", json!({ "type": "shutdown" }));
+        self.send_command("sd", &json!({ "type": "shutdown" }));
         let shutdown = self.read_response("sd");
         assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");
     }
@@ -277,7 +277,7 @@ fn wait_until<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T 
 fn messages(client: &mut Client, id: &str, active_session_id: &str) -> String {
     client.send_command(
         id,
-        json!({ "type": "get_messages", "activeSessionId": active_session_id }),
+        &json!({ "type": "get_messages", "activeSessionId": active_session_id }),
     );
     let response = client.read_response(id);
     assert_eq!(response["success"], true, "get_messages failed: {response}");
@@ -483,7 +483,7 @@ fn a_due_scheduled_job_never_boots_its_session_at_daemon_start() {
     // DORMANT, SURFACED: the heartbeat catalog still lists the passive
     // heartbeat row (the agents-view surface — "a scheduled heartbeat
     // exists"), and the cron catalog the cron row.
-    client.send_command("hb1", json!({ "type": "heartbeats_list" }));
+    client.send_command("hb1", &json!({ "type": "heartbeats_list" }));
     let heartbeats = client.read_response("hb1");
     assert_eq!(heartbeats["success"], true, "{heartbeats}");
     let rows = heartbeats["data"]["heartbeats"].as_array().expect("rows");
@@ -492,7 +492,7 @@ fn a_due_scheduled_job_never_boots_its_session_at_daemon_start() {
         .find(|row| row["job"]["id"] == json!("job-stale-heartbeat"))
         .expect("the dormant heartbeat row must stay surfaced in the catalog");
     assert_eq!(heartbeat_row["sessionName"], json!("the ts era session"));
-    client.send_command("cr1", json!({ "type": "cron_list" }));
+    client.send_command("cr1", &json!({ "type": "cron_list" }));
     let crons = client.read_response("cr1");
     assert_eq!(crons["success"], true, "{crons}");
     let cron_rows = crons["data"]["jobs"].as_array().expect("cron rows");
@@ -508,7 +508,7 @@ fn a_due_scheduled_job_never_boots_its_session_at_daemon_start() {
     // fires through the live worker's own scheduler.
     client.send_command(
         "c1",
-        json!({ "type": "create", "sessionPath": session_file.to_string_lossy() }),
+        &json!({ "type": "create", "sessionPath": session_file.to_string_lossy() }),
     );
     let created = client.read_response("c1");
     assert_eq!(created["success"], true, "resume create failed: {created}");
@@ -593,7 +593,7 @@ fn a_stale_ts_era_heartbeat_stays_dormant_across_daemon_restarts() {
     );
     // The catalog surfaces the active-state row; the archived session's
     // row is hidden (the TS parity state gate).
-    client.send_command("hb1", json!({ "type": "heartbeats_list" }));
+    client.send_command("hb1", &json!({ "type": "heartbeats_list" }));
     let heartbeats = client.read_response("hb1");
     let ids: Vec<&str> = heartbeats["data"]["heartbeats"]
         .as_array()

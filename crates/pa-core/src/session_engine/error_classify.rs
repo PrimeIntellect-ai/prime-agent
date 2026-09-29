@@ -220,6 +220,7 @@ pub struct ErrorClassification {
 /// Classify one failed call's error message. The message itself never
 /// uploads: only the fixed tuples, the diagnostic, and - when the text is
 /// a reviewed fixed string - that exact string.
+#[must_use]
 pub fn classify_error_message(message: &str) -> ErrorClassification {
     let diagnostic = |subtype: &str| {
         ERROR_DIAGNOSTICS
@@ -321,8 +322,9 @@ fn bounded_http_status(message: &str) -> Option<u64> {
         // (durations in the message text) never read as statuses.
         let unit_after = index + 3 < bytes.len() && bytes[index + 3].is_ascii_alphabetic();
         if !digit_before && !digit_after && !unit_after {
-            let status =
-                (bytes[index] - b'0') as u64 * 100 + (b - b'0') as u64 * 10 + (c - b'0') as u64;
+            let status = u64::from(bytes[index] - b'0') * 100
+                + u64::from(b - b'0') * 10
+                + u64::from(c - b'0');
             return Some(status);
         }
     }

@@ -24,6 +24,7 @@ pub enum RunTrigger {
 
 impl RunTrigger {
     /// The wire vocabulary value.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Prompt => "prompt",
@@ -53,6 +54,7 @@ pub enum ToolCategory {
 
 impl ToolCategory {
     /// Map a concrete tool name onto the fixed category vocabulary.
+    #[must_use]
     pub fn from_tool_name(tool_name: &str) -> Self {
         let normalized = tool_name.to_ascii_lowercase();
         let core = normalized.split([':', '_']).next().unwrap_or_default();
