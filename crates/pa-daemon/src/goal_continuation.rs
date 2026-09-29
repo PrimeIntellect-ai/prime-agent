@@ -234,11 +234,11 @@ impl AgentSessionEngine {
             // The unconsumed mint releases its OWN pending guard (the
             // handle captured under the driver lock at the mint — a
             // rebuild may have re-swapped the mirror onto a replacement
-            // session's handle while this task's awaits ran).
-            match pending_handle.as_ref() {
-                Some(pending) => pending.store(false, std::sync::atomic::Ordering::SeqCst),
-                None => self.clear_pending_goal_continuation(),
-            }
+            // session's handle while this task's awaits ran). The mint
+            // always arms the guard, so the handle is always `Some`
+            // here; the release names it, and an item that armed no
+            // guard would release nothing.
+            self.release_goal_continuation_handle(&pending_handle);
             return;
         }
         self.deliver_goal_work(GoalTurnEndWork::Continuation(GoalContinuation {
