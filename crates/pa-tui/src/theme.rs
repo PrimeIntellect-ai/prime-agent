@@ -693,6 +693,77 @@ impl Theme {
             })
             .collect()
     }
+
+    /// The ONE hover affordance style every clickable surface paints
+    /// (the operator's 2026-09-29 consistency rule): a LIGHT
+    /// background band — the same soft wash the menu panels' selected
+    /// rows carry — that marks "the mouse can click here", never the
+    /// focused state's purple [`Theme::selection_row_style`], so
+    /// hoverable and focused read as two different things everywhere
+    /// (the dock's group segments, the tray's `← manage` hint, the
+    /// agents view's rows). The wash is the established light band:
+    /// it clears the visibility bar over the surfaces it renders on
+    /// and follows the theme in both color modes, so one style serves
+    /// every surface instead of a per-surface copy.
+    pub fn hover_row_style(&self) -> Style {
+        self.soft_selection_style()
+    }
+
+    /// Paint one hover band over the given column span of a composed
+    /// row (the hover affordance's row painter): a span straddling the
+    /// span's edge splits, so the band covers exactly the hovered
+    /// region — a dock group's own segment, the hint's own text — and
+    /// cells that already carry a background keep it (a cell inside
+    /// the purple selection band keeps the focused state's band: both
+    /// styles apply where the two states overlap, and the hover never
+    /// demotes the selection).
+    pub fn paint_hover_band(&self, line: &mut crate::Line, cols: std::ops::Range<usize>) {
+        let band = self.hover_row_style();
+        let mut painted: crate::Line = Vec::with_capacity(line.len() + 2);
+        let mut col = 0usize;
+        for span in std::mem::take(line) {
+            let width = crate::width::str_width(&span.content);
+            let start = col;
+            let end = col + width;
+            col = end;
+            // The span's cells outside the hovered range paint as they
+            // are; the covered cells gain the band, unless they already
+            // carry a background (the selection's purple).
+            let before = cols.start.saturating_sub(start).min(width);
+            let after = end
+                .saturating_sub(cols.end)
+                .min(width.saturating_sub(before));
+            let hit = width - before - after;
+            if before > 0 {
+                painted.push(split_span(&span, 0, before));
+            }
+            if hit > 0 {
+                let mut covered = split_span(&span, before, before + hit);
+                if covered.style.bg.is_none() {
+                    covered.style = covered.style.patch(band);
+                }
+                painted.push(covered);
+            }
+            if after > 0 {
+                painted.push(split_span(&span, before + hit, width));
+            }
+        }
+        *line = painted;
+    }
+}
+
+/// One slice of a span's cells (grapheme-safe for the widths the
+/// composition pads and truncates at char boundaries): `from`/`to`
+/// index the span's chars, so a split piece keeps the original style.
+fn split_span(span: &crate::Span, from: usize, to: usize) -> crate::Span {
+    let mut piece = span.clone();
+    piece.content = span
+        .content
+        .chars()
+        .skip(from)
+        .take(to - from)
+        .collect::<String>();
+    piece
 }
 
 fn span_with(span: crate::Span, modifier: Modifier) -> crate::Span {
@@ -996,5 +1067,109 @@ mod tests {
             let theme = Theme::from_json(&json, ColorMode::TrueColor);
             assert_eq!(theme.background_rgb(), None, "background {raw}");
         }
+    }
+
+    /// The ONE hover affordance (the operator's 2026-09-29 consistency
+    /// rule): a LIGHT background band, never the purple selection —
+    /// the two state styles must stay distinguishable in every theme
+    /// and color mode, so "hoverable" and "focused" read as different
+    /// things on every surface that paints both.
+    #[test]
+    fn the_hover_band_is_light_never_the_purple_selection() {
+        for name in ["prime", "dark", "light"] {
+            for mode in [ColorMode::TrueColor, ColorMode::Color256] {
+                let theme = Theme::builtin(name, mode);
+                let hover = theme.hover_row_style();
+                let selection = theme.selection_row_style();
+                assert_eq!(
+                    hover.bg,
+                    theme.soft_selection_style().bg,
+                    "{name}/{mode:?}: the hover is the one light wash"
+                );
+                assert_ne!(
+                    hover.bg, selection.bg,
+                    "{name}/{mode:?}: the hover band and the selection band differ"
+                );
+                assert!(
+                    selection
+                        .add_modifier
+                        .contains(ratatui::style::Modifier::BOLD),
+                    "{name}/{mode:?}: the selection keeps its bold"
+                );
+                let band = hover.bg.expect("the hover paints a background");
+                let (Some(band_lum), Some(selection_lum)) = (
+                    quantized_luminance(band),
+                    quantized_luminance(selection.bg.expect("the selection paints a background")),
+                ) else {
+                    panic!("{name}/{mode:?}: both bands must evaluate");
+                };
+                let surface = theme
+                    .bg_color(ThemeBg::UserMessageBg)
+                    .and_then(quantized_luminance)
+                    .expect("the editor surface evaluates");
+                assert!(
+                    (band_lum - surface).abs() >= SELECTION_MIN_LUMINANCE_DELTA - 1.0,
+                    "{name}/{mode:?}: the light band reads off its surface"
+                );
+                assert!(
+                    (selection_lum - band_lum).abs() >= 10.0,
+                    "{name}/{mode:?}: the purple and the light band read apart                      (selection {selection_lum:.1} vs hover {band_lum:.1})"
+                );
+            }
+        }
+    }
+
+    /// The hover band paints only its own column span: a span
+    /// straddling an edge splits, and a cell already carrying the
+    /// selection's purple keeps it (both state styles apply where they
+    /// overlap — the hover never demotes the focused band).
+    #[test]
+    fn the_hover_band_covers_its_columns_and_never_demotes_the_selection() {
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let mut line = vec![
+            crate::Span::raw("plain "),
+            crate::Span::styled("focused".to_string(), theme.selection_row_style()),
+            crate::Span::raw(" tail"),
+        ];
+        theme.paint_hover_band(&mut line, 3..10);
+        let widths = span_width(&line);
+        assert_eq!(
+            widths,
+            vec![3, 3, 4, 3, 5],
+            "the straddling spans split at the band edges"
+        );
+        assert_eq!(flat(&line), "plain focused tail");
+        // The plain cells inside the band carry the light background.
+        assert_eq!(
+            line[0].style.bg, None,
+            "the cells outside the band stay bare"
+        );
+        assert_eq!(
+            line[1].style.bg,
+            theme.hover_row_style().bg,
+            "the covered plain cells gain the light band"
+        );
+        assert_eq!(
+            line[2].style.bg,
+            theme.selection_row_style().bg,
+            "the selection's own cells keep the purple under the hover"
+        );
+        assert_eq!(
+            line[3].style.bg,
+            theme.selection_row_style().bg,
+            "the focused cells keep the purple selection"
+        );
+        assert_eq!(line[4].style.bg, None, "the tail stays bare");
+    }
+
+    fn flat(line: &crate::Line) -> String {
+        line.iter().map(|s| s.content.as_str()).collect()
+    }
+
+    /// [`str_width`] over one span's content.
+    fn span_width(line: &crate::Line) -> Vec<usize> {
+        line.iter()
+            .map(|s| crate::width::str_width(&s.content))
+            .collect()
     }
 }

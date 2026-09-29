@@ -86,6 +86,14 @@ impl SessionUi {
                     self.dirty = true;
                 }
             }
+            ClickAction::OpenDockGroup(group) => {
+                self.track_click("dock");
+                self.open_dock_group_from_click(group, view);
+            }
+            ClickAction::OpenAgentsView => {
+                self.track_click("hint");
+                self.open_agents_view_from_hint(view);
+            }
         }
     }
 

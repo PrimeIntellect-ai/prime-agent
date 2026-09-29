@@ -489,8 +489,22 @@ pub fn conversation_detail_status(all_output: bool, details: bool, key_display: 
 /// The tray row under the editor (TS `SubagentSummaryLine.renderInfoLine`):
 /// location label left, context label right, over the full width.
 pub fn render_tray(state: &ChromeState, theme: &Theme, width: usize) -> Line {
+    render_tray_with_hint(state, theme, width).0
+}
+
+/// The tray row plus the `← manage` hint's column span (the click
+/// surface's region: a plain click on the hint's own cells performs
+/// the hinted action — the left arrow's agents-back handoff, operator
+/// directive 2026-09-29). `None` when the left label is the override
+/// or the hint is hidden: the tray keeps no region then.
+pub fn render_tray_with_hint(
+    state: &ChromeState,
+    theme: &Theme,
+    width: usize,
+) -> (Line, Option<std::ops::Range<usize>>) {
     let dim = theme.fg_style(ThemeColor::Dim);
     let muted = theme.fg_style(ThemeColor::Muted);
+    let mut hint: Option<std::ops::Range<usize>> = None;
     let mut left: Line = Vec::new();
     if let Some(override_label) = &state.tray_override {
         // TS `renderInfoLine`: the override label replaces the location
@@ -499,6 +513,10 @@ pub fn render_tray(state: &ChromeState, theme: &Theme, width: usize) -> Line {
     } else if state.show_manage {
         left.push(Span::styled("\u{2190}".to_string(), dim));
         left.push(Span::styled(" manage".to_string(), muted));
+        // The hint's own cells — the two spans just pushed — are the
+        // clickable region; the depth label that may follow is the
+        // session's metadata, not part of the hinted action.
+        hint = Some(0..left.iter().map(|s| str_width(&s.content)).sum());
         // TS `getTrayLocationLabel`: a subagent session joins its
         // `depth N` label onto the manage hint (a root session
         // renders none).
@@ -552,7 +570,7 @@ pub fn render_tray(state: &ChromeState, theme: &Theme, width: usize) -> Line {
     line.extend(left);
     line.push(Span::styled(" ".repeat(gap), Style::default()));
     line.extend(right);
-    line
+    (line, hint)
 }
 
 /// The tray model label's thinking-effort suffix (TS `getModelContextLabel`:
@@ -690,6 +708,30 @@ fn land_marker(out: &mut Vec<crate::Span>, width: usize) {
 /// item — `◆ x subagents` (the operator's 2026-09-25 consolidation:
 /// the separate running cluster was redundant).
 pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) -> Option<Vec<Line>> {
+    render_activity_dock_segments(dock, theme, width).map(|(frame, _)| frame)
+}
+
+/// One rendered group segment's column span on the dock's row (the
+/// click surface's region: a plain click on the group's own cells
+/// opens that group's view, the dock's Enter route — operator
+/// directive 2026-09-29, the hover + click affordance pass).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityDockSegment {
+    pub group: ActivityGroup,
+    /// The row columns the group's spans occupy, start inclusive, end
+    /// exclusive.
+    pub cols: std::ops::Range<usize>,
+}
+
+/// The framed activity dock plus its groups' column segments (see
+/// [`render_activity_dock`] for the row itself): the segments cover
+/// exactly the cells each group renders — separators between groups
+/// stay inert — clamped to the row the truncation actually kept.
+pub fn render_activity_dock_segments(
+    dock: &ActivityDock,
+    theme: &Theme,
+    width: usize,
+) -> Option<(Vec<Line>, Vec<ActivityDockSegment>)> {
     if !dock.visible() || width == 0 {
         return None;
     }
@@ -726,10 +768,15 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
     // skipped by its emptiness.
     let groups = dock.groups();
     let mut line = vec![Span::raw(" ")];
+    let mut segments: Vec<ActivityDockSegment> = Vec::new();
     for (index, group) in groups.iter().copied().enumerate() {
         if index > 0 {
             line.push(theme.fg_span(ThemeColor::Dim, "  ·  "));
         }
+        // The group's cells start where the row now stands: the
+        // segment's column span is what the terminal will paint (the
+        // truncation below clamps its end).
+        let start = line.iter().map(|s| str_width(&s.content)).sum();
         let spans = match group {
             ActivityGroup::Subagents => {
                 vec![theme.fg_span(running_color(running), format!("◆ {running} subagents"))]
@@ -795,12 +842,34 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
                 line.push(span);
             }
         }
+        let end = line.iter().map(|s| str_width(&s.content)).sum();
+        segments.push(ActivityDockSegment {
+            group,
+            cols: start..end,
+        });
     }
+    let row = truncate_spans_to_width(&line, width);
+    let rendered = row
+        .iter()
+        .map(|s| str_width(&s.content))
+        .sum::<usize>()
+        .min(width);
+    // The truncation may cut a trailing group's tail or drop it whole:
+    // a segment that no longer renders stays out of the click surface,
+    // and a partially kept one ends at the row's last painted column.
+    let segments = segments
+        .into_iter()
+        .filter(|segment| segment.cols.start < rendered)
+        .map(|mut segment| {
+            segment.cols.end = segment.cols.end.min(rendered);
+            segment
+        })
+        .collect();
     let frame = vec![
         vec![theme.fg_span(ThemeColor::BorderMuted, "─".repeat(width))],
-        truncate_spans_to_width(&line, width),
+        row,
     ];
-    Some(frame)
+    Some((frame, segments))
 }
 
 /// The footer's tok/sec row (TS `FooterComponent::render` under `/speed`):

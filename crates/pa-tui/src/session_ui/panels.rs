@@ -225,6 +225,41 @@ impl SessionUi {
         }
     }
 
+    /// The dock group a plain click opens (the dock's Enter route,
+    /// operator directive 2026-09-29): the click is an explicit user
+    /// choice, a direction key's peer — it moves the dock's selection
+    /// to the clicked group, takes the focus, and opens the group's
+    /// own view through the focused Enter's exact dispatch.
+    pub(crate) fn open_dock_group_from_click(
+        &mut self,
+        group: crate::chrome::ActivityGroup,
+        view: &mut AgentView,
+    ) {
+        self.activity_group = group;
+        self.subagents_focused = true;
+        self.update_subagent_summary(view);
+        self.open_dock_group_view(view);
+    }
+
+    /// The tray's `← manage` hint click performs the hinted action
+    /// (operator directive 2026-09-29): the left arrow's agents-back
+    /// handoff — the pane goes to the agents view (a `--no-session`
+    /// run has no daemon fleet to browse, so the click reports that
+    /// exactly like the key). A draft in the editor rides the exit
+    /// path's stash, like every agents-back key.
+    pub(crate) fn open_agents_view_from_hint(&mut self, view: &mut AgentView) {
+        if self.return_to_agents_view {
+            self.open_agents_view = true;
+            self.exit_requested = true;
+        } else {
+            self.note(
+                "The agents view needs a daemon-hosted session; start normally (without --no-session) to browse sessions",
+                view,
+            );
+        }
+        self.dirty = true;
+    }
+
     /// The dock's Enter hand-off (the operator's direct-navigation
     /// redesign): the focused group opens its own view directly — the
     /// scoped agents view for subagents, the heartbeats view, or the
