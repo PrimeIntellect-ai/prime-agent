@@ -260,7 +260,10 @@ impl Supervisor {
             return WakeOutcome::Woken(resident);
         }
         // The wake create: one worker over the saved file (the headless
-        // resume path), carrying the session's own cwd.
+        // resume path), carrying the session's own cwd. The persisted
+        // header depth rides the create's rest so the supervisor's
+        // parent-owned passivation fence sees the resumed child
+        // (a root's header depth of 0 restates its rootness).
         let create = DaemonCommand::Create {
             id: None,
             session_path: Some(session_path.clone()),
@@ -275,7 +278,7 @@ impl Supervisor {
             lifecycle: None,
             env: None,
             launch_env: None,
-            rest: Map::default(),
+            rest: Map::from_iter([("rlmDepth".to_string(), json!(info.rlm_depth))]),
         };
         match self.launch_worker(&create, None).await {
             Ok((resident, _create_summary)) => {
@@ -329,10 +332,16 @@ impl Supervisor {
             1 => {
                 let edge = matches.pop().expect("one match");
                 let session_file = edge.child.clone();
-                let cwd =
+                let (cwd, depth) =
                     crate::session_store::read_session_info(std::path::Path::new(&session_file))
-                        .map_or_else(|| "/".to_string(), |info| info.cwd);
-                Some(self.launch_ledger_child_wake(&session_file, cwd).await)
+                        .map_or_else(
+                            || ("/".to_string(), edge.depth),
+                            |info| (info.cwd, info.rlm_depth),
+                        );
+                Some(
+                    self.launch_ledger_child_wake(&session_file, cwd, &edge.child_id, depth)
+                        .await,
+                )
             }
             _ => Some(WakeOutcome::Failed(format!(
                 "Ambiguous session selector \"{selector}\""
@@ -350,6 +359,8 @@ impl Supervisor {
         self: &Arc<Self>,
         session_file: &str,
         cwd: String,
+        child_id: &str,
+        depth: u32,
     ) -> WakeOutcome {
         // Reuse before spawning (TS `createOrReuseWorker`): a concurrent
         // revival may already host the file.
@@ -368,7 +379,16 @@ impl Supervisor {
             lifecycle: None,
             env: None,
             launch_env: None,
-            rest: Map::default(),
+            // The child identity rides the create's rest (the durable
+            // descriptor carries it): the supervisor's parent-owned fence
+            // reads `rest.rlmDepth`, and the respawned worker's identity
+            // survives the revival (Macroscope's/Bugbot's finding: without
+            // it the revived child never re-passivates - the fence refuses
+            // a root).
+            rest: Map::from_iter([
+                ("rlmDepth".to_string(), json!(depth)),
+                ("rlmChildId".to_string(), json!(child_id)),
+            ]),
         };
         match self.launch_worker(&create, None).await {
             Ok((resident, _create_summary)) => {

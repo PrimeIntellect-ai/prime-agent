@@ -1001,6 +1001,30 @@ impl Supervisor {
         files.sort();
         files.dedup();
         let session_file = files.first()?.clone();
+        // The passive row's durable summary carries the child identity:
+        // the depth + the agent id ride the create's rest so the revived
+        // worker keeps them (the supervisor's parent-owned passivation
+        // fence reads `rest.rlmDepth` - without it the revived child
+        // never re-passivates).
+        let (depth, child_id) = {
+            let roster = self.roster.lock().unwrap();
+            roster
+                .by_active_session_id(selector)
+                .map(|row| {
+                    (
+                        row.summary
+                            .get("rlmDepth")
+                            .and_then(Value::as_u64)
+                            .unwrap_or_default(),
+                        row.summary
+                            .get("agentId")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    )
+                })
+                .unwrap_or((0, String::new()))
+        };
         let cwd = crate::session_store::read_session_info(std::path::Path::new(&session_file))
             .map_or_else(|| "/".to_string(), |info| info.cwd);
         let create = DaemonCommand::Create {
@@ -1015,7 +1039,10 @@ impl Supervisor {
             lifecycle: None,
             env: None,
             launch_env: None,
-            rest: serde_json::Map::default(),
+            rest: serde_json::Map::from_iter([
+                ("rlmDepth".to_string(), json!(depth)),
+                ("rlmChildId".to_string(), json!(child_id)),
+            ]),
         };
         // Reuse before launching (TS `createOrReuseWorker`): a concurrent
         // revival — or the resident the previous wake launched — may
