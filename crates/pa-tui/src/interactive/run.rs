@@ -1026,7 +1026,6 @@ async fn run_interactive_surface(
         });
         if let Some(settle) = settle {
             if settle.settled() {
-                headless_settle_pending = false;
                 break;
             }
             // The settle bound: the gate's wait is the harness's only
