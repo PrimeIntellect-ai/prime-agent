@@ -1,4 +1,4 @@
-//! The provider routing family: the OpenRouter routing preferences with
+//! The provider routing family: the `OpenRouter` routing preferences with
 //! their sort/max-price/threshold types, and the Vercel gateway routing.
 use super::*;
 
