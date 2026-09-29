@@ -29,6 +29,7 @@ fn escape_control_character(ch: char) -> String {
 /// Repairs malformed JSON string literals by:
 /// - escaping raw control characters inside strings
 /// - doubling backslashes before invalid escape characters
+#[must_use]
 pub fn repair_json(json: &str) -> String {
     let mut repaired = String::with_capacity(json.len());
     let mut in_string = false;
@@ -308,8 +309,8 @@ impl PartialParser {
                                         if let Ok(low_value) = u16::from_str_radix(&low, 16) {
                                             if (0xDC00..0xE000).contains(&low_value) {
                                                 let combined = 0x10000
-                                                    + ((value as u32 - 0xD800) << 10)
-                                                    + (low_value as u32 - 0xDC00);
+                                                    + ((u32::from(value) - 0xD800) << 10)
+                                                    + (u32::from(low_value) - 0xDC00);
                                                 if let Some(ch) = char::from_u32(combined) {
                                                     out.push(ch);
                                                     continue;
@@ -327,7 +328,7 @@ impl PartialParser {
                                 out.push('\u{FFFD}');
                             } else if (0xDC00..0xE000).contains(&value) {
                                 out.push('\u{FFFD}');
-                            } else if let Some(ch) = char::from_u32(value as u32) {
+                            } else if let Some(ch) = char::from_u32(u32::from(value)) {
                                 out.push(ch);
                             }
                         }
@@ -464,6 +465,7 @@ impl PartialParser {
 
 /// Attempts to parse potentially incomplete JSON during streaming.
 /// Always returns a valid object, even if the JSON is incomplete.
+#[must_use]
 pub fn parse_streaming_json(partial_json: Option<&str>) -> Value {
     let Some(partial_json) = partial_json else {
         return Value::Object(Map::new());
@@ -514,6 +516,7 @@ impl StreamingJsonAccumulator {
         }
     }
 
+    #[must_use]
     pub fn text(&self) -> &str {
         &self.text
     }

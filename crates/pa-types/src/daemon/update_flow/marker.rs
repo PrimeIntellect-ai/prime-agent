@@ -56,6 +56,7 @@ pub enum PreparedMarkerExpiry {
 /// Decide whether a prepared marker still authorizes consumption at `now`.
 /// A marker at exactly its deadline is expired: any command arriving after
 /// expiry (inclusive) treats the prepared directory as garbage (spec §5).
+#[must_use]
 pub fn prepared_marker_expiry(expires_at: &str, now: &str) -> PreparedMarkerExpiry {
     match (rfc3339_nanos(expires_at), rfc3339_nanos(now)) {
         (Some(expires), Some(now)) if now < expires => PreparedMarkerExpiry::Active,
@@ -124,7 +125,7 @@ fn rfc3339_nanos(timestamp: &str) -> Option<i64> {
         }
         let mut scale = 100_000_000i64;
         for byte in t.as_bytes()[start..end].iter().take(9) {
-            nanos += (byte - b'0') as i64 * scale;
+            nanos += i64::from(byte - b'0') * scale;
             scale /= 10;
         }
         idx = end;
@@ -161,7 +162,10 @@ fn rfc3339_nanos(timestamp: &str) -> Option<i64> {
         _ => return None,
     };
 
-    let days = days_from_civil(year, month as u64, day as u64);
+    // `month` and `day` are validated 1..=12 / 1..=31 above.
+    let month = u64::try_from(month).expect("month validated 1..=12");
+    let day = u64::try_from(day).expect("day validated 1..=31");
+    let days = days_from_civil(year, month, day);
     let secs = days * 86_400 + hour * 3600 + minute * 60 + second - offset_secs;
     Some(secs * 1_000_000_000 + nanos)
 }
@@ -182,7 +186,8 @@ fn days_from_civil(year: i64, month: u64, day: u64) -> i64 {
     let yoe = year - era * 400;
     let mp = if month > 2 { month - 3 } else { month + 9 };
     let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy as i64;
+    let doe =
+        yoe * 365 + yoe / 4 - yoe / 100 + i64::try_from(doy).expect("day-of-year is at most 367");
     era * 146_097 + doe - 719_468
 }
 

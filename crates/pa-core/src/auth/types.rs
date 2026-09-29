@@ -109,6 +109,7 @@ pub enum AuthCredential {
 }
 
 impl AuthCredential {
+    #[must_use]
     pub fn credential_type(&self) -> &'static str {
         match self {
             AuthCredential::ApiKey { .. } => "api_key",
@@ -124,10 +125,12 @@ impl AuthCredential {
 pub struct AuthStorageData(pub serde_json::Map<String, serde_json::Value>);
 
 impl AuthStorageData {
+    #[must_use]
     pub fn get(&self, provider: &str) -> Option<&serde_json::Value> {
         self.0.get(provider)
     }
 
+    #[must_use]
     pub fn credential(&self, provider: &str) -> Option<AuthCredential> {
         self.0
             .get(provider)
@@ -144,6 +147,7 @@ impl AuthStorageData {
         self.0.remove(provider);
     }
 
+    #[must_use]
     pub fn keys(&self) -> Vec<String> {
         self.0.keys().cloned().collect()
     }

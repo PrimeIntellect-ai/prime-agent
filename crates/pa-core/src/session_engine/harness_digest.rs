@@ -44,6 +44,7 @@ pub struct HarnessDigestContext {
 
 /// Relevance terms for digest entry ranking: the active goal objective
 /// (strongest) plus the last few user/assistant texts, newest first.
+#[must_use]
 pub fn digest_query_terms(
     goal_objective: Option<&str>,
     recent_texts_newest_first: &[String],
@@ -79,6 +80,7 @@ pub struct HarnessDigestRender {
 
 /// The rendered digest body (the `<harness_state>` content): merged global +
 /// local harness state, ranked by the query terms.
+#[must_use]
 pub fn harness_digest_text(
     context: &HarnessDigestContext,
     query_terms: HarnessQueryTerms,
@@ -134,6 +136,7 @@ pub struct HarnessDigestInputs {
 
 impl HarnessDigestInputs {
     /// Render the digest body (the `<harness_state>` content).
+    #[must_use]
     pub fn render(&self) -> String {
         self.render_with_fingerprint().digest
     }
@@ -141,12 +144,14 @@ impl HarnessDigestInputs {
     /// Render the digest body plus the fingerprint of the harness state
     /// behind it (TS `_harnessDigestWithFingerprint`): one state read
     /// feeds both, and the relevance terms drive the render only.
+    #[must_use]
     pub fn render_with_fingerprint(&self) -> HarnessDigestRender {
         render_digest_with_fingerprint(&self.context, self.terms.clone())
     }
 }
 
 /// Full digest message text (prefix + state + suffix).
+#[must_use]
 pub fn harness_digest_message_text(digest: &str) -> String {
     format!("{HARNESS_DIGEST_PREFIX}{digest}{HARNESS_DIGEST_SUFFIX}")
 }
@@ -163,6 +168,7 @@ pub fn harness_digest_message_text(digest: &str) -> String {
 ///
 /// Panics if serializing the digest row payload fails, which cannot happen
 /// for the plain message struct.
+#[must_use]
 pub fn harness_digest_prompt_row(
     digest: &str,
     timestamp: u64,
@@ -442,6 +448,7 @@ fn latest_typed_digest_details(messages: &[SessionAgentMessage]) -> Option<Lates
 /// (`dirname(dirname(file))/session-artifacts/<id>`, TS
 /// `getSessionArtifactPathForFile`); used when the caller owns persistence
 /// outside the session manager (the daemon worker's in-memory session).
+#[must_use]
 pub fn session_artifact_dir_for_log(log: &std::path::Path) -> Option<PathBuf> {
     let id = log.file_stem()?.to_string_lossy().to_string();
     let artifacts_root = log.parent()?.parent()?.join("session-artifacts");
@@ -451,11 +458,13 @@ pub fn session_artifact_dir_for_log(log: &std::path::Path) -> Option<PathBuf> {
 /// Session-local harness state directory implied by a conversation-log path
 /// (the artifact dir plus the harness subdir); used when the caller owns
 /// persistence.
+#[must_use]
 pub fn local_harness_dir_for_log(log: &std::path::Path) -> Option<PathBuf> {
     session_artifact_dir_for_log(log).map(|dir| dir.join(crate::refinement::HARNESS_STATE_DIR_NAME))
 }
 
 /// Session message view of the digest entries (resume context rebuild).
+#[must_use]
 pub fn digest_session_message(entry: &FileEntry) -> Option<SessionAgentMessage> {
     let FileEntry::CustomMessage { payload, .. } = entry else {
         return None;

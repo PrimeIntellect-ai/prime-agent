@@ -4458,6 +4458,7 @@ fn catalog() -> &'static ProviderCatalog {
 }
 
 /// Look up a model by provider and model id (`getModel` in the TS).
+#[must_use]
 pub fn get_model(provider: &str, model_id: &str) -> Option<&'static Model> {
     catalog().get(provider)?.get(model_id)
 }
@@ -4470,6 +4471,7 @@ pub fn get_providers() -> Vec<&'static str> {
 }
 
 /// All models for one provider, in catalog order (`getModels` in the TS).
+#[must_use]
 pub fn get_models(provider: &str) -> Vec<&'static Model> {
     let Some(models) = catalog().get(provider) else {
         return Vec::new();

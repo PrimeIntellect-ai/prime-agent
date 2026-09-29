@@ -25,6 +25,9 @@ use super::local_catalog::load_local_service_catalog;
 /// One merged-catalog entry projected onto the host descriptor shape
 /// (TS `McpServiceDescriptor`).
 #[derive(Debug, Clone, PartialEq)]
+// The mirrored TS API shape is deliberate (the booleans are the
+// product's own surface, not a refactor target).
+#[allow(clippy::struct_excessive_bools)]
 pub struct McpServiceDescriptor {
     /// Stable service id; kernel dispatch id and `mcp:<serviceId>` key.
     pub service_id: String,

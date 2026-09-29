@@ -101,6 +101,21 @@ pub(crate) mod sys;
 #[cfg(feature = "events")]
 pub use sys::supports_keyboard_enhancement;
 
+/// Prime Agent patch: the raw-path keyboard-enhancement check for a
+/// caller that already holds the terminal in raw mode. The stock
+/// [`supports_keyboard_enhancement`] re-decides the raw state at its
+/// entry and, when raw is off, brackets raw mode ITSELF - an implicit
+/// `enable_raw_mode` that must never run while a TUI hands its terminal
+/// back to the shell (the suspend window: the bracket would re-arm raw
+/// on the shell's terminal while the process group stops). The kitty
+/// probe guards its call on the app's own raw bracket and then takes
+/// this path, so the probe can never re-arm anything, whatever races
+/// the window between the guard's read and the check's own.
+#[cfg(all(unix, feature = "events"))]
+pub fn supports_keyboard_enhancement_checked_raw() -> io::Result<bool> {
+    sys::read_supports_keyboard_enhancement_raw()
+}
+
 /// Tells whether the raw mode is enabled.
 ///
 /// Please have a look at the [raw mode](./index.html#raw-mode) section.

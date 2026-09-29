@@ -234,6 +234,7 @@ impl ExtensionHost {
 
     /// The `hello` handshake result: registrations as loaded, plus
     /// per-path load errors (the stage-2 registration landing).
+    #[must_use]
     pub fn hello(&self) -> &HelloResult {
         &self.hello
     }
@@ -246,6 +247,7 @@ impl ExtensionHost {
 
     /// Whether the RPC side is still usable (§2.4: death never crashes the
     /// session; emits degrade to no-ops and requests fail fast).
+    #[must_use]
     pub fn is_alive(&self) -> bool {
         self.client.is_alive()
     }
@@ -373,7 +375,7 @@ impl ExtensionHost {
             Ok(Err(error)) => Err(error).context("waiting for extension sidecar exit"),
             Err(_) => {
                 if let Some(pid) = child.id() {
-                    crate::platform::kill_process_group_or_pid(pid as i32);
+                    let _ = crate::platform::kill_process_group_or_pid(pid as i32);
                 }
                 let status = child
                     .wait()
@@ -395,7 +397,7 @@ impl Drop for ExtensionHost {
             if let Some(pid) = child.id() {
                 // kill_on_drop reaps the direct child; the group kill also
                 // reaches any descendants the sidecar spawned.
-                crate::platform::kill_process_group_or_pid(pid as i32);
+                let _ = crate::platform::kill_process_group_or_pid(pid as i32);
             }
         }
     }

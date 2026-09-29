@@ -108,7 +108,7 @@ mod tests {
 
     /// The real shipped catalog fixture (the same payload the fetch lane
     /// caches), wrapped in the fetch lane's snapshot envelope.
-    fn snapshot_file(entries: serde_json::Value) -> Vec<u8> {
+    fn snapshot_file(entries: &serde_json::Value) -> Vec<u8> {
         let snapshot = serde_json::json!({
             "url": MCP_SERVICE_CATALOG_URL,
             "scope": PUBLIC_SCOPE,
@@ -117,7 +117,7 @@ mod tests {
             "payload": {
                 "version": 2,
                 "counts": { "total": 1 },
-                "entries": entries,
+                "entries": entries.clone(),
             }
         });
         serde_json::to_vec(&snapshot).expect("serialize snapshot")
@@ -142,7 +142,7 @@ mod tests {
     /// "catalog source unavailable".
     #[test]
     fn snapshot_envelope_serves() {
-        let bytes = snapshot_file(serde_json::json!([cache_only_entry()]));
+        let bytes = snapshot_file(&serde_json::json!([cache_only_entry()]));
         let snapshot = snapshot_catalog(&bytes).expect("the fetch lane's snapshot serves");
         assert!(snapshot
             .entries
@@ -227,7 +227,7 @@ mod tests {
         // A snapshot at the historical location beside the agent files serves.
         std::fs::write(
             dir.path().join(PLUGINS_CACHE_FILE),
-            snapshot_file(serde_json::json!([cache_only_entry()])),
+            snapshot_file(&serde_json::json!([cache_only_entry()])),
         )
         .expect("write the historical-location snapshot");
         let snapshot = cache_plugins_snapshot(&agent).expect("the historical location serves");
@@ -239,7 +239,7 @@ mod tests {
         // The primary path wins over the historical ones.
         std::fs::write(
             agent.join(PLUGINS_CACHE_FILE),
-            snapshot_file(serde_json::json!([cache_only_entry(), {
+            snapshot_file(&serde_json::json!([cache_only_entry(), {
                 "server": "primary-only", "service": "primary-only",
                 "label": "Primary Only", "url": "https://primary-only.example/mcp",
                 "aliases": [],

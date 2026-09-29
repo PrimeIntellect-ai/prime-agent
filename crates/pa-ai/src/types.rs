@@ -49,6 +49,7 @@ pub enum UserBlockPayload<'a> {
 }
 
 /// Classify a user/tool-result block for provider payload conversion.
+#[must_use]
 pub fn user_block_payload(block: &UserOrToolContent) -> UserBlockPayload<'_> {
     if let Some(text) = block.text() {
         return UserBlockPayload::Text(text);
@@ -125,6 +126,7 @@ pub struct SimpleStreamOptions {
 }
 
 impl SimpleStreamOptions {
+    #[must_use]
     pub fn from_base(base: StreamOptions) -> Self {
         Self {
             base,
@@ -180,6 +182,7 @@ impl ModelExt for Model {
 ///
 /// Panics for `error`/`aborted`, which only terminate streams through `error`
 /// events.
+#[must_use]
 pub fn done_reason(reason: StopReason) -> DoneStopReason {
     match reason {
         StopReason::Stop => DoneStopReason::Stop,
@@ -190,6 +193,7 @@ pub fn done_reason(reason: StopReason) -> DoneStopReason {
 }
 
 /// Map a [`StopReason`] to the terminal reason of an `error` event.
+#[must_use]
 pub fn error_reason(reason: StopReason) -> ErrorStopReason {
     match reason {
         StopReason::Aborted => ErrorStopReason::Aborted,
@@ -213,6 +217,7 @@ impl MessageExt for Message {
 }
 
 /// All-zero model cost ($0 per million tokens).
+#[must_use]
 pub fn zero_model_cost() -> ModelCost {
     ModelCost {
         input: 0.0.into(),
@@ -223,11 +228,13 @@ pub fn zero_model_cost() -> ModelCost {
 }
 
 /// Zeroed usage (the TS `Usage` type is initialized with all-zero fields).
+#[must_use]
 pub fn zeroed_usage() -> Usage {
     Usage::default()
 }
 
 /// Total billed tokens including cache traffic (`totalTokens`).
+#[must_use]
 pub fn usage_total_tokens(usage: &Usage) -> u64 {
     usage.input + usage.output + usage.cache_read + usage.cache_write
 }

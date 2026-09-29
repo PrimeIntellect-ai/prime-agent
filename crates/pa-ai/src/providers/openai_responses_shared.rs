@@ -117,6 +117,8 @@ fn build_foreign_responses_item_id(item_id: &str) -> String {
 }
 
 /// Convert a conversation to Responses API `input` items.
+// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+#[allow(clippy::too_many_lines)]
 pub fn convert_responses_messages(
     model: &Model,
     context: &Context,
@@ -176,7 +178,7 @@ pub fn convert_responses_messages(
                     "content": [{ "type": "input_text", "text": sanitize_surrogates(text) }],
                 })),
                 UserMessageContent::Blocks(blocks) => {
-                    let content: Vec<Value> = blocks
+                    let content_items: Vec<Value> = blocks
                         .iter()
                         .map(|item| match crate::types::user_block_payload(item) {
                             crate::types::UserBlockPayload::Text(text) => json!({
@@ -194,12 +196,12 @@ pub fn convert_responses_messages(
                             }),
                         })
                         .collect();
-                    if content.is_empty() {
+                    if content_items.is_empty() {
                         continue;
                     }
                     messages.push(json!({
                         "role": "user",
-                        "content": content,
+                        "content": content_items,
                     }));
                 }
             },

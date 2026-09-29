@@ -45,6 +45,7 @@ pub struct ProviderHttpResponse {
 
 impl ProviderHttpResponse {
     /// Whether the endpoint answered success (TS `response.ok`).
+    #[must_use]
     pub fn ok(&self) -> bool {
         (200..300).contains(&self.status)
     }
@@ -74,6 +75,7 @@ impl Default for ReqwestProviderHttp {
 impl ReqwestProviderHttp {
     /// Construction is trivial: the client is built per request, so
     /// there is nothing to fail here.
+    #[must_use]
     pub fn new() -> Self {
         ReqwestProviderHttp
     }

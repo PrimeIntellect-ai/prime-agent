@@ -108,6 +108,9 @@ pub enum ParsedHeartbeatCommand {
 
 /// Session activity snapshot used by heartbeat deferral.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+// The mirrored TS API shape is deliberate (the booleans are the
+// product's own surface, not a refactor target).
+#[allow(clippy::struct_excessive_bools)]
 pub struct HeartbeatSessionActivity {
     pub is_streaming: bool,
     pub is_compacting: bool,
@@ -137,7 +140,7 @@ pub fn parse_agent_cron_schedule(
     // `in <n> <unit>`: one-shot.
     let lower = text.to_lowercase();
     if let Some(rest) = lower.strip_prefix("in ") {
-        if let Some(next) = parse_in_delay(rest, now_millis)? {
+        if let Some(next) = parse_in_delay(rest, now_millis) {
             return Ok((
                 AgentCronSchedule {
                     kind: ScheduleKind::Once,
@@ -210,14 +213,10 @@ fn unit_multiplier(unit: &str, allow_seconds: bool) -> Option<u64> {
     None
 }
 
-fn parse_in_delay(rest: &str, now_millis: u64) -> anyhow::Result<Option<u64>> {
-    let Some((amount, unit)) = split_amount_unit(rest) else {
-        return Ok(None);
-    };
-    let Some(multiplier) = unit_multiplier(unit, false) else {
-        return Ok(None);
-    };
-    Ok(Some(now_millis + amount.saturating_mul(multiplier)))
+fn parse_in_delay(rest: &str, now_millis: u64) -> Option<u64> {
+    let (amount, unit) = split_amount_unit(rest)?;
+    let multiplier = unit_multiplier(unit, false)?;
+    Some(now_millis + amount.saturating_mul(multiplier))
 }
 
 /// `<digits> <unit?>` with the unit optionally attached (`10m`, `10 m`).
@@ -285,6 +284,7 @@ pub fn normalize_heartbeat_delivery_mode(
     }
 }
 
+#[must_use]
 pub fn resolve_heartbeat_streaming_behavior(delivery_mode: Option<DeliveryMode>) -> &'static str {
     match delivery_mode.unwrap_or(DEFAULT_HEARTBEAT_DELIVERY_MODE) {
         DeliveryMode::FollowUp => "followUp",
@@ -542,11 +542,13 @@ fn consume_leading_every_schedule(text: &str) -> Option<(String, String)> {
     None
 }
 
+#[must_use]
 pub fn is_heartbeat_cron_job(job: &AgentCronJob) -> bool {
     matches!(job.source.as_deref(), Some("heartbeat" | "rlm_heartbeat"))
 }
 
 /// Whether a due heartbeat should wait instead of firing now.
+#[must_use]
 pub fn should_defer_heartbeat_cron_job(
     job: &AgentCronJob,
     activity: &HeartbeatSessionActivity,
@@ -596,6 +598,7 @@ pub fn next_run_at_for_schedule(
 
 /// One-line job summary (the TS format; timestamps in local rendering are
 /// approximated by UTC ISO strings).
+#[must_use]
 pub fn format_agent_cron_job(job: &AgentCronJob) -> String {
     let next = job.next_run_at.as_deref().unwrap_or("-");
     let last = job.last_run_at.as_deref().unwrap_or("-");
@@ -801,8 +804,8 @@ pub(crate) fn parse_iso_millis(text: &str) -> Option<u64> {
     let y = if month <= 2 { year - 1 } else { year };
     let era = y.div_euclid(400);
     let yoe = y.rem_euclid(400);
-    let mp = if month > 2 { month - 3 } else { month + 9 } as i64;
-    let doy = (153 * mp + 2) / 5 + day as i64 - 1;
+    let mp = i64::from(if month > 2 { month - 3 } else { month + 9 });
+    let doy = (153 * mp + 2) / 5 + i64::from(day) - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let days = era * 146_097 + doe - 719_468;
     let (time, offset_ms) = parse_time_with_offset(time)?;

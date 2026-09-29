@@ -52,6 +52,7 @@ pub struct LineDecoder {
 }
 
 impl LineDecoder {
+    #[must_use]
     pub fn new(limits: LineLimits) -> Self {
         LineDecoder {
             buffer: Vec::new(),
@@ -60,6 +61,7 @@ impl LineDecoder {
     }
 
     /// Bytes buffered waiting for a newline.
+    #[must_use]
     pub fn buffered_bytes(&self) -> usize {
         self.buffer.len()
     }

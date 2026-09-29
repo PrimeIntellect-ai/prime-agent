@@ -62,7 +62,7 @@ fn dedupe_configured_sources(
             }
             ParsedSource::Local(local) => {
                 let base_dir = manager.base_dir_for_scope(scope);
-                let resolved = manager.resolve_path_from_base(&local.path, &base_dir);
+                let resolved = PackageManager::resolve_path_from_base(&local.path, &base_dir);
                 format!("local:{}", resolved.display())
             }
         };
@@ -166,18 +166,18 @@ impl PackageManager {
         for resource_type in RESOURCE_TYPES {
             let project_entries = settings_array(&project, resource_type);
             let global_entries = settings_array(&global, resource_type);
-            self.resolve_local_entries(
+            Self::resolve_local_entries(
                 &project_entries,
                 resource_type,
                 &mut accumulator,
-                top_level_metadata(MetadataSource::Local, SourceScope::Project),
+                &top_level_metadata(MetadataSource::Local, SourceScope::Project),
                 &project_base_dir,
             );
-            self.resolve_local_entries(
+            Self::resolve_local_entries(
                 &global_entries,
                 resource_type,
                 &mut accumulator,
-                top_level_metadata(MetadataSource::Local, SourceScope::User),
+                &top_level_metadata(MetadataSource::Local, SourceScope::User),
                 &global_base_dir,
             );
         }
@@ -243,7 +243,7 @@ impl PackageManager {
             match &parsed {
                 ParsedSource::Local(local) => {
                     let base_dir = self.base_dir_for_scope(configured.scope);
-                    self.resolve_local_extension_source(
+                    Self::resolve_local_extension_source(
                         &local.path,
                         accumulator,
                         configured.filter.as_ref(),
@@ -267,7 +267,7 @@ impl PackageManager {
                         continue;
                     }
                     metadata.base_dir = Some(installed_path.clone());
-                    self.collect_package_resources(
+                    PackageManager::collect_package_resources(
                         &installed_path,
                         accumulator,
                         configured.filter.as_ref(),
@@ -296,7 +296,7 @@ impl PackageManager {
                         self.refresh_temporary_git_source(git_source, &configured.source);
                     }
                     metadata.base_dir = Some(installed_path.clone());
-                    self.collect_package_resources(
+                    PackageManager::collect_package_resources(
                         &installed_path,
                         accumulator,
                         configured.filter.as_ref(),
@@ -344,14 +344,13 @@ impl PackageManager {
     /// contributes its package resources (or binds as one extension when it
     /// provides none).
     fn resolve_local_extension_source(
-        &self,
         path: &str,
         accumulator: &mut ResourceAccumulator,
         filter: Option<&PackageFilter>,
         metadata: &mut PathMetadata,
         base_dir: &Path,
     ) {
-        let resolved = self.resolve_path_from_base(path, base_dir);
+        let resolved = PackageManager::resolve_path_from_base(path, base_dir);
         if !resolved.exists() {
             return;
         }
@@ -368,7 +367,7 @@ impl PackageManager {
         if stats.is_dir() {
             metadata.base_dir = Some(resolved.clone());
             let has_resources =
-                self.collect_package_resources(&resolved, accumulator, filter, metadata);
+                PackageManager::collect_package_resources(&resolved, accumulator, filter, metadata);
             if !has_resources {
                 accumulator
                     .extensions
@@ -380,11 +379,10 @@ impl PackageManager {
     /// Settings top-level array entries: plain paths relative to the
     /// settings base, pattern entries applied as filters.
     fn resolve_local_entries(
-        &self,
         entries: &[String],
         resource_type: ResourceType,
         accumulator: &mut ResourceAccumulator,
-        metadata: PathMetadata,
+        metadata: &PathMetadata,
         base_dir: &Path,
     ) {
         if entries.is_empty() {
@@ -393,7 +391,7 @@ impl PackageManager {
         let (plain, pattern_entries) = split_patterns(entries);
         let resolved_plain: Vec<PathBuf> = plain
             .iter()
-            .map(|path| self.resolve_path_from_base(path, base_dir))
+            .map(|path| PackageManager::resolve_path_from_base(path, base_dir))
             .collect();
         let all_files = collect_files_from_paths(&resolved_plain, resource_type);
         let enabled_paths = apply_patterns(&all_files, &pattern_entries, base_dir);

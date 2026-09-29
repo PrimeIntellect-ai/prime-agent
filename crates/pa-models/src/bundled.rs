@@ -46,6 +46,7 @@ impl BundledAssets {
     }
 
     /// Assets at the package root ([`BundledAssets::package_dir`]).
+    #[must_use]
     pub fn at_package_root() -> Self {
         Self {
             dir: Self::package_dir(),
@@ -58,17 +59,20 @@ impl BundledAssets {
     }
 
     /// The directory the assets are read from.
+    #[must_use]
     pub fn dir(&self) -> &Path {
         &self.dir
     }
 
     /// Raw bytes of the bundled models snapshot, when the install has one.
+    #[must_use]
     pub fn read_models(&self) -> Option<String> {
         std::fs::read_to_string(self.dir.join(PACKAGED_MODEL_CATALOG_FILE)).ok()
     }
 
     /// Raw bytes of the bundled MCP services snapshot (the plugins lane owns
     /// parsing it).
+    #[must_use]
     pub fn read_mcp_services(&self) -> Option<String> {
         std::fs::read_to_string(self.dir.join(PACKAGED_MCP_CATALOG_FILE)).ok()
     }
@@ -77,6 +81,7 @@ impl BundledAssets {
 /// Load + pin the bundled models snapshot. `None` (missing/damaged asset)
 /// falls back to the compiled model definitions; the same shape TS
 /// `loadBundledModels` catches for.
+#[must_use]
 pub fn load_bundled_models(asset: &str, templates: &PinnedTemplates) -> Option<Vec<Model>> {
     let payload: serde_json::Value = serde_json::from_str(asset).ok()?;
     let catalog = parse_model_catalog(&payload, InvalidEntries::Reject).ok()?;
@@ -111,8 +116,9 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn asset(models: Vec<serde_json::Value>) -> String {
-        serde_json::to_string_pretty(&json!({"schemaVersion": 1, "models": models})).unwrap()
+    fn asset(models: impl AsRef<[serde_json::Value]>) -> String {
+        serde_json::to_string_pretty(&json!({"schemaVersion": 1, "models": models.as_ref()}))
+            .unwrap()
     }
 
     fn entry(id: &str, provider: &str) -> serde_json::Value {

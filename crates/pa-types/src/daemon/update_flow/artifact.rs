@@ -164,6 +164,7 @@ pub struct UpdateStatus {
 /// The update-flow scratch root: `<agent-dir>/update-restarts/`. Everything
 /// under it is swept unconditionally at supervisor boot, before the first
 /// client command is served (spec §6, invariant I2).
+#[must_use]
 pub fn update_restarts_dir(agent_dir: &Path) -> PathBuf {
     agent_dir.join("update-restarts")
 }
@@ -173,16 +174,19 @@ pub fn update_restarts_dir(agent_dir: &Path) -> PathBuf {
 /// `socketKey` parity); its derivation stays with the caller's platform layer
 /// so this crate stays crypto-free — coordinator and supervisor must derive
 /// it the same way.
+#[must_use]
 pub fn socket_update_dir(agent_dir: &Path, socket_hash: &str) -> PathBuf {
     update_restarts_dir(agent_dir).join(socket_hash)
 }
 
 /// `intent.json` — the coordinator lock inside a socket scratch dir.
+#[must_use]
 pub fn update_intent_path(socket_dir: &Path) -> PathBuf {
     socket_dir.join("intent.json")
 }
 
 /// `status.json` — the coordinator status file inside a socket scratch dir.
+#[must_use]
 pub fn update_status_path(socket_dir: &Path) -> PathBuf {
     socket_dir.join("status.json")
 }
@@ -190,28 +194,33 @@ pub fn update_status_path(socket_dir: &Path) -> PathBuf {
 /// `prepared/<update-id>/` — the old supervisor's durable prepare artifact.
 /// Written at `Snapshotted` (roster + marker, fsync before the ack), deleted
 /// by the supervisor's self-expiry or by the coordinator after `Restoring`.
+#[must_use]
 pub fn update_prepared_dir(socket_dir: &Path, update_id: &UpdateId) -> PathBuf {
     socket_dir.join("prepared").join(update_id.as_ref())
 }
 
 /// `roster.json` inside a prepared dir.
+#[must_use]
 pub fn update_roster_path(prepared_dir: &Path) -> PathBuf {
     prepared_dir.join("roster.json")
 }
 
 /// `marker.json` inside a prepared dir.
+#[must_use]
 pub fn update_marker_path(prepared_dir: &Path) -> PathBuf {
     prepared_dir.join("marker.json")
 }
 
 /// The TS-era supervisor manifest directory, `<agent-dir>/daemon-update-restarts/`.
 /// Nothing writes it anymore; the boot sweep deletes it if present (spec §6).
+#[must_use]
 pub fn legacy_update_restarts_dir(agent_dir: &Path) -> PathBuf {
     agent_dir.join("daemon-update-restarts")
 }
 
 /// The TS-era single-file update manifest, `<agent-dir>/daemon-update-restart.json`.
 /// Nothing writes it anymore; the boot sweep deletes it if present (spec §6).
+#[must_use]
 pub fn legacy_update_restart_status(agent_dir: &Path) -> PathBuf {
     agent_dir.join("daemon-update-restart.json")
 }

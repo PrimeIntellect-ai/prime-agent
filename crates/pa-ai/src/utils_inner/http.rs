@@ -90,7 +90,7 @@ impl HttpResponse {
         match chunk {
             Ok(Some(bytes)) => Ok(Some(String::from_utf8_lossy(&bytes).to_string())),
             Ok(None) => Ok(None),
-            Err(error) => Err(self.body_error(error)),
+            Err(error) => Err(self.body_error(&error)),
         }
     }
 
@@ -117,7 +117,7 @@ impl HttpResponse {
         match chunk {
             Ok(Some(bytes)) => Ok(Some(bytes.to_vec())),
             Ok(None) => Ok(None),
-            Err(error) => Err(self.body_error(error)),
+            Err(error) => Err(self.body_error(&error)),
         }
     }
 
@@ -125,9 +125,9 @@ impl HttpResponse {
     /// the TS transport's mid-stream failure texts (the event-stream reader
     /// fails, so the AWS SDK appends its deserialization hint); every other
     /// provider keeps the generic body-read error.
-    fn body_error(&self, error: reqwest::Error) -> ProviderError {
+    fn body_error(&self, error: &reqwest::Error) -> ProviderError {
         if let ConnectionErrorProfile::AwsHttp2 { .. } = self.connection {
-            let failure = crate::utils_inner::h2_classify::classify_reqwest_error(&error);
+            let failure = crate::utils_inner::h2_classify::classify_reqwest_error(error);
             return ProviderError::Connection(ProviderConnectionError {
                 kind: ConnectionErrorKind::H2MidStream(failure),
                 profile: self.connection.clone(),

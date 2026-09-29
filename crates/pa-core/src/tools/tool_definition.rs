@@ -41,6 +41,7 @@ impl ToolContentBlock {
     }
 
     /// The text of a text block, or `None` for images.
+    #[must_use]
     pub fn as_text(&self) -> Option<&str> {
         match self {
             ToolContentBlock::Text { text } => Some(text),
@@ -117,6 +118,7 @@ pub struct ToolDefinition {
 
 impl ToolDefinition {
     /// Built-in tool name used for replay in recorded sessions.
+    #[must_use]
     pub fn replay_built_in_tool_name(&self) -> Option<&str> {
         match self.name.as_str() {
             "bash" | "edit" | "ipython" => Some(self.name.as_str()),
@@ -125,6 +127,7 @@ impl ToolDefinition {
     }
 
     /// The wire `Tool` sent to providers (name, description, parameters).
+    #[must_use]
     pub fn to_tool(&self) -> Tool {
         Tool {
             name: self.name.clone(),

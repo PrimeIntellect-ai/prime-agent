@@ -5,6 +5,7 @@
 //! keeps the network enabled.
 
 /// Whether the catalog subsystem must avoid every network request.
+#[must_use]
 pub fn is_catalog_offline() -> bool {
     offline_flag().is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
 }

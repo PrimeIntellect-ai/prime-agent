@@ -45,6 +45,20 @@ pub(crate) enum ClickAction {
     SelectModelRow(usize),
     /// Move the `/effort` picker's selection to the clicked filtered row.
     SelectEffortRow(usize),
+    /// Open the activity dock group the click landed on (the dock's
+    /// Enter route — the click is an explicit user choice: it moves
+    /// the dock's selection to the group, takes the focus, and opens
+    /// the group's own view, operator directive 2026-09-29). The
+    /// target spans one group's rendered segment — the separators
+    /// between groups stay inert.
+    OpenDockGroup(crate::chrome::ActivityGroup),
+    /// The tray's `← manage` hint: perform the hinted action — the
+    /// left arrow's agents-back handoff, which hands the pane to the
+    /// agents view (operator directive 2026-09-29). The target spans
+    /// the hint's own cells; the depth label beside it is metadata.
+    /// The dispatch gates on the empty editor like `app.agents.back`,
+    /// the key the hint names.
+    OpenAgentsView,
 }
 
 /// One chat entry's visible span within the last composed transcript
@@ -73,6 +87,20 @@ pub(crate) struct EditorClickSurface {
     pub(crate) prompt_width: usize,
     /// The width the editor's layout wrapped at.
     pub(crate) content_width: usize,
+}
+
+/// One dock-row region the mouse can activate (the hover + click
+/// affordance pass's dock surfaces): the tray's `← manage` hint and the
+/// activity dock's group segments — dock-row indexed like the editor
+/// surface, so a click maps through the same un-cropped dock rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DockClickRegion {
+    /// The region's row in the un-cropped dock.
+    pub(crate) dock_row: usize,
+    /// The row columns the region's spans occupy, start inclusive, end
+    /// exclusive (the separator cells between dock groups stay inert).
+    pub(crate) cols: std::ops::Range<usize>,
+    pub(crate) action: ClickAction,
 }
 
 /// One picker pane's item rows in the dock.
@@ -126,12 +154,22 @@ pub(crate) struct ClickSurface {
     pub(super) dock_cropped: usize,
     pub(super) editor: Option<EditorClickSurface>,
     pub(super) picker: Option<PickerClickSurface>,
+    /// The tray's hint and the dock's group segments (the dock's
+    /// clickable chrome rows — `render_dock` records them as it
+    /// composes).
+    pub(super) dock_regions: Vec<DockClickRegion>,
 }
 
 impl ClickSurface {
     /// Reset for a fresh frame composition.
     pub(super) fn clear(&mut self) {
         *self = ClickSurface::default();
+    }
+
+    /// Record one dock-row region (the tray's `← manage` hint or one
+    /// activity dock group segment).
+    pub(super) fn record_dock_region(&mut self, region: DockClickRegion) {
+        self.dock_regions.push(region);
     }
 
     /// Mask screen rows `[from, to)` as overlay-covered: a click there
@@ -216,6 +254,22 @@ impl AgentView {
                 PickerKind::Effort => ClickAction::SelectEffortRow(picker.items.0 + item),
             });
         }
+        // The dock's clickable chrome rows — the tray's `← manage` hint
+        // and the activity dock's group segments — resolve before the
+        // editor (their rows are never editor content rows, and a frame
+        // whose dock a picker owns records none).
+        if let Some(action) = click
+            .dock_regions
+            .iter()
+            .find(|region| {
+                region.dock_row == dock_row
+                    && screen_col >= region.cols.start
+                    && screen_col < region.cols.end
+            })
+            .map(|region| region.action)
+        {
+            return Some(action);
+        }
         let editor = click.editor?;
         // The content rows follow the surface's top border and the
         // queue-selection header (TS `getClickRegions`'s line base).
@@ -230,22 +284,53 @@ impl AgentView {
         })
     }
 
-    /// Record the mouse's hover position (operator directive
-    /// 2026-09-26: the hovered card row re-styles so clickability is
-    /// discoverable). Only a clickable card row holds the hover —
-    /// anything else clears it — and the state changes only when the
-    /// hover crosses onto or off of that row (the affordance is
-    /// row-level; the tracked cell rides along for the render-side
-    /// revalidation), so a motion burst across one row never schedules
-    /// a render per report.
+    /// The dock-row region covering one screen cell, if any (the hover
+    /// band's column span: the frame paints the light background over
+    /// exactly the region the mouse rests on).
+    pub(crate) fn dock_region_at(
+        &self,
+        screen_row: usize,
+        screen_col: usize,
+    ) -> Option<&DockClickRegion> {
+        let click = &self.click;
+        if screen_row < click.dock_screen_origin {
+            return None;
+        }
+        let dock_row = screen_row - click.dock_screen_origin + click.dock_cropped;
+        click.dock_regions.iter().find(|region| {
+            region.dock_row == dock_row
+                && screen_col >= region.cols.start
+                && screen_col < region.cols.end
+        })
+    }
+
+    /// Record the mouse's hover position (operator directives
+    /// 2026-09-26 + 2026-09-29: the hovered clickable row re-styles so
+    /// clickability is discoverable). Only a hover-affordance target
+    /// holds the hover — a clickable card row, a dock group segment, or
+    /// the tray's `← manage` hint — anything else clears it. The state
+    /// changes when the hover crosses onto or off of a target row, and
+    /// when it lands on a DIFFERENT target on the same row — the dock's
+    /// groups share one row, and the band must follow the mouse across
+    /// the segments, so the highlighted group and the group a click
+    /// opens can never disagree. Within one target the affordance is
+    /// row-level: a motion burst across a card row schedules one
+    /// render per crossing, not one per report.
     pub(crate) fn note_hover(&mut self, row: usize, col: usize) -> bool {
+        let target = self.click_target_at(row, col);
         let hover = matches!(
-            self.click_target_at(row, col),
-            Some(ClickAction::ToggleCardExpansion)
+            target,
+            Some(
+                ClickAction::ToggleCardExpansion
+                    | ClickAction::OpenDockGroup(_)
+                    | ClickAction::OpenAgentsView
+            )
         )
         .then_some((row, col));
         let changed = match (self.hover_pos, hover) {
-            (Some((hover_row, _)), Some((row, _))) => hover_row != row,
+            (Some((hover_row, hover_col)), Some((row, _))) => {
+                hover_row != row || self.click_target_at(hover_row, hover_col) != target
+            }
             (Some(_), None) | (None, Some(_)) => true,
             (None, None) => false,
         };
@@ -436,6 +521,249 @@ mod tests {
         assert!(view.click.window_sections.is_empty());
         assert!(view.click.editor.is_none());
         assert_eq!(view.click_target_at(card_row, 2), None);
+    }
+
+    /// The dock's own surfaces: the tray's `← manage` hint and the
+    /// activity dock's group segments, over a dock that mounts with
+    /// the heartbeats group live and the subagents group at zero (an
+    /// empty group still renders and stays clickable, like the arrows
+    /// keep it traversable).
+    fn dock_frame(focused: crate::chrome::ActivityGroup) -> AgentView {
+        let mut view = view();
+        view.chrome.show_manage = true;
+        view.chrome.activity = Some(crate::chrome::ActivityDock {
+            heartbeats: 1,
+            selected: focused,
+            focused: true,
+            ..Default::default()
+        });
+        view.editor.set_text("hello world");
+        view.render_frame(80, 24);
+        view
+    }
+
+    /// The screen row and columns one recorded dock region covers.
+    fn region_span(view: &AgentView, wanted: &ClickAction) -> (usize, std::ops::Range<usize>) {
+        let region = view
+            .click
+            .dock_regions
+            .iter()
+            .find(|region| &region.action == wanted)
+            .unwrap_or_else(|| panic!("the region renders: {:?}", view.click.dock_regions));
+        // The same screen mapping `click_target_at` inverts: a cropped
+        // dock's regions index the un-cropped rows.
+        let row = view.click.dock_screen_origin + region.dock_row - view.click.dock_cropped;
+        (row, region.cols.clone())
+    }
+
+    #[test]
+    fn the_dock_groups_and_the_manage_hint_resolve_click_targets() {
+        let view = dock_frame(crate::chrome::ActivityGroup::Heartbeats);
+        let (_, heartbeats) = region_span(
+            &view,
+            &ClickAction::OpenDockGroup(crate::chrome::ActivityGroup::Heartbeats),
+        );
+        let (_, subagents) = region_span(
+            &view,
+            &ClickAction::OpenDockGroup(crate::chrome::ActivityGroup::Subagents),
+        );
+        let (_, hint) = region_span(&view, &ClickAction::OpenAgentsView);
+        // Every covered cell maps to the group's own open action.
+        let groups_row = region_span(
+            &view,
+            &ClickAction::OpenDockGroup(crate::chrome::ActivityGroup::Heartbeats),
+        )
+        .0;
+        for col in heartbeats.clone() {
+            assert_eq!(
+                view.click_target_at(groups_row, col),
+                Some(ClickAction::OpenDockGroup(
+                    crate::chrome::ActivityGroup::Heartbeats
+                )),
+                "the heartbeats segment's column {col} opens the heartbeats view"
+            );
+        }
+        for col in subagents.clone() {
+            assert_eq!(
+                view.click_target_at(groups_row, col),
+                Some(ClickAction::OpenDockGroup(
+                    crate::chrome::ActivityGroup::Subagents
+                )),
+                "the empty subagents segment stays clickable at column {col}"
+            );
+        }
+        for col in hint {
+            assert_eq!(
+                view.click_target_at(region_span(&view, &ClickAction::OpenAgentsView).0, col),
+                Some(ClickAction::OpenAgentsView),
+                "the manage hint's column {col} hands the pane to the agents view"
+            );
+        }
+        // The separator between two groups is inert, and so is every
+        // cell between the hint's own text and the depth label.
+        let between = subagents.end..heartbeats.start;
+        for col in between {
+            assert_eq!(view.click_target_at(groups_row, col), None);
+        }
+    }
+
+    #[test]
+    fn the_hover_tracks_the_dock_surfaces_row_level() {
+        let mut view = dock_frame(crate::chrome::ActivityGroup::Heartbeats);
+        let (group_row, heartbeats) = region_span(
+            &view,
+            &ClickAction::OpenDockGroup(crate::chrome::ActivityGroup::Heartbeats),
+        );
+        // Crossing onto the group row arms the hover; a motion within
+        // the same row changes nothing (the affordance is row-level).
+        assert!(view.note_hover(group_row, heartbeats.start));
+        assert_eq!(view.hover_pos, Some((group_row, heartbeats.start)));
+        assert!(!view.note_hover(group_row, heartbeats.end - 1));
+        // A motion onto the separator column clears it.
+        let (hint_row, hint) = region_span(&view, &ClickAction::OpenAgentsView);
+        assert!(view.note_hover(group_row, 0));
+        assert_eq!(view.hover_pos, None);
+        // The tray hint holds the hover the same way.
+        assert!(view.note_hover(hint_row, hint.start));
+        assert_eq!(view.hover_pos, Some((hint_row, hint.start)));
+        // A motion onto a plain row (the editor's border row above the
+        // tray) clears it again.
+        assert!(view.note_hover(hint_row - 2, 1));
+        assert_eq!(view.hover_pos, None);
+    }
+
+    /// The dock's hover affordance (operator directive 2026-09-29): the
+    /// hovered group's segment carries the ONE light hover band over
+    /// exactly its own cells, the focused group's purple selection band
+    /// stays, and the tray's hovered hint band lands on the hint's own
+    /// text — both state styles coexist on the row.
+    #[test]
+    fn the_dock_hover_paints_the_light_band_and_keeps_the_purple_selection() {
+        let mut view = dock_frame(crate::chrome::ActivityGroup::Heartbeats);
+        let (group_row, subagents) = region_span(
+            &view,
+            &ClickAction::OpenDockGroup(crate::chrome::ActivityGroup::Subagents),
+        );
+        let (hint_row, hint) = region_span(&view, &ClickAction::OpenAgentsView);
+        let light = view.theme.hover_row_style().bg;
+        let purple = view.theme.selection_row_style().bg;
+        // Hover the EMPTY subagents segment while the heartbeats group
+        // holds the focused selection: the subagents cells gain the
+        // light band, the heartbeats cells keep the purple.
+        assert!(view.note_hover(group_row, subagents.start));
+        let hovered = view.render_frame(80, 24);
+        let row_text = hovered[group_row]
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert!(row_text.contains("subagents"), "the dock row renders");
+        let band = |cols: &std::ops::Range<usize>| {
+            let mut col = 0usize;
+            let mut cells = Vec::new();
+            for span in &hovered[group_row] {
+                let width = crate::width::str_width(&span.content);
+                let covered = col.max(cols.start) < (col + width).min(cols.end);
+                if covered {
+                    cells.push(span.style.bg);
+                }
+                col += width;
+            }
+            cells
+        };
+        assert!(
+            band(&subagents).iter().all(|bg| *bg == light),
+            "the hovered group's cells carry the light hover band"
+        );
+        let heartbeats = region_span(
+            &view,
+            &ClickAction::OpenDockGroup(crate::chrome::ActivityGroup::Heartbeats),
+        )
+        .1;
+        assert!(
+            band(&heartbeats).iter().all(|bg| *bg == purple),
+            "the focused group's cells keep the purple selection under the hover"
+        );
+        // The manage hint's own cells band the same way.
+        assert!(view.note_hover(hint_row, hint.start));
+        let hovered = view.render_frame(80, 24);
+        let hint_cells: Vec<_> = hovered[hint_row]
+            .iter()
+            .take_while(|span| !span.content.trim().is_empty() || span.style.bg.is_some())
+            .collect();
+        assert!(
+            hint_cells.iter().any(|span| span.style.bg == light),
+            "the hovered hint carries the light band: {hint_cells:?}"
+        );
+        // A hover onto the FOCUSED group keeps the selection band: both
+        // state styles apply where they overlap, and the purple is
+        // never demoted.
+        assert!(view.note_hover(group_row, heartbeats.start));
+        let hovered = view.render_frame(80, 24);
+        let mut col = 0usize;
+        let mut kept = true;
+        for span in &hovered[group_row] {
+            let width = crate::width::str_width(&span.content);
+            let covered = col.max(heartbeats.start) < (col + width).min(heartbeats.end);
+            if covered && span.style.bg != purple {
+                kept = false;
+            }
+            col += width;
+        }
+        assert!(kept, "the hovered focused group keeps its purple band");
+    }
+
+    /// The dock's groups share one row: a hover that moves from one
+    /// segment onto another ON THE SAME ROW is a change (the band
+    /// follows the mouse — the highlighted group and the group a
+    /// click opens can never disagree), while a motion within one
+    /// segment still batches to a single render per crossing.
+    #[test]
+    fn the_hover_follows_the_mouse_across_the_dock_row() {
+        let mut view = dock_frame(crate::chrome::ActivityGroup::Heartbeats);
+        let (group_row, subagents) = region_span(
+            &view,
+            &ClickAction::OpenDockGroup(crate::chrome::ActivityGroup::Subagents),
+        );
+        let shells = region_span(
+            &view,
+            &ClickAction::OpenDockGroup(crate::chrome::ActivityGroup::Bash),
+        )
+        .1;
+        // Crossing onto the subagents segment changes the state.
+        assert!(view.note_hover(group_row, subagents.start));
+        let first = view.render_frame(80, 24);
+        // Moving WITHIN the segment changes nothing.
+        assert!(!view.note_hover(group_row, subagents.end - 1));
+        // Crossing onto the shells segment on the SAME row changes the
+        // state, and the repaint moves the band with it.
+        assert!(
+            view.note_hover(group_row, shells.start),
+            "the same-row group switch is a hover change"
+        );
+        let light = view.theme.hover_row_style().bg;
+        let band = |frame: &Vec<crate::Line>, cols: &std::ops::Range<usize>| {
+            let mut col = 0usize;
+            let mut banded = false;
+            for span in &frame[group_row] {
+                let width = crate::width::str_width(&span.content);
+                let covered = col.max(cols.start) < (col + width).min(cols.end);
+                if covered && span.style.bg == light {
+                    banded = true;
+                }
+                col += width;
+            }
+            banded
+        };
+        assert!(band(&first, &subagents), "the first hover banded subagents");
+        let second = view.render_frame(80, 24);
+        assert!(
+            !band(&second, &subagents),
+            "the band left the subagents segment"
+        );
+        assert!(
+            band(&second, &shells),
+            "the band followed the mouse onto the shells segment"
+        );
     }
 
     #[test]
