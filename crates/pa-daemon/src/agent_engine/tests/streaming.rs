@@ -95,7 +95,10 @@ fn assistant_updates_stream_live_while_the_turn_runs() {
         },
         &|| false,
         &mut |event| {
-            if let EngineEvent::AssistantUpdate { message, .. } = &event {
+            if let Some(message) = match &event {
+                EngineEvent::AssistantUpdate { message, .. } => message.clone().into_wire(),
+                _ => None,
+            } {
                 let text_len = message["content"].as_array().map_or(0, |blocks| {
                     blocks
                         .iter()

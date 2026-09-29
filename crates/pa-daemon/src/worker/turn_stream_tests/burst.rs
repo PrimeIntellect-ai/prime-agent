@@ -49,7 +49,7 @@ impl SessionEngine for BurstStreamEngine {
                 json!({ "type": "text_delta", "delta": "xxxx" })
             };
             if !emit(EngineEvent::AssistantUpdate {
-                message,
+                message: crate::engine::AssistantSnapshot::Wire(message),
                 stream_event: Some(stream_event),
             }) {
                 return;
@@ -162,6 +162,60 @@ async fn a_provider_burst_broadcasts_one_coalesced_update_per_tick_not_per_delta
         updates.iter().all(|index| *index < end[0]),
         "a superseded snapshot must never follow message_end"
     );
+}
+
+/// The streamed-turn pipeline end to end — pa-ai faux provider ->
+/// pa-core adapter -> pa-agent loop and listeners -> daemon engine
+/// forwarding -> worker emit -> coalescer -> broadcast — timed on the
+/// turn wall clock. The faux splitter randomizes chunk sizes, so runs
+/// vary; compare medians, not single runs.
+#[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
+#[tokio::test]
+#[ignore = "run with cargo test -p pa-daemon --release streamed_turn_pipeline_benchmark -- --ignored --nocapture"]
+async fn streamed_turn_pipeline_benchmark() {
+    for text_kb in [64usize, 256, 512] {
+        let _faux = crate::agent_engine::FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::TempDir::new().unwrap();
+        let word = "benchmark word ";
+        let text = word.repeat(text_kb * 1024 / word.len());
+        let script = serde_json::json!({
+            "engine": "faux",
+            "responses": [{ "content": [{ "type": "text", "text": text }] }],
+            "contextWindow": 4_000_000,
+            "maxTokens": 4_000_000,
+        });
+        let engine = AgentSessionEngine::new(AgentEngineConfig {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: dir.path().join("agent"),
+            provider: None,
+            model: None,
+            api_key: None,
+            thinking: None,
+            session_dir: None,
+            session_file: None,
+            faux_script: Some(script.to_string()),
+            supervisor_link: None,
+            telemetry_disabled: Some(true),
+            cron_store: None,
+            queued_steering_probe: None,
+        })
+        .unwrap();
+        let started = std::time::Instant::now();
+        let events = turn_session_events(std::sync::Arc::new(engine)).await;
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let updates = events
+            .iter()
+            .filter(|event| event["type"] == "message_update")
+            .count();
+        let end = events
+            .iter()
+            .find(|event| event["type"] == "message_end" && event["message"]["role"] == "assistant")
+            .expect("the assistant message_end frame");
+        assert_eq!(end["message"]["content"][0]["text"], json!(text));
+        println!("text_kb={text_kb} elapsed_ms={elapsed_ms:.1} wire_updates={updates}");
+    }
 }
 
 /// An instant burst (the provider outruns the tick entirely) parks one

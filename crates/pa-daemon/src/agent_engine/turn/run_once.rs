@@ -189,7 +189,7 @@ impl AgentSessionEngine {
                                 ) {
                                     if let Some(value) = session_wire_value(agent_message) {
                                         let _ = tx.send(EngineEvent::AssistantUpdate {
-                                            message: value,
+                                            message: AssistantSnapshot::Wire(value),
                                             stream_event: Some(json!({ "type": "start" })),
                                         });
                                     }
@@ -200,17 +200,17 @@ impl AgentSessionEngine {
                                 assistant_message_event: stream_event,
                             } => {
                                 if matches!(
-                                    agent_message,
+                                    agent_message.as_ref(),
                                     pa_agent::types::AgentMessage::Standard(
                                         pa_agent::types::Message::Assistant(_)
                                     )
                                 ) {
-                                    if let Some(value) = session_wire_value(agent_message) {
-                                        let _ = tx.send(EngineEvent::AssistantUpdate {
-                                            message: value,
-                                            stream_event: stream_event_value(stream_event),
-                                        });
-                                    }
+                                    let _ = tx.send(EngineEvent::AssistantUpdate {
+                                        message: AssistantSnapshot::Loop(std::sync::Arc::clone(
+                                            agent_message,
+                                        )),
+                                        stream_event: stream_event_value(stream_event),
+                                    });
                                 }
                             }
                             AgentEvent::MessageEnd {
@@ -500,7 +500,6 @@ impl AgentSessionEngine {
     }
 }
 
-/// Serialize a pa-agent message through the session wire shape (adds `role`).
 /// Wire form of one provider stream event (TS `assistantMessageEvent`):
 /// the event `type` plus the `delta` when the event carries one.
 fn stream_event_value(event: &pa_agent::stream::AssistantMessageEvent) -> Option<Value> {
@@ -536,32 +535,4 @@ fn tool_result_wire_value(result: &pa_agent::types::AgentToolResult) -> Value {
         .map(|block| serde_json::to_value(block).unwrap_or(Value::Null))
         .collect();
     json!({ "content": content, "details": result.details })
-}
-
-fn session_wire_value(agent_message: &pa_agent::types::AgentMessage) -> Option<Value> {
-    use pa_agent::types::Message as LoopMessage;
-    let session_message = match agent_message {
-        pa_agent::types::AgentMessage::Standard(LoopMessage::User(user)) => {
-            pa_types::session::AgentMessage::User(json_round_trip(user)?)
-        }
-        pa_agent::types::AgentMessage::Standard(LoopMessage::Assistant(assistant)) => {
-            pa_types::session::AgentMessage::Assistant(json_round_trip(assistant)?)
-        }
-        pa_agent::types::AgentMessage::Standard(LoopMessage::ToolResult(tool_result)) => {
-            pa_types::session::AgentMessage::ToolResult(json_round_trip(tool_result)?)
-        }
-        // A custom row (the harness digest, a goal-context row): the
-        // payload is the session-shape custom message and the wire form is
-        // the tagged session message — the payload plus the row's role
-        // (TS `agent_end.messages` carries custom rows in this shape).
-        pa_agent::types::AgentMessage::Custom(custom) => {
-            let mut value = custom.payload.clone();
-            let object = value.as_object_mut()?;
-            object
-                .entry("role".to_string())
-                .or_insert_with(|| Value::String(custom.role.clone()));
-            return Some(value);
-        }
-    };
-    serde_json::to_value(&session_message).ok()
 }

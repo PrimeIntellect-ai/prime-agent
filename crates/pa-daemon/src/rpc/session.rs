@@ -234,14 +234,12 @@ impl RpcSession {
                 let pending_outputs = Arc::clone(&pending_outputs);
                 let writer = writer.clone();
                 Box::pin(async move {
-                    if let Some(json) = agent_event_json(&event) {
-                        if let Ok(event) = serde_json::from_str::<serde_json::Value>(&json) {
-                            let mut pending_outputs = pending_outputs.lock().await;
-                            if let Some(buffer) = pending_outputs.as_mut() {
-                                buffer.push(event);
-                            } else {
-                                writer.write(event);
-                            }
+                    if let Some(event) = agent_event_json(&event) {
+                        let mut pending_outputs = pending_outputs.lock().await;
+                        if let Some(buffer) = pending_outputs.as_mut() {
+                            buffer.push(event);
+                        } else {
+                            writer.write(event);
                         }
                     }
                     Ok(())

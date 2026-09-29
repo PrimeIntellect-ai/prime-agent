@@ -219,20 +219,19 @@ pub async fn run_side_question(
         .subscribe(move |event, _signal| {
             let update_tx = Arc::clone(&update_tx);
             Box::pin(async move {
-                match &event {
-                    pa_agent::types::AgentEvent::MessageUpdate { message, .. }
-                    | pa_agent::types::AgentEvent::MessageEnd { message } => {
-                        if let pa_agent::types::AgentMessage::Standard(Message::Assistant(
-                            assistant,
-                        )) = message
-                        {
-                            let text = assistant_text(assistant);
-                            if !text.is_empty() {
-                                let _ = update_tx.send(text);
-                            }
-                        }
+                let message = match &event {
+                    pa_agent::types::AgentEvent::MessageUpdate { message, .. } => Some(&**message),
+                    pa_agent::types::AgentEvent::MessageEnd { message } => Some(message),
+                    _ => None,
+                };
+                if let Some(pa_agent::types::AgentMessage::Standard(Message::Assistant(
+                    assistant,
+                ))) = message
+                {
+                    let text = assistant_text(assistant);
+                    if !text.is_empty() {
+                        let _ = update_tx.send(text);
                     }
-                    _ => {}
                 }
                 Ok(())
             })

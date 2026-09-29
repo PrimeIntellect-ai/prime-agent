@@ -2,10 +2,10 @@
 //! engine, and settles the result.
 use super::{
     checkpoint_queue_recovery, compact_action_label, create_daemon_event_meta, emit_refinement_row,
-    gather_delivery_batch, json, oneshot, session_snapshot, DaemonOutbound, EngineEvent, EventPump,
-    Lane, Map, Notify, OutboundFrame, PromptRequest, QueueCheckpoint, QueuedItem, Result,
-    SessionActionSnapshot, SessionCore, SessionEngine, TurnSettle, Value, WorkerRecoveryJournal,
-    ABORTED_TURN_SETTLE_ERROR,
+    gather_delivery_batch, json, oneshot, session_snapshot, AssistantSnapshot, DaemonOutbound,
+    EngineEvent, EventPump, Lane, Map, Notify, OutboundFrame, PromptRequest, QueueCheckpoint,
+    QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine, TurnSettle, Value,
+    WorkerRecoveryJournal, ABORTED_TURN_SETTLE_ERROR,
 };
 
 use std::sync::{Arc, Mutex};
@@ -380,7 +380,6 @@ impl TurnRunner {
                 let aborted_row = matches!(
                     &event,
                     EngineEvent::AssistantMessage(message)
-                        | EngineEvent::AssistantUpdate { message, .. }
                         | EngineEvent::TurnEnd { message, .. }
                         if message.get("stopReason").and_then(Value::as_str) == Some("aborted")
                 ) || matches!(
@@ -389,7 +388,20 @@ impl TurnRunner {
                         if messages.iter().any(|message| {
                             message.get("stopReason").and_then(Value::as_str) == Some("aborted")
                         })
-                );
+                ) || match &event {
+                    EngineEvent::AssistantUpdate { message, .. } => match message {
+                        AssistantSnapshot::Wire(value) => {
+                            value.get("stopReason").and_then(Value::as_str) == Some("aborted")
+                        }
+                        AssistantSnapshot::Loop(agent_message) => matches!(
+                            &**agent_message,
+                            pa_agent::types::AgentMessage::Standard(
+                                pa_agent::types::Message::Assistant(assistant),
+                            ) if assistant.stop_reason == pa_agent::types::StopReason::Aborted
+                        ),
+                    },
+                    _ => false,
+                };
                 let abort_settle = matches!(
                     &event,
                     EngineEvent::ToolExecutionEnd { .. }
@@ -590,19 +602,78 @@ impl TurnRunner {
                         // A provider `start` begins a new assistant message;
                         // later stream events update it (TS message_start vs
                         // message_update).
-                        let starts_message = stream_event
+                        let stream_kind = stream_event
                             .as_ref()
                             .and_then(|event| event.get("type"))
-                            .and_then(Value::as_str)
-                            == Some("start");
-                        let mut event = json!({
-                            "type": if starts_message { "message_start" } else { "message_update" },
-                            "message": message,
-                        });
-                        if let Some(stream_event) = stream_event {
-                            event["assistantMessageEvent"] = stream_event;
+                            .and_then(Value::as_str);
+                        let starts_message = stream_kind == Some("start");
+                        // A block-end stream event (`text_end` and friends)
+                        // settles the parked delta run: it must supersede
+                        // nothing, so it travels direct (flushing the
+                        // parked update first, in order).
+                        let settles_run = matches!(
+                            stream_kind,
+                            Some("text_end" | "thinking_end" | "toolcall_end")
+                        );
+                        if !starts_message && !settles_run {
+                            // Streaming updates park in the coalescer (the
+                            // newest full-partial snapshot wins, the delta
+                            // run merges); `park_update` only returns false
+                            // after the turn joined, which cannot race this
+                            // closure. The debug dump keeps its per-update
+                            // line, paid only while the variable is set.
+                            if let Ok(path) = std::env::var("PA_DAEMON_EVENT_LOG") {
+                                use std::io::Write;
+                                if let Some(value) = message.clone().into_wire() {
+                                    if let Ok(mut file) = std::fs::OpenOptions::new()
+                                        .create(true)
+                                        .append(true)
+                                        .open(&path)
+                                    {
+                                        let mut event = json!({
+                                            "type": "message_update",
+                                            "message": value,
+                                        });
+                                        if let Some(stream_event) = &stream_event {
+                                            event["assistantMessageEvent"] = stream_event.clone();
+                                        }
+                                        let _ = writeln!(file, "{event}");
+                                    }
+                                }
+                            }
+                            let sequence = core.last_event_sequence + 1;
+                            core.last_event_sequence = sequence;
+                            let delta = stream_event
+                                .as_ref()
+                                .and_then(|event| event.get("delta"))
+                                .and_then(Value::as_str)
+                                .unwrap_or_default();
+                            if !turn_coalescer.park_update(
+                                message,
+                                stream_kind.unwrap_or_default(),
+                                delta,
+                                sequence,
+                            ) {
+                                return false;
+                            }
+                            Vec::new()
+                        } else {
+                            match message.into_wire() {
+                                Some(value) => {
+                                    let mut event = json!({
+                                        "type": if starts_message { "message_start" } else { "message_update" },
+                                        "message": value,
+                                    });
+                                    if let Some(stream_event) = stream_event {
+                                        event["assistantMessageEvent"] = stream_event;
+                                    }
+                                    vec![event]
+                                }
+                                // Unreachable for streamed partials; a
+                                // failed conversion frames nothing.
+                                None => Vec::new(),
+                            }
                         }
-                        vec![event]
                     }
                     EngineEvent::AssistantMessage(message) => {
                         vec![json!({ "type": "message_end", "message": message })]
@@ -797,43 +868,6 @@ impl TurnRunner {
                 }
                 let mut direct_payloads: Vec<Vec<u8>> = Vec::new();
                 for event_json in frames {
-                    let is_stream_update =
-                        event_json.get("type").and_then(Value::as_str) == Some("message_update");
-                    // A block-end stream event (`text_end` and friends)
-                    // settles the parked delta run: it must supersede
-                    // nothing, so it travels direct (flushing the parked
-                    // update first, in order).
-                    let stream_kind = event_json
-                        .get("assistantMessageEvent")
-                        .and_then(|event| event.get("type"))
-                        .and_then(Value::as_str);
-                    let flushes_pending = matches!(
-                        stream_kind,
-                        Some("text_end" | "thinking_end" | "toolcall_end")
-                    );
-                    if is_stream_update && !flushes_pending {
-                        let sequence = core.last_event_sequence + 1;
-                        core.last_event_sequence = sequence;
-                        // Streaming updates park in the coalescer (the
-                        // newest full-partial snapshot wins, the delta run
-                        // merges); `park_update` only returns false after
-                        // the turn joined, which cannot race this closure.
-                        let delta = event_json
-                            .get("assistantMessageEvent")
-                            .and_then(|event| event.get("delta"))
-                            .and_then(Value::as_str)
-                            .unwrap_or_default();
-                        let parked = turn_coalescer.park_update(
-                            event_json.get("message").cloned().unwrap_or(Value::Null),
-                            stream_kind.unwrap_or_default(),
-                            delta,
-                            sequence,
-                        );
-                        if !parked {
-                            return false;
-                        }
-                        continue;
-                    }
                     let sequence = core.last_event_sequence + 1;
                     core.last_event_sequence = sequence;
                     let meta = create_daemon_event_meta(
