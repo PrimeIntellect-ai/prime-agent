@@ -83,9 +83,20 @@ impl Worker {
             .await;
         {
             let mut core = self.core.lock().unwrap();
+            // The shutdown admission gate closes FIRST (the round-8
+            // bots' finding): a racing execute_bash handler must see
+            // the stop before the abort runs, or the fresh claim
+            // clears the abort request and spawns a child the exit
+            // leaves running.
             core.shutdown_requested = true;
             core.abort_requested = true;
         }
+        // The running user bash goes with the stop (the orphan
+        // protection's home - the bots' finding class: the passivation
+        // stop must never leave the user's process running after the
+        // worker exits; the abort is the same kill switch the
+        // `abort_bash` command pulls).
+        self.user_bash.abort().await;
         // TS `shutdown` closes through `session.abort()` -> `requestAbort()`:
         // the in-flight turn's fetch cancels now, not at its next event.
         self.engine.abort_in_flight_turn();

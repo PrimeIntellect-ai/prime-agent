@@ -123,6 +123,19 @@ pub struct Worker {
     roster_delta_sequence: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub(crate) work_notify: Arc<Notify>,
     idle_notify: Arc<Notify>,
+    /// The per-connection session-attach registry (the fresh bots'
+    /// release findings): connection tokens -> the client ids their
+    /// `attach` retained. The release is connection-scoped on EVERY
+    /// return path (the guard's Drop), and a shared client id leaves the
+    /// core only when the LAST live connection holding it goes (the
+    /// reconnect shape).
+    pub(crate) session_attachments:
+        std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
+    /// The connection tokens whose attach guard already released (the
+    /// round-8 race belt): a late registration from a detached attach
+    /// handler racing the close is rejected instead of recreating an
+    /// unowned attachment.
+    pub(crate) released_attach_tokens: std::sync::Mutex<std::collections::HashSet<String>>,
     pub(crate) events: Arc<EventPump>,
     /// The `/model` catalog background-refresh coalescing gate: at most
     /// one refresh runs per worker with one queued trailing re-arm, so a
@@ -298,6 +311,7 @@ impl Worker {
             abort_requested: false,
             suppress_aborted_row: false,
             shutdown_requested: false,
+            last_activity_ms: 0,
             compacting: false,
             auto_compaction_enabled: true,
             // TS seeds `_lastSessionActionSnapshot` with the empty
@@ -678,7 +692,7 @@ impl Worker {
                     engine: std::sync::Arc::clone(&engine),
                     user_bash: std::sync::Arc::clone(&user_bash),
                     roster_link: Arc::clone(&roster_link),
-                    worker_token,
+                    worker_token: worker_token.clone(),
                     worker_instance_id: config.worker_instance_id.clone(),
                     roster_delta_sequence: std::sync::Arc::clone(&roster_delta_sequence),
                     roster_push_order: std::sync::Arc::clone(&roster_push_order),
@@ -695,6 +709,12 @@ impl Worker {
                 engine: std::sync::Arc::clone(&engine),
                 active_session_id,
                 roster_pushes: roster_pushes.clone(),
+                user_bash: std::sync::Arc::clone(&user_bash),
+                passivation: crate::worker::turn::PassivationContext {
+                    agent_dir: config.agent_dir.clone(),
+                    link: Arc::clone(&roster_link),
+                    worker_token,
+                },
             };
             tokio::spawn(async move {
                 runner.run().await;
@@ -751,6 +771,8 @@ impl Worker {
             roster_delta_sequence,
             work_notify,
             idle_notify,
+            session_attachments: std::sync::Mutex::new(std::collections::HashMap::new()),
+            released_attach_tokens: std::sync::Mutex::new(std::collections::HashSet::new()),
             events,
             model_catalog_refresh_gate: std::sync::Arc::new(
                 crate::model_catalog::RefreshGate::default(),

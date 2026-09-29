@@ -581,9 +581,7 @@ impl SessionUi {
                 return Ok(());
             }
             if kb.matches(&id, "app.tools.expand") {
-                view.detail = view.detail.next();
-                self.save_chat_detail(view);
-                self.dirty = true;
+                self.cycle_detail(view);
                 return Ok(());
             }
             self.subagents_focused = false;

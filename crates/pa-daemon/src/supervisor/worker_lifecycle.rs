@@ -15,6 +15,7 @@ use super::{
     Supervisor, TypedCreateRejection, Value, LONG_ROUTE_TIMEOUT_MS, ROUTE_TIMEOUT_MS,
 };
 use crate::lease::is_process_alive;
+use crate::protocol::{response_failure, response_success, DaemonResponse};
 
 impl Supervisor {
     /// Complete a tombstoned stop for a worker encountered at adoption —
@@ -612,6 +613,90 @@ impl Supervisor {
             .await;
     }
 
+    /// The worker-driven idle passivation (TS's `idleEvictionMinutes`
+    /// tier, whole-worker): a parent-owned child worker whose park arm
+    /// proved the idle state and crossed the threshold asks for its own
+    /// graceful stop over the supervisor link. The supervisor verifies
+    /// the worker token, re-verifies the parent-owned descriptor (a root
+    /// worker can never ask its way out), and re-reads the setting — the
+    /// supervisor's own fresh-snapshot fence: a setting flipped to
+    /// `"off"` (or past the threshold) between the worker's ask and the
+    /// stop cancels the passivation. The stop itself is the existing
+    /// graceful path (`stop_worker`: durable tombstone, routed shutdown,
+    /// process-retirement wait, registry removal, roster passivation),
+    /// so a passivated child's row stays visible and family-addressable
+    /// and its next prompt wakes a fresh worker over the session file.
+    pub(crate) async fn handle_worker_idle_passivation(
+        self: &Arc<Self>,
+        command_id: &str,
+        type_name: &str,
+        worker_token: &str,
+        idle_minutes: Option<u64>,
+    ) -> DaemonResponse {
+        let Some(resident) = self.registry.find_by_token(worker_token).await else {
+            return response_failure(
+                Some(command_id),
+                type_name,
+                "Worker authentication failed",
+                None,
+            );
+        };
+        // The parent-owned gate: only a child worker (rlmDepth > 0) may
+        // ask; a root worker's resident lease is client-owned policy.
+        let parent_owned = {
+            let descriptor = resident.descriptor.lock().await;
+            descriptor
+                .create_command
+                .rest
+                .get("rlmDepth")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+                > 0
+        };
+        if !parent_owned {
+            return response_failure(
+                Some(command_id),
+                type_name,
+                "Idle passivation is a child-worker policy; the root worker stays resident",
+                None,
+            );
+        }
+        // The supervisor-side settings re-read (the fence): the same
+        // `idleEvictionMinutes` surface the worker read.
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+        let settings =
+            pa_core::settings::SettingsManager::create(cwd.as_path(), &self.options.agent_dir);
+        let threshold = match settings.get_idle_eviction() {
+            pa_core::settings::IdleEviction::Off => {
+                return response_success(Some(command_id), type_name, None);
+            }
+            pa_core::settings::IdleEviction::Minutes(minutes) => minutes,
+        };
+        // The idle claim the worker reported must match the live setting
+        // (a stale ask against a raised threshold is refused; the next
+        // park re-arms).
+        if let Some(reported) = idle_minutes {
+            if reported != threshold {
+                return response_success(Some(command_id), type_name, None);
+            }
+        }
+        match self.stop_worker(&resident).await {
+            Ok(()) => {
+                self.log_line(&format!(
+                    "session worker {} passivated idle (idleEvictionMinutes={threshold})",
+                    resident.worker_id
+                ));
+                response_success(Some(command_id), type_name, None)
+            }
+            Err(error) => response_failure(
+                Some(command_id),
+                type_name,
+                &format!("Idle passivation stop failed: {error:#}"),
+                None,
+            ),
+        }
+    }
+
     pub(crate) async fn stop_worker(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
@@ -632,7 +717,7 @@ impl Supervisor {
         // The stop is intentional: routes waiting out a replacement must
         // fail fast instead of parking on this worker.
         resident.note_retired();
-        let _ = self
+        match self
             .route_command_typed(
                 resident,
                 "shutdown",
@@ -640,7 +725,22 @@ impl Supervisor {
                 ROUTE_TIMEOUT_MS,
                 RouteAdmission::SupervisorInternal,
             )
-            .await;
+            .await
+        {
+            Ok(response) if response.success => {}
+            Ok(response) => {
+                self.log_line(&format!(
+                    "session worker {} shutdown route refused: {:?}",
+                    resident.worker_id, response.error
+                ));
+            }
+            Err(error) => {
+                self.log_line(&format!(
+                    "session worker {} shutdown route failed: {error:#}",
+                    resident.worker_id
+                ));
+            }
+        }
         // The per-session stop shares the terminal-stop contract: the
         // descriptor dies only with a provably-gone process, so a worker
         // that missed the routed shutdown stays adoptable (or is

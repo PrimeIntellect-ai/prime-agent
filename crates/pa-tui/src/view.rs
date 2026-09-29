@@ -12,6 +12,7 @@ use crate::theme::Theme;
 use crate::Line;
 
 pub(crate) mod click;
+mod expansion;
 mod flush;
 mod frame;
 mod geometry;
@@ -232,6 +233,9 @@ pub struct AgentView {
     /// verifiers assert the reuse actually happened, else the
     /// byte-identical frames make a vacuous pass).
     pub(crate) handoff_seeds: u32,
+    /// Entries whose card a click flipped away from the level's
+    /// tool-output expansion (see `view/expansion.rs`).
+    toggled_cards: std::collections::BTreeSet<usize>,
     /// Per-assistant-entry markdown block caches (TS `Markdown.blockCache`,
     /// one per component instance): a streaming message re-renders every
     /// frame, so its settled blocks replay from the cache instead of
@@ -382,6 +386,7 @@ impl AgentView {
             sparse_window: None,
             sparse_enabled: true,
             sparse_entries: std::collections::BTreeSet::new(),
+            toggled_cards: std::collections::BTreeSet::new(),
             md_caches: std::cell::RefCell::new(std::collections::HashMap::new()),
             layout_width: 0,
             layout_options: None,
@@ -479,6 +484,7 @@ impl AgentView {
         }
         self.md_caches.borrow_mut().remove(&index);
         self.sparse_entries.remove(&index);
+        self.toggled_cards.remove(&index);
         self.entry_heights.pop();
         self.entry_layout.pop();
         self.chat.pop()
@@ -592,6 +598,7 @@ impl AgentView {
         self.pending_handoff = None;
         self.sparse_enabled = true;
         self.sparse_entries.clear();
+        self.toggled_cards.clear();
         self.sparse_window = None;
         self.chat.clear();
         self.entry_layout.clear();

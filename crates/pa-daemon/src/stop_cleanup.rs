@@ -527,7 +527,7 @@ impl Supervisor {
     /// removal, a saved-session delete, and daemon restarts). Best effort
     /// by contract - a capture failure logs and leaves the lazy file
     /// fallback in force.
-    async fn capture_deleted_child_usage(
+    pub(crate) async fn capture_deleted_child_usage(
         self: &Arc<Self>,
         session_file: &str,
         child_id: &str,

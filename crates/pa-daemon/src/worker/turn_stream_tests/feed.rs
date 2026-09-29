@@ -144,6 +144,14 @@ fn live_feed_runner(engine: Arc<dyn SessionEngine>, socket: std::path::PathBuf) 
         engine,
         active_session_id: "feed-session".to_string(),
         roster_pushes,
+        user_bash: std::sync::Arc::new(crate::user_bash::UserBash::new()),
+        passivation: crate::worker::turn::PassivationContext {
+            agent_dir: std::path::PathBuf::from("/tmp"),
+            link: Arc::new(crate::supervisor_link::SupervisorLink::new(
+                std::path::PathBuf::from("/nonexistent-supervisor.sock"),
+            )),
+            worker_token: "token".to_string(),
+        },
     }
 }
 

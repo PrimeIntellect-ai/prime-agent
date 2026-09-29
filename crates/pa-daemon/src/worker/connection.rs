@@ -195,6 +195,24 @@ struct SupervisorClaimRelease {
     claims: Arc<std::sync::atomic::AtomicUsize>,
 }
 
+/// The connection-scoped session-attach guard: its Drop releases the
+/// connection's registry entry (every retained id, the anonymous
+/// fallback included) and wakes the runner — on EVERY return path of
+/// `handle_connection` (the clean EOF arm, the read errors, the
+/// malformed/oversized frames, the failed auth), closing the fresh
+/// bots' release gaps. A shared client id stays held while any other
+/// live connection retains it (the reconnect shape).
+struct SessionAttachGuard {
+    worker: Arc<Worker>,
+    token: String,
+}
+
+impl Drop for SessionAttachGuard {
+    fn drop(&mut self) {
+        self.worker.release_session_attachments(&self.token, true);
+    }
+}
+
 impl Drop for SupervisorClaimRelease {
     fn drop(&mut self) {
         let supervisor = matches!(
@@ -386,6 +404,17 @@ impl Worker {
             });
         }
 
+        // The connection's attach-release guard (the fresh bots'
+        // findings: the release must run on EVERY return path - the
+        // clean EOF, the read errors, the malformed frames, the auth
+        // failures - and it is connection-scoped, so a shared client id
+        // survives a reconnect's first close). The guard's Drop releases
+        // the token's registry entry + wakes the runner.
+        let connection_token = crate::util::new_display_id();
+        let _attach_release = SessionAttachGuard {
+            worker: Arc::clone(&self),
+            token: connection_token.clone(),
+        };
         let mut reader =
             crate::framing::PrivateFrameReader::new(reader, DEFAULT_PRIVATE_FRAME_LIMITS);
         loop {
@@ -393,6 +422,10 @@ impl Worker {
             let Some(frame) = frame else {
                 // Peer closed: wake the fan-out so it drops the write half.
                 let _ = closed_tx.send(true);
+                // The connection's session attaches release via the
+                // guard's Drop (every return path - this EOF arm, the
+                // read errors, the malformed frames, the auth failures:
+                // the `?` exits drop the guard too).
                 break;
             };
             let command_type = frame
@@ -407,7 +440,7 @@ impl Worker {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            let payload: Value = serde_json::from_slice(&frame.payload)
+            let mut payload: Value = serde_json::from_slice(&frame.payload)
                 .with_context(|| format!("invalid worker command JSON for {command_type}"))?;
             if std::env::var("PA_DAEMON_DEBUG").is_ok() {
                 eprintln!("[worker {}] got command {command_type}", std::process::id());
@@ -466,6 +499,15 @@ impl Worker {
                     });
                 }
                 ConnectionRole::SessionClient { ref session } => {
+                    // The connection token rides the attach/detach payloads
+                    // (the registry keys this connection's retained ids
+                    // by it; a failed attach's release is the idempotent
+                    // no-op).
+                    if matches!(command_type.as_str(), "attach" | "detach") {
+                        if let Some(object) = payload.as_object_mut() {
+                            object.insert("connectionToken".to_string(), json!(connection_token));
+                        }
+                    }
                     // A direct peer may only run session-plane commands for
                     // the grant's session (TS `peerClaims` gate).
                     if !peer_command_allowed(&command_type, &payload, &session.grant) {
@@ -777,6 +819,16 @@ impl Worker {
         if !core.attached_client_ids.iter().any(|id| id == &client_id) {
             core.attached_client_ids.push(client_id.clone());
         }
+        // The connection-scoped registry (the fresh bots' release
+        // findings): the attach's retention is keyed by the connection
+        // token so the release on ANY return path (the guard's Drop)
+        // removes exactly what this connection retained — a missing
+        // clientId's `anonymous` fallback included. The core lock stays
+        // held (the registry's lock nests inside it — the same order
+        // the release path uses).
+        if let Some(token) = payload.get("connectionToken").and_then(Value::as_str) {
+            self.register_session_attach(token, &client_id);
+        }
         let summary = self.summary_locked(&core);
         let mut messages: Vec<Value> = core
             .store
@@ -851,6 +903,73 @@ impl Worker {
         response_success(None, "attach", Some(result))
     }
 
+    /// Register one connection's retained attach (the per-connection
+    /// registry's insert arm; the connection token keys it - a shared
+    /// client id across two connections is held by BOTH entries and the
+    /// core keeps it until the last one releases). A token the guard
+    /// already released is REJECTED (the round-8 bots' finding: the
+    /// attach dispatch is detached, so the connection's close can beat
+    /// the handler's registration - a late registration would recreate
+    /// an unowned attachment that leaks the hold forever).
+    pub(crate) fn register_session_attach(&self, token: &str, client_id: &str) {
+        let mut attachments = self.session_attachments.lock().unwrap();
+        if self.released_attach_tokens.lock().unwrap().contains(token) {
+            return;
+        }
+        let ids = attachments.entry(token.to_string()).or_default();
+        if !ids.iter().any(|id| id == client_id) {
+            ids.push(client_id.to_string());
+        }
+    }
+
+    /// Release one connection's retained attaches (the registry's
+    /// release arm, run from the connection guard's Drop on every return
+    /// path AND the explicit detach command): a shared id leaves the
+    /// core only when no other live connection holds it.
+    pub(crate) fn release_session_attachments(&self, token: &str, final_release: bool) {
+        // `final_release` (the guard's Drop) marks the token dead - the
+        // connection is gone, so a late registration from its detached
+        // attach handler is rejected (the round-8 race belt, now
+        // bounded: only FINAL releases enter the set, and the set caps
+        // at 8192 - the round-9 bots' unbounded-growth finding). The
+        // explicit DETACH is NOT final (the round-9 bots' finding: the
+        // connection lives on - a later re-attach on the same
+        // connection must re-register or the close would find no entry
+        // and leak the hold).
+        if final_release {
+            let mut released = self.released_attach_tokens.lock().unwrap();
+            released.insert(token.to_string());
+            if released.len() > 8192 {
+                released.clear();
+            }
+        }
+        let mut core = self.core.lock().unwrap();
+        let ids = {
+            // The attachments' lock nests INSIDE the core lock (the
+            // same order the attach path uses).
+            let mut attachments = self.session_attachments.lock().unwrap();
+            attachments.remove(token).unwrap_or_default()
+        };
+        if ids.is_empty() {
+            return;
+        }
+        for id in &ids {
+            let held_elsewhere = self
+                .session_attachments
+                .lock()
+                .unwrap()
+                .values()
+                .any(|other| other.iter().any(|entry| entry == id));
+            if !held_elsewhere {
+                core.attached_client_ids.retain(|entry| entry != id);
+            }
+        }
+        drop(core);
+        // The runner's park re-arms: the released hold opens the idle
+        // passivation's unattached gate for a now-detached child.
+        self.work_notify.notify_one();
+    }
+
     pub(crate) fn handle_detach(&self, payload: &Value) -> DaemonResponse {
         let client_id = payload
             .get("clientId")
@@ -861,8 +980,33 @@ impl Worker {
         // The detaching client's input-pause leases go with the detach
         // (TS worker `detach` arm releases the client's pauses).
         self.release_input_pauses_for_detach(&client_id);
+        // The connection-scoped release first (the token's entry drops
+        // the id — the shared-id reconnect keeps its own hold); the
+        // direct core retain below stays as the detach's own belt (the
+        // explicit detach command is the connection's own intent).
+        if let Some(token) = payload.get("connectionToken").and_then(Value::as_str) {
+            self.release_session_attachments(token, false);
+        }
         let mut core = self.core.lock().unwrap();
-        core.attached_client_ids.retain(|id| id != &client_id);
+        // The belt is scoped (the fresh bots' sibling-hold finding): the
+        // explicit detach removes the id only when no other live
+        // connection still retains it (a reconnect sharing the client
+        // id keeps its own hold - the same set-membership rule the
+        // registry's release applies).
+        let held_elsewhere = self
+            .session_attachments
+            .lock()
+            .unwrap()
+            .values()
+            .any(|other| other.iter().any(|entry| entry == &client_id));
+        if !held_elsewhere {
+            core.attached_client_ids.retain(|id| id != &client_id);
+        }
+        drop(core);
+        // The detach wake: the runner's park computed its idle-passivation
+        // window while this client held the attach; the notify re-arms it
+        // (a now-detached child's window opens for the threshold).
+        self.work_notify.notify_one();
         response_success(None, "detach", None)
     }
 }

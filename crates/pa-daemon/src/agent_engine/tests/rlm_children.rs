@@ -293,3 +293,46 @@ fn release_settled_child_kernel_defers_to_scheduled_jobs_and_fires_the_release_p
         ));
     assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
+
+#[test]
+fn can_passivate_settled_session_mirrors_the_release_gates() {
+    // The whole-worker idle passivation's engine gate must accept exactly
+    // when the kernel release would fire: no unsettled descendants and no
+    // registered active-or-paused scheduled job (the shared store covers
+    // cron jobs AND armed heartbeats — the wake-blind substitution).
+    let dir = tempfile::TempDir::new().unwrap();
+    let engine = std::sync::Arc::new(bare_engine(dir.path()));
+    // No children and no jobs probe: the gates pass.
+    assert!(engine
+        .runtime
+        .block_on(crate::engine::SessionEngine::can_passivate_settled_session(
+            &*engine
+        )));
+    // A jobs probe reporting armed jobs blocks the passivation.
+    *engine
+        .registered_jobs_probe
+        .lock()
+        .expect("registered jobs probe lock") = Some(std::sync::Arc::new(|| true));
+    assert!(!engine
+        .runtime
+        .block_on(crate::engine::SessionEngine::can_passivate_settled_session(
+            &*engine
+        )));
+    // The release consumes the same gate: the probe never fires while a
+    // job is armed.
+    let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let probe_fired = std::sync::Arc::clone(&fired);
+    *engine
+        .kernel_release_probe
+        .lock()
+        .expect("kernel release probe lock") = Some(std::sync::Arc::new(move || {
+        probe_fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(std::future::ready(()))
+    }));
+    engine
+        .runtime
+        .block_on(crate::engine::SessionEngine::release_settled_child_kernel(
+            &*engine,
+        ));
+    assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 0);
+}

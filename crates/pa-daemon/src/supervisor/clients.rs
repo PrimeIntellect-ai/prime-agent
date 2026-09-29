@@ -644,6 +644,21 @@ impl Supervisor {
                 let response = Self::handle_roster_unsubscribe(&command_id, &type_name);
                 (vec![response_line(&response)], false)
             }
+            DaemonCommand::WorkerIdlePassivation {
+                worker_token,
+                idle_minutes,
+                ..
+            } => {
+                let response = self
+                    .handle_worker_idle_passivation(
+                        &command_id,
+                        &type_name,
+                        worker_token,
+                        *idle_minutes,
+                    )
+                    .await;
+                (vec![response_line(&response)], false)
+            }
             DaemonCommand::WorkerRosterDelta {
                 worker_token,
                 summary,

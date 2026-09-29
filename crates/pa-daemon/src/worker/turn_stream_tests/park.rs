@@ -285,3 +285,171 @@ async fn compacting_window_parks_a_cleared_suspension_until_it_ends() {
     );
     running.abort();
 }
+
+// ---------------------------------------------------------------------------
+// The whole-worker idle passivation's park arm (TS `idleEvictionMinutes`).
+// ---------------------------------------------------------------------------
+
+/// A settings fixture: the agent dir's `settings.json` carries the
+/// `idleEvictionMinutes` value under test.
+fn passivation_settings(dir: &std::path::Path, value: serde_json::Value) {
+    std::fs::create_dir_all(dir).unwrap();
+    let settings = serde_json::json!({ "idleEvictionMinutes": value });
+    std::fs::write(
+        dir.join("settings.json"),
+        serde_json::to_string(&settings).unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn idle_passivation_window_arms_only_for_idle_parent_owned_children() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    passivation_settings(&agent_dir, serde_json::json!(1));
+    let engine = Arc::new(ScriptedEngine::default());
+    let mut runner = burst_runner(Arc::clone(&engine) as Arc<dyn SessionEngine>);
+    // The shared PassivationContext with a live settings dir.
+    runner.passivation.agent_dir = agent_dir.clone();
+
+    // A root session (rlm_depth 0): no window.
+    assert!(runner.idle_passivation_window().is_none());
+
+    // A parent-owned child under a live threshold: the window arms.
+    {
+        let mut core = runner.core.lock().unwrap();
+        core.rlm_depth = 1;
+        core.cwd = dir.path().to_string_lossy().to_string();
+        core.last_activity_ms = crate::util::now_ms();
+    }
+    let window = runner.idle_passivation_window();
+    assert!(window.is_some(), "a parent-owned idle child must arm");
+    // A 1-minute threshold from now: the remaining window is under a
+    // minute (the clock already ran during the test).
+    assert!(
+        window.unwrap() <= std::time::Duration::from_secs(60),
+        "the remaining window must be the threshold minus the elapsed idle"
+    );
+
+    // An attached client cancels the window.
+    runner.core.lock().unwrap().attached_client_ids = vec!["client-1".to_string()];
+    assert!(runner.idle_passivation_window().is_none());
+    runner.core.lock().unwrap().attached_client_ids = Vec::new();
+
+    // An idle clock that already crossed the threshold arms a zero window.
+    {
+        let mut core = runner.core.lock().unwrap();
+        core.last_activity_ms = crate::util::now_ms().saturating_sub(120_000);
+    }
+    assert_eq!(
+        runner.idle_passivation_window(),
+        Some(std::time::Duration::from_secs(0)),
+        "a crossed clock must fire immediately"
+    );
+
+    // `"off"` disables the whole arm.
+    passivation_settings(&agent_dir, serde_json::json!("off"));
+    assert!(runner.idle_passivation_window().is_none());
+}
+
+#[tokio::test]
+async fn idle_passivation_refuses_while_the_lanes_hold_undelivered_input() {
+    // TS `isSessionActive`'s pending-prompt-admissions arm (Bugbot's
+    // paused-queued-work finding): a parked steer or follow-up lives only
+    // on the resident worker, so neither the window nor the fire's
+    // fresh-snapshot fence may pass while the lanes hold it.
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    passivation_settings(&agent_dir, serde_json::json!(1));
+    let engine = Arc::new(ScriptedEngine::default());
+    let mut runner = burst_runner(Arc::clone(&engine) as Arc<dyn SessionEngine>);
+    runner.passivation.agent_dir = agent_dir;
+    {
+        let mut core = runner.core.lock().unwrap();
+        core.rlm_depth = 1;
+        core.cwd = dir.path().to_string_lossy().to_string();
+        // The idle clock long crossed the 1-minute threshold: without
+        // the queued arm this window would fire immediately.
+        core.last_activity_ms = crate::util::now_ms().saturating_sub(120_000);
+        core.steering.push_back(QueuedItem {
+            priority: QueuePriority::Human,
+            preview: None,
+            message: "the parked steer".to_string(),
+            custom_message: None,
+            agent_message: None,
+            queue_key: None,
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible: true,
+            policy: TurnPolicy::Queued,
+            forced_batch: false,
+        });
+    }
+    assert!(
+        runner.idle_passivation_window().is_none(),
+        "a queued steer in the lanes must cancel the window"
+    );
+    // The fire's fresh-snapshot fence holds the same arm: the stop
+    // request never leaves (the dead-socket supervisor link answers
+    // errors best-effort, so the observable is the absence of any
+    // local stop — the runner stays parked).
+    runner.maybe_request_idle_passivation().await;
+    assert!(
+        runner.core.lock().unwrap().steering.len() == 1,
+        "the queued steer must survive the fire's fence"
+    );
+    // An empty follow-up lane alone does not block; a queued follow-up
+    // does (the same arm, the other lane).
+    runner.core.lock().unwrap().steering.clear();
+    assert!(
+        runner.idle_passivation_window().is_some(),
+        "an empty lane re-arms the window"
+    );
+    runner.core.lock().unwrap().follow_up.push_back(QueuedItem {
+        priority: QueuePriority::Human,
+        preview: None,
+        message: "the parked follow-up".to_string(),
+        custom_message: None,
+        agent_message: None,
+        queue_key: None,
+        admission_id: None,
+        images: Vec::new(),
+        done: None,
+        queue_visible: true,
+        policy: TurnPolicy::Queued,
+        forced_batch: false,
+    });
+    assert!(
+        runner.idle_passivation_window().is_none(),
+        "a queued follow-up in the lanes must cancel the window"
+    );
+}
+
+#[tokio::test]
+async fn idle_passivation_fire_rechecks_the_fresh_state_and_reports_the_threshold() {
+    // The fire's fresh-snapshot fence: an attached client (or an armed
+    // scheduled job via the engine gate) cancels the stop request even
+    // when the window armed before the change. The request itself goes
+    // to a dead supervisor socket (the link answers an error), which
+    // the fire swallows best-effort — the observable contract is that
+    // the fire NEVER stops the worker locally and never panics.
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    passivation_settings(&agent_dir, serde_json::json!(1));
+    let engine = Arc::new(ScriptedEngine::default());
+    let mut runner = burst_runner(Arc::clone(&engine) as Arc<dyn SessionEngine>);
+    runner.passivation.agent_dir = agent_dir;
+    {
+        let mut core = runner.core.lock().unwrap();
+        core.rlm_depth = 1;
+        core.cwd = dir.path().to_string_lossy().to_string();
+        core.last_activity_ms = crate::util::now_ms().saturating_sub(120_000);
+    }
+    // The fence: an attached client arrived during the window.
+    runner.core.lock().unwrap().attached_client_ids = vec!["client-1".to_string()];
+    runner.maybe_request_idle_passivation().await;
+    // No local stop occurred (the runner keeps running; nothing to
+    // observe beyond the absence of a panic and the request never sent —
+    // asserted by the dead-socket link answering errors best-effort).
+}

@@ -202,7 +202,7 @@ fn handle_key(
     if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
         // Ctrl+O cycles conversation detail (TS `app.tools.expand`):
         // overview -> details -> all -> overview.
-        view.detail = view.detail.next();
+        view.cycle_detail();
         return;
     }
     let Some(id) = key_event_to_id(&key) else {

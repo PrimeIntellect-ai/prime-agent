@@ -26,26 +26,34 @@ impl SessionEngine for AgentSessionEngine {
         }
     }
 
-    /// TS #2483's `_passivateSettledRlmChildRuntime` inline arm,
-    /// worker-side: the turn runner's park arm proved the parent-owned,
-    /// unattached, unqueued idle state; the remaining
-    /// `canPassivateSettledSession` gates run here. A settled child
-    /// releases its kernel with a final snapshot flush (the revivable
-    /// stop: the next kernel use boots fresh from the flushed snapshot)
-    /// while staying listable, inspectable, collectable, and deletable
-    /// — the roster and collect surfaces are untouched by design.
-    fn release_settled_child_kernel(
+    /// The engine-side gate mirror of the whole-worker idle
+    /// passivation (TS `canPassivateSession`, session-action-store
+    /// :411-419): `true` only when no non-passive descendants hold work
+    /// and no active-or-paused scheduled job is registered (the shared
+    /// store covers crons AND armed heartbeats — the wake-blind
+    /// substitution). This method only answers the gate; the caller
+    /// owns the residency decision (the kernel release and the
+    /// whole-worker stop each consume it separately).
+    fn can_passivate_settled_session(
         &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
         Box::pin(async move {
             // `hasNonPassiveDescendants`: a busy descendant keeps the
-            // child's kernel resident (the TS policy).
+            // child resident (the TS policy).
             if self.has_unsettled_rlm_work().await {
-                return;
+                return false;
             }
             // `hasRegisteredCronJob`: an active or paused scheduled job
-            // keeps the kernel resident (its next run needs it); an
-            // unwired probe stays open (a store-less embedding).
+            // keeps the worker resident — for the whole-worker idle
+            // passivation this gate covers plain cron jobs AND armed
+            // heartbeats alike (the shared scheduled-jobs store holds
+            // both): the port has no relaunch-on-fire for a stopped
+            // worker's jobs, so unlike TS's tier-2 (which evicts
+            // cron-armed workers and lets the fire relaunch) the port
+            // BLOCKS while any job is armed — the wake-blind
+            // substitution, a disclosed deliberate divergence until a
+            // relaunch-on-fire port exists. An unwired probe stays open
+            // (a store-less embedding never passes the gate).
             let probe = self
                 .registered_jobs_probe
                 .lock()
@@ -53,8 +61,19 @@ impl SessionEngine for AgentSessionEngine {
                 .clone();
             if let Some(probe) = probe {
                 if probe() {
-                    return;
+                    return false;
                 }
+            }
+            true
+        })
+    }
+
+    fn release_settled_child_kernel(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            if !self.can_passivate_settled_session().await {
+                return;
             }
             // The release itself: best-effort (a failed stop leaves
             // the kernel resident); a retired or never-built runtime
