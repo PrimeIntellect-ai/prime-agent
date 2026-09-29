@@ -26,14 +26,14 @@ impl SessionEngine for AgentSessionEngine {
         }
     }
 
-    /// TS #2483's `_passivateSettledRlmChildRuntime` inline arm,
-    /// worker-side: the turn runner's park arm proved the parent-owned,
-    /// unattached, unqueued idle state; the remaining
-    /// `canPassivateSettledSession` gates run here. A settled child
-    /// releases its kernel with a final snapshot flush (the revivable
-    /// stop: the next kernel use boots fresh from the flushed snapshot)
-    /// while staying listable, inspectable, collectable, and deletable
-    /// — the roster and collect surfaces are untouched by design.
+    /// The engine-side gate mirror of the whole-worker idle
+    /// passivation (TS `canPassivateSession`, session-action-store
+    /// :411-419): `true` only when no non-passive descendants hold work
+    /// and no active-or-paused scheduled job is registered (the shared
+    /// store covers crons AND armed heartbeats — the wake-blind
+    /// substitution). This method only answers the gate; the caller
+    /// owns the residency decision (the kernel release and the
+    /// whole-worker stop each consume it separately).
     fn can_passivate_settled_session(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {

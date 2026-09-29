@@ -229,27 +229,35 @@ impl TurnRunner {
     /// The idle-eviction window for a parent-owned child (TS's
     /// `idleEvictionMinutes` consumer, worker-side): `Some(remaining)`
     /// when the park state holds (parent-owned, unattached, not
-    /// compacting, not shutting down, no live background bash) and the
-    /// setting is a live threshold; `None` otherwise (roots, attached
-    /// children, `"off"`, and any state the engine gates would reject
-    /// stay parked without a timer). The engine-side passivation gates
+    /// compacting, not shutting down, no live background bash, no
+    /// queued input in the lanes — TS `isSessionActive`'s
+    /// pending-prompt-admissions arm) and the setting is a live
+    /// threshold; `None` otherwise (roots, attached children, `"off"`,
+    /// and any state the engine gates would reject stay parked without
+    /// a timer). The engine-side passivation gates
     /// (unsettled descendants, registered active-or-paused scheduled
     /// jobs) are re-checked at the fire inside
     /// [`Self::maybe_request_idle_passivation`] — the fresh-snapshot
     /// fence — so this window only decides whether to arm.
     pub(super) fn idle_passivation_window(&self) -> Option<std::time::Duration> {
-        let (rlm_depth, attached, compacting, shutdown, last_activity, cwd) = {
+        let (rlm_depth, attached, compacting, shutdown, queued, last_activity, cwd) = {
             let core = self.core.lock().unwrap();
             (
                 core.rlm_depth,
                 core.attached_client_ids.is_empty(),
                 core.compacting,
                 core.shutdown_requested,
+                // TS `isSessionActive`'s pending-prompt-admissions arm: a
+                // paused pump holding items in the lanes (a parked steer
+                // or follow-up) keeps the session active — the queued
+                // work lives only on this resident worker, so the
+                // passivation must never discard it.
+                !core.steering.is_empty() || !core.follow_up.is_empty(),
                 core.last_activity_ms,
                 core.cwd.clone(),
             )
         };
-        if rlm_depth == 0 || !attached || compacting || shutdown {
+        if rlm_depth == 0 || !attached || compacting || shutdown || queued {
             return None;
         }
         // A live background bash handle keeps the worker resident (the
@@ -281,13 +289,17 @@ impl TurnRunner {
     /// next park re-arms, exactly like the kernel release's best-effort
     /// arm.
     pub(super) async fn maybe_request_idle_passivation(&self) {
-        let (rlm_depth, attached, compacting, shutdown, last_activity, cwd) = {
+        let (rlm_depth, attached, compacting, shutdown, queued, last_activity, cwd) = {
             let core = self.core.lock().unwrap();
             (
                 core.rlm_depth,
                 core.attached_client_ids.is_empty(),
                 core.compacting,
                 core.shutdown_requested,
+                // The fresh-snapshot fence's queued-input arm: a wake that
+                // raced the timer leaves its item in the lanes — the
+                // passivation cancels instead of discarding it.
+                !core.steering.is_empty() || !core.follow_up.is_empty(),
                 core.last_activity_ms,
                 core.cwd.clone(),
             )
@@ -295,7 +307,7 @@ impl TurnRunner {
         // The fresh-snapshot fence: the wake that raced the timer must
         // find the worker resident, so any state change since the window
         // armed cancels the passivation.
-        if rlm_depth == 0 || !attached || compacting || shutdown {
+        if rlm_depth == 0 || !attached || compacting || shutdown || queued {
             return;
         }
         if self.user_bash.is_running() {

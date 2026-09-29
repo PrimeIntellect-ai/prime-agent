@@ -864,6 +864,162 @@ async fn idle_passivation_refuses_a_root_worker() {
     );
 }
 
+/// The roster wake's reuse arm (Macroscope's concurrent-wake finding,
+/// the reuse half): a prompt for a passivated child's active-session id
+/// whose roster row resolves to a session file a CONCURRENT revival
+/// already hosts must join the resident — no second launch.
+#[tokio::test]
+async fn a_passivated_row_prompt_joins_an_already_hosting_resident() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    // The child's file lives in the session-artifacts tree (the RLM
+    // child shape): the saved-session catalog never resolves it, so the
+    // wake falls to the roster row.
+    let artifacts = agent_dir.join("session-artifacts").join("child-1");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let session_file = artifacts.join("child-1.jsonl");
+    std::fs::write(
+        &session_file,
+        "{\"type\":\"session\",\"version\":3,\"id\":\"child-1\",\"timestamp\":\"t\",\"cwd\":\"/c\"}\n",
+    )
+    .unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: agent_dir.clone(),
+        })
+        .expect("supervisor"),
+    );
+    // The passive roster row: the active-session id the stripped routing
+    // left and the durable session file.
+    supervisor.roster.lock().unwrap().write_seeded(
+        json!({
+            "agentId": "sub-passive-1",
+            "type": "subagent",
+            "name": "child-1",
+            "activeSessionId": "passive-routing-1",
+            "sessionFile": session_file.to_string_lossy(),
+            "status": "done",
+        }),
+        false,
+    );
+    // The concurrent revival's resident: already hosting the row's file.
+    let descriptor = pa_types::daemon::DaemonWorkerDescriptor {
+        version: 1,
+        worker_id: "w-revived".to_string(),
+        pid: 4243,
+        process_start_id: None,
+        socket_path: "/tmp/none.sock".to_string(),
+        recovery_journal_path: "/tmp/none.jsonl".to_string(),
+        orphan_process_journal_path: None,
+        supervisor_socket_path: "/tmp/none.sock".to_string(),
+        authentication_token: "token".to_string(),
+        worker_instance_id: None,
+        root_active_session_id: "w-revived".to_string(),
+        owner_client_id: None,
+        root_session_id: Some("child-1".to_string()),
+        session_file: Some(session_file.to_string_lossy().into_owned()),
+        session_dir: Some(artifacts.to_string_lossy().into_owned()),
+        telemetry_disabled: None,
+        created_at: "t".to_string(),
+        updated_at: "t".to_string(),
+        lifecycle: DaemonWorkerLifecycle::Ready,
+        create_command: pa_types::daemon::DurableDaemonCreateCommand {
+            session_path: None,
+            no_session: None,
+            rest: Map::default(),
+        },
+        consecutive_failures: 0,
+        stop_requested_at: None,
+        archive_on_stop: None,
+        last_failure_at: None,
+        last_error: None,
+        rest: Map::default(),
+    };
+    let resident = ResidentWorker::new("w-revived".to_string(), descriptor, artifacts.join("w.d"));
+    supervisor
+        .registry
+        .insert(std::sync::Arc::clone(&resident))
+        .await;
+    let before = supervisor.registry.list().await.len();
+    // The wake: the roster row resolves, the reuse arm finds the hosting
+    // resident, and NO second launch runs.
+    let route = supervisor.wake_saved_session("passive-routing-1").await;
+    match route {
+        super::routing::WakeRoute::Woken(woken) => {
+            assert!(
+                std::sync::Arc::ptr_eq(&woken, &resident),
+                "the wake must join the already-hosting resident"
+            );
+        }
+        super::routing::WakeRoute::Fallthrough(message) => {
+            panic!("expected a woken resident, got the fallthrough: {message}");
+        }
+    }
+    assert_eq!(
+        supervisor.registry.list().await.len(),
+        before,
+        "the reuse arm must not launch a second worker"
+    );
+}
+
+/// The roster wake's failure arm: with no resident hosting the row's
+/// file and the launch refused (the shutdown gate stands in for any
+/// launch failure), the wake falls through to the caller's error — the
+/// concurrent-revival race's loser only fails when the rival never
+/// registered.
+#[tokio::test]
+async fn a_passivated_row_prompt_with_no_rival_falls_through_the_failed_launch() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let artifacts = agent_dir.join("session-artifacts").join("child-2");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let session_file = artifacts.join("child-2.jsonl");
+    std::fs::write(
+        &session_file,
+        "{\"type\":\"session\",\"version\":3,\"id\":\"child-2\",\"timestamp\":\"t\",\"cwd\":\"/c\"}\n",
+    )
+    .unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: agent_dir.clone(),
+        })
+        .expect("supervisor"),
+    );
+    supervisor.roster.lock().unwrap().write_seeded(
+        json!({
+            "agentId": "sub-passive-2",
+            "type": "subagent",
+            "name": "child-2",
+            "activeSessionId": "passive-routing-2",
+            "sessionFile": session_file.to_string_lossy(),
+            "status": "done",
+        }),
+        false,
+    );
+    // The launch gate: any launch is refused (a deterministic stand-in
+    // for the race's losing launch).
+    supervisor.shutting_down.store(true, Ordering::SeqCst);
+    let route = supervisor.wake_saved_session("passive-routing-2").await;
+    match route {
+        super::routing::WakeRoute::Fallthrough(message) => {
+            assert!(
+                message.contains("shutting down") || message.contains("Unknown active session"),
+                "the failed launch must surface, got: {message}"
+            );
+        }
+        super::routing::WakeRoute::Woken(woken) => {
+            panic!(
+                "expected a fallthrough, got a woken resident: {:?}",
+                woken.worker_id
+            );
+        }
+    }
+}
+
 /// The passivation-aware delete: a Kill carrying the `rlmLedgerDelete`
 /// marker aimed at a STOPPED child (no resident worker) resolves the
 /// ledger edge and tombstones it — the deletion boundary without a

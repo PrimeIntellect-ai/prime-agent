@@ -615,7 +615,6 @@ impl Supervisor {
     /// process-retirement wait, registry removal, roster passivation),
     /// so a passivated child's row stays visible and family-addressable
     /// and its next prompt wakes a fresh worker over the session file.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn handle_worker_idle_passivation(
         self: &Arc<Self>,
         command_id: &str,

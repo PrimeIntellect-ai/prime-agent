@@ -1005,7 +1005,7 @@ impl Supervisor {
             .map_or_else(|| "/".to_string(), |info| info.cwd);
         let create = DaemonCommand::Create {
             id: None,
-            session_path: Some(session_file),
+            session_path: Some(session_file.clone()),
             continue_recent: Some(false),
             no_session: None,
             name: None,
@@ -1017,12 +1017,30 @@ impl Supervisor {
             launch_env: None,
             rest: serde_json::Map::default(),
         };
+        // Reuse before launching (TS `createOrReuseWorker`): a concurrent
+        // revival — or the resident the previous wake launched — may
+        // already host the file.
+        if let Some(resident) = self.registry.find_by_session_file(&session_file).await {
+            return Some(crate::messaging::WakeOutcome::Woken(resident));
+        }
         match self.launch_worker(&create, None).await {
             Ok((resident, _create_summary)) => {
                 self.refresh_roster_entry(&resident).await;
                 Some(crate::messaging::WakeOutcome::Woken(resident))
             }
-            Err(error) => Some(crate::messaging::WakeOutcome::Failed(format!("{error:#}"))),
+            Err(error) => {
+                // The check-and-launch race (two concurrent prompt/
+                // attach wakes for the same passivated row): the rival
+                // wins the session lease while this launch runs, so the
+                // loser joins the rival's registered resident instead
+                // of failing its command (TS's in-flight-join revival
+                // semantics, `hydratePassiveRlmSubagent`'s single-flight
+                // outcome).
+                if let Some(resident) = self.registry.find_by_session_file(&session_file).await {
+                    return Some(crate::messaging::WakeOutcome::Woken(resident));
+                }
+                Some(crate::messaging::WakeOutcome::Failed(format!("{error:#}")))
+            }
         }
     }
 
