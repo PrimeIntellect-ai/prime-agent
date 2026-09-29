@@ -340,6 +340,10 @@ pub struct InteractiveOptions {
     pub client_settings: Option<std::sync::Arc<dyn crate::client_settings::ClientSettings>>,
 }
 
+// The opaque service handles (traces, provider_auth, telemetry,
+// prompt_stash, update_commands, client_settings) have no Debug surface;
+// the launch-config rows above are the debug surface.
+#[allow(clippy::missing_fields_in_debug)]
 impl std::fmt::Debug for InteractiveOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InteractiveOptions")

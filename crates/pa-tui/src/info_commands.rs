@@ -89,6 +89,7 @@ pub(crate) fn grouped(value: u64) -> String {
 /// exact rational value: `value = mantissa / 2^exponent` and
 /// `value * 10^digits = mantissa * 5^digits / 2^(exponent - digits)`
 /// reduce to one integer divide with a half-away tie on the remainder.
+#[must_use]
 pub fn js_to_fixed(value: f64, digits: usize) -> String {
     let bits = value.to_bits();
     let biased = ((bits >> 52) & 0x7ff) as i64;
@@ -97,7 +98,7 @@ pub fn js_to_fixed(value: f64, digits: usize) -> String {
     } else {
         ((bits & ((1u64 << 52) - 1)) | (1u64 << 52), biased - 1075)
     };
-    let numerator = mantissa as u128 * 5u128.pow(digits as u32);
+    let numerator = u128::from(mantissa) * 5u128.pow(digits as u32);
     // value * 10^digits = numerator * 2^(exponent + digits): a left
     // shift when the exponent absorbs the scale, else one exact divide
     // with a half-away tie on the remainder.
@@ -184,6 +185,7 @@ pub fn session_info_rows(stats: &Value, session_name: Option<&str>) -> Vec<Clien
 
 /// The `/logs` info rows (TS `handleLogsCommand`): the logs directory, its
 /// files sorted by name with `(N KB)` sizes, and the trailing note.
+#[must_use]
 pub fn logs_rows(logs_dir: &Path) -> Vec<ClientLine> {
     let mut rows = vec![
         vec![raw_span("Logs")],
@@ -232,6 +234,7 @@ pub fn logs_rows(logs_dir: &Path) -> Vec<ClientLine> {
 
 /// The `/system-prompt` header rows (TS `handleSystemPromptCommand`); the
 /// char count is the JS string length (UTF-16 code units).
+#[must_use]
 pub fn system_prompt_header_rows(prompt: &str) -> Vec<ClientLine> {
     let chars = prompt.encode_utf16().count();
     vec![vec![
@@ -242,6 +245,7 @@ pub fn system_prompt_header_rows(prompt: &str) -> Vec<ClientLine> {
 
 /// The `/system-prompt` body rows: the prompt split into source lines for
 /// per-line wrapping (the TS `Text` wraps each newline-delimited line).
+#[must_use]
 pub fn system_prompt_body_rows(prompt: &str) -> Vec<ClientLine> {
     prompt
         .split('\n')
@@ -252,6 +256,7 @@ pub fn system_prompt_body_rows(prompt: &str) -> Vec<ClientLine> {
 /// The `/changelog` markdown (TS `handleChangelogCommand` over
 /// `parseChangelog`): the CHANGELOG.md entries newest-first joined with
 /// a blank line, or the empty-state text.
+#[must_use]
 pub fn changelog_markdown(changelog_path: &Path) -> String {
     let entries = parse_changelog(changelog_path);
     if entries.is_empty() {
@@ -278,7 +283,7 @@ fn parse_changelog(changelog_path: &Path) -> Vec<String> {
     for line in content.split('\n') {
         if let Some(rest) = line.strip_prefix("## ") {
             if let Some(lines) = current.take() {
-                push_entry(&mut entries, lines);
+                push_entry(&mut entries, &lines);
             }
             if is_version_header(rest) {
                 current = Some(vec![line.to_string()]);
@@ -288,12 +293,12 @@ fn parse_changelog(changelog_path: &Path) -> Vec<String> {
         }
     }
     if let Some(lines) = current {
-        push_entry(&mut entries, lines);
+        push_entry(&mut entries, &lines);
     }
     entries
 }
 
-fn push_entry(entries: &mut Vec<String>, lines: Vec<String>) {
+fn push_entry(entries: &mut Vec<String>, lines: &[String]) {
     let trimmed = lines.join("\n").trim().to_string();
     if !trimmed.is_empty() {
         entries.push(trimmed);
@@ -797,7 +802,7 @@ pub fn context_tree_rows(tree: &Value, width: usize, scope: ContextTreeScope) ->
         ]);
         lines.push(vec![]);
     }
-    let mut header = format!("  {}", pad_end("agent", label_width),);
+    let mut header = format!("  {}", pad_end("agent", label_width));
     if show_models {
         let _ = write!(header, "  {}", pad_end("model", model_width));
     }
@@ -982,6 +987,7 @@ fn styled_spans(row: &[ClientSpan], theme: &Theme) -> Line {
 /// rows padded to the full width (continuation rows pad inside the open
 /// style, the last wrapped row after the segment's reset — TS ANSI
 /// behavior).
+#[must_use]
 pub fn render_client_text(rows: &[ClientLine], theme: &Theme, width: usize) -> Vec<Line> {
     let content_width = width.saturating_sub(2).max(1);
     let mut out: Vec<Line> = vec![Vec::new()];

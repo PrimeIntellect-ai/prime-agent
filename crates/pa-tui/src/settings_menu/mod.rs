@@ -47,6 +47,7 @@ pub enum SettingsSubmenu {
 
 /// The service-tier descriptions the TS settings submenu lists (TS
 /// `SERVICE_TIER_OPTIONS`).
+#[must_use]
 pub fn service_tier_description(tier: &str) -> &'static str {
     match tier {
         "default" => "Standard processing",
@@ -375,6 +376,7 @@ pub struct SettingsCurrentValues {
 }
 
 impl SettingsMenu {
+    #[must_use]
     pub fn new(rows: Vec<SettingsMenuRow>) -> Self {
         let tabs = tabs::row_indices(&rows)
             .into_iter()
@@ -552,14 +554,14 @@ impl SettingsMenu {
                 } else {
                     sub.selected - 1
                 };
-                return self.submenu_selection_change(sub);
+                return Self::submenu_selection_change(sub);
             }
             return SettingsMenuAction::None;
         }
         if kb.matches(key, "tui.select.down") {
             if options > 0 {
                 sub.selected = (sub.selected + 1) % options;
-                return self.submenu_selection_change(sub);
+                return Self::submenu_selection_change(sub);
             }
             return SettingsMenuAction::None;
         }
@@ -621,7 +623,7 @@ impl SettingsMenu {
 
     /// The selection-change side effect (TS `onSelectionChange` — only the
     /// theme submenu previews live).
-    fn submenu_selection_change(&self, sub: &SubmenuState) -> SettingsMenuAction {
+    fn submenu_selection_change(sub: &SubmenuState) -> SettingsMenuAction {
         match &sub.kind {
             SettingsSubmenu::Theme { themes } => themes
                 .get(sub.selected)
@@ -684,9 +686,10 @@ impl SettingsMenu {
     /// — the bordered search field, the windowed label/value rows, the
     /// scroll indicator, the selected row's description, and the hint
     /// line; a submenu replaces the whole list.
+    #[must_use]
     pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<crate::Line> {
         if let Some(sub) = &self.sub {
-            return self.render_submenu(sub, theme, width, kb);
+            return Self::render_submenu(sub, theme, width, kb);
         }
         let mut lines: Vec<crate::Line> = Vec::new();
         if self.rows.is_empty() {
@@ -780,7 +783,6 @@ impl SettingsMenu {
     /// description, the shared menu rows over the option list, and the
     /// back hint.
     fn render_submenu(
-        &self,
         sub: &SubmenuState,
         theme: &Theme,
         width: usize,

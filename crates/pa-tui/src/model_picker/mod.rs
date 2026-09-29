@@ -240,6 +240,7 @@ pub struct ModelPicker {
 impl ModelPicker {
     /// Build the picker: sort the catalog, resolve the per-model effort
     /// defaults, then show everything unfiltered.
+    #[must_use]
     pub fn new(options: ModelPickerOptions) -> Self {
         let mut picker = ModelPicker {
             all_models: Vec::new(),
@@ -271,6 +272,7 @@ impl ModelPicker {
     }
 
     /// The active filter query.
+    #[must_use]
     pub fn query(&self) -> &str {
         self.search.value()
     }
@@ -431,6 +433,7 @@ impl ModelPicker {
     }
 
     /// The list's visible-row budget at the current width.
+    #[must_use]
     pub fn visible_items(&self) -> usize {
         self.visible_items
     }
@@ -590,7 +593,7 @@ impl ModelPicker {
                 if a_match.quality != b_match.quality {
                     return a_match.quality.cmp(&b_match.quality);
                 }
-                if a_match.score != b_match.score {
+                if a_match.score.partial_cmp(&b_match.score) != Some(Ordering::Equal) {
                     return a_match
                         .score
                         .partial_cmp(&b_match.score)

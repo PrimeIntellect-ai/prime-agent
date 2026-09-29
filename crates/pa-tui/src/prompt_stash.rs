@@ -121,6 +121,7 @@ impl PromptStashStore {
 
     /// Whether no session holds stash state (verifier surface).
     #[cfg(test)]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.states.is_empty()
     }

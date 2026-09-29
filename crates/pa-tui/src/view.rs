@@ -56,6 +56,7 @@ pub struct ShareLoader {
 }
 
 impl ShareLoader {
+    #[must_use]
     pub fn new() -> Self {
         ShareLoader {
             message: "Creating gist...".to_string(),
@@ -320,7 +321,7 @@ impl AgentView {
     /// ipython cells included), bash executions, and shell completions
     /// render flush against each other — the set both the leading-space
     /// scan and `precededByToolActivity` compact decisions use.
-    pub(super) fn is_compact_neighbor(&self, entry: &ChatEntry) -> bool {
+    pub(super) fn is_compact_neighbor(entry: &ChatEntry) -> bool {
         matches!(
             entry,
             ChatEntry::Tool(_)
@@ -330,6 +331,7 @@ impl AgentView {
         )
     }
 
+    #[must_use]
     pub fn new(theme: Theme) -> Self {
         Self {
             theme,
@@ -753,7 +755,7 @@ impl AgentView {
                             // set: a tool call, agent message, bash
                             // execution, or shell completion).
                             let preceded_by_tool =
-                                idx > 0 && self.is_compact_neighbor(&self.chat[idx - 1]);
+                                idx > 0 && Self::is_compact_neighbor(&self.chat[idx - 1]);
                             if tool_separator
                                 || message.has_trailing_space(self.detail, preceded_by_tool)
                             {
@@ -767,13 +769,13 @@ impl AgentView {
                     }
                 }
                 preceding => {
-                    if tool_separator && !self.is_compact_neighbor(preceding) {
+                    if tool_separator && !Self::is_compact_neighbor(preceding) {
                         return false;
                     }
                     if expanded {
                         return true;
                     }
-                    return !self.is_compact_neighbor(preceding);
+                    return !Self::is_compact_neighbor(preceding);
                 }
             }
         }
@@ -1724,7 +1726,7 @@ impl AgentView {
             let rows =
                 self.render_entry(index, entry, width, index == 0, preceded_by_tool_activity);
             sink.feed(out, &rows)?;
-            preceded_by_tool_activity = self.is_compact_neighbor(entry);
+            preceded_by_tool_activity = Self::is_compact_neighbor(entry);
         }
         sink.feed(out, &layout.tail)?;
         let dock = self.render_dock(width);
@@ -2804,7 +2806,11 @@ mod tests {
         let repaint = flush_bytes(&mut long, 80, 10);
         assert!(repaint.starts_with(b"\x1b[2J\x1b[H"));
         // One screenful of rows: at most `screen_height` CRLFs.
-        assert!(repaint.iter().filter(|b| **b == b'\n').count() <= 10);
+        // The count is a bounded test assertion over one screen buffer;
+        // the SIMD bytecount dependency would be pointless here.
+        #[allow(clippy::naive_bytecount)]
+        let newline_rows = repaint.iter().filter(|b| **b == b'\n').count();
+        assert!(newline_rows <= 10);
         let joined = String::from_utf8_lossy(&repaint);
         assert!(joined.contains("late turn"));
         assert!(!joined.contains("reply 0"));
@@ -3656,7 +3662,8 @@ mod tests {
                     view.detail = detail;
                     for index in 0..view.chat.len() {
                         let entry = &view.chat[index];
-                        let preceded = index > 0 && view.is_compact_neighbor(&view.chat[index - 1]);
+                        let preceded =
+                            index > 0 && AgentView::is_compact_neighbor(&view.chat[index - 1]);
                         assert_eq!(
                             view.count_entry_rows(index, width),
                             view.render_entry(index, entry, width, index == 0, preceded)
@@ -3689,7 +3696,8 @@ mod tests {
                 view.detail = detail;
                 for index in 0..view.chat.len() {
                     let entry = &view.chat[index];
-                    let preceded = index > 0 && view.is_compact_neighbor(&view.chat[index - 1]);
+                    let preceded =
+                        index > 0 && AgentView::is_compact_neighbor(&view.chat[index - 1]);
                     assert_eq!(
                         view.count_entry_rows(index, width),
                         view.render_entry(index, entry, width, index == 0, preceded)

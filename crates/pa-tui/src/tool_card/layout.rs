@@ -68,7 +68,7 @@ impl RowOutput {
     }
     pub(super) fn images(
         &mut self,
-        result: &Option<ToolResultView>,
+        result: Option<&ToolResultView>,
         show_images: bool,
         theme: &Theme,
     ) {

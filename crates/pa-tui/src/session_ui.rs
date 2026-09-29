@@ -881,7 +881,7 @@ impl SessionUi {
         // Flush the attach snapshot BEFORE the banner lands: `rebuild_view`
         // replaces the transcript from the snapshot, so the banner must come
         // after it to survive the rebuild (§10.5's visible end state).
-        self.rebuild_view(view, RebuildKind::Resync);
+        self.rebuild_view(view, &RebuildKind::Resync);
         match kind {
             RecoveryKind::Update => match complete {
                 Some(false) => view.push_entry(crate::chat::ChatEntry::Status {
@@ -1212,7 +1212,7 @@ impl SessionUi {
 
     /// Fold the pending snapshot into the view (fresh transcript, footer
     /// labels). Called after attach and after every session switch.
-    pub(crate) fn rebuild_view(&mut self, view: &mut AgentView, kind: RebuildKind) {
+    pub(crate) fn rebuild_view(&mut self, view: &mut AgentView, kind: &RebuildKind) {
         let resync_bash = self.resync_bash.take();
         // The held cards' fate diverges by rebuild: a rebind drops them
         // with the old transcript (TS `resetCurrentSessionRenderState`), a
@@ -1332,7 +1332,7 @@ impl SessionUi {
                             // TS flushes inside the active-component branch:
                             // a side run (no mounted card) never flushes.
                             if !resync.snap_streaming {
-                                self.flush_pending_bash(view);
+                                Self::flush_pending_bash(view);
                             }
                         }
                         if self.side_bash.take().is_some() {
@@ -1975,7 +1975,7 @@ impl SessionUi {
             // bails out before fuzzy matching). Close typos get the exact TS
             // error; everything else passes through to the model.
             if name.chars().count() > 64 {
-                return self.send_prompt(text, behavior, view).await;
+                return self.send_prompt(text, behavior, view);
             }
             let candidates = registry.suggestion_candidates();
             return match pa_types::slash_commands::find_slash_command_suggestion(&name, &candidates)
@@ -1987,7 +1987,7 @@ impl SessionUi {
                     );
                     Ok(())
                 }
-                None => self.send_prompt(text, behavior, view).await,
+                None => self.send_prompt(text, behavior, view),
             };
         };
 
@@ -1995,7 +1995,7 @@ impl SessionUi {
             .get(resolved.name)
             .expect("resolved name is builtin");
         match command.execution {
-            SlashCommandExecution::Session => self.send_prompt(text, behavior, view).await,
+            SlashCommandExecution::Session => self.send_prompt(text, behavior, view),
             SlashCommandExecution::Client => {
                 self.dispatch_client_command(&resolved, text, view).await
             }
@@ -2025,7 +2025,7 @@ impl SessionUi {
                 // the chrome, or the rebind would ride the session being
                 // left's own cost and subagent aggregate.
                 self.refresh_stats().await;
-                self.rebuild_view(view, RebuildKind::Rebind);
+                self.rebuild_view(view, &RebuildKind::Rebind);
                 self.note(&format!("started session {id}"), view);
             }
             // TS `/quit` shuts the client down; this build's exit detaches
@@ -2713,7 +2713,7 @@ impl SessionUi {
                     );
                     return Ok(());
                 }
-                self.handle_reload_command(view).await?;
+                self.handle_reload_command(view)?;
             }
             // `/heartbeats` (TS `showHeartbeatManager`): the inline
             // management view over the session-scoped heartbeat catalog —

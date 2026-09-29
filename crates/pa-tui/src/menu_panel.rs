@@ -147,13 +147,13 @@ pub(crate) fn menu_row(
         row.push(Span::raw(" ".repeat(filler_width)));
     }
     row.extend(trailing);
-    finish_menu_row(theme, row, width, selected)
+    finish_menu_row(theme, &row, width, selected)
 }
 
 /// The shared row finish: truncate to the width, pad so the selection
 /// band spans the row, and patch the soft selection background.
-fn finish_menu_row(theme: &Theme, row: Line, width: usize, selected: bool) -> Line {
-    let mut row = truncate_line(&row, width, "");
+fn finish_menu_row(theme: &Theme, row: &Line, width: usize, selected: bool) -> Line {
+    let mut row = truncate_line(row, width, "");
     // Pad to the full width so the selection band spans the row.
     let used = crate::width::spans_width(&row);
     if used < width {
@@ -226,13 +226,13 @@ pub(crate) fn hug_width(content_width: usize, width: usize) -> usize {
 /// same purple band and bold the dock's groups and the agents view's
 /// rows paint), a little past the text, not the whole terminal width.
 pub(crate) fn hug_row(
-    row: Line,
+    row: &Line,
     content_width: usize,
     selected: bool,
     width: usize,
     style: Style,
 ) -> Line {
-    let mut row = truncate_line(&row, width, "");
+    let mut row = truncate_line(row, width, "");
     if !selected {
         return row;
     }
@@ -258,8 +258,8 @@ pub(crate) fn hug_row(
 /// frame width and paints the CALLER's style (the activity surfaces
 /// pass the ONE shared selection style — the operator's 2026-09-28
 /// consistency rule).
-pub(crate) fn fill_row(row: Line, selected: bool, width: usize, style: Style) -> Line {
-    let mut row = truncate_line(&row, width, "");
+pub(crate) fn fill_row(row: &Line, selected: bool, width: usize, style: Style) -> Line {
+    let mut row = truncate_line(row, width, "");
     if !selected {
         return row;
     }
@@ -552,9 +552,9 @@ pub(crate) fn key_hint(
 /// One detail-block row: the selected item's metadata under the list,
 /// truncated to the frame width (marked) and padded to the full row; the
 /// content's own spans carry the color and leading indent.
-pub(crate) fn detail_row(theme: &Theme, width: usize, content: Line) -> Line {
+pub(crate) fn detail_row(theme: &Theme, width: usize, content: &Line) -> Line {
     let _ = theme;
-    let mut line = truncate_line(&content, width, "\u{2026}");
+    let mut line = truncate_line(content, width, "\u{2026}");
     let used = crate::width::spans_width(&line);
     if used < width {
         line.push(Span::raw(" ".repeat(width - used)));
@@ -664,14 +664,14 @@ mod tests {
         // The shared row painters paint exactly the style passed: the
         // activity surfaces' purple band and bold.
         let band = theme.selection_row_style();
-        let filled = fill_row(vec![Span::raw("label")], true, 40, band);
+        let filled = fill_row(&vec![Span::raw("label")], true, 40, band);
         assert!(
             filled.iter().all(
                 |span| span.style.bg == band.bg && span.style.add_modifier == band.add_modifier
             ),
             "the fill row paints the caller's style: {filled:?}"
         );
-        let hugged = hug_row(vec![Span::raw("label")], 6, true, 40, band);
+        let hugged = hug_row(&vec![Span::raw("label")], 6, true, 40, band);
         assert!(
             hugged.iter().all(
                 |span| span.style.bg == band.bg && span.style.add_modifier == band.add_modifier
@@ -681,8 +681,8 @@ mod tests {
         // Unselected rows keep the surface: no band at all.
         for plain in [
             menu_row(&theme, 40, vec![Span::raw("label")], &[], false),
-            fill_row(vec![Span::raw("label")], false, 40, band),
-            hug_row(vec![Span::raw("label")], 6, false, 40, band),
+            fill_row(&vec![Span::raw("label")], false, 40, band),
+            hug_row(&vec![Span::raw("label")], 6, false, 40, band),
         ] {
             assert!(
                 plain.iter().all(|span| span.style.bg.is_none()),
@@ -718,13 +718,13 @@ mod tests {
         assert_eq!(theme.selection_row_style().bg, Some(fallback));
         for washed in [
             fill_row(
-                vec![Span::raw("label")],
+                &vec![Span::raw("label")],
                 true,
                 40,
                 theme.selection_row_style(),
             ),
             hug_row(
-                vec![Span::raw("label")],
+                &vec![Span::raw("label")],
                 6,
                 true,
                 40,

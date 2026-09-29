@@ -10,7 +10,7 @@ impl AgentView {
         // TS `precededByToolActivity` = `isCompactAgentMessageNeighbor` of
         // the previous row: a tool call, agent message, bash execution, or
         // shell completion all count.
-        let preceded_by_tool = index > 0 && self.is_compact_neighbor(&self.chat[index - 1]);
+        let preceded_by_tool = index > 0 && Self::is_compact_neighbor(&self.chat[index - 1]);
         let spacing = self.entry_spacing(index, entry, index == 0, preceded_by_tool);
         match entry {
             ChatEntry::Status { text, .. } => {
@@ -229,7 +229,8 @@ mod tests {
             view.detail = detail;
             for width in [0, 1, 7, 20, 80] {
                 for (index, entry) in view.chat.iter().enumerate() {
-                    let preceded = index > 0 && view.is_compact_neighbor(&view.chat[index - 1]);
+                    let preceded =
+                        index > 0 && AgentView::is_compact_neighbor(&view.chat[index - 1]);
                     assert_eq!(
                         view.count_entry_rows(index, width),
                         view.render_entry(index, entry, width, index == 0, preceded)

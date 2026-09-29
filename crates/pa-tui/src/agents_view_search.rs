@@ -71,6 +71,7 @@ enum SearchToken {
 const REGEX_BACKTRACK_LIMIT: usize = 10_000;
 
 /// Parse a query; invalid `re:` patterns parse to no matches.
+#[must_use]
 pub fn parse_search_query(query: &str) -> ParsedSearchQuery {
     let trimmed = query.trim();
     if let Some(pattern) = trimmed.strip_prefix("re:") {
@@ -170,6 +171,7 @@ struct TokenMatch {
 /// clamped inside one tier stride before the tier offset is added, so no
 /// within-tier difference — however long the name or however sprawling
 /// the fuzzy match — can cross a tier boundary.
+#[must_use]
 pub fn score_search(targets: &SessionSearchText, query: &ParsedSearchQuery) -> Option<f64> {
     if query.matches_never {
         return None;

@@ -2,7 +2,11 @@
 //! roster-driven subagent summary, the goal and info panels, and the
 //! retry-episode collapse (TS `activityBar` composition + panel keys).
 
-use super::*;
+use super::{
+    key_event_to_id, mpsc, paused_heartbeat_count, picker_viewport_rows, tray_goal_label,
+    AgentView, BashActivityUpdate, CommandCatalogUpdate, DaemonCommand, DockFocusSource, GoalPanel,
+    HeartbeatsUpdate, InfoContent, InfoPanelAction, KeyEvent, Map, Result, SessionUi, Value,
+};
 
 pub(crate) struct ActivityUpdates {
     pub heartbeats: mpsc::UnboundedSender<HeartbeatsUpdate>,
@@ -160,7 +164,7 @@ impl SessionUi {
     /// The editor's Down and Alt+A hand focus to the compact dock.
     pub(super) fn focus_subagents_summary(
         &mut self,
-        source: DockFocusSource,
+        source: &DockFocusSource,
         view: &mut AgentView,
     ) -> bool {
         // The tray override label blocks the hand-off (TS
@@ -297,7 +301,7 @@ impl SessionUi {
 
     /// The goal panel owns the frame while open: the close and back
     /// keys dismiss it; every other key is consumed (a read-only view).
-    pub(super) async fn handle_goal_panel_key(
+    pub(super) fn handle_goal_panel_key(
         &mut self,
         key: KeyEvent,
         view: &mut AgentView,
@@ -330,7 +334,7 @@ impl SessionUi {
     /// scroll its window, the close keys dismiss it, and every other key
     /// is consumed — the read-only document never leaks a key back to
     /// the editor, and the transcript gains nothing while it is open.
-    pub(super) async fn handle_info_panel_key(
+    pub(super) fn handle_info_panel_key(
         &mut self,
         key: KeyEvent,
         view: &mut AgentView,
@@ -390,9 +394,9 @@ mod activity_dock_counts_tests {
     use crate::heartbeats_picker::{parse_heartbeat_job, HeartbeatEntry};
     use serde_json::json;
 
-    fn entry(job_json: serde_json::Value) -> HeartbeatEntry {
+    fn entry(job_json: &serde_json::Value) -> HeartbeatEntry {
         HeartbeatEntry {
-            job: parse_heartbeat_job(&job_json).expect("job parses"),
+            job: parse_heartbeat_job(job_json).expect("job parses"),
             session_name: None,
             first_message: None,
         }
@@ -414,16 +418,16 @@ mod activity_dock_counts_tests {
     /// (the dogfood repro) count exactly like labeled ones.
     #[test]
     fn dock_counts_heartbeats_and_paused() {
-        let labeled = entry(job("labeled", "active"));
+        let labeled = entry(&job("labeled", "active"));
         let mut unlabeled = job("unlabeled", "active");
         unlabeled["label"] = serde_json::Value::Null;
-        let unlabeled = entry(unlabeled);
-        let paused = entry(job("b", "paused"));
+        let unlabeled = entry(&unlabeled);
+        let paused = entry(&job("b", "paused"));
         let catalog = vec![labeled, unlabeled, paused];
         assert_eq!(catalog.len(), 3);
         assert_eq!(paused_heartbeat_count(&catalog), 1);
         // An all-active catalog renders no paused suffix.
-        let active = vec![entry(job("a", "active")), entry(job("c", "active"))];
+        let active = vec![entry(&job("a", "active")), entry(&job("c", "active"))];
         assert_eq!(paused_heartbeat_count(&active), 0);
     }
 
@@ -433,13 +437,13 @@ mod activity_dock_counts_tests {
     /// — the divergence lives in the caller).
     #[test]
     fn dock_heartbeats_scope_to_the_current_session_only() {
-        let own = entry(job("own", "active"));
+        let own = entry(&job("own", "active"));
         // The child's durable session differs: with an empty child-id
         // list it must drop even though its active id also differs.
         let mut child = job("child", "active");
         child["activeSessionId"] = json!("child-live");
         child["sessionId"] = json!("sess-child");
-        let child = entry(child);
+        let child = entry(&child);
         let scoped = crate::heartbeats_picker::scope_heartbeats(
             vec![own, child],
             Some("live-1"),

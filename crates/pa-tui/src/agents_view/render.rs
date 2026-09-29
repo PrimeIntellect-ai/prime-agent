@@ -2,7 +2,11 @@
 //! sectioned list, hints), the row builders, the notice/list/row
 //! renderers, the cell/truncate helpers, and the terminal/
 //! headless renderer (moved with their concern).
-use super::*;
+use super::{
+    build_layout, mpsc, pad_line, section_title, str_width, truncate_text, AgentsStep,
+    AgentsViewMode, AgentsViewRow, AgentsViewUiMode, Duration, Line, Result, RowKind, RowLayout,
+    Section, ThemeColor, UiInput,
+};
 
 impl AgentsViewMode {
     /// Compose one frame (splash, search prompt, sectioned list, hints).
@@ -316,7 +320,7 @@ impl AgentsViewMode {
         let start = anchor.min(upper).max(0) as usize;
         let show_leading = start > 0 && visible_rows > 1;
         let show_trailing = start + visible_rows < display.len() && visible_rows > 2;
-        let content_rows = visible_rows - show_leading as usize - show_trailing as usize;
+        let content_rows = visible_rows - usize::from(show_leading) - usize::from(show_trailing);
         let slice_start = if selected_display_index >= start as isize + content_rows as isize {
             (selected_display_index + 1 - content_rows as isize) as usize
         } else {
@@ -368,7 +372,7 @@ impl AgentsViewMode {
         // The viewport's front rows (the leading ellipsis and the column
         // legend block) shift the session rows down; the recorded click
         // rows carry the shift with them.
-        let shift = header_rows + show_leading as usize;
+        let shift = header_rows + usize::from(show_leading);
         self.click_rows = click_rows
             .into_iter()
             .map(|(local, index)| (frame_row + local + shift, index))
@@ -516,7 +520,7 @@ impl AgentsViewMode {
                 ),
                 None => "Press again to exit".to_string(),
             };
-            return truncate_line(vec![theme.fg(ThemeColor::Muted, hint)], width);
+            return truncate_line(&vec![theme.fg(ThemeColor::Muted, hint)], width);
         }
         // The armed stop-or-delete confirm: "Press ctrl+x again to
         // stop|delete" (TS `renderHints`'s delete hint, keyed by the
@@ -527,7 +531,7 @@ impl AgentsViewMode {
                 .rows
                 .iter()
                 .find(|row| row.identity == pending.identity)
-                .map_or(pending.stop, |row| self.delete_arm_word(row));
+                .map_or(pending.stop, Self::delete_arm_word);
             let word = if stop { "stop" } else { "delete" };
             let hint = match self.keybindings.first_key("app.agents.delete") {
                 Some(key) => format!(
@@ -536,10 +540,13 @@ impl AgentsViewMode {
                 ),
                 None => format!("Press again to {word}"),
             };
-            return truncate_line(vec![theme.fg(ThemeColor::Muted, hint)], width);
+            return truncate_line(&vec![theme.fg(ThemeColor::Muted, hint)], width);
         }
         if let Some(status) = status_override.or(self.status.as_deref()) {
-            return truncate_line(vec![theme.fg(ThemeColor::Error, status.to_string())], width);
+            return truncate_line(
+                &vec![theme.fg(ThemeColor::Error, status.to_string())],
+                width,
+            );
         }
         // TS `renderHints`: every hint slot renders the effective binding
         // (`keyText`, arrows for up/down/left/right), so a user override
@@ -624,7 +631,7 @@ impl AgentsViewMode {
             segments.push(format!("{new} new"));
         }
         let hints = segments.join("   ");
-        truncate_line(vec![theme.fg(ThemeColor::Muted, hints)], width)
+        truncate_line(&vec![theme.fg(ThemeColor::Muted, hints)], width)
     }
 }
 
@@ -636,7 +643,7 @@ pub(super) fn cell(value: &str, width: usize) -> String {
     )
 }
 
-pub(super) fn truncate_line(line: Line, width: usize) -> Line {
+pub(super) fn truncate_line(line: &Line, width: usize) -> Line {
     let text = line.iter().map(|s| s.content.as_str()).collect::<String>();
     crate::width::wrap_text(&text, width.max(1))
         .into_iter()
@@ -714,7 +721,7 @@ impl Renderer {
                         // off (terminal noise downstream); an active surface
                         // decodes and dispatches them.
                         let report = crate::mouse_tracking::active()
-                            .then(|| crate::mouse::from_crossterm(&mouse))
+                            .then(|| crate::mouse::from_crossterm(mouse))
                             .flatten();
                         match report {
                             Some(event) => ui_tx.send(UiInput::Mouse(event)).is_ok(),

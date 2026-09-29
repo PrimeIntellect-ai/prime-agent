@@ -2,7 +2,7 @@
 //! movement over the visual line map.
 
 use super::text_utils::{char_find_after, char_find_before, char_prefix, char_suffix};
-use super::*;
+use super::{is_atomic_marker, is_whitespace_char, word_wrap_line, Editor, VisualLine};
 use crate::width::{is_punctuation_char, str_width};
 
 impl Editor {
@@ -238,6 +238,7 @@ impl Editor {
         }
     }
 
+    #[must_use]
     pub fn build_visual_line_map(&self, width: usize) -> Vec<VisualLine> {
         let mut visual_lines = Vec::new();
         for (i, line) in self.lines.iter().enumerate() {
@@ -450,7 +451,7 @@ impl Editor {
 
     pub(crate) fn page_scroll(&mut self, direction: isize) {
         self.last_action = None;
-        let page_size = (self.terminal_rows as f32 * 0.3).floor().max(5.0) as usize;
+        let page_size = (f32::from(self.terminal_rows) * 0.3).floor().max(5.0) as usize;
         let visual_lines = self.build_visual_line_map(self.last_width);
         if visual_lines.is_empty() {
             return;

@@ -636,6 +636,7 @@ pub type OrderedConfig = Vec<(String, serde_json::Value)>;
 /// known ids first in definition order, extras sorted after. Values are
 /// carried over unchanged (filtering happens in [`to_keybindings_config`]).
 /// Returns the migrated entries and whether any rename happened.
+#[must_use]
 pub fn migrate_keybindings_config(
     raw: &serde_json::Map<String, serde_json::Value>,
 ) -> (OrderedConfig, bool) {
@@ -830,10 +831,12 @@ fn all_definitions() -> BTreeMap<&'static str, KeybindingDefinition> {
 
 impl KeybindingsManager {
     /// All definitions with the TS defaults.
+    #[must_use]
     pub fn new() -> Self {
         Self::with_user_bindings(KeybindingsConfig::new())
     }
 
+    #[must_use]
     pub fn with_user_bindings(user_bindings: KeybindingsConfig) -> Self {
         let definitions = all_definitions();
         let mut manager = Self {
@@ -850,6 +853,7 @@ impl KeybindingsManager {
     /// TS `KeybindingsManager.create(agentDir)`: the user bindings from
     /// `<agentDir>/keybindings.json` (legacy names migrated, malformed
     /// values dropped), remembered for [`reload`](Self::reload).
+    #[must_use]
     pub fn create(agent_dir: &Path) -> Self {
         let config_path = agent_dir.join("keybindings.json");
         let user_bindings = load_config(&config_path);
@@ -940,6 +944,7 @@ impl KeybindingsManager {
 
     /// TS `matches` (via `matchesKey`): the input's parsed key id equals a
     /// parsed configured key, so matching is case- and order-insensitive.
+    #[must_use]
     pub fn matches(&self, data: &str, keybinding: &str) -> bool {
         let Some(input) = parse_key_id(data) else {
             return false;
@@ -950,38 +955,45 @@ impl KeybindingsManager {
         })
     }
 
+    #[must_use]
     pub fn get_keys(&self, keybinding: &str) -> Vec<String> {
         self.resolved.get(keybinding).cloned().unwrap_or_default()
     }
 
+    #[must_use]
     pub fn first_key(&self, keybinding: &str) -> Option<String> {
         self.get_keys(keybinding).into_iter().next()
     }
 
     /// TS `keyText(keybinding)`: every key of the binding formatted and
     /// joined with "/" ("Esc/Ctrl+C"); an unbound id renders empty.
+    #[must_use]
     pub fn key_text(&self, keybinding: &str) -> String {
         format_key_text(&self.get_keys(keybinding).join("/"))
     }
 
+    #[must_use]
     pub fn get_definition(&self, keybinding: &str) -> Option<&KeybindingDefinition> {
         self.definitions.get(keybinding)
     }
 
     /// The raw user bindings (TS `getUserBindings`): migrated ids with the
     /// well-formed key lists, unknown ids included.
+    #[must_use]
     pub fn get_user_bindings(&self) -> &KeybindingsConfig {
         &self.user_bindings
     }
 
     /// TS `getConflicts`: keys explicitly claimed by more than one user
     /// binding.
+    #[must_use]
     pub fn get_conflicts(&self) -> &[KeybindingConflict] {
         &self.conflicts
     }
 
     /// TS `getEffectiveConfig` / `getResolvedBindings`: the effective key
     /// list per definition id (used by extension shortcut conflict rules).
+    #[must_use]
     pub fn get_effective_config(&self) -> BTreeMap<String, Vec<String>> {
         self.resolved.clone()
     }
@@ -992,6 +1004,7 @@ impl KeybindingsManager {
     }
 
     /// Load user bindings from a keybindings.json file (missing file = defaults).
+    #[must_use]
     pub fn load_from_file(path: &Path) -> Self {
         Self::with_user_bindings(load_config(path))
     }
@@ -1032,6 +1045,7 @@ impl LabelPlatform {
 
 /// Format a key id for display in hints ("ctrl+o" -> "Ctrl+O", arrows to
 /// glyphs; `alt` renders as `Option` on macOS, `Alt` elsewhere).
+#[must_use]
 pub fn format_key_text(key: &str) -> String {
     format_key_text_on(key, LabelPlatform::host())
 }

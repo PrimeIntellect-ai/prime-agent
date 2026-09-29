@@ -415,8 +415,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn decoded(message: serde_json::Value) -> Vec<ChatEntry> {
-        custom_message_entries(&message)
+    fn decoded(message: &serde_json::Value) -> Vec<ChatEntry> {
+        custom_message_entries(message)
     }
 
     #[test]
@@ -429,7 +429,7 @@ mod tests {
             "prime-agent.worker_recovery",
             AGENT_MESSAGE_CUSTOM_TYPE,
         ] {
-            let entries = decoded(json!({
+            let entries = decoded(&json!({
                 "role": "custom",
                 "customType": custom_type,
                 "content": "kept out of the transcript",
@@ -453,7 +453,7 @@ mod tests {
             "ipython_state",
             "thread_goal_state",
         ] {
-            let entries = decoded(json!({
+            let entries = decoded(&json!({
                 "role": "custom",
                 "customType": custom_type,
                 "content": "digest",
@@ -473,7 +473,7 @@ mod tests {
 
     #[test]
     fn agent_message_decodes_counterpart_and_body() {
-        let entries = decoded(json!({
+        let entries = decoded(&json!({
             "role": "custom",
             "customType": AGENT_MESSAGE_CUSTOM_TYPE,
             "content": "[agent-message from child:model-probe]\n\nready",
@@ -504,7 +504,7 @@ mod tests {
         // The relationship word never reaches the row (the arrow carries
         // the direction, the operator's 2026-09-25 directive).
         let base = |from: serde_json::Value| {
-            decoded(json!({
+            decoded(&json!({
                 "role": "custom",
                 "customType": AGENT_MESSAGE_CUSTOM_TYPE,
                 "content": "[agent-message from x]\n\nhi",
@@ -539,7 +539,7 @@ mod tests {
         );
         // Without valid id/message details the row is not an agent message;
         // it falls through to the generic box.
-        let entries = decoded(json!({
+        let entries = decoded(&json!({
             "role": "custom",
             "customType": AGENT_MESSAGE_CUSTOM_TYPE,
             "content": "[agent-message from x]",
@@ -551,7 +551,7 @@ mod tests {
 
     #[test]
     fn injected_prompt_kinds_decode() {
-        let heartbeat = decoded(json!({
+        let heartbeat = decoded(&json!({
             "role": "custom",
             "customType": HEARTBEAT_PROMPT_CUSTOM_TYPE,
             "content": "[heartbeat: every 10m run#0]\n\nnudge",
@@ -564,7 +564,7 @@ mod tests {
                 if matches!(boxed.kind, InjectedPromptKind::Heartbeat { ref schedule }
                     if schedule.as_deref() == Some("every 10m"))
         ));
-        let goal = decoded(json!({
+        let goal = decoded(&json!({
             "role": "custom",
             "customType": GOAL_CONTEXT_CUSTOM_TYPE,
             "content": "[goal: continuation]",
@@ -579,7 +579,7 @@ mod tests {
                         if kind.as_deref() == Some("continuation")
                             && objective.as_deref() == Some("ship it"))
         ));
-        let restored = decoded(json!({
+        let restored = decoded(&json!({
             "role": "custom",
             "customType": IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
             "content": "[python-state-restored]",
@@ -593,7 +593,7 @@ mod tests {
         ));
         // The RLM child rows decode the outcome and the session name (the
         // render shapes live with the kind, in `injected_prompt`).
-        let failed = decoded(json!({
+        let failed = decoded(&json!({
             "role": "custom",
             "customType": RLM_CHILD_FAILURE_CUSTOM_TYPE,
             "content": "[child-failed child:lane]\n\nboom",
@@ -615,7 +615,7 @@ mod tests {
             ("completed_without_reply", RlmChildOutcome::Finished),
             ("cancelled", RlmChildOutcome::Cancelled),
         ] {
-            let row = decoded(json!({
+            let row = decoded(&json!({
                 "role": "custom",
                 "customType": RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
                 "content": "[child-exited: no-reply child:lane]",
@@ -638,7 +638,7 @@ mod tests {
             );
         }
         // The kernel-state row carries no expandable body.
-        let restored = decoded(json!({
+        let restored = decoded(&json!({
             "role": "custom",
             "customType": IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
             "content": "[python-state-restored]",
@@ -651,7 +651,7 @@ mod tests {
         ));
         // The unavailable-skills row decodes the failed names and keeps
         // the full report as its expandable body.
-        let unavailable = decoded(json!({
+        let unavailable = decoded(&json!({
             "role": "custom",
             "customType": PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE,
             "content": "[python-skills-unavailable]\n\n- websearch: No module named 'websearch'",
@@ -670,7 +670,7 @@ mod tests {
 
     #[test]
     fn shell_completion_decodes_details() {
-        let entries = decoded(json!({
+        let entries = decoded(&json!({
             "role": "custom",
             "customType": ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
             "content": "[bash-done pid:4371 exit:0]\n\nCommand: \"ls\"",
@@ -685,7 +685,7 @@ mod tests {
         // An invalid details block (TS `readShellCompletion` requires a
         // positive pid, a string command, and an integer exit code) keeps
         // the default finished row and the JSON content fallback.
-        let entries = decoded(json!({
+        let entries = decoded(&json!({
             "role": "custom",
             "customType": ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
             "content": [{ "type": "text", "text": "[bash-done]" }],
@@ -704,7 +704,7 @@ mod tests {
         // TS `isAgentSessionMessage` checks only `typeof id === "string"`
         // and `typeof message === "string"`; empty strings still decode as
         // agent-message rows.
-        let entries = decoded(json!({
+        let entries = decoded(&json!({
             "role": "custom",
             "customType": AGENT_MESSAGE_CUSTOM_TYPE,
             "content": "[agent-message from x]",
@@ -716,7 +716,7 @@ mod tests {
 
     #[test]
     fn compaction_outcome_maps_to_status_rows() {
-        let skipped = decoded(json!({
+        let skipped = decoded(&json!({
             "role": "custom",
             "customType": COMPACTION_OUTCOME_CUSTOM_TYPE,
             "content": "Compaction skipped: below threshold",
@@ -730,7 +730,7 @@ mod tests {
                 kind: StatusKind::Warning,
             }]
         );
-        let failed = decoded(json!({
+        let failed = decoded(&json!({
             "role": "custom",
             "customType": COMPACTION_OUTCOME_CUSTOM_TYPE,
             "content": "Compaction failed",
@@ -744,7 +744,7 @@ mod tests {
                 kind: StatusKind::Error,
             }]
         );
-        let malformed = decoded(json!({
+        let malformed = decoded(&json!({
             "role": "custom",
             "customType": COMPACTION_OUTCOME_CUSTOM_TYPE,
             "content": "Compaction?",
@@ -762,7 +762,7 @@ mod tests {
 
     #[test]
     fn unknown_displayed_types_render_the_generic_box() {
-        let entries = decoded(json!({
+        let entries = decoded(&json!({
             "role": "custom",
             "customType": "autonomous_status",
             "content": "[autonomous-status: on]",

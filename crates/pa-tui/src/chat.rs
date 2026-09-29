@@ -38,16 +38,19 @@ impl Detail {
     }
 
     /// Thinking blocks render (TS `hideThinkingBlock = detail === "overview"`).
+    #[must_use]
     pub fn show_thinking(self) -> bool {
         !matches!(self, Detail::Overview)
     }
 
     /// Tool output expands (TS `toolOutputExpanded = detail === "all"`).
+    #[must_use]
     pub fn tool_output_expanded(self) -> bool {
         matches!(self, Detail::All)
     }
 
     /// Edit diffs expand (TS `editDiffsExpanded = detail !== "overview"`).
+    #[must_use]
     pub fn edit_diffs_expanded(self) -> bool {
         !matches!(self, Detail::Overview)
     }
@@ -169,6 +172,7 @@ impl AssistantMessage {
     /// separator renders for visible bodies, aborted messages, and messages
     /// not following tool activity (the same condition `render_assistant`
     /// applies).
+    #[must_use]
     pub fn has_trailing_space(&self, detail: Detail, preceded_by_tool_activity: bool) -> bool {
         let has_visible_content = self.blocks.iter().any(|block| match block {
             MessageBlock::Thinking(text) => detail.show_thinking() && !text.trim().is_empty(),
@@ -203,6 +207,7 @@ pub struct WorkingState {
 /// TS `message_end`'s aborted arm: the live abort row's text — the retry
 /// count and the working-elapsed suffix ride the client, never the wire
 /// (the rebuild path keeps the stored "Operation aborted").
+#[must_use]
 pub fn live_abort_text(retry_attempt: u32, elapsed_secs: Option<u64>) -> String {
     let elapsed_suffix = elapsed_secs
         .map(|secs| format!(" \u{00b7} {}", format_working_elapsed(secs)))
@@ -218,6 +223,7 @@ pub fn live_abort_text(retry_attempt: u32, elapsed_secs: Option<u64>) -> String 
 }
 
 /// TS `formatWorkingElapsed`: "3s", "1m 05s", "1h 02m 03s", "1d 02h 03m 04s".
+#[must_use]
 pub fn format_working_elapsed(total_secs: u64) -> String {
     let secs = total_secs % 60;
     let total_mins = total_secs / 60;
@@ -237,6 +243,7 @@ pub fn format_working_elapsed(total_secs: u64) -> String {
 }
 
 impl WorkingState {
+    #[must_use]
     pub fn label(&self) -> String {
         // Extensions and tool bootstrap own the message: plain
         // "<message> <elapsed>" (TS `getWorkingLoaderMessage`).
@@ -272,6 +279,7 @@ pub(crate) const LOADER_FRAMES: [&str; 10] = [
 /// tool markers.
 pub const WORKING_ICON_FRAMES: [&str; 4] = ["\u{25c7}", "\u{25c8}", "\u{25c6}", "\u{25c8}"];
 
+#[must_use]
 pub fn working_icon_frame(frame: usize) -> &'static str {
     WORKING_ICON_FRAMES[frame % WORKING_ICON_FRAMES.len()]
 }
@@ -293,6 +301,7 @@ pub(crate) fn pad_to(line: Line, width: usize, base: Style) -> Line {
 
 /// Render a status text (TS `Text` with paddingX=1, paddingY=0): wrapped at
 /// `width - 2`, one leading margin column, padded to the full width.
+#[must_use]
 pub fn render_text_rows(text: &str, style: Style, width: usize) -> Vec<Line> {
     if text.trim().is_empty() {
         return Vec::new();
@@ -333,6 +342,7 @@ pub fn render_text_rows(text: &str, style: Style, width: usize) -> Vec<Line> {
 /// their own colors: TS masks them to same-width placeholders before the
 /// markdown layout and restores them after, so markdown cannot wrap,
 /// emphasize, or eat them (`HighlightedMarkdown` + `PromptTokenMask`).
+#[must_use]
 pub fn render_user_block(
     text: &str,
     theme: &Theme,
@@ -499,6 +509,7 @@ fn render_thinking_block(
 }
 
 /// The working loader rows (TS `Loader.render`: `["", spinner + message]`).
+#[must_use]
 pub fn render_loader(
     working: &WorkingState,
     frame: usize,
@@ -539,6 +550,7 @@ pub struct RetryState {
 
 impl RetryState {
     /// Whole seconds left in the countdown (never negative).
+    #[must_use]
     pub fn seconds_left(&self) -> u64 {
         self.ends_at
             .saturating_duration_since(std::time::Instant::now())
@@ -570,6 +582,7 @@ impl RetryState {
 
 /// The retry loader rows (TS `auto_retry_start` rendering: muted spinner +
 /// the retry message).
+#[must_use]
 pub fn render_retry(retry: &RetryState, frame: usize, theme: &Theme, width: usize) -> Vec<Line> {
     let muted = theme.fg_style(ThemeColor::Muted);
     let spinner = LOADER_FRAMES[frame % LOADER_FRAMES.len()];

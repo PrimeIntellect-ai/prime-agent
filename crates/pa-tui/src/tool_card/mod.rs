@@ -98,6 +98,7 @@ fn hidden_image_text(block: &Value) -> String {
 }
 
 /// The animated working icon glyph (TS `working-icon.ts`).
+#[must_use]
 pub fn working_icon(frame: usize) -> &'static str {
     crate::chat::working_icon_frame(frame)
 }
@@ -106,6 +107,7 @@ pub fn working_icon(frame: usize) -> &'static str {
 /// `terminal.showImages` setting (TS `showImages` on the tool component):
 /// image blocks render their metadata rows when set, their
 /// `[Image: ...]` text placeholders otherwise.
+#[must_use]
 pub fn render_tool_card(
     card: &ToolCallCard,
     frame: usize,
@@ -202,6 +204,7 @@ pub(crate) fn format_bash_duration(ms: u128) -> String {
 pub const DEFAULT_MAX_BYTES: usize = 50 * 1024;
 
 /// `formatSize` (TS `truncate.ts`): `512B`, `50.0KB`, `1.2MB`.
+#[must_use]
 pub fn format_size(bytes: usize) -> String {
     if bytes < 1024 {
         format!("{bytes}B")
@@ -220,7 +223,7 @@ pub fn format_size(bytes: usize) -> String {
 /// hidden ones contribute their `[Image: ...]` text through
 /// [`ToolResultView::text_output`] instead.
 pub(crate) fn image_rows(
-    result: &Option<ToolResultView>,
+    result: Option<&ToolResultView>,
     show_images: bool,
     theme: &Theme,
 ) -> Vec<Line> {
@@ -230,7 +233,7 @@ pub(crate) fn image_rows(
             data.to_string(),
             mime.to_string(),
             theme.fg_style(ThemeColor::ToolOutput),
-            crate::image_component::ImageOptions {
+            &crate::image_component::ImageOptions {
                 fallback_only: true,
                 fallback_prefix: Some("    \u{2570}\u{2500} ".to_string()),
                 ..Default::default()
@@ -245,11 +248,11 @@ pub(crate) fn image_rows(
 }
 
 fn eligible_images(
-    result: &Option<ToolResultView>,
+    result: Option<&ToolResultView>,
     show_images: bool,
 ) -> impl Iterator<Item = (&str, &str)> {
     result
-        .iter()
+        .into_iter()
         .flat_map(|result| &result.content)
         .filter_map(move |block| {
             if !show_images || block.get("type").and_then(Value::as_str) != Some("image") {

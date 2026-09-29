@@ -89,6 +89,7 @@ impl BashActivity {
 /// running-first ruling, 2026-09-25): the stable sort keeps the
 /// registry's own order within each side, the idle, stopped, and dead
 /// rows follow the live work.
+#[must_use]
 pub fn parse_bash_activities(data: &Value) -> Vec<BashActivity> {
     let rows = data.get("activities").unwrap_or(data);
     let mut activities: Vec<BashActivity> = rows
@@ -222,6 +223,7 @@ pub struct BashView {
 
 impl BashView {
     /// Build the view over a registry snapshot.
+    #[must_use]
     pub fn new(activities: Vec<BashActivity>, viewport_rows: usize) -> Self {
         let mut view = BashView {
             activities,
@@ -612,7 +614,7 @@ impl BashView {
                 ]);
             }
         }
-        lines.extend(self.pane_footer(theme, width, &self.list_hint(kb)));
+        lines.extend(self.pane_footer(theme, width, &Self::list_hint(kb)));
         // The budget math keeps every normal viewport exact; a terminal
         // shorter than the frame itself degrades by truncation — the
         // pane never renders past its allocated rows.
@@ -789,7 +791,7 @@ impl BashView {
     /// the back binding drops its key (the hint never advertises a key
     /// the handler does not take; the cancel fallback is the pane's
     /// core key).
-    fn list_hint(&self, kb: &KeybindingsManager) -> String {
+    fn list_hint(kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
                 .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))

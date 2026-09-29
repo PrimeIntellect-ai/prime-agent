@@ -94,7 +94,7 @@ impl ImageComponent {
         base64_data: String,
         mime_type: String,
         fallback_style: Style,
-        options: ImageOptions,
+        options: &ImageOptions,
         dimensions: Option<ImageDimensions>,
     ) -> Self {
         let dimensions = dimensions
@@ -284,7 +284,7 @@ mod tests {
             "QQ==".into(),
             "image/png".into(),
             Style::new(),
-            ImageOptions {
+            &ImageOptions {
                 fallback_only: true,
                 fallback_prefix: Some("    \u{2570}\u{2500} ".into()),
                 ..Default::default()
@@ -307,7 +307,7 @@ mod tests {
             "QQ==".into(),
             "image/png".into(),
             Style::new(),
-            ImageOptions {
+            &ImageOptions {
                 fallback_only: true,
                 filename: Some("shot.png".into()),
                 ..Default::default()
@@ -330,7 +330,7 @@ mod tests {
             "QQ==".into(),
             "image/png".into(),
             Style::new(),
-            ImageOptions::default(),
+            &ImageOptions::default(),
             None,
         );
         assert_eq!(image.dimensions, DEFAULT_DIMENSIONS);
@@ -344,7 +344,7 @@ mod tests {
             tiny_png(),
             "image/png".into(),
             Style::new(),
-            ImageOptions {
+            &ImageOptions {
                 filename: Some("shot.png".into()),
                 ..Default::default()
             },
@@ -364,7 +364,7 @@ mod tests {
             tiny_png(),
             "image/png".into(),
             Style::new(),
-            ImageOptions {
+            &ImageOptions {
                 max_width_cells: Some(20),
                 ..Default::default()
             },
@@ -398,7 +398,7 @@ mod tests {
             tiny_png(),
             "image/png".into(),
             Style::new(),
-            ImageOptions {
+            &ImageOptions {
                 max_width_cells: Some(80),
                 ..Default::default()
             },
@@ -429,7 +429,7 @@ mod tests {
             tiny_png(),
             "image/png".into(),
             Style::new(),
-            ImageOptions::default(),
+            &ImageOptions::default(),
             None,
         );
         let rows = with_fullscreen_image_fallback(|| image.render(80));

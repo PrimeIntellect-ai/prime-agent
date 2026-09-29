@@ -8,6 +8,7 @@ use crate::width::{str_width, wrap_line};
 use crate::{Line, Span};
 
 /// `normalizeErrorDetails`: strip ANSI, normalize newlines, trim the end.
+#[must_use]
 pub fn normalize_error_details(text: &str) -> String {
     let stripped = strip_ansi(text);
     let unified = stripped.replace("\r\n", "\n").replace('\r', "\n");
@@ -16,11 +17,13 @@ pub fn normalize_error_details(text: &str) -> String {
 
 /// `stripAnsi`: remove every escape sequence (the exact TS utils.ts:899
 /// scanner — see [`crate::ansi::strip_ansi`]).
+#[must_use]
 pub fn strip_ansi(text: &str) -> String {
     crate::ansi::strip_ansi(text)
 }
 
 /// `shouldCollapseErrorDetails`: multi-line errors collapse.
+#[must_use]
 pub fn should_collapse_error_details(text: &str) -> bool {
     normalize_error_details(text).contains('\n')
 }
@@ -34,6 +37,7 @@ const LOGIN_RECOVERY_MESSAGE: &str = "Run /login to update credentials.";
 /// as one inline line — `{base} · {hint}` with `base` the suffix-stripped,
 /// end-trimmed remainder. `None` keeps the normal error paths: no suffix,
 /// an empty base, or a base that would itself collapse (multi-line).
+#[must_use]
 pub fn format_inline_login_recovery_message(text: &str) -> Option<String> {
     let normalized = normalize_error_details(text);
     let base = normalized
@@ -60,6 +64,7 @@ fn is_stack_context_line(raw: &str) -> bool {
 
 /// `summarizeErrorDetails`: the first line, or the last non-stack-context
 /// line when the error opens with a traceback.
+#[must_use]
 pub fn summarize_error_details(text: &str) -> String {
     let normalized = normalize_error_details(text);
     let lines: Vec<&str> = normalized
@@ -124,6 +129,7 @@ pub(crate) fn collapsible_error_row_count(
 /// The collapsible error rows (`CollapsibleErrorComponent.render`): the
 /// summary line while collapsed, the full text expanded; every row
 /// one-space indented, wrapped at `width - 1`, padded with plain spaces.
+#[must_use]
 pub fn render_collapsible_error(
     text: &str,
     summary: Option<&str>,

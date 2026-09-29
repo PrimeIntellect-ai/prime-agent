@@ -2,7 +2,7 @@
 //! vocabulary and the exit gate's settle snapshot - the verifier seam that
 //! drives the identical attach/submit/stream/render path without a TTY.
 
-use super::*;
+use super::{AgentView, SessionUi};
 
 /// How the UI is driven.
 pub enum UiMode {

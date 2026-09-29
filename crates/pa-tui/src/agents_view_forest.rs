@@ -96,6 +96,7 @@ pub(crate) fn is_summary_row_identity(identity: &str) -> bool {
 
 impl AgentsViewRow {
     /// Rows the selection may land on (TS `selectable`: every row here).
+    #[must_use]
     pub fn selectable(&self) -> bool {
         true
     }

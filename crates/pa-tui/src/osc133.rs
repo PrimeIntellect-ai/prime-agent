@@ -43,6 +43,7 @@ pub struct RowMarkers {
 }
 
 /// Detect the zone sequences at the start of a rendered row.
+#[must_use]
 pub fn row_markers(line: &Line) -> RowMarkers {
     let joined: String = line.iter().map(|s| s.content.as_str()).collect();
     let mut markers = RowMarkers::default();
@@ -92,6 +93,7 @@ fn markers_only(content: &str) -> bool {
 
 /// Per-frame row marker plan: `(terminal row, markers)` for every marked
 /// row, in row order.
+#[must_use]
 pub fn frame_markers(frame: &[Line]) -> Vec<(usize, RowMarkers)> {
     frame
         .iter()

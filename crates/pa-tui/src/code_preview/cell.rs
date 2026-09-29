@@ -52,6 +52,7 @@ pub struct ParsedIpythonBashCell {
 }
 
 /// Detect an `%%bash` cell magic and return the cell body that follows it.
+#[must_use]
 pub fn parse_ipython_bash_cell(code: &str) -> Option<ParsedIpythonBashCell> {
     let matched = bash_cell_magic_match(code)?;
     Some(ParsedIpythonBashCell {

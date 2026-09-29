@@ -28,11 +28,11 @@ fn the_summary_line_renders_the_aggregate_in_the_cost_column() {
     inactive_child["usage"] = serde_json::json!({ "cost": 0.75 });
     let mut mode = mode_with_parent_and_child();
     mode.roster = vec![
-        roster_entry("p", "idle", parent),
-        roster_entry("r1", "running", runner),
-        roster_entry("gc", "running", grandchild),
-        roster_entry("i1", "idle", idle_child),
-        roster_entry("x1", "inactive", inactive_child),
+        roster_entry("p", "idle", &parent),
+        roster_entry("r1", "running", &runner),
+        roster_entry("gc", "running", &grandchild),
+        roster_entry("i1", "idle", &idle_child),
+        roster_entry("x1", "inactive", &inactive_child),
     ];
     mode.rebuild_rows();
     assert_eq!(mode.rows[1].title, "4 subagents (2 running)");
@@ -104,9 +104,9 @@ fn the_summary_line_renders_the_aggregate_in_the_all_done_state() {
     inactive_child["usage"] = serde_json::json!({ "cost": 0.75 });
     let mut mode = mode_with_parent_and_child();
     mode.roster = vec![
-        roster_entry("p", "idle", parent),
-        roster_entry("i1", "idle", idle_child),
-        roster_entry("x1", "inactive", inactive_child),
+        roster_entry("p", "idle", &parent),
+        roster_entry("i1", "idle", &idle_child),
+        roster_entry("x1", "inactive", &inactive_child),
     ];
     mode.rebuild_rows();
     assert_eq!(
@@ -147,8 +147,8 @@ fn aggregate_survives_the_incident_notice_render_path() {
     idle_child["usage"] = serde_json::json!({ "cost": 1.25 });
     let mut mode = mode_with_parent_and_child();
     mode.roster = vec![
-        roster_entry("p", "idle", parent),
-        roster_entry("i1", "idle", idle_child),
+        roster_entry("p", "idle", &parent),
+        roster_entry("i1", "idle", &idle_child),
     ];
     mode.rebuild_rows();
     mode.incident_notice_state.notice = Some(crate::incident_notices::IncidentNotice {
@@ -194,8 +194,8 @@ fn aggregate_survives_the_click_surface_render_path() {
     idle_child["usage"] = serde_json::json!({ "cost": 1.25 });
     let mut mode = mode_with_parent_and_child();
     mode.roster = vec![
-        roster_entry("p", "idle", parent),
-        roster_entry("i1", "idle", idle_child),
+        roster_entry("p", "idle", &parent),
+        roster_entry("i1", "idle", &idle_child),
     ];
     mode.rebuild_rows();
     let (lines, _) = mode.render_frame(120, 36);

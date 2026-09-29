@@ -1,7 +1,7 @@
 //! The stream concern: the working loader's activity and token accounting
 //! over provider stream events, plus the `/speed` readout and the
 //! streaming/running/resume hint helpers.
-use super::*;
+use super::{AgentView, SessionUi, Value, WorkingState};
 
 /// The loader's token accounting (TS `AgentActivityTracker`): the live
 /// count is completed-message output tokens plus max(reported usage, the
@@ -126,7 +126,7 @@ impl SessionUi {
     /// [`Self::track_stream_tokens`]: the event's own delta is only the
     /// last of possibly many coalesced provider deltas, so the message —
     /// not the delta — carries the token truth.
-    pub(crate) fn track_stream_activity(&mut self, event: &Value, view: &mut AgentView) {
+    pub(crate) fn track_stream_activity(event: &Value, view: &mut AgentView) {
         let (activity, download) = match event.get("type").and_then(Value::as_str) {
             Some("thinking_start" | "thinking_delta") => ("Thinking", true),
             Some("text_start" | "text_delta") => ("Writing", true),

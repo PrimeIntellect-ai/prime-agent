@@ -79,6 +79,7 @@ pub enum HeartbeatAction {
 
 impl HeartbeatAction {
     /// The wire word (TS `heartbeat_manage` action values).
+    #[must_use]
     pub fn as_wire(self) -> &'static str {
         match self {
             HeartbeatAction::Pause => "pause",
@@ -134,6 +135,7 @@ pub struct HeartbeatsPicker {
 
 impl HeartbeatsPicker {
     /// Build the view over a fetched (scoped, sorted) catalog.
+    #[must_use]
     pub fn new(
         heartbeats: Vec<HeartbeatEntry>,
         fetch_error: Option<String>,
@@ -163,7 +165,7 @@ impl HeartbeatsPicker {
         self.heartbeats = heartbeats;
         self.fetch_error = fetch_error;
         let selected = self.selected_heartbeat_id.clone();
-        self.conform_selection(&selected);
+        self.conform_selection(selected.as_deref());
         self.dirty_conform_mode();
     }
 
@@ -181,7 +183,7 @@ impl HeartbeatsPicker {
             entry.job = updated;
         }
         let selected = self.selected_heartbeat_id.clone();
-        self.conform_selection(&selected);
+        self.conform_selection(selected.as_deref());
         self.mode = Mode::List;
         self.error = None;
     }
@@ -208,10 +210,9 @@ impl HeartbeatsPicker {
 
     /// Reset the selection to the first row when the selected job vanished
     /// (TS `render`'s fallback).
-    fn conform_selection(&mut self, selected: &Option<String>) {
-        let exists = selected
-            .as_deref()
-            .is_some_and(|id| self.heartbeats.iter().any(|entry| entry.job.id == id));
+    fn conform_selection(&mut self, selected: Option<&str>) {
+        let exists =
+            selected.is_some_and(|id| self.heartbeats.iter().any(|entry| entry.job.id == id));
         if !exists {
             self.selected_heartbeat_id = self.heartbeats.first().map(|entry| entry.job.id.clone());
         }
@@ -405,6 +406,7 @@ impl HeartbeatsPicker {
     }
 
     /// Render the view's frame: the columned list or the detail drill-in.
+    #[must_use]
     pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         match &self.mode {
             Mode::List => self.render_list(theme, width, kb),
@@ -451,7 +453,7 @@ impl HeartbeatsPicker {
                 ]);
             }
         }
-        lines.extend(self.pane_footer(theme, width, &self.list_hint(kb)));
+        lines.extend(self.pane_footer(theme, width, &Self::list_hint(kb)));
         // The budget math keeps every normal viewport exact; a terminal
         // shorter than the frame itself degrades by truncation — the
         // pane never renders past its allocated rows.
@@ -496,7 +498,7 @@ impl HeartbeatsPicker {
                 Span::raw("  "),
                 theme.fg_span(ThemeColor::Muted, "This heartbeat is no longer available."),
             ]);
-            lines.extend(self.pane_footer(theme, width, &self.detail_hint(kb)));
+            lines.extend(self.pane_footer(theme, width, &Self::detail_hint(kb)));
             return lines;
         };
         let name = entry
@@ -597,7 +599,7 @@ impl HeartbeatsPicker {
                 index == action_index,
             ));
         }
-        lines.extend(self.pane_footer(theme, width, &self.detail_hint(kb)));
+        lines.extend(self.pane_footer(theme, width, &Self::detail_hint(kb)));
         lines.truncate(self.viewport_rows.max(1));
         lines
     }
@@ -609,7 +611,7 @@ impl HeartbeatsPicker {
     /// list — and an override that empties one of the pair drops that
     /// key (the hint never advertises a key the handler does not take;
     /// the confirm/cancel fallbacks are the pane's core keys).
-    fn list_hint(&self, kb: &KeybindingsManager) -> String {
+    fn list_hint(kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
                 .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
@@ -631,7 +633,7 @@ impl HeartbeatsPicker {
     }
 
     /// The detail pane's bottom hint line.
-    fn detail_hint(&self, kb: &KeybindingsManager) -> String {
+    fn detail_hint(kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
                 .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))

@@ -387,11 +387,11 @@ fn string_at(text: &str, i: usize) -> Option<usize> {
         }
         let ch = rest.chars().next()?;
         if triple {
-            let closing = [quote_char(quote); 3].iter().collect::<String>();
+            let closing = [quote_char(*quote); 3].iter().collect::<String>();
             if rest.starts_with(&closing) {
                 return Some(cursor + 3 - i);
             }
-        } else if ch == quote_char(quote) {
+        } else if ch == quote_char(*quote) {
             return Some(cursor + ch.len_utf8() - i);
         }
         // Single-quoted strings never cross a line break; an unterminated
@@ -408,8 +408,8 @@ fn string_at(text: &str, i: usize) -> Option<usize> {
     }
 }
 
-fn quote_char(byte: &u8) -> char {
-    if byte == &b'\'' {
+fn quote_char(byte: u8) -> char {
+    if byte == b'\'' {
         '\''
     } else {
         '"'

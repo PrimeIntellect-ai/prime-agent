@@ -28,12 +28,14 @@ use crate::Line;
 pub type LinkBackend = ratatui::backend::CrosstermBackend<HyperlinkWriter<std::io::Stdout>>;
 
 /// Construct the stdout paint backend with the hyperlink writer.
+#[must_use]
 pub fn stdout_backend() -> LinkBackend {
     LinkBackend::new(HyperlinkWriter::new(std::io::stdout()))
 }
 
 /// OSC 8 open: starts a hyperlink region for `url`.
 /// Byte-identical to the TS `hyperlink()` helper (`terminal-image.ts`).
+#[must_use]
 pub fn osc8_open(url: &str) -> String {
     format!("\x1b]8;;{url}\x1b\\")
 }
@@ -45,6 +47,7 @@ pub const OSC8_CLOSE: &str = "\x1b]8;;\x1b\\";
 /// URL, mirroring the TS href normalization that classifies it as a path
 /// rather than a URL scheme and lets `new URL()` canonicalize the
 /// backslashes. Other targets pass through unchanged.
+#[must_use]
 pub fn rewrite_drive_path(url: &str) -> String {
     let bytes = url.as_bytes();
     if url.len() >= 3
@@ -69,6 +72,7 @@ pub fn rewrite_drive_path(url: &str) -> String {
 /// through raw here - the one documented gap: resolving them against the
 /// session cwd needs cwd plumbing the markdown pipeline does not carry,
 /// and no battery covers a relative link target.
+#[must_use]
 pub fn resolve_link_href(token_href: &str) -> String {
     let target = rewrite_drive_path(token_href);
     if target.starts_with('#') {
@@ -116,6 +120,7 @@ fn sanitize_control_bytes(target: String) -> String {
 /// OSC 8, forced off under tmux/screen (which swallow the sequences by
 /// default), and off in unknown terminals (a swallowed OSC 8 hides the URL
 /// from the rendered output).
+#[must_use]
 pub fn hyperlinks_enabled() -> bool {
     if let Some(overridden) = OVERRIDE.with(|c| *c.borrow()) {
         return overridden;
@@ -175,6 +180,7 @@ pub struct LinkRange {
 /// open at a row end (its label wrapped mid-link) extends to the end of the
 /// row and resumes at column 0 of the next row, matching the TS renderer's
 /// stream where the region stays open across the wrap.
+#[must_use]
 pub fn frame_link_ranges(frame: &[Line]) -> Vec<LinkRange> {
     let mut ranges: Vec<LinkRange> = Vec::new();
     let mut carry: Option<(usize, usize, String)> = None;
@@ -267,6 +273,7 @@ pub fn strip_osc8(line: &mut Line) {
 /// Cannot panic for any valid `str`: the `expect` guards the scanner
 /// invariant that the loop only ever advances by whole escape sequences
 /// and chars, so a char always starts at the visited index.
+#[must_use]
 pub fn strip_osc8_content(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut i = 0usize;

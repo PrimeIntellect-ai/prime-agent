@@ -79,14 +79,14 @@ pub(crate) fn split_line_on_newlines(line: &Line) -> Vec<Line> {
 /// content width (styles preserved through the wrap), the first rendered
 /// content row carries the dim gutter, the rest the continuation indent,
 /// and every row truncates to the full width.
-pub(crate) fn branch_block(line: Line, theme: &crate::theme::Theme, width: usize) -> Vec<Line> {
+pub(crate) fn branch_block(line: &Line, theme: &crate::theme::Theme, width: usize) -> Vec<Line> {
     let flat: String = line.iter().map(|span| span.content.as_str()).collect();
     if flat.trim().is_empty() {
         return Vec::new();
     }
     let content_width = branch_content_width(width);
     let mut wrapped: Vec<Line> = Vec::new();
-    for source in split_line_on_newlines(&line) {
+    for source in split_line_on_newlines(line) {
         wrapped.extend(crate::width::wrap_line(&source, content_width));
     }
     branch_rows(wrapped, theme)
@@ -123,7 +123,7 @@ mod tests {
     #[test]
     fn block_hangs_first_row_on_the_gutter() {
         let line = vec![Span::raw("one two three four five six seven")];
-        let rows = branch_block(line, &theme(), 24);
+        let rows = branch_block(&line, &theme(), 24);
         assert_eq!(
             flat(&rows),
             vec![" \u{2570}\u{2500} one two three four", "    five six seven"]
@@ -139,7 +139,7 @@ mod tests {
             ),
             Span::raw(" local memory `x`\nsecond line"),
         ];
-        let rows = branch_block(line, &theme(), 40);
+        let rows = branch_block(&line, &theme(), 40);
         assert_eq!(flat(&rows).len(), 2);
         assert_eq!(rows[0][2].content, "Created");
         assert_eq!(
@@ -155,7 +155,7 @@ mod tests {
         // the leading empty row first, so the gutter must land on the
         // first row that carries content, not the first vector row.
         let line = vec![Span::raw("\nthe session story")];
-        let rows = branch_block(line, &theme(), 40);
+        let rows = branch_block(&line, &theme(), 40);
         let flat = flat(&rows);
         assert_eq!(
             flat[0], "    ",
@@ -166,8 +166,8 @@ mod tests {
 
     #[test]
     fn empty_block_renders_nothing() {
-        assert!(branch_block(vec![Span::raw("   ")], &theme(), 40).is_empty());
-        assert!(branch_block(vec![], &theme(), 40).is_empty());
+        assert!(branch_block(&vec![Span::raw("   ")], &theme(), 40).is_empty());
+        assert!(branch_block(&vec![], &theme(), 40).is_empty());
         assert_eq!(branch_block_count("  ", 40), 0);
     }
 
@@ -185,7 +185,7 @@ mod tests {
             for width in 0..40usize {
                 let line = vec![Span::raw(text)];
                 assert_eq!(
-                    branch_block(line, &theme, width).len(),
+                    branch_block(&line, &theme, width).len(),
                     branch_block_count(text, width),
                     "text={text:?} width={width}"
                 );

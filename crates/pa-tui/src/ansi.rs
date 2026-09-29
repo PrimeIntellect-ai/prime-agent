@@ -17,6 +17,7 @@ use std::fmt::Write;
 /// Cannot panic for any valid `str`: the internal `expect`s guard
 /// byte-scan invariants (every visited index starts a char; the
 /// two-char strip only runs once the following char exists).
+#[must_use]
 pub fn strip_ansi(text: &str) -> String {
     if !text.contains('\u{1b}') {
         return text.to_string();
@@ -91,6 +92,7 @@ fn bg_code(color: Color) -> Option<String> {
 }
 
 /// Encode a line as an ANSI string with SGR sequences.
+#[must_use]
 pub fn line_to_ansi(line: &Line) -> String {
     let mut out = String::new();
     let mut open = false;
@@ -144,11 +146,13 @@ fn sgr_codes(span: &Span) -> Option<String> {
 }
 
 /// Plain-text version of a line.
+#[must_use]
 pub fn line_to_plain(line: &Line) -> String {
     line.iter().map(|s| s.content.as_str()).collect()
 }
 
 /// Render lines to an ANSI text block (with newlines). Pads to `width`.
+#[must_use]
 pub fn lines_to_ansi_block(lines: &[Line], width: usize) -> String {
     let mut out = String::new();
     for line in lines {
@@ -159,6 +163,7 @@ pub fn lines_to_ansi_block(lines: &[Line], width: usize) -> String {
     out
 }
 
+#[must_use]
 pub fn raw_span(s: &str) -> Span {
     Span::raw(s.to_string())
 }

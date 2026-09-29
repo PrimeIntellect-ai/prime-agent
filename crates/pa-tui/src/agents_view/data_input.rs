@@ -3,7 +3,12 @@
 //! filter), the roster update apply, the saved-catalog stream
 //! reconcile, and the selection/key/mouse dispatch residue
 //! (moved with their concern).
-use super::*;
+use super::{
+    build_rows, compute_rollups, filter_empty_sessions, filter_unified_sessions,
+    parse_search_query, reconcile_unified_sessions, resolve_selection, scope_ancestors,
+    scope_depth, scope_to_subtree, AgentsViewMode, AgentsViewScope, PressedMouseClick, RowKind,
+    SelectionEdge, Value, ANCHOR_LOADING_HINT,
+};
 
 impl AgentsViewMode {
     /// The unified records the view runs on (reconciled from the live
@@ -479,7 +484,7 @@ impl AgentsViewMode {
                         // (running -> idle) re-arms rather than executing
                         // the stale word (the hint said stop; the row now
                         // deletes - the confirm rides the CURRENT state).
-                        && self.delete_arm_word(row) == pending.stop
+                        && Self::delete_arm_word(row) == pending.stop
                 })
             }) {
                 if let Some(action) = self.delete_action_for_selected() {

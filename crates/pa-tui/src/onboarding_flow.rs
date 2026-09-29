@@ -108,6 +108,7 @@ pub struct ProviderPicker {
 }
 
 impl ProviderPicker {
+    #[must_use]
     pub fn new(options: Vec<ProviderPickerOption>) -> Self {
         ProviderPicker {
             options,
@@ -183,7 +184,7 @@ impl ProviderPicker {
     /// follows it.
     fn move_selection(&mut self, delta: i32) {
         let filtered = self.filtered().len();
-        let next = self.selected as i64 + delta as i64;
+        let next = self.selected as i64 + i64::from(delta);
         if next < 0 || next > filtered as i64 {
             return;
         }
@@ -201,6 +202,7 @@ impl ProviderPicker {
     /// The picker's frame (TS `render`): the prompt, the search field, the
     /// pinned continue row, the viewport's rows, the below/top hint, and
     /// the trailing note.
+    #[must_use]
     pub fn render(&self, theme: &Theme, width: usize) -> Vec<Line> {
         let width = width.max(1);
         let filtered = self.filtered();
@@ -219,7 +221,7 @@ impl ProviderPicker {
             PROVIDERS_SEARCH_PLACEHOLDER,
         ));
         lines.push(padded(width));
-        lines.push(self.row(
+        lines.push(Self::row(
             theme,
             width,
             row_width,
@@ -239,7 +241,7 @@ impl ProviderPicker {
             } else {
                 format!("{} · not available", item.name)
             };
-            lines.push(self.row(
+            lines.push(Self::row(
                 theme,
                 width,
                 row_width,
@@ -273,14 +275,7 @@ impl ProviderPicker {
     /// One row (TS `renderRow`): the marker, the label, the connected
     /// check, and the row-width padding; the selected row carries the
     /// highlight wash.
-    fn row(
-        &self,
-        theme: &Theme,
-        width: usize,
-        row_width: usize,
-        label: &str,
-        marks: RowMarks,
-    ) -> Line {
+    fn row(theme: &Theme, width: usize, row_width: usize, label: &str, marks: RowMarks) -> Line {
         let RowMarks {
             connected,
             selected,
@@ -383,6 +378,7 @@ pub enum OnboardingPanel {
 impl OnboardingPanel {
     /// TS `renderHeadingLine`: the panel that owns the block names
     /// itself; `None` keeps the brand line.
+    #[must_use]
     pub fn heading(&self) -> Option<&str> {
         match self {
             OnboardingPanel::Auth { heading, .. } => heading.as_deref(),

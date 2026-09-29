@@ -2,7 +2,10 @@
 //! switches, the `/import` confirm flow, and the fast/rlm-max-depth/
 //! fullscreen/reload command surface, plus the parked `ReloadNote` and
 //! `PendingConfirm` types.
-use super::*;
+use super::{
+    key_event_to_id, AgentView, DaemonCommand, Duration, KeyEvent, Map, PathBuf, Result, SessionUi,
+    StatusKind, Value, UI_REQUEST_TIMEOUT_MS,
+};
 
 /// The `/reload` task's report: the daemon reloaded the session's live
 /// inputs, or the failure message (TS `handleReloadCommand`'s outcome).
@@ -399,7 +402,7 @@ impl SessionUi {
                 );
                 // TS fires `handleReloadCommand()` — the toggle takes
                 // effect after a reload.
-                let _ = self.handle_reload_command(view).await;
+                let _ = self.handle_reload_command(view);
             }
             "show-hardware-cursor" => {
                 // The show-images shape: a failed persist surfaces the
@@ -843,7 +846,7 @@ impl SessionUi {
     /// `/reload` (TS `handleReloadCommand`): the reload box replaces the
     /// editor (TS swaps the editor container) while the daemon reload
     /// runs; the run loop folds the outcome in when it lands.
-    pub(super) async fn handle_reload_command(&mut self, view: &mut AgentView) -> Result<()> {
+    pub(super) fn handle_reload_command(&mut self, view: &mut AgentView) -> Result<()> {
         view.reload_box =
             Some("Reloading keybindings, extensions, skills, prompts, themes...".to_string());
         self.dirty = true;

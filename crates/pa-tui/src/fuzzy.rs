@@ -3,6 +3,7 @@
 //! rank better. Space-separated query tokens must all match.
 
 /// One fuzzy match: `Some(score)` when the query matches (lower is better).
+#[must_use]
 pub fn fuzzy_match(query: &str, text: &str) -> Option<f64> {
     let query_lower: Vec<char> = query.to_lowercase().chars().collect();
     let text_lower: Vec<char> = text.to_lowercase().chars().collect();
@@ -55,7 +56,7 @@ fn match_query(query_lower: &[char], text_lower: &[char]) -> Option<f64> {
                 i == 0 || matches!(text_lower[i - 1], ' ' | '\t' | '-' | '_' | '.' | '/' | ':');
             if last_match_index == Some(i.saturating_sub(1)) {
                 consecutive_matches += 1;
-                score -= (consecutive_matches * 5) as f64;
+                score -= f64::from(consecutive_matches * 5);
             } else {
                 consecutive_matches = 0;
                 if let Some(last) = last_match_index {

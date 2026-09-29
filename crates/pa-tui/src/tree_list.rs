@@ -47,6 +47,7 @@ impl FilterMode {
     }
 
     /// The settings' wire name (`treeFilterMode`).
+    #[must_use]
     pub fn wire_name(self) -> &'static str {
         match self {
             Self::Default => "default",
@@ -70,6 +71,7 @@ impl FilterMode {
 }
 
 /// Parse the settings' `treeFilterMode` wire value.
+#[must_use]
 pub fn filter_mode_from_str(value: &str) -> FilterMode {
     match value {
         "no-tools" => FilterMode::NoTools,
@@ -135,13 +137,13 @@ impl TreeList {
     /// Build the list over one session tree; `current_leaf_id` marks the
     /// active branch, `initial_selected` the preselected entry.
     pub fn new(
-        tree: Vec<TreeNode>,
+        tree: &[TreeNode],
         current_leaf_id: Option<String>,
         max_visible_lines: usize,
         initial_selected_id: Option<&str>,
         initial_filter_mode: FilterMode,
     ) -> Self {
-        let flat = Self::flatten_tree(&tree, current_leaf_id.as_deref());
+        let flat = Self::flatten_tree(tree, current_leaf_id.as_deref());
         let mut list = TreeList {
             flat,
             filtered: Vec::new(),
@@ -224,15 +226,15 @@ impl TreeList {
             for node in all.iter().rev() {
                 let mut has = leaf_id.is_some_and(|leaf| node.id() == Some(leaf));
                 for child in &node.children {
-                    if contains_active.get(&(child as *const TreeNode)) == Some(&true) {
+                    if contains_active.get(&std::ptr::from_ref(child)) == Some(&true) {
                         has = true;
                     }
                 }
-                contains_active.insert(*node as *const TreeNode, has);
+                contains_active.insert(std::ptr::from_ref(*node), has);
             }
         }
         let multiple_roots = roots.len() > 1;
-        let has = |node: &TreeNode| contains_active.get(&(node as *const TreeNode)) == Some(&true);
+        let has = |node: &TreeNode| contains_active.get(&std::ptr::from_ref(node)) == Some(&true);
 
         let mut result: Vec<FlatNode> = Vec::new();
         // Stack of (node, indent, just_branched, show_connector, is_last,
@@ -661,6 +663,7 @@ impl TreeList {
     }
 
     /// The selected entry's id, when one row is selected.
+    #[must_use]
     pub fn selected_id(&self) -> Option<String> {
         self.filtered
             .get(self.selected)
@@ -680,17 +683,20 @@ impl TreeList {
     }
 
     /// The active search query.
+    #[must_use]
     pub fn search_query(&self) -> &str {
         &self.search_query
     }
 
     /// The session's current leaf id (the active-branch tip).
+    #[must_use]
     pub fn current_leaf_id(&self) -> Option<&str> {
         self.current_leaf_id.as_deref()
     }
 
     /// The label currently attached to an entry (the label-edit input's
     /// initial value).
+    #[must_use]
     pub fn label_of(&self, entry_id: &str) -> Option<String> {
         self.flat
             .iter()
@@ -908,6 +914,7 @@ impl TreeList {
     }
 
     /// Render the visible rows plus the counter (TS `TreeList.render`).
+    #[must_use]
     pub fn render(&self, theme: &Theme, width: usize) -> Vec<Line> {
         let mut lines: Vec<Line> = Vec::new();
         if self.filtered.is_empty() {
@@ -1253,7 +1260,7 @@ mod tests {
 
     fn list(flat: Vec<TreeNodeData>, leaf: Option<&str>) -> TreeList {
         TreeList::new(
-            build_tree(flat),
+            &build_tree(flat),
             leaf.map(str::to_string),
             40,
             None,

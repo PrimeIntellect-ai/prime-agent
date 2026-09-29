@@ -2,7 +2,13 @@
 //! points and open routes, the terminal/headless surface loop with the
 //! reconnect and settle gates, and the loop's timing constants.
 
-use super::*;
+use super::{
+    apply_startup_chrome, arm_shutdown_recovery, check_tmux_keyboard_setup, mpsc,
+    run_onboarding_phase, AgentView, Context, DaemonClient, Duration, ExitGuard, HeadlessSettle,
+    Instant, InteractiveOptions, InteractiveOutcome, PaneDrive, ReconnectConnect, ReconnectLoop,
+    RecoveryKind, Renderer, Result, SessionReconnect, SessionSelection, SessionUi, TerminalHandoff,
+    UiInput, UiMode, VecDeque, SESSION_RECONNECT_ATTEMPT_TIMEOUT_S,
+};
 
 /// Cap on the exit-path telemetry flush: the `PostHog` sink alone allows up
 /// to 1.5s, so the exit event must be dropped rather than awaited past the
@@ -455,7 +461,7 @@ async fn run_interactive_surface(
     // `getConnectionAvailableModels`): failures stay silent and the
     // composition-root snapshot keeps serving the picker.
     session.spawn_model_catalog_refresh();
-    session.rebuild_view(&mut view, crate::session_ui::RebuildKind::Rebind);
+    session.rebuild_view(&mut view, &crate::session_ui::RebuildKind::Rebind);
     if let Some(notice) = check_tmux_keyboard_setup().await {
         view.push_entry(crate::chat::ChatEntry::Status {
             text: format!("\u{26a0} {notice}"),
@@ -1082,7 +1088,7 @@ async fn run_interactive_surface(
                         {
                             Ok(()) => session.rebuild_view(
                                 &mut view,
-                                crate::session_ui::RebuildKind::Rebind,
+                                &crate::session_ui::RebuildKind::Rebind,
                             ),
                             Err(error) => session.note(
                                 &format!("session rebind failed: {error:#}"),
@@ -1601,7 +1607,7 @@ async fn run_interactive_surface(
                         // `connection_status: "connected"`).
                         session.rebuild_view(
                             &mut view,
-                            crate::session_ui::RebuildKind::Resync,
+                            &crate::session_ui::RebuildKind::Resync,
                         );
                         session.note_as(
                             "Daemon reconnected",

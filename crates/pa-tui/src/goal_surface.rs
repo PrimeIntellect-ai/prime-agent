@@ -22,6 +22,7 @@ impl Default for GoalAnnouncementSnapshot {
 }
 
 /// TS `goalAnnouncementSnapshot`.
+#[must_use]
 pub fn announcement_snapshot(goal: &GoalState) -> GoalAnnouncementSnapshot {
     GoalAnnouncementSnapshot {
         goal_id: goal.goal_id.clone(),
@@ -35,6 +36,7 @@ pub fn announcement_snapshot(goal: &GoalState) -> GoalAnnouncementSnapshot {
 /// TS `shouldAnnounceGoalUpdate`: state changes always announce; a goal-id
 /// change announces unless the new state is idle; within one goal only
 /// reason/error changes re-announce (an active goal never does).
+#[must_use]
 pub fn should_announce(
     previous: &GoalAnnouncementSnapshot,
     next: &GoalAnnouncementSnapshot,
@@ -55,6 +57,7 @@ pub fn should_announce(
 }
 
 /// TS `formatGoalUsage`: the token budget usage, or wall-clock seconds.
+#[must_use]
 pub fn format_goal_usage(goal: &GoalState) -> Option<String> {
     if let Some(budget) = goal.token_budget {
         return Some(format!("{} / {} tokens", goal.tokens_used, budget));
@@ -67,6 +70,7 @@ pub fn format_goal_usage(goal: &GoalState) -> Option<String> {
 
 /// TS `formatGoalStatus` + `formatGoalDetailSuffix`: the status-row text for
 /// one goal state at the given terminal width.
+#[must_use]
 pub fn format_goal_status(goal: &GoalState, columns: usize) -> String {
     let usage_text = format_goal_usage(goal)
         .map(|usage| format!(" ({usage})"))
@@ -139,6 +143,7 @@ fn truncate_plain(text: &str, width: usize) -> String {
 
 /// TS `getTrayGoalLabel`: the tray label while the goal is running;
 /// terminal states (idle/complete/error) carry no label.
+#[must_use]
 pub fn tray_goal_label(goal: &GoalState) -> Option<String> {
     match goal.status {
         GoalStatus::Active => Some(format!(
@@ -158,6 +163,7 @@ pub fn tray_goal_label(goal: &GoalState) -> Option<String> {
 }
 
 /// TS `formatGoalElapsed`: `45s`, `12m 05s`, `1h 07m`.
+#[must_use]
 pub fn format_goal_elapsed(seconds: u64) -> String {
     if seconds < 60 {
         return format!("{seconds}s");
@@ -326,6 +332,7 @@ pub struct GoalView {
 }
 
 impl GoalView {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }

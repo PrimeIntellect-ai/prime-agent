@@ -88,6 +88,7 @@ fn is_image_marker(seg: &str) -> bool {
     !body.is_empty() && body.bytes().all(|b| b.is_ascii_digit())
 }
 
+#[must_use]
 pub fn is_atomic_marker(seg: &str) -> bool {
     seg.len() >= 10 && (is_paste_marker(seg) || is_image_marker(seg))
 }

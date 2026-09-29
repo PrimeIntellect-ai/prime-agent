@@ -1,6 +1,11 @@
 //! The apply concern: the streamed-event pump — client events, turn
 //! updates, assistant/tool rows, compaction aborts, and the telemetry seams.
-use super::*;
+use super::{
+    assistant_message_parts, event_to_update, pop_superseded_attempt_row, AgentView, ChatEntry,
+    CompactionReason, CompactionState, DaemonClientEvent, DaemonCommand, Duration, Map,
+    MessageBlock, Result, RetryState, SessionUi, StatusKind, ToolResultView, TurnUpdate, Value,
+    UI_REQUEST_TIMEOUT_MS,
+};
 
 /// One backgrounded compaction-abort outcome (the abort supervision's UI
 /// recovery): a failed abort request surfaces as the transcript note and
@@ -445,7 +450,7 @@ impl SessionUi {
                     // pending map (a card may predate a pending-state reset or
                     // arrive without its own streamed frame).
                     self.pending_tools.insert(tool_call_id.clone());
-                    self.set_working_activity("Executing", false, view);
+                    Self::set_working_activity("Executing", false, view);
                 }
             }
             TurnUpdate::ToolExecutionUpdate {
@@ -458,7 +463,7 @@ impl SessionUi {
                 // landed-result gate: the aborted card's late frames must
                 // not clobber the delivered turn's loader.
                 let loader_message = crate::snapshot::working_message_from_update(&partial);
-                if self.apply_tool_result(&tool_call_id, partial, false, true, view) {
+                if self.apply_tool_result(&tool_call_id, &partial, false, true, view) {
                     if let (Some(message), Some(working)) = (loader_message, view.working.as_mut())
                     {
                         working.message = Some(message);
@@ -474,8 +479,8 @@ impl SessionUi {
                 // interrupt delivers the parked queue, a late end frame from
                 // the aborted run must not rewrite the new turn's activity
                 // label or clear its loader note.
-                if self.apply_tool_result(&tool_call_id, result, is_error, false, view) {
-                    self.set_working_activity("Waiting", false, view);
+                if self.apply_tool_result(&tool_call_id, &result, is_error, false, view) {
+                    Self::set_working_activity("Waiting", false, view);
                     // The tool that owned the loader note finished executing
                     // (TS clears `workingMessage` in the tool's `finally`).
                     if let Some(working) = &mut view.working {
@@ -496,7 +501,7 @@ impl SessionUi {
                 // The turn settled: the bash cards held above the
                 // indicator stream into the transcript (TS `turn_end`
                 // flushes `pendingBashComponents`).
-                self.flush_pending_bash(view);
+                Self::flush_pending_bash(view);
                 // TS `turn_end` clears the pending tool map after the
                 // failed frame's settle: stragglers never leak into the
                 // next run.
@@ -665,7 +670,13 @@ impl SessionUi {
                 transient,
                 run_id,
             } => {
-                self.apply_bash_start(command, exclude_from_context, transient, run_id, view);
+                self.apply_bash_start(
+                    &command,
+                    exclude_from_context,
+                    transient,
+                    run_id.as_deref(),
+                    view,
+                );
             }
             TurnUpdate::BashOutput { chunk } => {
                 self.apply_bash_output(&chunk, view);
@@ -686,7 +697,7 @@ impl SessionUi {
                     full_output_path,
                     error_message,
                     transient,
-                    run_id,
+                    run_id.as_deref(),
                     view,
                 );
             }
@@ -772,7 +783,7 @@ impl SessionUi {
         view: &mut AgentView,
     ) {
         if let Some(event) = stream_event {
-            self.track_stream_activity(event, view);
+            Self::track_stream_activity(event, view);
         }
         let (blocks, tool_calls) = assistant_message_parts(message);
         // A message_start always opens a new streaming message (the engine
@@ -967,7 +978,7 @@ impl SessionUi {
     fn apply_tool_result(
         &mut self,
         tool_call_id: &str,
-        result: Value,
+        result: &Value,
         is_error: bool,
         partial: bool,
         view: &mut AgentView,
@@ -1012,12 +1023,7 @@ impl SessionUi {
     }
 
     /// Update the loader activity label (agent-activity tracker subset).
-    fn set_working_activity(
-        &mut self,
-        activity: &'static str,
-        download: bool,
-        view: &mut AgentView,
-    ) {
+    fn set_working_activity(activity: &'static str, download: bool, view: &mut AgentView) {
         if let Some(working) = &mut view.working {
             working.activity = activity;
             working.download = download;

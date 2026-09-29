@@ -30,8 +30,8 @@ fn scoped_view_keeps_the_first_row_default() {
         incident_notice_state: None,
     });
     mode.roster = vec![
-        roster_entry("p", "idle", parent_summary("p")),
-        roster_entry("c", "running", child_summary("c", "p", "worker one")),
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("c", "running", &child_summary("c", "p", "worker one")),
     ];
     mode.rebuild_rows();
     assert_eq!(mode.rows.len(), 1, "the scope root is excluded");
@@ -112,11 +112,11 @@ fn mode_with_mixed_children() -> AgentsViewMode {
         incident_notice_state: None,
     });
     mode.roster = vec![
-        roster_entry("p", "idle", parent_summary("p")),
-        roster_entry("r1", "running", child_summary("r1", "p", "runner one")),
-        roster_entry("r2", "running", child_summary("r2", "p", "runner two")),
-        roster_entry("i1", "idle", child_summary("i1", "p", "old worker one")),
-        roster_entry("i2", "idle", child_summary("i2", "p", "old worker two")),
+        roster_entry("p", "idle", &parent_summary("p")),
+        roster_entry("r1", "running", &child_summary("r1", "p", "runner one")),
+        roster_entry("r2", "running", &child_summary("r2", "p", "runner two")),
+        roster_entry("i1", "idle", &child_summary("i1", "p", "old worker one")),
+        roster_entry("i2", "idle", &child_summary("i2", "p", "old worker two")),
     ];
     mode.rebuild_rows();
     mode
@@ -178,7 +178,7 @@ fn live_transitions_update_the_one_line_and_keep_the_selection() {
     assert_eq!(mode.rows[mode.selected].title, "runner one");
     let selected_identity = mode.rows[mode.selected].identity.clone();
     // The runner finishes: its roster row flips to idle.
-    let idle_flip = roster_entry("r1", "idle", child_summary("r1", "p", "runner one"));
+    let idle_flip = roster_entry("r1", "idle", &child_summary("r1", "p", "runner one"));
     mode.apply_roster_update(vec![idle_flip], Vec::new(), false);
     // The counts updated in the same rebuild: one runner left, and
     // the finished child stays a row in the group.
@@ -202,7 +202,7 @@ fn live_transitions_update_the_one_line_and_keep_the_selection() {
         "the selection stays on the session it followed"
     );
     // The runner restarts: the counts flip back.
-    let running_flip = roster_entry("r1", "running", child_summary("r1", "p", "runner one"));
+    let running_flip = roster_entry("r1", "running", &child_summary("r1", "p", "runner one"));
     mode.apply_roster_update(vec![running_flip], Vec::new(), false);
     let line = mode
         .rows
@@ -226,11 +226,11 @@ fn frame_renders_the_one_line() {
     let mut grandchild = child_summary("gc", "c", "grandkid");
     grandchild["rlmChildId"] = serde_json::json!("child-gc");
     let mut mode = mode_with_parent_and_child();
-    mode.roster.push(roster_entry("gc", "running", grandchild));
+    mode.roster.push(roster_entry("gc", "running", &grandchild));
     mode.roster.push(roster_entry(
         "i1",
         "idle",
-        child_summary("i1", "p", "old worker"),
+        &child_summary("i1", "p", "old worker"),
     ));
     mode.rebuild_rows();
     assert_eq!(mode.rows.len(), 2, "the parent and its ONE line");

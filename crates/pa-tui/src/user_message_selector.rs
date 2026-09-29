@@ -36,12 +36,14 @@ pub struct UserMessageSelector {
 impl UserMessageSelector {
     /// Build over the `get_user_messages_for_forking` response; the latest
     /// message is preselected (TS `initialSelectedId` fallback).
+    #[must_use]
     pub fn new(messages: Vec<UserMessageItem>) -> Self {
         let selected = messages.len().saturating_sub(1);
         UserMessageSelector { messages, selected }
     }
 
     /// True when there is nothing to fork from.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.messages.is_empty()
     }
@@ -68,6 +70,7 @@ impl UserMessageSelector {
 
     /// The full pane: the title and description rows, then the shared menu
     /// list (one row per message, the scroll indicator, the key hint).
+    #[must_use]
     pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         // TS mounts the title and description with a one-space margin
         // (`new Text(..., 1, 0)`): the indent sits outside any escape.

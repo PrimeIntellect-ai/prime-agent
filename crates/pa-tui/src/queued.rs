@@ -227,6 +227,7 @@ fn queued_item_origin(
 
 /// TS `formatQueuedMessagePreview`: the lane label plus the message, or
 /// the message itself when it carries an internal label.
+#[must_use]
 pub fn format_queued_message_preview(message: &str, label: &str) -> String {
     if internal_prompt_origin(message).is_some() {
         message.to_string()
@@ -265,6 +266,7 @@ pub struct QueuedMessages {
 }
 
 impl QueuedMessages {
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.steering.is_empty() && self.follow_ups.is_empty()
     }
@@ -287,6 +289,7 @@ pub struct QueueLaneIndices {
 
 impl QueueLaneIndices {
     /// Whether the lane item at `index` is a child status notice.
+    #[must_use]
     pub fn is_marked(&self, lane: QueueLane, index: usize) -> bool {
         match lane {
             QueueLane::Steering => self.steering.contains(&index),
@@ -304,6 +307,7 @@ pub enum QueueLane {
 
 impl QueueLane {
     /// The wire name (`"steering"` / `"followUp"`).
+    #[must_use]
     pub fn wire_name(&self) -> &'static str {
         match self {
             QueueLane::Steering => "steering",
@@ -312,6 +316,7 @@ impl QueueLane {
     }
 
     /// The browse-header display name (TS `getQueueSelectionHeader`).
+    #[must_use]
     pub fn display_name(&self) -> &'static str {
         match self {
             QueueLane::Steering => "steering",
@@ -343,6 +348,7 @@ pub struct QueueSelectionItem {
 /// but never the hint (there is nothing parked to browse).
 /// `browse_key` is the effective binding display for
 /// `app.message.navigateOlder` (user overrides show).
+#[must_use]
 pub fn render_queue(
     theme: &Theme,
     queue: &QueuedMessages,
@@ -399,6 +405,7 @@ pub fn render_queue(
 /// the read-only phrasing instead (the edit affordances never apply to
 /// it - the system owns the harness prompts, so the header offers
 /// browsing only, never the reorder/steer/queue/delete keys).
+#[must_use]
 pub fn browse_header_text(selected: &QueueSelectionItem, key_display: &QueueBrowseKeys) -> String {
     if selected.internal {
         return format!(
@@ -489,14 +496,17 @@ pub struct QueueSelection {
 }
 
 impl QueueSelection {
+    #[must_use]
     pub fn selected(&self) -> Option<&QueueSelectionItem> {
         self.cursor.and_then(|cursor| self.items.get(cursor))
     }
 
+    #[must_use]
     pub fn is_browsing(&self) -> bool {
         self.cursor.is_some()
     }
 
+    #[must_use]
     pub fn has_draft(&self) -> bool {
         self.has_stashed_draft
     }

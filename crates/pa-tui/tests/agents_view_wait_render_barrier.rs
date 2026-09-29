@@ -9,6 +9,29 @@
 //! where the retired wall-clock settle only won on an idle machine (the
 //! mock's 2s answer lag outlives any 300ms budget deterministically).
 #![cfg(unix)]
+// Pedantic-gate exceptions (every other pedantic warning in this crate is
+// fixed in place; each exception carries its one-line justification):
+// - the casts: terminal-layout arithmetic narrows structurally bounded
+//   values (screen coordinates, byte counts, timestamps); guarded
+//   conversions would add panic paths the bounds guarantee away.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+// - the render routes are flat tables (one arm per route); splitting them
+//   would add indirection without changing the flow.
+#![allow(clippy::too_many_lines)]
+// - widget state structs carry independent flag bits; a nested struct
+//   would add indirection without changing the shape.
+#![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
+// - the futures are bounded by the surface's lifetime; boxing them would
+//   add an allocation to the steady-state loop.
+#![allow(clippy::large_futures)]
+// - the wrappers preserve a uniform Result-returning API surface; unwrap
+//   removals would ripple through the callers without changing behavior.
+#![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -106,7 +129,7 @@ impl MockSupervisor {
                         &mut writer,
                         id,
                         "roster_subscribe",
-                        json!({ "roster": roster }),
+                        &json!({ "roster": roster }),
                     ) {
                         return;
                     }
@@ -118,7 +141,7 @@ impl MockSupervisor {
                             &mut writer,
                             id,
                             "list_saved_sessions",
-                            json!({ "sessions": saved_catalog() }),
+                            &json!({ "sessions": saved_catalog() }),
                         ) {
                             return;
                         }
@@ -132,7 +155,7 @@ impl MockSupervisor {
                     // fire-and-forget (selection handoff included); the
                     // answer ends the mock's one connection so the test's
                     // join never rides out the quiet cap.
-                    let _ = respond(&mut writer, id, "roster_unsubscribe", Value::Null);
+                    let _ = respond(&mut writer, id, "roster_unsubscribe", &Value::Null);
                     return;
                 }
                 other => {
@@ -178,7 +201,7 @@ fn write_line(writer: &mut UnixStream, value: &Value) -> bool {
     writer.write_all(line.as_bytes()).is_ok() && writer.flush().is_ok()
 }
 
-fn respond(writer: &mut UnixStream, id: &str, command: &str, data: Value) -> bool {
+fn respond(writer: &mut UnixStream, id: &str, command: &str, data: &Value) -> bool {
     write_line(
         writer,
         &json!({

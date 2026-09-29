@@ -31,6 +31,7 @@ fn normalize_base_url(value: &str) -> String {
 /// TS `resolvePrimeAgentTracesBaseUrl`: the `PRIME_AGENT_TRACES_BASE_URL`
 /// override normalized, else the platform default (the status block's
 /// endpoint row).
+#[must_use]
 pub fn traces_base_url() -> String {
     match std::env::var("PRIME_AGENT_TRACES_BASE_URL") {
         Ok(value) => normalize_base_url(&value),
@@ -39,6 +40,7 @@ pub fn traces_base_url() -> String {
 }
 
 /// TS `toLocaleString` (the default en-US grouping): `1,234,567`.
+#[must_use]
 pub fn thousands(value: u64) -> String {
     let raw = value.to_string();
     let mut grouped = String::with_capacity(raw.len() + raw.len() / 3);
@@ -70,6 +72,7 @@ fn dim(text: impl Into<String>) -> crate::info_commands::ClientSpan {
 /// The status block (TS "status" arm): the flag, the credential, the
 /// endpoint, and the session file — one structured line per source line
 /// (the info panel renders them like every other info display).
+#[must_use]
 pub fn status_block(
     enabled: bool,
     credential: Option<&str>,
@@ -129,6 +132,7 @@ pub enum TracePreviewOutcome {
 
 /// TS `formatTracePreview`: the preview block's structured rows (the
 /// info panel renders them like the status block).
+#[must_use]
 pub fn preview_block(info: &TracePreviewInfo) -> Vec<crate::info_commands::ClientLine> {
     let mut rows: Vec<crate::info_commands::ClientLine> = vec![
         vec![plain("Trace Preview")],
@@ -207,6 +211,7 @@ pub enum TraceUploadOutcome {
 
 impl TraceUploadOutcome {
     /// The status tag the arms branch on (TS the `status` field).
+    #[must_use]
     pub fn status_tag(&self) -> TraceUploadStatus {
         match self {
             TraceUploadOutcome::Uploaded { .. } => TraceUploadStatus::Uploaded,
@@ -247,6 +252,7 @@ pub struct TraceUploadReport {
 impl TraceUploadReport {
     /// TS the upload rows come from `formatTraceUploadResult` (the client
     /// bakes in the log path); the report carries the outcome's tag.
+    #[must_use]
     pub fn new(outcome: &TraceUploadOutcome, log_path: &str) -> Self {
         TraceUploadReport {
             status: outcome.status_tag(),
@@ -257,6 +263,7 @@ impl TraceUploadReport {
     /// The enable arm's upload message: the no-session states answer with
     /// the TS future-upload line (the enabled setting outlives the empty
     /// first turn).
+    #[must_use]
     pub fn enable_message(&self) -> String {
         match self.status {
             TraceUploadStatus::NoSessionFile | TraceUploadStatus::EmptySession => {
@@ -268,6 +275,7 @@ impl TraceUploadReport {
 }
 
 /// TS `formatTraceUploadResult`: every outcome's user-visible row.
+#[must_use]
 pub fn format_upload_outcome(outcome: &TraceUploadOutcome, log_path: &str) -> String {
     match outcome {
         TraceUploadOutcome::Uploaded { bytes_stored } => {
@@ -345,6 +353,7 @@ pub struct TraceUploadCancel {
 }
 
 impl TraceUploadCancel {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -354,6 +363,7 @@ impl TraceUploadCancel {
         self.notify.notify_waiters();
     }
 
+    #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.flag.load(Ordering::Acquire)
     }

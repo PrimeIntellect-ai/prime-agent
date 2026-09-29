@@ -2,7 +2,7 @@
 //! the configured provider.
 
 use super::text_utils::{char_at, char_prefix, ends_with_symbol_token};
-use super::*;
+use super::{Editor, EditorEvent, PendingAutocomplete};
 
 impl Editor {
     // ---- autocomplete ------------------------------------------------------
@@ -21,6 +21,7 @@ impl Editor {
     /// the cursor sits in the argument text of a recognized command token:
     /// the command name plus the typed partial. Tab interception uses this
     /// to open a picker-command's menu filtered to the partial.
+    #[must_use]
     pub fn picker_argument_context(&self) -> Option<(String, String)> {
         let context = self.current_slash_command_context()?;
         if context.kind != crate::autocomplete::SlashKind::Argument || !context.at_prompt_start {
