@@ -108,7 +108,9 @@ fn dump_hang_state(worker: &Worker) -> String {
     dump
 }
 
-#[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
+// The faux registry is process-global: the lock guard must span the
+// whole async flow (every rep registers into the same registry).
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 #[ignore = "the rate harness: run with PA_RACE_* knobs (see the module docs)"]
 async fn abort_and_send_idle_race_rate_harness() {
