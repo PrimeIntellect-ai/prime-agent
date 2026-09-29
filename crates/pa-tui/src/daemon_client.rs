@@ -1352,10 +1352,10 @@ mod tests {
             }
         });
         match client_event_from_value(&with_sequence) {
-            Some(DaemonClientEvent::SessionEvent {
-                meta_sequence, ..
-            }) => assert_eq!(meta_sequence, 41),
-                other => panic!("the frame must parse as a session event: {other:?}"),
+            Some(DaemonClientEvent::SessionEvent { meta_sequence, .. }) => {
+                assert_eq!(meta_sequence, 41)
+            }
+            other => panic!("the frame must parse as a session event: {other:?}"),
         }
         // The cursor's sequence is the fallback shape; a frame without
         // either collapses to zero (the tracker's monotonic max ignores
@@ -1367,10 +1367,10 @@ mod tests {
             "meta": { "cursor": { "generation": "g-1", "sequence": 12 } }
         });
         match client_event_from_value(&cursor_only) {
-            Some(DaemonClientEvent::SessionEvent {
-                meta_sequence, ..
-            }) => assert_eq!(meta_sequence, 12),
-                other => panic!("the frame must parse as a session event: {other:?}"),
+            Some(DaemonClientEvent::SessionEvent { meta_sequence, .. }) => {
+                assert_eq!(meta_sequence, 12)
+            }
+            other => panic!("the frame must parse as a session event: {other:?}"),
         }
         let no_meta = json!({
             "type": "session_event",
@@ -1378,10 +1378,10 @@ mod tests {
             "event": { "type": "message_end" }
         });
         match client_event_from_value(&no_meta) {
-            Some(DaemonClientEvent::SessionEvent {
-                meta_sequence, ..
-            }) => assert_eq!(meta_sequence, 0),
-                other => panic!("the frame must parse as a session event: {other:?}"),
+            Some(DaemonClientEvent::SessionEvent { meta_sequence, .. }) => {
+                assert_eq!(meta_sequence, 0)
+            }
+            other => panic!("the frame must parse as a session event: {other:?}"),
         }
     }
 
