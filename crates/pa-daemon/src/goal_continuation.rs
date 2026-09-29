@@ -326,19 +326,13 @@ impl AgentSessionEngine {
         // The progress check's input (the 402 diagnosis's (a)): the
         // just-settled turn of the live loop context, read BEFORE the
         // driver lock (the engine-session mutex never nests under the
-        // driver lock). A trailing failed continuation pair also drops
-        // here ((c)): the corpse pair stops riding the context into
-        // every next request.
+        // driver lock). The trailing failed continuation pair's DROP
+        // ((c)) happens inside, only once the consult is actually about
+        // to examine the corpse — never before the deferral gates (an
+        // early drop would hide the no-progress turn from the later owed
+        // or post-compaction consult, which would then read the previous
+        // progress row and reset the streak).
         let last_turn = self.last_loop_assistant_message();
-        if last_turn
-            .as_ref()
-            .is_some_and(|turn: &pa_agent::types::AssistantMessage| {
-                turn.stop_reason == pa_agent::types::StopReason::Error || turn.content.is_empty()
-            })
-        {
-            self.runtime
-                .block_on(async { self.drop_failed_goal_continuation_pair().await });
-        }
         self.runtime.block_on(async {
             let mut driver = handles.driver.lock().await;
             if !driver.owns_continuation_wakeup() {
@@ -363,6 +357,21 @@ impl AgentSessionEngine {
             if self.has_unsettled_rlm_work().await || self.has_live_background_bash_handles() {
                 driver.mark_continuation_owed();
                 return GoalBoundary::End;
+            }
+            // The consult is about to examine the just-settled turn: now
+            // the trailing failed continuation pair can leave the live
+            // loop (the captured `last_turn` still carries the corpse's
+            // verdict for the check below).
+            if last_turn
+                .as_ref()
+                .is_some_and(|turn: &pa_agent::types::AssistantMessage| {
+                    turn.stop_reason == pa_agent::types::StopReason::Error
+                        || turn.content.is_empty()
+                })
+            {
+                drop(driver);
+                self.drop_failed_goal_continuation_pair().await;
+                driver = handles.driver.lock().await;
             }
             let was_owed = driver.owes_continuation();
             let mut session = handles.session.lock().await;

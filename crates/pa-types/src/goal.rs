@@ -59,6 +59,12 @@ pub struct GoalState {
     /// output resets it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_progress_streak: Option<u32>,
+    /// The last turn the streak counted (its Unix-ms timestamp): the
+    /// re-consult dedup across a worker restart (the in-process key is
+    /// live-only, so the durable row carries it — the same corpse never
+    /// strikes twice, however often the session rebuilds).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_progress_turn_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -86,6 +92,7 @@ pub fn empty_goal_state() -> GoalState {
         continuations_used: 0,
         created_at: None,
         no_progress_streak: None,
+        no_progress_turn_ms: None,
         updated_at: None,
         last_reason: None,
         last_error: None,

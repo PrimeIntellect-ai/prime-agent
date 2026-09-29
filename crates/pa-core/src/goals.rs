@@ -453,6 +453,7 @@ mod tests {
             continuations_used: 3,
             created_at: Some(1),
             no_progress_streak: None,
+            no_progress_turn_ms: None,
             updated_at: Some(2),
             last_reason: None,
             last_error: None,

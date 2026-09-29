@@ -123,26 +123,33 @@ impl AgentSessionEngine {
     /// missing) job stays untouched — rewriting it would hide that a
     /// wake landed.
     pub(crate) fn cancel_goal_backoff_wake(&self) {
-        let job_id = self
-            .goal_backoff_wake_job_id
+        self.goal_backoff_wake_job_id
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
-        let Some(job_id) = job_id else {
-            return;
-        };
         let Some(wiring) = self.cron_wiring() else {
             return;
         };
-        // A fired (or already-cancelled) job stays untouched (the park's
-        // cancel arm: rewriting it would hide that a wake landed).
-        let matches_job = wiring
-            .store
-            .list()
-            .iter()
-            .any(|job| job.id == job_id && job.status == pa_core::cron::JobStatus::Active);
-        if matches_job {
-            let _ = wiring.store.cancel(&job_id, crate::util::now_ms());
+        // The cancel is DURABLE-JOB-RECOVERING: a worker rebuild loses the
+        // in-memory job-id slot, so the store itself is scanned for the
+        // session's still-Active goal-backoff-wake jobs (an inactive goal
+        // never receives the marker turn). A fired (or already-cancelled)
+        // job stays untouched (the park's cancel arm: rewriting it would
+        // hide that a wake landed).
+        let binding = self.kernel_cron_binding();
+        for job in wiring.store.list() {
+            if job.status != pa_core::cron::JobStatus::Active
+                || job.label.as_deref()
+                    != Some(pa_core::session_engine::goal_driver::GOAL_BACKOFF_WAKE_CRON_LABEL)
+            {
+                continue;
+            }
+            if let Some(binding) = &binding {
+                if job.session_id != binding.session_id {
+                    continue;
+                }
+            }
+            let _ = wiring.store.cancel(&job.id, crate::util::now_ms());
         }
     }
 

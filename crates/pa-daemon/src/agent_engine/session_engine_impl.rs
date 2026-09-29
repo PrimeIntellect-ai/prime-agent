@@ -148,8 +148,17 @@ impl SessionEngine for AgentSessionEngine {
                 // A refused mint (the progress check's terminal finish or
                 // the backoff window) still changed the durable goal
                 // state: publish it so connected clients see the error or
-                // the backoff transition instead of a stale active read.
-                self.publish_goal_state(&driver.state_with_creation_elapsed());
+                // the backoff transition instead of a stale active read —
+                // and arm the no-progress backoff's one-shot wake (the
+                // advertised 10s/20s/40s retry must run from this mint
+                // site too, not only the natural boundary).
+                let state = driver.state_with_creation_elapsed();
+                let wake_at = driver.backoff_wake_at();
+                drop(driver);
+                self.publish_goal_state(&state);
+                if let Some(wake_at) = wake_at {
+                    self.schedule_goal_backoff_wake(wake_at).await;
+                }
                 return None;
             }
             let message = message?;

@@ -93,6 +93,9 @@ pub struct GoalDriver {
     /// just-settled turn.
     no_progress_streak: u32,
     no_progress_backoff_until_ms: u64,
+    /// The last turn the streak counted (the re-consult dedup): adopted
+    /// from the durable `no_progress_turn_ms` so a restart never
+    /// re-counts the same corpse.
     counted_no_progress_turn_ms: Option<i64>,
 }
 
@@ -233,7 +236,7 @@ impl GoalDriver {
                 // strikes); the backoff window does not survive the move.
                 self.no_progress_streak = reloaded.no_progress_streak.unwrap_or(0);
                 self.no_progress_backoff_until_ms = 0;
-                self.counted_no_progress_turn_ms = None;
+                self.counted_no_progress_turn_ms = reloaded.no_progress_turn_ms;
                 reloaded
             }
         };
@@ -266,7 +269,7 @@ impl GoalDriver {
         // a restart outlives it, so the next consult passes the gate.
         self.no_progress_streak = self.state.no_progress_streak.unwrap_or(0);
         self.no_progress_backoff_until_ms = 0;
-        self.counted_no_progress_turn_ms = None;
+        self.counted_no_progress_turn_ms = self.state.no_progress_turn_ms;
         self.continuation_consumed();
     }
 
@@ -326,6 +329,7 @@ impl GoalDriver {
             // A fresh goal never inherits the previous goal's no-progress
             // streak: its own three-strike budget starts at 0.
             no_progress_streak: Some(0),
+            no_progress_turn_ms: None,
             updated_at: Some(now),
             last_reason: None,
             last_error: None,
@@ -339,14 +343,21 @@ impl GoalDriver {
         // streak: a replacement goal never inherits the terminal goal's
         // strikes.
         self.owed_continuation_for_rlm_work = false;
+        let previous_streak = self.no_progress_streak;
+        let previous_backoff = self.no_progress_backoff_until_ms;
+        let previous_counted = self.counted_no_progress_turn_ms;
         self.no_progress_streak = 0;
         self.no_progress_backoff_until_ms = 0;
         self.counted_no_progress_turn_ms = None;
         self.continuation_consumed();
         if let Err(error) = self.set_state(session, goal) {
-            // A failed start leaves the previous goal's bookkeeping intact.
+            // A failed start leaves the previous goal's bookkeeping intact
+            // (the no-progress cap included).
             self.accounted_messages = previous_accounted;
             self.owed_continuation_for_rlm_work = previous_owed;
+            self.no_progress_streak = previous_streak;
+            self.no_progress_backoff_until_ms = previous_backoff;
+            self.counted_no_progress_turn_ms = previous_counted;
             if previous_pending {
                 self.mark_continuation_pending();
             }
@@ -651,13 +662,16 @@ impl GoalDriver {
                         self.no_progress_backoff_until_ms = now_millis()
                             + CONTINUATION_NO_PROGRESS_BACKOFF_BASE_MS
                                 * 2u64.saturating_pow(self.no_progress_streak.saturating_sub(1));
-                        // The streak persists with the goal state (the cap
-                        // counter is durable: a worker restart cannot reset
-                        // it and un-cap a degenerate loop).
+                        // The streak AND the counted-turn key persist with
+                        // the goal state (the cap counter is durable: a
+                        // worker restart cannot reset it and un-cap a
+                        // degenerate loop, and the same corpse never
+                        // strikes twice however often the session rebuilds).
                         self.set_state(
                             session,
                             GoalState {
                                 no_progress_streak: Some(self.no_progress_streak),
+                                no_progress_turn_ms: Some(turn.timestamp),
                                 ..self.state.clone()
                             },
                         )?;
@@ -696,6 +710,7 @@ impl GoalDriver {
                             session,
                             GoalState {
                                 no_progress_streak: Some(0),
+                                no_progress_turn_ms: Some(turn.timestamp),
                                 ..self.state.clone()
                             },
                         )?;
@@ -1352,10 +1367,23 @@ mod tests {
             .is_none());
         assert_eq!(driver.state().no_progress_streak, Some(1));
         // A rebuilt driver (the worker restart) adopts the persisted
-        // strikes: the streak survives the restart.
+        // strikes: the streak survives the restart — and the counted-turn
+        // key too, so the same corpse never strikes twice however often
+        // the session rebuilds.
         let mut driver = GoalDriver::load_persisted(&session);
         assert_eq!(driver.state().no_progress_streak, Some(1));
         assert_eq!(driver.no_progress_streak(), 1);
+        // The same turn re-consulted after the restart: NOT re-counted
+        // (the durable no_progress_turn_ms carries the dedup across the
+        // rebuild) — and the wall-clock backoff window does not survive
+        // the restart (the rebuild retries the mint immediately; the
+        // streak carries the cap, not the delay).
+        let reconsult = driver
+            .next_continuation_message(&mut session, Some(&empty_one))
+            .unwrap();
+        assert!(reconsult.is_some(), "the restart retries the mint");
+        assert_eq!(driver.no_progress_streak(), 1);
+        driver.continuation_consumed();
         // A second distinct no-output turn: counted again (the streak
         // carried over the restart: strike two — a fresh corpse, the
         // restart's own counted-turn key starting empty).
@@ -1366,13 +1394,15 @@ mod tests {
             .is_none());
         assert_eq!(driver.state().no_progress_streak, Some(2));
         assert_eq!(driver.state().status, GoalStatus::Active);
-        // A progress turn resets the streak and mints.
+        // A progress turn resets the streak and mints (the restart's
+        // immediate re-mint above already consumed one slot; this is the
+        // second).
         let progress = test_progress_turn(created_at as i64 + 3);
         assert!(driver
             .next_continuation_message(&mut session, Some(&progress))
             .unwrap()
             .is_some());
-        assert_eq!(driver.state().continuations_used, 1);
+        assert_eq!(driver.state().continuations_used, 2);
         assert_eq!(driver.state().no_progress_streak, Some(0));
         // Three consecutive no-output turns (the fresh streak): the
         // third hits the cap and finishes the goal.
@@ -1674,6 +1704,7 @@ mod tests {
             continuations_used: 2,
             created_at: Some(1),
             no_progress_streak: Some(2),
+            no_progress_turn_ms: None,
             updated_at: Some(2),
             last_reason: None,
             last_error: None,

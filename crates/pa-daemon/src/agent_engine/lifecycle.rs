@@ -520,20 +520,34 @@ impl AgentSessionEngine {
                     // interrupted settle's missing write lands here), and
                     // a later reload adopts the terminal state directly.
                     let mut session = handles.session.lock().await;
-                    if let Err(persist_error) = driver.finish_for_terminal_message(
+                    match driver.finish_for_terminal_message(
                         &mut session,
                         pa_types::ai::StopReason::Error,
                         Some(&error),
                     ) {
-                        // Best effort: the in-memory adoption stands; the
-                        // stale-row scan re-adopts on the next rebuild.
-                        eprintln!(
-                            "pa-daemon: stale goal terminal persist failed: {persist_error:#}"
-                        );
+                        Ok(()) => {}
+                        Err(persist_error) => {
+                            // Best effort on the durable row: the scan
+                            // re-adopts on the next rebuild. The PUBLISHED
+                            // verdict is still the terminal one (never
+                            // the driver's still-Active in-memory state —
+                            // a persist failure must not leave the
+                            // recovered provider failure looking
+                            // resumable).
+                            eprintln!(
+                                "pa-daemon: stale goal terminal persist failed: {persist_error:#}"
+                            );
+                        }
                     }
-                    let adopted = driver.state().clone();
                     drop(driver);
-                    *self.published_goal.lock().expect("published goal lock") = Some(adopted);
+                    *self.published_goal.lock().expect("published goal lock") =
+                        Some(pa_core::goals::GoalState {
+                            active: false,
+                            status: pa_core::goals::GoalStatus::Error,
+                            last_reason: Some(error.clone()),
+                            last_error: Some(error),
+                            ..state
+                        });
                 } else {
                     drop(driver);
                     *self.published_goal.lock().expect("published goal lock") = Some(state);
