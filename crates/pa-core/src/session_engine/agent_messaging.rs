@@ -601,6 +601,9 @@ impl AgentObserveActivity {
 
 /// One roster row / agent summary.
 #[derive(Debug, Clone)]
+// The mirrored TS API shape is deliberate (the booleans are the
+// product's own surface, not a refactor target).
+#[allow(clippy::struct_excessive_bools)]
 pub struct AgentObserveSummary {
     pub active_session_id: Option<String>,
     pub session_id: String,

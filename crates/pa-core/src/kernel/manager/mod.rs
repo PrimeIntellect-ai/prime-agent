@@ -68,6 +68,9 @@ struct ExitInfo {
 
 /// Fields of a settled execution shared with the stdout reader task.
 #[derive(Default)]
+// The mirrored TS API shape is deliberate (the booleans are the
+// product's own surface, not a refactor target).
+#[allow(clippy::struct_excessive_bools)]
 struct ExecBuffers {
     stdout: String,
     stderr: String,
@@ -213,6 +216,9 @@ struct RestoredNamespaceSkip {
     completed_executions: u64,
 }
 
+// The mirrored TS API shape is deliberate (the booleans are the
+// product's own surface, not a refactor target).
+#[allow(clippy::struct_excessive_bools)]
 struct Guarded {
     state: KernelState,
     start_generation: u64,

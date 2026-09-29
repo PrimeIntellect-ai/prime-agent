@@ -51,6 +51,9 @@ fn escape_html(text: &str) -> String {
 
 /// The SGR state carried across one conversion.
 #[derive(Debug, Default, PartialEq, Eq)]
+// The mirrored TS API shape is deliberate (the booleans are the
+// product's own surface, not a refactor target).
+#[allow(clippy::struct_excessive_bools)]
 struct TextStyle {
     fg: Option<String>,
     bg: Option<String>,

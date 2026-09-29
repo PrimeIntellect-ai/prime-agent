@@ -112,6 +112,9 @@ pub struct NewSessionOptions {
 }
 
 /// The stateful session writer/reader.
+// The mirrored TS API shape is deliberate (the booleans are the
+// product's own surface, not a refactor target).
+#[allow(clippy::struct_excessive_bools)]
 pub struct SessionManager {
     session_id: String,
     session_file: Option<PathBuf>,

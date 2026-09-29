@@ -108,6 +108,9 @@ pub enum ParsedHeartbeatCommand {
 
 /// Session activity snapshot used by heartbeat deferral.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+// The mirrored TS API shape is deliberate (the booleans are the
+// product's own surface, not a refactor target).
+#[allow(clippy::struct_excessive_bools)]
 pub struct HeartbeatSessionActivity {
     pub is_streaming: bool,
     pub is_compacting: bool,

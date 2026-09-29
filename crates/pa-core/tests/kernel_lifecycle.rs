@@ -1,3 +1,15 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
+// crate root: the same bounded-boundary disposition as src/lib.rs
+// (large_futures/too_many_lines/the cast family; details there).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! Verifier integration tests: spawn a real `python -m rlm.repl` kernel
 //! (the same JSON-lines protocol v3 runtime the TS product ships) through
 //! `ReplKernelManager`, and check the persistence/revival semantics against
