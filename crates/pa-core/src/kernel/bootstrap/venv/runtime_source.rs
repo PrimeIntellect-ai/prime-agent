@@ -7,7 +7,7 @@ use super::*;
 /// Directory of the installed `prime-agent-runtime` sources. The Rust binary
 /// ships the same sidecar layout the compiled TS executable uses; an explicit
 /// `PI_PACKAGE_DIR` override wins (matching the TS `getPackageDir`).
-pub(super) fn package_dir() -> PathBuf {
+pub(in crate::kernel::bootstrap) fn package_dir() -> PathBuf {
     if let Ok(env_dir) = std::env::var("PI_PACKAGE_DIR") {
         if !env_dir.is_empty() {
             return expand_home(&env_dir);
@@ -23,7 +23,7 @@ pub(super) fn package_dir() -> PathBuf {
 /// The packaged sidecar directory (the exe-adjacent layout): the TS
 /// `runtimeCandidateDirs` bun-binary candidates, `PI_PACKAGE_DIR` included
 /// through [`package_dir`].
-pub(super) fn packaged_runtime_dir() -> Option<PathBuf> {
+pub(in crate::kernel::bootstrap) fn packaged_runtime_dir() -> Option<PathBuf> {
     let package = package_dir();
     [
         package.join("prime-agent-runtime"),
