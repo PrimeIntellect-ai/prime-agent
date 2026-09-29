@@ -115,6 +115,7 @@ impl PostHogSink {
     ) -> serde_json::Value {
         json!({
             "api_key": self.api_key,
+            "schema_version": crate::catalog::SCHEMA_VERSION,
             "batch": events
                 .iter()
                 .map(|event| {
@@ -197,6 +198,10 @@ mod tests {
         let sink = PostHogSink::new(&PostHogEndpoint::new("https://ph.example", "phc-key"));
         let body = sink.batch_body("install-1", &[event("agent started")]);
         assert_eq!(body["api_key"], "phc-key");
+        assert_eq!(
+            body["schema_version"],
+            json!(crate::catalog::SCHEMA_VERSION)
+        );
         assert_eq!(body["batch"][0]["event"], "agent started");
         assert_eq!(body["batch"][0]["distinct_id"], "install-1");
         assert_eq!(body["batch"][0]["properties"]["version"], "0.1.0");
