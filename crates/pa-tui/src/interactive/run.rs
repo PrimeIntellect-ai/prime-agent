@@ -268,15 +268,16 @@ async fn run_interactive_surface(
     )?;
     // The startup chrome paints before the session loads only for a NEW
     // chat (TS `ui.start()` renders the banner once before the session
-    // loads): a fresh session's dock is deterministically empty, so the
-    // placeholder frame never reflows when the attach lands. A direct
-    // open into an existing session holds the previous surface instead
-    // (TS attaches BEFORE the chat mounts — main.ts and the agents view
-    // construct the chat over an already-attached connection whose
-    // `getInitialSnapshot` is cached, so the first visible frame is the
-    // content): the queued clear rides the first draw's single flush,
-    // which carries the complete frame — no splash flash, no panel
-    // appearing late over a half-open view.
+    // loads): the startup chrome carries the zero dock a fresh session
+    // mounts (`apply_startup_chrome`), so the placeholder frame never
+    // reflows when the attach lands. A direct open into an existing
+    // session holds the previous surface instead (TS attaches BEFORE
+    // the chat mounts — main.ts and the agents view construct the chat
+    // over an already-attached connection whose `getInitialSnapshot`
+    // is cached, so the first visible frame is the content): the queued
+    // clear rides the first draw's single flush, which carries the
+    // complete frame — no splash flash, no panel appearing late over a
+    // half-open view.
     if !headless && matches!(&options.session, SessionSelection::New) {
         if let Some(renderer) = renderer.is_terminal_mut() {
             crate::app::draw(renderer, &mut view)?;
@@ -524,6 +525,10 @@ async fn run_interactive_surface(
     // named error when a member never drains — see
     // [`HEADLESS_SETTLE_TIMEOUT_MS`]).
     let mut headless_settle_deadline: Option<Instant> = None;
+    // Whether the settle gate is waiting out a member: the quiet
+    // tick's wake condition reads it (the gate re-checks each
+    // wake — see the gate below).
+    let mut headless_settle_pending = false;
     // First-run onboarding owns the pane before the session screen (TS
     // `runStartupOnboarding`): a home whose startup model is ready sees
     // the trace question alone, and a not-ready home runs the full
@@ -1037,6 +1042,7 @@ async fn run_interactive_surface(
             // fails the run with its name instead of wedging the test
             // binary forever (the CI wedge family: a 30-45min job
             // budget with no failure row).
+            headless_settle_pending = true;
             let deadline = headless_settle_deadline
                 .get_or_insert(Instant::now() + Duration::from_millis(HEADLESS_SETTLE_TIMEOUT_MS));
             if Instant::now() >= *deadline {
@@ -1048,7 +1054,70 @@ async fn run_interactive_surface(
             }
         }
 
+        // An exit key must not wait out the select: the loop condition
+        // consumes `running`/`exit_requested` at the NEXT wake, and the
+        // input batch's bare `break` only leaves the batch — the select
+        // after it parks the exit (the old unconditional quiet tick was
+        // the guaranteed ≤50ms wake; with the tick parked on idle work,
+        // an exit on an otherwise idle surface would wait for whatever
+        // timer happens to be armed). The frame arm is the one that can
+        // wake now, so a pending exit takes it immediately: the tail
+        // pass paints its final frame and the loop condition runs within
+        // the same iteration, strictly sooner than the tick ever did.
+        if (!running || session.exit_requested)
+            && render_deadline.is_none_or(|deadline| deadline > Instant::now())
+        {
+            render_deadline = Some(Instant::now());
+        }
+        // The frame-wake inventory: every pending-work state whose
+        // observation needs a loop iteration arms the frame deadline
+        // here, pre-select — the states the old unconditional tick
+        // used to observe implicitly. A dirty frame (the open's first
+        // paint; a keystroke's toast or hint) must not park behind a
+        // select that has no other wake: the frame gate that paints
+        // it runs at the iteration's tail. The headless barriers'
+        // deadlines re-check at the loop top, and the hint/toast
+        // expiry arms live HERE, not after the frame gate (a parked
+        // select would never reach a post-gate arm; a paint's
+        // deadline wipe only happens after the wake already fired,
+        // and the next iteration re-arms while the state persists).
+        if session.dirty && render_deadline.is_none() {
+            render_deadline = Some(Instant::now());
+        }
+        for deadline in [wait_idle_deadline, wait_render_deadline]
+            .into_iter()
+            .flatten()
+        {
+            if render_deadline.is_none_or(|armed| deadline < armed) {
+                render_deadline = Some(deadline);
+            }
+        }
+        if let Some(expiry) = session.ctrl_c_hint_expiry() {
+            if render_deadline.is_none_or(|armed| expiry < armed) {
+                render_deadline = Some(expiry);
+            }
+        }
+        if let Some(expiry) = view.toasts.next_expiry() {
+            if render_deadline.is_none_or(|armed| expiry < armed) {
+                render_deadline = Some(expiry);
+            }
+        }
         let was_active = session.turn_active;
+        // The quiet tick's arming state, snapshotted before the select:
+        // parked autocomplete requests and an armed selection auto-scroll
+        // are the only work the tick exists for, and the arm future reads
+        // these locals instead of borrowing the surface.
+        let autocomplete_pending = view.editor.has_pending_autocomplete();
+        let auto_scroll_armed = session.selection_auto_scroll_armed();
+        let bash_refresh_wanted = session.kernel_bash_supported();
+        // A settle waiting out a member is pending work like the
+        // autocomplete park: the gate runs at the loop top, so its
+        // re-check (and the settle bound's expiry) needs this arm's
+        // wake — a fully quiet select would otherwise park the
+        // settle forever, and the bound itself fires only on an
+        // iteration. Terminal runs never arm it (`headless_done`
+        // exists only on the headless harness).
+        let settle_recheck_wanted = headless_done && headless_settle_pending;
         tokio::select! {
             maybe_event = async {
                 // A closed channel's recv() resolves None instantly and
@@ -1674,23 +1743,44 @@ async fn run_interactive_surface(
                     }
                 }
             }
-            () = tokio::time::sleep(Duration::from_millis(50)) => {
-                // The input stream went quiet for a tick: parked editor
-                // autocomplete requests materialize now (TS resolves
-                // suggestions asynchronously after the keystroke batch, so
-                // a typed command plus Enter in one burst submits as typed
-                // and the dropdown opens only once typing pauses).
-                session.materialize_editor_autocomplete(&mut view);
-                // The same tick drives the selection auto-scroll (TS's
-                // 150 ms hold + 50 ms interval timer): a drag holding the
-                // window edge keeps scrolling while no other input
-                // arrives, which is the only time this arm runs at that
-                // cadence.
-                session.selection_auto_scroll_tick(&mut view);
-                if last_bash_refresh.elapsed() >= Duration::from_secs(2) {
-                    last_bash_refresh = Instant::now();
-                    session.spawn_bash_activity_refresh();
+            () = async {
+                // The quiet tick runs only while work is actually
+                // pending: a parked editor autocomplete request (TS
+                // resolves suggestions asynchronously after the
+                // keystroke batch, so a typed command plus Enter in one
+                // burst submits as typed and the dropdown opens only
+                // once typing pauses) or an armed selection auto-scroll
+                // (TS's 150 ms hold + 50 ms interval timer, armed only
+                // while a drag holds the window edge). An idle surface
+                // parks this arm — TS keeps no free-running timer either
+                // (the loader's interval runs only while a turn
+                // animates, scheduleRender arms only on a render
+                // request), so the unconditional tick spent its wakeups
+                // on nothing observable.
+                if !(autocomplete_pending || auto_scroll_armed || settle_recheck_wanted) {
+                    std::future::pending::<()>().await;
                 }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            } => {
+                session.materialize_editor_autocomplete(&mut view);
+                session.selection_auto_scroll_tick(&mut view);
+            }
+            () = async {
+                // The 2s bash-activity poll, on its own absolute
+                // deadline and only on daemons that advertise the
+                // kernel-bash registry (the same gate the spawn applies —
+                // without the capability every fire was a no-op, so the
+                // arm parks and an idle surface spends no wakeups on it).
+                if !bash_refresh_wanted {
+                    std::future::pending::<()>().await;
+                }
+                tokio::time::sleep_until(
+                    tokio::time::Instant::from_std(last_bash_refresh + Duration::from_secs(2)),
+                )
+                .await;
+            } => {
+                last_bash_refresh = Instant::now();
+                session.spawn_bash_activity_refresh();
             }
             _frame = async {
                 match render_deadline {
@@ -1743,10 +1833,11 @@ async fn run_interactive_surface(
 
         // The Ctrl+C exit hint expires on a timer (TS
         // `showCtrlCExitHint`'s setTimeout requestRender): once the
-        // window passed, the hint row repaints away. The deadline arm
-        // lives AFTER the frame gate (a draw resets `render_deadline`,
-        // so an arm placed here would be wiped by the same iteration's
-        // paint and a fully idle loop would never wake at the expiry).
+        // window passed, the hint row repaints away. The expiry's
+        // wake arm lives in the pre-select inventory (see the frame-wake
+        // comment there): the wake fires at the expiry, this check marks
+        // the row dirty, and the same iteration's frame gate repaints
+        // it away.
         if session.ctrl_c_hint_expiry().is_some() {
             hint_painted = true;
         } else if hint_painted {
@@ -1814,14 +1905,6 @@ async fn run_interactive_surface(
             // (the spinner's next phase boundary) stays: the select needs
             // that wakeup even when nothing else is dirty.
             render_deadline = None;
-        }
-        // The armed exit hint's expiry wakeup (see the pre-gate check):
-        // armed after the gate so the paint above cannot wipe it — an
-        // otherwise idle loop must still wake once to clear the hint row.
-        if let Some(until) = session.ctrl_c_hint_expiry() {
-            if render_deadline.is_none_or(|deadline| deadline > until) {
-                render_deadline = Some(until);
-            }
         }
         if session.exit_requested {
             session.exit_reason = "session_request";

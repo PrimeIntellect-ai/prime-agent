@@ -419,11 +419,11 @@ fn dock_press_drag_copies_the_frame_region() {
     // The right-aligned detail label (the collapsed startup level,
     // operator directive 2026-09-28: "Collapsed mode (Ctrl+O to
     // expand)", 2 columns longer than the details label) renders at
-    // 25:66.
+    // 23:66 (the activity dock's rule and row sit below it).
     assert_eq!(
         (ctx_row, ctx_col),
-        (25, 66),
-        "the context row renders at 25:66"
+        (23, 66),
+        "the context row renders at 23:66"
     );
     let steps = vec![
         // Mount the window at the transcript top: the probe layout is the

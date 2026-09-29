@@ -471,8 +471,11 @@ impl TreeNavigation {
         // TS re-restores the forked session's saved model at its runtime
         // recreation (`createRuntime` -> `createAgentSession`): the fork
         // resolves to the model its own file pins, not the previous
-        // session's (an explicit flag still wins inside).
-        self.engine.restore_session_model(&new_path).await;
+        // session's (an explicit flag still wins inside). No pre-read
+        // context here: the replacement flow keeps its file-read shape
+        // (the create-path reuse is the measured cut; the replacement
+        // paths' own walls are unmeasured).
+        self.engine.restore_session_model(&new_path, None).await;
         // A replacement flow retires the runtime first, so the rebuild
         // parks on the fresh, unbuilt session: its first build seeds the
         // goal state from the moved branch's own rows (the TS

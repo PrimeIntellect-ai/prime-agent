@@ -278,10 +278,11 @@ impl SessionEngine for AgentSessionEngine {
     fn restore_session_model(
         &self,
         session_path: &std::path::Path,
+        saved: Option<crate::engine::SavedSessionContext>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         let path = session_path.to_path_buf();
         Box::pin(async move {
-            self.restore_session_model_at(&path).await;
+            self.restore_session_model_at(&path, saved).await;
         })
     }
 

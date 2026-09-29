@@ -161,6 +161,40 @@ fn saved_session_rows_publish_the_own_usage_summary() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// TS `summaryForInactiveSession` publishes the header binding: a saved
+/// row carries its `parentSessionPath` (only when one is recorded — TS's
+/// `undefined` is omitted) and its `rlmDepth`, so a non-resident bound
+/// session keeps its family edge for the family classifiers.
+#[test]
+fn saved_session_summaries_carry_the_parent_binding() {
+    let dir = std::env::temp_dir().join(format!("pa-saved-binding-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut bound = crate::session_store::SessionFile::create("/tmp", Some("/s/p.jsonl"), 1);
+    let bound_path = dir.join(format!("{}.jsonl", bound.session_id()));
+    bound.set_path(bound_path.clone());
+    bound.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
+    bound.rewrite().unwrap();
+    let bound_info = crate::session_store::read_session_info(&bound_path).unwrap();
+    let summary = saved_session_summary(&bound_info);
+    assert_eq!(
+        (summary.get("parentSessionPath"), summary.get("rlmDepth")),
+        (Some(&json!("/s/p.jsonl")), Some(&json!(1)))
+    );
+
+    let mut root = crate::session_store::SessionFile::create("/tmp", None, 0);
+    let root_path = dir.join(format!("{}.jsonl", root.session_id()));
+    root.set_path(root_path.clone());
+    root.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
+    root.rewrite().unwrap();
+    let root_info = crate::session_store::read_session_info(&root_path).unwrap();
+    let summary = saved_session_summary(&root_info);
+    assert_eq!(
+        (summary.get("parentSessionPath"), summary.get("rlmDepth")),
+        (None, Some(&json!(0)))
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn worker_probe_fails_at_the_deadline_and_names_the_worker() {
     let dir = std::env::temp_dir().join(format!("pa-probe-{}", uuid::Uuid::new_v4()));

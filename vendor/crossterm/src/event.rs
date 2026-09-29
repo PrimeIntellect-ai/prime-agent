@@ -127,6 +127,8 @@ pub(crate) mod sys;
 pub(crate) mod timeout;
 
 #[cfg(feature = "event-stream")]
+pub use crate::event::sys::Waker;
+#[cfg(feature = "event-stream")]
 pub use stream::EventStream;
 
 use crate::event::{
@@ -201,6 +203,30 @@ fn try_lock_internal_event_reader_for(
 /// ```
 pub fn poll(timeout: Duration) -> std::io::Result<bool> {
     poll_internal(Some(timeout), &EventFilter)
+}
+
+/// Same as [`poll`], but `None` parks until an event arrives or a
+/// registered waker fires (see [`waker`]).
+///
+/// A parked caller holds the process-global event-reader lock until it
+/// wakes, so every other poller in the process waits on it: call sites
+/// that share the reader with a bounded poller (the vendored
+/// kitty-probe window) must keep a bounded timeout for that window's
+/// duration instead of parking.
+pub fn poll_opt(timeout: Option<Duration>) -> std::io::Result<bool> {
+    poll_internal(timeout, &EventFilter)
+}
+
+/// The process-global event source's wake handle: `wake()` makes a parked
+/// [`poll_opt`] (or any in-flight bounded [`poll`]) return `Ok(false)`,
+/// the same result a timeout produces.
+///
+/// Returns `None` when the event source failed to initialize (no
+/// controlling tty): parking is unsafe then — the caller has no way to
+/// be woken — so it must keep a bounded poll.
+#[cfg(feature = "event-stream")]
+pub fn waker() -> Option<Waker> {
+    lock_internal_event_reader().try_waker()
 }
 
 /// Reads a single [`Event`](enum.Event.html).

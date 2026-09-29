@@ -132,12 +132,13 @@ impl SequenceGuard {
         }
     }
 
-    /// The poll wait: never past a pending sequence's deadline.
-    pub(crate) fn poll_timeout(&self, default: Duration, now: Instant) -> Duration {
-        match &self.pending {
-            Some(pending) => default.min(pending.deadline.saturating_duration_since(now)),
-            None => default,
-        }
+    /// The parking wait: the remaining flush deadline while a partial
+    /// sequence is held, or `None` to park until real input — an idle
+    /// wait has no tick of its own to bound.
+    pub(crate) fn poll_deadline(&self, now: Instant) -> Option<Duration> {
+        self.pending
+            .as_ref()
+            .map(|pending| pending.deadline.saturating_duration_since(now))
     }
 
     /// Flush whatever the deadline released.

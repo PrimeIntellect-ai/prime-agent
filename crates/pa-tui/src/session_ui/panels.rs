@@ -81,32 +81,14 @@ impl SessionUi {
         );
         self.subagent_counts = crate::subagents::count_descendants(&self.roster, &identity);
         let dock = self.activity_dock_state();
-        // A scope-back reopen hands the dock back its focus exactly once,
-        // at the FIRST summary after the attach: the roster is seeded by
-        // then, so the Subagents group rides the rendered row at its
-        // first paint (the operator's 2026-09-26 panel-exit ruling:
-        // leaving the dock's Subagents panel lands on its own dock item,
-        // not the prompt bar) — and a dock that never mounts keeps the
-        // editor's focus; the one-shot means a LATE roster never yanks
-        // the keyboard back mid-composition.
-        if self.pending_dock_focus_restore {
-            self.pending_dock_focus_restore = false;
-            self.subagents_focused = dock.visible();
+        // A focused selection must stay on a rendered group: only the
+        // goal group can leave the row (its goal ended), and the
+        // selection steps back to the group that now ends the row.
+        if self.subagents_focused && !dock.groups().contains(&self.activity_group) {
+            self.activity_group =
+                dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
         }
-        // A focused selection must stay on a rendered group: the arrows
-        // visit every group an empty one included, so the selection
-        // only moves when its group leaves the row (the goal row ends
-        // with the goal) — and a dock that unmounts entirely (nothing
-        // left to show) returns the focus to the editor.
-        if self.subagents_focused {
-            if !dock.visible() {
-                self.subagents_focused = false;
-            } else if !dock.groups().contains(&self.activity_group) {
-                self.activity_group =
-                    dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
-            }
-        }
-        view.chrome.activity = dock.visible().then_some(crate::chrome::ActivityDock {
+        view.chrome.activity = Some(crate::chrome::ActivityDock {
             selected: self.activity_group,
             focused: self.subagents_focused,
             ..dock
@@ -136,8 +118,7 @@ impl SessionUi {
         // right now (operator scoping): finished runs stay as rows inside
         // the bash view, never in the indicator. The feed is the
         // current session's kernel registry — nested subagents' kernels
-        // are separate and never appear here. The total keeps the dock
-        // (and the bash view's history) mounted when no run is live.
+        // are separate and never appear here.
         let bash_rows = crate::bash_view::parse_bash_activities(&self.bash_activities);
         let bash_running = bash_rows
             .iter()
@@ -150,11 +131,9 @@ impl SessionUi {
         crate::chrome::ActivityDock {
             subagents_running_direct: self.subagent_counts.running_direct,
             subagents_running_nested: self.subagent_counts.running_nested,
-            subagents_total: self.subagent_counts.total,
             heartbeats: self.heartbeat_catalog.len(),
             heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
             bash_running,
-            bash_total: bash_rows.len(),
             goal_label,
             selected: self.activity_group,
             focused: self.subagents_focused,
@@ -189,7 +168,7 @@ impl SessionUi {
                 }
                 self.activity_group = crate::chrome::ActivityGroup::Subagents;
             }
-            DockFocusSource::Shortcut => return self.focus_activity_dock(view),
+            DockFocusSource::Shortcut => {}
         }
         self.subagents_focused = true;
         self.update_subagent_summary(view);

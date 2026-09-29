@@ -29,13 +29,16 @@ fn typed_keys(text: &str) -> Vec<KeyEvent> {
 }
 
 /// Seed the static chrome state for a fresh interactive run: splash
-/// version/cwd, top-bar name, and the `manage` hint for persisted sessions.
+/// version/cwd, top-bar name, the `manage` hint for persisted sessions,
+/// and the zero dock a fresh session mounts — the placeholder frame
+/// keeps the landed frame's geometry.
 pub(super) fn apply_startup_chrome(view: &mut AgentView, options: &InteractiveOptions) {
     view.chrome.version.clone_from(&options.version);
     view.chrome.cwd = options.cwd.to_string_lossy().to_string();
     view.chrome.chat_name = crate::chrome::display_name(&view.chrome.cwd);
     view.chrome.show_manage = !options.no_session;
     view.chrome.tray_depth = options.session_rlm_depth;
+    view.chrome.activity = Some(crate::chrome::ActivityDock::default());
 }
 
 /// The tmux keyboard notice (TS `checkTmuxKeyboardSetup`): warn once per
@@ -518,6 +521,13 @@ impl Renderer {
         if !preserve_alt_screen && self.is_terminal() {
             crate::enhanced_keys::release_for_exit();
         }
+        // The surface's input reader stands down FIRST (TS tears its
+        // listener down with the chat): the drain below reads the tty
+        // through crossterm's global event-reader lock, and a parked
+        // reader would hold it — the wake makes the flagged reader exit
+        // now, the drain owns the reader, and the next surface's mount
+        // joins an already-exited thread instead of waiting out a poll.
+        crate::input::request_reader_stop();
         // In-flight kitty key releases are consumed before the terminal is
         // restored (TS `drainInput` before `stop`): a release that lands
         // after raw mode is off would leak its escape sequence into the
@@ -554,12 +564,6 @@ impl Renderer {
                     };
                     drop(term);
                     let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Hide);
-                    // Flag this surface's input reader for the background
-                    // stop now (TS tears its listener down with the chat):
-                    // the next surface joins it at mount, and the already
-                    // flagged reader exits at its next poll tick instead
-                    // of making the switch wait a full timeout.
-                    crate::input::request_reader_stop();
                 } else {
                     let _ = self.flush_to_main_screen(view);
                     // The shared exit tail ends the parity teardown: the

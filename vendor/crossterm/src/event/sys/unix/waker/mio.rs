@@ -5,7 +5,7 @@ use ::mio::{Registry, Token};
 /// Allows to wake up the `mio::Poll::poll()` method.
 /// This type wraps `mio::Waker`, for more information see its documentation.
 #[derive(Clone, Debug)]
-pub(crate) struct Waker {
+pub struct Waker {
     inner: Arc<Mutex<::mio::Waker>>,
 }
 
@@ -20,7 +20,7 @@ impl Waker {
     /// Wake up the [`Poll`] associated with this `Waker`.
     ///
     /// Readiness is set to `Ready::readable()`.
-    pub(crate) fn wake(&self) -> std::io::Result<()> {
+    pub fn wake(&self) -> std::io::Result<()> {
         self.inner.lock().unwrap().wake()
     }
 

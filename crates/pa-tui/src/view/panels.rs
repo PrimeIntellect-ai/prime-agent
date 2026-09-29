@@ -59,18 +59,16 @@ impl AgentView {
         // The activity dock's group segments are click regions too:
         // the groups sit on the frame's second row, under the rule.
         if let Some(dock) = &self.chrome.activity {
-            if let Some((frame, segments)) =
-                crate::chrome::render_activity_dock_segments(dock, &self.theme, width)
-            {
-                for segment in segments {
-                    self.click.record_dock_region(DockClickRegion {
-                        dock_row: tray_row + 2,
-                        cols: segment.cols,
-                        action: ClickAction::OpenDockGroup(segment.group),
-                    });
-                }
-                lines.extend(frame);
+            let (frame, segments) =
+                crate::chrome::render_activity_dock_segments(dock, &self.theme, width);
+            for segment in segments {
+                self.click.record_dock_region(DockClickRegion {
+                    dock_row: tray_row + 2,
+                    cols: segment.cols,
+                    action: ClickAction::OpenDockGroup(segment.group),
+                });
             }
+            lines.extend(frame);
         }
         // The `/speed` footer (TS `footerSlot`, the main container's last
         // child): a dim row only while the display is on with a sample.
