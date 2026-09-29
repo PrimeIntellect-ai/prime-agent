@@ -32,6 +32,7 @@ pub struct OAuthHttpResponse {
     pub body: String,
 }
 impl OAuthHttpResponse {
+    #[must_use]
     pub fn header(&self, name: &str) -> Option<&str> {
         let name = name.to_ascii_lowercase();
         self.headers
@@ -42,6 +43,7 @@ impl OAuthHttpResponse {
 
     /// The `content-type` media type (parameters stripped, lowercased),
     /// matching `response.headers.get("content-type")?.split(";", 1)[0].trim()`.
+    #[must_use]
     pub fn content_type(&self) -> Option<String> {
         self.header("content-type").map(|value| {
             value
@@ -80,6 +82,7 @@ impl ReqwestOAuthHttp {
     /// Panics when the underlying `reqwest` client cannot be built; with no
     /// TLS configuration and redirects disabled this construction cannot
     /// fail.
+    #[must_use]
     pub fn new() -> Self {
         ReqwestOAuthHttp {
             client: reqwest::Client::builder()
@@ -108,7 +111,7 @@ impl OAuthHttp for ReqwestOAuthHttp {
                 builder = builder.body(body.clone());
             }
             let response = builder.send().await.with_context(|| {
-                format!("{} {} failed", method_label(&request.method), request.url)
+                format!("{} {} failed", method_label(request.method), request.url)
             })?;
             let status = response.status().as_u16();
             let headers = response
@@ -124,7 +127,7 @@ impl OAuthHttp for ReqwestOAuthHttp {
             let body = response.text().await.with_context(|| {
                 format!(
                     "{} {} body read failed",
-                    method_label(&request.method),
+                    method_label(request.method),
                     request.url
                 )
             })?;
@@ -137,7 +140,7 @@ impl OAuthHttp for ReqwestOAuthHttp {
     }
 }
 
-fn method_label(method: &OAuthHttpMethod) -> &'static str {
+fn method_label(method: OAuthHttpMethod) -> &'static str {
     match method {
         OAuthHttpMethod::Get => "GET",
         OAuthHttpMethod::Post => "POST",

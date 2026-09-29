@@ -37,6 +37,7 @@ pub enum RlmChildTerminalNotice {
 
 /// The terminal-notice row: `[child-exited: cancelled|no-reply child:<name>]`
 /// with the reason or the child's last assistant text as the body.
+#[must_use]
 pub fn create_rlm_child_terminal_notice(
     notice: &RlmChildTerminalNotice,
     timestamp: u64,
@@ -95,6 +96,7 @@ pub fn create_rlm_child_terminal_notice(
 }
 
 /// The failure row: `[child-failed child:<name>]` with the error text.
+#[must_use]
 pub fn create_rlm_child_failure_message(
     child_id: &str,
     session_name: &str,

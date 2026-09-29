@@ -704,11 +704,11 @@ fn the_settings_flag_round_trips_and_defaults_off() {
         serde_json::from_str(r#"{"requestTiming": true}"#).unwrap();
     assert_eq!(settings.request_timing, Some(true));
     assert!(
-        crate::settings::SettingsManager::in_memory(settings).get_request_timing(),
+        crate::settings::SettingsManager::in_memory(&settings).get_request_timing(),
         "the getter reads the merged flag"
     );
     assert!(
-        !crate::settings::SettingsManager::in_memory(crate::settings::Settings::default())
+        !crate::settings::SettingsManager::in_memory(&crate::settings::Settings::default())
             .get_request_timing(),
         "unset means off"
     );

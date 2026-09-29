@@ -519,7 +519,23 @@ impl Worker {
                 let sink_events = events.clone();
                 let sink_notify = Arc::clone(&work_notify);
                 let sink_recovery = Arc::clone(&recovery);
+                // A weak engine reference: the engine holds this sink, so a
+                // strong reference would pin the engine forever (the same
+                // downgrade the bash-completion notice sink applies).
+                let sink_engine = std::sync::Arc::downgrade(concrete);
                 let sink: crate::engine::GoalAdmissionSink = Arc::new(move |work| {
+                    // The item's OWN pending handle (captured under the
+                    // driver lock at the mint), cloned before the admission
+                    // takes the work: the release touches exactly this
+                    // mint's guard, never the mutable mirror (a rebuilt
+                    // core re-swaps the mirror onto the replacement
+                    // session's guard, and this sink must not clear that).
+                    let pending_handle = match &work {
+                        crate::engine::GoalTurnEndWork::Continuation(item)
+                        | crate::engine::GoalTurnEndWork::BudgetLimitSteer(item) => {
+                            item.pending_handle.clone()
+                        }
+                    };
                     admit_goal_follow_up(
                         &sink_recovery,
                         &sink_core,
@@ -527,6 +543,16 @@ impl Worker {
                         &sink_notify,
                         work,
                     );
+                    let Some(engine) = sink_engine.upgrade() else {
+                        return;
+                    };
+                    // The queue admitted the minted continuation: the
+                    // guard releases at the admission (the owed flag
+                    // clears at the queue, TS `_admitSessionInput`'s
+                    // follow-up), so the next boundary may mint again —
+                    // the queued row's own wait is guarded by the
+                    // session-input probe.
+                    engine.release_goal_continuation_handle(&pending_handle);
                 });
                 // TS `_clearQueuedGoalContexts`: withdraw queued minted
                 // goal-context turns (the pause/clear/start commands and
@@ -821,7 +847,7 @@ fn emit_refinement_row(
         if store.session_id() != review_session_id {
             pa_core::session_engine::compaction_trace::trace(
                 "autorefine.rows_dropped_session_moved",
-                serde_json::Value::Null,
+                &serde_json::Value::Null,
             );
             return false;
         }

@@ -11,13 +11,11 @@ use super::CONTENT_ENTRY_TYPES;
 
 impl SessionManager {
     /// The active session state (latest normalized `session_state` entry).
+    #[must_use]
     pub fn get_session_state(&self) -> Option<SessionStateStatus> {
         for entry in self.get_entries().iter().rev() {
             if let FileEntry::SessionState { payload, .. } = entry {
-                let status = normalize_state(payload.state.status);
-                if let Some(status) = status {
-                    return Some(status);
-                }
+                return Some(normalize_state(payload.state.status));
             }
         }
         None
@@ -25,6 +23,7 @@ impl SessionManager {
 
     /// True when the session holds user-meaningful content beyond the default
     /// creation prefix (`model_change`, `thinking_level_change`, `service_tier_change`).
+    #[must_use]
     pub fn has_user_content(&self) -> bool {
         let owned_entries = self.get_entries();
         let content_entries: Vec<&FileEntry> = owned_entries
@@ -153,6 +152,7 @@ impl SessionManager {
 
     /// `getFlatTree`: every entry in file order with its active label and
     /// label timestamp (the `get_session_tree` wire shape's source).
+    #[must_use]
     pub fn get_flat_tree(&self) -> Vec<(FileEntry, Option<String>, Option<String>)> {
         self.get_entries()
             .into_iter()
@@ -167,6 +167,7 @@ impl SessionManager {
 
     /// `getUserMessagesForForking`: user messages with their text, in file
     /// order (TS `AgentSession.getUserMessagesForForking`).
+    #[must_use]
     pub fn get_user_messages_for_forking(&self) -> Vec<(String, String)> {
         self.get_entries()
             .iter()
@@ -269,12 +270,12 @@ impl SessionManager {
     }
 }
 
-fn normalize_state(status: SessionStateStatus) -> Option<SessionStateStatus> {
-    Some(match status {
+fn normalize_state(status: SessionStateStatus) -> SessionStateStatus {
+    match status {
         SessionStateStatus::Active | SessionStateStatus::Archived | SessionStateStatus::Crash => {
             status
         }
-    })
+    }
 }
 
 fn entry_type(entry: &FileEntry) -> &'static str {

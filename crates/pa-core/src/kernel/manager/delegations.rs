@@ -1,6 +1,9 @@
 //! `ReplKernelManager` delegations onto Inner.
 
-use super::*;
+use super::{
+    AbortSignal, Arc, ExecuteOptions, Inner, InternalExecuteResult, ReplKernelManager, Request,
+    RestoreResult, SnapshotResult,
+};
 
 // ---------------------------------------------------------------------------
 // ReplKernelManager delegations onto Inner

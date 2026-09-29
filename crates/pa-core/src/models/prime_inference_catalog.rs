@@ -206,6 +206,7 @@ fn default_compat() -> ModelCompat {
 }
 
 /// Build models from catalog entries over the bundled templates.
+#[must_use]
 pub fn build_prime_inference_models(
     bundled_models: &[Model],
     entries: &[PrimeInferenceCatalogEntry],

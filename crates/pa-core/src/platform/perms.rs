@@ -73,6 +73,7 @@ pub fn set_private_mode(_options: &mut OpenOptions) {
 
 /// The file's mode bits (`mode & 0o777`); None where mode bits do not exist.
 #[cfg(unix)]
+#[must_use]
 pub fn file_mode(path: &Path) -> Option<u32> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path)
@@ -87,6 +88,7 @@ pub fn file_mode(_path: &Path) -> Option<u32> {
 
 /// True when the path is an executable file (any execute bit on Unix).
 #[cfg(unix)]
+#[must_use]
 pub fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
@@ -100,6 +102,7 @@ pub fn is_executable(path: &Path) -> bool {
 /// True when the current process may read and write the file (access(2)
 /// semantics: real/effective uid checks, not just the file mode).
 #[cfg(unix)]
+#[must_use]
 pub fn is_readable_writable(path: &Path) -> bool {
     nix::unistd::access(
         path,

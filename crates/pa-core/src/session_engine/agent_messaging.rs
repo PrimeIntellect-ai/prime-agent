@@ -44,6 +44,7 @@ impl std::fmt::Display for AgentFamilyRelationship {
 }
 
 impl AgentFamilyRelationship {
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             AgentFamilyRelationship::Parent => "parent",
@@ -52,6 +53,7 @@ impl AgentFamilyRelationship {
         }
     }
 
+    #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "parent" => Some(AgentFamilyRelationship::Parent),
@@ -70,6 +72,7 @@ pub enum AgentMessageDeliveryStatus {
 }
 
 impl AgentMessageDeliveryStatus {
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             AgentMessageDeliveryStatus::Delivered => "delivered",
@@ -124,6 +127,7 @@ pub struct AgentFamilyMember {
 
 impl AgentFamilyMember {
     /// TS `agentFamilyMemberName`: the name, else the id.
+    #[must_use]
     pub fn member_name(&self) -> &str {
         self.name.as_deref().unwrap_or(&self.id)
     }
@@ -155,11 +159,13 @@ pub struct AgentMessagePromptPayload {
     pub from_relationship: Option<AgentFamilyRelationship>,
 }
 
+#[must_use]
 pub fn create_agent_session_message_id() -> String {
     format!("{AGENT_MESSAGE_ID_PREFIX}{}", uuid::Uuid::new_v4())
 }
 
 /// Distinguishes agent-to-agent ids from synthetic prompt ids.
+#[must_use]
 pub fn is_agent_session_message_id(id: Option<&str>) -> bool {
     id.is_some_and(|id| id.starts_with(AGENT_MESSAGE_ID_PREFIX))
 }
@@ -260,6 +266,7 @@ pub(crate) fn sanitize_message_header_value(value: &str) -> String {
 }
 
 /// The rendered prompt a receiving context sees.
+#[must_use]
 pub fn create_agent_session_message_prompt(payload: &AgentMessagePromptPayload) -> String {
     let sender = sanitize_message_header_value(&payload.sender_name);
     let sender = if sender.is_empty() {
@@ -298,6 +305,7 @@ pub struct AgentSessionMessageRowPayload<'a> {
 /// prompt, so the turn's model context (the loop-boundary user-role
 /// conversion of the custom row) matches the plain-prompt delivery, while
 /// the details carry the identity the `agent_message` UI reads.
+#[must_use]
 pub fn create_agent_session_message_row(payload: &AgentSessionMessageRowPayload<'_>) -> Value {
     let mut details = serde_json::Map::new();
     details.insert("id".to_string(), json!(payload.id));
@@ -318,9 +326,10 @@ pub fn create_agent_session_message_row(payload: &AgentSessionMessageRowPayload<
 }
 
 /// Parse the message id out of the pre-bracket-grammar transcript header.
+#[must_use]
 pub fn parse_agent_session_message_prompt_id(text: &str) -> Option<String> {
     let lines: Vec<&str> = text.split('\n').collect();
-    let offset = lines.first().is_some_and(|line| line.starts_with("[from ")) as usize;
+    let offset = usize::from(lines.first().is_some_and(|line| line.starts_with("[from ")));
     if lines.get(offset).copied() != Some("Agent-to-agent message received.")
         || lines.get(offset + 1).copied()
             != Some(format!("Source: {AGENT_MESSAGE_SOURCE}").as_str())
@@ -346,6 +355,7 @@ pub fn parse_agent_session_message_prompt_id(text: &str) -> Option<String> {
     (!id.is_empty() && id.starts_with(AGENT_MESSAGE_ID_PREFIX)).then(|| id.to_string())
 }
 
+#[must_use]
 pub fn is_agent_session_message_prompt(text: &str) -> bool {
     parse_agent_session_message_prompt_id(text).is_some()
 }
@@ -552,6 +562,7 @@ pub enum AgentFamilyStatus {
 }
 
 impl AgentFamilyStatus {
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             AgentFamilyStatus::Running => "running",
@@ -575,6 +586,7 @@ pub enum AgentObserveActivity {
 }
 
 impl AgentObserveActivity {
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             AgentObserveActivity::Tool => "tool",
@@ -589,6 +601,9 @@ impl AgentObserveActivity {
 
 /// One roster row / agent summary.
 #[derive(Debug, Clone)]
+// The mirrored TS API shape is deliberate (the booleans are the
+// product's own surface, not a refactor target).
+#[allow(clippy::struct_excessive_bools)]
 pub struct AgentObserveSummary {
     pub active_session_id: Option<String>,
     pub session_id: String,
@@ -702,6 +717,7 @@ fn optional_integer(value: Option<&Value>, label: &str) -> anyhow::Result<Option
 }
 
 /// Build one preview from a session message.
+#[must_use]
 pub fn create_agent_observe_message_preview(
     message: &pa_types::session::AgentMessage,
     index: usize,
@@ -1129,15 +1145,17 @@ mod tests {
     struct RecordingMessageController;
 
     impl AgentMessageController for RecordingMessageController {
-        async fn family(&self) -> anyhow::Result<Vec<AgentFamilyMember>> {
-            Ok(family())
+        fn family(
+            &self,
+        ) -> impl std::future::Future<Output = anyhow::Result<Vec<AgentFamilyMember>>> {
+            std::future::ready(Ok(family()))
         }
 
-        async fn send_agent_message(
+        fn send_agent_message(
             &self,
             input: AgentMessageSendInput,
-        ) -> anyhow::Result<AgentMessageReceipt> {
-            Ok(AgentMessageReceipt {
+        ) -> impl std::future::Future<Output = anyhow::Result<AgentMessageReceipt>> {
+            std::future::ready(Ok(AgentMessageReceipt {
                 id: create_agent_session_message_id(),
                 target_session_id: Some(format!("{}-session", input.target)),
                 target: input.target,
@@ -1149,7 +1167,7 @@ mod tests {
                 receiver_role: input.receiver_role,
                 delivered_at: Some("2024-01-01T00:00:00.000Z".to_string()),
                 queued_at: None,
-            })
+            }))
         }
     }
 
@@ -1289,31 +1307,39 @@ mod tests {
     async fn broadcast_without_family_is_empty_and_failures_settle() {
         struct NoFamilyController;
         impl AgentMessageController for NoFamilyController {
-            async fn family(&self) -> anyhow::Result<Vec<AgentFamilyMember>> {
-                Ok(Vec::new())
+            fn family(
+                &self,
+            ) -> impl std::future::Future<Output = anyhow::Result<Vec<AgentFamilyMember>>>
+            {
+                std::future::ready(Ok(Vec::new()))
             }
-            async fn send_agent_message(
+            fn send_agent_message(
                 &self,
                 _input: AgentMessageSendInput,
-            ) -> anyhow::Result<AgentMessageReceipt> {
-                anyhow::bail!("no route")
+            ) -> impl std::future::Future<Output = anyhow::Result<AgentMessageReceipt>>
+            {
+                std::future::ready(Err(anyhow::anyhow!("no route")))
             }
         }
         struct LoneFamilyController;
         impl AgentMessageController for LoneFamilyController {
-            async fn family(&self) -> anyhow::Result<Vec<AgentFamilyMember>> {
-                Ok(vec![AgentFamilyMember {
+            fn family(
+                &self,
+            ) -> impl std::future::Future<Output = anyhow::Result<Vec<AgentFamilyMember>>>
+            {
+                std::future::ready(Ok(vec![AgentFamilyMember {
                     relationship: AgentFamilyRelationship::Sibling,
                     id: "sib-1".to_string(),
                     name: None,
                     aliases: Vec::new(),
-                }])
+                }]))
             }
-            async fn send_agent_message(
+            fn send_agent_message(
                 &self,
                 _input: AgentMessageSendInput,
-            ) -> anyhow::Result<AgentMessageReceipt> {
-                anyhow::bail!("peer unreachable")
+            ) -> impl std::future::Future<Output = anyhow::Result<AgentMessageReceipt>>
+            {
+                std::future::ready(Err(anyhow::anyhow!("peer unreachable")))
             }
         }
         let mut handlers = HostRequestHandlers::default();

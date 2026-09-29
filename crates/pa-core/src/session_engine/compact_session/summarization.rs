@@ -1,7 +1,7 @@
 //! Compact-session summarization math (moved with its concern): the two
 //! summary calls' completion budgets, the chars/4 request estimate, and
 //! the exact-request window estimator the auxiliary-model routing consults.
-use super::*;
+use super::AgentMessage;
 
 /// The history summary's completion budget (TS `generateSummary`:
 /// `Math.floor(0.8 * reserveTokens)`): multiply before dividing so

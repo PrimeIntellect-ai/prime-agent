@@ -147,7 +147,7 @@ impl McpConnectionStore {
     /// state wins for every OTHER id first). Install paths and tests that
     /// build records by hand.
     #[cfg(test)]
-    pub fn upsert(&mut self, record: McpConnectionRecord) -> Result<(), anyhow::Error> {
+    pub fn upsert(&mut self, record: &McpConnectionRecord) -> Result<(), anyhow::Error> {
         self.with_disk_state(|records| {
             records.insert(record.connection_id.clone(), record.clone());
         })
@@ -168,7 +168,7 @@ impl McpConnectionStore {
     /// mid-probe) commits nothing.
     pub fn apply_verify_result(
         &mut self,
-        record: McpConnectionRecord,
+        record: &McpConnectionRecord,
         still_current: bool,
     ) -> Result<bool, anyhow::Error> {
         let connection_id = record.connection_id.clone();

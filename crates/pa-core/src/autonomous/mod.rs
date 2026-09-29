@@ -162,6 +162,7 @@ pub struct GitWorktreeSnapshot {
     pub untracked_hash: String,
 }
 
+#[must_use]
 pub fn is_unlimited_autonomous_limit(value: u64) -> bool {
     value >= UNLIMITED_AUTONOMOUS_LIMIT
 }
@@ -306,6 +307,7 @@ pub fn set_autonomous_limits(state: &mut AutonomousRuntimeState, config: &AgentA
     }
 }
 
+#[must_use]
 pub fn autonomous_status(state: &AutonomousRuntimeState) -> AgentAutonomousStatus {
     AgentAutonomousStatus {
         enabled: state.enabled,
@@ -342,6 +344,7 @@ pub fn add_autonomous_continuation(state: &mut AutonomousRuntimeState) {
 
 /// Cache-read tokens are repeated context served from the provider cache;
 /// count input + output + cache-write only.
+#[must_use]
 pub fn autonomous_token_delta(usage: Option<&pa_types::ai::Usage>) -> u64 {
     match usage {
         Some(usage) => usage.input + usage.output + usage.cache_write,
@@ -351,6 +354,7 @@ pub fn autonomous_token_delta(usage: Option<&pa_types::ai::Usage>) -> u64 {
 
 /// The disabled status snapshot (TS `emptyAutonomousStatus`): what
 /// `wait_for_headless_completion` answers when no run is (or was) enabled.
+#[must_use]
 pub fn disabled_autonomous_status() -> AgentAutonomousStatus {
     let state = create_autonomous_runtime_state(None, None);
     autonomous_status(&state)
@@ -360,6 +364,7 @@ pub fn disabled_autonomous_status() -> AgentAutonomousStatus {
 /// `autonomousLimitReason(status)` in acp-stop-reason.ts: the same counter
 /// fields the runtime state carries, evaluated on the wire shape so headless
 /// surfaces can derive the stop reason without the live state).
+#[must_use]
 pub fn autonomous_limit_reason_of_status(
     status: &AgentAutonomousStatus,
     now: u64,
@@ -382,6 +387,7 @@ pub fn autonomous_limit_reason_of_status(
 }
 
 /// Limit check against the current counters.
+#[must_use]
 pub fn autonomous_limit_reason(
     state: &AutonomousRuntimeState,
     now: u64,
@@ -404,6 +410,7 @@ pub fn autonomous_limit_reason(
 }
 
 /// Continuation prompt for a failed gate.
+#[must_use]
 pub fn build_autonomous_gate_failure_continuation(
     failure: &AgentAutonomousGateFailure,
     max_retries: u64,
@@ -425,6 +432,7 @@ pub fn build_autonomous_gate_failure_continuation(
 }
 
 /// The plain `[autonomous-continuation]` message body.
+#[must_use]
 pub fn autonomous_continuation_text(state: &AutonomousRuntimeState) -> String {
     format!("[autonomous-continuation]\n\n{}", state.continuation_prompt)
 }
@@ -434,6 +442,7 @@ pub fn autonomous_continuation_text(state: &AutonomousRuntimeState) -> String {
 /// [{ type: "text", text }], timestamp }`): the loop emits and persists the
 /// row through its own message events, so the surface that mints it owns no
 /// emission of its own.
+#[must_use]
 pub fn autonomous_continuation_loop_row(
     text: &str,
     timestamp: u64,
@@ -452,6 +461,7 @@ pub fn autonomous_continuation_loop_row(
 }
 
 /// Keep-alive message delivered while subagents are still active.
+#[must_use]
 pub fn create_autonomous_subagent_keep_alive_text(state: &AutonomousRuntimeState) -> String {
     let minutes = (state.subagent_keep_alive_ms / 60_000).max(1);
     let plural = if minutes == 1 { "" } else { "s" };
@@ -462,6 +472,7 @@ pub fn create_autonomous_subagent_keep_alive_text(state: &AutonomousRuntimeState
 
 /// Highest recorded gate attempt (across the failure record and per-command
 /// counts): the terminal-gate headline a headless client prints.
+#[must_use]
 pub fn latest_autonomous_gate_attempt(status: &AgentAutonomousStatus) -> u64 {
     let from_failure = status
         .last_gate_failure
@@ -472,6 +483,7 @@ pub fn latest_autonomous_gate_attempt(status: &AgentAutonomousStatus) -> u64 {
 }
 
 /// Human description of an autonomous limit (`<limit> reached (used/cap)`).
+#[must_use]
 pub fn describe_autonomous_limit(
     status: &AgentAutonomousStatus,
     reason: AutonomousLimitReason,
@@ -499,6 +511,7 @@ pub fn describe_autonomous_limit(
     }
 }
 
+#[must_use]
 pub fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -643,9 +643,9 @@ fn route_authoritative_stream_fn(
                 service_tier,
                 headers,
             } = target;
-            Box::pin(
-                async move { stream_once(model, api_key, service_tier, headers, context, options) },
-            )
+            Box::pin(async move {
+                stream_once(&model, api_key, service_tier, headers, context, options)
+            })
         },
     )
 }

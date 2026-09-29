@@ -288,7 +288,7 @@ fn onboarding_gate_follows_settings_and_auth() {
     .expect("models.json");
     let mut settings = pa_core::settings::SettingsManager::create(dir.path(), &agent);
     settings
-        .set_default_model_and_provider("onboard-test".into(), "m1".into())
+        .set_default_model_and_provider("onboard-test", "m1")
         .expect("saved default");
     let options = run_options(dir.path());
     let task = onboarding_task(&options, None).expect("the ready home mounts the flow");

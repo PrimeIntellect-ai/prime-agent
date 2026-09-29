@@ -150,6 +150,7 @@ impl AgentCronJobStore {
 /// projection of these files, never a separate write path) and the
 /// supervisor's boot
 /// re-arm. A missing or unparseable file reads as no jobs.
+#[must_use]
 pub fn read_scheduled_jobs_artifact(path: &Path) -> Vec<AgentCronJob> {
     with_state_locks(&[path.to_path_buf()], || read_jobs_state(path).jobs)
 }

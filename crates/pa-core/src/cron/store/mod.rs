@@ -83,6 +83,7 @@ impl std::fmt::Debug for AgentCronJobStore {
 
 impl AgentCronJobStore {
     /// Store backed by a single file.
+    #[must_use]
     pub fn new(file_path: PathBuf) -> Self {
         Self {
             file_path: Some(file_path),
@@ -93,6 +94,7 @@ impl AgentCronJobStore {
     }
 
     /// Store spanning per-session artifact files.
+    #[must_use]
     pub fn for_session_artifacts() -> Self {
         Self {
             file_path: None,

@@ -60,6 +60,7 @@ pub enum CompactionOutcomeReason {
 impl CompactionOutcomeReason {
     /// The wire `reason` string: the outcome row's `details.reason` and the
     /// `compaction_end` event's `reason`.
+    #[must_use]
     pub fn wire(self) -> &'static str {
         match self {
             Self::Threshold => "threshold",
@@ -82,6 +83,7 @@ pub enum CompactionOutcomeKind {
 
 impl CompactionOutcomeKind {
     /// The wire `outcome` string: the outcome row's `details.outcome`.
+    #[must_use]
     pub fn wire(self) -> &'static str {
         match self {
             Self::Skipped => "skipped",
@@ -101,6 +103,7 @@ fn now_millis() -> u64 {
 /// error plus how many retries it took. This is the ONE line the episode
 /// leaves in the chat (live and rebuilt), replacing the per-attempt error
 /// rows TS keeps.
+#[must_use]
 pub fn provider_retry_recovered_text(attempts: u32, last_error: &str) -> String {
     format!("Recovered after {attempts} retries: {last_error}")
 }
@@ -112,6 +115,7 @@ pub fn provider_retry_recovered_text(attempts: u32, last_error: &str) -> String 
 /// attempt) never retried, so it reads as the plain provider failure it
 /// is — TS never emits this shape (that omission is the silent empty
 /// message the disclosure now covers).
+#[must_use]
 pub fn provider_retry_exhausted_text(attempts: u32, final_error: &str) -> String {
     if attempts == 0 {
         format!("\u{26a0} Error: {final_error}")
@@ -123,6 +127,7 @@ pub fn provider_retry_exhausted_text(attempts: u32, final_error: &str) -> String
 /// The durable disclosure row of one provider-retry episode (see
 /// [`PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE`]): `content` carries the row text
 /// the chat renders, `details` the structured verdict.
+#[must_use]
 pub fn create_provider_retry_outcome_message(
     success: bool,
     attempts: u32,
@@ -152,6 +157,7 @@ pub fn create_provider_retry_outcome_message(
 /// carrying the outcome message and `{reason, outcome}` details. It is a
 /// user-facing disclosure, never model context — `convert_to_llm` drops it,
 /// so the KV-cacheable prefix is unaffected.
+#[must_use]
 pub fn create_compaction_outcome_message(
     content: &str,
     reason: CompactionOutcomeReason,
@@ -177,6 +183,7 @@ pub fn create_compaction_outcome_message(
 /// `[<kind> ...]` header (TS `sanitizeMessageHeaderValue`); the daemon's
 /// fire delivers the row as the turn's injected prompt, so the transcript
 /// renders the heartbeat component instead of a plain user message.
+#[must_use]
 pub fn create_heartbeat_prompt_message(
     job: &AgentCronJob,
     timestamp: u64,
@@ -226,6 +233,7 @@ pub fn create_heartbeat_prompt_message(
 /// the row, so the transcript renders the bash-done component); a
 /// later kernel read that reaches the model first withdraws it through
 /// its details (`bash.consumed`).
+#[must_use]
 pub fn create_async_bash_completion_message(
     pid: u32,
     command: &str,
@@ -298,6 +306,7 @@ fn bash_output_to_text(
 }
 
 /// Bash execution as user-facing text for LLM context.
+#[must_use]
 pub fn bash_execution_to_text(message: &pa_types::session::BashExecutionMessage) -> String {
     format!(
         "Ran `{}`\n{}",
@@ -322,6 +331,7 @@ fn text_block(text: String) -> UserContentBlock {
 
 /// The LLM message view of session messages: session-only roles become user
 /// text turns; bookkeeping custom types drop out entirely.
+#[must_use]
 pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<AgentMessage> {
     let mut out = Vec::new();
     for message in messages {
@@ -405,6 +415,7 @@ pub type LlmToolResultMessage = ToolResultMessage;
 /// unknown roles drop, everything else becomes a user turn. This is what
 /// lets the harness-digest row ride the loop (prompt input and agent-end
 /// message list) while still reaching the provider as model context.
+#[must_use]
 pub fn loop_convert_to_llm(
     messages: Vec<pa_agent::types::AgentMessage>,
 ) -> Vec<pa_agent::types::Message> {
@@ -445,6 +456,7 @@ fn session_llm_row_to_loop(message: &AgentMessage) -> Option<pa_agent::types::Me
 
 /// The `ConvertToLlmFn` handed to the pa-agent loop: infallible by contract
 /// (a failed wire round-trip drops the row, mirroring the TS default arm).
+#[must_use]
 pub fn engine_convert_to_llm() -> pa_agent::agent_loop::ConvertToLlmFn {
     std::sync::Arc::new(|messages: Vec<pa_agent::types::AgentMessage>| {
         Box::pin(async move { Ok(loop_convert_to_llm(messages)) })

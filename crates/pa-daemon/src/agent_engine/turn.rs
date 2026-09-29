@@ -1404,7 +1404,10 @@ impl AgentSessionEngine {
                         custom_message: None,
                         batch: Vec::new(),
                     },
+                    // The quota-resume marker is a synthetic admission, not
+                    // a minted continuation: no pending guard exists.
                     goal_update: None,
+                    pending_handle: None,
                 },
             ));
         }

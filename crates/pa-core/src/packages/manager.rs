@@ -119,6 +119,7 @@ impl PackageManager {
         })
     }
 
+    #[must_use]
     pub fn with_options(options: PackageManagerOptions) -> Self {
         let bundled_skills_dir = match options.bundled_skills_dir {
             BundledSkillsDir::Packaged => Some(super::get_bundled_skills_dir()),
@@ -136,6 +137,7 @@ impl PackageManager {
         }
     }
 
+    #[must_use]
     pub fn settings(&self) -> &SettingsManager {
         &self.settings
     }
@@ -193,9 +195,9 @@ impl PackageManager {
         self.progress = Some(callback);
     }
 
-    fn emit_progress(&self, event: ProgressEvent) {
+    fn emit_progress(&self, event: &ProgressEvent) {
         if let Some(callback) = &self.progress {
-            callback(&event);
+            callback(event);
         }
     }
 
@@ -206,7 +208,7 @@ impl PackageManager {
         message: &str,
         operation: impl FnOnce(&mut Self) -> Result<()>,
     ) -> Result<()> {
-        self.emit_progress(ProgressEvent {
+        self.emit_progress(&ProgressEvent {
             kind: ProgressEventKind::Start,
             action,
             source: source.to_string(),
@@ -214,7 +216,7 @@ impl PackageManager {
         });
         match operation(self) {
             Ok(()) => {
-                self.emit_progress(ProgressEvent {
+                self.emit_progress(&ProgressEvent {
                     kind: ProgressEventKind::Complete,
                     action,
                     source: source.to_string(),
@@ -223,7 +225,7 @@ impl PackageManager {
                 Ok(())
             }
             Err(error) => {
-                self.emit_progress(ProgressEvent {
+                self.emit_progress(&ProgressEvent {
                     kind: ProgressEventKind::Error,
                     action,
                     source: source.to_string(),
@@ -348,6 +350,7 @@ impl PackageManager {
     }
 
     /// Configured packages across both scopes (user first).
+    #[must_use]
     pub fn list_configured_packages(&self) -> Vec<ConfiguredPackage> {
         let mut packages = Vec::new();
         for scope in [UserOrProject::User, UserOrProject::Project] {
@@ -365,6 +368,7 @@ impl PackageManager {
     }
 
     /// Absolute install location for a configured source, when present.
+    #[must_use]
     pub fn get_installed_path(&self, source: &str, scope: UserOrProject) -> Option<PathBuf> {
         match parse_source(source) {
             ParsedSource::Npm(npm_source) => {
@@ -380,7 +384,7 @@ impl PackageManager {
             }
             ParsedSource::Local(local) => {
                 let base = self.base_dir_for_scope(SourceScope::from(scope));
-                let path = self.resolve_path_from_base(&local.path, &base);
+                let path = Self::resolve_path_from_base(&local.path, &base);
                 path.exists().then_some(path)
             }
         }
@@ -469,7 +473,7 @@ impl PackageManager {
                 let base = self.base_dir_for_scope(scope.into());
                 format!(
                     "local:{}",
-                    self.resolve_path_from_base(&local.path, &base).display()
+                    Self::resolve_path_from_base(&local.path, &base).display()
                 )
             }
         }
@@ -483,7 +487,7 @@ impl PackageManager {
         super::source::lexical_resolve(&self.cwd, trimmed)
     }
 
-    pub(super) fn resolve_path_from_base(&self, input: &str, base: &Path) -> PathBuf {
+    pub(super) fn resolve_path_from_base(input: &str, base: &Path) -> PathBuf {
         let trimmed = input.trim();
         if let Some(path) = expand_tilde(trimmed) {
             return path;

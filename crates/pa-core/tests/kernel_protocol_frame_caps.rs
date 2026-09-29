@@ -1,3 +1,15 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
+// crate root: the same bounded-boundary disposition as src/lib.rs
+// (large_futures/too_many_lines/the cast family; details there).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! Verifier integration test: an oversized protocol line poisons the child
 //! and lands in protocol repair instead of buffering until OOM (TS #2423
 //! `MAX_PROTOCOL_LINE_CHARS` + the `oversized protocol line` repair test).

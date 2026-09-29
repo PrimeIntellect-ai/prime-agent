@@ -33,9 +33,25 @@ pub enum GoalBranchReload {
     FaithfulBranch,
 }
 
-/// Wall-clock accounting anchor for time-used attribution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct AccountingStartedAt(pub u64);
+/// The goal timer's contract (operator ruling 2026-09-28):
+/// `time_used_seconds` is the goal's AGE — the plain wall clock since
+/// the goal's creation, computed fresh from `created_at` on every read.
+/// Nothing folds and nothing accumulates: the pre-ruling
+/// `accounting_started_at` anchor compounded each accounting write's
+/// elapsed-since-anchor onto the persisted `time_used_seconds` (the
+/// operator's 2h-old goal read 73h; the orchestrator's 1.4h goal read
+/// 242.8h across 388 persisted rows), so the anchor machinery is deleted
+/// entirely — `created_at` is set once at [`GoalDriver::start`] and never
+/// re-based, making the stale-anchor class structurally impossible.
+///
+/// TS divergence (agent-session.ts `_goalWithAccountedWallClock`): TS
+/// re-baselines an `_goalAccountingStartedAt` anchor at each accounting
+/// fold and charges only active-status wall clock. The creation-based
+/// ruling is simpler and deliberately different: a paused or idle goal
+/// still displays its age, and the timer never depends on any anchor.
+pub fn creation_elapsed_seconds(created_at: Option<u64>, now: u64) -> u64 {
+    created_at.map_or(0, |created| now.saturating_sub(created) / 1000)
+}
 
 /// What happened after accounting one assistant turn's usage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,13 +65,24 @@ pub enum UsageOutcome {
 
 pub struct GoalDriver {
     state: GoalState,
-    accounting_started_at: Option<AccountingStartedAt>,
     /// Ids of assistant messages already counted (double-counting guard).
     accounted_messages: std::collections::HashSet<String>,
     /// TS `_goalContinuationAwaitsRlmWork`: a continuation is owed behind
     /// unsettled RLM descendant work. In-memory only (never persisted,
     /// never rehydrated): descendant quiescence is a live-session fact.
     owed_continuation_for_rlm_work: bool,
+    /// A minted continuation its surface has not admitted yet. While set,
+    /// no mint site mints or re-arms another (the
+    /// pending-never-re-arms contract: exactly one continuation per owed
+    /// boundary — a queued-but-unconsumed continuation never duplicates).
+    /// The surface releases it at admission
+    /// ([`GoalDriver::continuation_consumed`]); a rollback or a goal
+    /// going inactive drops it with the mint. In-memory only (never
+    /// persisted, never rehydrated). An atomic behind an [`Arc`] so
+    /// admission surfaces that cannot take the async driver lock (a
+    /// spawned settle task, a nested `block_on`) release it through
+    /// [`GoalDriver::pending_continuation_handle`].
+    pending_continuation: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The consecutive-no-progress continuation bookkeeping (the hot-loop
     /// killer, the 402 diagnosis's (b)): a mint consult that finds the
     /// just-settled turn produced no output counts once (keyed by the
@@ -106,12 +133,13 @@ pub fn terminal_provider_failure(message: &pa_agent::types::AssistantMessage) ->
 }
 
 impl GoalDriver {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             state: empty_goal_state(),
-            accounting_started_at: None,
             accounted_messages: std::collections::HashSet::default(),
             owed_continuation_for_rlm_work: false,
+            pending_continuation: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             no_progress_streak: 0,
             no_progress_backoff_until_ms: 0,
             counted_no_progress_turn_ms: None,
@@ -125,6 +153,7 @@ impl GoalDriver {
     /// restart interrupted the settle) adopts the failure as the goal's
     /// terminal state instead of resurrecting the loop; the resume sites
     /// then deliver no continuations into the dead provider.
+    #[must_use]
     pub fn load_persisted(session: &SessionManager) -> Self {
         let mut state = Self::latest_persisted_state(session);
         if state.status == GoalStatus::Active {
@@ -150,10 +179,11 @@ impl GoalDriver {
 
     /// Reload the goal state from the session's current branch (TS
     /// `_reloadGoalStateFromBranch` at the `_navigateTree` tail): the
-    /// branch's latest persisted entry adopts under [`rule`], and the
-    /// wall-clock anchor restarts like the TS `_goalAccountingStartedAt`
-    /// reset (active goals re-anchor at the reload; everything else drops
-    /// the anchor).
+    /// branch's latest persisted entry adopts under [`rule`]. The timer
+    /// needs no anchor work here — the creation-based contract reads the
+    /// adopted state's `created_at` directly (TS re-anchors its
+    /// `_goalAccountingStartedAt` at the reload; see
+    /// [`creation_elapsed_seconds`]' divergence note).
     pub fn reload_from_branch(&mut self, session: &SessionManager, rule: GoalBranchReload) {
         let previous = self.state.clone();
         let reloaded = Self::latest_persisted_state(session);
@@ -175,17 +205,27 @@ impl GoalDriver {
                     ..previous
                 }
             }
-            _ => reloaded,
+            _ => {
+                // A different goal (or none) adopts: the previous goal's
+                // pending mint and its armed deferral belong to the old
+                // timeline — keeping either would block (or mis-deliver)
+                // the adopted goal's continuations until the next
+                // pause/start/clear. Every other state-adoption site
+                // drops both with the replaced goal; the branch reload
+                // does the same.
+                self.continuation_consumed();
+                self.owed_continuation_for_rlm_work = false;
+                reloaded
+            }
         };
-        self.accounting_started_at =
-            (self.state.status == GoalStatus::Active).then_some(AccountingStartedAt(now_millis()));
     }
 
     /// Adopt an already-persisted goal state without re-persisting it: a
     /// recovery rebuild continues the durable state verbatim (the
-    /// `thread_goal_state` row already records it, and the accounting
-    /// anchor restarts wall-clock attribution like the TS constructor's
-    /// `_goalState = this._loadPersistedGoalState()`).
+    /// `thread_goal_state` row already records it, and the creation-based
+    /// timer reads the adopted `created_at` — no anchor, no downtime
+    /// accrual beyond the age the ruling defines).
+    #[must_use]
     pub fn restore_persisted(state: GoalState) -> Self {
         let mut driver = Self::new();
         driver.restore_from_persisted(state);
@@ -193,22 +233,41 @@ impl GoalDriver {
     }
 
     /// [`GoalDriver::restore_persisted`]'s in-place form, for the driver
-    /// behind the session's shared handle: adopts the persisted state and
-    /// restarts the wall-clock anchor, never re-persisting (the durable
-    /// row already exists) and never resetting the per-message
-    /// double-counting guard (a fresh build starts it empty anyway).
+    /// behind the session's shared handle: adopts the persisted state
+    /// without re-persisting (the durable row already exists) and without
+    /// resetting the per-message double-counting guard (a fresh build
+    /// starts it empty anyway). The mint bookkeeping (the owed flag, the
+    /// pending guard) stays quiescent: descendant quiescence and a
+    /// queued-but-unconsumed continuation are live-session facts.
     pub fn restore_from_persisted(&mut self, state: GoalState) {
         self.state = normalize_goal_state(state);
-        self.accounting_started_at =
-            (self.state.status == GoalStatus::Active).then_some(AccountingStartedAt(now_millis()));
+        self.continuation_consumed();
     }
 
+    #[must_use]
     pub fn state(&self) -> &GoalState {
         &self.state
     }
 
+    /// The served goal state: `time_used_seconds` reads the goal's
+    /// creation-based age, computed fresh from `created_at` on every read
+    /// (so an actively pursued goal's timer ticks live, an idle goal never
+    /// compounds, and a paused goal shows its age). A state without
+    /// `created_at` (a pre-contract row normalized before the backfill)
+    /// keeps its last persisted `time_used_seconds`.
+    pub fn state_with_creation_elapsed(&self) -> GoalState {
+        match self.state.created_at {
+            Some(created_at) => GoalState {
+                time_used_seconds: creation_elapsed_seconds(Some(created_at), now_millis()),
+                ..self.state.clone()
+            },
+            None => self.state.clone(),
+        }
+    }
+
     /// Whether the branch may be seeded with an initial goal: only bootstrap
     /// entries (model/thinking changes) and no prior persisted goal.
+    #[must_use]
     pub fn is_branch_seedable(session: &SessionManager) -> bool {
         !session.has_non_bootstrap_entries()
     }
@@ -242,20 +301,24 @@ impl GoalDriver {
             last_reason: None,
             last_error: None,
         };
-        let previous_anchor = self.accounting_started_at;
         let previous_accounted = std::mem::take(&mut self.accounted_messages);
         let previous_owed = self.owed_continuation_for_rlm_work;
-        self.accounting_started_at = Some(AccountingStartedAt(now));
-        // TS `_startGoal`: a fresh goal starts with no owed continuation.
+        let previous_pending = self.pending_continuation();
+        // TS `_startGoal`: a fresh goal starts with no owed continuation
+        // (and no pending one — `_clearQueuedGoalContexts` drops the queued
+        // contexts with the state change).
         self.owed_continuation_for_rlm_work = false;
+        self.continuation_consumed();
         if let Err(error) = self.set_state(session, goal) {
-            // A failed start leaves the previous accounting intact.
-            self.accounting_started_at = previous_anchor;
+            // A failed start leaves the previous goal's bookkeeping intact.
             self.accounted_messages = previous_accounted;
             self.owed_continuation_for_rlm_work = previous_owed;
+            if previous_pending {
+                self.mark_continuation_pending();
+            }
             return Err(error);
         }
-        Ok(self.state.clone())
+        Ok(self.state_with_creation_elapsed())
     }
 
     /// Clear the goal entirely (empty state).
@@ -265,40 +328,39 @@ impl GoalDriver {
     /// Returns an error when the cleared goal state cannot be persisted.
     pub fn clear(&mut self, session: &mut SessionManager) -> anyhow::Result<()> {
         self.set_state(session, empty_goal_state())?;
-        self.accounting_started_at = None;
         // TS `_clearGoal` routes through `_clearQueuedGoalContexts`, which
-        // drops any owed continuation with the queued contexts.
+        // drops any owed or pending continuation with the queued contexts.
         self.owed_continuation_for_rlm_work = false;
+        self.continuation_consumed();
         Ok(())
     }
 
-    /// Time-used attribution: fold wall-clock time since accounting started.
-    fn with_accounted_wall_clock(&self) -> GoalState {
-        let Some(started) = self.accounting_started_at else {
-            return self.state.clone();
-        };
-        let elapsed_seconds = now_millis().saturating_sub(started.0) / 1000;
-        GoalState {
-            time_used_seconds: self.state.time_used_seconds + elapsed_seconds,
-            ..self.state.clone()
-        }
-    }
-
     fn set_state(&mut self, session: &mut SessionManager, next: GoalState) -> anyhow::Result<()> {
+        let now = now_millis();
         let normalized = normalize_goal_state(GoalState {
-            updated_at: Some(now_millis()),
+            updated_at: Some(now),
             ..next
         });
+        // The creation-based timer: every durable row carries the goal's
+        // age at the write — `time_used_seconds` recomputes from
+        // `created_at` (never accumulates), so a rehydrated session serves
+        // the same contract the live read does.
+        let normalized = match normalized.created_at {
+            Some(created_at) => GoalState {
+                time_used_seconds: creation_elapsed_seconds(Some(created_at), now),
+                ..normalized
+            },
+            None => normalized,
+        };
         let value = serde_json::to_value(&normalized)?;
         session.append_custom_entry(GOAL_STATE_CUSTOM_TYPE, Some(value))?;
         session.flush_now()?;
-        // Anchor accounting only once the state is durable: a failed resume
-        // must not start charging wall-clock against a paused goal.
-        if normalized.status == GoalStatus::Active {
-            self.accounting_started_at
-                .get_or_insert(AccountingStartedAt(now_millis()));
-        } else {
-            self.accounting_started_at = None;
+        // A goal leaving the active state drops its pending mint with the
+        // queued contexts (TS `_clearQueuedGoalContexts` at the pause/
+        // complete/clear state changes): a continuation owed to a dead
+        // goal never wedges the next one's mint.
+        if normalized.status != GoalStatus::Active {
+            self.continuation_consumed();
         }
         self.state = normalized;
         Ok(())
@@ -325,10 +387,9 @@ impl GoalDriver {
             return Ok(UsageOutcome::Ignored);
         }
         let token_delta = goal_token_delta_for_usage(usage.input as i64, usage.output as i64);
-        let goal = self.with_accounted_wall_clock();
         let next_goal = GoalState {
-            tokens_used: goal.tokens_used + token_delta,
-            ..goal
+            tokens_used: self.state.tokens_used + token_delta,
+            ..self.state.clone()
         };
         let budget_reached = next_goal
             .token_budget
@@ -367,7 +428,6 @@ impl GoalDriver {
         if self.state.status != GoalStatus::Active {
             return Ok(());
         }
-        let goal = self.with_accounted_wall_clock();
         self.set_state(
             session,
             GoalState {
@@ -375,14 +435,15 @@ impl GoalDriver {
                 status: GoalStatus::Paused,
                 last_reason: Some(reason.to_string()),
                 last_error: None,
-                ..goal
+                ..self.state.clone()
             },
         )?;
         // TS `_pauseGoal` routes through `_clearQueuedGoalContexts`, which
-        // drops any owed continuation with the queued contexts — after the
-        // durable write, so a failed persist keeps the previous goal's
-        // deferral exactly as it was.
+        // drops any owed or pending continuation with the queued contexts —
+        // after the durable write, so a failed persist keeps the previous
+        // goal's deferral exactly as it was.
         self.owed_continuation_for_rlm_work = false;
+        self.continuation_consumed();
         Ok(())
     }
 
@@ -444,7 +505,6 @@ impl GoalDriver {
         if self.state.objective.is_none() || self.state.status == GoalStatus::Idle {
             return Ok(());
         }
-        let goal = self.with_accounted_wall_clock();
         self.set_state(
             session,
             GoalState {
@@ -452,7 +512,7 @@ impl GoalDriver {
                 status: GoalStatus::Complete,
                 last_reason: Some("Goal achieved".to_string()),
                 last_error: None,
-                ..goal
+                ..self.state.clone()
             },
         )
     }
@@ -476,7 +536,6 @@ impl GoalDriver {
             let reason = error_message
                 .filter(|message| !message.is_empty())
                 .unwrap_or("Assistant response failed");
-            let goal = self.with_accounted_wall_clock();
             self.set_state(
                 session,
                 GoalState {
@@ -484,7 +543,7 @@ impl GoalDriver {
                     status: GoalStatus::Error,
                     last_reason: Some(reason.to_string()),
                     last_error: Some(reason.to_string()),
-                    ..goal
+                    ..self.state.clone()
                 },
             )?;
         }
@@ -545,7 +604,6 @@ impl GoalDriver {
                         + CONTINUATION_NO_PROGRESS_BACKOFF_BASE_MS
                             * 2u64.saturating_pow(self.no_progress_streak.saturating_sub(1));
                     if self.no_progress_streak >= CONTINUATION_NO_PROGRESS_CAP {
-                        let goal = self.with_accounted_wall_clock();
                         let reason =
                             "Goal continuation cap reached: consecutive turns made no progress"
                                 .to_string();
@@ -556,7 +614,7 @@ impl GoalDriver {
                                 status: GoalStatus::Error,
                                 last_reason: Some(reason.clone()),
                                 last_error: Some(reason),
-                                ..goal
+                                ..self.state.clone()
                             },
                         )?;
                         return Ok(None);
@@ -581,6 +639,14 @@ impl GoalDriver {
         if now_millis() < self.no_progress_backoff_until_ms {
             return Ok(None);
         }
+        // The pending-never-re-arms contract: a continuation minted but
+        // not yet admitted by its surface blocks every further mint —
+        // exactly one continuation per owed boundary, never duplicates
+        // (the operator's dock saw one boundary deliver several "Goal
+        // continuation" turns).
+        if self.pending_continuation() {
+            return Ok(None);
+        }
         self.set_state(
             session,
             GoalState {
@@ -590,19 +656,38 @@ impl GoalDriver {
                 ..self.state.clone()
             },
         )?;
-        Ok(create_goal_context_message(&self.state, GoalContextKind::Continuation).ok())
+        let message = create_goal_context_message(&self.state, GoalContextKind::Continuation).ok();
+        // The mint is owed to the calling surface until it admits the
+        // turn ([`GoalDriver::continuation_consumed`]); a rollback
+        // un-mints it.
+        if message.is_some() {
+            self.mark_continuation_pending();
+        }
+        Ok(message)
     }
 
     /// TS `_getGoalContinuationMessages`'s quiescence arm: the natural
     /// turn end defers the continuation while descendant RLM work is
     /// unsettled. The mint consumes nothing while it waits; descendant
     /// settlement delivers it (`take_owed_continuation`).
+    ///
+    /// TS arms only when nothing is already queued
+    /// (`_goalContinuationAwaitsRlmWork ||= !hasQueuedMessages()`): a
+    /// minted-but-unadmitted continuation IS this boundary's queued
+    /// delivery, so arming beside it would leave the flag set when the
+    /// pending mint admits — a later settle would deliver a SECOND
+    /// continuation for the same boundary. The pending guard makes the
+    /// arm a no-op instead.
     pub fn mark_continuation_owed(&mut self) {
+        if self.pending_continuation() {
+            return;
+        }
         self.owed_continuation_for_rlm_work = true;
     }
 
     /// Whether a continuation is currently owed behind descendant work
     /// (TS `_goalContinuationAwaitsRlmWork`).
+    #[must_use]
     pub fn owes_continuation(&self) -> bool {
         self.owed_continuation_for_rlm_work
     }
@@ -624,17 +709,22 @@ impl GoalDriver {
         last_turn: Option<&pa_agent::types::AssistantMessage>,
     ) -> anyhow::Result<Option<CustomMessage>> {
         let owed = self.owed_continuation_for_rlm_work;
-        self.owed_continuation_for_rlm_work = false;
         if !owed {
             return Ok(None);
         }
+        // A pending continuation holds the deferral: the owed boundary
+        // delivers once the previous mint is admitted, never beside it.
+        if self.pending_continuation() {
+            return Ok(None);
+        }
+        self.owed_continuation_for_rlm_work = false;
         match self.next_continuation_message(session, last_turn) {
             Ok(None) => {
                 // The mint refused for progress reasons (the goal
-                // finished, or the backoff window): an inactive goal
-                // drops the deferral (TS); a live goal in backoff keeps
-                // it, so a later boundary after the window still
-                // delivers the owed continuation.
+                // finished, the pending guard, or the backoff window):
+                // an inactive goal drops the deferral (TS); a live goal
+                // in backoff keeps it, so a later boundary after the
+                // window still delivers the owed continuation.
                 if self.state.status == GoalStatus::Active {
                     self.owed_continuation_for_rlm_work = true;
                 }
@@ -651,6 +741,38 @@ impl GoalDriver {
         }
     }
 
+    /// The minted continuation's surface admitted it (the queue push or
+    /// the in-run handoff): the pending guard releases, so the next
+    /// boundary may mint again. TS clears `_goalContinuationAwaitsRlmWork`
+    /// at the same point (`_admitSessionInput`'s follow-up admission).
+    pub fn continuation_consumed(&mut self) {
+        self.pending_continuation
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether a minted continuation is still waiting for its surface's
+    /// admission (the pending-never-re-arms guard).
+    pub fn pending_continuation(&self) -> bool {
+        self.pending_continuation
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The pending guard's lock-free handle: admission surfaces that
+    /// cannot take the async driver lock (a spawned settle task, a nested
+    /// `block_on`, the worker's abort-cancel) release the guard through
+    /// it (`store(false)`) — the driver's own mint sites still read and
+    /// set it under the driver lock.
+    pub fn pending_continuation_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.pending_continuation)
+    }
+
+    /// Arm the pending guard: one minted continuation is owed to the
+    /// calling surface until it admits the turn.
+    fn mark_continuation_pending(&mut self) {
+        self.pending_continuation
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Roll back one just-minted continuation (TS `_getContinuationMessages`
     /// restores the goal snapshot when new session input arrived during the
     /// mint; the threshold-cancel rollback decrements the same way): the
@@ -665,23 +787,37 @@ impl GoalDriver {
         session: &mut SessionManager,
     ) -> anyhow::Result<()> {
         if self.state.continuations_used == 0 {
+            // The rolled-back mint never reaches a turn: the pending guard
+            // releases with the slot.
+            self.continuation_consumed();
             return Ok(());
         }
-        self.set_state(
+        let rolled_back = self.set_state(
             session,
             GoalState {
                 continuations_used: self.state.continuations_used - 1,
                 ..self.state.clone()
             },
-        )
+        );
+        // The rolled-back mint never reaches a turn, so its pending
+        // guard releases on both outcomes (`set_state` persists before
+        // assigning, so a failed write leaves the slot charged at the
+        // mint's increment — in memory and on disk, consistently). The
+        // CALLER must drop the re-owe on that failure branch: the slot
+        // stays spent, and a re-minted follow-up would double-charge
+        // the eventual turn.
+        self.continuation_consumed();
+        rolled_back
     }
 
     /// Whether the goal drives session wake-ups.
+    #[must_use]
     pub fn owns_continuation_wakeup(&self) -> bool {
         self.state.status == GoalStatus::Active && self.state.objective.is_some()
     }
 
     /// The active objective, when set and active.
+    #[must_use]
     pub fn active_objective(&self) -> Option<String> {
         (self.state.status == GoalStatus::Active)
             .then(|| self.state.objective.clone())
@@ -1001,6 +1137,9 @@ mod tests {
         };
         assert!(text.contains("- status: active"));
         assert_eq!(driver.state().continuations_used, 1);
+        // The first mint's admission (its surface consumed it) releases the
+        // pending guard: the next boundary mints again.
+        driver.continuation_consumed();
         assert!(driver
             .next_continuation_message(&mut session, None)
             .unwrap()
@@ -1552,10 +1691,9 @@ mod tests {
 
     /// The reload's newest-first scan skips invalid rows (TS
     /// `isPersistedGoalState` guard) and the empty state is the
-    /// no-entry fallthrough; the wall-clock anchor follows the reloaded
-    /// status like the TS `_goalAccountingStartedAt` reset.
+    /// no-entry fallthrough.
     #[test]
-    fn reload_skips_invalid_rows_and_restarts_the_anchor() {
+    fn reload_skips_invalid_rows() {
         let mut session = persisted_session();
         let mut driver = GoalDriver::new();
         driver.start(&mut session, "do work", None).unwrap();
@@ -1574,10 +1712,8 @@ mod tests {
         driver.reload_from_branch(&session, GoalBranchReload::FaithfulBranch);
         assert_eq!(driver.state().status, GoalStatus::Active);
         assert!(driver.state().goal_id.is_some());
-        assert!(driver.accounting_started_at.is_some());
 
-        // A branch without any goal entry reloads to the empty state and
-        // drops the anchor.
+        // A branch without any goal entry reloads to the empty state.
         let mut fresh = persisted_session();
         fresh
             .append_message(pa_types::session::AgentMessage::User(
@@ -1590,6 +1726,229 @@ mod tests {
             .unwrap();
         driver.reload_from_branch(&fresh, GoalBranchReload::FaithfulBranch);
         assert_eq!(driver.state(), &empty_goal_state());
-        assert!(driver.accounting_started_at.is_none());
+    }
+
+    /// The operator's exact case (2026-09-28): a goal created ~2 hours ago
+    /// reads ~2 hours — the creation-based timer computes fresh from
+    /// `created_at` on every read, and no accounting write compounds it
+    /// (the pre-ruling anchor read 73h for the same goal).
+    #[test]
+    fn creation_based_timer_reads_the_goals_age() {
+        let mut session = persisted_session();
+        let mut driver = GoalDriver::new();
+        driver
+            .start(&mut session, "make the visualizer", None)
+            .unwrap();
+        // The goal was created 2 hours ago (a rehydrated driver adopts the
+        // persisted `created_at`).
+        let two_hours_ago = now_millis().saturating_sub(2 * 60 * 60 * 1000);
+        let mut reloaded = GoalDriver::restore_persisted(GoalState {
+            created_at: Some(two_hours_ago),
+            ..GoalDriver::latest_persisted_state(&session)
+        });
+        // A dozen accounting events must not compound the timer: the read
+        // recomputes `now - created_at` fresh every time.
+        for index in 0..12 {
+            let mut usage = usage(30, 10);
+            usage.output += index;
+            assert_eq!(
+                reloaded
+                    .record_assistant_usage(&mut session, &format!("a{index}"), &usage)
+                    .unwrap(),
+                UsageOutcome::Accounted
+            );
+        }
+        let elapsed = reloaded.state_with_creation_elapsed();
+        assert_eq!(elapsed.status, GoalStatus::Active);
+        // The created_at is fabricated 2h in the past, so the read is
+        // arithmetic — the lower bound cannot fail; the generous upper
+        // bound tolerates a descheduled CI worker between the fabricated
+        // anchor and the read (never a tight execution-time window).
+        assert!(
+            (7_190..=7_260).contains(&elapsed.time_used_seconds),
+            "a 2h-old goal reads ~2h, got {}",
+            elapsed.time_used_seconds
+        );
+        // The persisted rows carry the age at write, never an accumulated
+        // value (the quadratic compounding class is dead).
+        assert!(
+            (7_190..=7_260).contains(&reloaded.state().time_used_seconds),
+            "the durable row carries the age: {}",
+            reloaded.state().time_used_seconds
+        );
+        // The idle state reads zero: no `created_at`, no age.
+        let idle = GoalDriver::new();
+        assert_eq!(idle.state_with_creation_elapsed().time_used_seconds, 0);
+    }
+
+    /// The paused goal displays the same creation-based age (the goal's
+    /// age, not a separately stopped clock — the operator's ruling).
+    #[test]
+    fn paused_goal_reads_its_age() {
+        let mut session = persisted_session();
+        let mut driver = GoalDriver::new();
+        driver.start(&mut session, "ship it", None).unwrap();
+        driver.pause(&mut session, "Paused by user").unwrap();
+        assert_eq!(driver.state().status, GoalStatus::Paused);
+        // The paused state keeps `created_at`: its served state still reads
+        // the goal's age.
+        assert!(driver.state().created_at.is_some());
+        assert!(
+            driver.state_with_creation_elapsed().time_used_seconds <= 60,
+            "a freshly paused goal reads its (small) age"
+        );
+        // A rehydrated paused goal created 2h ago reads ~2h.
+        let two_hours_ago = now_millis().saturating_sub(2 * 60 * 60 * 1000);
+        let reloaded = GoalDriver::restore_persisted(GoalState {
+            created_at: Some(two_hours_ago),
+            ..GoalDriver::latest_persisted_state(&session)
+        });
+        let elapsed = reloaded.state_with_creation_elapsed();
+        assert_eq!(elapsed.status, GoalStatus::Paused);
+        assert!(
+            (7_190..=7_260).contains(&elapsed.time_used_seconds),
+            "a paused 2h-old goal reads its age, got {}",
+            elapsed.time_used_seconds
+        );
+    }
+
+    /// Goals persisted before the creation-based contract have no
+    /// `created_at`: the load backfills it from `updated_at`, so the row
+    /// reads its age sanely instead of compounding nothing.
+    #[test]
+    fn rows_without_created_at_backfill_from_updated_at() {
+        let mut session = persisted_session();
+        let legacy = GoalState {
+            active: true,
+            status: GoalStatus::Active,
+            goal_id: Some("legacy-goal".to_string()),
+            objective: Some("legacy pursuit".to_string()),
+            tokens_used: 100,
+            time_used_seconds: 900,
+            continuations_used: 2,
+            created_at: None,
+            updated_at: Some(now_millis().saturating_sub(60 * 60 * 1000)),
+            ..empty_goal_state()
+        };
+        append_goal_row(&mut session, &legacy);
+        let driver = GoalDriver::load_persisted(&session);
+        // The backfill: `created_at` adopts `updated_at` (documented
+        // migration for pre-contract rows).
+        assert_eq!(
+            driver.state().created_at,
+            driver.state().updated_at,
+            "the legacy goal backfills created_at from updated_at"
+        );
+        let elapsed = driver.state_with_creation_elapsed();
+        assert!(
+            (3_590..=3_660).contains(&elapsed.time_used_seconds),
+            "a legacy 1h-old goal reads ~1h, got {}",
+            elapsed.time_used_seconds
+        );
+        // An empty state (no goal) never fabricates a creation time.
+        let mut fresh = persisted_session();
+        fresh
+            .append_message(pa_types::session::AgentMessage::User(
+                pa_types::ai::UserMessage {
+                    content: UserContent::Text("no goal".to_string()),
+                    timestamp: 0,
+                    rest: serde_json::Map::default(),
+                },
+            ))
+            .unwrap();
+        assert_eq!(GoalDriver::load_persisted(&fresh).state().created_at, None);
+    }
+
+    /// The pending-never-re-arms contract: a minted continuation blocks
+    /// every further mint until its surface admits it
+    /// (`continuation_consumed`), and a rollback or an inactive state
+    /// drops the guard with the mint.
+    #[test]
+    fn pending_continuation_never_re_arms() {
+        let mut session = persisted_session();
+        let mut driver = GoalDriver::new();
+        driver.start(&mut session, "work", None).unwrap();
+        // The first mint arms the pending guard.
+        assert!(driver
+            .next_continuation_message(&mut session, None)
+            .unwrap()
+            .is_some());
+        assert!(driver.pending_continuation());
+        // A second mint refuses while the first is pending.
+        assert!(
+            driver
+                .next_continuation_message(&mut session, None)
+                .unwrap()
+                .is_none(),
+            "a pending continuation must not re-arm another"
+        );
+        assert_eq!(driver.state().continuations_used, 1);
+        // The arm never fires BESIDE a pending mint (TS
+        // `_goalContinuationAwaitsRlmWork ||= !hasQueuedMessages()`:
+        // the pending mint IS this boundary's queued delivery, so a
+        // later settle must never deliver a second continuation for the
+        // same boundary once the pending one admits).
+        driver.mark_continuation_owed();
+        assert!(
+            !driver.owes_continuation(),
+            "the arm is a no-op while a mint is pending"
+        );
+        // An arm that fired BEFORE the mint waits behind it: the take
+        // refuses while the pending mint holds the guard, the armed flag
+        // stays put, and the delivery lands once the admission released
+        // the guard.
+        driver.continuation_consumed();
+        assert!(!driver.pending_continuation());
+        driver.mark_continuation_owed();
+        assert!(driver.owes_continuation());
+        assert!(
+            driver
+                .next_continuation_message(&mut session, None)
+                .unwrap()
+                .is_some(),
+            "a direct mint lands while an earlier arm waits"
+        );
+        assert!(driver.pending_continuation());
+        assert!(driver
+            .take_owed_continuation(&mut session, None)
+            .unwrap()
+            .is_none());
+        assert!(driver.owes_continuation());
+        assert_eq!(driver.state().continuations_used, 2);
+        // The admission releases the guard; the owed delivery mints next.
+        driver.continuation_consumed();
+        let delivered = driver.take_owed_continuation(&mut session, None).unwrap();
+        assert!(delivered.is_some());
+        assert!(!driver.owes_continuation());
+        assert!(driver.pending_continuation());
+        assert_eq!(driver.state().continuations_used, 3);
+        // A rollback un-mints and releases the guard together.
+        driver.rollback_continuation_mint(&mut session).unwrap();
+        assert!(!driver.pending_continuation());
+        assert_eq!(driver.state().continuations_used, 2);
+        // Pausing drops a pending mint with the queued contexts.
+        assert!(driver
+            .next_continuation_message(&mut session, None)
+            .unwrap()
+            .is_some());
+        assert!(driver.pending_continuation());
+        driver.pause(&mut session, "Paused by user").unwrap();
+        assert!(!driver.pending_continuation());
+        assert!(
+            driver
+                .next_continuation_message(&mut session, None)
+                .unwrap()
+                .is_none(),
+            "an inactive goal mints nothing"
+        );
+        // A fresh start resets the guard with the queued contexts.
+        driver.start(&mut session, "again", None).unwrap();
+        assert!(!driver.pending_continuation());
+        assert!(driver
+            .next_continuation_message(&mut session, None)
+            .unwrap()
+            .is_some());
+        driver.clear(&mut session).unwrap();
+        assert!(!driver.pending_continuation());
     }
 }

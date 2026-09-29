@@ -108,6 +108,7 @@ fn per_provider_policy(
 /// `base_delay_ms` doubling each retry, capped at `max_delay_ms`, honoring
 /// a server-requested wait (`Retry-After`) the same way the TS quick-retry
 /// delay does.
+#[must_use]
 pub fn failover_retry_delay(
     attempt: u32,
     retry_after_ms: Option<u64>,

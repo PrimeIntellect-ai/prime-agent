@@ -279,7 +279,7 @@ pub(crate) fn glob_paths(pattern: &str, root: &Path) -> Vec<PathBuf> {
     let matcher = glob.compile_matcher();
     let allow_dot = pattern.starts_with('.') || pattern.contains("/.");
 
-    let mut matches = Vec::new();
+    let mut matched_paths = Vec::new();
     let mut queue = vec![root.to_path_buf()];
     while let Some(dir) = queue.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -301,13 +301,13 @@ pub(crate) fn glob_paths(pattern: &str, root: &Path) -> Vec<PathBuf> {
                 continue;
             }
             if !rel.is_empty() && matcher.is_match(&rel) {
-                matches.push(child.clone());
+                matched_paths.push(child.clone());
             }
             if meta.is_dir() {
                 queue.push(child);
             }
         }
     }
-    matches.sort();
-    matches
+    matched_paths.sort();
+    matched_paths
 }

@@ -1,3 +1,15 @@
+// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
+// crate root: the same bounded-boundary disposition as src/lib.rs
+// (large_futures/too_many_lines/the cast family; details there).
+#![allow(
+    clippy::large_futures,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+
 //! Verifier integration tests for the Python-skills-unavailable notice (TS
 //! PR #2381: the `python_skills_unavailable` regression plus the
 //! broken-vs-healthy pin):
@@ -195,10 +207,7 @@ async fn notice_rides_the_next_turn_as_model_context() {
         ),
         ("edit".to_string(), "boom".to_string()),
     ];
-    engine
-        .session
-        .queue_next_turn_row(notice_message(&errors))
-        .await;
+    engine.session.queue_next_turn_row(notice_message(&errors));
 
     let outcome = engine
         .prompt("go", PromptOptions::default())

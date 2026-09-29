@@ -34,20 +34,20 @@ impl EnvCredentialSource for ScriptedEnv {
     }
 }
 
-fn storage_with(data: serde_json::Value) -> AuthStorage {
+fn storage_with(data: &serde_json::Value) -> AuthStorage {
     storage_with_env(data, ScriptedEnv(HashMap::new()))
 }
 
-fn storage_with_env(data: serde_json::Value, env: ScriptedEnv) -> AuthStorage {
+fn storage_with_env(data: &serde_json::Value, env: ScriptedEnv) -> AuthStorage {
     let data = AuthStorageData(data.as_object().cloned().unwrap_or_default());
-    AuthStorage::in_memory_with_env(data, Arc::new(NoOAuth), Arc::new(env))
+    AuthStorage::in_memory_with_env(&data, Arc::new(NoOAuth), Arc::new(env))
 }
 
 #[test]
 fn runtime_override_wins() {
     // Non-prime provider: runtime beats stored; ambient env of the test
     // process cannot interfere (stored outranks env for these).
-    let mut auth = storage_with(serde_json::json!({
+    let mut auth = storage_with(&serde_json::json!({
         "anthropic": { "type": "api_key", "key": "stored-key" }
     }));
     assert_eq!(auth.get_api_key("anthropic").as_deref(), Some("stored-key"));
@@ -62,7 +62,7 @@ fn runtime_override_wins() {
 
 #[test]
 fn stale_marking_skips_source_and_clears() {
-    let mut auth = storage_with(serde_json::json!({
+    let mut auth = storage_with(&serde_json::json!({
         "prime-inference": { "type": "api_key", "key": "sk-stale" }
     }));
     assert!(auth.mark_auth_stale("prime-inference"));
@@ -86,7 +86,7 @@ fn candidate_memos_supersede_exactly_when_material_changes() {
     // the new one, and the same value keeps serving the same
     // resolution.
     let mut auth = storage_with_env(
-        serde_json::json!({}),
+        &serde_json::json!({}),
         ScriptedEnv(HashMap::from([(
             "ANTHROPIC_API_KEY".to_string(),
             "sk-one".to_string(),
@@ -122,7 +122,7 @@ fn candidate_memos_supersede_exactly_when_material_changes() {
     // The stored arm: replacing the credential changes the hashed
     // material, so a stale marking of the old key never gates the new
     // one.
-    let mut auth = storage_with(serde_json::json!({
+    let mut auth = storage_with(&serde_json::json!({
         "anthropic": { "type": "api_key", "key": "sk-old" }
     }));
     assert!(auth.mark_auth_stale("anthropic"));
@@ -141,7 +141,7 @@ fn candidate_memos_supersede_exactly_when_material_changes() {
 
 #[test]
 fn set_and_remove_credentials() {
-    let mut auth = storage_with(serde_json::json!({}));
+    let mut auth = storage_with(&serde_json::json!({}));
     auth.set(
         "anthropic",
         AuthCredential::ApiKey {
@@ -168,7 +168,7 @@ fn set_and_remove_credentials() {
 
 #[test]
 fn command_keys_resolve() {
-    let mut auth = storage_with(serde_json::json!({
+    let mut auth = storage_with(&serde_json::json!({
         "anthropic": { "type": "api_key", "key": "!echo cmd-key" }
     }));
     assert_eq!(auth.get_api_key("anthropic").as_deref(), Some("cmd-key"));
@@ -178,7 +178,7 @@ fn command_keys_resolve() {
 fn env_key_priority_for_prime_inference() {
     // prime-inference prefers the environment over stored.
     let mut auth = storage_with_env(
-        serde_json::json!({
+        &serde_json::json!({
             "prime-inference": { "type": "api_key", "key": "stored-key" }
         }),
         ScriptedEnv(HashMap::from([(
@@ -194,7 +194,7 @@ fn env_key_priority_for_prime_inference() {
 
 #[test]
 fn fallback_resolver_last_resort() {
-    let mut auth = storage_with(serde_json::json!({}));
+    let mut auth = storage_with(&serde_json::json!({}));
     auth.set_fallback_resolver(Arc::new(|provider| {
         (provider == "custom").then(|| "fb-key".to_string())
     }));
@@ -203,7 +203,7 @@ fn fallback_resolver_last_resort() {
 
 #[test]
 fn provider_headers_team_selection() {
-    let auth = storage_with(serde_json::json!({
+    let auth = storage_with(&serde_json::json!({
         "prime-inference": {
             "type": "api_key",
             "key": "pi-key",
@@ -224,7 +224,7 @@ fn provider_headers_team_selection() {
     // box posture): PRIME_API_KEY supplies the key, the stored login's
     // team still scopes the header.
     let mut auth = storage_with_env(
-        serde_json::json!({
+        &serde_json::json!({
             "prime-inference": {
                 "type": "api_key",
                 "key": "pi-key",
@@ -248,7 +248,7 @@ fn provider_headers_team_selection() {
         Some("team-1")
     );
     // The stored team survives a runtime API-key override too.
-    let mut auth = storage_with(serde_json::json!({
+    let mut auth = storage_with(&serde_json::json!({
         "prime-inference": {
             "type": "api_key",
             "key": "pi-key",
@@ -269,7 +269,7 @@ fn provider_headers_team_selection() {
     );
     // PRIME_TEAM_ID env wins over the stored selection.
     let auth = storage_with_env(
-        serde_json::json!({
+        &serde_json::json!({
             "prime-inference": {
                 "type": "api_key",
                 "key": "pi-key",
@@ -302,7 +302,7 @@ fn team(id: &str, name: &str) -> PrimeTeamCredential {
 
 #[test]
 fn prime_inference_key_writes_follow_the_ts_assignment_rules() {
-    let mut auth = storage_with(serde_json::json!({}));
+    let mut auth = storage_with(&serde_json::json!({}));
     // A team write binds the team to the key.
     auth.set_prime_inference_api_key("sk-1", PrimeTeamAssignment::Team(team("1", "Team 1")));
     assert_eq!(
@@ -362,7 +362,7 @@ fn prime_inference_key_writes_follow_the_ts_assignment_rules() {
 
 #[test]
 fn prime_inference_team_selection_rebinds_only_the_stored_key() {
-    let mut auth = storage_with(serde_json::json!({}));
+    let mut auth = storage_with(&serde_json::json!({}));
     // Without a stored credential the selection is a no-op.
     auth.set_prime_inference_team_selection(Some(team("1", "Team 1")), None);
     assert_eq!(auth.get_all().get(PRIME_INFERENCE_PROVIDER_ID), None);
@@ -390,7 +390,7 @@ fn prime_inference_team_selection_rebinds_only_the_stored_key() {
         StoredPrimeTeam::PersonalAccount
     );
     // A non-api-key credential is never rebound.
-    let mut auth = storage_with(serde_json::json!({
+    let mut auth = storage_with(&serde_json::json!({
         "prime-inference": {
             "type": "oauth", "access": "a", "refresh": null, "expires": 1
         }
@@ -453,13 +453,13 @@ fn a_failed_prime_inference_key_write_keeps_the_stale_marking() {
 #[test]
 fn prime_inference_team_selection_reads_follow_the_ts_tri_state() {
     // No credential: no selection.
-    let auth = storage_with(serde_json::json!({}));
+    let auth = storage_with(&serde_json::json!({}));
     assert_eq!(
         auth.get_prime_inference_team_selection(),
         StoredPrimeTeam::NotSelected
     );
     // A stored team selection reads back.
-    let auth = storage_with(serde_json::json!({
+    let auth = storage_with(&serde_json::json!({
         "prime-inference": {
             "type": "api_key",
             "key": "pi-key",
@@ -471,7 +471,7 @@ fn prime_inference_team_selection_reads_follow_the_ts_tri_state() {
         StoredPrimeTeam::Team(team("team-1", "Team 1"))
     );
     // A stored personal account reads back.
-    let auth = storage_with(serde_json::json!({
+    let auth = storage_with(&serde_json::json!({
         "prime-inference": {
             "type": "api_key", "key": "pi-key", "primeTeam": null
         }
@@ -483,7 +483,7 @@ fn prime_inference_team_selection_reads_follow_the_ts_tri_state() {
     // PRIME_TEAM_ID hides the stored selection (the env pin owns the
     // team).
     let auth = storage_with_env(
-        serde_json::json!({
+        &serde_json::json!({
             "prime-inference": {
                 "type": "api_key", "key": "pi-key", "primeTeam": null
             }
@@ -502,7 +502,7 @@ fn prime_inference_team_selection_reads_follow_the_ts_tri_state() {
     // override (fleet P5, the dogfood daemon posture — no PRIME_TEAM_ID
     // pin needed).
     let auth = storage_with_env(
-        serde_json::json!({
+        &serde_json::json!({
             "prime-inference": {
                 "type": "api_key",
                 "key": "pi-key",
@@ -519,7 +519,7 @@ fn prime_inference_team_selection_reads_follow_the_ts_tri_state() {
         StoredPrimeTeam::Team(team("team-1", "Team 1"))
     );
     // A runtime override (the active source) does not hide it either.
-    let mut auth = storage_with(serde_json::json!({
+    let mut auth = storage_with(&serde_json::json!({
         "prime-inference": {
             "type": "api_key",
             "key": "pi-key",
@@ -597,12 +597,12 @@ fn expired_oauth(access: &str) -> AuthCredential {
 fn storage_over_backend_with(
     oauth: Arc<CountingOAuth>,
     provider: &str,
-    credential: AuthCredential,
+    credential: &AuthCredential,
 ) -> (AuthStorage, Arc<dyn AuthStorageBackend>) {
     let backend: Arc<dyn AuthStorageBackend> =
         Arc::new(crate::auth::storage::InMemoryAuthStorageBackend::default());
     let mut data = AuthStorageData::default();
-    data.insert(provider, &credential);
+    data.insert(provider, credential);
     let seed = serde_json::to_string_pretty(&data.0).unwrap_or_default();
     backend
         .with_lock(&mut |current| {
@@ -625,7 +625,7 @@ fn an_unexpired_oauth_credential_serves_without_a_fetch() {
     let (mut auth, _backend) = storage_over_backend_with(
         oauth.clone(),
         "x-fast",
-        oauth_credential("live-access", now_epoch_ms() + 3_600_000),
+        &oauth_credential("live-access", now_epoch_ms() + 3_600_000),
     );
     assert_eq!(auth.get_api_key("x-fast").as_deref(), Some("live-access"));
     assert_eq!(
@@ -646,7 +646,7 @@ fn the_token_fetch_holds_no_document_lock_and_a_peer_write_keeps_its_fresher_cre
         delay_ms: 120,
     });
     let (mut auth, backend) =
-        storage_over_backend_with(oauth.clone(), "x-peer", expired_oauth("old-access"));
+        storage_over_backend_with(oauth.clone(), "x-peer", &expired_oauth("old-access"));
     let writer_backend = Arc::clone(&backend);
     let (wrote_tx, wrote_rx) = std::sync::mpsc::channel::<std::time::Duration>();
     std::thread::spawn(move || {
@@ -704,7 +704,7 @@ fn a_second_refresh_joins_the_first_flight_instead_of_fetching_again() {
         delay_ms: 80,
     });
     let (_, backend) =
-        storage_over_backend_with(oauth.clone(), "x-flight", expired_oauth("old-access"));
+        storage_over_backend_with(oauth.clone(), "x-flight", &expired_oauth("old-access"));
     let barrier = Arc::new(std::sync::Barrier::new(2));
     let mut handles = Vec::new();
     for _ in 0..2 {

@@ -10,6 +10,7 @@ use pa_types::ai::{Model, ModelCompat, ModelCost, ModelInput};
 use pa_types::JsNumber;
 
 /// Strip `//` line comments and trailing commas, leaving strings intact.
+#[must_use]
 pub fn strip_json_comments(input: &str) -> String {
     // Pass 1: remove // comments. Pass 2: remove trailing commas before } or ].
     let mut out = String::with_capacity(input.len());
@@ -282,6 +283,7 @@ fn compat_from_value(value: Option<&serde_json::Value>) -> Option<ModelCompat> {
 }
 
 /// Compat merge: override fields win; nested routing objects merge.
+#[must_use]
 pub fn merge_compat(base: Option<&ModelCompat>, over: Option<ModelCompat>) -> Option<ModelCompat> {
     let over = over?;
     let mut merged = base.map(|compat| compat.raw.clone()).unwrap_or_default();
@@ -306,6 +308,7 @@ pub fn merge_compat(base: Option<&ModelCompat>, over: Option<ModelCompat>) -> Op
 }
 
 /// Deep-merge a model override into a model.
+#[must_use]
 pub fn apply_model_override(model: &Model, over: &ModelOverride) -> Model {
     let mut result = model.clone();
     if let Some(name) = &over.name {

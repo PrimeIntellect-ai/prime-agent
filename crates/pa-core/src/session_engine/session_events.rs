@@ -15,6 +15,7 @@ use super::provider_adapter::json_round_trip;
 /// assistant message rides the event's `message` field already). Terminal
 /// `start`/`done`/`error` events never ride a `message_update` (the loop
 /// emits `message_start`/`message_end` for those), so they map to `None`.
+#[must_use]
 pub fn assistant_message_event_json(event: &AssistantMessageEvent) -> Option<serde_json::Value> {
     use pa_agent::stream::AssistantMessageEvent as StreamEvent;
     Some(match event {

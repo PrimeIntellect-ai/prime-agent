@@ -319,6 +319,7 @@ fn format_count(value: u64) -> String {
 }
 
 /// `_formatAutonomousStatus`: the `[autonomous-status: ...]` block.
+#[must_use]
 pub fn format_autonomous_status(status: &AgentAutonomousStatus) -> String {
     let state = if status.enabled { "on" } else { "off" };
     let elapsed_seconds = status.started_at.map_or(0, |started_at| {

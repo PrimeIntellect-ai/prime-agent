@@ -72,8 +72,7 @@ fn fixture_with_clock(clock: TestClock) -> Fixture {
 }
 
 fn emit(fixture: &Fixture, event: AgentEvent) {
-    handle_event(&fixture.client, "interactive", &fixture.state, event)
-        .expect("telemetry event handled");
+    handle_event(&fixture.client, "interactive", &fixture.state, event);
 }
 
 fn assistant_message() -> AssistantMessage {
