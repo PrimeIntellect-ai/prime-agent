@@ -10,8 +10,8 @@ use super::git::{parse_status, GitStatus, HeadTreeEntry, StatusEntry};
 use super::manifest::{is_safe_relative_path, symlink_target_stays_inside};
 use super::{
     build_manifest, capture_leaf, create_workspace_snapshot, git_blob_oid, is_secret_path,
-    verify_workspace_snapshot, Baseline, BaselineMode, CapturedEntry, ExcludeReason, ExcludedEntry,
-    LeafOutcome, SnapshotError, SnapshotLimits, SnapshotManifest,
+    open_leaf, verify_workspace_snapshot, Baseline, BaselineMode, CapturedEntry, ExcludeReason,
+    ExcludedEntry, LeafOutcome, OpenLeaf, SnapshotError, SnapshotLimits, SnapshotManifest,
 };
 
 fn git(dir: &Path, args: &[&str]) {
@@ -841,6 +841,50 @@ async fn snapshot_rejects_unusable_staging_directories() {
         .await
         .unwrap();
     assert!(staging.join("manifest.json").is_file());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn untracked_special_paths_never_block_the_leaf_open() {
+    // Regression guard: a plain read-only open of a FIFO (or a unix
+    // socket) blocks until a writer or client appears, which would hang
+    // the whole capture. git does not enumerate special files as
+    // untracked (probed), so this is defense in depth for the open
+    // itself: with O_NONBLOCK it must classify immediately instead.
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    nix::unistd::mkfifo(&root.join("pipe"), nix::sys::stat::Mode::S_IRWXU).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(root.join("sock")).unwrap();
+    assert!(matches!(
+        open_leaf(root, "pipe", 1024),
+        Ok(OpenLeaf::NotRegularFile)
+    ));
+    assert!(matches!(
+        open_leaf(root, "sock", 1024),
+        Ok(OpenLeaf::NotRegularFile)
+    ));
+    drop(listener);
+    // The fix's end-to-end behavior: a repo holding such files snapshots
+    // and verifies fine, mentioning them nowhere (git does not list them).
+    init_repo(root);
+    write(root, "tracked.txt", "base\n");
+    git(root, &["add", "tracked.txt"]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    let staging = tempfile::tempdir().unwrap();
+    let snapshot =
+        create_workspace_snapshot(root, staging.path(), BaselineMode::HeadTree, &limits())
+            .await
+            .unwrap();
+    assert_eq!(
+        snapshot.manifest,
+        repo_manifest(
+            root,
+            head_tree(vec![file_entry("tracked.txt", "100644", "base\n")]),
+            vec![],
+            vec![]
+        )
+    );
+    assert!(verify_workspace_snapshot(staging.path()).is_ok());
 }
 
 #[cfg(unix)]

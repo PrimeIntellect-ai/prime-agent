@@ -493,10 +493,15 @@ fn open_leaf(root: &Path, path: &str, max_bytes: usize) -> std::io::Result<OpenL
     }
     if let Some(leaf) = components.last() {
         let leaf = *leaf;
+        // O_NONBLOCK: opening a FIFO (or a device) read-only blocks
+        // until a writer or driver appears - an untracked named pipe in
+        // the worktree would otherwise hang the whole capture. Regular
+        // files ignore the flag, and the fstat below classifies before
+        // any read happens.
         match openat(
             Some(dir.0),
             leaf,
-            OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
             Mode::empty(),
         ) {
             Ok(fd) => {
@@ -540,6 +545,11 @@ fn open_leaf(root: &Path, path: &str, max_bytes: usize) -> std::io::Result<OpenL
                 Ok(OpenLeaf::Symlink { target })
             }
             Err(nix::errno::Errno::ENOENT) => Ok(OpenLeaf::Missing),
+            // A unix socket path: present, but nothing regular to read.
+            // linux reports ENXIO, darwin EOPNOTSUPP.
+            Err(nix::errno::Errno::ENXIO | nix::errno::Errno::EOPNOTSUPP) => {
+                Ok(OpenLeaf::NotRegularFile)
+            }
             Err(errno) => Err(io_from_errno(errno)),
         }
     } else {
