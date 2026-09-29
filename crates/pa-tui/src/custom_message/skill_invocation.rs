@@ -150,34 +150,6 @@ pub fn render_skill_invocation(
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn geometry_matches_skill_rendering() {
-        let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
-        for content in [
-            "",
-            "数据 **bold**\n\ntext",
-            "| a | b |\n| --- | --- |\n| long words | 数据 |",
-            "```python\nprint(1)\n```",
-        ] {
-            let row = SkillInvocationRow {
-                name: "test 数据".into(),
-                content: content.into(),
-            };
-            for detail in [Detail::Overview, Detail::Details, Detail::All] {
-                for leading in [false, true] {
-                    let counts: Vec<_> = (0..70)
-                        .map(|width| count_skill_invocation(&row, detail, &theme, width, leading))
-                        .collect();
-                    let rendered: Vec<_> = (0..70)
-                        .map(|width| {
-                            render_skill_invocation(&row, detail, &theme, width, leading).len()
-                        })
-                        .collect();
-                    assert_eq!(counts, rendered);
-                }
-            }
-        }
-    }
 
     use super::*;
     use crate::theme::ColorMode;

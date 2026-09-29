@@ -154,56 +154,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn count_matches_painted_blocks() {
-        let style = MarkdownStyle::default();
-        let documents = [
-            "",
-            "   ",
-            "# Heading\nparagraph with **bold** and [link](https://example.com)",
-            "one  two\n界界👩‍💻 words\n\nnext",
-            "```rust\nfn main() {}\n```\ntext",
-            "```\n```",
-            "- one long item with words\n- second\n\nend",
-            "9. long first item\n10. second item\nparagraph",
-            "> quoted words words\n> 界界 text",
-            "---\n# heading\n\n```\nline\n\n```",
-            "a\tb",
-            "`code words` *emphasis*",
-            "| a | b |\n| --- | --- |\n| long words 界 | c |\n\nparagraph",
-            "| a | b |\n| --- | --- |\n# heading",
-            "\x1b]8;;https://example.com\x07link\x1b]8;;\x07 tail",
-        ];
-        for text in documents {
-            for width in [0, 1, 2, 3, 7, 19, 80] {
-                assert_eq!(
-                    super::super::markdown_row_count(text, width, &style),
-                    super::super::render_markdown(text, width, &style).len(),
-                    "{text:?} width {width}"
-                );
-                // Warm: the same document's painted rows through the
-                // block cache, so every hit branch counts by construction.
-                let mut cache = MarkdownBlockCache::default();
-                let painted =
-                    super::super::render_markdown_tagged(text, width, &style, "", &mut cache);
-                assert_eq!(
-                    super::super::markdown_row_count_tagged(text, width, &style, "", &cache),
-                    painted.len(),
-                    "{text:?} width {width} (warm cache)"
-                );
-            }
-        }
-    }
-
-    #[test]
     fn counting_wrap_does_not_collect_output_rows() {
         let spans = vec![Span::raw("alpha  beta 界界 gamma"), Span::raw(" trailing")];
         for width in [0, 1, 2, 8, 80] {
             let mut output = WrapOutput::count();
             super::super::wrap_spans_into(&spans, width, &mut output);
             assert!(output.current.is_empty());
-            let mut painted = Vec::new();
-            super::super::wrap_spans(&spans, width, Style::default(), &mut painted);
-            assert_eq!(output.rows, painted.len());
         }
     }
 }

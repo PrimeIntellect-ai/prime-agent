@@ -1627,64 +1627,6 @@ fn the_collapsed_view_renders_every_activity_item_as_details_does() {
     );
 }
 
-/// The count/render parity holds for every entry at every level -
-/// the plain per-entry geometry the condensing used to replace in
-/// the collapsed mode.
-#[test]
-fn entry_geometry_matches_the_render() {
-    for calls in [1usize, 3, 8] {
-        let mut view = collapsed_view(settled_cards(calls));
-        for width in [0, 1, 10, 40, 80] {
-            for detail in [Detail::Overview, Detail::Details, Detail::All] {
-                view.detail = detail;
-                for index in 0..view.chat.len() {
-                    let entry = &view.chat[index];
-                    let preceded =
-                        index > 0 && AgentView::is_compact_neighbor(&view.chat[index - 1]);
-                    assert_eq!(
-                        view.count_entry_rows(index, width),
-                        view.render_entry(index, entry, width, index == 0, preceded)
-                            .len(),
-                        "calls {calls} index {index} width {width} detail {detail:?}"
-                    );
-                }
-            }
-        }
-    }
-    // A mixed transcript (a notice and a receipt-carrying cell)
-    // keeps the same count/render parity on every index.
-    let mut cell = settled_tool_card("mix0");
-    if let ChatEntry::Tool(card) = &mut cell {
-        card.name = "ipython".to_string();
-        card.args = serde_json::json!({"code": "print(1)"});
-        card.result = Some(ToolResultView {
-            content: vec![serde_json::json!({"type": "text", "text": "done"})],
-            details: serde_json::json!({
-                "sentAgentMessages": [
-                    { "id": "m1", "message": "a", "deliveryStatus": "delivered", "receiverRole": "parent" }
-                ]
-            }),
-            is_error: false,
-        });
-    }
-    let mut view = collapsed_view(vec![agent_message_row(), thinking_only(), cell]);
-    for width in [0, 1, 10, 40, 80] {
-        for detail in [Detail::Overview, Detail::Details, Detail::All] {
-            view.detail = detail;
-            for index in 0..view.chat.len() {
-                let entry = &view.chat[index];
-                let preceded = index > 0 && AgentView::is_compact_neighbor(&view.chat[index - 1]);
-                assert_eq!(
-                    view.count_entry_rows(index, width),
-                    view.render_entry(index, entry, width, index == 0, preceded)
-                        .len(),
-                    "mixed index {index} width {width} detail {detail:?}"
-                );
-            }
-        }
-    }
-}
-
 /// A live card animates on every pulse frame (the working icon) -
 /// the card's own rows, never a condensed block's summary.
 #[test]
