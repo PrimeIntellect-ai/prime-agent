@@ -192,10 +192,25 @@ impl Worker {
                         // explicit model wins end-to-end, TS
                         // `options.model`).
                         self.engine.set_session_file(path.clone());
-                        if !flagged_model {
-                            self.engine.restore_session_model(path).await;
-                        }
+                        // One fold serves both consumers (TS
+                        // `createAgentSession` reads the session's loaded
+                        // entries once): the model restore takes its
+                        // saved context off the store this create just
+                        // opened — the port's second windowed open of
+                        // the same file and its duplicate fold are gone
+                        // — and the create-config adoption below reuses
+                        // the same fold.
                         let restored = opened.restored_settings();
+                        let has_thinking_level = opened.has_thinking_level();
+                        let saved = crate::agent_engine::saved_session_context_from_parts(
+                            &restored,
+                            has_thinking_level,
+                        );
+                        if !flagged_model {
+                            self.engine
+                                .restore_session_model(path, Some(saved.clone()))
+                                .await;
+                        }
                         // TS createAgentSession restores the session
                         // file's saved thinking level when the create
                         // carries no explicit flag (sdk.ts
@@ -210,16 +225,7 @@ impl Worker {
                             provider: None,
                             model: None,
                             api_key: None,
-                            thinking: requested_thinking.or_else(|| {
-                                opened
-                                    .has_thinking_level()
-                                    .then(|| {
-                                        pa_ai::models::thinking_level_from_str(
-                                            &restored.thinking_level,
-                                        )
-                                    })
-                                    .flatten()
-                            }),
+                            thinking: requested_thinking.or(saved.thinking),
                         });
                         let append_start = opened.entries.len();
                         append_creation_prefix(
