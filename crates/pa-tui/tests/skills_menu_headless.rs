@@ -667,6 +667,11 @@ fn the_bare_skill_guard_restores_into_the_argument_position() {
         Some("/skill:web-search find rust tuis"),
         "the typed request became the command's args: {prompts:?}"
     );
+    let all = frames.join("\n");
+    assert!(
+        all.contains("add your request after the skill"),
+        "the notice rendered before the recovery: {all}"
+    );
 }
 
 /// A completed skill invocation with the request typed after it sends
