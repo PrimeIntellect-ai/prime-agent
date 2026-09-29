@@ -23,6 +23,7 @@ pub mod goal_driver;
 pub mod harness_digest;
 pub mod headless;
 pub mod host_requests;
+pub mod image_model_routing;
 pub mod ipython_state;
 pub mod messages;
 pub mod provider_adapter;
@@ -181,6 +182,10 @@ pub struct AgentSession {
     /// The telemetry handle for the `skill used` adoption event the
     /// prompt path owns (`None` in sessions without telemetry).
     skill_telemetry: Option<std::sync::Arc<telemetry::SessionTelemetry>>,
+    /// The image-model routing host seam (`None` keeps the session model on
+    /// image turns: verification harnesses, and the daemon worker whose
+    /// turn dispatch owns routing itself).
+    image_model_router: Option<image_model_routing::ImageModelRouter>,
     /// The live compaction summary-delta sink
     /// ([`compaction_exec::SummaryDeltaSink`]): every summarizer text
     /// delta the session's compactions stream reaches it, in arrival
@@ -256,10 +261,87 @@ impl AgentSession {
             pending_next_turn_rows: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             skills: Vec::new(),
             skill_telemetry: None,
+            image_model_router: None,
             compaction_summary_sink: std::sync::Mutex::new(None),
         };
         this.ensure_harness_digest_context().await?;
         Ok(this)
+    }
+
+    /// Install the image-model routing host seam (the headless surfaces'
+    /// settings + registry + pinned stream target); `None` keeps image
+    /// turns on the session model.
+    pub fn set_image_model_router(
+        &mut self,
+        router: Option<image_model_routing::ImageModelRouter>,
+    ) {
+        self.image_model_router = router;
+    }
+
+    /// The dispatch-time routing decision for one admitted batch (TS
+    /// `_imageModelOverrideForTurns` at commit): when the batch attaches
+    /// image blocks the session model cannot serve, the host's route
+    /// takes the stream target and the agent's per-run override, so the
+    /// run serves on the configured image model while the session model
+    /// keeps identifying the session. The fresh decision of EVERY admitted
+    /// batch (image-free included) re-evaluates the route, so retries and
+    /// post-compaction continuations of a routed turn keep serving it and
+    /// the next image-free batch returns to the session model. `Err` fails
+    /// the turn with the actionable refusal.
+    async fn apply_image_model_routing(
+        &self,
+        images: &[pa_agent::types::ImageContent],
+        batch: &[PromptBatchRow],
+    ) -> anyhow::Result<()> {
+        let Some(router) = self.image_model_router.as_ref() else {
+            return Ok(());
+        };
+        // The prior episode never outlives this admission (TS
+        // `_clearModelOverrideWhenIdle`: an explicit selection wins over
+        // routing lingering from the last dispatched turn, and the next
+        // dispatch re-evaluates against the new selection). The settle
+        // runs only while no run streams — the winner of an admission
+        // race keeps its own live serving target — and its still-routed
+        // guard leaves a mid-idle model switch alone, so the capture this
+        // batch's decision reads is always the live session model, never
+        // one from before a switch.
+        if !self.agent.state().await.is_streaming {
+            (router.swap_target)(None);
+            self.agent.set_model_override(None);
+        }
+        let carries_images = !images.is_empty() || batch.iter().any(|row| !row.images.is_empty());
+        // The live thinking level (the agent state's, matching
+        // `request_output_budget`'s read) rides the decision: a mid-run
+        // `/effort` or model switch must not route with the build-time
+        // level.
+        let live_level =
+            provider_adapter::model_thinking_level(self.agent.state().await.thinking_level);
+        let route = (router.decide)(carries_images, live_level).map_err(anyhow::Error::msg)?;
+        let Some(resolved) = route.as_ref() else {
+            (router.swap_target)(None);
+            self.agent.set_model_override(None);
+            return Ok(());
+        };
+        (router.swap_target)(Some(resolved));
+        // The conversion failure happens AFTER the swap armed the routed
+        // target: unwind the route so the failed turn does not leave it
+        // serving the next batch (the same unwind the admission race and
+        // the refusal paths perform).
+        let Some(agent_model) =
+            crate::session_engine::provider_adapter::json_round_trip(&resolved.model)
+        else {
+            (router.swap_target)(None);
+            self.agent.set_model_override(None);
+            return Err(anyhow::anyhow!("model conversion failed"));
+        };
+        self.agent
+            .set_model_override(Some(pa_agent::agent::AgentModelOverride {
+                model: agent_model,
+                thinking_level: crate::session_engine::provider_adapter::map_thinking_level(
+                    resolved.thinking_level,
+                ),
+            }));
+        Ok(())
     }
 
     /// Override the compaction settings from the session's resolved
@@ -797,6 +879,11 @@ impl AgentSession {
         prompt_messages.extend(self.take_next_turn_rows().await);
         let custom_row = session_message_to_loop(&SessionAgentMessage::Custom(message.clone()))
             .ok_or_else(|| anyhow::anyhow!("injected custom message conversion failed"))?;
+        // The dispatch-time routing decision fires for every dispatched
+        // turn (TS `_startPreparedTurnActions` runs it per prepared turn
+        // action): an injected row never carries images, so it clears a
+        // route left behind by the previous dispatched turn.
+        self.apply_image_model_routing(&[], &[]).await?;
         prompt_messages.push(custom_row);
         self.agent
             .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
@@ -893,6 +980,13 @@ impl AgentSession {
                 None => unreachable!("busy without a streaming behavior errors above"),
             }
         } else {
+            // The dispatch-time image-model routing decision (TS
+            // `_imageModelOverrideForTurns` at commit): an image-attaching
+            // batch routes to the host's configured image model or fails
+            // with the actionable refusal, never silently downgrading the
+            // images to placeholders.
+            self.apply_image_model_routing(&images, &options.batch)
+                .await?;
             // The turn's prompt messages (TS preparedMessages): the deferred
             // first-turn harness digest rides first when one is due, so the
             // loop streams its message pair ahead of the user prompt and
@@ -920,16 +1014,47 @@ impl AgentSession {
             }
             if options.return_after_accepted {
                 // TS `returnAfterAccepted: true` — the connection's prompt
-                // returns once the admitted turn delivers.
-                self.agent
+                // returns once the admitted turn delivers. The failure
+                // path unwinds the route exactly like the plain prompt
+                // branch below: this prompt never started, so its route
+                // must not survive (while no winner streams).
+                if let Err(error) = self
+                    .agent
                     .prompt_until_accepted(pa_agent::agent::AgentPromptInput::Messages(
                         prompt_messages,
                     ))
-                    .await?;
-            } else {
-                self.agent
-                    .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
-                    .await?;
+                    .await
+                {
+                    if !self.agent.state().await.is_streaming {
+                        if let Some(router) = self.image_model_router.as_ref() {
+                            (router.swap_target)(None);
+                            self.agent.set_model_override(None);
+                        }
+                    }
+                    return Err(error);
+                }
+            } else if let Err(error) = self
+                .agent
+                .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
+                .await
+            {
+                // A concurrent admission won the agent's run slot: this
+                // prompt never started, so its route must not survive. The
+                // unwind only happens while NO run streams - the winner's
+                // live run keeps its own serving target (an idle slot means
+                // our route never served a request; a streaming one belongs
+                // to the winner). TS decides per prepared action inside the
+                // same commit fence, so its single-threaded commit cannot
+                // observe this race at all; the headless surfaces serialize
+                // prompt admissions (one ACP prompt turn per session, the
+                // print loop's sequential awaits) besides.
+                if !self.agent.state().await.is_streaming {
+                    if let Some(router) = self.image_model_router.as_ref() {
+                        (router.swap_target)(None);
+                        self.agent.set_model_override(None);
+                    }
+                }
+                return Err(error);
             }
         }
         Ok(PromptOutcome::Prompt)

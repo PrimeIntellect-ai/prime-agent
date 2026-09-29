@@ -155,10 +155,20 @@ impl AgentSessionEngine {
         let Ok(model) = self.session_model() else {
             return OverflowAttempt::None;
         };
+        // TS's overflow check reads `_runModel()` — the routed image model
+        // while a routed turn is armed — so the routed turn's overflow
+        // errors recover like the session model's own (the `sameModel`
+        // check accepts them and the context window that classifies the
+        // overflow is the serving model's). The summarizer below stays on
+        // the session model (TS `_runAutoCompaction` resolves the summary
+        // request's auth from `this.model`).
+        let run_model = self
+            .armed_image_route()
+            .map_or_else(|| model.clone(), |route| route.target.model);
         // Skip the overflow check when the message came from a different
         // model (TS `sameModel`: a model switch must not compact for the
         // old model's overflow).
-        if assistant.provider != model.provider || assistant.model != model.id {
+        if assistant.provider != run_model.provider || assistant.model != run_model.id {
             return OverflowAttempt::None;
         }
         let Some(wire) = json_round_trip::<_, pa_types::ai::AssistantMessage>(assistant) else {
@@ -197,7 +207,7 @@ impl AgentSessionEngine {
         if !enabled && !pending_scheduled {
             return OverflowAttempt::None;
         }
-        if !pa_ai::is_context_overflow(&wire, Some(model.context_window)) {
+        if !pa_ai::is_context_overflow(&wire, Some(run_model.context_window)) {
             return OverflowAttempt::None;
         }
         // One recovery attempt per overflow (TS `_overflowRecovery`).
