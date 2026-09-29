@@ -165,6 +165,7 @@ impl ActivityDock {
     /// always render (an empty one reads its zero count and stays
     /// traversable); the goal group renders exactly while a live goal
     /// keeps its row mounted.
+    #[must_use]
     pub fn groups(&self) -> Vec<ActivityGroup> {
         let mut groups = vec![
             ActivityGroup::Subagents,
@@ -183,6 +184,7 @@ impl ActivityDock {
     /// groups take N presses to return to the start. A `current` that
     /// no longer renders (a goal group whose row unmounted) steps
     /// from the row's start.
+    #[must_use]
     pub fn step(&self, current: ActivityGroup, direction: ActivityDirection) -> ActivityGroup {
         let groups = self.groups();
         let len = groups.len();
@@ -206,6 +208,7 @@ pub struct ContextUsage {
 }
 
 impl ContextUsage {
+    #[must_use]
     pub fn percent(&self) -> f64 {
         if self.context_window == 0 {
             0.0
@@ -216,6 +219,7 @@ impl ContextUsage {
 }
 
 /// `formatTokenCount` (agent-activity.ts): 999, 1.0k-9.9k, 10k, 1.2M.
+#[must_use]
 pub fn format_token_count(count: u64) -> String {
     if count < 1_000 {
         return count.to_string();
@@ -234,6 +238,7 @@ pub fn format_token_count(count: u64) -> String {
 
 /// The top-bar chat name for an unnamed session: the cwd basename
 /// (TS `path.basename(getCurrentCwd())`).
+#[must_use]
 pub fn display_name(cwd: &str) -> String {
     std::path::Path::new(cwd).file_name().map_or_else(
         || cwd.to_string(),
@@ -242,6 +247,7 @@ pub fn display_name(cwd: &str) -> String {
 }
 
 /// The `~`-compressed cwd for the splash line (TS `formatSplashCwd`).
+#[must_use]
 pub fn format_splash_cwd(cwd: &str, home: Option<&str>) -> String {
     let Some(home) = home else {
         return cwd.replace('\\', "/");
@@ -331,6 +337,7 @@ pub fn render_top_bar(state: &ChromeState, theme: &Theme, width: usize) -> Line 
 
 /// The brand splash: butterfly logo beside the version/model/cwd metadata
 /// (TS `BrandSplashHeader`; `topPadding` is always on in the chat header).
+#[must_use]
 pub fn render_splash(state: &ChromeState, theme: &Theme, width: usize) -> Vec<Line> {
     let safe_width = width.max(1);
     let padding_x = usize::from(safe_width > 1);
@@ -438,6 +445,7 @@ pub fn render_splash(state: &ChromeState, theme: &Theme, width: usize) -> Vec<Li
 
 /// The plain row above the prompt: the detail status right (TS
 /// `PromptContextLine`, always `["", row]`).
+#[must_use]
 pub fn render_prompt_context(detail_label: &str, theme: &Theme, width: usize) -> Vec<Line> {
     if width < 1 {
         return Vec::new();
@@ -464,6 +472,7 @@ pub fn render_prompt_context(detail_label: &str, theme: &Theme, width: usize) ->
 /// The conversation-detail status label (TS `formatConversationDetailStatus`):
 /// "Expanded" (all output), "Details" (thinking + diffs, output collapsed), or
 /// "Collapsed"; only Expanded flips the key hint to "collapse".
+#[must_use]
 pub fn conversation_detail_status(all_output: bool, details: bool, key_display: &str) -> String {
     let label = if all_output {
         "Expanded"
@@ -478,6 +487,7 @@ pub fn conversation_detail_status(all_output: bool, details: bool, key_display: 
 
 /// The tray row under the editor (TS `SubagentSummaryLine.renderInfoLine`):
 /// location label left, context label right, over the full width.
+#[must_use]
 pub fn render_tray(state: &ChromeState, theme: &Theme, width: usize) -> Line {
     render_tray_with_hint(state, theme, width).0
 }
@@ -487,6 +497,7 @@ pub fn render_tray(state: &ChromeState, theme: &Theme, width: usize) -> Line {
 /// the hinted action — the left arrow's agents-back handoff, operator
 /// directive 2026-09-29). `None` when the left label is the override
 /// or the hint is hidden: the tray keeps no region then.
+#[must_use]
 pub fn render_tray_with_hint(
     state: &ChromeState,
     theme: &Theme,
@@ -719,6 +730,7 @@ pub struct ActivityDockSegment {
 /// [`render_activity_dock`] for the row itself): the segments cover
 /// exactly the cells each group renders — separators between groups
 /// stay inert — clamped to the row the truncation actually kept.
+#[must_use]
 pub fn render_activity_dock_segments(
     dock: &ActivityDock,
     theme: &Theme,
@@ -866,6 +878,7 @@ pub fn render_activity_dock_segments(
 /// The footer's tok/sec row (TS `FooterComponent::render` under `/speed`):
 /// one dim line — the dock's last row — truncated with no ellipsis when it
 /// overflows the width.
+#[must_use]
 pub fn render_speed_footer(text: &str, theme: &Theme, width: usize) -> Line {
     let dim = theme.fg_style(ThemeColor::Dim);
     let text = truncate_to_width(text, width, "");
@@ -873,6 +886,7 @@ pub fn render_speed_footer(text: &str, theme: &Theme, width: usize) -> Line {
 }
 
 /// The editor surface background: `userMessageBg` (TS `getEditorTheme`).
+#[must_use]
 pub fn editor_background(theme: &Theme) -> ratatui::style::Style {
     theme.bg_style(ThemeBg::UserMessageBg)
 }

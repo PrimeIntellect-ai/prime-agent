@@ -74,7 +74,7 @@ fn childless_scope() -> AgentsViewMode {
         show_hardware_cursor: false,
         incident_notice_state: None,
     });
-    mode.roster = vec![roster_entry("p", "idle", parent_summary("p"))];
+    mode.roster = vec![roster_entry("p", "idle", &parent_summary("p"))];
     mode.rebuild_rows();
     mode
 }
