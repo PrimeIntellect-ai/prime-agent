@@ -900,6 +900,15 @@ async fn run_interactive_surface(
                     UiInput::ScrollTop => {
                         session.stop_selection_auto_scroll();
                         view.scroll_to_top();
+                        // The scrolled window must repaint: the terminal
+                        // path's inline paint covers this arm, but the
+                        // headless capture only renders a dirty view —
+                        // without this the `ScrollTop` step (the
+                        // verifier's window into the transcript head)
+                        // never shows the head. The viewport key's own
+                        // handler (`tui.viewport.top`) dirties the view
+                        // the same way.
+                        session.dirty = true;
                     }
                     UiInput::Resize => {
                         session.stop_selection_auto_scroll();
