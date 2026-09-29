@@ -65,7 +65,7 @@ impl AgentView {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::chat::{ChatEntry, ToolResultView};
     use crate::theme::{ColorMode, Theme};
@@ -75,7 +75,7 @@ mod tests {
     /// A settled `bash` card whose output out-talls the collapsed
     /// preview (the last five visual lines), so expansion is the only
     /// way its first output lines render.
-    fn finished_tool_card(id: &str, line: &str) -> ChatEntry {
+    pub(in crate::view) fn finished_tool_card(id: &str, line: &str) -> ChatEntry {
         let output = (1..=8)
             .map(|number| format!("{line} {number}"))
             .collect::<Vec<_>>()
