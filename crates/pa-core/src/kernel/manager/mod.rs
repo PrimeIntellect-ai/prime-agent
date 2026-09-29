@@ -307,6 +307,11 @@ struct Guarded {
     /// invalidation that lands while a capture's own request is in flight
     /// can never be re-described by that capture's post-await arm.
     freshness_epoch: u64,
+    /// Bumped by every capture COMMIT: the arm compares it so only the
+    /// LATEST capture's record arms — a straggling earlier capture's
+    /// delayed stat probe could otherwise pair its stale result lists with
+    /// the newer capture's files.
+    capture_sequence: u64,
     /// Unattributed stream text that arrived between cells; surfaced on the next execution.
     pending_background_output: String,
     pending_background_output_chars: usize,
@@ -451,6 +456,7 @@ impl ReplKernelManager {
                 restored_namespace_skip: None,
                 capture_freshness: None,
                 freshness_epoch: 0,
+                capture_sequence: 0,
                 pending_background_output: String::new(),
                 pending_background_output_chars: 0,
                 pending_background_output_truncated: false,

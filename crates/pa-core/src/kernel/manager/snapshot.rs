@@ -89,11 +89,21 @@ impl Inner {
                     bytes: fields.get("bytes").and_then(Value::as_u64).unwrap_or(0),
                     path: cfg.path.clone(),
                 };
+                // This capture's commit sequence: the arm may only run
+                // while no LATER capture has committed, or a straggling
+                // earlier record's delayed stat probe could pair its stale
+                // result lists with the newer capture's files.
+                let capture_sequence = {
+                    let mut g = lock(&self.guarded);
+                    g.capture_sequence += 1;
+                    g.capture_sequence
+                };
                 self.record_capture_freshness(
                     &cfg,
                     &committed,
                     user_executions_before,
                     epoch_before,
+                    capture_sequence,
                 )
                 .await;
                 Some(committed)
@@ -190,6 +200,7 @@ impl Inner {
         result: &SnapshotResult,
         user_executions: u64,
         epoch: u64,
+        capture_sequence: u64,
     ) {
         // The stat pair is the witness artifact: the payload stat is the
         // load-bearing one (it fingerprints what a later restore reads),
@@ -213,7 +224,11 @@ impl Inner {
                     .is_some_and(|pruned| pruned.contains(&skip.name))
         });
         let mut g = lock(&self.guarded);
-        if payload_stat.is_some() && manifest_stat.is_some() && g.freshness_epoch == epoch {
+        if payload_stat.is_some()
+            && manifest_stat.is_some()
+            && g.freshness_epoch == epoch
+            && g.capture_sequence == capture_sequence
+        {
             g.capture_freshness = Some(CaptureFreshness {
                 user_executions,
                 epoch,
