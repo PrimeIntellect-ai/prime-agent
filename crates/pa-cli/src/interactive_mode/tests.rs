@@ -345,6 +345,7 @@ fn settings_sink_completes_a_provisioned_home_without_touching_the_choice() {
         cwd: dir.path().to_path_buf(),
         agent_dir: agent_dir.clone(),
         created_at: std::time::Instant::now(),
+        onboarding_id: uuid::Uuid::new_v4().to_string(),
         probe: StartupModelProbe {
             cwd: dir.path().to_path_buf(),
             agent_dir: agent_dir.clone(),
@@ -393,6 +394,7 @@ fn settings_sink_persists_the_fresh_home_answer_with_the_flag() {
         cwd: dir.path().to_path_buf(),
         agent_dir: agent_dir.clone(),
         created_at: std::time::Instant::now(),
+        onboarding_id: uuid::Uuid::new_v4().to_string(),
         probe: StartupModelProbe {
             cwd: dir.path().to_path_buf(),
             agent_dir: agent_dir.clone(),

@@ -309,3 +309,49 @@ pub fn runtime_config_from_args(
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The opt-out chain (the operator's explicit ask: nothing sends when
+    /// disabled): settings `telemetry.enabled=false` disables, and the env
+    /// overrides apply in the documented precedence - `DO_NOT_TRACK` and
+    /// `PI_OFFLINE` disable even against `PRIME_AGENT_TELEMETRY=1`.
+    #[test]
+    fn telemetry_opt_out_resolves_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let mut settings = pa_core::settings::SettingsManager::create(dir.path(), agent_dir);
+        settings.set_telemetry_enabled(false).unwrap();
+        assert!(
+            telemetry_disabled(&settings),
+            "settings telemetry.enabled=false opts out"
+        );
+    }
+
+    #[test]
+    fn telemetry_env_overrides_apply_in_precedence() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let settings = pa_core::settings::SettingsManager::create(dir.path(), agent_dir);
+        // `PRIME_AGENT_TELEMETRY=1` re-enables over the settings default.
+        std::env::set_var("PRIME_AGENT_TELEMETRY", "1");
+        assert!(!telemetry_disabled(&settings));
+        // But DO_NOT_TRACK outranks it: still disabled.
+        std::env::set_var("DO_NOT_TRACK", "1");
+        assert!(telemetry_disabled(&settings));
+        std::env::remove_var("DO_NOT_TRACK");
+        std::env::remove_var("PRIME_AGENT_TELEMETRY");
+    }
+
+    /// Default-on: a fresh install resolves enabled (telemetry stays on by
+    /// default, matching the TS posture).
+    #[test]
+    fn telemetry_defaults_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let settings = pa_core::settings::SettingsManager::create(dir.path(), agent_dir);
+        assert!(!telemetry_disabled(&settings));
+    }
+}

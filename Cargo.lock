@@ -1396,6 +1396,7 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width 0.2.0",
  "url",
+ "uuid",
 ]
 
 [[package]]

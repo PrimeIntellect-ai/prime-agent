@@ -136,6 +136,9 @@ pub(super) struct SettingsOnboardingSink {
     /// flow right away; a fresh home answers the question, a home with a
     /// standing choice completes silently).
     pub(super) created_at: std::time::Instant,
+    /// The flow's `onboarding_id` (#2117): pairs the `onboarding stage`
+    /// events and the `onboarding completed` enrichment.
+    pub(super) onboarding_id: String,
     /// The startup-model probe (the completion telemetry's category
     /// columns: the resolved startup model and its auth source).
     pub(super) probe: StartupModelProbe,
@@ -168,11 +171,9 @@ impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
         if !crate::mode::telemetry_disabled(&settings) {
             let client =
                 pa_core::session_engine::telemetry::build_client(&settings, &self.agent_dir);
+            let duration_ms = self.created_at.elapsed().as_millis() as u64;
             let mut properties = pa_telemetry::base_properties("interactive");
-            properties.set(
-                "duration_ms",
-                serde_json::Value::from(self.created_at.elapsed().as_millis() as u64),
-            );
+            properties.set("duration_ms", serde_json::Value::from(duration_ms));
             properties.set("outcome", serde_json::Value::from("success"));
             let (auth_category, provider_category) = self.probe.telemetry_categories();
             properties.set("auth_category", serde_json::Value::from(auth_category));
@@ -180,7 +181,25 @@ impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
                 "provider_category",
                 serde_json::Value::from(provider_category),
             );
+            properties.set(
+                "onboarding_id",
+                serde_json::Value::from(self.onboarding_id.as_str()),
+            );
             client.track("onboarding completed", properties);
+            // The `exit` stage (#2117 `onboarding stage`): the completion
+            // marker's own stage event, paired by `onboarding_id`. The
+            // final flush rides the client's drop (the worker drains once
+            // every handle is gone - no missed fires).
+            pa_telemetry::OnboardingStage {
+                onboarding_id: self.onboarding_id.clone(),
+                stage: "exit",
+                outcome: "completed",
+                duration_ms: Some(duration_ms),
+                auth_category: Some("none"),
+                entry_reason: Some("first_setup"),
+                timing_scope: Some("elapsed_including_user_wait"),
+            }
+            .track(&client);
         }
         Ok(())
     }
@@ -218,13 +237,45 @@ pub(super) fn onboarding_task(
             || options.session.fork.is_some(),
         api_key: config.api_key.clone(),
     };
-    let (current_model, _) = probe.resolve();
+    let (current_model, model_ready_now) = probe.resolve();
     let readiness_probe = probe.clone();
+    let onboarding_id = uuid::Uuid::new_v4().to_string();
+    // `onboarding stage` (v2, #2117): the flow's REAL stages only - the
+    // Rust onboarding is the first-run trace question, so `entry` fires
+    // when the task mounts and `ready` once the startup model resolved
+    // with configured auth (the flow's credential gate); no invented
+    // provider-selection or login steps.
+    if !crate::mode::telemetry_disabled(&settings) {
+        let client = pa_core::session_engine::telemetry::build_client(&settings, &config.agent_dir);
+        pa_telemetry::OnboardingStage {
+            onboarding_id: onboarding_id.clone(),
+            stage: "entry",
+            outcome: "initiated",
+            duration_ms: None,
+            auth_category: Some("none"),
+            entry_reason: Some("first_setup"),
+            timing_scope: None,
+        }
+        .track(&client);
+        if model_ready_now {
+            pa_telemetry::OnboardingStage {
+                onboarding_id: onboarding_id.clone(),
+                stage: "ready",
+                outcome: "configured",
+                duration_ms: None,
+                auth_category: Some("none"),
+                entry_reason: Some("first_setup"),
+                timing_scope: Some("system_work"),
+            }
+            .track(&client);
+        }
+    }
     Some(pa_tui::interactive::OnboardingTask {
         sink: std::sync::Arc::new(SettingsOnboardingSink {
             cwd: config.cwd.clone(),
             agent_dir: config.agent_dir.clone(),
             created_at: std::time::Instant::now(),
+            onboarding_id,
             probe,
         }),
         model_ready: std::sync::Arc::new(move || readiness_probe.resolve().1),

@@ -29,6 +29,13 @@ impl Properties {
         self.0.insert(key.to_string(), value);
     }
 
+    /// Insert an already-validated value (the catalog sanitize path for the
+    /// documented primitive-map exception). Not public: the public
+    /// insertion surface stays primitive-only.
+    pub(crate) fn insert_validated(&mut self, key: &str, value: Value) {
+        self.0.insert(key.to_string(), value);
+    }
+
     /// Merge every primitive of `other` into this map (later value wins).
     pub fn merge(&mut self, other: &Properties) {
         for (key, value) in other.iter() {

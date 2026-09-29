@@ -145,6 +145,9 @@ fn context_tokens(entries: &[FileEntry], leaf_id: Option<&str>) -> u64 {
 pub struct CompactRun {
     pub result: CompactionResult,
     pub entry: pa_types::session::CompactionEntry,
+    /// The whole compaction's wall duration (the `agent timing` compaction
+    /// stage; measured here once, centrally, for every arm).
+    pub duration_ms: u64,
     /// The post-compaction `ipython_state` kernel-persistence notice, when a
     /// kernel was running (TS `_syncKernelStateAfterCompaction`): the row is
     /// already durable and in the live context; surfaces broadcast it as a
@@ -173,6 +176,7 @@ pub async fn execute_compaction(
     session: &mut SessionManager,
     options: CompactOptions<'_>,
 ) -> anyhow::Result<CompactOutcome> {
+    let started_at = std::time::Instant::now();
     let entries = session.retained_entries().to_vec();
     let preparation = match prepare_compaction(&entries, options.settings.keep_recent_tokens) {
         Ok(preparation) => preparation,
@@ -475,6 +479,7 @@ pub async fn execute_compaction(
     Ok(CompactOutcome::Ran(Box::new(CompactRun {
         result,
         entry,
+        duration_ms: started_at.elapsed().as_millis() as u64,
         ipython_state: None,
     })))
 }

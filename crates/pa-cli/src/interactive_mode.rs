@@ -56,6 +56,7 @@ mod tests;
 /// Run the interactive TUI attached to the daemon. Returns the exit code.
 pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
     let socket_path = resolve_socket_path(options.daemon_socket.as_deref());
+    let configuration_load_started = std::time::Instant::now();
     let tui_options = build_tui_options(
         options,
         socket_path,
@@ -63,6 +64,7 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
             pa_tui::prompt_stash::PromptStashStore::default(),
         )),
     )?;
+    let configuration_load_ms = configuration_load_started.elapsed().as_millis() as u64;
     // Telemetry disclosure (TS agent-session-services): once per
     // installation, only after onboarding marked itself shown (a first
     // interactive run belongs to the onboarding screen; the notice surfaces
@@ -90,16 +92,44 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
         .context("build the interactive runtime")?;
     let startup_started = std::time::Instant::now();
     runtime.block_on(async {
+        // `agent startup stage` (v2, #2117): the configuration-load and
+        // session-attach stages measured on the same one-shot client as
+        // the `startup` event; the configuration stage covers the whole
+        // options resolution (`build_tui_options` above), the attach
+        // stage the daemon-socket resolution.
+        let startup_telemetry = (!options.config.telemetry_disabled).then(|| {
+            let agent_dir = options.config.agent_dir.clone();
+            let settings =
+                pa_core::settings::SettingsManager::create(&options.config.cwd, &agent_dir);
+            pa_core::session_engine::telemetry::build_client(&settings, &agent_dir)
+        });
+        if let Some(client) = startup_telemetry.as_ref() {
+            pa_telemetry::AgentStartupStage {
+                stage: "configuration_load",
+                outcome: "completed",
+                duration_ms: Some(configuration_load_ms),
+                startup_kind: Some("cold"),
+                timing_scope: Some("system_work"),
+            }
+            .track(client);
+        }
+        let attach_started = std::time::Instant::now();
         ensure_daemon_running(&tui_options.socket_path, &tui_options.cwd).await?;
+        if let Some(client) = startup_telemetry.as_ref() {
+            pa_telemetry::AgentStartupStage {
+                stage: "session_attach",
+                outcome: "completed",
+                duration_ms: Some(attach_started.elapsed().as_millis() as u64),
+                startup_kind: Some("cold"),
+                timing_scope: Some("system_work"),
+            }
+            .track(client);
+        }
         // `startup` (schema v1): process entry to a ready interactive
         // session environment (daemon listening). Emitted through a
         // one-shot client that flushes immediately; the session's own
         // telemetry rides the daemon worker.
-        if !options.config.telemetry_disabled {
-            let agent_dir = options.config.agent_dir.clone();
-            let settings =
-                pa_core::settings::SettingsManager::create(&options.config.cwd, &agent_dir);
-            let client = pa_core::session_engine::telemetry::build_client(&settings, &agent_dir);
+        if let Some(client) = startup_telemetry.as_ref() {
             let daemon_ready_ms = startup_started.elapsed().as_millis() as u64;
             let mut properties = pa_telemetry::base_properties("interactive");
             properties.set("duration_ms", serde_json::Value::from(daemon_ready_ms));
@@ -107,6 +137,14 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
             phase_timings.set("daemon_ready", serde_json::Value::from(daemon_ready_ms));
             properties.set_map("phase_timings", &phase_timings);
             client.track("startup", properties);
+            pa_telemetry::AgentStartupStage {
+                stage: "ui_ready",
+                outcome: "completed",
+                duration_ms: Some(daemon_ready_ms),
+                startup_kind: Some("cold"),
+                timing_scope: Some("system_work"),
+            }
+            .track(client);
             let _ = client.shutdown().await;
         }
         // `prime-agent agents` and bare `--resume` open the agents view

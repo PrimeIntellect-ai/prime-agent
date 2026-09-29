@@ -173,7 +173,7 @@ impl AgentSessionEngine {
                         .as_deref()
                         .and_then(|engine| engine.telemetry.as_ref())
                     {
-                        telemetry.note_compaction();
+                        telemetry.note_compaction(Some(run.duration_ms));
                     }
                 }
                 // TS `_scheduleAutoRefineAfterCompaction`: the compaction
