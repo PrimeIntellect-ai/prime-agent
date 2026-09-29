@@ -22,24 +22,51 @@
 #
 # THE TYPESCRIPT TAKEOVER (this script is also the uninstall path for the
 # TS product — one installer owns the keyword's lifecycle):
-#   1. THE TS DAEMON IS STOPPED CLEANLY, NEVER KILLED, but only AFTER the
+#   1. BOTH DAEMONS ARE STOPPED CLEANLY, NEVER KILLED, but only AFTER the
 #      new payload and launcher are published — the retirement steps
-#      (daemon stop, npm uninstall) never leave the machine without a
-#      working prime-agent if the install aborts mid-way. The TS daemon's
-#      default socket is ${TMPDIR:-/tmp}/prime-agent-$(id -u)/daemon.sock;
-#      the installer probes it (and its own rust socket) the same way the
-#      schema-id check does: the daemon's hello line carries a schemaId,
-#      and only a daemon whose hello answers the TypeScript schema id
-#      (protocol-7-schema-29-...) is treated as the TS daemon. Such a
-#      daemon is shut down REGARDLESS of busy-ness (the field ruling: an
-#      install that leaves the old daemon up is the takeover bug) — a
-#      session count over `list`, a `shutdown` request (force:false when
-#      idle, force:true when busy), then a 5s confirm poll that verifies
-#      it went down; the summary reports what was stopped. An unknown
-#      schema is skipped, and no signal is ever sent to any pid from this
-#      script (even the forced request is the daemon's own shutdown over
-#      its socket; the TS sessions' state stays on disk for the Rust
-#      side).
+#      (daemon stops, npm uninstall) never leave the machine without a
+#      working prime-agent if the install aborts mid-way. The probed
+#      candidates: the TS daemon's default socket
+#      (${TMPDIR:-/tmp}/prime-agent-$(id -u)/daemon.sock),
+#      PRIME_AGENT_DAEMON_SOCKET when a profile exported it (the
+#      non-default socket the first field install had), and this
+#      product's own pinned rust socket. The daemon that answers a
+#      candidate is classified by IDENTITY first — a hello whose
+#      runtime build id is this product's ("pa-daemon-rs-<version>",
+#      carried since the port) is OUR daemon of any build (the update
+#      flow: the running daemon holds the old binary and venv state, the
+#      update needs it down, the next invocation boots the new daemon —
+#      the summary's next-step line says so) — then by the protocol-7
+#      SCHEMA FAMILY: the family prefix minus this product's own hash is
+#      the TypeScript daemon of ANY version (the second field install
+#      answered schema-30-f908f493c9e1 where the last-known id was
+#      schema-29-a5c9d20f8b13; an exact-hash check left it running); the
+#      pinned rust socket is ours by construction, no classification at
+#      all (an installer older than the daemon build must still stop
+#      it). THE SELF-SOCKET REFUSAL: a candidate that equals the daemon
+#      DRIVING this very install (the internal supervisor-socket
+#      variable a daemon exports to its workers) is never probed at all
+#      — the suite that killed the fleet daemon twice ran exactly that
+#      shape — unless PRIME_AGENT_STOP_LIVE_DAEMON=1 overrides for a
+#      deliberate in-daemon update; an operator shell never carries the
+#      internal variable, so the field contract is unchanged. Every
+#      daemon so identified is shut down REGARDLESS of busy-ness (the
+#      field ruling: an install that leaves the old daemon up is the
+#      takeover bug), by an ESCALATING ladder that never sends a signal
+#      to any pid: the graceful `shutdown` request (force:false), a 5s
+#      confirm poll, then the forced request (force:true) and a
+#      DRAIN-SCALED second poll (2s per reported session over a 5s
+#      floor — the field measured a 46-worker drain at ~49s, and a fixed
+#      5s poll reported the dying daemon as a stop-failure) — every
+#      request is the daemon's own shutdown over its socket, and the
+#      sessions' state stays on disk for the Rust side. The install then
+#      VERIFIES every stopped socket is down (the socket stops
+#      answering) and reports what was stopped in the summary; a daemon
+#      that would not go down — or answers an unrecognized schema, or
+#      will not greet — is a LOUD warning naming it and the manual stop
+#      command (never a silent nothing-was-done), and a machine with no
+#      daemon anywhere says so (every candidate is reported — no silent
+#      skips). An unreadable session count never skips the stop.
 #   2. THE TS FILES ARE PRESERVED, NOT DELETED (the pi_agent_rust
 #      `legacy-pi` precedent: rollback stays possible). What the TS
 #      installer actually created, researched from its install.sh: a
@@ -207,30 +234,55 @@ note() { printf '%s\n' "$*" >&2; }
 # itself (its own standalone builds — no system python anywhere).
 #
 # NOTE ON THE GUARD ORDER BELOW: the astral installer writes only its own
-# fixed install path (~/.local/bin/uv), never under the shared session
-# store and never under this installer's prefix — so the store guard still
-# runs before the FIRST PREFIX-DERIVED write, which is the invariant that
-# matters. (uv's install also lands on PATH at ~/.local/bin, the same
-# default prefix this script uses; a custom prefix simply keeps uv at
-# ~/.local, where the product's own ensure_uv also looks for it.)
+# fixed install path (~/.local/bin/uv), never under this installer's
+# prefix — so the store guard still runs before the FIRST PREFIX-DERIVED
+# write, which is the invariant that matters. THE STORE-ALIAS FALLBACK:
+# ~/.local/bin can still resolve INSIDE the shared session store (the
+# alias shape: a user symlinked ~/.local into ~/.prime/agent), which
+# would put the astral installer's write under the store before the
+# guard runs — so when the default target resolves there, uv goes to
+# THIS install's prefix bin dir instead (the payload-adjacent fallback)
+# and the store is never written. (uv's install otherwise lands on PATH
+# at ~/.local/bin, the same default prefix this script uses; a custom
+# prefix simply keeps uv at ~/.local, where the product's own ensure_uv
+# also looks for it.)
+# The physical-path probe is POSIX-only (cd + pwd -P): readlink -f is
+# coreutils, and macOS ships without it.
+physical_path() {
+  ( cd "$1" 2>/dev/null && pwd -P ) || printf '%s' "$1"
+}
+uv_store_root="$(physical_path "${HOME}/.prime/agent")"
+uv_default_root="$(physical_path "${HOME}/.local")"
+uv_bin_dir="${HOME}/.local/bin"
+uv_under_store="no"
+case "${uv_default_root}/" in
+  "${uv_store_root}/"*) uv_under_store="yes" ;;
+esac
+if [ "$uv_under_store" = "yes" ]; then
+  uv_bin_dir="${PREFIX}/bin"
+  say "uv target: ${HOME}/.local resolves inside the shared session store;"
+  say "  uv installs payload-adjacent at ${uv_bin_dir} instead"
+fi
 uv_bin=""
 if command -v uv >/dev/null 2>&1; then
   uv_bin="$(command -v uv)"
-elif [ -x "${HOME}/.local/bin/uv" ]; then
-  uv_bin="${HOME}/.local/bin/uv"
+elif [ -x "${uv_bin_dir}/uv" ]; then
+  uv_bin="${uv_bin_dir}/uv"
 else
   # The fetch and the script run are checked SEPARATELY: a plain
   # `curl | sh` pipeline reports the script's status, so a dead network
   # would masquerade as success. The astral installer honors two
   # destination-redirecting env vars (UV_INSTALL_DIR, UV_UNMANAGED_INSTALL):
-  # an inherited value pointing into the shared session store would place uv
-  # there BEFORE the store guard runs — clear both so the install lands at
-  # uv's own fixed path.
+  # the computed target is passed EXPLICITLY — the default path
+  # (~/.local/bin) in the normal case, the prefix bin dir under the store
+  # alias — which also overrides any inherited value pointing into the
+  # shared session store (it would place uv there BEFORE the store guard
+  # runs).
   if uv_install_out="$(curl -fsSLsS https://astral.sh/uv/install.sh)" \
      && printf '%s\n' "$uv_install_out" \
-        | env -u UV_INSTALL_DIR -u UV_UNMANAGED_INSTALL sh >/dev/null 2>&1 \
-     && [ -x "${HOME}/.local/bin/uv" ]; then
-    uv_bin="${HOME}/.local/bin/uv"
+        | env -u UV_UNMANAGED_INSTALL UV_INSTALL_DIR="$uv_bin_dir" sh >/dev/null 2>&1 \
+     && [ -x "${uv_bin_dir}/uv" ]; then
+    uv_bin="${uv_bin_dir}/uv"
   fi
 fi
 
@@ -477,28 +529,82 @@ fi
 commit="$("$UVPY" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("commit", ""))' "$dl/manifest.json" 2>/dev/null || true)"
 say "checksum verified: ${asset_name} (built from ${commit:-unknown commit})"
 
-# --- the TypeScript takeover, step 1: stop the TS daemon ALWAYS ---------------
-# Probe the TS daemon's own socket and this product's pinned socket with the
-# same schema-id check the CLI uses: the daemon hello line carries a
-# schemaId; only the TypeScript schema id identifies the TS daemon. A TS
-# daemon is asked to shut down REGARDLESS of busy-ness (the field ruling on
-# the fresh-install bug: the friend's TS daemon survived the install — the
-# Rust daemon owns the store now, and the TS sessions' state stays on disk
-# for the Rust side to resume what the user resumes). Idle keeps the clean
-# `shutdown` request (force:false, the graceful path); a busy daemon gets
-# the forced request (force:true). Both are the daemon's OWN shutdown
-# request over its socket — NOTHING IS EVER KILLED from here, no signal is
-# sent to any pid — and both are confirmed down the same way (a 5s poll
-# until the socket stops answering; the summary reports the stop).
-# An unknown schema or a dead socket file skips the stop (the launcher's
-# socket pin already makes conflicts impossible, so a skip is safe); the
-# env-override candidate probing and the loud leftover warning ride the
-# follow-up hardening.
-# ts_stop_summary accumulates the summary line(s) a stop earns; the
-# success block prints them with the other takeover facts.
+# --- the TypeScript takeover, step 1: stop BOTH daemons ALWAYS ----------------
+# THE ALWAYS-STOP CONTRACT (PR1's field ruling, hardened + the second
+# field install's evidence): the TS daemon is shut down REGARDLESS of
+# busy-ness — the Rust daemon owns the store after this install, and the
+# TS sessions' state is on disk for the Rust side to resume what the
+# user resumes — and THIS PRODUCT'S OWN daemon is stopped too (the
+# operator's update ruling: a running rust daemon holds the old binary
+# and venv state; the update needs it down, and the next invocation
+# boots the new daemon — the summary's next-step line says so).
+# The stop is ESCALATING but still clean: the graceful `shutdown`
+# request first (force:false — the daemon's own stop path), a confirm
+# poll, then a forced `shutdown` request (force:true) if the graceful
+# one did not settle, and a second confirm poll. NOTHING IS EVER KILLED
+# from here: no signal is sent to any pid at any step — even the forced
+# request is the daemon's own shutdown request over its socket. An
+# unreadable session count never skips the stop (the ladder runs with
+# the count unknown).
+# THE CLASSIFICATION (the second field install's evidence: the friend's
+# TS daemon answered schema protocol-7-schema-30-f908f493c9e1 where the
+# installer expected protocol-7-schema-29-a5c9d20f8b13 — the exact-hash
+# check classified it as foreign and the install stopped nothing): the
+# TS daemon is the protocol-7 SCHEMA FAMILY minus this product's own
+# hash — the family match catches every TS version. The pinned rust
+# socket is OUR daemon by construction (no schema inspection; the
+# pinned path is the identity). A daemon that answers neither shape, or
+# will not greet, is NEVER silently skipped: the LOUD warning names it
+# and the manual stop command.
+# THE CANDIDATES (no silent skips): the TS daemon's default socket,
+# PRIME_AGENT_DAEMON_SOCKET when a profile exported it, and this
+# product's pinned rust socket. Every outcome is REPORTED (a say/note
+# line, plus a summary line for the stops) — a daemon that would not go
+# down is a LOUD warning, and the install ALWAYS verifies every stopped
+# socket is DOWN before the summary prints (a --listening re-check; the
+# socket stops answering).
+# ts_stop_summary accumulates the summary line(s); the success block
+# prints them with the other takeover facts.
 ts_stop_summary=""
+ts_stop_stopped=""
+ts_stop_found_any=""
+ts_stop_refused=""
+ts_stop_rust_stopped=""
 ts_socket="${TMPDIR:-/tmp}/prime-agent-$(id -u)/daemon.sock"
 rust_socket="${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock"
+env_socket="${PRIME_AGENT_DAEMON_SOCKET:-}"
+# THE SELF-SOCKET REFUSAL (the fleet-kill class, twice in the field: an
+# installer run UNDER a daemon probed that daemon's own socket through
+# the inherited PRIME_AGENT_DAEMON_SOCKET and stopped it — the running
+# agent died with its supervisor): the daemon driving THIS process tree
+# is identified by the internal supervisor-socket variable it exports to
+# its workers (TS parity), with the worker-role marker + the public
+# socket as the belt. A stop candidate equal to it is NEVER probed at
+# all — not even the hello — unless PRIME_AGENT_STOP_LIVE_DAEMON=1
+# explicitly overrides for a deliberate in-daemon update. An operator
+# shell never carries the internal variables (a profile-exported
+# PRIME_AGENT_DAEMON_SOCKET alone does not trigger the refusal), so the
+# field contract is unchanged.
+live_daemon_socket="${PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET:-}"
+if [ -z "$live_daemon_socket" ] && [ "${PRIME_AGENT_INTERNAL_DAEMON_WORKER:-}" = "1" ]; then
+  live_daemon_socket="${PRIME_AGENT_DAEMON_SOCKET:-}"
+fi
+# The probe list: the TS-classified candidates (the TS default socket, a
+# profile-exported env socket). The pinned rust socket is probed ONCE, as
+# ours, after them — never as a schema guess (an installer older than the
+# daemon build must still stop it, and the pinned path is the identity).
+ts_stop_candidates="$ts_socket"
+if [ -n "$env_socket" ] && [ "$env_socket" != "$ts_socket" ] && [ "$env_socket" != "$rust_socket" ]; then
+  ts_stop_candidates="$ts_stop_candidates $env_socket"
+fi
+# The report list names every candidate (the no-silent-skips ruling):
+# the pinned rust socket is always a candidate when it is not the TS
+# default (a PRIME_AGENT_DAEMON_SOCKET export pointing at the pin is the
+# same probe - the pin, as ours - never a second one).
+ts_candidate_report="$ts_stop_candidates"
+if [ "$rust_socket" != "$ts_socket" ]; then
+  ts_candidate_report="$ts_candidate_report $rust_socket"
+fi
 # The daemon probe rides a FILE, not a heredoc inside a command
 # substitution: macOS ships bash 3.2 as /bin/sh, and its POSIX-mode parser
 # cannot close a $( ) that spans a heredoc body ("unexpected EOF while
@@ -510,62 +616,108 @@ probe_py="${dl}/daemon-stop.py"
 cat > "$probe_py" <<'PROBE_PY'
 import json, select, socket, sys, time
 
-path = sys.argv[1]
-TS_SCHEMA_ID = "protocol-7-schema-29-a5c9d20f8b13"
+path = sys.argv[-1]
+kind = "ts"
+listening_only = False
+for flag in sys.argv[1:-1]:
+    if flag == "--listening":
+        listening_only = True
+    if flag.startswith("--kind="):
+        kind = flag[len("--kind="):]
+
+# The classification ladder, identity before schema: a hello whose
+# runtime build id is this product's ("pa-daemon-rs-<version>", carried by
+# every rust build since the port) is OUR daemon of ANY build; below that,
+# the two products share the protocol-7 schema FAMILY
+# ("protocol-7-schema-<revision>-<hash>"): the TypeScript product's id
+# moves with every TS release (the field install answered
+# schema-30-f908f493c9e1 where the last-known id was schema-29-a5c9d20f8b13
+# — an exact-hash check classified the friend's older TS daemon as foreign
+# and the install left it up). The family prefix minus this product's own
+# shapes is the TypeScript daemon of ANY version; anything else is
+# unrecognized (the loud warning).
+TS_SCHEMA_FAMILY = "protocol-7-schema-"
+RUST_SCHEMA_ID = "protocol-7-schema-30-8e4b17c2a9f5"
+RUST_BUILD_ID_PREFIX = "pa-daemon-rs-"
 HELLO_TIMEOUT_S = 1.5
 PROBE_TIMEOUT_S = 5.0
 STOP_CONFIRM_TIMEOUT_S = 5.0
+# The final (post-forced) poll outlasts a healthy drain instead of a fixed
+# 5s: the field event measured a 46-worker drain at ~49s while the 5s poll
+# declared the dying daemon "still running".
+STOP_DRAIN_MINIMUM_S = 5.0
+STOP_DRAIN_PER_SESSION_S = 2.0
+STOP_DRAIN_UNKNOWN_S = 30.0
 
-def read_line(sock, deadline):
-    chunks = []
+def read_line(sock, deadline, buf):
+    # One persistent buffer per connection: a daemon that answers
+    # immediately can land its hello and the response in one packet, and
+    # a line reader that returns only the first line and drops the rest
+    # would lose the response.
     while time.monotonic() < deadline:
+        if b"\n" in buf:
+            line, _, _rest = buf.partition(b"\n")
+            del buf[: len(line) + 1]
+            return line.decode("utf-8", "replace")
         if select.select([sock], [], [], 0.05)[0]:
             part = sock.recv(4096)
             if not part:
                 return None
-            chunks.append(part)
-            data = b"".join(chunks)
-            if b"\n" in data:
-                return data.split(b"\n", 1)[0].decode("utf-8", "replace")
+            buf.extend(part)
     return None
 
-try:
+def connect():
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(HELLO_TIMEOUT_S)
     sock.connect(path)
-except OSError:
-    print("stale")
-    sys.exit(0)
+    return sock
 
-hello = None
-deadline = time.monotonic() + HELLO_TIMEOUT_S
-while time.monotonic() < deadline:
-    line = read_line(sock, deadline)
-    if line is None:
-        break
+def wait_hello(sock):
+    buf = bytearray()
+    deadline = time.monotonic() + HELLO_TIMEOUT_S
+    while time.monotonic() < deadline:
+        line = read_line(sock, deadline, buf)
+        if line is None:
+            return None
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if value.get("type") == "daemon_hello":
+            return value
+    return None
+
+def listening_flag():
     try:
-        value = json.loads(line)
-    except ValueError:
-        continue
-    if value.get("type") == "daemon_hello":
-        hello = value
-        break
-if hello is None:
-    print("no-hello")
-    sys.exit(0)
-schema = hello.get("schemaId")
-if not isinstance(schema, str):
-    print("no-schema")
-    sys.exit(0)
-if schema != TS_SCHEMA_ID:
-    print("foreign:" + schema)
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        probe.settimeout(0.25)
+        probe.connect(path)
+        probe.close()
+        return True
+    except OSError:
+        return False
+
+def stopped_within(timeout_s):
+    end = time.monotonic() + timeout_s
+    while time.monotonic() < end:
+        if not listening_flag():
+            return True
+        time.sleep(0.05)
+    return False
+
+# The listening-only mode: the summary-time verification that a socket a
+# stop verdict was recorded for stays down.
+if listening_only:
+    print("up" if listening_flag() else "down")
     sys.exit(0)
 
-# TS daemon identified: read its session count (the request rides the
-# protocol-7 COMMAND ENVELOPE exactly like the products' own clients —
-# the TS supervisor refuses bare commands: "Daemon commands require
-# protocol ... or newer" — a bare `list` would kill the probe), then ask
-# it to shut down: force:false when idle, force:true when busy.
+# The request rides the protocol-7 COMMAND ENVELOPE exactly like the
+# products' own clients (the supervisor refuses bare commands: "Daemon
+# commands require protocol ... or newer" — a bare `list` would kill the
+# probe). Each request opens a fresh connection, CONSUMES the daemon's
+# hello first (the daemon greets every connection; leaving the hello
+# unread parks the line reader on it), then sends the command and reads
+# the reply.
 def envelope(request_id, body):
     return json.dumps({
         "type": "command",
@@ -575,113 +727,254 @@ def envelope(request_id, body):
         "command": dict(body, id=request_id),
     }) + "\n"
 
-sock.sendall(envelope("installer-probe", {"type": "list"}).encode())
-deadline = time.monotonic() + PROBE_TIMEOUT_S
-count = None
-while time.monotonic() < deadline:
-    line = read_line(sock, deadline)
-    if line is None:
-        break
+def request(body):
+    request_id = "installer-" + body["type"] + ("-force" if body.get("force") else "")
     try:
-        value = json.loads(line)
-    except ValueError:
-        continue
-    if value.get("type") == "response" and value.get("id") == "installer-probe":
-        sessions = (value.get("data") or {}).get("sessions")
-        count = len(sessions) if isinstance(sessions, list) else None
-        break
-if count is None:
-    print("ts:probe-failed")
+        sock = connect()
+    except OSError:
+        return None
+    if wait_hello(sock) is None:
+        sock.close()
+        return None
+    sock.sendall(envelope(request_id, body).encode())
+    buf = bytearray()
+    deadline = time.monotonic() + PROBE_TIMEOUT_S
+    while time.monotonic() < deadline:
+        line = read_line(sock, deadline, buf)
+        if line is None:
+            break
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if value.get("type") == "response" and value.get("id") == request_id:
+            sock.close()
+            return value
+    sock.close()
+    return None
+
+try:
+    sock = connect()
+except OSError:
+    print("stale")
     sys.exit(0)
 
-# THE ALWAYS-STOP RULING (the field fix: the friend's install left his TS
-# daemon up): the TS daemon is shut down regardless of busy-ness — the
-# Rust daemon owns the store after this install, and the TS sessions'
-# state is on disk (the Rust side resumes what the user resumes), so
-# nothing needs to keep running under the old daemon. Idle keeps the
-# clean request (force:false — the graceful path); a busy daemon gets
-# the forced request (force:true). Both are the daemon's OWN shutdown
-# request over its socket — no signal is ever sent to any pid — and both
-# are confirmed down the same way (the socket stops answering within the
-# 5s poll).
-forced = count != 0
-sock.sendall(
-    envelope("installer-stop", {"type": "shutdown", "force": forced}).encode()
-)
-ack_deadline = time.monotonic() + PROBE_TIMEOUT_S
-while time.monotonic() < ack_deadline:
-    line = read_line(sock, ack_deadline)
-    if line is None:
-        break
-    try:
-        value = json.loads(line)
-    except ValueError:
-        continue
-    if value.get("type") == "response" and value.get("id") == "installer-stop":
-        break
-sock.close()
-end = time.monotonic() + STOP_CONFIRM_TIMEOUT_S
-while time.monotonic() < end:
-    try:
-        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        probe.settimeout(0.25)
-        probe.connect(path)
-        probe.close()
-    except OSError:
-        if forced:
-            print("ts:stopped-busy:%d" % count)
+hello = wait_hello(sock)
+if hello is None:
+    print("no-hello")
+    sys.exit(0)
+schema = hello.get("schemaId")
+runtime = hello.get("runtime")
+build_id = runtime.get("buildId") if isinstance(runtime, dict) else None
+if kind == "ts":
+    # The TS candidates classify by IDENTITY first, then by schema: a
+    # hello carrying this product's runtime build id is OUR daemon of any
+    # build (a user's PRIME_AGENT_DAEMON_SOCKET override pointing at a
+    # running Rust daemon — the update flow stops it too, whatever its
+    # schema hash; the field's stale rust daemon was twice mislabeled TS
+    # by the hash-only guess); below that the family prefix is the
+    # TypeScript daemon of any version, this product's own exact hash
+    # stays ours, and anything else is unrecognized.
+    if isinstance(build_id, str) and build_id.startswith(RUST_BUILD_ID_PREFIX):
+        owner = "rust"
+    else:
+        if not isinstance(schema, str):
+            sock.close()
+            print("no-schema")
+            sys.exit(0)
+        if schema == RUST_SCHEMA_ID:
+            owner = "rust"
+        elif schema.startswith(TS_SCHEMA_FAMILY):
+            owner = "ts"
         else:
-            print("ts:stopped")
-        sys.exit(0)
-    time.sleep(0.05)
-print("ts:stop-failed")
+            sock.close()
+            print("unrecognized:" + schema)
+            sys.exit(0)
+else:
+    # --kind=ours: the pinned rust socket is this product's own daemon by
+    # construction — whatever answers there is stopped for the update,
+    # no schema inspection (an installer older than the daemon build must
+    # still stop it: the pinned path is the identity, not the hash).
+    owner = "rust"
+# The identify connection's job is done; every command opens its own
+# connection so a busy daemon never parks the probe on a held socket.
+sock.close()
+
+# The daemon's session count, for the report. The count is REPORT-ONLY:
+# an unreadable list never skips the stop — the ladder runs with the
+# count unknown ("?").
+count = None
+list_response = request({"type": "list"})
+if list_response is not None and list_response.get("success"):
+    sessions = (list_response.get("data") or {}).get("sessions")
+    if isinstance(sessions, list):
+        count = len(sessions)
+count_label = "?" if count is None else str(count)
+
+# THE ESCALATING LADDER (the always-stop contract, for BOTH daemons —
+# still no signal to any pid at any step):
+#   1. the graceful shutdown request (force:false) — the clean stop an
+#      idle daemon settles on immediately;
+#   2. a confirm poll (the socket stops answering within 5s);
+#   3. the forced shutdown request (force:true) — the busy daemon's own
+#      forced stop (its sessions' resume state stays on disk);
+#   4. a second confirm poll scaled to the DRAIN (2s per reported session
+#      over a 5s floor, 30s when the count is unreadable) — the field
+#      event's 46-worker drain took ~49s, and a fixed 5s poll reported
+#      the dying daemon as a stop-failure; still listening after the
+#      scaled window -> the verdict that makes the installer warn loudly
+#      instead of reporting a stop.
+def drain_confirm_timeout_s():
+    if count is None:
+        return STOP_DRAIN_UNKNOWN_S
+    return STOP_DRAIN_MINIMUM_S + STOP_DRAIN_PER_SESSION_S * count
+
+request({"type": "shutdown", "force": False})
+if stopped_within(STOP_CONFIRM_TIMEOUT_S):
+    print("%s:stopped:%s" % (owner, count_label))
+    sys.exit(0)
+request({"type": "shutdown", "force": True})
+if stopped_within(drain_confirm_timeout_s()):
+    print("%s:stopped-forced:%s" % (owner, count_label))
+    sys.exit(0)
+print("%s:stop-failed:%s" % (owner, count_label))
+
 PROBE_PY
 
-stop_ts_daemon() {
+# The per-candidate verdict handler: every stop attempt and every skip
+# reason is reported (a say/note line now, a summary line for the stops);
+# a daemon that would not go down — or one that would not IDENTIFY —
+# accumulates into the LOUD warning the success block prints (never a
+# silent nothing-was-done).
+stop_daemon_candidate() {
   socket_path="$1"
-  [ -e "$socket_path" ] || return 0
-  verdict="$("$UVPY" "$probe_py" "$socket_path" 2>/dev/null)" || verdict="probe-error"
+  candidate_kind="$2"
+  # THE SELF-SOCKET REFUSAL: the candidate that is the daemon DRIVING this
+  # very install is never probed — not even the hello — unless the
+  # explicit override is set (a deliberate in-daemon update). The refusal
+  # is loud and lands in the summary: a skipped live daemon is a fact the
+  # operator must see, never a silent skip.
+  if [ -n "$live_daemon_socket" ] && [ "$socket_path" = "$live_daemon_socket" ] \
+     && [ "${PRIME_AGENT_STOP_LIVE_DAEMON:-}" != "1" ]; then
+    note "note: ${socket_path} is the daemon this install runs under — it is"
+    note "  never probed (stopping it would cut the branch this installer"
+    note "  sits on). Set PRIME_AGENT_STOP_LIVE_DAEMON=1 to stop it for a"
+    note "  deliberate in-daemon update."
+    ts_stop_summary="${ts_stop_summary}daemon: skipped the live daemon socket ${socket_path} (this install runs under it; PRIME_AGENT_STOP_LIVE_DAEMON=1 stops it)
+"
+    ts_stop_refused="yes"
+    return 0
+  fi
+  if [ -e "$socket_path" ]; then
+    verdict="$("$UVPY" "$probe_py" "--kind=${candidate_kind}" "$socket_path" 2>/dev/null)" || verdict="probe-error"
+  else
+    verdict="absent"
+  fi
   case "$verdict" in
-    ts:stopped)
+    ts:stopped:0)
+      ts_stop_found_any="yes"
+      ts_stop_stopped="$ts_stop_stopped $socket_path"
       say "the TypeScript daemon on ${socket_path} stopped cleanly (idle; no signal sent)"
       ts_stop_summary="${ts_stop_summary}ts daemon: stopped cleanly on ${socket_path} (idle; no signal sent; verified down)
 "
       ;;
-    ts:stopped-busy:*)
-      sessions="${verdict#ts:stopped-busy:}"
+    ts:stopped:*)
+      sessions="${verdict##*:}"
+      ts_stop_found_any="yes"
+      ts_stop_stopped="$ts_stop_stopped $socket_path"
       say "the TypeScript daemon on ${socket_path} stopped (${sessions} session(s) were live;"
-      say "  the forced shutdown request; no signal sent)"
-      ts_stop_summary="${ts_stop_summary}ts daemon: stopped on ${socket_path} (${sessions} session(s) were live; the forced shutdown request; verified down)
+      say "  the graceful request settled it; no signal sent)"
+      ts_stop_summary="${ts_stop_summary}ts daemon: stopped on ${socket_path} (serving ${sessions} session(s); the graceful request settled it; verified down)
 "
       ;;
-    ts:probe-failed)
-      note "note: the TypeScript daemon on ${socket_path} did not answer the idle probe;"
-      note "  it was left running (never killed)."
+    ts:stopped-forced:*)
+      sessions="${verdict##*:}"
+      ts_stop_found_any="yes"
+      ts_stop_stopped="$ts_stop_stopped $socket_path"
+      say "the TypeScript daemon on ${socket_path} stopped (${sessions} session(s) were live;"
+      say "  forced after the graceful request; no signal sent)"
+      ts_stop_summary="${ts_stop_summary}ts daemon: stopped on ${socket_path} (serving ${sessions} session(s); forced after the graceful request; verified down)
+"
       ;;
-    ts:stop-failed)
-      note "note: the TypeScript daemon on ${socket_path} was asked to shut down but is"
-      note "  still listening after 5s; it was NOT killed — it will drain on its own,"
-      note "  or run 'prime-agent shutdown --force' (the shared-state-root sweep) to stop it."
+    rust:stopped:0)
+      ts_stop_found_any="yes"
+      ts_stop_stopped="$ts_stop_stopped $socket_path"
+      ts_stop_rust_stopped="yes"
+      say "the Rust daemon on ${socket_path} stopped for the update (idle; no signal sent)"
+      ts_stop_summary="${ts_stop_summary}rust daemon: stopped for the update on ${socket_path} (idle; no signal sent; verified down)
+"
       ;;
-    foreign:*)
-      note "note: a daemon is listening on ${socket_path} but its hello schema"
-      note "  (${verdict#foreign:}) is not the TypeScript daemon's; nothing was done."
+    rust:stopped:*)
+      sessions="${verdict##*:}"
+      ts_stop_found_any="yes"
+      ts_stop_stopped="$ts_stop_stopped $socket_path"
+      ts_stop_rust_stopped="yes"
+      say "the Rust daemon on ${socket_path} stopped for the update (${sessions} session(s)"
+      say "  were live; the graceful request settled it; no signal sent)"
+      ts_stop_summary="${ts_stop_summary}rust daemon: stopped for the update on ${socket_path} (serving ${sessions} session(s); the graceful request settled it; verified down)
+"
+      ;;
+    rust:stopped-forced:*)
+      sessions="${verdict##*:}"
+      ts_stop_found_any="yes"
+      ts_stop_stopped="$ts_stop_stopped $socket_path"
+      ts_stop_rust_stopped="yes"
+      say "the Rust daemon on ${socket_path} stopped for the update (${sessions} session(s)"
+      say "  were live; forced after the graceful request; no signal sent)"
+      ts_stop_summary="${ts_stop_summary}rust daemon: stopped for the update on ${socket_path} (serving ${sessions} session(s); forced after the graceful request; verified down)
+"
+      ;;
+    ts:stop-failed:*|rust:stop-failed:*)
+      sessions="${verdict##*:}"
+      owner="the TypeScript daemon"
+      case "$verdict" in rust:*) owner="the Rust daemon" ;; esac
+      ts_stop_found_any="yes"
+      note "WARNING: ${owner} on ${socket_path} is STILL RUNNING after this install"
+      note "  (it was serving ${sessions} session(s); the graceful and the forced shutdown"
+      note "  requests both failed to bring it down, and no signal was ever sent)."
+      note "  Stop it by hand: prime-agent shutdown --force"
+      ts_stop_summary="${ts_stop_summary}daemon: WARNING still running on ${socket_path} (${owner}, ${sessions} session(s); the graceful and forced requests did not bring it down; stop it by hand: prime-agent shutdown --force)
+"
+      ;;
+    unrecognized:*)
+      schema_id="${verdict#unrecognized:}"
+      ts_stop_found_any="yes"
+      note "WARNING: a daemon is listening on ${socket_path} but its hello schema"
+      note "  (${schema_id}) identifies as neither the TypeScript family"
+      note "  (protocol-7-schema-*) nor this product's daemon; nothing was stopped."
+      note "  Stop it by hand: prime-agent shutdown --force"
+      ts_stop_summary="${ts_stop_summary}daemon: WARNING unrecognized on ${socket_path} (schema ${schema_id}; left running; stop it by hand: prime-agent shutdown --force)
+"
+      ;;
+    no-hello|no-schema)
+      ts_stop_found_any="yes"
+      note "WARNING: something is listening on ${socket_path} but did not greet"
+      note "  with a daemon hello; nothing was stopped (never killed blind)."
+      note "  Stop it by hand: prime-agent shutdown --force"
+      ts_stop_summary="${ts_stop_summary}daemon: WARNING unidentified on ${socket_path} (no daemon hello; left running; stop it by hand: prime-agent shutdown --force)
+"
       ;;
     stale)
       note "note: no daemon answers on ${socket_path} (a stale socket file was left alone)"
       ;;
-    no-hello|no-schema)
-      note "note: whatever listens on ${socket_path} did not greet with a schema id;"
-      note "  nothing was done (the installer only stops what identifies itself)."
-      ;;
     probe-error|"")
-      note "note: could not probe ${socket_path}; nothing was done (never killed blind)."
+      ts_stop_found_any="yes"
+      note "WARNING: could not probe ${socket_path}; nothing was stopped"
+      note "  (never killed blind). Stop it by hand if one is running there:"
+      note "  prime-agent shutdown --force"
+      ts_stop_summary="${ts_stop_summary}daemon: WARNING unprobed on ${socket_path} (nothing was stopped; stop it by hand: prime-agent shutdown --force)
+"
+      ;;
+    absent)
+      :
       ;;
   esac
 }
+
 # The stop itself runs in the COMPLETION section after the publish (below):
 # a failed install must never leave the machine with its TS daemon stopped
 # and no Rust replacement published.
+
 
 # --- the TypeScript takeover, step 2: the files -------------------------------
 # ts_managed_root: the directory the TS installer owns (its .managed marker).
@@ -993,15 +1286,40 @@ if [ -f "$old_launcher" ] && grep -q 'launcher written by install-rust.sh' "$old
 fi
 
 # --- the TypeScript takeover completes AFTER the publish ----------------------
-# The TS-side steps that RETIRE the old command — the clean idle-daemon stop
-# and the npm uninstall — run only once this install has published its
+# The TS-side steps that RETIRE the old command — the always-stop daemon
+# pass and the npm uninstall — run only once this install has published its
 # payload and launcher: a failed install (a refused share dir, a live lock,
 # a failed swap) must never leave the machine without a working prime-agent.
 # The TS native tree's move to the legacy name cannot be deferred (it
 # occupies this installer's publish path); it runs inside the lock with its
 # own restore-on-failure and printed rollback instead.
-stop_ts_daemon "$ts_socket"
-stop_ts_daemon "$rust_socket"
+# Every candidate is probed (the default TS socket, the profile-exported
+# PRIME_AGENT_DAEMON_SOCKET, this product's pinned rust socket) — no
+# silent skips, except the one the self-socket refusal protects. The TS
+# candidates classify by identity first, then the schema family; the
+# pinned rust socket is OUR daemon by construction (the update flow: a
+# running rust daemon holds the old binary and venv state, the update
+# needs it down, the next invocation boots the new daemon).
+for stop_candidate in $ts_stop_candidates; do
+  stop_daemon_candidate "$stop_candidate" ts
+done
+if [ "$rust_socket" != "$ts_socket" ]; then
+  stop_daemon_candidate "$rust_socket" ours
+fi
+
+# THE VERIFY (the field contract: the TS daemon is DOWN before the install
+# finishes): every socket a stop verdict was recorded for is re-checked
+# once more — a daemon that came back between its confirm poll and here
+# (a restart loop, a supervisor re-exec) reads as a leftover and gets the
+# loud warning instead of a stop line alone.
+for verified_socket in $ts_stop_stopped; do
+  if [ "$("$UVPY" "$probe_py" --listening "$verified_socket" 2>/dev/null)" = "up" ]; then
+    note "WARNING: the daemon on ${verified_socket} answered the post-stop"
+    note "  verification; it is treated as still running (see the install summary)"
+    ts_stop_summary="${ts_stop_summary}daemon: WARNING still running on ${verified_socket} (it answered the post-stop verification; stop it by hand: prime-agent shutdown --force)
+"
+  fi
+done
 
 # The TS npm package: uninstalled (operator directive — the Rust port owns the
 # keyword), with the restore command printed. Exact package `prime-agent`
@@ -1037,7 +1355,7 @@ fi
 # precedent) creates the venv now; both steps are best-effort — an offline
 # machine still gets a successful install, and the first session retries
 # the bootstrap online per the product's own guidance.
-if command -v uv >/dev/null 2>&1 || [ -x "${HOME}/.local/bin/uv" ]; then
+if command -v uv >/dev/null 2>&1 || [ -x "${uv_bin_dir}/uv" ]; then
   say "uv found (the kernel venv's package manager)"
 else
   say "installing uv (the kernel venv's package manager — the command the"
@@ -1045,18 +1363,22 @@ else
   # The fetch and the script run are checked SEPARATELY: a plain
   # `curl | sh` pipeline reports the SCRIPT's status, so a dead network
   # (curl fails, sh reads nothing and exits 0) would masquerade as success.
+  # The computed uv target is passed EXPLICITLY (the default path in the
+  # normal case, the payload-adjacent prefix bin dir under the store
+  # alias — the store-alias fallback above), which also overrides any
+  # inherited value pointing into the shared session store.
   if curl_out="$(curl -LsSf https://astral.sh/uv/install.sh)" \
      && printf '%s\n' "$curl_out" \
-        | env -u UV_INSTALL_DIR -u UV_UNMANAGED_INSTALL sh; then
-    [ -x "${HOME}/.local/bin/uv" ] \
-      || note "warning: the uv installer reported success but ${HOME}/.local/bin/uv is missing; the first session may need to install uv itself"
+        | env -u UV_UNMANAGED_INSTALL UV_INSTALL_DIR="$uv_bin_dir" sh; then
+    [ -x "${uv_bin_dir}/uv" ] \
+      || note "warning: the uv installer reported success but ${uv_bin_dir}/uv is missing; the first session may need to install uv itself"
   else
     note "warning: could not install uv (offline?); the kernel pre-warm was"
     note "  skipped. The first session needs uv — install it with:"
     note "  curl -LsSf https://astral.sh/uv/install.sh | sh"
   fi
 fi
-if command -v uv >/dev/null 2>&1 || [ -x "${HOME}/.local/bin/uv" ]; then
+if command -v uv >/dev/null 2>&1 || [ -x "${uv_bin_dir}/uv" ]; then
   if bootstrap_out="$("$launcher" --prime-agent-bootstrap 2>&1)"; then
     say "kernel pre-warmed: the first session's Python kernel is ready"
     say "$bootstrap_out"
@@ -1103,9 +1425,19 @@ fi
 echo "source:    ${WORKFLOW} run ${RUN} (commit ${commit:-unknown})"
 if [ -n "$ts_stop_summary" ]; then
   printf '%s' "$ts_stop_summary"
+elif [ -z "$ts_stop_found_any" ] && [ -z "$ts_stop_refused" ]; then
+  # No silent skips: a machine with no daemon anywhere says so, naming
+  # every candidate that was probed.
+  echo "daemon: none found (no daemon answered on: ${ts_candidate_report})"
 fi
 
 echo "next steps: the README's Install section ships inside the payload"
 echo "  ${share_dir}/README.md"
+if [ "$ts_stop_rust_stopped" = "yes" ]; then
+  # The update flow's half: the stopped daemon was OURS — the next
+  # invocation boots the fresh payload this install just published.
+  echo "  the previous Rust daemon was stopped for this update — the next"
+  echo "  prime-agent invocation boots the new daemon"
+fi
 
 rm -rf "$dl"
