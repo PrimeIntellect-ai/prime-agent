@@ -270,7 +270,7 @@ impl SessionEngine for GateHoldEngine {
     }
 }
 
-/// The raced-fire runner fixture: a parent-owned child (rlm_depth 1) under
+/// The raced-fire runner fixture: a parent-owned child (`rlm_depth` 1) under
 /// the one-minute eviction threshold, its idle clock already two minutes
 /// past the stamp (the park loop's own re-stamp shape — `now_ms() - 120s`,
 /// wall-clock elapsed, so the fire's fresh-clock gate passes
@@ -355,10 +355,7 @@ struct FiredSeam {
 /// the transcript — the join barrier, never a timing window. The settle
 /// TAKES the fire handle (the caller's last use of the seam's settle
 /// arm; the survivors stay readable through the seam's own handles).
-async fn release_the_gate_and_settle(
-    gate: &GateHoldEngine,
-    fired: tokio::task::JoinHandle<()>,
-) {
+async fn release_the_gate_and_settle(gate: &GateHoldEngine, fired: tokio::task::JoinHandle<()>) {
     gate.release.notify_waiters();
     fired.await.expect("the fire settles at its own completion");
 }
