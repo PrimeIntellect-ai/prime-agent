@@ -814,12 +814,12 @@ pub fn render_activity_dock_segments(
         };
         if dock.focused && dock.selected == group {
             // The focused group reads as one unit behind the ONE shared
-            // selection band (the operator's 2026-09-28 visibility
-            // directive: the 2026-09-26 dark-green ToolSuccessBg band
-            // read near-invisible) — the accent purple restored at full
-            // opacity with bold text, the same style every activity
-            // surface's selected row paints; each span keeps its own
-            // status color, so the selection never repaints the text.
+            // selection band (the operator's 2026-09-29 revert ruling:
+            // #3031's purple read ugly — the selection returns to the
+            // gray `selectedBg`, the same gray the agents view's rows
+            // carried, the same style every activity surface's
+            // selected row paints); each span keeps its own status
+            // color, so the selection never repaints the text.
             let band = theme.selection_row_style();
             for span in spans {
                 line.push(Span::styled(span.content.clone(), span.style.patch(band)));

@@ -1,6 +1,6 @@
 //! The hover affordance (operator directive 2026-09-29): the row under
 //! the mouse carries the ONE light hover band — the "clickable"
-//! signal, distinct from the purple selection — on every row the click
+//! signal, distinct from the gray selection — on every row the click
 //! grammar covers (the agents-view rows, the inactive rows, the merged
 //! dropdown summary, and the children it expands).
 
@@ -87,12 +87,13 @@ fn a_motion_over_a_heading_or_hint_never_hovers() {
     crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
 }
 
-/// The ONE hover style is the light band, distinct from the purple
-/// selection (the operator's consistency rule): the selected row keeps
-/// the purple + bold band even under the mouse, and a hovered
-/// unselected row never takes the purple.
+/// The ONE hover style is the light band, distinct from the gray
+/// selection (the operator's consistency rule; the 2026-09-29 revert
+/// ruling returns the selection to the gray `selectedBg`): the
+/// selected row keeps its gray band even under the mouse, and a
+/// hovered unselected row never takes the gray.
 #[test]
-fn the_hover_band_is_light_and_the_selection_stays_purple() {
+fn the_hover_band_is_light_and_the_selection_stays_gray() {
     let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
@@ -103,25 +104,23 @@ fn the_hover_band_is_light_and_the_selection_stays_purple() {
     let held = row_of(&lines, "holder").expect("the holder row renders");
     let other = row_of(&lines, "hover me too").expect("the hovered row renders");
     let light = mode.theme.hover_row_style().bg;
-    let purple = mode.theme.selection_row_style().bg;
+    let gray = mode.theme.selection_row_style().bg;
+    assert_eq!(
+        gray,
+        mode.theme.bg_color(crate::theme::ThemeBg::SelectedBg),
+        "the selection is the pre-#3031 gray, the operator's revert ruling"
+    );
     // The selected row (the holder, the default selection) under the
-    // mouse keeps its purple band: both state styles apply where they
+    // mouse keeps its gray band: both state styles apply where they
     // overlap — the focused state is never demoted.
     mode.handle_mouse(&hover_motion(held));
     let (lines, _) = mode.render_frame(120, 24);
     let selected = &lines[held];
     assert!(
-        selected.iter().all(|span| span.style.bg == purple),
-        "the hovered selected row keeps the purple band: {selected:?}"
+        selected.iter().all(|span| span.style.bg == gray),
+        "the hovered selected row keeps the gray band: {selected:?}"
     );
-    assert!(
-        selected.iter().any(|span| span
-            .style
-            .add_modifier
-            .contains(ratatui::style::Modifier::BOLD)),
-        "the selected row keeps its bold: {selected:?}"
-    );
-    // The unselected hovered row takes the LIGHT band, never purple.
+    // The unselected hovered row takes the LIGHT band, never the gray.
     mode.handle_mouse(&hover_motion(other));
     let (lines, _) = mode.render_frame(120, 24);
     let hovered = &lines[other];
@@ -131,8 +130,8 @@ fn the_hover_band_is_light_and_the_selection_stays_purple() {
     );
     let still_selected = &lines[held];
     assert!(
-        still_selected.iter().all(|span| span.style.bg == purple),
-        "the selection keeps its purple while another row hovers: {still_selected:?}"
+        still_selected.iter().all(|span| span.style.bg == gray),
+        "the selection keeps its gray while another row hovers: {still_selected:?}"
     );
     crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
 }
@@ -163,7 +162,7 @@ fn the_merged_dropdown_rows_hover_like_every_row() {
     // Expanding the dropdown keeps the child rows hoverable: the
     // child under the mouse bands the same way (the summary row is
     // selected here, so the child carries the light band while the
-    // selection's purple rides the summary).
+    // selection's gray rides the summary).
     mode.handle_key("down");
     mode.handle_key("enter");
     let (lines, _) = mode.render_frame(120, 36);

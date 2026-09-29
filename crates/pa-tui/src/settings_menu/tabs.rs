@@ -116,7 +116,7 @@ pub(crate) fn row_indices(rows: &[SettingsMenuRow]) -> Vec<(&'static str, Vec<us
 /// inner column): one `N Name` per tab — the number dim, the name muted,
 /// the active tab white bold (the operator's 2026-09-28 selection
 /// ruling: the settings page's own selected-section styling renders the
-/// theme's text color, distinct from the dock's accent-purple selection)
+/// theme's text color, distinct from the dock's gray selection band)
 /// — four spaces between tabs (the operator's 2026-09-28 spacing pass),
 /// truncated to the frame width like every status row. The numbers are
 /// the digit keys that jump straight to the tab.
@@ -170,7 +170,7 @@ mod tabs_tests {
         // pass; two before).
         assert_eq!(text, "  1 General    2 Models");
         // The active tab renders white bold — the theme's text color,
-        // not the dock's accent purple (the selection ruling).
+        // not the dock's gray selection band (the selection ruling).
         let active = line
             .iter()
             .find(|span| span.content == "Models")

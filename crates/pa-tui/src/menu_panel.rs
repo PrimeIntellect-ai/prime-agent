@@ -223,8 +223,8 @@ pub(crate) fn hug_width(content_width: usize, width: usize) -> usize {
 /// padded to its band width and painted over the hug only — the style
 /// the CALLER passes (the activity surfaces pass the ONE shared
 /// selection style, the operator's 2026-09-28 consistency rule: the
-/// same purple band and bold the dock's groups and the agents view's
-/// rows paint), a little past the text, not the whole terminal width.
+/// same gray band the dock's groups and the agents view's rows
+/// paint), a little past the text, not the whole terminal width.
 pub(crate) fn hug_row(
     row: &Line,
     content_width: usize,
@@ -642,9 +642,9 @@ mod tests {
     /// (`fill_row`/`hug_row`) paint the style their CALLER passes: the
     /// activity surfaces (the heartbeats picker, the shell view) pass
     /// the ONE shared selection style — the operator's 2026-09-28
-    /// consistency rule — the same purple band and bold the dock's
-    /// groups and the agents view's rows paint, so every activity
-    /// surface's selected row reads identically.
+    /// consistency rule — the same gray band the dock's groups and
+    /// the agents view's rows paint, so every activity surface's
+    /// selected row reads identically.
     #[test]
     fn menu_rows_wash_and_the_row_painters_take_the_callers_style() {
         let theme = theme();
@@ -667,7 +667,7 @@ mod tests {
             "the wash reads off the surface: lum {wash_lum:.2} vs {surface_lum:.2}"
         );
         // The shared row painters paint exactly the style passed: the
-        // activity surfaces' purple band and bold.
+        // activity surfaces' gray selection band.
         let band = theme.selection_row_style();
         let filled = fill_row(&vec![Span::raw("label")], true, 40, band);
         assert!(
@@ -716,9 +716,9 @@ mod tests {
             "the partial theme computes no selection"
         );
         // The ONE shared selection style keeps the same contract: with
-        // neither the accent nor `selectedBg` resolvable, the band
-        // falls back to the onboarding wash, so a selected
-        // heartbeat/shell row never reads as unselected.
+        // `selectedBg` unresolvable, the band falls back to the
+        // onboarding wash, so a selected heartbeat/shell row never
+        // reads as unselected.
         let fallback = crate::onboarding::highlight_wash(&theme);
         assert_eq!(theme.selection_row_style().bg, Some(fallback));
         for washed in [

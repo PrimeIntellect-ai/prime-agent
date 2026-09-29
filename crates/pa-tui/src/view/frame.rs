@@ -237,7 +237,7 @@ impl AgentView {
                 // 2026-09-29): the hovered group segment or tray hint
                 // carries the ONE light hover band — exactly the
                 // region's own cells, never the row around them — and
-                // the focused group's purple selection band stays
+                // the focused group's gray selection band stays
                 // under it (the paint skips cells that already carry
                 // a background, so both state styles apply where they
                 // overlap).

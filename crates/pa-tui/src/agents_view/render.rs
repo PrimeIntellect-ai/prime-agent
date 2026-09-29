@@ -472,7 +472,7 @@ impl AgentsViewMode {
     /// carries the light hover band (operator directive 2026-09-29: the
     /// row is clickable — every row, the summaries and the nested
     /// children included, opens on a click), and a hovered selected row
-    /// keeps the purple selection band (both state styles apply where
+    /// keeps the gray selection band (both state styles apply where
     /// they overlap; the focused state is never demoted).
     pub(super) fn render_row(
         &self,
@@ -734,7 +734,7 @@ impl AgentsViewMode {
 
 /// One session row's affordance finish (operator directive
 /// 2026-09-29): the selected row pads to the full width and keeps the
-/// ONE purple selection band — a hovered selected row keeps it too
+/// ONE gray selection band — a hovered selected row keeps it too
 /// (both state styles apply where they overlap; the focused state is
 /// never demoted) — while a hovered unselected row pads and gains the
 /// ONE light hover band, the same "clickable" affordance the dock's

@@ -669,36 +669,31 @@ impl Theme {
     /// operator's consistency rule: the selected row's background is
     /// IDENTICAL across the dock's groups, the agents view's rows, the
     /// heartbeats picker, and the bash view — one style, not
-    /// per-surface copies): the accent purple as the selection
-    /// background at FULL opacity (a solid band, never a translucent
-    /// wash), with the selected row's text bold. Each surface keeps its
-    /// own foreground colors; the style patches only the background
-    /// and the bold modifier.
-    ///
-    /// TS parity: the TS fork paints `theme.bg("selectedBg", ...)` on
-    /// its focused rows (a plain dark-gray band — no purple, no bold);
-    /// the purple+opaque+bold treatment is the operator's sanctioned
-    /// divergence. A theme whose accent or `selectedBg` is
-    /// unresolvable or explicitly empty (the empty string resolves to
-    /// `Color::Reset`, which paints no band) falls through to the
+    /// per-surface copies): the theme's `selectedBg` — the plain gray
+    /// band the agents view's rows carried before #3031 (prime
+    /// `#222226`) — at full opacity, with no extra modifiers: the
+    /// 2026-09-28 purple+opaque+bold treatment (#3031's fix 3) is
+    /// reverted by the operator's 2026-09-29 ruling (the pink read
+    /// ugly; the selection returns to the gray). Each surface keeps
+    /// its own foreground colors; the style patches only the
+    /// background — TS parity, which paints `theme.bg("selectedBg")`
+    /// on its focused rows the same way. A theme whose `selectedBg`
+    /// is unresolvable or explicitly empty (the empty string resolves
+    /// to `Color::Reset`, which paints no band) falls through to the
     /// onboarding wash, so a selected row always reads as selected
     /// (Macroscope PR #2908's contract).
     #[must_use]
     pub fn selection_row_style(&self) -> Style {
-        let purple = self
-            .fg_style(ThemeColor::Accent)
-            .fg
-            .filter(|color| *color != Color::Reset)
-            .or_else(|| self.bg_color(ThemeBg::SelectedBg))
+        let gray = self
+            .bg_color(ThemeBg::SelectedBg)
             .filter(|color| *color != Color::Reset)
             .unwrap_or_else(|| crate::onboarding::highlight_wash(self));
-        Style::default().bg(purple).add_modifier(Modifier::BOLD)
+        Style::default().bg(gray)
     }
 
     /// Paint one line's spans with [`Theme::selection_row_style`] —
     /// the `bg_paint` counterpart for the one selection style: each
-    /// span keeps its own foreground, gains the purple band and the
-    /// bold modifier.
+    /// span keeps its own foreground, gains the gray band.
     #[must_use]
     pub fn selection_paint(&self, line: crate::Line) -> crate::Line {
         let style = self.selection_row_style();
@@ -714,7 +709,7 @@ impl Theme {
     /// (the operator's 2026-09-29 consistency rule): a LIGHT
     /// background band — the same soft wash the menu panels' selected
     /// rows carry — that marks "the mouse can click here", never the
-    /// focused state's purple [`Theme::selection_row_style`], so
+    /// focused state's gray [`Theme::selection_row_style`], so
     /// hoverable and focused read as two different things everywhere
     /// (the dock's group segments, the tray's `← manage` hint, the
     /// agents view's rows). The wash is the established light band:
@@ -731,7 +726,7 @@ impl Theme {
     /// span's edge splits, so the band covers exactly the hovered
     /// region - a dock group's own segment, the hint's own text - and
     /// cells that already carry a background keep it (a cell inside
-    /// the purple selection band keeps the focused state's band: both
+    /// the gray selection band keeps the focused state's band: both
     /// styles apply where the two states overlap, and the hover never
     /// demotes the selection).
     ///
@@ -938,44 +933,58 @@ mod tests {
         assert_eq!(theme.background_rgb(), Some((0x0a, 0x0b, 0x0c)));
     }
 
-    /// An explicitly empty custom-theme `accent` resolves to
-    /// `Color::Reset` — the terminal default, a band painted with it
-    /// shows nothing. The shared selection style filters Reset before
-    /// the fallback chain (Macroscope 2026-09-28: an empty accent
-    /// must fall through, not strand the selection without a band),
-    /// so it lands on `selectedBg` and then the onboarding wash.
+    /// The ONE selection style is the gray `selectedBg` band (the
+    /// operator's 2026-09-29 revert ruling: the #3031 purple read
+    /// ugly; the selection returns to the exact gray the agents view's
+    /// rows carried before #3031): the theme's own `selectedBg`, never
+    /// the accent, never a bold modifier. A `selectedBg` that is
+    /// unresolvable or explicitly empty (the empty string resolves to
+    /// `Color::Reset`, a band painted with it shows nothing) falls
+    /// through to the onboarding wash (Macroscope 2026-09-28: an
+    /// empty slot must fall through, not strand the selection without
+    /// a band).
     #[test]
-    fn an_empty_accent_falls_back_instead_of_painting_reset() {
+    fn the_selection_style_is_the_gray_selected_bg_never_the_accent() {
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        assert_eq!(
+            theme.selection_row_style(),
+            Style::default().bg(Color::Rgb(0x22, 0x22, 0x26)),
+            "prime: the gray `selectedBg` band, no bold — the pre-#3031 gray"
+        );
+        assert_ne!(
+            theme.selection_row_style().bg,
+            theme.fg_style(ThemeColor::Accent).fg,
+            "the accent never rides the selection band"
+        );
         let json = serde_json::from_str::<ThemeJson>(
             r##"{
-                "name": "empty-accent",
-                "colors": { "text": "#f4f4f5", "accent": "", "selectedBg": "#222226" }
+                "name": "loud-accent",
+                "colors": { "text": "#f4f4f5", "accent": "#ff00ff", "selectedBg": "#222226" }
             }"##,
         )
         .expect("valid theme json");
-        let theme = Theme::from_json(&json, ColorMode::TrueColor);
-        assert_eq!(theme.fg_style(ThemeColor::Accent).fg, Some(Color::Reset));
+        let loud = Theme::from_json(&json, ColorMode::TrueColor);
         assert_eq!(
-            theme.selection_row_style().bg,
-            theme.bg_color(ThemeBg::SelectedBg),
-            "the empty accent falls back to selectedBg, never Reset"
+            loud.selection_row_style().bg,
+            loud.bg_color(ThemeBg::SelectedBg),
+            "the accent stays out of the band even when it is loud"
         );
         let bare = serde_json::from_str::<ThemeJson>(
-            r##"{ "name": "bare", "colors": { "text": "#f4f4f5", "accent": "" } }"##,
+            r##"{ "name": "bare", "colors": { "text": "#f4f4f5" } }"##,
         )
         .expect("valid theme json");
         let bare = Theme::from_json(&bare, ColorMode::TrueColor);
         assert_eq!(
             bare.selection_row_style().bg,
             Some(crate::onboarding::highlight_wash(&bare)),
-            "with no selectedBg either, the wash keeps the selected row readable"
+            "with no selectedBg, the wash keeps the selected row readable"
         );
-        // An empty `selectedBg` resolves the same way: the second slot's
+        // An empty `selectedBg` resolves the same way: the slot's
         // Reset is filtered too, so the wash takes the band.
         let empty_slot = serde_json::from_str::<ThemeJson>(
             r##"{
                 "name": "empty-slot",
-                "colors": { "text": "#f4f4f5", "accent": "", "selectedBg": "" }
+                "colors": { "text": "#f4f4f5", "selectedBg": "" }
             }"##,
         )
         .expect("valid theme json");
@@ -984,7 +993,7 @@ mod tests {
         assert_eq!(
             empty_slot.selection_row_style().bg,
             Some(crate::onboarding::highlight_wash(&empty_slot)),
-            "an empty selectedBg never paints Reset either"
+            "an empty selectedBg never paints Reset"
         );
     }
 
@@ -1088,12 +1097,16 @@ mod tests {
     }
 
     /// The ONE hover affordance (the operator's 2026-09-29 consistency
-    /// rule): a LIGHT background band, never the purple selection —
-    /// the two state styles must stay distinguishable in every theme
-    /// and color mode, so "hoverable" and "focused" read as different
-    /// things on every surface that paints both.
+    /// rule): a LIGHT background band, never the gray selection — the
+    /// two state styles stay distinct in every theme and color mode,
+    /// so "hoverable" and "focused" read as different things on every
+    /// surface that paints both. The selection is the gray
+    /// `selectedBg` band with NO modifiers (the operator's 2026-09-29
+    /// revert ruling); the hover keeps the light wash, and the two
+    /// bands never share a row's cell — the hover paint skips cells
+    /// that already carry the selection's background.
     #[test]
-    fn the_hover_band_is_light_never_the_purple_selection() {
+    fn the_hover_band_is_light_never_the_gray_selection() {
         for name in ["prime", "dark", "light"] {
             for mode in [ColorMode::TrueColor, ColorMode::Color256] {
                 let theme = Theme::builtin(name, mode);
@@ -1104,23 +1117,22 @@ mod tests {
                     theme.soft_selection_style().bg,
                     "{name}/{mode:?}: the hover is the one light wash"
                 );
+                assert_eq!(
+                    selection.bg,
+                    theme.bg_color(ThemeBg::SelectedBg),
+                    "{name}/{mode:?}: the selection is the gray selectedBg band"
+                );
                 assert_ne!(
                     hover.bg, selection.bg,
                     "{name}/{mode:?}: the hover band and the selection band differ"
                 );
                 assert!(
-                    selection
-                        .add_modifier
-                        .contains(ratatui::style::Modifier::BOLD),
-                    "{name}/{mode:?}: the selection keeps its bold"
+                    selection.add_modifier.is_empty(),
+                    "{name}/{mode:?}: the reverted selection carries no modifiers"
                 );
                 let band = hover.bg.expect("the hover paints a background");
-                let (Some(band_lum), Some(selection_lum)) = (
-                    quantized_luminance(band),
-                    quantized_luminance(selection.bg.expect("the selection paints a background")),
-                ) else {
-                    panic!("{name}/{mode:?}: both bands must evaluate");
-                };
+                let band_lum = quantized_luminance(band)
+                    .unwrap_or_else(|| panic!("{name}/{mode:?}: the band must evaluate"));
                 let surface = theme
                     .bg_color(ThemeBg::UserMessageBg)
                     .and_then(quantized_luminance)
@@ -1128,10 +1140,6 @@ mod tests {
                 assert!(
                     (band_lum - surface).abs() >= SELECTION_MIN_LUMINANCE_DELTA - 1.0,
                     "{name}/{mode:?}: the light band reads off its surface"
-                );
-                assert!(
-                    (selection_lum - band_lum).abs() >= 10.0,
-                    "{name}/{mode:?}: the purple and the light band read apart                      (selection {selection_lum:.1} vs hover {band_lum:.1})"
                 );
             }
         }
@@ -1179,7 +1187,7 @@ mod tests {
 
     /// The hover band paints only its own column span: a span
     /// straddling an edge splits, and a cell already carrying the
-    /// selection's purple keeps it (both state styles apply where they
+    /// selection's gray keeps it (both state styles apply where they
     /// overlap — the hover never demotes the focused band).
     #[test]
     fn the_hover_band_covers_its_columns_and_never_demotes_the_selection() {
@@ -1210,12 +1218,12 @@ mod tests {
         assert_eq!(
             line[2].style.bg,
             theme.selection_row_style().bg,
-            "the selection's own cells keep the purple under the hover"
+            "the selection's own cells keep the gray under the hover"
         );
         assert_eq!(
             line[3].style.bg,
             theme.selection_row_style().bg,
-            "the focused cells keep the purple selection"
+            "the focused cells keep the gray selection"
         );
         assert_eq!(line[4].style.bg, None, "the tail stays bare");
     }
