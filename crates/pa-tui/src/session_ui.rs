@@ -170,11 +170,6 @@ pub(crate) struct SessionUi {
     /// The `terminal.fullscreenMouse` setting: whether the interactive
     /// surface enables mouse tracking; carried into `/new` runs.
     fullscreen_mouse: bool,
-    /// The runtime fullscreen flag (`/fullscreen`, TS `fullscreenEnabled`):
-    /// this surface always renders on the alternate screen, so the flag
-    /// starts on and the command persists the preference (TS
-    /// `settingsManager.setFullscreen`) and reports the TS status.
-    fullscreen_enabled: bool,
     /// The `/speed` display flag (TS `speedDisplayEnabled`): per-client
     /// runtime state, never persisted; turning it off clears the stats and
     /// the row.
@@ -663,10 +658,6 @@ impl SessionUi {
             last_status_index: None,
             show_images: options.show_images,
             fullscreen_mouse: options.fullscreen_mouse,
-            fullscreen_enabled: options
-                .client_settings
-                .as_ref()
-                .is_none_or(|settings| settings.fullscreen()),
             service_tier: None,
             speed_display_enabled: false,
             speed_stats: None,
@@ -2607,25 +2598,6 @@ impl SessionUi {
                 self.track_command_used("rlm-max-depth");
                 self.handle_rlm_max_depth_command(view, &resolved.args)
                     .await;
-            }
-            // `/fullscreen [on|off]` (TS `setFullscreenMode`): persist the
-            // preference and report the TS status row. This surface always
-            // renders on the alternate screen (the Rust TUI has no inline
-            // rendering mode yet), so the toggle changes the persisted
-            // preference and the reported state, not the surface.
-            "fullscreen" => {
-                self.track_command_used("fullscreen");
-                let arg = resolved.args.trim().to_lowercase();
-                if !arg.is_empty() && arg != "on" && arg != "off" {
-                    self.error_row("Usage: /fullscreen [on|off]", view);
-                    return Ok(());
-                }
-                let enable = match arg.as_str() {
-                    "on" => true,
-                    "off" => false,
-                    _ => !self.fullscreen_enabled,
-                };
-                self.set_fullscreen_mode(enable, view);
             }
             // `/speed [on|off]` (TS `setSpeedDisplay`): toggle the footer
             // tok/sec readout for this session — the dim dock row with the
