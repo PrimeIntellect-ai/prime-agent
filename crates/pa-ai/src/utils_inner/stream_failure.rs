@@ -662,7 +662,7 @@ pub fn truncate_raw_payload(raw: &str) -> String {
 // (stream_failure::http_retry); `parse_retry_after_ms` keeps its `pub` level
 // and the private helpers stay private (child-internal callers).
 mod http_retry;
-use http_retry::parse_retry_after_ms;
+pub(crate) use http_retry::parse_retry_after_ms;
 
 fn extract_parts_from_http(error: &ProviderHttpError) -> ExtractedParts {
     let mut body_type: Option<String> = None;
