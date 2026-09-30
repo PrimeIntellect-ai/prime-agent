@@ -1128,6 +1128,35 @@ async fn snapshot_records_executable_bits() {
 }
 
 #[test]
+fn git_selection_env_is_scrubbed_from_child_commands() {
+    // GIT_DIR/GIT_WORK_TREE inherited from the caller would point every
+    // git command at another repository; the child command drops the
+    // git-discovery variables so the capture always describes the root
+    // it was given.
+    let command = super::git::git_command(&["status"], Path::new("/tmp"));
+    let removed: Vec<String> = command
+        .as_std()
+        .get_envs()
+        .filter(|(_, value)| value.is_none())
+        .map(|(key, _)| key.to_string_lossy().into_owned())
+        .collect();
+    for variable in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+    ] {
+        assert!(
+            removed.iter().any(|entry| entry == variable),
+            "{variable} must be scrubbed from the git child env"
+        );
+    }
+}
+
+#[test]
 fn status_parser_reads_porcelain_v2_records() {
     let output = b"# branch.oid ee3a902349fa5446bf3edd1e1e8d8f7f48013081\0\
 # branch.head main\0\

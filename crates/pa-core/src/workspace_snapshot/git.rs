@@ -102,10 +102,32 @@ pub(crate) async fn read_worktree_status(
 /// more than the OS pipe capacity would otherwise block forever on write
 /// (the status output of a large untracked tree easily exceeds it), so
 /// the drain futures, the wait, and one shared deadline race together.
+/// The git child commands' environment: git-discovery variables inherited
+/// from the caller would redirect every command to a different repository
+/// or index than `cwd` (`GIT_DIR`/`GIT_WORK_TREE` select the tree the manifest
+/// claims to describe), so they are scrubbed and the snapshot's git view
+/// is always `cwd`'s own.
+pub(super) fn git_command(args: &[&str], cwd: &Path) -> tokio::process::Command {
+    const GIT_SELECTION_VARS: [&str; 7] = [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+    ];
+    let mut command = tokio::process::Command::new("git");
+    command.args(args).current_dir(cwd);
+    for variable in GIT_SELECTION_VARS {
+        command.env_remove(variable);
+    }
+    command
+}
+
 async fn run_git(args: &[&str], cwd: &Path, timeout_ms: u64) -> Result<Vec<u8>, SnapshotError> {
-    let mut child = tokio::process::Command::new("git")
-        .args(args)
-        .current_dir(cwd)
+    let mut command = git_command(args, cwd);
+    let mut child = command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

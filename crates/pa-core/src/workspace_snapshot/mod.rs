@@ -869,6 +869,21 @@ fn write_manifest(
         path: manifest_path.clone(),
         detail: format!("serialization failed: {error}"),
     })?;
+    // The verifier's manifest cap is a property of the format, so a
+    // manifest past it fails the capture loudly instead of producing an
+    // artifact verify would always reject (symlink targets do not count
+    // toward the content budget, so the entry caps alone do not bound
+    // the serialized size).
+    if bytes.len() as u64 > verify::MAX_MANIFEST_BYTES {
+        return Err(limit_error(
+            "max_manifest_bytes",
+            format!(
+                "manifest is {} bytes, cap is {}",
+                bytes.len(),
+                verify::MAX_MANIFEST_BYTES
+            ),
+        ));
+    }
     let temp_path = staging_dir.join(format!("{MANIFEST_FILE}.tmp"));
     std::fs::write(&temp_path, &bytes).map_err(|error| io_error(&temp_path, error))?;
     crate::platform::rename_onto(&temp_path, &manifest_path)
