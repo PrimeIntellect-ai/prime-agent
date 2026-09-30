@@ -290,7 +290,11 @@ jobs:
     needs: trust
     if: needs.trust.outputs.allowed == 'true' && (github.event_name == 'push' || !github.event.pull_request.draft)
     runs-on: windows-latest
-    timeout-minutes: 90
+    # The full battery on the MSVC runner needs more than the build+clippy
+    # residue of 90 minutes (the wave's test phase hit the 90-minute cap with
+    # build+clippy green); windows-runtime-triage.yml times the same battery
+    # on the same runner at 120 - the repo's own calibration.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
