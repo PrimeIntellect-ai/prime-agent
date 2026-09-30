@@ -487,3 +487,18 @@ fn a_pasted_slash_materializes_the_completion() {
         "the pasted slash suggests the commands"
     );
 }
+
+/// The open completion renders its panel above the box (the chat's
+/// stacking; TS shows the same dropdown through the editor's TUI
+/// overlay).
+#[test]
+fn the_open_completion_renders_the_overlay_panel() {
+    let mut mode = armed_live();
+    mode.handle_key("/");
+    mode.materialize_composer_autocomplete();
+    let frame = frame_text(&mut mode);
+    assert!(
+        frame.contains("compact"),
+        "the completion panel renders above the box:\n{frame}"
+    );
+}

@@ -168,8 +168,8 @@ fn reply_headline(text: &str) -> Option<String> {
 fn reply_key(summary: &Value) -> String {
     summary
         .get("activeSessionId")
-        .or_else(|| summary.get("id"))
         .and_then(Value::as_str)
+        .or_else(|| summary.get("id").and_then(Value::as_str))
         .unwrap_or_default()
         .to_string()
 }

@@ -170,8 +170,12 @@ impl AgentsViewMode {
             // The reply composer's real editor box (the rename box's
             // shape): the target's header line rides INSIDE the box, the
             // placeholder names the action by the target's state, and
-            // the cursor comes from the box.
+            // the cursor comes from the box. An open completion renders
+            // its overlay panel above the box — the chat's stacking (TS
+            // draws the same dropdown through the editor's TUI overlay,
+            // editor.ts `showOverlay`, anchored over the box).
             Composer::Reply(reply) => {
+                let overlay = crate::view::editor_surface::overlay(&reply.editor, theme, width);
                 let header = reply.header_line(theme);
                 let placeholder = reply.placeholder();
                 let surface = crate::view::editor_surface::render(
@@ -182,7 +186,7 @@ impl AgentsViewMode {
                     Some(header),
                     Some(placeholder),
                 );
-                (Vec::new(), surface.rows, surface.cursor)
+                (overlay, surface.rows, surface.cursor)
             }
             // The rename composer's real editor box (TS `CustomEditor.render`
             // over `Editor.render`): the warning header rides INSIDE the box
