@@ -40,6 +40,11 @@ import { theme } from "../modes/interactive/theme/theme.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
 import { sleep } from "../utils/sleep.js";
 import {
+	AGENT_MESSAGE_DIGEST_NOTICE_CUSTOM_TYPE,
+	AgentMessageInbox,
+	createAgentMessageDigestNoticeContent,
+} from "./agent-message-inbox.js";
+import {
 	AGENT_MESSAGE_CUSTOM_TYPE,
 	AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL,
 	AGENT_MESSAGE_SKILL_NAME,
@@ -524,6 +529,11 @@ export interface AgentSessionConfig {
 	agentMessageController?: AgentSessionMessageController;
 	agentObserveController?: AgentObserveController;
 	/**
+	 * Start with the digest inbox lane enabled for inbound agent messages
+	 * from non-parent senders. Default: false (push delivery only).
+	 */
+	agentMessageDigest?: boolean;
+	/**
 	 * Whether the bundled compact skill and its compact.* host handlers are
 	 * available to the model. Default: the compaction.agentCallable setting.
 	 */
@@ -618,7 +628,7 @@ export interface PromptOptions {
 	streamingBehavior?: "steer" | "followUp";
 	followUpQueueKey?: string;
 	source?: InputSource;
-	preflightResult?: (success: boolean, queued?: boolean) => void;
+	preflightResult?: (success: boolean, queued?: boolean, digest?: boolean) => void;
 	queueIfBusy?: boolean;
 	resumeIfIdle?: boolean;
 	internalPrompt?: boolean;
@@ -735,13 +745,13 @@ class DeferredSessionInputError extends Error {}
 class SessionInputAdmissionPausedError extends Error {}
 
 function oncePreflight(
-	preflightResult: ((success: boolean, queued?: boolean) => void) | undefined,
-): (success: boolean, queued?: boolean) => void {
+	preflightResult: ((success: boolean, queued?: boolean, digest?: boolean) => void) | undefined,
+): (success: boolean, queued?: boolean, digest?: boolean) => void {
 	let settled = false;
-	return (success, queued = false) => {
+	return (success, queued = false, digest = false) => {
 		if (!settled) {
 			settled = true;
-			preflightResult?.(success, queued);
+			preflightResult?.(success, queued, digest);
 		}
 	};
 }
@@ -909,7 +919,7 @@ function parsePersistedIpythonSentAgentMessage(value: unknown): PersistedIpython
 	if (
 		typeof id !== "string" ||
 		typeof message !== "string" ||
-		(deliveryStatus !== "delivered" && deliveryStatus !== "queued") ||
+		(deliveryStatus !== "delivered" && deliveryStatus !== "queued" && deliveryStatus !== "digest") ||
 		!isObjectRecord(target) ||
 		typeof target.activeSessionId !== "string" ||
 		typeof target.sessionId !== "string"
@@ -1742,6 +1752,10 @@ export class AgentSession {
 	private readonly _messagingStats = new MessagingStats();
 	/** True while the current model run was triggered by an agent message. */
 	private _currentRunAgentTriggered = false;
+	/** Digest inbox lane: agent messages from non-parent senders land in the inbox. */
+	private _agentMessageDigestMode: boolean;
+	private readonly _agentMessageInbox: AgentMessageInbox;
+	private readonly _digestNoticeActionIds = new Set<string>();
 	/** Latest recap for this session, written by the daemon summarizer; read by a parent to label its child snapshots. */
 	private _currentRecap?: string;
 
@@ -1820,6 +1834,8 @@ export class AgentSession {
 		this._prewarmIpythonKernel = (config.prewarmIpythonKernel ?? false) && this._rlmDepth === 0;
 		this._autoRefineReviewer = config.autoRefineReviewer;
 		this._serializedRefine = config.serializedRefine ?? false;
+		this._agentMessageDigestMode = config.agentMessageDigest ?? false;
+		this._agentMessageInbox = new AgentMessageInbox(config.sessionManager);
 		this._rlmSessionDir = config.rlmSessionDir;
 		this._rlmParentNodeId = config.rlmParentNodeId;
 		this._rlmParentAgent = config.rlmParentAgent;
@@ -5690,6 +5706,21 @@ export class AgentSession {
 				throw new Error("Agent message was cleared before admission");
 			}
 		};
+		// Digest lane: store the payload and wake the recipient once per batch.
+		// Parent-to-child instructions always stay push (never digested).
+		if (
+			this._agentMessageDigestMode &&
+			customMessage &&
+			customMessage.details.fromRelationship &&
+			customMessage.details.fromRelationship !== "parent"
+		) {
+			admissionCommitted();
+			this._agentMessageInbox.append(customMessage);
+			this._messagingStats.recordArrival();
+			this._ensureAgentMessageDigestNotice();
+			options?.preflightResult?.(true, false, true);
+			return;
+		}
 		if (
 			this._sessionInputPumpSuspended &&
 			this._isBusyForSessionInput("preflight") &&
@@ -5814,6 +5845,71 @@ export class AgentSession {
 			this._pendingNextTurnMessages.splice(index, 1);
 		}
 		this._scheduleSessionInputPump();
+	}
+
+	/**
+	 * Digest inbox lane (default off). When enabled, inbound agent messages
+	 * from non-parent senders land in a persistent inbox instead of prompting;
+	 * one coalesced notice wakes the recipient per batch. See PR C of the
+	 * swarm communication feature set.
+	 */
+	setAgentMessageDigestMode(enabled: boolean): void {
+		this._agentMessageDigestMode = enabled;
+	}
+
+	get agentMessageDigestMode(): boolean {
+		return this._agentMessageDigestMode;
+	}
+
+	agentMessageInbox(): AgentMessageInbox {
+		return this._agentMessageInbox;
+	}
+
+	private _ensureAgentMessageDigestNotice(): void {
+		if (this._disposed || this._disposing) return;
+		if (this._agentMessageInbox.unreadCount() === 0) return;
+		// One live notice covers the whole batch; later arrivals wait for the
+		// recipient to pull them with rlm.inbox.read() in that turn.
+		const liveNotice = this._actionStore
+			.clearableActions()
+			.find((action) => this._digestNoticeActionIds.has(action.id));
+		if (liveNotice) return;
+		const unread = this._agentMessageInbox.list().filter((entry) => !entry.read);
+		const senders = [...new Set(unread.map((entry) => entry.from.sessionName ?? entry.from.activeSessionId))];
+		const message: CustomMessage = {
+			role: "custom",
+			customType: AGENT_MESSAGE_DIGEST_NOTICE_CUSTOM_TYPE,
+			content: createAgentMessageDigestNoticeContent(unread.length, senders),
+			display: false,
+			details: undefined,
+			timestamp: Date.now(),
+		};
+		const action = this._createPreparedTurnAction("followUp", message.content as string, undefined, {
+			message,
+			suppressAutonomousContinuation: true,
+			resumeIfIdle: false,
+			source: "internal",
+			executionPolicy: this._turnExecutionPolicy("injected"),
+			queueVisible: false,
+		});
+		this._digestNoticeActionIds.add(action.id);
+		try {
+			const result = this._admitSessionInput(action, { wake: false });
+			if (!result.accepted) throw new Error("Agent message digest notice was not admitted.");
+		} catch (error) {
+			this._digestNoticeActionIds.delete(action.id);
+			throw error;
+		}
+		this.resumeQueuedWork();
+	}
+
+	private _cancelPendingDigestNotices(): void {
+		if (this._digestNoticeActionIds.size === 0) return;
+		const error = new Error("Digest notice cancelled: inbox entries were already read.");
+		this._cancelSessionActions((action) => this._digestNoticeActionIds.has(action.id), error);
+		this._digestNoticeActionIds.clear();
+		this._emitQueueUpdate();
+		this.resumeQueuedWork();
 	}
 
 	private async _acquireRlmTerminalNoticeRetentionFence(): Promise<{ owner: symbol; release(): void } | undefined> {
@@ -11003,6 +11099,20 @@ export class AgentSession {
 			),
 			"rlm.messaging_stats": async () => this.messagingStats() as unknown as Record<string, unknown>,
 			"rlm.progress.note": createRlmProgressNoteHostHandler((message) => this.noteRlmProgress(message)),
+			"rlm.inbox.list": async () =>
+				({
+					entries: this._agentMessageInbox.list(),
+					unread: this._agentMessageInbox.unreadCount(),
+					total: this._agentMessageInbox.totalCount(),
+				}) as unknown as Record<string, unknown>,
+			"rlm.inbox.read": async (payload: Record<string, unknown>) => {
+				const ids = Array.isArray(payload?.ids)
+					? payload.ids.filter((id): id is string => typeof id === "string")
+					: undefined;
+				const result = this._agentMessageInbox.read(ids);
+				if (result.unread === 0) this._cancelPendingDigestNotices();
+				return result as unknown as Record<string, unknown>;
+			},
 			"rlm.delete_subagent": createRlmDeleteSubagentHostHandler((target) => this.deleteRlmSubagent(target)),
 			"model.info": async () => ({
 				id: this.model?.id ?? null,
@@ -11240,6 +11350,10 @@ export class AgentSession {
 		return this._messagingStats.snapshot({
 			contextTokens: this._contextTokensForCurrentMessages(),
 			estimatedAgentMessageTokens: estimateMessagingTokens(agentMessageChars),
+			inbox: {
+				unread: this._agentMessageInbox.unreadCount(),
+				total: this._agentMessageInbox.totalCount(),
+			},
 		});
 	}
 

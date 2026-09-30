@@ -123,7 +123,7 @@ export interface KernelAttachment {
 export interface KernelSentAgentMessage {
 	id: string;
 	message: string;
-	deliveryStatus: "delivered" | "queued";
+	deliveryStatus: "delivered" | "queued" | "digest";
 	receiverRole?: "parent" | "sibling" | "child";
 	target: {
 		activeSessionId: string;
@@ -191,7 +191,7 @@ export function parseSentAgentMessage(payload: unknown): KernelSentAgentMessage 
 	if (
 		typeof id !== "string" ||
 		typeof message !== "string" ||
-		(deliveryStatus !== "delivered" && deliveryStatus !== "queued") ||
+		(deliveryStatus !== "delivered" && deliveryStatus !== "queued" && deliveryStatus !== "digest") ||
 		typeof activeSessionId !== "string" ||
 		typeof sessionId !== "string"
 	) {

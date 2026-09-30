@@ -31,6 +31,8 @@ export interface MessagingStatsSnapshot {
 		share: number | null;
 	};
 	sends: { attempts: number; failures: number };
+	/** Digest inbox lane state (unread/total inbox entries). */
+	inbox: { unread: number; total: number };
 }
 
 export class MessagingStats {
@@ -72,7 +74,11 @@ export class MessagingStats {
 	}
 
 	snapshot(
-		context: { contextTokens: number | undefined; estimatedAgentMessageTokens: number },
+		context: {
+			contextTokens: number | undefined;
+			estimatedAgentMessageTokens: number;
+			inbox?: { unread: number; total: number };
+		},
 		now = Date.now(),
 	): MessagingStatsSnapshot {
 		const windowStart = now - this.windowMs;
@@ -103,6 +109,7 @@ export class MessagingStats {
 						: null,
 			},
 			sends: { attempts: this.sendAttempts, failures: this.sendFailures },
+			inbox: context.inbox ?? { unread: 0, total: 0 },
 		};
 	}
 }
