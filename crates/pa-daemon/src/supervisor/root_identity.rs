@@ -66,6 +66,15 @@ impl Supervisor {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
                 backoff_ms = (backoff_ms * 2).min(RECONCILIATION_BACKOFF_MAX_MS);
+                if supervisor
+                    .shutting_down
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    // The shutdown exit (the background loops' join
+                    // discipline): a stopping daemon never leaves the
+                    // retry spinning behind.
+                    return;
+                }
                 if !resident.identity_quarantined() {
                     // The live word already landed elsewhere (the
                     // worker's own roster push or a concurrent pull).
