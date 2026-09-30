@@ -267,6 +267,7 @@ jobs:
     permissions:
       contents: write
       id-token: write
+      attestations: write
     timeout-minutes: 30
     steps:
       # Checkout is isolated under verification-source and is used ONLY for
