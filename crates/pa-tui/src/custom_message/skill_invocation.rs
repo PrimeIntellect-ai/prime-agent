@@ -1,24 +1,23 @@
 //! The skill-invocation card: TS `skill-invocation-message.ts` +
 //! `skill-blocks.ts`. A user message whose text is one `<skill ...>` block
 //! (what a `/skill:<name>` submission expands into) renders the compact
-//! expandable card instead of the raw block: collapsed, the `[skill]`
-//! label and the skill name; expanded, the label above the
-//! `**<name>**` + content markdown in `customMessageText`; the trailing
-//! argument text renders as its own user block below (no spacer between,
-//! TS `addMessageToChat`'s user case). The block parse itself lives in
-//! the shared vocabulary crate (`pa_types::skill_blocks`), so the session
-//! engine and every rendering surface agree on the format.
+//! expandable card instead of the raw block: the `[skill]` label and the
+//! skill name header, with the content markdown under the branch gutter
+//! when expanded; the trailing argument text renders as its own user block
+//! below (no spacer between, TS `addMessageToChat`'s user case). The block
+//! parse itself lives in the shared vocabulary crate
+//! (`pa_types::skill_blocks`), so the session engine and every rendering
+//! surface agree on the format.
 
 use crate::chat::{ChatEntry, Detail};
-use crate::theme::{Theme, ThemeBg, ThemeColor};
-use crate::width::str_width;
+use crate::theme::{Theme, ThemeColor};
 use crate::{Line, Span};
 
-/// One skill-invocation card (TS `SkillInvocationMessageComponent`, an
-/// `ExpandableCustomMessageBox`): collapsed, the `[skill]` label and the
-/// skill name; expanded, the label above `**<name>**` and the skill content
-/// as markdown. Parsed out of a user message whose text is one
-/// `<skill ...>` block (TS `parseSkillBlock` in `addMessageToChat`).
+/// One skill-invocation card (TS `SkillInvocationMessageComponent`): the
+/// `[skill]` label and the skill name header, the content markdown under
+/// the branch gutter when expanded. Parsed out of a user message whose
+/// text is one `<skill ...>` block (TS `parseSkillBlock` in
+/// `addMessageToChat`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkillInvocationRow {
     /// The invoked skill's name.
@@ -46,44 +45,18 @@ pub fn skill_invocation_entries(text: &str) -> Option<Vec<ChatEntry>> {
     Some(entries)
 }
 
-/// One box content row: left padding column, content spans (bg-patched),
-/// padded to the full width on the box background (TS `Box.applyBg` covers
-/// the whole row, trailing padding included).
-fn box_row(spans: Line, bg: ratatui::style::Style, width: usize) -> Line {
-    let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
-    let mut row: Line = vec![Span::styled(" ".to_string(), bg)];
-    for mut span in spans {
-        span.style = span.style.patch(bg);
-        row.push(span);
-    }
-    if used < width {
-        row.push(Span::styled(" ".repeat(width - used), bg));
-    }
-    row
-}
-
-struct SkillBody {
-    text: String,
-    width: usize,
-    style: crate::markdown::MarkdownStyle,
-}
-
-fn expanded_body(
-    row: &SkillInvocationRow,
-    detail: Detail,
-    theme: &Theme,
-    width: usize,
-) -> Option<SkillBody> {
-    if !detail.tool_output_expanded() {
-        return None;
-    }
-    let mut style = crate::markdown::MarkdownStyle::from_theme(theme);
-    style.body = theme.fg_style(ThemeColor::CustomMessageText);
-    Some(SkillBody {
-        text: format!("**{}**\n\n{}", row.name, row.content),
-        width: width.saturating_sub(2).max(1),
-        style,
-    })
+/// The card's header row: the bold `[skill]` label in `customMessageLabel`,
+/// a space, and the skill name in `customMessageText` — the same row in
+/// both states (the header never depends on expansion).
+fn skill_header(row: &SkillInvocationRow, theme: &Theme) -> Line {
+    vec![
+        super::render::custom_message_label("skill", theme),
+        Span::raw(" ".to_string()),
+        Span::styled(
+            row.name.clone(),
+            theme.fg_style(ThemeColor::CustomMessageText),
+        ),
+    ]
 }
 
 pub(crate) fn count_skill_invocation(
@@ -93,18 +66,24 @@ pub(crate) fn count_skill_invocation(
     width: usize,
     leading: bool,
 ) -> usize {
-    let body_rows = expanded_body(row, detail, theme, width).map_or(0, |body| {
-        crate::markdown::markdown_row_count(&body.text, body.width, &body.style)
-    });
-    usize::from(leading) + 3 + body_rows
+    usize::from(leading)
+        + super::geometry::text_row_count(&skill_header(row, theme), width)
+        + if detail.tool_output_expanded() {
+            crate::branch::branch_markdown_count(
+                &row.content,
+                &super::geometry::markdown_style(ThemeColor::CustomMessageText, theme),
+                width,
+            )
+        } else {
+            0
+        }
 }
 
-/// One skill-invocation card (TS `SkillInvocationMessageComponent`, an
-/// `ExpandableCustomMessageBox`: `Box(1,1)` on `customMessageBg`).
-/// Collapsed: one row, the bold `[skill]` label in `customMessageLabel`
-/// and the skill name in `customMessageText` (the TS expand hint for
-/// `app.tools.expand` renders empty). Expanded: the label row above the
-/// `**<name>**\n\n<content>` markdown body in `customMessageText`.
+/// One skill-invocation card (TS `SkillInvocationMessageComponent`, after
+/// #2779's one shared layout): the optional leading blank, the `[skill]` +
+/// name header, then the content markdown under the branch gutter when
+/// expanded (the name lives on the header, never duplicated in the
+/// body).
 #[must_use]
 pub fn render_skill_invocation(
     row: &SkillInvocationRow,
@@ -113,38 +92,19 @@ pub fn render_skill_invocation(
     width: usize,
     leading: bool,
 ) -> Vec<Line> {
-    let bg = theme.bg_style(ThemeBg::CustomMessageBg);
-    let blank = vec![Span::styled(" ".repeat(width), bg)];
-    let label = || {
-        Span::styled(
-            "[skill]".to_string(),
-            theme
-                .fg_style(ThemeColor::CustomMessageLabel)
-                .add_modifier(ratatui::style::Modifier::BOLD),
-        )
-    };
     let mut out = Vec::new();
     if leading {
         out.push(Vec::new());
     }
-    out.push(blank.clone());
-    if let Some(body) = expanded_body(row, detail, theme, width) {
-        out.push(box_row(vec![label()], bg, width));
-        for line in crate::markdown::render_markdown(&body.text, body.width, &body.style) {
-            out.push(box_row(line, bg, width));
-        }
-    } else {
-        let name = Span::styled(
-            row.name.clone(),
-            theme.fg_style(ThemeColor::CustomMessageText),
-        );
-        out.push(box_row(
-            vec![label(), Span::raw(" ".to_string()), name],
-            bg,
+    out.extend(super::render::text_rows(&skill_header(row, theme), width));
+    if detail.tool_output_expanded() {
+        out.extend(crate::branch::branch_markdown(
+            &row.content,
+            &super::geometry::markdown_style(ThemeColor::CustomMessageText, theme),
+            theme,
             width,
         ));
     }
-    out.push(blank);
     out
 }
 
@@ -224,58 +184,34 @@ mod tests {
         assert!(skill_invocation_entries("/skill:websearch find tuis").is_none());
     }
 
+    /// The collapsed card is the header row alone: no box, no pad rows,
+    /// no bold-name body.
     #[test]
-    fn collapsed_box_shape() {
+    fn collapsed_header_row() {
         let row = SkillInvocationRow {
             name: "websearch".to_string(),
             content: "Run one query.".to_string(),
         };
         let rows = render_skill_invocation(&row, Detail::Overview, &theme(), 40, true);
-        // Leading blank, box top pad, the one-line card, box bottom pad.
-        assert_eq!(rows.len(), 4, "{rows:?}");
-        assert!(rows[0].is_empty());
-        let bg = theme().bg_style(ThemeBg::CustomMessageBg);
-        assert_eq!(rows[1][0].style, bg, "top pad row on the box bg");
-        assert_eq!(flat(&rows[2]).trim_end(), " [skill] websearch");
-        // Colors: the bold label in customMessageLabel, the name in
-        // customMessageText (the TS expand hint renders empty).
-        assert!(rows[2][1]
-            .style
-            .add_modifier
-            .contains(ratatui::style::Modifier::BOLD));
+        let trimmed: Vec<String> = rows
+            .iter()
+            .map(|row| flat(row).trim_end().to_string())
+            .collect();
+        assert_eq!(trimmed, vec!["", " [skill] websearch"], "{rows:?}");
+        // The label is the shared `customMessageLabel` span, the name the
+        // `customMessageText` fg.
         assert_eq!(
-            rows[2][1].style.fg,
-            theme().fg_style(ThemeColor::CustomMessageLabel).fg
+            rows[1][1],
+            super::super::render::custom_message_label("skill", &theme())
         );
         assert_eq!(
-            rows[2][3].style.fg,
+            rows[1][3].style.fg,
             theme().fg_style(ThemeColor::CustomMessageText).fg
         );
-        assert_eq!(rows[3][0].style, bg, "bottom pad row on the box bg");
         // The skill content stays out of the collapsed card.
-        assert!(!flat(&rows[2]).contains("Run one query."));
-        // Without the leading blank the card starts at the top pad row.
+        assert!(!trimmed.iter().any(|row| row.contains("Run one query.")));
+        // Without the leading blank the header row leads.
         let rows = render_skill_invocation(&row, Detail::Overview, &theme(), 40, false);
-        assert_eq!(rows.len(), 3, "{rows:?}");
-    }
-
-    #[test]
-    fn expanded_renders_the_markdown_body() {
-        let row = SkillInvocationRow {
-            name: "websearch".to_string(),
-            content: "Run one query.".to_string(),
-        };
-        let rows = render_skill_invocation(&row, Detail::All, &theme(), 40, false);
-        // Box top pad, label row, then the `**name**` + body markdown.
-        assert!(rows.len() > 3, "{rows:?}");
-        assert_eq!(flat(&rows[1])[..10].trim_end(), " [skill]");
-        let rendered: String = rows.iter().map(flat).collect();
-        assert!(rendered.contains("websearch"), "bold name: {rendered:?}");
-        assert!(rendered.contains("Run one query."), "body: {rendered:?}");
-        // Every content row carries the box background.
-        let bg = theme().bg_style(ThemeBg::CustomMessageBg);
-        for row in &rows[1..rows.len() - 1] {
-            assert!(row.iter().all(|span| span.style.patch(bg) == span.style));
-        }
+        assert_eq!(rows.len(), 1, "{rows:?}");
     }
 }

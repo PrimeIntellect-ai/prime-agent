@@ -1,7 +1,7 @@
 //! Injected-prompt rows (TS `InjectedPromptMessageComponent`): the kind's
-//! header line, plus the markdown body in the expanded view. Decode maps
-//! each custom type to its kind (TS `isInjectedPromptMessage`); the render
-//! ports each header shape and the expand contract.
+//! header line, plus the guttered markdown body in the expanded view.
+//! Decode maps each custom type to its kind (TS `isInjectedPromptMessage`);
+//! the render ports each header shape and the expand contract.
 //!
 //! Divergence (Kevin directive 2026-09-23, product improvement beyond the
 //! TS binary): the RLM child rows render the `◆ Subagent <name>
@@ -18,7 +18,7 @@
 //! TS binary still renders the `♥` heart. The TS side is expected to
 //! adopt the same glyph.
 
-use super::render::{markdown_rows, spacer, text_rows, truncate_text};
+use super::render::{spacer, text_rows, truncate_text};
 use super::{
     custom_content_text, GOAL_CONTEXT_CUSTOM_TYPE, HEARTBEAT_PROMPT_CUSTOM_TYPE,
     IPYTHON_STATE_RESTORED_CUSTOM_TYPE, PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE,
@@ -187,7 +187,7 @@ fn rlm_child_reason(details: &Value, field: &str, content: &str) -> Option<Strin
 }
 
 /// One injected-prompt row (TS `InjectedPromptMessageComponent`): a leading
-/// blank, then the kind's header when collapsed, or the markdown body when
+/// blank, the kind's header, then the guttered markdown body below it when
 /// expanded (the kernel-state and finished-child rows stay header-only in
 /// both states).
 pub(crate) fn render_injected_prompt(
@@ -197,12 +197,12 @@ pub(crate) fn render_injected_prompt(
     width: usize,
 ) -> Vec<Line> {
     let mut out = vec![spacer()];
-    let header = prompt_header(row, detail, theme);
+    let header = prompt_header(row, theme);
     out.extend(text_rows(&header, width));
     if let Some(body) = expanded_prompt_body(row, detail) {
-        out.extend(markdown_rows(
+        out.extend(crate::branch::branch_markdown(
             body,
-            ThemeColor::CustomMessageText,
+            &super::geometry::markdown_style(ThemeColor::CustomMessageText, theme),
             theme,
             width,
         ));
@@ -210,15 +210,14 @@ pub(crate) fn render_injected_prompt(
     out
 }
 
-fn prompt_header(row: &InjectedPromptRow, detail: Detail, theme: &Theme) -> Line {
+fn prompt_header(row: &InjectedPromptRow, theme: &Theme) -> Line {
     let muted = theme.fg_style(ThemeColor::Muted);
     let dim = theme.fg_style(ThemeColor::Dim);
     let accent = theme.fg_style(ThemeColor::Accent);
-    let expanded = detail.tool_output_expanded();
     // TS `InjectedPromptMessageComponent.updateDisplay`: the header always
     // renders; the expanded form adds the markdown body below it (the
     // kernel-state row stays header-only).
-    let mut header: Line = match &row.kind {
+    let header: Line = match &row.kind {
         InjectedPromptKind::Heartbeat { schedule } => vec![
             // The ◷ clock (the dock's Heartbeats icon), not the TS ♥ heart:
             // the operator-directed divergence in the module docs.
@@ -286,12 +285,6 @@ fn prompt_header(row: &InjectedPromptRow, detail: Detail, theme: &Theme) -> Line
             ]
         }
     };
-    // TS `headerText`: the collapsed expandable rows append the dim expand
-    // hint (`expandCollapseHint("app.tools.expand")` renders empty,
-    // leaving the dim-colored space); header-only rows never do.
-    if !expanded && row.body.is_some() {
-        header.push(Span::styled(" ".to_string(), dim));
-    }
     header
 }
 
@@ -301,9 +294,13 @@ pub(crate) fn count_injected_prompt(
     theme: &Theme,
     width: usize,
 ) -> usize {
-    let header = prompt_header(row, detail, theme);
+    let header = prompt_header(row, theme);
     let body = expanded_prompt_body(row, detail).map_or(0, |body| {
-        super::geometry::markdown_row_count(body, ThemeColor::CustomMessageText, theme, width)
+        crate::branch::branch_markdown_count(
+            body,
+            &super::geometry::markdown_style(ThemeColor::CustomMessageText, theme),
+            width,
+        )
     });
     1 + super::geometry::text_row_count(&header, width) + body
 }
@@ -517,7 +514,7 @@ mod tests {
     #[test]
     fn python_skills_unavailable_header_shapes() {
         // Collapsed: muted label + dim names (the TS header has no marker
-        // glyph) with the dim expand-hint space; no body.
+        // glyph); no body.
         let row = InjectedPromptRow {
             kind: InjectedPromptKind::PythonSkillsUnavailable {
                 skills: vec!["websearch".to_string(), "edit".to_string()],
