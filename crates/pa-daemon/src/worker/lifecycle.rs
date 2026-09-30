@@ -689,6 +689,11 @@ impl Worker {
             // this waiter.
             let settled = children.settle_notified();
             if !children.any_running().await {
+                // A settle funnel queues its terminal-notice follow-up
+                // BEFORE it marks the run settled, so every notice owed by
+                // the runs settled at this read is already queued: one
+                // more idle wait drains them before the barrier answers.
+                self.wait_until_idle().await;
                 break;
             }
             settled.await;
