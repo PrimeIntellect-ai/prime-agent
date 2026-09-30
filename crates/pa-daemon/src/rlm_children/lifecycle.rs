@@ -449,13 +449,27 @@ impl SupervisorChildSessionsInner {
                     // A dead child keeps whatever rows its file already
                     // holds; capture them before the terminal notice.
                     self.emit_child_usage(record).await;
-                    self.settle_failed(
-                        record,
-                        "Child worker unreachable".to_string(),
-                        FailedArm::Unreachable,
-                    )
-                    .await;
-                    return;
+                    if self
+                        .settle_failed(
+                            record,
+                            "Child worker unreachable".to_string(),
+                            FailedArm::Unreachable,
+                        )
+                        .await
+                    {
+                        return;
+                    }
+                    // The claim lost to a verdict a reader's refresh landed
+                    // after this pass's settle read (the worker answered
+                    // idle, so the dead streak is broken): the settled
+                    // branch owes that verdict its notice and funnel. With
+                    // no verdict left, a cancel or a parent close owns the
+                    // tail.
+                    if record.lock().await.settled_status.is_none() {
+                        return;
+                    }
+                    unreachable_polls = 0;
+                    continue;
                 }
             }
             tokio::time::sleep(Duration::from_millis(WATCH_POLL_INTERVAL_MS)).await;
@@ -489,21 +503,23 @@ impl SupervisorChildSessionsInner {
     /// the settle funnel fires like TS's `finally` resume. Exactly-once:
     /// the claim is split by arm. The unreachable arm keeps
     /// `should_mark_unreachable_error` — an already-settled child keeps
-    /// its verdict (#3104's passivation semantics; its 150-poll streak
-    /// cannot race `refresh_record`, which would err on the same dead
-    /// link). The prompt arm bails only on a REAL terminal verdict:
+    /// its verdict (#3104's passivation semantics: a verdict a reader's
+    /// refresh lands inside the give-up keeps standing, and the claim
+    /// reports the loss so the watcher runs that verdict's settle tail).
+    /// The prompt arm bails only on a REAL terminal verdict:
     /// a task turn that provably never started cannot have genuinely
     /// completed, so a `done` visible inside the prompt-failure window is
     /// `refresh_record`'s admission-window misread of an alive-but-idle
     /// worker, not a settle verdict — the failure row must still land
     /// (and, since #3171, the run must still mark settled, or the
-    /// quiescence barrier parks forever).
+    /// quiescence barrier parks forever). Returns whether this call
+    /// claimed the settle.
     pub(super) async fn settle_failed(
         &self,
         record: &Arc<Mutex<ChildRecord>>,
         error: String,
         arm: FailedArm,
-    ) {
+    ) -> bool {
         let message = {
             let mut record = record.lock().await;
             let keep_verdict = match arm {
@@ -515,7 +531,7 @@ impl SupervisorChildSessionsInner {
                 }
             };
             if keep_verdict {
-                return;
+                return false;
             }
             record.settled_status = Some("error");
             record.notice_delivered = true;
@@ -530,6 +546,7 @@ impl SupervisorChildSessionsInner {
         };
         self.deliver_terminal_notice(message).await;
         self.fire_settle_hook(record).await;
+        true
     }
 
     /// Deliver one terminal notice into the parent session: the notice rides
@@ -578,22 +595,23 @@ impl SupervisorChildSessionsInner {
     }
 }
 
-/// Whether a child may still settle as an error (the `settle_failed`
-/// claim, shared by the prompt-route and unreachable paths): a
-/// parent-closed child, a noticed child, or an ALREADY-SETTLED child
-/// keeps its POSITIVE verdict — its worker leaving afterward (the idle
-/// passivation's graceful stop, a crash after settle, or a give-up) is
-/// residency churn, not a settle verdict change. The settle state is
-/// durable and the passive roster row stays the representation.
 /// Which failure arm is claiming the settle: the two arms bail on
 /// different evidence (see `settle_failed`).
 pub(super) enum FailedArm {
     /// The task-prompt admission failed and its retry failed.
     Prompt,
-    /// The unreachable-poller's give-up (150 consecutive dead polls).
+    /// The unreachable-poller's give-up (`WATCH_MAX_UNREACHABLE_POLLS`
+    /// consecutive dead polls).
     Unreachable,
 }
 
+/// Whether a child may still settle as an error (the unreachable
+/// give-up's claim): a parent-closed child, a noticed child, or an
+/// ALREADY-SETTLED child keeps its POSITIVE verdict — its worker leaving
+/// afterward (the idle passivation's graceful stop, a crash after
+/// settle, or a give-up) is residency churn, not a settle verdict
+/// change. The settle state is durable and the passive roster row
+/// stays the representation.
 pub(super) fn should_mark_unreachable_error(state: &ChildRecord) -> bool {
     !(state.closed_by_parent || state.notice_delivered || state.settled_status.is_some())
 }
