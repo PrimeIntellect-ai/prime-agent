@@ -1,5 +1,4 @@
 //! Message normalization shared by providers.
-//! Ported from `packages/ai/src/providers/transform-messages.ts`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -72,10 +71,9 @@ fn downgrade_unsupported_images(messages: &[Message], model: &Model) -> Vec<Mess
 
 type Normalizer<'a> = dyn Fn(&str, &Model, &AssistantMessage) -> Option<String> + 'a;
 
-/// Core port of `transformMessages`: tool-call ID normalization plus
-/// synthetic tool results for unanswered calls, dropping errored assistant
-/// turns.
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+/// Tool-call ID normalization plus synthetic tool results for unanswered calls, dropping errored
+/// assistant turns (TS `transformMessages`).
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 pub fn transform_messages_with_normalizer(
     messages: &[Message],
@@ -204,8 +202,8 @@ pub fn transform_messages_with_normalizer(
                     &mut existing_tool_result_ids,
                 );
 
-                // Skip errored/aborted assistant messages entirely.
-                // These are incomplete turns that shouldn't be replayed.
+                // Skip errored/aborted assistant messages entirely. These are incomplete turns that
+                // shouldn't be replayed.
                 if matches!(
                     assistant.stop_reason,
                     StopReason::Error | StopReason::Aborted

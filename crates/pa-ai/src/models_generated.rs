@@ -1,18 +1,7 @@
 //! Compiled fallback catalog ported from the TS `packages/ai/src/models.generated.ts`.
 //!
-//! The TS catalog is the tiny built-in fallback + transport trust table
-//! (32 providers, 152 models: one-plus transport-template model per
-//! `(provider, api, baseUrl)` tuple the client implements, plus the 110
-//! offline Prime Inference onboarding entries); the full model catalog is
-//! fetched from the `PrimeIntellect-ai/prime-agent-catalog` repo at
-//! runtime (no-cold-start chain: validated disk cache -> packaged
-//! bundled snapshot -> this compiled fallback). The data lives here as
-//! hand-maintained Rust source mirroring the TS object literal — there is
-//! no generated `models.generated.json` and no generator; the table
-//! changes only with a client release, exactly like its TS source.
-//!
-//! This is data plumbing, exempt from the module-size split rule: its size
-//! is a direct function of the TS fallback table, not of hand-written logic.
+//! The full catalog is fetched at runtime (no-cold-start chain: validated disk cache ->
+//! packaged bundled snapshot -> this compiled fallback). Hand-maintained; there is no generator.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -26,7 +15,7 @@ type ProviderCatalog = HashMap<String, HashMap<String, Model>>;
 
 /// The compat fields the fallback table carries: the
 /// [`OpenAiCompletionsCompat`] subset the TS fallback file uses. Absent
-/// fields stay `None` on the wire, exactly like the TS object literal.
+/// fields stay `None` on the wire.
 struct RawCompat {
     supports_store: Option<bool>,
     supports_developer_role: Option<bool>,
@@ -4383,8 +4372,8 @@ compat: Some(RawCompat {
         }),
     },];
 
-/// Expand a raw compat into the wire compat object ([`ModelCompat::from_kind`]:
-/// the fallback table only uses the OpenAI-completions compat shape).
+/// Expand a raw compat into the wire compat object (the fallback
+/// table only uses the OpenAI-completions shape).
 fn compat_from_raw(raw: &RawCompat) -> ModelCompat {
     ModelCompat::from_kind(CompatKind::OpenAiCompletions(Box::new(
         OpenAiCompletionsCompat {
@@ -4457,20 +4446,20 @@ fn catalog() -> &'static ProviderCatalog {
     &CATALOG
 }
 
-/// Look up a model by provider and model id (`getModel` in the TS).
+/// Look up a model by provider and model id (TS `getModel`).
 #[must_use]
 pub fn get_model(provider: &str, model_id: &str) -> Option<&'static Model> {
     catalog().get(provider)?.get(model_id)
 }
 
-/// All providers in the catalog (`getProviders` in the TS).
+/// All providers in the catalog (TS `getProviders`).
 pub fn get_providers() -> Vec<&'static str> {
     let mut providers: Vec<&'static str> = catalog().keys().map(String::as_str).collect();
     providers.sort_unstable();
     providers
 }
 
-/// All models for one provider, in catalog order (`getModels` in the TS).
+/// All models for one provider, in catalog order (TS `getModels`).
 #[must_use]
 pub fn get_models(provider: &str) -> Vec<&'static Model> {
     let Some(models) = catalog().get(provider) else {
@@ -4540,11 +4529,9 @@ mod tests {
         assert!(get_models("nope").is_empty());
     }
 
-    /// The compiled Prime Inference section is the conservative fallback
-    /// (TS #2519): it declares no reasoning controls — the live catalog's
-    /// `supported_parameters` rebuild them at runtime
-    /// (pa-models `build_prime_inference_models`) — and it never carries the
-    /// zai thinking format (TS #2459: Prime Inference rejects
+    /// The compiled Prime Inference section is the conservative fallback (TS #2519): it declares no
+    /// reasoning controls — the live catalog's `supported_parameters` rebuild them at runtime — and
+    /// it never carries the zai thinking format (TS #2459: Prime Inference rejects
     /// `enable_thinking` with a 400).
     #[test]
     fn prime_inference_fallback_declares_no_reasoning_controls() {

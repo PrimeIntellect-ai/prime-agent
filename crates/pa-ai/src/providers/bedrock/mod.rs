@@ -1,12 +1,7 @@
-//! Amazon Bedrock Converse Stream provider.
-//!
-//! Port of `packages/ai/src/providers/amazon-bedrock.ts` as a raw-HTTP
-//! implementation: SigV4-signed `POST /model/{modelId}/converse-stream`,
-//! binary `vnd.amazon.eventstream` response decoding (see [`eventstream`]),
-//! message conversion and cache points (see [`convert`]), and credential /
-//! region resolution (see [`auth`]). Supports bearer-token auth, `SigV4` skip
-//! for local gateways, Claude adaptive vs budget-based thinking, and
-//! GovCloud-safe request fields.
+//! Amazon Bedrock Converse Stream provider. Raw-HTTP implementation of the TS `amazon-bedrock.ts`:
+//! SigV4-signed `POST /model/{modelId}/converse-stream`, binary eventstream decoding, message
+//! conversion and cache points, credential/region resolution; bearer-token auth, `SigV4` skip for
+//! local gateways, GovCloud-safe request fields.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -67,7 +62,7 @@ impl BedrockThinkingDisplay {
     }
 }
 
-/// Provider-specific request options (`BedrockOptions` in the TS reference).
+/// Provider-specific request options.
 #[derive(Clone, Default)]
 pub struct BedrockOptions {
     pub base: StreamOptions,
@@ -78,10 +73,8 @@ pub struct BedrockOptions {
     pub thinking_budgets: Option<ThinkingBudgets>,
     pub interleaved_thinking: Option<bool>,
     pub thinking_display: Option<BedrockThinkingDisplay>,
-    /// Ordered (`BTreeMap`): the metadata serializes into the provider
-    /// request body (`requestMetadata`), and unordered iteration would leak
-    /// random key order into the bytes (the request body feeds the
-    /// provider's cacheable prefix).
+    /// Ordered (`BTreeMap`): the metadata serializes into the request body (`requestMetadata`), and
+    /// unordered iteration would leak random key order into the cacheable prefix.
     pub request_metadata: Option<std::collections::BTreeMap<String, String>>,
     pub bearer_token: Option<String>,
 }
@@ -95,9 +88,8 @@ impl BedrockOptions {
     }
 }
 
-/// Human-readable prefixes for Bedrock SDK exception names (see the TS
-/// comment: the downstream retry logic in agent-session matches patterns like
-/// `server.?error`, so the legacy prefix format is preserved).
+/// Human-readable prefixes for Bedrock SDK exception names: the downstream retry logic matches
+/// patterns like `server.?error`, so the legacy prefix format is preserved.
 const BEDROCK_ERROR_PREFIXES: [(&str, &str); 5] = [
     ("InternalServerException", "Internal server error"),
     ("ModelStreamErrorException", "Model stream error"),
@@ -115,9 +107,9 @@ pub(crate) fn bedrock_error_prefix(exception_name: &str) -> String {
     exception_name.to_string()
 }
 
-/// Port of `formatBedrockError`'s composed form for an AWS SDK exception:
-/// `{prefix}: {message}` with the human-readable prefix for known exception
-/// names (`prefix` falls back to the raw SDK exception name).
+/// `formatBedrockError`'s composed form for an AWS SDK exception: `{prefix}: {message}` with the
+/// human-readable prefix for known exception names (`prefix` falls back to the raw SDK exception
+/// name).
 pub(crate) fn bedrock_exception_message(exception_name: &str, message: &str) -> String {
     format!("{}: {}", bedrock_error_prefix(exception_name), message)
 }
@@ -130,13 +122,9 @@ fn bedrock_endpoint_port(endpoint: &str) -> u16 {
         .unwrap_or(443)
 }
 
-/// Port of the AWS SDK error deserialization for a non-2xx HTTP response:
-/// the error name comes from the body `__type`/`code` (after the `#`
-/// namespace separator, like the SDK's error-code parser) and the message
-/// from the body `message` (defaulting to "`UnknownError`", like
-/// `decorateServiceException`); unknown names fall through
-/// `throwDefaultError`'s `parsedBody.code || errorCode || statusCode` chain.
-/// The result is what `formatBedrockError` composes for it.
+/// The AWS SDK error deserialization for a non-2xx response: the error name comes from the body
+/// `__type`/`code`, the message from the body `message` (defaulting to "`UnknownError`"); unknown
+/// names fall through `parsedBody.code || errorCode || statusCode`.
 fn bedrock_http_error(
     status: u16,
     body: &str,
@@ -184,9 +172,8 @@ fn bedrock_http_error(
     })
 }
 
-/// The opened bedrock response, whichever transport produced it: the reqwest
-/// path (http1 handler, https ALPN) or the direct h2c prior-knowledge path
-/// (the TS default cleartext transport).
+/// The opened bedrock response, whichever transport produced it: the reqwest path (http1 handler,
+/// https ALPN) or the direct h2c path.
 enum BedrockResponse {
     Http(HttpResponse),
     H2(crate::providers::bedrock::h2::H2Response),
@@ -229,14 +216,13 @@ impl BedrockResponse {
     }
 }
 
-/// Port of the TS `AWS_BEDROCK_FORCE_HTTP1` request-handler switch.
+/// The TS `AWS_BEDROCK_FORCE_HTTP1` request-handler switch.
 fn bedrock_force_http1() -> bool {
     std::env::var("AWS_BEDROCK_FORCE_HTTP1").as_deref() == Ok("1")
 }
 
-/// Port of the TS proxy-env request-handler switch: any configured proxy
-/// environment variable selects the node http1 handler with the proxy
-/// agent (reqwest honors the proxy environment natively).
+/// The TS proxy-env request-handler switch: any configured proxy environment variable selects the
+/// http1 handler (reqwest honors the proxy environment natively).
 fn bedrock_proxy_configured() -> bool {
     [
         "HTTP_PROXY",
@@ -250,7 +236,6 @@ fn bedrock_proxy_configured() -> bool {
     .any(|key| std::env::var(key).is_ok_and(|value| !value.is_empty()))
 }
 
-/// Port of `streamBedrock`.
 pub fn stream_bedrock(
     model: &Model,
     context: &Context,
@@ -293,8 +278,8 @@ pub fn stream_bedrock(
                 } else {
                     StopReason::Error
                 };
-                // TS surfaces `formatBedrockError(error)`: the SDK exception
-                // name prefix form, not the classified stream-failure rewrite.
+                // TS surfaces `formatBedrockError(error)`: the SDK exception name prefix form, not
+                // the classified stream-failure rewrite.
                 output.error_message = Some(error.to_string());
                 record_stream_failure(
                     (&model.provider, &model.id, &model.api),
@@ -313,7 +298,6 @@ pub fn stream_bedrock(
     reader
 }
 
-/// Port of `resolveCacheRetention`.
 fn resolve_cache_retention(cache_retention: Option<CacheRetention>) -> CacheRetention {
     if let Some(retention) = cache_retention {
         return retention;
@@ -324,7 +308,6 @@ fn resolve_cache_retention(cache_retention: Option<CacheRetention>) -> CacheRete
     CacheRetention::Short
 }
 
-/// Port of `isGovCloudBedrockTarget`.
 fn is_gov_cloud_bedrock_target(model: &Model, options: &BedrockOptions) -> bool {
     if options
         .region
@@ -337,7 +320,6 @@ fn is_gov_cloud_bedrock_target(model: &Model, options: &BedrockOptions) -> bool 
     model_id.starts_with("us-gov.") || model_id.starts_with("arn:aws-us-gov:")
 }
 
-/// Port of `buildAdditionalModelRequestFields`.
 fn build_additional_model_request_fields(model: &Model, options: &BedrockOptions) -> Option<Value> {
     let reasoning = options.reasoning?;
     if !model.reasoning {
@@ -345,8 +327,8 @@ fn build_additional_model_request_fields(model: &Model, options: &BedrockOptions
     }
 
     if is_anthropic_claude_model(model) {
-        // GovCloud Bedrock currently rejects the Claude thinking.display field.
-        // Omit it there until the GovCloud Converse schema catches up.
+        // GovCloud Bedrock currently rejects the Claude thinking.display field. Omit it there until
+        // the GovCloud Converse schema catches up.
         let display = if is_gov_cloud_bedrock_target(model, options) {
             None
         } else {
@@ -380,8 +362,8 @@ fn build_additional_model_request_fields(model: &Model, options: &BedrockOptions
                 // Budget-based Claude has no max tier, clamp to high
                 (ModelThinkingLevel::Max, 16384),
             ];
-            // Custom budgets are keyed by the clamped level; xhigh/max
-            // resolve through the `high` entry, matching the TS.
+            // Custom budgets are keyed by the clamped level; xhigh/max resolve through the `high`
+            // entry, matching the TS.
             let clamped_level = clamp_reasoning(reasoning);
             let custom_budget =
                 options
@@ -422,8 +404,8 @@ fn build_additional_model_request_fields(model: &Model, options: &BedrockOptions
 
 use serde_json::Map;
 
-/// Percent-encode the model id for the `/model/{modelId}/converse-stream`
-/// path, matching the SDK's URI-component encoding of path labels.
+/// Percent-encode the model id for the `/model/{modelId}/converse-stream` path, matching the SDK's
+/// URI-component encoding of path labels.
 fn encode_model_id(model_id: &str) -> String {
     let mut encoded = String::new();
     for byte in model_id.bytes() {
@@ -437,7 +419,7 @@ fn encode_model_id(model_id: &str) -> String {
     encoded
 }
 
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 async fn run_stream(
     model: &Model,
@@ -571,12 +553,9 @@ async fn run_stream(
         }
     }
 
-    // The TS request-handler selection: NodeHttp2Handler (http2) by default,
-    // NodeHttpHandler (http1) for AWS_BEDROCK_FORCE_HTTP1 or a proxy
-    // environment. Cleartext endpoints speak h2c prior-knowledge HTTP/2
-    // directly (bun's node:http2 surface); https endpoints negotiate h2 via
-    // TLS ALPN through reqwest. The connection profile carries the endpoint
-    // address so the failure texts name the target.
+    // The TS request-handler selection: http2 by default, http1 for AWS_BEDROCK_FORCE_HTTP1 or a
+    // proxy environment. Cleartext endpoints speak h2c prior-knowledge HTTP/2 directly; https
+    // endpoints negotiate h2 via TLS ALPN through reqwest.
     let scheme = url::Url::parse(&url)
         .map(|parsed| parsed.scheme().to_string())
         .unwrap_or_default();
@@ -641,9 +620,8 @@ async fn run_stream(
         on_response(
             crate::types::ProviderResponse {
                 status: response.status(),
-                // Collected into the ordered map: the hook payload can
-                // serialize, and the HTTP header arrival order is not a
-                // stable serialization order.
+                // Collected into the ordered map: the hook payload can serialize, and the HTTP
+                // header arrival order is not a stable serialization order.
                 headers: response.headers().into_iter().collect(),
             },
             model,
@@ -662,9 +640,8 @@ async fn run_stream(
         .or_else(|| response.header("x-amzn-request-id"));
 
     let mut state = BedrockStreamState::new();
-    // The TS try/catch encloses this whole streaming section, including the
-    // abort and stop-reason checks; the catch settles partial tool calls
-    // before the error event carries the message (TS PR #2783).
+    // The TS try/catch encloses this whole streaming section, including the abort and stop-reason
+    // checks; the catch settles partial tool calls before the error event carries the message.
     let stream_result: Result<(), ProviderError> = async {
         let mut decoder = EventStreamDecoder::new();
         let mut stream_error: Option<ProviderError> = None;
@@ -727,7 +704,6 @@ async fn run_stream(
 
 use crate::providers::bedrock::convert::build_system_prompt as build_system_prompt_blocks;
 
-/// Port of `streamSimpleBedrock`.
 pub fn stream_simple_bedrock(
     model: &Model,
     context: &Context,
@@ -867,9 +843,9 @@ mod tests {
         get_standard_bedrock_endpoint_region, should_use_explicit_bedrock_endpoint,
     };
 
-    /// The TS `formatBedrockError` shape for an HTTP-level failure: the AWS
-    /// SDK exception name (from the body `__type` after the namespace) maps to
-    /// a stable human-readable prefix; unknown names keep the raw name.
+    /// The TS `formatBedrockError` shape for an HTTP-level failure: the AWS SDK exception name
+    /// (from the body `__type` after the namespace) maps to a stable human-readable prefix; unknown
+    /// names keep the raw name.
     #[test]
     fn bedrock_http_error_prefix_shape() {
         let error = bedrock_http_error(
@@ -893,8 +869,8 @@ mod tests {
         assert_eq!(diagnostic.name.as_deref(), Some("ValidationException"));
     }
 
-    /// Throttling exceptions keep their name as the classification key
-    /// ("throttl" -> `rate_limit`), like the TS rethrown stream exception.
+    /// Throttling exceptions keep their name as the classification key ("throttl" -> `rate_limit`),
+    /// like the TS rethrown stream exception.
     #[test]
     fn bedrock_throttling_error_classifies() {
         let error = bedrock_http_error(
@@ -910,19 +886,17 @@ mod tests {
         );
     }
 
-    /// An unrecognized error body names the generic fallback by the raw
-    /// status text (smithy `throwDefaultError`: `parsedBody.code ||
-    /// errorCode || statusCode || "UnknownError"`), and a missing message
-    /// defaults to "`UnknownError`" like `decorateServiceException`.
+    /// An unrecognized error body names the generic fallback by the raw status text
+    /// (`parsedBody.code || errorCode || statusCode || "UnknownError"`), and a missing message
+    /// defaults to "`UnknownError`".
     #[test]
     fn bedrock_http_error_generic_fallback() {
         let error = bedrock_http_error(400, "{\"foo\":1}", &HashMap::default());
         assert_eq!(error.to_string(), "400: UnknownError");
     }
 
-    /// Connection failures surface undici's raw `TypeError` message, like the
-    /// TS raw-`fetch` path (the AWS SDK does not wrap them).
-    /// The in-stream exception message composition (`{prefix}: {message}`).
+    /// Connection failures surface undici's raw `TypeError` message (the AWS SDK does not wrap
+    /// them). The in-stream exception message composition (`{prefix}: {message}`).
     #[test]
     fn bedrock_exception_message_shape() {
         assert_eq!(

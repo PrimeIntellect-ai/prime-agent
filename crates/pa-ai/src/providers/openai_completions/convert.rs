@@ -1,5 +1,4 @@
 //! `OpenAI` Completions conversion: reasoning-details signatures, messages, and tools.
-//! Section of the port of `packages/ai/src/providers/openai-completions.ts`.
 
 use serde_json::{json, Map, Value};
 
@@ -12,9 +11,9 @@ use crate::types::{
 };
 use crate::utils_inner::sanitize_unicode::sanitize_surrogates;
 
-/// Convert a conversation into Chat Completions `messages` params.
-/// Port of `convertMessages` including tool-result bridging and image replay.
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+/// Convert a conversation into Chat Completions `messages` params, including tool-result bridging
+/// and image replay.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompat) -> Vec<Value> {
     use crate::types::Message;
@@ -423,9 +422,8 @@ pub(crate) fn parse_chunk_usage(
     // Normalize to the provider-layer usage accounting semantics:
     // - cacheRead: hits from cache created by previous requests only
     // - cacheWrite: tokens written to cache in this request
-    // Some OpenAI-compatible providers (observed on OpenRouter) report
-    // cached_tokens as (previous hits + current writes). Remove cacheWrite from
-    // cacheRead in that case.
+    // Some OpenAI-compatible providers (observed on OpenRouter) report cached_tokens as (previous
+    // hits + current writes). Remove cacheWrite from cacheRead in that case.
     let cache_read_tokens = if cache_write_tokens > 0 {
         reported_cached_tokens.saturating_sub(cache_write_tokens)
     } else {
@@ -454,10 +452,9 @@ pub(crate) fn parse_chunk_usage(
             })
             .as_ref(),
     );
-    // OpenRouter reports billing truth in usage, already priced by the endpoint
-    // and service tier that served the request
-    // (https://openrouter.ai/docs/api-reference/overview). Trust it over the
-    // catalog-rate estimate, scaling the component breakdown to match.
+    // OpenRouter reports billing truth in usage, already priced by the endpoint and service tier
+    // that served the request (https://openrouter.ai/docs/api-reference/overview). Trust it over
+    // the catalog-rate estimate, scaling the component breakdown to match.
     let reported_cost = if model.provider == "openrouter" {
         openrouter_reported_cost(raw_usage)
     } else {
@@ -486,12 +483,11 @@ pub(crate) fn parse_chunk_usage(
     usage
 }
 
-/// The user's real spend for an `OpenRouter` request, or `None` to keep the
-/// catalog estimate. `usage.cost` only carries what `OpenRouter` charged the
-/// account's credits: for BYOK requests that is just `OpenRouter`'s fee, so
-/// real spend is the upstream provider's bill plus that fee. A cost of 0 can
-/// mean not-billed-via-credits (e.g. `:free` endpoints) rather than free, so
-/// it keeps the catalog estimate.
+/// The user's real spend for an `OpenRouter` request, or `None` to keep the catalog estimate.
+/// `usage.cost` only carries what `OpenRouter` charged the account's credits: for BYOK requests
+/// that is just `OpenRouter`'s fee, so real spend is the upstream provider's bill plus that fee. A
+/// cost of 0 can mean not-billed-via-credits (e.g. `:free` endpoints) rather than free, so it keeps
+/// the catalog estimate.
 fn openrouter_reported_cost(raw_usage: &Value) -> Option<f64> {
     let credits = raw_usage
         .get("cost")
@@ -588,8 +584,8 @@ mod tests {
     #[test]
     fn openrouter_zero_reported_cost_keeps_catalog_estimate() {
         let model = model("openrouter", 0.5, 0.5);
-        // A cost of 0 can mean not-billed-via-credits (:free endpoints)
-        // rather than free, so the catalog estimate stays.
+        // A cost of 0 can mean not-billed-via-credits (:free endpoints) rather than free, so the
+        // catalog estimate stays.
         let usage = parse_chunk_usage(&raw_usage(0.0, ByokBilling::NotByok), &model, None);
         assert!((usage.cost.total.as_f64() - 0.05).abs() < 1e-9);
     }
@@ -597,8 +593,8 @@ mod tests {
     #[test]
     fn openrouter_byok_without_upstream_keeps_catalog_estimate() {
         let model = model("openrouter", 0.5, 0.5);
-        // BYOK credits are only OpenRouter's fee; without the upstream bill
-        // the real spend is unknown, so the catalog estimate stays.
+        // BYOK credits are only OpenRouter's fee; without the upstream bill the real spend is
+        // unknown, so the catalog estimate stays.
         let usage = parse_chunk_usage(&raw_usage(0.003, ByokBilling::FeeOnly), &model, None);
         assert!((usage.cost.total.as_f64() - 0.05).abs() < 1e-9);
     }

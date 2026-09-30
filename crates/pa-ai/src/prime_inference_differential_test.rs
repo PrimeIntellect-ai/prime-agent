@@ -1,12 +1,8 @@
 //! Live differential test against the prime-inference endpoint.
 //!
-//! Streams the captured real SSE exchange with `z-ai/glm-5.3-flash` (saved in
-//! `tests/testdata/prime_inference_glm53_flash.sse`) through a local replay
-//! server, runs both the TS reference provider (via `tests/differential/`)
-//! and this Rust port against it, and requires identical assistant text and
-//! usage accounting.
-//!
-//! Ignored by default (needs the replay server and the TS baseline). Run:
+//! Streams the captured `z-ai/glm-5.3-flash` SSE exchange through a local replay server, runs the
+//! TS reference provider and this Rust port against it, and requires identical text and usage.
+//! Ignored by default; run:
 //!
 //! ```sh
 //! tests/differential/run.sh
@@ -17,8 +13,7 @@ use serde_json::{json, Map, Value};
 use crate::providers::openai_completions::{stream_openai_completions, OpenAICompletionsOptions};
 use crate::types::{AssistantContent, Model, StopReason, StreamOptions};
 
-/// Model entry mirroring the prime-inference catalog entry for
-/// `z-ai/glm-5.3-flash`.
+/// Mirrors the prime-inference catalog entry for `z-ai/glm-5.3-flash`.
 fn glm_53_flash(base_url: &str) -> Model {
     let compat_json = json!({
         "supportsStore": false,
@@ -142,7 +137,6 @@ async fn differential_prime_inference_glm_53_flash() {
     let model = glm_53_flash(&replay_base_url);
     let actual = normalized_result(&model).await;
 
-    // Compare content and identity fields exactly.
     assert_eq!(
         actual["content"], expected["content"],
         "assistant content differs from the TS reference"
@@ -180,7 +174,6 @@ async fn differential_prime_inference_glm_53_flash() {
         );
     }
 
-    // Stop reason should be a clean stop for the captured stream.
     assert_eq!(expected["stopReason"], json!("stop"));
     let _ = StopReason::Stop;
 }

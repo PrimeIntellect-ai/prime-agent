@@ -1,5 +1,4 @@
 //! Public streaming facade.
-//! Ported from `packages/ai/src/stream.ts`.
 
 use std::sync::Arc;
 
@@ -15,26 +14,18 @@ fn resolve_provider(api: &str) -> Result<Arc<dyn crate::registry::Provider>, Pro
         .ok_or_else(|| ProviderError::Message(format!("No API provider registered for api: {api}")))
 }
 
-// ---------------------------------------------------------------------------
-// Combined-ceiling output clamp
-// ---------------------------------------------------------------------------
-
-/// Estimate a request's input tokens before it is sent: chars/4 over the
-/// text the provider will serialize, images at 1,200 tokens each. The same
-/// conservative policy the session engine's compaction estimator applies
-/// (`pa-core` cannot be a dependency here, so the heuristic is restated).
+/// Estimate a request's input tokens before it is sent: chars/4 over the text the provider will
+/// serialize, images at 1,200 tokens each (the session engine's compaction policy, restated:
+/// `pa-core` cannot be a dependency here).
 fn estimated_input_tokens(context: &Context) -> u64 {
     const TOOL_ENVELOPE_CHARS: u64 = 48;
     let mut chars = context
         .system_prompt
         .as_deref()
         .map_or(0, |text| text.chars().count()) as u64;
-    // Tool definitions serialize into every request (the provider sends
-    // each schema on every call), so they claim input room like the
-    // tool-call arguments below. Providers wrap each schema in their own
-    // envelope on the wire (OpenAI-completions:
-    // `{"type":"function","function":...}` plus flags like `strict`), so
-    // every tool also counts the widest envelope's chars.
+    // Tool definitions serialize into every request, so they claim input room like the tool-call
+    // arguments below. Providers wrap each schema in their own envelope on the wire, so every tool
+    // also counts the widest envelope's chars.
     for tool in context.tools.iter().flatten() {
         chars = chars.saturating_add(
             serde_json::to_string(tool)
@@ -86,22 +77,13 @@ fn user_content_block_chars(blocks: &[crate::types::UserOrToolContent]) -> u64 {
         .sum()
 }
 
-/// Clamp the requested output budget against the model's combined
-/// input+output ceiling: a provider that enforces `input + max_tokens <=
-/// contextWindow` rejects an unsatisfiable request outright (the live
-/// 400: 1,017,457 input + 32,000 requested output on a 1,048,576 window),
-/// so the facade shrinks the output budget to whatever room the estimated
-/// input leaves. The estimate covers the full serialized request — system
-/// prompt, tool schemas, message text, raw blocks, images — so it tracks
-/// the provider's own input count instead of leaving uncounted bytes to
-/// overflow it.
+/// Clamp the requested output budget against the model's combined input+output ceiling: a provider
+/// enforcing `input + max_tokens <= contextWindow` rejects an unsatisfiable request outright, so
+/// the facade shrinks the output budget to whatever room the estimated input leaves.
 ///
-/// The TS facade never clamps (`packages/ai/src/providers/simple-options.ts`
-/// caps only at `min(model.maxTokens, 32000)`); this is a deliberate
-/// Rust-side guard. Budget-folding thinking providers (Anthropic, Bedrock)
-/// add their thinking budget after this clamp and cap it at
-/// `model.max_tokens`; the compaction threshold's headroom and the overflow
-/// recovery arm remain the guards for that corner.
+/// The TS facade never clamps; this is a deliberate Rust-side guard. Budget-folding thinking
+/// providers (Anthropic, Bedrock) add their budget after this clamp and cap it at
+/// `model.max_tokens`.
 fn clamp_output_budget(model: &Model, context: &Context, options: Option<&mut StreamOptions>) {
     let Some(options) = options else {
         return;
@@ -118,8 +100,8 @@ fn clamp_output_budget(model: &Model, context: &Context, options: Option<&mut St
     let available = model
         .context_window
         .saturating_sub(estimated_input_tokens(context));
-    // Zero room means the input alone fills the window — no budget can
-    // save the request, so it stays as sent for the overflow recovery arm.
+    // Zero room means the input alone fills the window — no budget can save the request, so it
+    // stays as sent for the overflow recovery arm.
     if requested > available && available > 0 {
         options.max_tokens = Some(available);
     }
@@ -167,10 +149,8 @@ pub fn stream_simple(
 ) -> Result<AssistantMessageEventStream, ProviderError> {
     let provider = resolve_provider(&model.api)?;
     let mut options = options;
-    // A `None` caller still gets the default output budget downstream
-    // (`build_base_options` fills `min(model.maxTokens, 32000)`), so
-    // materialize the options to clamp that default too. The materialized
-    // default builds the same request otherwise.
+    // A `None` caller still gets the default output budget downstream (`build_base_options` fills
+    // `min(model.maxTokens, 32000)`), so materialize the options to clamp that default too.
     let simple = options.get_or_insert_with(SimpleStreamOptions::default);
     clamp_output_budget(model, context, Some(&mut simple.base));
     Ok(provider.stream_simple(model, context, options.as_ref()))
@@ -233,8 +213,7 @@ mod tests {
         let serialized = serde_json::to_string(&tool).expect("tool serializes");
         let mut context = text_context(3_000);
         context.tools = Some(vec![tool]);
-        // The tool schema's serialized bytes plus its wire envelope join
-        // the text under chars/4.
+        // The tool schema's serialized bytes plus its wire envelope join the text under chars/4.
         assert_eq!(
             estimated_input_tokens(&context),
             (3_000 + 48 + serialized.chars().count() as u64).div_ceil(4)
@@ -243,8 +222,8 @@ mod tests {
 
     #[test]
     fn the_estimate_counts_raw_blocks_as_their_serialized_json() {
-        // Raw blocks reach the prompt as text (`user_block_payload`'s
-        // opaque arm), so their serialized bytes claim input room.
+        // Raw blocks reach the prompt as text (`user_block_payload`'s opaque arm), so their
+        // serialized bytes claim input room.
         let value = json!({"unmodeled": "y".repeat(4_000)});
         let serialized = serde_json::to_string(&value).expect("value serializes");
         let mut context = text_context(3_000);
@@ -263,10 +242,8 @@ mod tests {
 
     #[test]
     fn tool_schemas_shrink_the_room_the_clamp_leaves() {
-        // A tool-carrying request the text-only estimate called
-        // satisfiable now clamps: the schemas eat the output room. The
-        // input must still fit the window — zero room leaves the budget
-        // for the overflow recovery arm instead.
+        // The schemas eat the output room; the input must still fit the window — zero room leaves
+        // the budget for the overflow recovery arm instead.
         let model = test_model(1_000, 40_000);
         let mut context = text_context(3_000); // 750 text tokens
         let tool: crate::types::Tool = serde_json::from_value(json!({
@@ -282,9 +259,8 @@ mod tests {
             ..Default::default()
         };
         clamp_output_budget(&model, &context, Some(&mut options));
-        // 250 exactly fit the 750-token text input; the schema's
-        // serialized tokens leave less room than the budget requests,
-        // so the budget clamps to exactly what is left.
+        // The schema's serialized tokens leave less room than the budget requests, so the budget
+        // clamps to exactly what is left.
         let room =
             1_000u64.saturating_sub((3_000 + 48 + serialized.chars().count() as u64).div_ceil(4));
         assert_eq!(options.max_tokens, Some(room));
@@ -293,8 +269,8 @@ mod tests {
 
     #[test]
     fn clamp_shrinks_an_unsatisfiable_output_budget() {
-        // The live failure shape: an input estimate leaving less room than
-        // the requested output budget.
+        // The live failure shape: an input estimate leaving less room than the requested output
+        // budget.
         let model = test_model(1_000, 40_000);
         let context = text_context(3_000); // 750 estimated input tokens
         let mut options = StreamOptions {
@@ -307,8 +283,8 @@ mod tests {
 
     #[test]
     fn clamp_resolves_the_default_budget_when_none_set() {
-        // The main-loop shape: no explicit max_tokens, so the effective
-        // request budget is min(model.maxTokens, 32000).
+        // The main-loop shape: no explicit max_tokens, so the effective request budget is
+        // min(model.maxTokens, 32000).
         let model = test_model(1_000, 40_000);
         let context = text_context(3_600); // 900 estimated input tokens
         let mut options = StreamOptions::default();
@@ -335,8 +311,8 @@ mod tests {
 
     #[test]
     fn clamp_takes_whatever_room_exists() {
-        // A sub-floor budget still fits: the clamp honors exactly the room
-        // the estimate leaves (250 room -> 250 requested output).
+        // A sub-floor budget still fits: the clamp honors exactly the room the estimate leaves (250
+        // room -> 250 requested output).
         let model = test_model(1_000, 40_000);
         let context = text_context(3_000); // 750 estimated input tokens
         let mut options = StreamOptions {
@@ -345,8 +321,8 @@ mod tests {
         };
         clamp_output_budget(&model, &context, Some(&mut options));
         assert_eq!(options.max_tokens, Some(250));
-        // The input estimate fills the window: no budget can save the
-        // request, so it stays as sent for the overflow recovery arm.
+        // The input estimate fills the window: no budget can save the request, so it stays as sent
+        // for the overflow recovery arm.
         let context = text_context(4_400); // 1,100 estimated input tokens
         let mut options = StreamOptions {
             max_tokens: Some(400),

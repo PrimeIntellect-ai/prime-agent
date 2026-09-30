@@ -1,10 +1,7 @@
-//! Minimal async HTTP client plumbing for providers.
-//!
-//! Providers in the TS reference go through SDK clients configured with
-//! `maxRetries: 0`; here each provider issues one streaming HTTP request
-//! through a shared `reqwest` client. Aborts are surfaced as
-//! [`ProviderError::Aborted`]; HTTP failures as [`ProviderError::Http`];
-//! request-send failures as [`ProviderError::Connection`].
+//! Minimal async HTTP client plumbing for providers: one streaming HTTP request through a shared
+//! `reqwest` client (TS SDKs run `maxRetries: 0`). Aborts surface as [`ProviderError::Aborted`];
+//! HTTP failures as [`ProviderError::Http`]; request-send failures as
+//! [`ProviderError::Connection`].
 
 use std::sync::OnceLock;
 
@@ -18,10 +15,8 @@ use crate::utils::stream_failure::{
 static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static H2_ALPN_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
-/// The HTTP/1.1 client every provider shares (the transport all TS SDK
-/// clients but bedrock's default `NodeHttp2Handler` speak). Pinned with
-/// `http1_only()` so that enabling the reqwest `http2` feature (bedrock)
-/// cannot change the transport of any other provider.
+/// The HTTP/1.1 client every provider shares, pinned with `http1_only()` so that enabling the
+/// reqwest `http2` feature (bedrock) cannot change the transport of any other provider.
 fn client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
@@ -32,11 +27,8 @@ fn client() -> &'static reqwest::Client {
     })
 }
 
-/// The TLS-ALPN client for bedrock https endpoints: HTTP/2 preferred
-/// (ALPN-negotiated), like the TS default transport. Cleartext bedrock
-/// endpoints do not go through reqwest at all — the bedrock provider
-/// drives h2c prior-knowledge HTTP/2 directly there (see
-/// `providers/bedrock/h2.rs`).
+/// The TLS-ALPN client for bedrock https endpoints: HTTP/2 preferred (ALPN-negotiated), like the TS
+/// default transport; cleartext bedrock endpoints go through `providers/bedrock/h2.rs` instead.
 fn h2_alpn_client() -> &'static reqwest::Client {
     H2_ALPN_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
@@ -61,8 +53,8 @@ pub struct HttpResponse {
     pub headers: std::collections::HashMap<String, String>,
     body: reqwest::Response,
     signal: Option<CancellationToken>,
-    /// The request's connection-error profile: body-read failures on the AWS
-    /// http2 profile surface the TS bedrock transport's mid-stream texts.
+    /// The request's connection-error profile: body-read failures on the AWS http2 profile surface
+    /// the TS bedrock transport's mid-stream texts.
     pub(crate) connection: ConnectionErrorProfile,
 }
 
@@ -121,10 +113,9 @@ impl HttpResponse {
         }
     }
 
-    /// Classify a body-read failure. The AWS bedrock http2 profile surfaces
-    /// the TS transport's mid-stream failure texts (the event-stream reader
-    /// fails, so the AWS SDK appends its deserialization hint); every other
-    /// provider keeps the generic body-read error.
+    /// Classify a body-read failure: the AWS bedrock http2 profile surfaces the TS transport's
+    /// mid-stream texts (the AWS SDK appends its deserialization hint); every other provider keeps
+    /// the generic body-read error.
     fn body_error(&self, error: &reqwest::Error) -> ProviderError {
         if let ConnectionErrorProfile::AwsHttp2 { .. } = self.connection {
             let failure = crate::utils_inner::h2_classify::classify_reqwest_error(error);
@@ -163,12 +154,11 @@ pub struct RequestOptions {
     pub body: Option<String>,
     pub signal: Option<CancellationToken>,
     pub timeout_ms: Option<u64>,
-    /// The provider family's connection-error shape (fixed texts, names,
-    /// and error codes the TS binary surfaces per SDK); the openai/anthropic
-    /// `Sdk` default covers the Stainless-generated SDK family.
+    /// The provider family's connection-error shape (fixed texts, names, and error codes the TS
+    /// binary surfaces per SDK); the openai/anthropic `Sdk` default covers the Stainless-generated
+    /// SDK family.
     pub connection: ConnectionErrorProfile,
-    /// The wire transport (HTTP/1.1 by default; bedrock https requests use
-    /// ALPN-negotiated HTTP/2).
+    /// The wire transport (HTTP/1.1 by default; bedrock https requests use ALPN-negotiated HTTP/2).
     pub transport: Transport,
 }
 
@@ -188,9 +178,8 @@ impl RequestOptions {
     }
 }
 
-/// Issue a request and return the response with a streaming body. No retries:
-/// retry ownership lives with the caller (agent layer), matching the TS
-/// `maxRetries: 0` client configuration.
+/// Issue a request and return the response with a streaming body. No retries: retry ownership lives
+/// with the caller (agent layer), matching the TS `maxRetries: 0` client configuration.
 pub async fn send(request: RequestOptions) -> Result<HttpResponse, ProviderError> {
     let signal = request.signal.clone();
     if signal
@@ -237,27 +226,25 @@ pub async fn send(request: RequestOptions) -> Result<HttpResponse, ProviderError
         (None, None) => send_future.await,
     };
 
-    // The TS SDKs surface request-send failures as their fixed connection
-    // error texts: the openai/anthropic SDK family throws
-    // `APIConnectionError` ("Connection error.") / `APIConnectionTimeoutError`
-    // ("Request timed out.") for every fetch failure; providers whose SDK
-    // appends the raw cause (mistral) or surfaces undici's raw text (codex,
-    // bedrock, google: "fetch failed") rewrite it at their catch site.
+    // The TS SDKs surface request-send failures as their fixed connection error texts: the
+    // openai/anthropic SDK family throws `APIConnectionError` ("Connection error.") /
+    // `APIConnectionTimeoutError` ("Request timed out.") for every fetch failure; providers whose
+    // SDK appends the raw cause (mistral) or surfaces undici's raw text (codex, bedrock, google:
+    // "fetch failed") rewrite it at their catch site.
     let response = response.map_err(|error| {
         let kind = if error.is_timeout() {
             ConnectionErrorKind::Timeout
         } else if error.is_connect() {
             ConnectionErrorKind::Connect
         } else if matches!(request.connection, ConnectionErrorProfile::AwsHttp2 { .. }) {
-            // Pre-response http2 failure on the bedrock https transport: the
-            // h2 failure detail (no deserialization hint — no response yet).
+            // Pre-response http2 failure on the bedrock https transport: the h2 failure detail (no
+            // deserialization hint — no response yet).
             ConnectionErrorKind::H2Request(crate::utils_inner::h2_classify::classify_reqwest_error(
                 &error,
             ))
         } else {
-            // The peer closed or reset after the connection was established
-            // but before the response arrived (only distinguishable from
-            // refused connects on the AWS handler surfaces).
+            // The peer closed or reset after the connection was established but before the response
+            // arrived (only distinguishable from refused connects on the AWS handler surfaces).
             ConnectionErrorKind::Reset
         };
         ProviderError::Connection(ProviderConnectionError {

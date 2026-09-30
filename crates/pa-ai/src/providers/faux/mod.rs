@@ -1,7 +1,6 @@
-//! Faux provider: deterministic in-process responses for tests and tooling.
-//! Full port of `providers/faux.ts`, including usage estimation, per-session
-//! prompt-cache simulation, token-paced streaming with aborts, and queued
-//! response factories.
+//! Faux provider: deterministic in-process responses for tests and tooling: usage estimation,
+//! per-session prompt-cache simulation, token-paced streaming with aborts, and queued response
+//! factories.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -82,8 +81,7 @@ fn normalize_faux_assistant_content(content: &str) -> Vec<AssistantContent> {
     vec![faux_text(content)]
 }
 
-/// Build a faux assistant message from plain text (mirrors the TS
-/// `fauxAssistantMessage` string overload).
+/// Build a faux assistant message from plain text (TS `fauxAssistantMessage` string overload).
 #[must_use]
 pub fn faux_assistant_text_message(
     text: &str,
@@ -92,7 +90,7 @@ pub fn faux_assistant_text_message(
     faux_assistant_message(normalize_faux_assistant_content(text), options)
 }
 
-/// Build a faux assistant message (helper mirroring `fauxAssistantMessage`).
+/// Build a faux assistant message.
 pub fn faux_assistant_message(
     content: Vec<AssistantContent>,
     options: FauxAssistantMessageOptions,
@@ -133,9 +131,8 @@ pub type FauxResponseFactory = Arc<
 #[allow(clippy::large_enum_variant)] // the TS shape is a tagged union of the same payloads
 pub enum FauxResponseStep {
     Message(AssistantMessage),
-    /// A message whose stream starts after `delay_ms` (harness pacing: the
-    /// delay holds the request in flight so verification harnesses can
-    /// capture mid-turn states). Verification harness only.
+    /// A message whose stream starts after `delay_ms` (harness pacing: the delay holds the request
+    /// in flight so harnesses can capture mid-turn states).
     Delayed {
         message: AssistantMessage,
         delay_ms: u64,
@@ -157,31 +154,22 @@ struct FauxSharedState {
     received_api_keys: Mutex<Vec<Option<String>>>,
     pending: Mutex<Vec<FauxResponseStep>>,
     prompt_cache: Mutex<HashMap<String, String>>,
-    /// The last served step, recorded on every serve: an exhausted queue
-    /// re-serves it in repeat-last mode instead of erroring (the record
-    /// is kept regardless of the mode, so repeat-last switched on after
-    /// serving still has a step to re-serve). Verification harness only;
-    /// see [`FauxProviderRegistration::set_repeat_last_response`].
+    /// The last served step, recorded on every serve: an exhausted queue re-serves it in
+    /// repeat-last mode, even one switched on after serving. Verification harness only.
     last_served: Mutex<Option<FauxResponseStep>>,
-    /// Repeat-last mode (verification harness only): `false` by default,
-    /// so an exhausted queue keeps erroring with "No more faux responses
-    /// queued" — the response-budget contract every existing harness
-    /// scripts against.
+    /// Repeat-last mode (verification harness only): `false` by default — the finite queue and its
+    /// exhaustion error are the response-budget contract harnesses script against.
     repeat_last_response: std::sync::atomic::AtomicBool,
 }
 
 impl FauxSharedState {
-    /// The next scripted step: the queued front, or — in repeat-last mode
-    /// — the last served step again once the queue ran dry, or `None`
-    /// (the caller's exhaustion error). The dequeue and the last-served
-    /// publish share one hold of the pending `Mutex`, so overlapping
-    /// stream calls cannot observe an emptied queue with a stale or
-    /// missing last-served step.
+    /// The next scripted step: the queued front, or — in repeat-last mode — the last served step
+    /// once the queue ran dry, or `None` (the caller's exhaustion error). The dequeue and the
+    /// last-served publish share one hold of the pending `Mutex`.
     ///
     /// # Panics
     ///
-    /// Panics if the pending or last-served `Mutex` is poisoned (a thread
-    /// panicked while holding it).
+    /// Panics if the pending or last-served `Mutex` is poisoned.
     fn next_step(&self) -> Option<FauxResponseStep> {
         let repeat = self
             .repeat_last_response
@@ -218,20 +206,18 @@ impl FauxProviderRegistration {
     ///
     /// # Panics
     ///
-    /// Panics if the counter `Mutex` is poisoned (a thread panicked while
-    /// holding the lock).
+    /// Panics if the counter `Mutex` is poisoned.
     #[must_use]
     pub fn call_count(&self) -> u64 {
         *self.state.call_count.lock().unwrap()
     }
 
-    /// The API key each recorded request carried (per call, in order):
-    /// summarizer arms that must follow the session's live key pin on it.
+    /// The API key each recorded request carried (per call, in order): summarizer arms that must
+    /// follow the session's live key pin on it.
     ///
     /// # Panics
     ///
-    /// Panics if the recorded-keys `Mutex` is poisoned (a thread panicked
-    /// while holding the lock).
+    /// Panics if the recorded-keys `Mutex` is poisoned.
     #[must_use]
     pub fn received_api_keys(&self) -> Vec<Option<String>> {
         self.state.received_api_keys.lock().unwrap().clone()
@@ -241,8 +227,7 @@ impl FauxProviderRegistration {
     ///
     /// # Panics
     ///
-    /// Panics if the pending `Mutex` is poisoned (a thread panicked while
-    /// holding the lock).
+    /// Panics if the pending `Mutex` is poisoned.
     pub fn set_responses(&self, responses: Vec<FauxResponseStep>) {
         *self.state.pending.lock().unwrap() = responses;
     }
@@ -251,8 +236,7 @@ impl FauxProviderRegistration {
     ///
     /// # Panics
     ///
-    /// Panics if the pending `Mutex` is poisoned (a thread panicked while
-    /// holding the lock).
+    /// Panics if the pending `Mutex` is poisoned.
     pub fn append_responses(&self, responses: Vec<FauxResponseStep>) {
         self.state.pending.lock().unwrap().extend(responses);
     }
@@ -261,26 +245,17 @@ impl FauxProviderRegistration {
     ///
     /// # Panics
     ///
-    /// Panics if the pending `Mutex` is poisoned (a thread panicked while
-    /// holding the lock).
+    /// Panics if the pending `Mutex` is poisoned.
     #[must_use]
     pub fn get_pending_response_count(&self) -> usize {
         self.state.pending.lock().unwrap().len()
     }
 
-    /// Switch the registration into repeat-last mode: once the queued
-    /// responses run out, the provider serves the last response again on
-    /// every further call instead of erroring with "No more faux
-    /// responses queued". Verification harness only — the goal-continuation
-    /// churn of a scripted session can mint one model turn per natural
-    /// turn end for as long as an arrival latency keeps a pause in
-    /// flight, so a harness that must never run dry opts in
-    /// (`register_faux_provider_from_script`, the `repeatLastResponse`
-    /// script key). The last served step is recorded on every serve, so
-    /// switching the mode on after responses have already been served
-    /// still has a step to re-serve. The default stays `false`: the
-    /// finite queue and its exhaustion error are the response-budget
-    /// contract the existing harnesses script against.
+    /// Switch the registration into repeat-last mode: once the queued responses run out, the
+    /// provider serves the last response again on every further call instead of erroring.
+    /// Verification harness only (`register_faux_provider_from_script`, the `repeatLastResponse`
+    /// script key). The default stays `false`: the finite queue and its exhaustion error are the
+    /// response-budget contract.
     pub fn set_repeat_last_response(&self, repeat: bool) {
         self.state
             .repeat_last_response
@@ -478,11 +453,9 @@ fn clone_message(
     cloned.api = api.to_string();
     cloned.provider = provider.to_string();
     cloned.model = model_id.to_string();
-    // The served message is produced at serve time — a real provider stamps
-    // its assistant messages when the stream starts, while a scripted
-    // template carries its parse-time stamp. Harness pacing (`delayMs`)
-    // resolves before this, so a delayed response lands with its post-delay
-    // timestamp.
+    // The served message is produced at serve time — a real provider stamps its assistant messages
+    // when the stream starts, while a scripted template carries its parse-time stamp; the `delayMs`
+    // pacing resolves before this, so a delayed response lands post-delay.
     cloned.timestamp = now_ms();
     cloned
 }
@@ -531,7 +504,7 @@ async fn schedule_chunk(chunk: &str, tokens_per_second: Option<f64>) {
 }
 
 #[allow(clippy::too_many_arguments)]
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 async fn stream_with_deltas(
     writer: &AssistantMessageEventWriter,
@@ -727,7 +700,7 @@ pub struct RegisterFauxProviderOptions {
 
 /// Register a faux provider and return its handle.
 #[must_use]
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProviderRegistration {
     struct FauxStream {
@@ -744,7 +717,7 @@ pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProvi
             &self.api
         }
 
-        // Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+        // Long by design: mirrors the provider's stream shape.
         #[allow(clippy::too_many_lines)]
         fn stream(
             &self,
@@ -806,12 +779,9 @@ pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProvi
 
                 let resolved = match step {
                     FauxResponseStep::Message(message) => Ok(message),
-                    // The harness pacing delay holds the stream closed
-                    // before the first delta: in-flight states (loaders,
-                    // spinners) stay visible for the harness's capture
-                    // window. The token races the hold, so a turn abort
-                    // mid-wait cancels the request like the real transport
-                    // (the fetch dies before any event streams).
+                    // The harness pacing delay holds the stream closed before the first delta so
+                    // in-flight states (loaders, spinners) stay visible; the token races the hold,
+                    // so a mid-wait abort cancels the request like the real transport.
                     FauxResponseStep::Delayed { message, delay_ms } => {
                         if delay_ms > 0 {
                             let hold =
@@ -828,9 +798,8 @@ pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProvi
                                 false
                             };
                             if cancelled {
-                                // The real providers' abort path: the request
-                                // dies mid-flight (ProviderError::Aborted),
-                                // the stream settles on the aborted message.
+                                // The real providers' abort path: the request dies mid-flight, the
+                                // stream settles on the aborted message.
                                 let mut partial = message.clone();
                                 partial.content = Vec::new();
                                 let aborted = create_aborted_message(&partial);
@@ -981,7 +950,7 @@ impl PopFront for Vec<FauxResponseStep> {
     }
 }
 
-/// Helper: build an image content block (kept next to the other faux helpers).
+/// Helper: build an image content block.
 #[must_use]
 pub fn faux_image(data: &str, mime_type: &str) -> ImageContent {
     ImageContent {

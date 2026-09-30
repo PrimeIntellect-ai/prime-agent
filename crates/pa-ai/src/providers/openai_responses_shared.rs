@@ -1,9 +1,5 @@
-//! `OpenAI` Responses API message and tool conversion.
-//!
-//! Port of the conversion half of
-//! `packages/ai/src/providers/openai-responses-shared.ts`: reasoning item
-//! replay via thinkingSignature, text signatures, foreign tool-call id
-//! normalization. The stream event processor lives in
+//! `OpenAI` Responses API message and tool conversion: reasoning item replay via thinkingSignature,
+//! text signatures, foreign tool-call id normalization. The stream event processor lives in
 //! [`crate::providers::openai_responses_stream`].
 
 use serde_json::{json, Map, Value};
@@ -62,12 +58,7 @@ fn parse_text_signature(signature: Option<&str>) -> Option<ParsedTextSignature> 
     })
 }
 
-// ---------------------------------------------------------------------------
-// Message conversion
-// ---------------------------------------------------------------------------
-
-/// Providers whose tool-call IDs may carry the `call_id|item_id` Responses
-/// encoding natively.
+/// Providers whose tool-call IDs may carry the `call_id|item_id` Responses encoding natively.
 pub const OPENAI_TOOL_CALL_PROVIDERS: [&str; 3] = ["openai", "openai-codex", "opencode"];
 pub const AZURE_TOOL_CALL_PROVIDERS: [&str; 4] = [
     "openai",
@@ -117,7 +108,7 @@ fn build_foreign_responses_item_id(item_id: &str) -> String {
 }
 
 /// Convert a conversation to Responses API `input` items.
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 pub fn convert_responses_messages(
     model: &Model,
@@ -230,10 +221,9 @@ pub fn convert_responses_messages(
                         AssistantContent::Text(text) => {
                             let parsed_signature =
                                 parse_text_signature(text.text_signature.as_deref());
-                            // OpenAI requires id to be max 64 characters and
-                            // rejects empty ids ([ApiParam][invalid_id]); a
-                            // message without a usable signature id falls
-                            // back to its index in the converted history.
+                            // OpenAI requires id to be max 64 characters and rejects empty ids
+                            // ([ApiParam][invalid_id]); a message without a usable signature id
+                            // falls back to its index in the converted history.
                             let msg_id = match parsed_signature
                                 .as_ref()
                                 .filter(|signature| !signature.id.is_empty())
@@ -268,11 +258,10 @@ pub fn convert_responses_messages(
                             output.push(Value::Object(entry));
                         }
                         AssistantContent::ToolCall(tool_call) => {
-                            // The item id is the `fc_` segment after the `|`.
-                            // Without a `|` there is no item id: the `id` key
-                            // is omitted (an empty id is rejected by the API
-                            // with [ApiParam][invalid_id]) and the whole id
-                            // serves as the call id.
+                            // The item id is the `fc_` segment after the `|`. Without a `|` there
+                            // is no item id: the `id` key is omitted (an empty id is rejected by
+                            // the API with [ApiParam][invalid_id]) and the whole id serves as the
+                            // call id.
                             let (call_id, item_id) = match tool_call.id.split_once('|') {
                                 Some((call_id, item_id)) => {
                                     (call_id, (!item_id.is_empty()).then_some(item_id))
@@ -281,9 +270,8 @@ pub fn convert_responses_messages(
                             };
                             let mut entry = Map::new();
                             entry.insert("type".into(), json!("function_call"));
-                            // For different-model messages, omit the id to
-                            // avoid pairing validation against rs_ reasoning
-                            // items tracked by the provider.
+                            // For different-model messages, omit the id to avoid pairing validation
+                            // against rs_ reasoning items tracked by the provider.
                             let omit_id = item_id.is_none()
                                 || (is_different_model
                                     && item_id.is_some_and(|id| id.starts_with("fc_")));
@@ -493,8 +481,8 @@ mod tests {
         )
     }
 
-    /// Every input item that carries an `id` or `call_id` must be non-empty:
-    /// the Responses API rejects empty ids with `[ApiParam][invalid_id]`.
+    /// Every input item that carries an `id` or `call_id` must be non-empty: the Responses API
+    /// rejects empty ids with `[ApiParam][invalid_id]`.
     fn assert_no_empty_ids(items: &[Value]) {
         for item in items {
             for key in ["id", "call_id"] {
@@ -505,10 +493,9 @@ mod tests {
         }
     }
 
-    /// A tool call without the `call_id|item_id` encoding omits the item
-    /// `id` entirely and keeps the whole id as `call_id` (TS evidence:
-    /// `convertResponsesMessages` with a pipe-less toolCall.id; the dogfood
-    /// bug emitted `id: ""` here and the API rejected the turn).
+    /// A tool call without the `call_id|item_id` encoding omits the item `id` entirely and keeps
+    /// the whole id as `call_id` (TS evidence: `convertResponsesMessages` with a pipe-less
+    /// toolCall.id; the dogfood bug emitted `id: ""` here and the API rejected the turn).
     #[test]
     fn pipe_less_tool_call_id_omits_item_id() {
         let items = convert(
@@ -542,8 +529,8 @@ mod tests {
         );
     }
 
-    /// A tool call id with an empty `fc_` segment (stream items without an
-    /// id) omits the item `id` instead of emitting `id: ""`.
+    /// A tool call id with an empty `fc_` segment (stream items without an id) omits the item `id`
+    /// instead of emitting `id: ""`.
     #[test]
     fn empty_item_id_segment_omits_item_id() {
         let items = convert(
@@ -565,10 +552,9 @@ mod tests {
         assert_eq!(function_call.get("call_id"), Some(&json!("call_x")));
     }
 
-    /// A fully-empty tool call id omits the item `id`; the `call_id` fields
-    /// stay empty on both items, matching the TS reference exactly (the
-    /// reachable dogfood shape never produces an empty tool call id because
-    /// tool results inherit the tool call id verbatim).
+    /// A fully-empty tool call id omits the item `id`; the `call_id` fields stay empty on both
+    /// items, matching the TS reference exactly (the reachable dogfood shape never produces an
+    /// empty tool call id because tool results inherit the tool call id verbatim).
     #[test]
     fn empty_tool_call_id_omits_item_id() {
         let items = convert(
@@ -589,9 +575,8 @@ mod tests {
         assert_eq!(function_call.get("call_id"), Some(&json!("")));
     }
 
-    /// Same-provider messages from a different model omit the `fc_` item id
-    /// so the API does not pair it against `rs_` reasoning items tracked for
-    /// this model (TS: `itemId = undefined`).
+    /// Same-provider messages from a different model omit the `fc_` item id so the API does not
+    /// pair it against `rs_` reasoning items tracked for this model (TS: `itemId = undefined`).
     #[test]
     fn different_model_fc_item_id_is_omitted() {
         let items = convert(
@@ -634,8 +619,8 @@ mod tests {
         assert_eq!(function_call.get("call_id"), Some(&json!("call_x")));
     }
 
-    /// Assistant text without a signature id falls back to its converted
-    /// history index instead of an empty message id (TS: `msg_${msgIndex}`).
+    /// Assistant text without a signature id falls back to its converted history index instead of
+    /// an empty message id (TS: `msg_${msgIndex}`).
     #[test]
     fn message_without_signature_uses_index_fallback_id() {
         let items = convert(

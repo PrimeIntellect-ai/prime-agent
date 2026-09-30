@@ -1,16 +1,15 @@
 //! Shared simple-stream option assembly.
-//! Ported from `packages/ai/src/providers/simple-options.ts`.
 
 use crate::types::{
     Model, ModelThinkingLevel, SimpleStreamOptions, StreamOptions, ThinkingBudgets,
 };
 
-/// The per-request output cap when the caller sets no `max_tokens` (TS
-/// `buildBaseOptions`: `Math.min(model.maxTokens, 32000)`).
+/// The per-request output cap when the caller sets no `max_tokens` (TS `buildBaseOptions`:
+/// `Math.min(model.maxTokens, 32000)`).
 pub const REQUEST_MAX_TOKENS_CAP: u64 = 32_000;
 
-/// The smallest output budget a request may keep after clamping (TS
-/// `adjustMaxTokensForThinking`: `minOutputTokens`).
+/// The smallest output budget a request may keep after clamping (TS `adjustMaxTokensForThinking`:
+/// `minOutputTokens`).
 pub const MIN_OUTPUT_TOKENS: u64 = 1_024;
 
 /// The default per-request output budget for a model (TS `buildBaseOptions`):
@@ -65,8 +64,8 @@ pub fn clamp_reasoning(effort: ModelThinkingLevel) -> ModelThinkingLevel {
 
 /// Budget-based thinking token adjustment (mirrors `adjustMaxTokensForThinking`).
 ///
-/// Returns an error mirroring the TS throw when there is not enough room for
-/// thinking tokens plus the response.
+/// Returns an error mirroring the TS throw when there is not enough room for thinking tokens plus
+/// the response.
 pub fn adjust_max_tokens_for_thinking(
     base_max_tokens: u64,
     model_max_tokens: u64,
@@ -115,15 +114,12 @@ pub fn adjust_max_tokens_for_thinking(
     Ok((max_tokens, thinking_budget))
 }
 
-/// The `max_tokens` the provider will actually send for a request against
-/// `model` with this reasoning level: budget-folding providers (Anthropic
-/// and Bedrock models without adaptive thinking) add the level's thinking
-/// budget on top of the base per-request budget, capped at the model's
-/// declared max output ([`adjust_max_tokens_for_thinking`]); every other
-/// provider (and reasoning off) sends the base budget itself. Compaction
-/// thresholds must reserve this effective budget, or a request can claim
-/// `input + max_tokens > contextWindow` while the trigger still says
-/// "not due".
+/// The `max_tokens` the provider will actually send for a request against `model` with this
+/// reasoning level: budget-folding providers (Anthropic and Bedrock models without adaptive
+/// thinking) add the level's thinking budget on top of the base per-request budget, capped at the
+/// model's declared max output ([`adjust_max_tokens_for_thinking`]); every other provider sends the
+/// base budget itself. Compaction thresholds must reserve this effective budget, or a request can
+/// claim `input + max_tokens > contextWindow` while the trigger still says "not due".
 #[must_use]
 pub fn effective_request_max_tokens(model: &Model, reasoning: ModelThinkingLevel) -> u64 {
     let base = default_request_max_tokens(model).unwrap_or(0);
@@ -132,8 +128,8 @@ pub fn effective_request_max_tokens(model: &Model, reasoning: ModelThinkingLevel
     }
     let budget_folds = match model.api.as_str() {
         "anthropic" => !crate::providers::anthropic::supports_adaptive_thinking(&model.id),
-        // The Bedrock fold runs only on Claude models without adaptive
-        // thinking (`streamSimpleBedrock`'s own gate).
+        // The Bedrock fold runs only on Claude models without adaptive thinking
+        // (`streamSimpleBedrock`'s own gate).
         "bedrock" => {
             crate::providers::bedrock::is_anthropic_claude_model(model)
                 && !crate::providers::bedrock::supports_adaptive_thinking(
@@ -169,8 +165,8 @@ mod tests {
 
     #[test]
     fn budget_folding_providers_add_the_thinking_budget_on_top() {
-        // A non-adaptive Anthropic model: `high` folds 16_384 thinking
-        // tokens onto the 32_000 base budget (adjustMaxTokensForThinking).
+        // A non-adaptive Anthropic model: `high` folds 16_384 thinking tokens onto the 32_000 base
+        // budget (adjustMaxTokensForThinking).
         let anthropic = model("anthropic", "claude-sonnet-4-5", 65_536);
         assert_eq!(
             effective_request_max_tokens(&anthropic, ModelThinkingLevel::Off),
@@ -204,8 +200,7 @@ mod tests {
             effective_request_max_tokens(&adaptive, ModelThinkingLevel::High),
             32_000
         );
-        // OpenAI-style reasoning consumes the budget from within, never on
-        // top of it.
+        // OpenAI-style reasoning consumes the budget from within, never on top of it.
         let openai = model("openai-completions", "gpt-x", 65_536);
         assert_eq!(
             effective_request_max_tokens(&openai, ModelThinkingLevel::High),
