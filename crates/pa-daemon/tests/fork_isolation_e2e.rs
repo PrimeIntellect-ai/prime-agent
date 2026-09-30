@@ -452,7 +452,7 @@ fn the_fork_is_a_fully_detached_session() {
     // (its own worker), never the fork.
     assert_eq!(
         reopened_durable, original_durable,
-        "the create over the original file must open the original, not the fork (fork id {fork_durable})"
+        "the create over the original file must open the original, not the fork (the values print above)"
     );
     assert_ne!(
         reopened_id, original_active,

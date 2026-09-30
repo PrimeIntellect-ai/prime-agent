@@ -506,7 +506,7 @@ mod tests {
         assert_eq!(
             root_session_id.as_deref(),
             Some(roster_session.as_str()),
-            "the descriptor names the roster's final row: {root_session_id:?} vs {roster_session}"
+            "the descriptor names the roster's final row (the values print above)"
         );
         assert_eq!(session_file.as_deref(), Some(roster_file.as_str()));
         assert_eq!(persisted.as_deref(), Some(roster_session.as_str()));
