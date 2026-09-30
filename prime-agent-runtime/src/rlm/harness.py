@@ -1051,7 +1051,8 @@ class HarnessState:
             "Factory entries declare validated state-machine workflows of subagent states in arguments['machine'] "
             "(the original DAG sugar in arguments['dag'] compiles to machine form): manage them with "
             "create_factory/update_factory/delete_factory (create_factory validates either form at write time); run "
-            "them with rlm.factory.run(\"<id>\") once the executor lands in a follow-up PR.",
+            "them with await rlm.factory.run(\"<id>\"), watch with rlm.factory.status(run_id), stop with "
+            "rlm.factory.stop(run_id), and resume a paused run with rlm.factory.resume(run_id).",
         ]
         for kind in _KINDS:
             records = self.list(kind)[:max_entries_per_kind]

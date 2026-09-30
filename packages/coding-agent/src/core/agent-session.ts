@@ -196,6 +196,7 @@ import {
 	convertToLlm,
 	createAsyncBashCompletionMessage,
 	createCompactionOutcomeMessage,
+	createFactoryProgressMessage,
 	createHarnessDigestMessage,
 	createHeartbeatPromptMessage,
 	createRefinementNoticeMessage,
@@ -204,6 +205,8 @@ import {
 	createRlmChildTerminalNoticeMessage,
 	createSessionSlashCommandMessage,
 	createSessionSlashCommandResultMessage,
+	FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE,
+	FACTORY_PROGRESS_PREVIEW_LABEL,
 	HARNESS_DIGEST_CUSTOM_TYPE,
 	type HarnessDigestDetails,
 	HEARTBEAT_PROMPT_CUSTOM_TYPE,
@@ -268,6 +271,7 @@ import {
 	createAsyncBashCompletionHostHandler,
 	createAsyncBashConsumedHostHandler,
 	createDefaultRlmSubagentSessionName,
+	createFactoryProgressHostHandler,
 	createRlmCollectHostHandler,
 	createRlmCreateSessionHostHandler,
 	createRlmDeleteSubagentHostHandler,
@@ -956,6 +960,8 @@ function injectedMessagePreviewLabel(message: CustomMessage): string | undefined
 			return HEARTBEAT_PROMPT_PREVIEW_LABEL;
 		case ASYNC_BASH_COMPLETION_CUSTOM_TYPE:
 			return ASYNC_BASH_COMPLETION_PREVIEW_LABEL;
+		case FACTORY_PROGRESS_NOTICE_CUSTOM_TYPE:
+			return FACTORY_PROGRESS_PREVIEW_LABEL;
 		case GOAL_CONTEXT_CUSTOM_TYPE:
 			return GOAL_CONTEXT_PREVIEW_LABEL;
 		default:
@@ -10981,6 +10987,31 @@ export class AgentSession {
 			),
 			"rlm.progress.note": createRlmProgressNoteHostHandler((message) => this.noteRlmProgress(message)),
 			"rlm.delete_subagent": createRlmDeleteSubagentHostHandler((target) => this.deleteRlmSubagent(target)),
+			"factory.progress": createFactoryProgressHostHandler(async (details) => {
+				const message = createFactoryProgressMessage(details);
+				const disposeSignal = this._sessionActionCommitDisposeAbortController.signal;
+				while (true) {
+					let admissionCommitted = false;
+					try {
+						await this._promptInjectedMessage(message.content, message, {
+							streamingBehavior: "steer",
+							queueIfBusy: true,
+							resumeIfIdle: true,
+							returnAfterAccepted: true,
+							suppressAutonomousContinuation: true,
+							admissionCommitted: () => {
+								admissionCommitted = true;
+							},
+						});
+						return;
+					} catch (error) {
+						if (admissionCommitted || !(error instanceof SessionInputAdmissionPausedError)) throw error;
+						while (this._sessionInputAdmissionPauses.size > 0 && !disposeSignal.aborted) {
+							await this._waitForSessionActivityChange(disposeSignal);
+						}
+					}
+				}
+			}),
 			"model.info": async () => ({
 				id: this.model?.id ?? null,
 				provider: this.model?.provider ?? null,

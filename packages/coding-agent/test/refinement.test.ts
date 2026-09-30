@@ -100,6 +100,18 @@ const factoryDag = {
 	],
 };
 
+const factoryMachine = {
+	states: [
+		{ id: "collect", entry: true, subagent: "researcher", outputs: [{ name: "findings", type: "text" }] },
+		{
+			id: "review",
+			subagent: { prompt: "Review the findings." },
+			inputs: [{ name: "draft", type: "text", from: "collect.findings" }],
+		},
+	],
+	transitions: [{ from: "collect", to: "review" }],
+};
+
 function proposal(summary: string, edits: RefinementProposal["edits"]): RefinementProposal {
 	return {
 		summary,
@@ -297,12 +309,12 @@ describe("harness refinement", () => {
 		expect(state.refinements.at(-1)?.changes).toEqual([`delete ${kind}:${id}`]);
 	});
 
-	it("requires a dag object in arguments for factory creates and updates", () => {
+	it("requires exactly one dag or machine object in arguments for factory creates and updates", () => {
 		const state = loadHarnessState(makeTempDir());
 
-		const missingDag = applyRefinementProposal(
+		const missingSpec = applyRefinementProposal(
 			state,
-			proposal("Create factory without a dag", [
+			proposal("Create factory without a spec", [
 				{
 					action: "create",
 					kind: "factory",
@@ -314,9 +326,9 @@ describe("harness refinement", () => {
 			{ id: "refine_factory_missing_dag" },
 		);
 
-		expect(missingDag.appliedEdits[0]).toMatchObject({
+		expect(missingSpec.appliedEdits[0]).toMatchObject({
 			applied: false,
-			error: "factory entry requires a dag object in arguments",
+			error: "factory entry requires a dag or machine object in arguments",
 		});
 		expect(state.entries.factory.factory_entry).toBeUndefined();
 		expect(state.refinements.at(-1)?.changes).toEqual([]);
@@ -338,8 +350,29 @@ describe("harness refinement", () => {
 
 		expect(nonObjectDag.appliedEdits[0]).toMatchObject({
 			applied: false,
-			error: "factory entry requires a dag object in arguments",
+			error: "factory entry requires a dag or machine object in arguments",
 		});
+
+		const bothForms = applyRefinementProposal(
+			state,
+			proposal("Create factory with both forms", [
+				{
+					action: "create",
+					kind: "factory",
+					id: "factory_entry",
+					title: "Factory title",
+					content: "Factory content",
+					arguments: { dag: factoryDag, machine: factoryMachine },
+				},
+			]),
+			{ id: "refine_factory_both_forms" },
+		);
+
+		expect(bothForms.appliedEdits[0]).toMatchObject({
+			applied: false,
+			error: "pass either dag or machine form, not both",
+		});
+		expect(state.entries.factory.factory_entry).toBeUndefined();
 
 		const created = applyRefinementProposal(
 			state,
@@ -361,9 +394,27 @@ describe("harness refinement", () => {
 		expect(created.appliedEdits[0].applied).toBe(true);
 		expect(state.entries.factory.factory_entry.arguments).toEqual({ dag: factoryDag });
 
-		const updateWithoutDag = applyRefinementProposal(
+		const machineCreated = applyRefinementProposal(
 			state,
-			proposal("Update factory without a dag", [
+			proposal("Create factory with a machine", [
+				{
+					action: "create",
+					kind: "factory",
+					id: "factory_machine_entry",
+					title: "Factory machine",
+					content: "Factory machine content",
+					arguments: { machine: factoryMachine },
+				},
+			]),
+			{ id: "refine_factory_machine_valid" },
+		);
+
+		expect(machineCreated.appliedEdits[0].applied).toBe(true);
+		expect(state.entries.factory.factory_machine_entry.arguments).toEqual({ machine: factoryMachine });
+
+		const updateWithoutSpec = applyRefinementProposal(
+			state,
+			proposal("Update factory without a spec", [
 				{
 					action: "update",
 					kind: "factory",
@@ -375,9 +426,9 @@ describe("harness refinement", () => {
 			{ id: "refine_factory_update_missing_dag" },
 		);
 
-		expect(updateWithoutDag.appliedEdits[0]).toMatchObject({
+		expect(updateWithoutSpec.appliedEdits[0]).toMatchObject({
 			applied: false,
-			error: "factory entry requires a dag object in arguments",
+			error: "factory entry requires a dag or machine object in arguments",
 		});
 		expect(state.entries.factory.factory_entry.title).toBe("Factory title");
 	});

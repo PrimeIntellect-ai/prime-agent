@@ -125,6 +125,30 @@ interface AsyncBashConsumedRequest {
 }
 
 type AsyncBashConsumedHandler = (request: AsyncBashConsumedRequest) => void | Promise<void>;
+
+export type FactoryProgressKind = "finished" | "failed" | "paused" | "budget_exceeded" | "max_transitions_exceeded";
+
+export interface FactoryProgressRequest {
+	runId: string;
+	kind: FactoryProgressKind;
+	node?: string;
+	detail: string;
+}
+
+export type FactoryProgressHandler = (request: FactoryProgressRequest) => void | Promise<void>;
+
+const FACTORY_PROGRESS_KINDS: readonly FactoryProgressKind[] = [
+	"finished",
+	"failed",
+	"paused",
+	"budget_exceeded",
+	"max_transitions_exceeded",
+];
+
+function isFactoryProgressKind(value: unknown): value is FactoryProgressKind {
+	return typeof value === "string" && (FACTORY_PROGRESS_KINDS as readonly string[]).includes(value);
+}
+
 export type RlmListSubagentsHandler = () => RlmListSubagentsResult | Promise<RlmListSubagentsResult>;
 export type RlmDeleteSubagentHandler = (target: string) => Promise<RlmDeleteSubagentResult>;
 export type RlmFindModelsHandler = (query: string, limit: number) => RlmFindModelsResult | Promise<RlmFindModelsResult>;
@@ -327,6 +351,39 @@ export function createAsyncBashCompletionHostHandler(handler: AsyncBashCompletio
 			throw new Error("bash.completed exitCode must be an integer");
 		}
 		await handler({ pid, command, exitCode });
+		return {};
+	};
+}
+
+/** Adapt a factory executor milestone into a validated `factory.progress` host notification. */
+export function createFactoryProgressHostHandler(handler: FactoryProgressHandler): HostRequestHandler {
+	return async (payload) => {
+		const runId = payload.run_id;
+		if (typeof runId !== "string" || !runId.trim()) {
+			throw new Error("factory.progress run_id must be a non-empty string");
+		}
+		const kind = payload.kind;
+		if (!isFactoryProgressKind(kind)) {
+			throw new Error(
+				`factory.progress kind must be one of ${FACTORY_PROGRESS_KINDS.join(", ")}, got ${JSON.stringify(kind)}`,
+			);
+		}
+		const detail = payload.detail;
+		if (typeof detail !== "string" || !detail.trim()) {
+			throw new Error("factory.progress detail must be a non-empty string");
+		}
+		const node = payload.node;
+		if (node !== undefined && typeof node !== "string") {
+			throw new Error("factory.progress node must be a string when provided");
+		}
+		if (node !== undefined && !node.trim()) {
+			throw new Error("factory.progress node must be a non-empty string when provided");
+		}
+		const request: FactoryProgressRequest = { runId: runId.trim(), kind, detail };
+		if (typeof node === "string" && node.trim()) {
+			request.node = node.trim();
+		}
+		await handler(request);
 		return {};
 	};
 }
