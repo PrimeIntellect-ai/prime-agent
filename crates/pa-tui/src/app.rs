@@ -20,9 +20,8 @@ pub struct AppOptions {
     pub replay_delay_ms: u64,
     /// Auto-exit after this many ms of runtime (headless verification).
     pub auto_exit_ms: Option<u64>,
-    /// Panic after the first paint (the exit-restore verifier's panic-path
-    /// driver: a real unwind on the live surface must still leave the
-    /// terminal whole).
+    /// Panic after the first paint (the exit-restore verifier's panic-path driver: a real unwind
+    /// on the live surface must still leave the terminal whole).
     pub panic_after_frame: bool,
 }
 
@@ -47,19 +46,13 @@ pub fn load_theme(name: &str) -> Theme {
     Theme::builtin(name, mode)
 }
 
-/// Run the view against a session stream until the stream ends and the user
-/// exits. `on_submit` receives editor submissions (unused in replay mode).
-///
-/// Every error return funnels through the one exit restore: an early `?`
-/// after the mount (a stream read, a draw failure) must not hand the shell
-/// a terminal still in TUI state.
+/// Run the view against a session stream until the stream ends and the user exits. `on_submit`
+/// receives editor submissions (unused in replay mode).
 ///
 /// # Errors
 ///
-/// Returns `Err` when the surface fails to mount or the replay loop fails
-/// (raw-mode enable, the alternate-screen enter, a stream read, or a
-/// draw); the exit restore runs first, so the shell never keeps a
-/// TUI-state terminal.
+/// Returns `Err` when the surface fails to mount or the replay loop fails; the exit restore runs
+/// first, so the shell never keeps a TUI-state terminal.
 pub fn run_app(
     stream: Box<dyn SessionStream>,
     options: &AppOptions,
@@ -82,20 +75,17 @@ fn run_app_surface(
     // The TS theme emits raw ANSI color codes regardless of NO_COLOR; match
     // that so the same terminal renders the same frames either way.
     crossterm::style::force_color_output(true);
-    // A panic anywhere between the mount below and the deliberate
-    // teardown must still hand the terminal back whole (the same
-    // unwind-guard contract the session surface arms).
+    // A panic anywhere between the mount below and the deliberate teardown must still hand
+    // the terminal back whole (the same unwind-guard contract the session surface arms).
     let _surface_restore = crate::exit_restore::SurfaceRestore::armed();
-    // The raw-mode bracket's `cfmakeraw` write clears IXON, which is the
-    // kernel's one trigger for lifting a pending Ctrl+S stop (see the
-    // flow e2e's launch route).
+    // The raw-mode bracket's `cfmakeraw` write clears IXON, the kernel's one trigger for
+    // lifting a pending Ctrl+S stop (see the flow e2e's launch route).
     terminal::enable_raw_mode()?;
-    // The alternate screen mounts through the ownership module (the same
-    // `pendingAltScreenHandoff` semantics the session surface uses), so
-    // the surface's alt-screen state is tracked for every exit path.
+    // The alternate screen mounts through the ownership module (the same `pendingAltScreenHandoff`
+    // semantics the session surface uses), so the alt-screen state is tracked for every exit path.
     crate::altscreen::enter()?;
-    // The replay surface owns the same enhanced-key modes as the session
-    // (TS `ProcessTerminal.start`): bracketed pastes arrive as one chunk.
+    // The replay surface owns the same enhanced-key modes as the session: bracketed pastes
+    // arrive as one chunk.
     crate::enhanced_keys::enable(&mut std::io::stdout())?;
     let mut terminal = Terminal::new(crate::hyperlinks::stdout_backend())?;
 
@@ -106,7 +96,6 @@ fn run_app_surface(
     let mut stream_ended = false;
 
     loop {
-        // Drain stream events.
         if !stream_ended {
             match stream.poll()? {
                 SessionEvent::Item(item) => {
@@ -135,7 +124,6 @@ fn run_app_surface(
             "pa-tui-replay: --panic-exit reached"
         );
 
-        // Input.
         let timeout = Duration::from_millis(if stream_ended { 50 } else { 5 });
         if crossterm::event::poll(timeout)? {
             match crossterm::event::read()? {
@@ -148,10 +136,8 @@ fn run_app_surface(
                 _ => {}
             }
         }
-        // Materialize once per loop turn: a parked request resolves
-        // right after its key, and a background `@` search lands on a
-        // quiet turn the same way the interactive loop's input-idle
-        // tick resolves it (`Editor::materialize_autocomplete`).
+        // Materialize once per loop turn: a parked request resolves right after its key, and a
+        // background `@` search lands on a quiet turn.
         view.editor.materialize_autocomplete();
         let _ = view.editor.take_events();
 
@@ -181,8 +167,8 @@ fn handle_key(
     running: &mut bool,
     on_submit: &mut dyn FnMut(&str),
 ) {
-    // App-level bindings (coding-agent keybindings.ts):
-    // ctrl+c exits the app shell in replay mode; escape cancels autocomplete.
+    // App-level bindings: ctrl+c exits the app shell in replay mode; escape cancels
+    // autocomplete.
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         if view.editor.is_showing_autocomplete() {
             view.editor.cancel_autocomplete();
@@ -200,16 +186,15 @@ fn handle_key(
         return;
     }
     if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        // Ctrl+O cycles conversation detail (TS `app.tools.expand`):
-        // overview -> details -> all -> overview.
+        // Ctrl+O cycles conversation detail: overview -> details -> all -> overview.
         view.cycle_detail();
         return;
     }
     let Some(id) = key_event_to_id(&key) else {
         return;
     };
-    // Transcript viewport keys (TS tui.ts consumes them before the editor
-    // in fullscreen): page scroll, top, follow.
+    // Transcript viewport keys (consumed before the editor in fullscreen): page scroll,
+    // top, follow.
     let (page_up, page_down, to_top, follow) = {
         let kb = view.editor.keybindings();
         (
@@ -248,8 +233,8 @@ pub fn dispatch_events(editor: &mut Editor, on_submit: &mut dyn FnMut(&str)) {
                 editor.add_to_history(&text);
                 on_submit(&text);
             }
-            // This minimal harness owns no terminal clipboard channel;
-            // the full session UI (session_ui.rs) performs the copy.
+            // This minimal harness owns no terminal clipboard channel; the full session UI
+            // performs the copy.
             EditorEvent::Changed(_)
             | EditorEvent::AutocompleteToggled(_)
             | EditorEvent::ClipboardWrite(_) => {}
@@ -261,12 +246,9 @@ pub(crate) fn draw(
     terminal: &mut Terminal<crate::hyperlinks::LinkBackend>,
     view: &mut AgentView,
 ) -> Result<()> {
-    // The interactive surface's mount sequences (the alt-screen
-    // adopt/enter for a fresh process, the queued clear, the cursor
-    // hide) ride THIS draw's single flush: the first paint is the mount
-    // (a direct open holds the shell or the previous surface until its
-    // first frame is ready — TS attaches before the chat mounts), and a
-    // mid-gap flush can never carry the clear out early over it.
+    // The mount sequences (the alt-screen adopt/enter, the queued clear, the cursor hide) ride
+    // THIS draw's single flush: the first paint is the mount, and a mid-gap flush can never
+    // carry the clear out early over it.
     if crate::altscreen::take_first_draw_mount() {
         let mut out = std::io::stdout();
         crate::altscreen::enter_queued(&mut out)?;
@@ -282,26 +264,20 @@ pub(crate) fn draw(
     let height = area.height as usize;
     let frame = view.render_frame(width, height);
     let cursor = view.frame_cursor();
-    // The frame's embedded OSC 8 sequences drive the paint backend's
-    // hyperlink injection; install the row/column ranges before the draw
-    // (which strips the sequences from the painted cells).
+    // The frame's embedded OSC 8 sequences drive the paint backend's hyperlink injection; install
+    // the ranges before the draw (which strips the sequences from the painted cells).
     crate::hyperlinks::install_frame(&frame);
-    // Zone markers ride on the composed rows; plan their emission before
-    // the cell paint (which strips them), then write the sequences at their
-    // rows after the frame is painted.
+    // Zone markers ride on the composed rows; plan their emission before the cell paint
+    // (which strips them), then write the sequences at their rows after the frame is painted.
     let emissions = view.take_osc_emissions(&frame);
-    // TS fullscreen paint brackets the row diff in synchronized output so
-    // terminals never display an intermediate, partly scrolled frame. A
-    // terminal without mode 2026 support ignores the two escape sequences.
+    // Fullscreen paint brackets the row diff in synchronized output so terminals never display
+    // an intermediate, partly scrolled frame; a terminal without mode 2026 support ignores the
+    // two escape sequences.
     crossterm::execute!(stdout(), terminal::BeginSynchronizedUpdate)?;
-    // TS cursor control (tui.ts `renderFullscreen`): the hardware cursor
-    // is positioned at the focused caret for IME on every frame, but is
-    // only shown when `showHardwareCursor` is on (default off). ratatui's
-    // `set_cursor_position` shows the cursor unconditionally, so it may
-    // carry the caret only in the show case — handing it the caret with
-    // the setting off would leave the terminal's own cursor visible at
-    // the caret while later paints drag it across every changed row (the
-    // cursor-glitch the operator reported).
+    // The hardware cursor is positioned at the focused caret for IME on every frame, but only
+    // shown when `showHardwareCursor` is on. ratatui's `set_cursor_position` shows the cursor
+    // unconditionally, so it may carry the caret only in the show case — the hidden case would
+    // leave the terminal's own cursor visible while later paints drag it across every changed row.
     let show_hardware_cursor = view.show_hardware_cursor;
     let painted = terminal.draw(|f| {
         let lines: Vec<ratatui::text::Line<'static>> =
@@ -315,10 +291,8 @@ pub(crate) fn draw(
             }
         }
     });
-    // The hidden case still positions (TS's paint buffer ends with the
-    // caret MoveTo before the synchronized-update release): IME
-    // candidates anchor at the caret whether or not it is visible. The
-    // bare MoveTo rides the same sync bracket, after the paint.
+    // The hidden case still positions: IME candidates anchor at the caret whether or not it
+    // is visible. The bare MoveTo rides the same sync bracket, after the paint.
     if !show_hardware_cursor {
         if let Some((row, col)) = cursor {
             if row < height && col < width {
@@ -338,10 +312,8 @@ pub(crate) fn draw(
     markers
 }
 
-/// Write OSC 133 zone-marker sequences at their frame rows. The sequences
-/// are zero-width: the grid content is untouched and only the row flags the
-/// terminal shell-integration reads change. The frame cursor is restored
-/// afterwards (the marker writes move it).
+/// Write OSC 133 zone-marker sequences at their frame rows. The sequences are zero-width: only
+/// the row flags the shell integration reads change; the frame cursor is restored afterwards.
 fn emit_zone_markers(
     emissions: &[(usize, crate::osc133::RowMarkers)],
     cursor: Option<(usize, usize)>,
@@ -369,8 +341,8 @@ fn emit_zone_markers(
     Ok(())
 }
 
-/// Render one frame as plain text (headless structural dump used by the tmux
-/// verifier and diff tests). ANSI styling and OSC zone markers are stripped.
+/// Render one frame as plain text (the headless structural dump the tmux verifier and diff
+/// tests use). ANSI styling and OSC zone markers are stripped.
 pub fn render_frame_text(view: &mut AgentView, width: u16, height: u16) -> Vec<String> {
     let frame = view.render_frame(width as usize, height as usize);
     frame

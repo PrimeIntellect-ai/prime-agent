@@ -1,7 +1,5 @@
-//! The live-event decoder: the `TurnUpdate` vocabulary (the session-event wire
-//! shapes), the `event_to_update` fold (one `session_event` frame's event ->
-//! the transcript update), the loader-note partial decode, and the custom/
-//! text message helpers (moved with their concern).
+//! The live-event decoder: the `TurnUpdate` vocabulary (session-event
+//! wire shapes) and the `event_to_update` fold.
 use super::{
     assistant_value_to_entries, queue_lane, queue_lane_indices, starting_from_actions, ChatEntry,
     Value,
@@ -13,15 +11,14 @@ use super::{
 pub enum TurnUpdate {
     /// `agent_start` / `turn_start`.
     TurnStarted,
-    /// `session_info_changed`: the session display name (cleared when the
-    /// event carries none).
+    /// `session_info_changed`: the session display name (cleared when
+    /// the event carries none).
     SessionInfoChanged { name: Option<String> },
     /// `service_tier_changed`: the session's effective service tier.
     ServiceTierChanged { tier: String },
     /// `message_start` with a user message.
     UserMessage(String),
-    /// `message_start`/`message_update`/`message_end` with an assistant
-    /// message (raw wire value); `streaming` distinguishes in-flight from
+    /// An assistant message; `streaming` distinguishes in-flight from
     /// final.
     AssistantMessage {
         message: Value,
@@ -51,9 +48,7 @@ pub enum TurnUpdate {
     /// echo/result rows, or the malformed-notice fallback).
     CustomRow(ChatEntry),
     /// `auto_retry_start`: a provider failure is being retried after
-    /// `delay_ms` (TS retry loader countdown). A `Backup` reason is a
-    /// provider-failover switch: the failed turn re-routes to
-    /// `backup_model` ("provider/model-id") immediately.
+    /// `delay_ms`.
     AutoRetryStart {
         attempt: u32,
         max_attempts: u32,
@@ -61,9 +56,9 @@ pub enum TurnUpdate {
         error_message: String,
         reason: RetryStartReason,
     },
-    /// `auto_retry_end`: the retry loop settled; `final_error` is set when
-    /// the retries were exhausted; `restored_model` is the primary model
-    /// restored after a failover switch succeeded.
+    /// `auto_retry_end`: the retry loop settled; `final_error` when
+    /// retries were exhausted; `restored_model` after a successful
+    /// failover.
     AutoRetryEnd {
         success: bool,
         attempt: u32,
@@ -72,51 +67,40 @@ pub enum TurnUpdate {
     },
     /// `agent_end`: the prompt queue drained.
     Idle,
-    /// `compaction_start`: a compaction run began (TS compaction loader).
+    /// `compaction_start`: a compaction run began.
     CompactionStart {
         /// Why the compaction runs (`manual`/`requested`/`overflow`/`threshold`).
         reason: String,
         /// `/compact <instructions>` focus guidance.
         custom_instructions: Option<String>,
     },
-    /// `compaction_summary_delta`: one streamed chunk of the summary the
-    /// compaction model is generating (the operator's "stream the
-    /// compacted summary" feature). The chunks accumulate onto the live
-    /// loader's state; the settling `compaction_end` clears the streamed
-    /// block when its durable summary row lands.
+    /// `compaction_summary_delta`: one streamed summary chunk (the
+    /// operator's "stream the compacted summary" feature); the settling
+    /// `compaction_end` clears the streamed block.
     CompactionSummaryDelta {
         /// The delta text (one summarizer text delta, verbatim).
         delta: String,
     },
-    /// `compaction_end`: the compaction settled. Success carries the result
-    /// (summary + token counts); skip/failure carries the error message and
-    /// its severity (TS shows those for `manual` runs).
+    /// `compaction_end`: success carries the result; skip/failure
+    /// carries the error message and its severity.
     CompactionEnd {
-        /// Why the compaction ran.
         reason: String,
         /// The TS `CompactionResult` on success.
         result: Option<Value>,
-        /// `/compact <instructions>` focus guidance (the event payload).
+        /// `/compact <instructions>` focus guidance.
         custom_instructions: Option<String>,
-        /// `true` when the run was cancelled.
         aborted: bool,
-        /// The skip/failure message.
         error_message: Option<String>,
         /// `warning` or `error`.
         error_severity: Option<String>,
     },
-    /// `goal_update`: the session goal state changed (raw wire `goal`
-    /// payload; the session view owns announcement and tray rendering).
+    /// `goal_update`: the raw wire `goal` payload (the session view
+    /// owns rendering).
     GoalUpdate(Value),
-    /// `session_action_update`: the queue projection changed (a message
-    /// parked behind the run, was delivered, or was cleared). `starting`
-    /// carries the picked-up prompt whose turn is still preparing (TS
-    /// #2063 `sessionActions.active` with `kind: "turn"` / `phase:
-    /// "preparing"`), so the strip keeps it visible until the turn
-    /// begins. `rlm_child_status` carries the parked RLM child status
-    /// notices' lane indices and `injected_prompts` the engine-minted
-    /// continuations' (the Rust-native typed provenance riders) so
-    /// the strip folds exactly those rows, never a user-typed lookalike.
+    /// `session_action_update`: the queue projection changed. `starting`
+    /// carries the picked-up prompt still preparing (TS #2063); the
+    /// `rlm_child_status`/`injected_prompts` riders are Rust-native
+    /// provenance, so the strip folds exactly those rows.
     QueueUpdated {
         steering: Vec<String>,
         follow_ups: Vec<String>,
@@ -124,9 +108,9 @@ pub enum TurnUpdate {
         rlm_child_status: crate::queued::QueueLaneIndices,
         injected_prompts: crate::queued::QueueLaneIndices,
     },
-    /// `bash_start` (the user-bash slot, TS `!command`): a command run
-    /// outside the model loop; `transient` marks a side-conversation run
-    /// that renders only in the owning client's pane.
+    /// `bash_start` (the user-bash slot): a command run outside the model
+    /// loop; `transient` marks a side-conversation run rendering only
+    /// in the owning client's pane.
     BashStart {
         command: String,
         exclude_from_context: bool,
@@ -208,16 +192,14 @@ pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
                 .map(str::to_string),
         }),
         "agent_start" | "turn_start" => Some(TurnUpdate::TurnStarted),
-        // `session_info_changed { name }` (TS `session.setSessionName`):
-        // every attached client re-reads the session display name.
+        // Every attached client re-reads the session display name.
         "session_info_changed" => Some(TurnUpdate::SessionInfoChanged {
             name: event
                 .get("name")
                 .and_then(Value::as_str)
                 .map(str::to_string),
         }),
-        // `service_tier_changed { serviceTier }` (TS fast-mode toggle):
-        // the client patches its connection state (the `/fast` status
+        // The client patches its connection state (the `/fast` status
         // reads the tier from it).
         "service_tier_changed" => Some(TurnUpdate::ServiceTierChanged {
             tier: event
@@ -238,10 +220,9 @@ pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
             let event_type = event.get("type").and_then(Value::as_str);
             let streaming = event_type != Some("message_end");
             match message.get("role").and_then(Value::as_str) {
-                // User messages carry the full payload on start; the
-                // message_end twin of the same row must not re-render it
-                // (TS interactive ignores user message_end frames), and
-                // only a partial user frame would be a protocol anomaly.
+                // The message_end twin must not re-render the full
+                // user payload (TS interactive ignores user
+                // message_end frames).
                 Some("user")
                     if event_type == Some("message_update")
                         || event_type == Some("message_end") =>
@@ -250,8 +231,7 @@ pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
                 }
                 Some("user") => Some(match user_display_text(&message) {
                     Some(text) => TurnUpdate::UserMessage(text),
-                    // Nothing to show (an empty user message is a protocol
-                    // anomaly): the transcript does not grow a blank row.
+                    // Nothing to show: no blank row.
                     None => TurnUpdate::StatusUpdate,
                 }),
                 Some("assistant") => Some(TurnUpdate::AssistantMessage {
@@ -360,9 +340,7 @@ pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
                 injected_prompts: queue_lane_indices(&actions, "injectedPrompts"),
             })
         }
-        // `bash_start` (TS `runUserBash` emits before the process runs):
-        // the identity fields ride the same frame (`transient` marks a
-        // side-conversation run, `runId` matches the owning client).
+        // The identity fields ride the same frame.
         "bash_start" => Some(TurnUpdate::BashStart {
             command: event
                 .get("command")
@@ -422,14 +400,10 @@ pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
     }
 }
 
-/// The loader note from a `tool_execution_update` partial result, if the
-/// tool owns one. The python-kernel bootstrap reports its startup stages as
-/// partial results with `details.status = "starting"` (TS
-/// `reportStartupProgress`), the same payload TS also hands its working
-/// message surface (TS `setWorkingMessage`), so the loader row mirrors the
-/// stage text. `None`
-/// leaves any current note untouched: streamed cell output reports `ok`,
-/// which is not a note change.
+/// The loader note from a `tool_execution_update` partial result, if any:
+/// the python-kernel bootstrap reports startup stages with
+/// `details.status = "starting"`. `None` leaves the current note
+/// untouched (streamed `ok` is not a note change).
 pub fn working_message_from_update(partial: &Value) -> Option<String> {
     let status = partial
         .get("details")
@@ -452,10 +426,9 @@ pub fn working_message_from_update(partial: &Value) -> Option<String> {
         .filter(|text| !text.is_empty())
 }
 
-/// Decode one `custom`-role wire message into its transcript update: the
-/// session-command echo and result rows render as slash rows; a custom type
-/// matching either shape with an invalid payload renders the malformed
-/// notice; everything else (and non-display rows) renders nothing.
+/// Decode one `custom`-role message into its transcript update: the
+/// session-command echo/result rows render; an invalid payload renders
+/// the malformed notice; everything else renders nothing.
 fn custom_row_update(message: &Value) -> Option<TurnUpdate> {
     let entries = custom_message_entries(message);
     match entries.first() {
@@ -464,18 +437,15 @@ fn custom_row_update(message: &Value) -> Option<TurnUpdate> {
     }
 }
 
-/// The transcript entries for one `custom`-role message: the custom-type
-/// dispatch lives in [`crate::custom_message::custom_message_entries`]
-/// (every entry type maps to its TS component).
+/// The transcript entries for one `custom`-role message (the dispatch
+/// lives in [`crate::custom_message::custom_message_entries`]).
 #[must_use]
 pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
     crate::custom_message::custom_message_entries(message)
 }
 
-/// The user-message display text (TS `conversation-components`' user
-/// branch): the text blocks joined, or the `[image]` placeholder when the
-/// message carries content but no text (an image-only prompt), or `None`
-/// for a message with nothing to show.
+/// The user-message display text: the text blocks joined, the `[image]`
+/// placeholder for image-only content, or `None` for nothing to show.
 #[must_use]
 pub fn user_display_text(message: &Value) -> Option<String> {
     let text = message_text(message);
@@ -498,9 +468,8 @@ pub fn message_text(message: &Value) -> String {
     }
 }
 
-/// Text of one content block: tagged text blocks and the engine's untagged
-/// `{"text": ...}` form. Adjacent fragments of one message concatenate
-/// without separators, like the TS message rendering.
+/// Text of one content block: tagged text blocks and the engine's
+/// untagged `{"text": ...}` form; fragments concatenate without separators.
 fn block_text(block: &Value) -> Option<String> {
     match block {
         Value::Object(_) => block
@@ -512,18 +481,16 @@ fn block_text(block: &Value) -> Option<String> {
     }
 }
 
-/// Fold one raw message into chat entries. Assistant messages expand into a
-/// message component (ordered text/thinking blocks) plus one card per tool
-/// call, in content order.
+/// Fold one raw message into chat entries; assistant messages expand
+/// into blocks plus one card per tool call, in content order.
 pub fn message_value_to_entries(message: &Value) -> Vec<ChatEntry> {
     let role = message
         .get("role")
         .and_then(Value::as_str)
         .unwrap_or_default();
     match role {
-        // TS `addMessageToChat`'s user case: a text that IS a skill block
-        // renders the skill-invocation card (+ the trailing argument text
-        // as its own user block); every other text renders the user block.
+        // A skill-block text renders the skill-invocation card (+ the
+        // trailing argument text); every other text renders the user block.
         "user" => user_display_text(message)
             .map(|text| {
                 crate::custom_message::skill_invocation_entries(&text)
@@ -539,9 +506,7 @@ pub fn message_value_to_entries(message: &Value) -> Vec<ChatEntry> {
     }
 }
 
-/// The compaction summary row (TS `CompactionSummaryMessageComponent`) from
-/// its wire message: `summary`, `tokensBefore`, and the optional
-/// `customInstructions` that focused it.
+/// The compaction summary row from its wire message.
 fn compaction_summary_entries(message: &Value) -> Vec<ChatEntry> {
     let summary = message
         .get("summary")

@@ -1,15 +1,7 @@
-//! Provider auth management (`/login`, `/logout`): the TS providers
-//! selector (`OAuthSelectorComponent` in its inline mode) plus the
-//! command contract
-//! the composition root implements (TS `ProviderAuthFlows`:
-//! `getLoginProviderOptions` / `getLogoutProviderOptions` / the login
-//! flows / `runLogout`). The TUI owns the panel, the search, and the
-//! API-key prompt; credential storage and the OAuth flows live above this
-//! crate.
-//!
-//! The menu rule: a row whose login flow this build does not carry is
-//! marked inline BEFORE selection (dimmed, the "not available"
-//! annotation) and Enter is inert — no row dead-ends in an
+//! Provider auth management (`/login`, `/logout`): the providers selector and the command contract
+//! the composition root implements; credential storage and the OAuth flows live above this crate.
+//! Menu rule: a row whose login flow this build does not carry is marked inline BEFORE selection
+//! (dimmed, the "not available" annotation) and Enter is inert — no row dead-ends in an
 //! after-selection error wall.
 
 use std::pin::Pin;
@@ -21,7 +13,6 @@ use crate::search_input::SearchInput;
 use crate::theme::{Theme, ThemeColor};
 use crate::Line;
 
-/// The credential type a provider row logs in with (TS `authType`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthType {
     Oauth,
@@ -29,7 +20,6 @@ pub enum AuthType {
 }
 
 impl AuthType {
-    /// The row's auth label (TS `authLabel`).
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -40,27 +30,21 @@ impl AuthType {
 }
 
 /// How the login runs: the TUI prompts for the key in the panel, or the
-/// composition root runs the provider's flow against the inline auth
-/// panel (TS splits the same way: `showApiKeyLoginDialog` vs the
-/// OAuth/Prime/Bedrock login dialogs).
+/// composition root runs the provider's flow against the inline auth panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthFlow {
-    /// Prompt for the key in the panel (TS `showPrompt("Enter API key:")`).
     ApiKeyPrompt,
     /// Run the flow through the inline auth panel (browser OAuth, the
     /// Prime login, the MCP device flow).
     TerminalFlow,
 }
 
-/// The status indicator of one row (TS `formatStatusIndicator`: the label
-/// plus its theme color).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthStatusIndicator {
     pub style: AuthStatusStyle,
     pub label: String,
 }
 
-/// The status label's color (TS `theme.fg` kinds).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthStatusStyle {
     Success,
@@ -68,86 +52,62 @@ pub enum AuthStatusStyle {
     Muted,
 }
 
-/// One provider row (TS `AuthSelectorProvider` plus its rendered
-/// status).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderRow {
     pub id: String,
     pub name: String,
     pub auth_type: AuthType,
-    /// The row's status indicator; `None` hides the trailing meta (TS's
-    /// unconfigured non-stale inline case).
+    /// The row's status indicator; `None` hides the trailing meta.
     pub status: Option<AuthStatusIndicator>,
-    /// The login flow the row runs.
     pub flow: AuthFlow,
-    /// Whether a usable credential exists (TS
-    /// `getProviderAuthStatus(id).configured`): the onboarding picker's
-    /// connected check, distinct from the display indicator.
+    /// Whether a usable credential exists: the onboarding picker's connected check, distinct from
+    /// the display indicator.
     pub configured: bool,
-    /// Whether this build carries the row's login flow (the codex
-    /// subscription row does; the not-yet-ported subscription providers
-    /// do not). An unavailable row renders dimmed with the "not
-    /// available" annotation and Enter is inert — the menu states the
-    /// dead-end BEFORE selection instead of error-walling after it.
+    /// Whether this build carries the row's login flow (the menu rule:
+    /// unavailable rows are dimmed and Enter is inert).
     pub available: bool,
 }
 
-/// The outcome of one login/logout flow: the status row to show, the
-/// error row, or a silent cancel.
+/// The outcome of one login/logout flow: the status row to show, the error row, or a silent cancel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderAuthOutcome {
     Status(String),
     Error(String),
-    /// The flow was cancelled (TS `AuthenticationResult`'s `cancelled`
-    /// state): silent — no status row, no error row.
+    /// The flow was cancelled: silent — no status row, no error row.
     Cancelled,
 }
 
-/// The boxed-future shape of the hook's methods.
 pub type ProviderRowsFuture = Pin<Box<dyn std::future::Future<Output = Vec<ProviderRow>> + Send>>;
 pub type ProviderAuthFuture =
     Pin<Box<dyn std::future::Future<Output = ProviderAuthOutcome> + Send>>;
 
-/// `/login` + `/logout` provider auth, implemented by the composition
-/// root (credential storage, OAuth flows, and the provider catalog stay
-/// above this crate).
+/// `/login` + `/logout` provider auth, implemented by the composition root
+/// (credential storage, OAuth flows, and the provider catalog stay above this crate).
 pub trait ProviderAuthCommands: Send + Sync {
-    /// TS `getLoginProviderOptions`: the provider rows sorted TS-style
-    /// (configured first, prime-inference first among them, oauth before
-    /// api key, then by name).
+    /// The login provider rows sorted TS-style (configured first,
+    /// prime-inference first among them, oauth before api key, then by name).
     fn login_options(&self) -> ProviderRowsFuture;
-    /// TS `getLogoutProviderOptions`: one row per stored credential,
-    /// sorted by name.
+    /// One row per stored credential, sorted by name.
     fn logout_options(&self) -> ProviderRowsFuture;
-    /// TS `loginProvider`: store the key for `ApiKeyPrompt` rows. The
-    /// unavailable rows never reach this (the menu marks them before
-    /// selection); an OAuth row arriving here answers the silent
-    /// cancel, never an error wall.
+    /// Store the key for `ApiKeyPrompt` rows; an OAuth row arriving here
+    /// answers the silent cancel, never an error wall (unavailable rows never reach this).
     fn login(&self, provider: &ProviderRow, api_key: Option<&str>) -> ProviderAuthFuture;
-    /// TS `loginProvider` for the panel-driven flows (the MCP OAuth
-    /// login, the Prime Inference login): the TUI mounts the inline auth
-    /// panel ([`crate::auth_panel`]) and services the flow's requests
-    /// while it runs in the background; the future settles the flow's
-    /// outcome (the session sends it back through the panel channel).
+    /// The panel-driven flows (the MCP OAuth login, the Prime Inference login): the TUI mounts the
+    /// inline auth panel ([`crate::auth_panel`]) and services the flow's requests.
     fn login_on_panel(
         &self,
         provider: &ProviderRow,
         panel: crate::auth_panel::AuthPanelHandle,
     ) -> ProviderAuthFuture;
-    /// TS `runLogout`: remove the stored credential.
     fn logout(&self, provider: &ProviderRow) -> ProviderAuthFuture;
-    /// TS `getAnthropicSubscriptionAuthWarning`: the composition root
-    /// reports the subscription-auth warning text when the stored
-    /// Anthropic credential is an OAuth login or the resolved key is a
-    /// subscription token (`sk-ant-oat...`); `None` when it is not.
+    /// The subscription-auth warning text when the stored Anthropic credential is an OAuth login or
+    /// the resolved key is a subscription token (`sk-ant-oat...`); `None` when it is not.
     fn anthropic_subscription_warning(&self) -> ProviderWarningFuture;
 }
 
-/// The boxed-future shape of the subscription-auth warning lookup.
 pub type ProviderWarningFuture =
     Pin<Box<dyn std::future::Future<Output = Option<&'static str>> + Send>>;
 
-/// The handle the interactive options carry.
 #[derive(Clone)]
 pub struct ProviderAuthCommandsHandle(pub std::sync::Arc<dyn ProviderAuthCommands>);
 
@@ -157,48 +117,36 @@ impl std::fmt::Debug for ProviderAuthCommandsHandle {
     }
 }
 
-/// The Prime Inference provider's id (pa-core's
-/// `PRIME_INFERENCE_PROVIDER_ID`: the row the panel-driven login
-/// serves).
+/// The Prime Inference provider's id (pa-core's `PRIME_INFERENCE_PROVIDER_ID`).
 pub const PRIME_INFERENCE_PROVIDER_ID: &str = "prime-inference";
-/// The Prime Inference default model's id (pa-core's
-/// `PRIME_INFERENCE_DEFAULT_MODEL_ID` = TS `PRIME_INFERENCE_DEFAULT_MODEL_ID`):
-/// the model the onboarding flow applies after the sign-in when the home
-/// has no current model.
+/// The Prime Inference default model's id: the model the onboarding flow
+/// applies after the sign-in when the home has no current model.
 pub const PRIME_INFERENCE_DEFAULT_MODEL_ID: &str = "z-ai/glm-5.3";
 
 /// The Codex Subscription provider's id (the wire identifier pa-core's
-/// auth exports; carried here too because the TUI does not link the
-/// session engine).
+/// auth exports; carried here because the TUI does not link the session engine).
 pub const OPENAI_CODEX_PROVIDER_ID: &str = "openai-codex";
 
-/// The other subscription providers' ids (the same wire identifiers,
-/// carried the same way).
+/// The other subscription providers' ids (the same wire identifiers, carried the same way).
 pub const ANTHROPIC_PROVIDER_ID: &str = "anthropic";
 pub const GITHUB_COPILOT_PROVIDER_ID: &str = "github-copilot";
 pub const XAI_PROVIDER_ID: &str = "xai";
 
-/// The subscription rows whose logins run on the panel (TS
-/// `loginProvider`'s oauth dispatch): every flow checks the
-/// cooperative cancel flag (#2770).
+/// The subscription rows whose logins run on the panel; every flow checks the cooperative cancel
+/// flag.
 pub const SUBSCRIPTION_PROVIDER_IDS: [&str; 4] = [
     ANTHROPIC_PROVIDER_ID,
     GITHUB_COPILOT_PROVIDER_ID,
     OPENAI_CODEX_PROVIDER_ID,
     XAI_PROVIDER_ID,
 ];
-/// The TS list geometry (`PREFERRED_VISIBLE_PROVIDERS`).
 const PREFERRED_VISIBLE_PROVIDERS: usize = 8;
 
-/// The panel's search placeholder (TS `MenuSearchInput("Search
-/// providers")`).
 const SEARCH_PLACEHOLDER: &str = "Search providers";
 
-/// The unavailable row's trailing annotation (the menu rule: a row
-/// without a login flow in this build states it BEFORE selection).
+/// The unavailable row's trailing annotation (the menu rule).
 const NOT_AVAILABLE_LABEL: &str = "not available";
 
-/// One key press while the selector owns the frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthSelectorAction {
     /// Navigation or filter editing only.
@@ -219,23 +167,18 @@ pub enum AuthSelectorAction {
 
 enum Mode {
     List,
-    /// The API-key prompt (TS `LoginDialogComponent.showPrompt`).
     Prompt {
         provider: ProviderRow,
         input: SearchInput,
     },
 }
 
-/// Which command the selector serves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthSelectorKind {
-    /// `/login`: the provider catalog.
     Login,
-    /// `/logout`: the stored credentials.
     Logout,
 }
 
-/// The providers selector (`/login` and `/logout` panels).
 pub struct ProviderAuthSelector {
     kind: AuthSelectorKind,
     mode: Mode,
@@ -247,9 +190,8 @@ pub struct ProviderAuthSelector {
 }
 
 impl ProviderAuthSelector {
-    /// Build the selector over the hook's rows. Login rows default to the
-    /// Provider tab; the empty list still opens (TS renders the empty
-    /// message in the panel).
+    /// Build the selector over the hook's rows; the empty list still opens
+    /// (the panel renders the empty message).
     #[must_use]
     pub fn new(kind: AuthSelectorKind, providers: Vec<ProviderRow>) -> Self {
         let mut selector = ProviderAuthSelector {
@@ -265,10 +207,8 @@ impl ProviderAuthSelector {
         selector
     }
 
-    /// Preselect a provider's row (the model-picker sign-in route mounts
-    /// the selector on the row the picked model needs; TS
-    /// `ensureModelProviderConfigured` runs the same provider's flow).
-    /// A provider without a row keeps the top selection.
+    /// Preselect a provider's row (the model-picker sign-in route mounts the selector on the row
+    /// the picked model needs); a provider without a row keeps the top selection.
     pub fn preselect_provider(&mut self, provider_id: &str) {
         if let Some(position) = self
             .filtered
@@ -279,8 +219,7 @@ impl ProviderAuthSelector {
         }
     }
 
-    /// The panel title (TS `OAuthSelectorOptions.title`; the API-key
-    /// prompt is TS `showApiKeyLoginDialog`'s `Login to {provider}`).
+    /// The panel title (the API-key prompt uses `Login to {provider}`).
     fn title(&self) -> String {
         match &self.mode {
             Mode::Prompt { provider, .. } => format!("Login to {}", provider.name),
@@ -289,7 +228,6 @@ impl ProviderAuthSelector {
         }
     }
 
-    /// The panel subtitle (TS `MenuPanel` subtitle).
     fn subtitle(&self) -> String {
         if self.is_logout() && matches!(self.mode, Mode::List) {
             return "Choose a credential to remove.".to_string();
@@ -421,10 +359,7 @@ impl ProviderAuthSelector {
                                         };
                                         AuthSelectorAction::None
                                     }
-                                    // The menu rule: an unavailable row
-                                    // shows its dead-end state inline and
-                                    // Enter never starts a flow that
-                                    // would error-wall after selection.
+                                    // The menu rule: an unavailable row never starts a flow.
                                     AuthFlow::TerminalFlow if !provider.available => {
                                         AuthSelectorAction::None
                                     }
@@ -438,7 +373,6 @@ impl ProviderAuthSelector {
                         None => AuthSelectorAction::None,
                     };
                 }
-                // Everything else edits the search field.
                 let previous = self.search.value().to_string();
                 self.search.handle_key(key, kb);
                 if self.search.value() != previous {
@@ -449,26 +383,21 @@ impl ProviderAuthSelector {
         }
     }
 
-    /// Whether the selector serves `/logout`.
     fn is_logout(&self) -> bool {
         self.kind == AuthSelectorKind::Logout
     }
 
-    /// The panel's rendered rows. The hint rows render the effective
-    /// bindings, so a user `keybindings.json` override moves the hint
-    /// with the handler.
+    /// The panel's rendered rows. The hint rows render the effective bindings,
+    /// so a user `keybindings.json` override moves the hint with the handler.
     pub fn render(&mut self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         let mut lines: Vec<Line> = Vec::new();
-        // The logout selector and the API-key prompt keep their framed
-        // header (the rule, the title, the subtitle); the login menu
-        // matches the /model and /mcp pickers (the operator's
-        // 2026-09-25 directive): the search bar is the frame's first
-        // row — no header block, no leading blank.
+        // The logout selector and the API-key prompt keep their framed header; the login menu
+        // matches the /model and /mcp pickers (operator directive 2026-09-25): the search bar is
+        // the frame's first row — no header block, no leading blank.
         let framed = self.is_logout() || !matches!(self.mode, Mode::List);
         if framed {
-            // TS `MenuPanel` inline chrome: the borderMuted rule and the
-            // muted one-space title (no leading blank — the content's own
-            // `startContent` blank opens the body).
+            // `MenuPanel` inline chrome: the borderMuted rule and the muted
+            // one-space title (the content's own `startContent` blank opens the body).
             lines.push(vec![
                 theme.fg_span(ThemeColor::BorderMuted, "─".repeat(width.max(1)))
             ]);
@@ -482,10 +411,8 @@ impl ProviderAuthSelector {
             }
         }
         match &self.mode {
-            // TS `showApiKeyLoginDialog` -> `showPrompt("Enter API key:")`:
-            // the section-title prompt, the plain `> ` field, the blank
-            // between field and actions, and the auth-actions row last —
-            // no bottom rule.
+            // The API-key prompt: the section-title prompt, the plain `> ` field, the blank between
+            // field and actions, and the auth-actions row last — no bottom rule.
             Mode::Prompt { input, .. } => {
                 lines.push(Vec::new());
                 lines.push(vec![
@@ -517,7 +444,6 @@ impl ProviderAuthSelector {
             SEARCH_PLACEHOLDER,
         );
         lines.append(&mut search);
-        // The list window, centered on the selection (TS `updateList`).
         let count = self.filtered.len();
         let visible = self.visible.min(count.max(1));
         let start = if count > visible {
@@ -533,9 +459,7 @@ impl ProviderAuthSelector {
                 continue;
             };
             let selected = index == self.selected;
-            // An unavailable row renders dimmed (the menu rule: the
-            // missing flow is stated inline, not answered after
-            // selection).
+            // An unavailable row renders dimmed (the menu rule).
             let label = format!("{} · {}", provider.name, provider.auth_type.label());
             let primary = if provider.available {
                 vec![crate::Span::raw(label)]
@@ -575,7 +499,6 @@ impl ProviderAuthSelector {
             };
             lines.push(vec![theme.fg_span(ThemeColor::Muted, message.to_string())]);
         }
-        // The selected row's status detail (TS's inline detail row).
         if count > 0 {
             if let Some(provider) = self.selected_row() {
                 if let Some(status) = provider.status {
@@ -601,9 +524,7 @@ impl ProviderAuthSelector {
                 theme.fg_span(ThemeColor::Border, "─".repeat(width.max(1)))
             ]);
         } else {
-            // One blank line of spacing below the shortcuts (the pickers'
-            // grammar): the hint is the frame's last content row, never
-            // a rule.
+            // One blank line below the hint (the pickers' grammar).
             lines.push(Vec::new());
         }
         lines
@@ -634,8 +555,6 @@ mod tests {
         }
     }
 
-    /// The ported codex subscription row: available, driven through the
-    /// panel.
     fn codex() -> ProviderRow {
         ProviderRow {
             id: "openai-codex".to_string(),
@@ -675,15 +594,13 @@ mod tests {
         }
     }
 
-    /// Left and right over the filter: inert over an empty query (there
-    /// is nothing to move the caret across), and caret-moving edits with
-    /// text in it. The row set never changes on either press.
+    /// Left and right over the filter: inert over an empty query; the row
+    /// set never changes on either press.
     #[test]
     fn left_and_right_always_edit_the_search() {
         let mut selector =
             ProviderAuthSelector::new(AuthSelectorKind::Login, vec![anthropic(), linear()]);
-        // An empty query: both presses keep it empty and keep every row
-        // in the one list.
+        // An empty query: both presses keep it empty and keep every row.
         assert_eq!(selector.search.value(), "");
         selector.handle_key("right", &kb());
         selector.handle_key("left", &kb());
@@ -693,7 +610,6 @@ mod tests {
             2,
             "every row stays in the one list"
         );
-        // With text: the keys move the filter caret.
         selector.handle_key("l", &kb());
         selector.handle_key("right", &kb());
         assert_eq!(selector.search.value(), "l");
@@ -735,7 +651,6 @@ mod tests {
             selector.handle_key("enter", &kb()),
             AuthSelectorAction::None
         );
-        // The prompt is open: typing edits the key, enter submits it.
         selector.handle_key("k", &kb());
         selector.handle_key("e", &kb());
         selector.handle_key("y", &kb());
@@ -788,9 +703,8 @@ mod tests {
         );
     }
 
-    /// The menu rule's render: an unavailable row is dimmed and carries
-    /// the "not available" annotation; a signed-in row keeps the TS row
-    /// shape with its configured status.
+    /// The menu rule's render: an unavailable row is dimmed and carries the
+    /// "not available" annotation; a signed-in row keeps the TS row shape.
     #[test]
     fn the_panel_marks_unavailable_rows_before_selection() {
         let codex_signed_in = ProviderRow {
@@ -809,14 +723,12 @@ mod tests {
                 .collect::<String>()
         };
         let text: Vec<String> = rows.iter().map(plain).collect();
-        // The signed-in row: the TS row shape with its configured status.
         assert!(text.iter().any(|row| {
             row.contains("ChatGPT Plus/Pro (Codex Subscription) · subscription")
                 && row.contains("configured")
                 && !row.contains("not available")
         }));
-        // The unavailable row: the dimmed primary (a themed span, not a
-        // raw one) plus the annotation.
+        // The unavailable row: the dimmed primary (a themed span) plus the annotation.
         let unavailable_row = rows
             .iter()
             .find(|line| plain(line).contains("Anthropic · subscription"))
@@ -834,7 +746,6 @@ mod tests {
             name_span.style.fg.is_some(),
             "the unavailable primary is dimmed (themed), not raw"
         );
-        // The available row's primary stays raw (no dimming).
         let available_row = rows
             .iter()
             .find(|line| {
@@ -859,7 +770,6 @@ mod tests {
             selector.handle_key(ch.to_string().as_str(), &kb());
         }
         assert!(selector.filtered.is_empty(), "no provider matches");
-        // Clear the query and filter on a real provider's id.
         for _ in 0.."linear".len() {
             selector.handle_key("backspace", &kb());
         }
@@ -876,12 +786,9 @@ mod tests {
 
     #[test]
     fn the_panel_renders_the_ts_chrome() {
-        // The login menu matches the /model and /mcp pickers (the
-        // operator's 2026-09-25 directive): the frame opens with the
-        // search field itself (its top rule, the placeholder row, its
-        // bottom rule) — no header block, no leading blank — the rows
-        // follow, and the hint is the last content row with one blank
-        // under it.
+        // The login menu matches the /model and /mcp pickers (operator directive 2026-09-25): the
+        // frame opens with the search field itself — no header block, no leading blank — the rows
+        // follow, and the hint is the last content row with one blank under it.
         let mut selector =
             ProviderAuthSelector::new(AuthSelectorKind::Login, vec![openai(), linear()]);
         selector.render(&theme(), 80, &kb());
@@ -947,20 +854,15 @@ mod tests {
         assert!(text
             .iter()
             .any(|row| row.contains("Choose a credential to remove.")));
-        // Enter on a logout row removes the credential.
         assert_eq!(
             selector.handle_key("enter", &kb()),
             AuthSelectorAction::Logout { provider: openai() }
         );
     }
 
-    /// TS `showApiKeyLoginDialog`'s prompt frame (the operator addendum:
-    /// the /login API-key prompt aligns with the TS login dialog): the
-    /// borderMuted rule, the muted `Login to {provider}` title, the
-    /// `startContent` blank, the text-coloured `Enter API key:` section
-    /// title, the plain `> ` field, the blank between field and actions,
-    /// and the auth-actions row last — no bottom rule, no "Sign In"
-    /// header, no combined prompt-and-value row.
+    /// The API-key prompt frame (operator addendum: the /login prompt aligns with the TS login
+    /// dialog): the borderMuted rule, the muted `Login to {provider}` title, the `Enter API key:`
+    /// section title, the plain `> ` field, and the auth-actions row last — no bottom rule.
     #[test]
     fn the_api_key_prompt_renders_the_ts_login_dialog_frame() {
         let mut selector = ProviderAuthSelector::new(AuthSelectorKind::Login, vec![openai()]);

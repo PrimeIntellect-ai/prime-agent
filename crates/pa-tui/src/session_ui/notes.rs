@@ -1,15 +1,14 @@
-//! The status-row concern: the note/toast/error-row rendering family
-//! (TS `showStatus`/`showError`), the tray rebuild, the goal-tray
-//! glue, and the anthropic-subscription warning pair that rides it.
+//! The note/toast/error-row rendering family, the tray rebuild, the
+//! goal-tray glue, and the anthropic-subscription warning pair that
+//! rides it.
 use super::{
     format_goal_status, terminal_columns, AgentView, ChatEntry, DaemonCommand, Duration, Map,
     SessionUi, StatusKind, Value, ANTHROPIC_SUBSCRIPTION_AUTH_WARNING, UI_REQUEST_TIMEOUT_MS,
 };
 
 impl SessionUi {
-    /// One `goal_update` session event (TS `handleGoalUpdate`): store the
-    /// state, announce as a status row when the dedupe rules say so, and
-    /// sync the tray goal label.
+    /// One `goal_update` session event: store the state, announce as a status
+    /// row when the dedupe rules say so, and sync the tray goal label.
     pub(super) fn apply_goal_update(&mut self, goal: Value, view: &mut AgentView) {
         let Ok(goal) = serde_json::from_value::<pa_types::goal::GoalState>(goal) else {
             return;
@@ -26,9 +25,8 @@ impl SessionUi {
         self.sync_goal_tray(view);
     }
 
-    /// The goal status row (TS `showStatus` via `formatGoalStatus`): a
-    /// consecutive announcement rewrites the previous status row in place
-    /// while it is still the transcript's last entry.
+    /// The goal status row: a consecutive announcement rewrites the previous
+    /// status row in place while it is still the transcript's last entry.
     fn announce_goal_status(&mut self, view: &mut AgentView) {
         let columns = terminal_columns();
         let text = format_goal_status(&self.goal_view.goal, columns);
@@ -48,10 +46,8 @@ impl SessionUi {
         self.dirty = true;
     }
 
-    /// The goal's dock row follows the current goal state (the tray's
-    /// TS `getTrayGoalLabel` cluster is deliberately not ported — the
-    /// operator's 2026-09-24 directive moves "Pursuing goal" off the
-    /// line below the prompt bar; the dock's row below carries it).
+    /// The goal's dock row follows the current goal state; the tray's TS cluster is deliberately
+    /// not ported (the operator's 2026-09-24 directive).
     pub(crate) fn sync_goal_tray(&mut self, view: &mut AgentView) {
         let previous = view.chrome.activity.clone();
         self.update_subagent_summary(view);
@@ -71,19 +67,16 @@ impl SessionUi {
         self.note_as(text, StatusKind::Info, view);
     }
 
-    /// Show an ephemeral action toast (the top-right auto-dismiss overlay;
-    /// a sanctioned divergence from TS — see `toast`): the confirmation
-    /// never lands in the transcript, and the frame repaints so the
-    /// overlay appears at once (its expiry repaints it away).
+    /// Show an ephemeral action toast (a sanctioned divergence from TS — see `toast`): the
+    /// confirmation never lands in the transcript, and the frame repaints so the overlay appears at
+    /// once.
     pub(crate) fn toast(&mut self, text: &str, view: &mut AgentView) {
         view.toasts.push(text);
         self.dirty = true;
     }
 
-    /// A plain appended dim row (TS `chatContainer.addChild(new
-    /// Markdown/Text(...))` — `/name` and `/rlm-max-depth` report rows):
-    /// unlike `note` it never rewrites the previous status in place, so
-    /// back-to-back rows stack like the TS plain rows.
+    /// A plain appended dim row (`/name` and `/rlm-max-depth` report rows): unlike `note` it never
+    /// rewrites the previous status in place, so back-to-back rows stack.
     pub(crate) fn plain_row(&mut self, text: &str, view: &mut AgentView) {
         view.push_entry(ChatEntry::Status {
             text: text.to_string(),
@@ -93,12 +86,10 @@ impl SessionUi {
         self.dirty = true;
     }
 
-    /// TS `showStatus` with a tone: the same back-to-back in-place rewrite
-    /// as [`Self::note`], with the row's kind following the TS tone.
+    /// [`Self::note`] with a tone: the same back-to-back in-place rewrite.
     pub(crate) fn note_as(&mut self, text: &str, kind: StatusKind, view: &mut AgentView) {
-        // TS `showStatus`: a status emitted back-to-back (nothing else
-        // reached the chat since the previous one) rewrites the previous
-        // status row in place instead of appending a new one.
+        // TS `showStatus`: a status emitted back-to-back (nothing else reached the chat since the
+        // previous one) rewrites the previous status row in place.
         let updated_in_place = match self.last_status_index {
             Some(index) if index + 1 == view.chat_len() => {
                 view.update_status_row(index, text, kind.clone())

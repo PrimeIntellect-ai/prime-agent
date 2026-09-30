@@ -1,32 +1,22 @@
-//! Headless e2e for the slash-menu panel's top border (the operator's
-//! 2026-09-26 directive): the dropdown opens with the one full-width
-//! muted rule every inline menu panel opens with (TS `MenuPanel.render`,
-//! the rule that separates a panel from the transcript above), drawn
-//! directly above the menu rows — so an open slash-command menu reads as
-//! a panel, not as loose transcript rows.
+//! Headless e2e for the slash-menu panel's top border (operator directive
+//! 2026-09-26): the dropdown opens with the full-width muted rule every
+//! inline menu panel opens with (TS `MenuPanel.render`), drawn directly
+//! above the menu rows.
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -50,8 +40,6 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve one connection: attach an empty session, then answer the
-    /// loop's requests.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
         let write_stream = stream.try_clone().expect("clone mock socket");
@@ -265,10 +253,6 @@ fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
     outcome.frames
 }
 
-/// Typing `/` opens the slash-command panel with its top border: the
-/// full-width muted rule renders directly above the selected marker row —
-/// no blank row between them — so the panel reads as open against the
-/// transcript above it.
 #[test]
 fn slash_menu_opens_with_the_top_border_rule() {
     let steps = vec![
