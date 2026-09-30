@@ -6,7 +6,7 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
-use super::git::{parse_status, GitStatus, HeadTreeEntry, StatusEntry};
+use super::git::{git_command, parse_status, GitStatus, HeadTreeEntry, StatusEntry};
 #[cfg(unix)]
 use super::git::{read_head_tree, read_worktree_status};
 use super::manifest::{is_safe_relative_path, symlink_target_stays_inside};
@@ -20,11 +20,7 @@ use super::{open_leaf, OpenLeaf};
 
 #[cfg(unix)]
 fn git(dir: &Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .unwrap();
+    let output = git_command(args, dir).into_std().output().unwrap();
     assert!(
         output.status.success(),
         "git {args:?} failed: {}",
@@ -50,9 +46,8 @@ fn write(dir: &Path, rel: &str, content: &str) {
 
 #[cfg(unix)]
 fn git_show(dir: &Path, revision: &str) -> String {
-    let output = std::process::Command::new("git")
-        .args(["show", revision])
-        .current_dir(dir)
+    let output = git_command(&["show", revision], dir)
+        .into_std()
         .output()
         .unwrap();
     assert!(
@@ -65,9 +60,8 @@ fn git_show(dir: &Path, revision: &str) -> String {
 
 #[cfg(unix)]
 fn head_commit(dir: &Path) -> String {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(dir)
+    let output = git_command(&["rev-parse", "HEAD"], dir)
+        .into_std()
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -639,9 +633,8 @@ async fn snapshot_captures_unmerged_conflict_worktree_content() {
     git(root, &["checkout", "-q", "-"]);
     write(root, "f.txt", "main\n");
     git(root, &["commit", "-q", "-am", "main"]);
-    let merge = std::process::Command::new("git")
-        .args(["merge", "side"])
-        .current_dir(root)
+    let merge = git_command(&["merge", "side"], root)
+        .into_std()
         .output()
         .unwrap();
     assert!(!merge.status.success(), "expected a conflict");
@@ -707,9 +700,8 @@ async fn head_tree_baseline_ships_head_content_and_full_coverage() {
     // matches `git hash-object` byte for byte.
     assert_eq!(git_show(root, "HEAD:b.txt"), "bee\n");
     assert_eq!(read_blob(staging.path(), &digest(b"bee\n")), b"bee\n");
-    let hash_object = std::process::Command::new("git")
-        .args(["hash-object", "--", "b.txt"])
-        .current_dir(root)
+    let hash_object = git_command(&["hash-object", "--", "b.txt"], root)
+        .into_std()
         .output()
         .unwrap();
     assert!(hash_object.status.success());
@@ -726,9 +718,8 @@ async fn head_tree_baseline_ships_head_content_and_full_coverage() {
     );
     // Full coverage: every path in HEAD's tree is carried by the delta,
     // the baseline, or an exclusion with a reason.
-    let ls_tree = std::process::Command::new("git")
-        .args(["ls-tree", "-r", "--name-only", "HEAD"])
-        .current_dir(root)
+    let ls_tree = git_command(&["ls-tree", "-r", "--name-only", "HEAD"], root)
+        .into_std()
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&ls_tree.stdout);
@@ -1318,7 +1309,7 @@ fn git_selection_env_is_scrubbed_from_child_commands() {
     // git command at another repository; the child command drops the
     // git-discovery variables so the capture always describes the root
     // it was given.
-    let command = super::git::git_command(&["status"], Path::new("/tmp"));
+    let command = git_command(&["status"], Path::new("/tmp"));
     let removed: Vec<String> = command
         .as_std()
         .get_envs()
