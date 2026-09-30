@@ -45,9 +45,11 @@ $ReleaseChannelDefault = 'stable'
 
 function Fail($message) {
     # The download scratch (the tarball + the sums) rides every exit path:
-    # Fail sweeps it before exiting (the bots' finding: accumulated release
-    # tarballs in the temp folder).
-    if (Get-Variable -Name download -Scope Script -ErrorAction SilentlyContinue) {
+    # Fail sweeps it before exiting - but ONLY the scratch THIS script
+    # created (the created-flag guards it: under `irm | iex` the script
+    # scope is the caller's session, and an ambient `$download` variable
+    # must never be deleted - the bots' finding).
+    if ($script:downloadCreated) {
         Remove-Item -Recurse -Force $script:download -ErrorAction SilentlyContinue
     }
     Write-Error "install.ps1: $message"
@@ -168,13 +170,16 @@ if (-not $versionPin) {
 $releasePrefix = "releases/v$version"
 $download = Join-Path ([IO.Path]::GetTempPath()) ("prime-agent-download-{0}" -f [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $download | Out-Null
+$script:downloadCreated = $true
 # THE DOWNLOAD SWEEP: the scratch (the tarball + the sums) is removed when
 # this script exits - success, a Fail, or a terminating error (install-
 # rust.sh's `rm -rf "$dl"` discipline; the bots' finding: accumulated
 # release tarballs in the temp folder). A script-scoped trap carries the
 # cleanup through the non-local Fail exits.
 trap {
-    Remove-Item -Recurse -Force $download -ErrorAction SilentlyContinue
+    if ($script:downloadCreated) {
+        Remove-Item -Recurse -Force $script:download -ErrorAction SilentlyContinue
+    }
     break
 }
 $tarball = Join-Path $download $expectedFile
@@ -233,9 +238,17 @@ try {
     if (Test-Path $pidPath) { $heldBy = (Get-Content -LiteralPath $pidPath -ErrorAction SilentlyContinue) }
     Fail "another installer (pid $heldBy) or a stale publication lock owns $lockDir; if no installer is running, remove it and re-run"
 }
-Set-Content -LiteralPath (Join-Path $lockDir 'pid') -Value $PID
+try {
+    Set-Content -LiteralPath (Join-Path $lockDir 'pid') -Value $PID
+} catch {
+    # A failed PID write releases the freshly claimed lock (the bots'
+    # finding: the leaked lock otherwise blocks every later install).
+    Remove-Item -Recurse -Force $lockDir -ErrorAction SilentlyContinue
+    Fail "could not write the publication lock PID: $($_.Exception.Message)"
+}
 
 $published = $false
+$rollback = $null
 try {
     # THE DAEMON STOP, inside the lock's try (a terminating error in the
     # stop must still release the lock - the bots' finding: the stale lock
@@ -284,10 +297,14 @@ try {
 } finally {
     # A failed publish never leaves the machine without its previous payload:
     # the old tree returns to the live name before the lock releases (the sh
-    # installer's restore-on-exit discipline).
-    if (-not $published -and (Test-Path $rollback -PathType Container) -and -not (Test-Path $share)) {
-        [IO.Directory]::Move($rollback, $share)
-        Write-Warning "the publish failed; the previous payload was restored to $share"
+    # installer's restore-on-exit discipline). $rollback is pre-initialized:
+    # a terminating error before its assignment must not turn the finally's
+    # own check into the leaked-lock failure (the bots' finding).
+    if ($rollback -and (Test-Path $rollback -PathType Container) -and -not (Test-Path $share)) {
+        if (-not $published) {
+            [IO.Directory]::Move($rollback, $share)
+            Write-Warning "the publish failed; the previous payload was restored to $share"
+        }
     }
     Remove-Item -Recurse -Force $lockDir -ErrorAction SilentlyContinue
 }
@@ -299,11 +316,28 @@ try {
 # --- aside, never overwritten (an unrelated command is never destroyed)
 # --- AND a failure after a preserve puts the user's file back (the sh
 # --- installer's restore-on-exit contract; the bots' finding).
+# The failure-restore contract: a launcher write that truncates its
+# destination mid-write must never leave the machine without its command.
+# An UNOWNED launcher is moved aside (never overwritten without a backup);
+# an INSTALLER-OWNED launcher is snapshotted to a backup slot first (an
+# I/O failure at the Set-Content can truncate a live, working launcher -
+# the bots' finding), and the catch block restores from either.
 $preservedLaunchers = @()
+$ownedLauncherBackups = @()
+function Backup-ExistingLauncher($path) {
+    if (-not (Test-Path $path -PathType Leaf)) { return }
+    $backup = "$path.install-backup"
+    while (Test-Path $backup) { $backup = "$backup.$([Guid]::NewGuid().ToString('N').Substring(0,4))" }
+    Copy-Item -LiteralPath $path -Destination $backup -Force
+    $script:ownedLauncherBackups += ,@($backup, $path)
+}
 function Preserve-UnownedLauncher($path) {
     if (-not (Test-Path $path -PathType Leaf)) { return }
     $firstLine = (Get-Content -LiteralPath $path -TotalCount 2) -join ' '
-    if ($firstLine -match 'launcher written by install-rust\.sh') { return }
+    if ($firstLine -match 'launcher written by install-rust\.sh') {
+        Backup-ExistingLauncher $path
+        return
+    }
     $preserved = "$path.pre-takeover"
     while (Test-Path $preserved) { $preserved = "$preserved.$([Guid]::NewGuid().ToString('N').Substring(0,4))" }
     [IO.File]::Move($path, $preserved)
@@ -332,13 +366,18 @@ exec "$(dirname "$0")/../share/prime-agent/prime-agent.exe" "$@"
     [IO.File]::WriteAllText($shLauncher, $shBody.Replace("`r`n", "`n"))
 } catch {
     # A failed launcher write never leaves the machine without its command:
-    # every preserved file goes home before the failure surfaces. The
-    # destination's PARTIAL file (Set-Content/WriteAllText can create or
-    # truncate before throwing) is removed first - the bots' finding: the
-    # broken new file otherwise blocks the restore.
+    # every preserved file goes home, and every OWNED launcher's pre-write
+    # snapshot is restored over its truncated form, before the failure
+    # surfaces. The destination's PARTIAL file (Set-Content/WriteAllText
+    # can create or truncate before throwing) is removed first - the broken
+    # new file otherwise blocks the restore.
     foreach ($pair in $script:preservedLaunchers) {
         if (Test-Path $pair[1]) { Remove-Item -Force $pair[1] -ErrorAction SilentlyContinue }
         [IO.File]::Move($pair[0], $pair[1])
+    }
+    foreach ($pair in $script:ownedLauncherBackups) {
+        Copy-Item -LiteralPath $pair[0] -Destination $pair[1] -Force
+        Remove-Item -Force $pair[0] -ErrorAction SilentlyContinue
     }
     throw
 }
@@ -382,4 +421,4 @@ Write-Host "source:    the $channel channel at $baseUrl (prime-agent $version)"
 Write-Host 'next steps: the README''s Install section ships inside the payload:'
 Write-Host "  $share\README.md"
 
-Remove-Item -Recurse -Force $download -ErrorAction SilentlyContinue
+if ($script:downloadCreated) { Remove-Item -Recurse -Force $script:download -ErrorAction SilentlyContinue }
