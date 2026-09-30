@@ -1,10 +1,7 @@
-//! Scripted-loop verifier tests for the agent crate.
-//!
-//! Each test replays a scripted tool-call conversation through the loop via the
-//! [`ScriptedProvider`] faux provider, checking the semantics ported from
-//! `packages/agent/src/agent-loop.ts`: normal turns, parallel tool calls, tool
-//! errors, mid-turn provider stream failures with retry, user abort
-//! mid-stream, and max-iteration stops.
+//! Scripted-loop verifier tests for the agent crate: each test replays a
+//! scripted tool-call conversation through the loop via [`ScriptedProvider`],
+//! checking normal turns, parallel tool calls, tool errors, mid-turn failures
+//! with retry, abort, and max-iteration stops.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -36,7 +33,7 @@ fn test_model() -> Model {
 }
 
 /// Echo tool: returns its `text` argument, optionally after a delay and/or
-/// failing. Records concurrent executions.
+/// failing; records concurrent executions.
 struct EchoTool {
     name: &'static str,
     delay_ms: u64,
@@ -277,7 +274,6 @@ async fn tool_call_turn_dispatches_and_feeds_result_back() {
 
     assert_eq!(echo.calls.load(Ordering::SeqCst), 1);
 
-    // Second provider call must see user, assistant, toolResult in order.
     let calls = provider.calls();
     assert_eq!(calls.len(), 2);
     let second = &calls[1];
@@ -319,7 +315,6 @@ async fn parallel_tool_calls_execute_concurrently_and_emit_in_order() {
     agent.prompt("go").await.unwrap();
     agent.wait_for_idle().await;
 
-    // Parallel mode (default toolExecution): the calls overlapped.
     assert!(
         slow.max_concurrent.load(Ordering::SeqCst) >= 2,
         "parallel tool calls must overlap"
@@ -373,7 +368,6 @@ async fn tool_error_produces_error_tool_result_and_loop_continues() {
     let result = tool_result(&state.messages[2]);
     assert!(result.is_error);
     assert_eq!(single_text(&result.content), "boom from bad_tool");
-    // The loop continues: the model sees the error result and answers.
     assert_eq!(state.messages.len(), 4);
     assert!(matches!(
         &state.messages[3],
@@ -404,7 +398,6 @@ async fn unknown_tool_name_yields_error_tool_result() {
 #[tokio::test]
 async fn provider_stream_failure_mid_turn_ends_run_and_retry_continues() {
     let (agent, provider, _events) = scripted_agent(vec![]).await;
-    // The stream delivers partial text, then fails mid-turn.
     provider.push_stream_failure_turn("partial answer", "connection reset by peer");
 
     agent.prompt("hello").await.unwrap();
@@ -426,8 +419,8 @@ async fn provider_stream_failure_mid_turn_ends_run_and_retry_continues() {
         Some("connection reset by peer")
     );
 
-    // Retry: `runAgentLoopContinue` is the documented retry path; the context
-    // still ends in a user message, so the retry produces a fresh answer.
+    // Retry via `runAgentLoopContinue`: the context still ends in a user
+    // message, so the retry produces a fresh answer.
     let retry_provider = Arc::new(ScriptedProvider::new(test_model()));
     retry_provider.push_text_turn("retried answer");
     let config = AgentLoopConfig::new(test_model(), AgentLoopConfig::default_convert_to_llm());
@@ -501,7 +494,6 @@ async fn user_abort_mid_stream_finalizes_aborted_assistant_message() {
         aborted.error_message.as_deref(),
         Some("Request was aborted")
     );
-    // The partial content streamed before the abort is preserved.
     assert!(
         matches!(&aborted.content[..], [AssistantContent::Text(TextContent { text, .. })] if text == "partial before abort")
     );
@@ -530,8 +522,7 @@ async fn abort_during_tool_execution_produces_aborted_tool_result() {
 
     let state = agent.state().await;
     // user, assistant(toolUse), toolResult(aborted) — the TS abort test
-    // (agent.test.ts "abort during tool execution") asserts exactly this
-    // shape: aborted tool result, no further assistant turn.
+    // asserts exactly this shape: no further assistant turn.
     let result = tool_result(&state.messages[2]);
     assert!(result.is_error);
     assert_eq!(single_text(&result.content), "Tool execution aborted");
@@ -544,7 +535,6 @@ async fn abort_during_tool_execution_produces_aborted_tool_result() {
 async fn max_iterations_stops_after_configured_turn_count() {
     let echo = EchoTool::new("echo");
     let (_agent, provider, _events) = scripted_agent(vec![echo.clone()]).await;
-    // Loop of tool-call turns; the stop hook bounds the iteration count.
     for _ in 0..5 {
         provider.push_tool_call_turn(
             None,
@@ -552,11 +542,10 @@ async fn max_iterations_stops_after_configured_turn_count() {
         );
     }
 
-    // Max-turn behavior is host-owned (TS parity): stop before the third turn.
-    // `shouldStopBeforeTurn` is evaluated at several boundaries per turn in
-    // the TS loop, so the turn count is tracked in `shouldStopAfterTurn`
-    // (invoked exactly once per completed turn) and the before-turn hook
-    // only reads it.
+    // Stop before the third turn: `shouldStopBeforeTurn` is evaluated at
+    // several boundaries per turn in the TS loop, so the turn count is
+    // tracked in `shouldStopAfterTurn` (once per completed turn) and the
+    // before-turn hook only reads it.
     let turn_count = Arc::new(AtomicUsize::new(0));
     let count_turns = Arc::clone(&turn_count);
     let turn_count_snapshot = Arc::clone(&turn_count);
@@ -582,7 +571,6 @@ async fn max_iterations_stops_after_configured_turn_count() {
     bounded.prompt("go").await.unwrap();
     bounded.wait_for_idle().await;
 
-    // Exactly two assistant turns ran (max iterations reached, then stop).
     let state = bounded.state().await;
     let assistant_turns = state
         .messages
@@ -649,8 +637,6 @@ async fn terminate_tool_result_stops_the_run() {
     agent.prompt("go").await.unwrap();
     agent.wait_for_idle().await;
 
-    // `terminate: true` on every tool result in the batch ends the run without
-    // another model call.
     assert_eq!(provider.calls().len(), 1);
     let state = agent.state().await;
     assert_eq!(state.messages.len(), 3);
@@ -714,7 +700,6 @@ fn scripted_event_shapes_round_trip_through_the_event_enum() {
     assert!(done.terminal_message().is_some());
     assert!(!done.is_delta());
 
-    // Scripted script builders produce well-formed terminal scripts.
     let steps = pa_agent::scripted::text_turn_steps(&model, "hi");
     assert!(steps
         .iter()
