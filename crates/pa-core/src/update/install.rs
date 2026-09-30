@@ -1,25 +1,13 @@
-//! The managed install-root layout (the TS `native-installation.ts` port):
-//! the on-disk contract the coordinator's activation path owns —
-//! `bin/prime-agent` and `bin/previous` symlinks into
-//! `releases/<version>-<platform>-<sha256>/`, the `.managed` marker, and the
-//! `.activation-state` rollback pointer (spec §7 "install root
-//! (TS-compatible, native-installation.ts parity)").
-//!
-//! Divergence from TS: TS releases carry
-//! `package.json`, `install.sh`, `.archive-sha256`, and `.install-source`
-//! from the installer; the Rust release payload
-//! ships `prime-agent`, `prime-agent-runtime/`, `skills/`,
-//! `LICENSE`, `README.md`, and the update flow writes `.archive-sha256` and
-//! `.install-source` itself at staging time. Validation checks the Rust
-//! payload, never the TS asset list.
+//! The managed install-root layout: `bin/prime-agent` and `bin/previous` symlinks into
+//! `releases/<version>-<platform>-<sha256>/`, the `.managed` marker, and the `.activation-state`
+//! rollback pointer. Divergence: the release payload is the Rust asset list, never the TS one.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 
-/// The release platforms the update flow knows (TS `NATIVE_PLATFORMS`, the
-/// subset the Rust port currently publishes; the manifest ignores unknown
-/// entries, so future platforms pass through unvalidated).
+/// The release platforms the update flow knows; the manifest ignores
+/// unknown entries, so future platforms pass through unvalidated.
 pub const KNOWN_PLATFORMS: &[&str] = &[
     "darwin-arm64",
     "darwin-x64",
@@ -28,9 +16,8 @@ pub const KNOWN_PLATFORMS: &[&str] = &[
     "win32-x64",
 ];
 
-/// The TS release-platform alias of the running build (`assemble_artifacts.py`
-/// `TARGET_ALIASES`). Baseline/musl variants cannot be distinguished at
-/// runtime; the plain alias matches what the coordinator downloads.
+/// The TS release-platform alias of the running build (baseline/musl variants
+/// cannot be distinguished at runtime; the plain alias matches the download).
 #[must_use]
 pub fn current_platform_alias() -> &'static str {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -56,8 +43,7 @@ pub fn current_platform_alias() -> &'static str {
 }
 
 /// One symlink target under the install root: the release directory name,
-/// version, platform, and archive sha256 parsed from the
-/// `../releases/<version>-<platform>-<sha256>/prime-agent` link shape.
+/// version, platform, and archive sha256 parsed from the launcher-link shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallTarget {
     pub root: PathBuf,
@@ -69,8 +55,7 @@ pub struct InstallTarget {
     pub sha256: String,
 }
 
-/// A validated installation plus its download base URL (TS
-/// `NativeInstallation`).
+/// A validated installation plus its download base URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Installation {
     pub target: InstallTarget,
@@ -92,8 +77,7 @@ impl Installation {
     }
 }
 
-/// The marker file proving the root belongs to the Prime Agent installer
-/// layout (TS `.managed` = `prime-agent-native-v1`).
+/// The marker file proving the root belongs to the Prime Agent installer layout.
 pub const MANAGED_MARKER: &str = "prime-agent-native-v1";
 
 /// The payload every staged release must carry.
@@ -109,9 +93,8 @@ pub const RELEASE_ASSETS: &[&str] = &[
 pub const CURRENT_LAUNCHER: &str = "prime-agent";
 pub const PREVIOUS_LAUNCHER: &str = "previous";
 
-/// Read the install root of `executable`'s managed layout: the executable
-/// resolves through `<root>/bin/<link>`; the root is `<root>/.managed`'s
-/// directory (TS `getNativeInstallationTarget`).
+/// Read the install root of `executable`'s managed layout: the executable resolves
+/// through `<root>/bin/<link>`; the root is `<root>/.managed`'s directory.
 #[must_use]
 pub fn install_root_of(executable: &Path) -> Option<PathBuf> {
     let resolved = executable.canonicalize().ok()?;
@@ -129,10 +112,9 @@ pub fn install_root_of(executable: &Path) -> Option<PathBuf> {
     Some(root.to_path_buf())
 }
 
-/// Parse one launcher's symlink into a validated [`InstallTarget`] (TS
-/// `readNativeTarget`): the link must point at
-/// `../releases/<version>-<platform>-<sha256>/prime-agent`, the payload must
-/// exist, and `.archive-sha256` must match the recorded digest.
+/// Parse one launcher's symlink into a validated [`InstallTarget`]: the
+/// link must point at `../releases/<version>-<platform>-<sha256>/prime-agent`,
+/// the payload must exist, and `.archive-sha256` must match the recorded digest.
 fn read_target(root: &Path, link: &str) -> Result<InstallTarget> {
     let launcher = root.join("bin").join(link);
     let target_text = std::fs::read_link(&launcher)
@@ -172,26 +154,18 @@ fn release_directory_name(link: &ReleaseLink) -> String {
     format!("{}-{}-{}", link.version, link.platform, link.sha256)
 }
 
-/// The release a running executable lives in: its release directory and the
-/// version parsed from the directory name. This is the updater's baseline
-/// anchor — the version the update decision compares against comes from the
-/// directory the RUNNING binary occupies, never from a launcher that can
-/// point elsewhere. A hand-named directory (`0.10.0-rust-<sha>` dogfood
-/// trains) fails the parse and is refused as a baseline, so the updater can
-/// never plan an update "from" a version its binary does not report.
+/// The release a running executable lives in: its release directory and the version parsed from the
+/// directory name — the updater's baseline anchor, never a launcher that can point elsewhere.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningRelease {
     pub release_dir: PathBuf,
     pub version: String,
 }
 
-/// The running binary's release directory and version.
-///
 /// # Errors
 ///
-/// Returns an error when the executable path cannot be resolved, does not
-/// live in a release directory, or its directory name is not a managed
-/// release name.
+/// Returns an error when the executable cannot be resolved or does not
+/// live in a managed release directory.
 pub fn running_release(executable: &Path) -> Result<RunningRelease> {
     let resolved = executable
         .canonicalize()
@@ -236,8 +210,7 @@ pub fn install_source_is_valid(source: &str) -> bool {
 ///
 /// # Errors
 ///
-/// Returns an error when the directory cannot be opened or its `sync_all`
-/// fails.
+/// Returns an error when the directory cannot be opened or its `sync_all` fails.
 pub fn sync_directory(path: &Path) -> Result<()> {
     let dir = std::fs::File::open(path)?;
     dir.sync_all()
@@ -251,12 +224,9 @@ struct ReleaseLink {
     sha256: String,
 }
 
-/// Parse `../releases/<version>-<platform>-<sha256>/prime-agent` (TS
-/// `NATIVE_RELEASE_DIRECTORY`, without a regex dependency: strip the digest
-/// from the right, then match the longest known platform suffix - the
-/// platform may itself contain dashes and the version a prerelease tag).
-/// The TS layout allows an optional 6-character build id after the digest;
-/// a Rust coordinator reading a TS-era install root must accept it too.
+/// Parse `../releases/<version>-<platform>-<sha256>/prime-agent` (TS `NATIVE_RELEASE_DIRECTORY`):
+/// strip the digest from the right, then match the longest known platform suffix (the TS layout
+/// allows an optional 6-character build id after the digest, which must be accepted too).
 fn parse_release_link(target: &Path) -> Option<ReleaseLink> {
     let text = target.to_str()?;
     if !text.starts_with("../releases/") || !text.ends_with("/prime-agent") {
@@ -291,8 +261,7 @@ fn parse_release_link(target: &Path) -> Option<ReleaseLink> {
     })
 }
 
-/// Validate a release directory's payload and archive digest (TS
-/// `validateNativeInstallation`, Rust payload list).
+/// Validate a release directory's payload and archive digest (the Rust payload list).
 pub(super) fn validate_release_dir(release_dir: &Path, archive_sha256: &str) -> Result<()> {
     for asset in RELEASE_ASSETS {
         let path = release_dir.join(asset);
@@ -322,14 +291,13 @@ pub(super) fn validate_release_dir(release_dir: &Path, archive_sha256: &str) -> 
     Ok(())
 }
 
-/// Read the active installation (`bin/prime-agent`), TS
-/// `readNativeInstallation(root)`. Falls back to `bin/previous` when the
-/// active link is missing (the coordinator's rollback planning path).
+/// Read the active installation (`bin/prime-agent`). Falls back to
+/// `bin/previous` when the active link is missing (the coordinator's
+/// rollback planning path).
 ///
 /// # Errors
 ///
-/// Returns an error when the launcher link cannot be read or validated, or
-/// the release's `.install-source` metadata cannot be read.
+/// Returns an error when the launcher link or `.install-source` cannot be read or validated.
 pub fn read_installation(root: &Path, link: &str) -> Result<Installation> {
     let target = read_target(root, link)?;
     let base_url = std::fs::read_to_string(target.release_dir.join(".install-source"))
@@ -339,16 +307,13 @@ pub fn read_installation(root: &Path, link: &str) -> Result<Installation> {
     Ok(Installation { target, base_url })
 }
 
-/// The rollback installation (TS `readNativeRollbackInstallation`): the
-/// `.activation-state` record wins when present — it carries both link
-/// targets from the interrupted swap, and trusting the bare `previous` link
-/// alone would be ambiguous after a partial repoint.
+/// The rollback installation: the `.activation-state` record wins when
+/// present — trusting the bare `previous` link alone would be ambiguous
+/// after a partial repoint.
 ///
 /// # Errors
 ///
-/// Returns an error when the `.activation-state` record cannot be read or is
-/// empty or truncated, or when the fallback `previous` installation cannot
-/// be read.
+/// Returns an error when the rollback record or fallback `previous` cannot be read.
 pub fn read_rollback_installation(root: &Path) -> Result<Installation> {
     let state_path = root.join(".activation-state");
     if !state_path.exists() {
@@ -368,10 +333,8 @@ pub fn read_rollback_installation(root: &Path) -> Result<Installation> {
             state_path.display()
         )
     })?;
-    // The state's second line is the previous launcher's TARGET text (the
-    // swap writes exactly that): parse it, resolve the release directory
-    // through the root, and never re-read a link - a rollback must not
-    // depend on links a partial swap may not have written yet.
+    // The state's second line is the previous launcher's TARGET text: parse it and never re-read a
+    // link - a rollback must not depend on links a partial swap may not have written yet.
     let target = parse_release_link(Path::new(previous)).ok_or_else(|| {
         anyhow!(
             "the previous target recorded in {} is not a release",

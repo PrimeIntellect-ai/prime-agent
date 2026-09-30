@@ -1,5 +1,4 @@
-//! The model-registry unit battery: the in-memory catalog, the auth
-//! filters, the live cache merges, and the provider headers.
+//! The registry unit battery: catalog, auth filters, cache merges, headers.
 use super::*;
 use crate::auth::manager::{AuthStorage, NoOAuth};
 use crate::auth::types::AuthStorageData;
@@ -33,7 +32,6 @@ fn in_memory_loads_built_in_catalog() {
     let registry = ModelRegistry::in_memory(auth_with(&serde_json::json!({})));
     assert!(registry.get_error().is_none());
     assert!(!registry.get_all().is_empty());
-    // Bundled private model is present in the unfiltered catalog.
     assert!(registry
         .get_all()
         .iter()
@@ -46,13 +44,10 @@ fn available_filters_by_configured_auth() {
         "anthropic": { "type": "api_key", "key": "sk-ant" }
     }));
     let registry = ModelRegistry::in_memory(auth);
-    // Stored credential authorizes the provider.
     assert!(registry.has_configured_auth(&model("m", "anthropic")));
-    // An unconfigured provider (no stored cred, no env var, no models.json
-    // key) is auth-gated out. The name is deliberately obscure so ambient
-    // environment variables cannot authorize it.
+    // An unconfigured provider is auth-gated out; the name is deliberately
+    // obscure so ambient environment variables cannot authorize it.
     assert!(!registry.has_configured_auth(&model("m", "zz-no-provider")));
-    // Available is a subset of all.
     let all = registry.get_all();
     let available = registry.get_available();
     assert!(available.iter().all(|available_model| {
@@ -64,10 +59,9 @@ fn available_filters_by_configured_auth() {
 
 #[test]
 fn rlm_searchable_models_gate_one_stale_provider_across_its_models() {
-    // The per-provider status memo must answer every model of a
-    // provider with the same probe result: a stale provider's whole
-    // model list stays gated while a second authed provider keeps its
-    // models searchable.
+    // The per-provider status memo must answer every model of a provider
+    // with the same probe result: a stale provider's whole model list stays
+    // gated while a second authed provider keeps its models searchable.
     let mut auth = auth_without_env(&serde_json::json!({
         "anthropic": { "type": "api_key", "key": "sk-ant" },
         "openai": { "type": "api_key", "key": "sk-oai" }
@@ -111,7 +105,6 @@ fn models_json_custom_models_and_auth_header() {
         .expect("custom model merged")
         .clone();
     assert_eq!(custom.base_url, "https://custom.example");
-    // models.json apiKey makes the provider available.
     assert!(registry.get_available().iter().any(|m| m.id == "my-model"));
     let auth_result = registry.get_api_key_and_headers(&custom, None);
     assert!(auth_result.ok);
@@ -233,17 +226,13 @@ fn live_scope_keyed_cache_merges_over_the_compiled_prime_inference_models() {
         repriced_model.base_url,
         super::super::prime_inference::PRIME_INFERENCE_BASE_URL
     );
-    // The live-only model is present.
     assert!(all
         .iter()
         .any(|model| model.id == "anthropic/live-only-model"));
-    // The custom models.json model survives the merge.
     assert!(all.iter().any(|model| model.id == "my-model"));
-    // Compiled models of other providers stay.
     assert!(all
         .iter()
         .any(|model| model.provider == "anthropic" && model.id != repriced.id));
-    // A different credential's scope never sees this snapshot.
     let other_auth = auth_without_env(&serde_json::json!({
         "prime-inference": { "type": "api_key", "key": "other-key",
             "primeTeam": { "teamId": "team-2", "name": "Team 2" } }
@@ -279,7 +268,6 @@ fn a_missing_or_corrupt_cache_falls_back_to_the_bundled_catalog() {
     )
     .unwrap();
     let registry = ModelRegistry::create(auth_with(&serde_json::json!({})), &models_path);
-    // The bundled public prime-inference models serve the catalog.
     assert!(registry
         .get_all()
         .iter()
@@ -376,11 +364,9 @@ fn a_stored_xai_subscription_switches_its_models_onto_responses() {
     );
 }
 
-/// TS `getXaiSubscriptionModel` fills only an absent `thinkingLevelMap`:
-/// a model that already declares addressable levels keeps them under
-/// the subscription — a blanket replacement collapsed a thinking-capable
-/// route onto the all-null "unverified controls" default arm (the
-/// `/effort` false refusal).
+/// A model that already declares addressable levels keeps them under the
+/// subscription — a blanket replacement collapsed a thinking-capable route
+/// onto the all-null default arm (the `/effort` false refusal).
 #[test]
 fn a_subscription_model_keeps_its_own_thinking_level_map() {
     let mut grok = model("grok-build-0.1", "xai");

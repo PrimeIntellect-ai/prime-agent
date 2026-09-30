@@ -8,10 +8,6 @@ use super::{
     DEFAULT_MAX_OUTPUT_CHARS, KERNEL_ABORT_GRACE_MS,
 };
 
-// ---------------------------------------------------------------------------
-// Request plumbing
-// ---------------------------------------------------------------------------
-
 pub(crate) use crate::platform::process::Signal;
 
 /// Append stream text up to `max_chars` Unicode scalars, keeping the buffered count in sync.
@@ -94,18 +90,17 @@ impl ReplKernelManager {
                 return Ok(InternalExecuteResult::aborted(started));
             }
         }
-        // Re-check: a final flush may have started while this request awaited
-        // the lazy re-bootstrap; admitting it now would splice it between the
-        // flush\'s captured queue and the final snapshot, unbounding the teardown.
+        // Re-check: a final flush may have started while this request awaited the lazy
+        // re-bootstrap; admitting it now would splice it between the flush\'s captured queue
+        // and the final snapshot, unbounding the teardown.
         if lock(&self.inner.guarded).flushing_snapshot_for_dispose && !opts.internal {
             return Err(anyhow!("Kernel is shutting down"));
         }
 
         let queue_guard = self.inner.execution_queue.lock().await;
 
-        // A repair started while this request was queued or busy-waiting:
-        // release the slot so the repair\'s own restore can run, then requeue
-        // behind it.
+        // A repair started while this request was queued or busy-waiting: release the slot
+        // so the repair\'s own restore can run, then requeue behind it.
         if lock(&self.inner.guarded).protocol_repair.is_some() && !opts.protocol_repair {
             drop(queue_guard);
             self.wait_for_protocol_repair(opts.signal.as_ref()).await?;
@@ -206,9 +201,8 @@ impl ReplKernelManager {
         // Abort watcher: interrupts the kernel out-of-band, then force-aborts
         // after the grace window if the runtime did not settle the cell.
         if let Some(signal) = execution.opts.signal.clone() {
-            // Weak on both sides: a never-fired signal leaves this watcher
-            // pending forever, and a strong manager would pin the kernel
-            // past the last manager's drop (the reader-retention class).
+            // Weak on both sides: a never-fired signal leaves this watcher pending forever, and a
+            // strong manager would pin the kernel past the last manager's drop.
             let inner = Arc::downgrade(&self.inner);
             let weak_exec = Arc::downgrade(&execution);
             tokio::spawn(async move {
@@ -221,9 +215,8 @@ impl ReplKernelManager {
                 };
                 let _ = inner.interrupt(Some(&execution.request_id)).await;
                 tokio::time::sleep(Duration::from_millis(KERNEL_ABORT_GRACE_MS)).await;
-                // The execution stays active until its done event arrives;
-                // clearing it early would let a new cell race the interrupted
-                // one (see busy-after-interrupt).
+                // The execution stays active until its done event arrives; clearing it early would
+                // let a new cell race the interrupted one (see busy-after-interrupt).
                 inner.force_abort(&execution);
             });
         }
@@ -263,9 +256,9 @@ impl ReplKernelManager {
             tokio::select! {
                 r = send_promise => r.unwrap_or_else(|e| Err(anyhow!("{e}"))),
                 settled = &mut result_rx => {
-                    // The cell settled before the write completed (fast runtime).
-                    // Only an aborted status may skip waiting for the write; a
-                    // failed write on a successful cell must surface.
+                    // The cell settled before the write completed (fast runtime). Only an aborted
+                    // status may skip waiting for the write; a failed write on a successful cell
+                    // must surface.
                     let settled: anyhow::Result<InternalExecuteResult> = match settled {
                         Ok(result) => result,
                         Err(_) => Err(anyhow!("Kernel has been shut down")),
@@ -349,8 +342,7 @@ mod tests {
     #[test]
     fn exact_fill_remainder_counts_as_truncation() {
         // The buffer filled exactly on an earlier frame; a later non-empty
-        // frame is dropped but still marks the stream truncated (TS #2423:
-        // without this, exactly-filled streams reported no truncation).
+        // frame is dropped but still marks the stream truncated (TS #2423).
         let mut buffer = String::from("abcd");
         let mut truncated = false;
         let mut count = 4;

@@ -279,7 +279,6 @@ async fn compact_run_prepare_skips_report_the_ts_reasons() {
         let response = probe.result().await;
         assert_eq!(response["scheduled"], false, "case={expected}");
         assert_eq!(response["reason"], expected);
-        // Nothing was scheduled.
         assert!(requests.take_compaction().await.is_none());
     }
 }
@@ -335,14 +334,12 @@ async fn compact_run_schedules_inside_a_tool_call_and_status_sees_it() {
     assert_eq!(status["context_window"], 100_000);
     assert!(status["tokens"].as_u64().unwrap() > 0, "{status}");
     assert!(status["percent"].as_f64().unwrap() > 0.0, "{status}");
-    // The boundary takes the request with its instructions.
     assert_eq!(
         requests.take_compaction().await,
         Some(PendingCompaction {
             instructions: Some("keep the failing test names".to_string())
         })
     );
-    // Taking once: the request is consumed.
     assert!(requests.take_compaction().await.is_none());
 }
 
@@ -399,7 +396,6 @@ async fn refine_run_and_status_round_trip_inside_a_tool_call() {
         .await
         .unwrap();
     assert_eq!(status["pending"], true);
-    // The boundary takes the merged request.
     assert_eq!(
         requests.take_refine().await,
         Some(PendingRefine {
@@ -428,9 +424,9 @@ async fn refine_run_validates_and_merges_into_a_pending_request() {
         error.to_string(),
         "refine.run global must be a boolean when provided"
     );
-    // Merge semantics through the real handler path: two `refine.run`
-    // calls inside one turn — the second without instructions keeps the
-    // first ones and ORs the global flag (TS merge).
+    // Merge semantics through the real handler path: two `refine.run` calls inside one
+    // turn — the second without instructions keeps the first ones and ORs the global
+    // flag (TS merge).
     let session = Arc::new(Mutex::new(session_with_history(false)));
     let provider = Arc::new(ScriptedProvider::new(agent_model()));
     provider.push_tool_call_turn(None, vec![("call-1", "probe-a", json!({}))]);
@@ -515,7 +511,6 @@ async fn clear_pending_drops_scheduled_requests() {
     agent.wait_for_idle().await;
     assert_eq!(probe.result().await["scheduled"], true);
     assert!(requests.refine_pending().await);
-    // The aborted-turn arm drops both request kinds.
     requests.clear_pending().await;
     assert!(requests.take_refine().await.is_none());
     assert!(requests.take_compaction().await.is_none());
@@ -559,7 +554,6 @@ async fn compact_run_merges_instructions_into_a_pending_request() {
     agent.wait_for_idle().await;
     assert_eq!(probe.result().await["scheduled"], true);
     assert_eq!(probe_again.result().await["scheduled"], true);
-    // The second call without instructions keeps the first ones.
     assert_eq!(
         requests.take_compaction().await,
         Some(PendingCompaction {
@@ -592,7 +586,6 @@ fn context_usage_anchors_on_the_last_valid_assistant_usage() {
         .append_message(user_entry("a somewhat long trailing message"))
         .unwrap();
     let entries = session.get_all_entries().to_vec();
-    // Unknown context window -> None.
     assert!(context_usage(&entries, None).is_none());
     let usage = context_usage(&entries, Some(100_000)).unwrap();
     // The usage anchor plus the trailing estimate (chars/4).
@@ -625,9 +618,9 @@ fn context_usage_after_a_compaction_without_post_usage_is_null_tokens() {
     assert_eq!(usage.context_window, 100_000);
 }
 
-/// One scripted probe: a tool whose execution calls a registered host
-/// handler with `data` (the kernel-cell shape — host requests fire inside
-/// a tool call while the turn streams) and records the response.
+/// One scripted probe: a tool whose execution calls a registered host handler with `data` (the
+/// kernel-cell shape — host requests fire inside a tool call while the turn streams) and records
+/// the response.
 struct Probe {
     tool: Arc<dyn pa_agent::types::AgentTool>,
     slot: Arc<std::sync::Mutex<Option<Value>>>,

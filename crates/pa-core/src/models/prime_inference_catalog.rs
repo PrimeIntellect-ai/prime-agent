@@ -1,5 +1,4 @@
 //! Prime Inference model catalog: parse, build, disk cache, and refresh.
-//! Port of prime-inference-model-catalog.ts.
 
 use std::collections::HashMap;
 
@@ -60,14 +59,12 @@ fn string_array(value: &serde_json::Value) -> Option<Vec<String>> {
 ///
 /// # Errors
 ///
-/// Returns a human-readable error string when the payload carries no model
-/// array, contains duplicate model ids, or parses to an empty catalog while
+/// Human-readable error: no model array, duplicate ids, or empty while
 /// `allow_empty` is false.
 ///
 /// # Panics
 ///
-/// The `context_window.unwrap()` runs only when the specs guard proved the
-/// field present, so the unwrap is unreachable.
+/// The `context_window.unwrap()` runs only when the specs guard proved the field present.
 pub fn parse_prime_inference_model_catalog(
     payload: &serde_json::Value,
     allow_empty: bool,
@@ -117,12 +114,9 @@ pub fn parse_prime_inference_model_catalog(
             .map(strip_control)
             .filter(|name| !name.is_empty());
         // Capability filtering (documented deviation from the TS parser,
-        // which never reads this field): a model that declares its
-        // supported request parameters without "tools" can never serve a
-        // prime-agent turn — the session always attaches its tool set and
-        // the router answers `404 No endpoints found that support tool
-        // use` — so it never enters the selectable catalog. Entries
-        // without the field stay: no signal, historical behavior.
+        // which never reads this field): a model whose supported parameters
+        // omit "tools" can never serve a turn, so it never enters the catalog;
+        // entries without the field stay.
         let supported_parameters = string_array(
             item.get("supported_parameters")
                 .unwrap_or(&serde_json::Value::Null),
@@ -407,10 +401,6 @@ mod tests {
         assert!(build_prime_inference_models(&bundled(), &entries, false).is_none());
     }
 
-    /// Capability filtering: a model that declares its supported request
-    /// parameters without "tools" can never serve a session (the router
-    /// answers 404 "No endpoints found that support tool use"), so it
-    /// never enters the catalog. Entries without the declaration stay.
     #[test]
     fn entries_without_tool_support_are_filtered() {
         let payload = serde_json::json!({ "data": [
