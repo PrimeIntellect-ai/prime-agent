@@ -19,7 +19,7 @@ Every contributor (human or agent) must read this before working on this repo.
   no god-modules. The dependency direction is pinned in the Crates table below; each crate's
   README.md states its scope, non-goals, and public API surface.
 - Prefer private modules with an explicitly exported public crate API. Internals are `pub(crate)`.
-- Aim for files under 500 lines, tests included. The 500-600 range is a soft review
+- Aim for files under 2,000 lines, tests included. The 2,000-2,100 range is a soft review
   signal, not a merge limit: when adding to an already-large file, consider splitting by
   responsibility rather than growing it further. Move related tests and docs with extracted code.
 - Name modules for what they own, not `utils` or `common`. Follow existing structure: in
@@ -78,7 +78,7 @@ Every contributor (human or agent) must read this before working on this repo.
   `cargo test --workspace` must pass before every merge. Run `make check` — the local mirror of
   the same gates; CI runs on the org's billing (`.github/workflows/continuous.yml` on `main`
   pushes; `release.yml` on version tags). The PR-only codebase-health check reports growth
-  past 500 lines as review guidance; it never blocks a merge.
+  past 2,000 lines as review guidance; it never blocks a merge.
 - **Parity-diff evidence is a merge gate** (the port's definition, not optional polish): every PR
   that touches a user-visible surface must include a "parity-diff evidence" section in its
   description showing the TS-binary comparison for what it changed: (1) rendered output —
