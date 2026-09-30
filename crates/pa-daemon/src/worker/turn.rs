@@ -620,9 +620,25 @@ impl TurnRunner {
                 );
                 let mut core = core.lock().unwrap();
                 if core.abort_requested {
-                    abort_gate_armed_seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                    // The sighting arms the fallback's silence only when
+                    // it is load-bearing for this run: the gate is
+                    // dropping one of this run's frames (the suppressed-
+                    // row class), or the event itself carries the aborted
+                    // outcome (the admission consult's `DoneAborted`, the
+                    // engine's aborted row). A flag sighting on the plain
+                    // settle frames of a run that completed on its own -
+                    // the trailing `Done` of a finished session command
+                    // or pre-model failure - cancels nothing of it: the
+                    // fallback closer must still pair the run's opening
+                    // `agent_start` (TS: an abort of a finished run
+                    // no-ops; the flag stays delivery-scoped and the next
+                    // pickup clears it).
                     if core.suppress_aborted_row || !(abort_settle || aborted_row) {
+                        abort_gate_armed_seen.store(true, std::sync::atomic::Ordering::SeqCst);
                         return false;
+                    }
+                    if aborted_row || matches!(&event, EngineEvent::DoneAborted) {
+                        abort_gate_armed_seen.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
                 }
                 // The engine cuts its in-memory entries; its
