@@ -301,4 +301,3 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     }
     text.chars().take(max_chars).collect()
 }
-

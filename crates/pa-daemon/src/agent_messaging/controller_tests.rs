@@ -5,6 +5,7 @@
 // Controller tests: family roster, direct peer delivery, fallback
 // ---------------------------------------------------------------------------
 
+use super::observe::summaries_from_roster;
 use super::*;
 use crate::protocol::{response_failure, response_success};
 use crate::rlm_children::RlmChildIdentity;

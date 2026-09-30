@@ -232,10 +232,10 @@ fn row_is_sibling(row: &Value, identity: &FamilyIdentity) -> bool {
 // glob. The durable family-edges concern (FamilyIdentity + the row
 // classification) stays facade-resident: both controllers drive it.
 mod message;
+mod observe;
 
 pub use message::LinkAgentMessageController;
-use observe::summaries_from_roster;
-pub use observe::LinkAgentObserveController;
+pub(crate) use observe::LinkAgentObserveController;
 
 // The controller test battery moved to the child module at the same tree
 // position (agent_messaging::controller_tests); the #[cfg(test)] decl

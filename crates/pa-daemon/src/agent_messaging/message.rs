@@ -13,15 +13,15 @@ use super::*;
 /// Exposed for the agent-family e2e verifier (`tests/agent_family_e2e.rs)`:
 /// the same controller construction the worker engine wires.
 pub struct LinkAgentMessageController {
-    link: Arc<SupervisorLink>,
-    active_session_id: String,
-    worker_token: String,
+    pub(super) link: Arc<SupervisorLink>,
+    pub(super) active_session_id: String,
+    pub(super) worker_token: String,
     /// This worker's own session summary, pushed by the worker at create
     /// (and rename); the sender identity block for direct deliveries.
-    own_summary: Arc<std::sync::Mutex<Option<Value>>>,
+    pub(super) own_summary: Arc<std::sync::Mutex<Option<Value>>>,
     /// This session's resident RLM children (the same registry
     /// `rlm.list_subagents` reads); `None` for standalone workers.
-    children: Option<Arc<crate::rlm_children::SupervisorChildSessions>>,
+    pub(super) children: Option<Arc<crate::rlm_children::SupervisorChildSessions>>,
 }
 
 impl LinkAgentMessageController {
