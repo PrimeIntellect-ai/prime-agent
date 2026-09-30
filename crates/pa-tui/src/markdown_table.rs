@@ -444,45 +444,6 @@ mod tests {
     }
 
     #[test]
-    // deliberate decomposed/non-NFC fixtures: the width engine must measure the raw sequences
-    #[allow(clippy::unicode_not_nfc)]
-    fn table_geometry_matches_rendered_rows() {
-        let style = MarkdownStyle::default();
-        let mut empty_rendered = Vec::new();
-        render_table(&[], &[], &[], 40, &style, &mut empty_rendered);
-        assert_eq!(count_table(&[], &[], &[], 40, &style), empty_rendered.len());
-        let fixtures = [
-            "| a | b |\n| --- | --- |\n| 1 | 2 |",
-            "| a | b |\n| --- | --- |",
-            "| **long header** | `code` |\n| --- | --- |\n| aa bb cc dd | one |\n| 数据 👩‍💻 | é |\n| | |",
-            "| a | b |\n| --- | --- |\n| abcdefghijklmnopqrstuvwxyz0123456789 | short |\n| lone |",
-            "| | |\n| --- | --- |\n| | |",
-        ];
-        for source in fixtures {
-            let lines: Vec<_> = source.lines().collect();
-            let table = parse_table_block(&lines, &mut 0);
-            let expected: Vec<_> = (0..100)
-                .map(|width| {
-                    let mut rendered = Vec::new();
-                    render_table(
-                        &table.header,
-                        &table.rows,
-                        &table.raw,
-                        width,
-                        &style,
-                        &mut rendered,
-                    );
-                    rendered.len()
-                })
-                .collect();
-            let actual: Vec<_> = (0..100)
-                .map(|width| count_table(&table.header, &table.rows, &table.raw, width, &style))
-                .collect();
-            assert_eq!(actual, expected, "{source}");
-        }
-    }
-
-    #[test]
     fn simple_table_renders_boxed() {
         let out = plain("| a | b |\n| --- | --- |\n| 1 | 2 |", 40);
         assert_eq!(

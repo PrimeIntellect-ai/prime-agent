@@ -26,6 +26,10 @@ pub const ENV_PREFIX: &str = "PRIME_AGENT_RUST_PREFIX";
 /// `PRIME_AGENT_RUST_INSTALLER_URL`: the installer script URL override —
 /// tests serve their own script, a pinned install can point elsewhere.
 pub const ENV_INSTALLER_URL: &str = "PRIME_AGENT_RUST_INSTALLER_URL";
+/// The installer's release-channel knob (the publish-rendered default the
+/// served script carries; the env override pins it — the funnel passes the
+/// INSTALLED channel so a beta install updates on beta).
+pub const ENV_RELEASE_CHANNEL: &str = "PRIME_AGENT_RELEASE_CHANNEL";
 /// `GITHUB_TOKEN`: the installer's own artifact-auth knob, sent on the
 /// run-list request when set (the run list is public; the token only lifts
 /// the anonymous rate limit).
@@ -272,6 +276,33 @@ pub async fn run_installer_from(
     Ok(Installed { version })
 }
 
+/// The installed payload's channel, read from the install marker (the
+/// installer's own `.prime-agent-install` under the prefix's share dir;
+/// its first line is "channel <name>"). `None` when the marker is absent
+/// (a pre-marker install or a foreign tree) or carries no known channel —
+/// the update then rides the fetched script's own default.
+#[must_use]
+pub fn installed_channel(prefix: &Path) -> Option<&'static str> {
+    let marker =
+        std::fs::read_to_string(prefix.join("share/prime-agent/.prime-agent-install")).ok()?;
+    // The marker's first line must be the installer's OWN write shape —
+    // "install-rust.sh channel <name>" — not merely any line that ends in
+    // a channel claim: a foreign marker ("other installer channel beta")
+    // must never steer the update onto a channel; the exact prefix is the
+    // ownership proof, exactly like the share tree's own marker file.
+    let channel = marker
+        .lines()
+        .next()?
+        .trim()
+        .strip_prefix("install-rust.sh channel ")?
+        .trim();
+    match channel {
+        "stable" => Some("stable"),
+        "beta" => Some("beta"),
+        _ => None,
+    }
+}
+
 /// Fetch the installer script to a per-run temp file (the small-file
 /// budget; the file is the exact bytes the branch serves).
 ///
@@ -325,6 +356,15 @@ async fn execute_script(
 ) -> std::result::Result<(), UpdateFailure> {
     let mut command = tokio::process::Command::new("/bin/sh");
     command.arg(script).env(ENV_PREFIX, prefix);
+    // THE CHANNEL-STICKINESS: an install made through install-beta.sh
+    // (the beta render) records its channel in the install marker, and
+    // the update must STAY on it — the fetched script's own default is
+    // the stable render, so without the override a beta user's `update`
+    // would silently switch channels. The marker's first line is
+    // "channel <name>" (the installer writes it at publish).
+    if let Some(channel) = installed_channel(prefix) {
+        command.env(ENV_RELEASE_CHANNEL, channel);
+    }
     match output {
         InstallerOutput::Inherit => {
             let status = command.status().await.map_err(|error| UpdateFailure {
@@ -432,6 +472,49 @@ async fn launcher_version(prefix: &Path) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// The installed-marker channel read: a beta install's update must
+    /// stay on beta (the marker the installer writes at publish carries
+    /// the channel), a stable or pre-marker install rides the script's
+    /// own default, and a foreign marker is never treated as a channel.
+    #[test]
+    fn installed_channel_reads_the_publish_marker() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let prefix = dir.path().join("prefix");
+        // No marker at all: no channel (the script's default rides).
+        assert_eq!(installed_channel(&prefix), None);
+        // The installer's ACTUAL write shape: "install-rust.sh channel
+        // <name>" then "version <v>" (the publish's printf).
+        let share = prefix.join("share/prime-agent");
+        std::fs::create_dir_all(&share).unwrap();
+        std::fs::write(
+            share.join(".prime-agent-install"),
+            "install-rust.sh channel beta\nversion 0.10.0\n",
+        )
+        .unwrap();
+        assert_eq!(installed_channel(&prefix), Some("beta"));
+        std::fs::write(
+            share.join(".prime-agent-install"),
+            "install-rust.sh channel stable\nversion 0.10.0\n",
+        )
+        .unwrap();
+        assert_eq!(installed_channel(&prefix), Some("stable"));
+        // A foreign/garbage marker: never a channel claim.
+        std::fs::write(share.join(".prime-agent-install"), "nightly\n").unwrap();
+        assert_eq!(installed_channel(&prefix), None);
+        // A FOREIGN channel claim (not the installer's own write shape):
+        // never a channel — the exact prefix is the ownership proof.
+        std::fs::write(
+            share.join(".prime-agent-install"),
+            "other installer channel beta\n",
+        )
+        .unwrap();
+        assert_eq!(installed_channel(&prefix), None);
+        // A bare channel line (not the installer's shape): also None —
+        // the update rides the fetched script's own default.
+        std::fs::write(share.join(".prime-agent-install"), "channel beta\n").unwrap();
+        assert_eq!(installed_channel(&prefix), None);
+    }
+
     /// Serve `body` over one plain HTTP request (the hermetic source the
     /// funnel fetches its mock installer from): bind an ephemeral loopback
     /// socket, answer the first request, return the URL the funnel uses.
@@ -469,7 +552,6 @@ mod tests {
     /// The sandboxed preserve fixture: a session file under a home the
     /// installer world shares (`<home>/.prime/agent/sessions/…`), with
     /// its exact bytes snapshotted for the byte-identity assert.
-    #[cfg_attr(not(unix), allow(dead_code))]
     struct Preserve {
         // The byte-identity readers are the unix `assert_untouched`
         // checks; on other platforms the fixture only stages the file.

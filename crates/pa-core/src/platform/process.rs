@@ -71,6 +71,58 @@ pub fn set_no_window(command: &mut Command) {
 #[cfg(not(windows))]
 pub fn set_no_window(_command: &mut Command) {}
 
+/// Raise the soft open-file limit to the hard limit and return the
+/// resulting soft limit (Node raises it the same way at startup). macOS
+/// refuses a soft limit above `kern.maxfilesperproc`, `RLIM_INFINITY`
+/// included, so the target is capped there.
+///
+/// # Errors
+///
+/// The OS error of a failed `getrlimit`, `sysctlbyname` or `setrlimit`.
+#[cfg(unix)]
+pub fn raise_open_file_limit() -> std::io::Result<Option<u64>> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    #[cfg(not(target_os = "macos"))]
+    let target = limit.rlim_max;
+    #[cfg(target_os = "macos")]
+    let target = {
+        let mut per_process: libc::c_int = 0;
+        let mut size = std::mem::size_of::<libc::c_int>();
+        let read = unsafe {
+            libc::sysctlbyname(
+                c"kern.maxfilesperproc".as_ptr(),
+                (&raw mut per_process).cast(),
+                &raw mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if read != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        limit.rlim_max.min(per_process.unsigned_abs().into())
+    };
+    if limit.rlim_cur < target {
+        limit.rlim_cur = target;
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(Some(limit.rlim_cur))
+}
+
+/// No per-process descriptor limit to raise.
+#[cfg(not(unix))]
+pub fn raise_open_file_limit() -> std::io::Result<Option<u64>> {
+    Ok(None)
+}
+
 /// Signal a single pid. Returns true only when the signal was delivered,
 /// proving the pid was alive at signal time.
 #[cfg(unix)]
@@ -92,7 +144,6 @@ pub fn kill_pid(pid: i32, signal: Signal) -> bool {
 /// collapses there). Descendants are NOT killed: teardown paths that need
 /// tree kills use [`kill_process_group_or_pid`], like the TS callers.
 #[cfg(windows)]
-#[must_use]
 pub fn kill_pid(pid: i32, signal: Signal) -> bool {
     if pid <= 0 {
         return false;
@@ -132,7 +183,6 @@ pub fn kill_process_group_or_pid(pid: i32) -> bool {
 /// [`set_new_process_group`] are irrelevant here. True only when taskkill
 /// exited 0, the same proof TS's `result.status === 0` requires.
 #[cfg(windows)]
-#[must_use]
 pub fn kill_process_group_or_pid(pid: i32) -> bool {
     if pid <= 0 {
         return false;
@@ -202,7 +252,6 @@ pub fn open_pidfd(_pid: u32) -> Option<i32> {
 }
 
 #[cfg(not(unix))]
-#[must_use]
 pub fn open_pidfd(_pid: u32) -> Option<i32> {
     None
 }
@@ -244,7 +293,6 @@ pub fn pidfd_signal(_fd: i32, _signal: Signal) -> bool {
 }
 
 #[cfg(not(unix))]
-#[must_use]
 pub fn pidfd_signal(_fd: i32, _signal: Signal) -> bool {
     false
 }
@@ -264,7 +312,6 @@ pub fn close_pidfd(fd: i32) {
 /// checks the same `STILL_ACTIVE` exit code). A query that fails outright
 /// reads as gone.
 #[cfg(windows)]
-#[must_use]
 pub fn pid_exists(pid: u32) -> bool {
     pa_types::platform::process::is_process_alive(pid).unwrap_or(false)
 }
@@ -284,7 +331,6 @@ pub fn termination_signal(status: &std::process::ExitStatus) -> Option<i32> {
 }
 
 #[cfg(not(unix))]
-#[must_use]
 pub fn termination_signal(_status: &std::process::ExitStatus) -> Option<i32> {
     // Windows terminations surface as exit codes, not signals.
     None

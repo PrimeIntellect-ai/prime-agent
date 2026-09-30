@@ -329,6 +329,9 @@ impl Supervisor {
     /// Panics when the telemetry mutex is poisoned (a holder panicked
     /// while holding the lock).
     pub async fn run(self: Arc<Self>) -> Result<()> {
+        // Before any socket or worker exists: workers and their kernels
+        // inherit the raised limit.
+        let open_file_limit = pa_core::platform::process::raise_open_file_limit();
         // Daemon telemetry: same env/settings posture as the sessions
         // (the supervisor is the `daemon` execution mode).
         {
@@ -390,6 +393,13 @@ impl Supervisor {
         socket::restrict_socket_path(&self.options.socket_path);
         self.log
             .append(&format!("supervisor started pid {}", std::process::id()));
+        match open_file_limit {
+            Ok(Some(limit)) => self.log.append(&format!("open file limit {limit}")),
+            Ok(None) => {}
+            Err(error) => self
+                .log
+                .append(&format!("open file limit raise failed: {error}")),
+        }
 
         // The OS-signal drain (SIGTERM/SIGINT; the loop lives in
         // `crate::signal_drain`): `install` registers the handlers

@@ -366,9 +366,6 @@ pub fn is_process_alive(pid: u32) -> anyhow::Result<bool> {
     Ok(winapi::is_still_active(pid))
 }
 
-/// # Errors
-///
-/// Liveness has no implementation on this platform: always errors.
 #[cfg(not(any(unix, windows)))]
 pub fn is_process_alive(_pid: u32) -> anyhow::Result<bool> {
     anyhow::bail!("process liveness is not implemented on this platform")
