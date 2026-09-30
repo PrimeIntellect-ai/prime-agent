@@ -67,7 +67,7 @@ on:
   # CI before tagging (the proven-built evidence).
   push:
     branches:
-      - rust
+      - main
   # The operator's supervised cut: resolves the newest proven-green commit
   # instead of a pushed one (the walk).
   workflow_dispatch: {}
@@ -142,7 +142,7 @@ jobs:
             run_id=""
             deadline=$((SECONDS + 4500))
             while :; do
-              runs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/continuous.yml/runs?branch=rust&per_page=1&head_sha=${target_sha}" 2>/dev/null || echo '{"workflow_runs":[]}')"
+              runs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/continuous.yml/runs?branch=main&per_page=1&head_sha=${target_sha}" 2>/dev/null || echo '{"workflow_runs":[]}')"
               read -r status conclusion candidate_run < <(printf '%s\n' "${runs_json}" | jq -r \
                 '(.workflow_runs[0] // {}) | [(.status // "absent"), (.conclusion // "-"), (.id // "-")] | @tsv')
               if [ "${status}" = "completed" ]; then
@@ -181,13 +181,13 @@ jobs:
             # BUILD actually ran green, walking the successful runs newest
             # first and accepting the first whose build-* jobs all
             # completed green.
-            if ! gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/continuous.yml/runs?branch=rust&per_page=100" \
+            if ! gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/continuous.yml/runs?branch=main&per_page=100" \
                  | jq -e -r '[.workflow_runs[]
                              | select(.status == "completed" and .conclusion == "success")]
                             | sort_by(.run_number) | reverse | .[]
                             | [.id, .head_sha] | @tsv' \
                  > "${out}/candidate-runs" 2>/dev/null || [ ! -s "${out}/candidate-runs" ]; then
-              echo "::error::no successful continuous run on rust in the last 100 runs; refusing to cut a beta off an unproven tip"
+              echo "::error::no successful continuous run on main in the last 100 runs; refusing to cut a beta off an unproven tip"
               exit 1
             fi
             while IFS="$(printf '\t')" read -r run_id candidate_sha; do
@@ -204,7 +204,7 @@ jobs:
               echo "continuous run ${run_id} (${candidate_sha}) concluded success but its builds did not run to green (${built}/${total}); looking further back"
             done < "${out}/candidate-runs"
             if [ -z "${target_sha}" ]; then
-              echo "::error::no continuous run on rust with a green 4-target build in the last 100 runs; refusing to cut a beta off an unbuilt tip"
+              echo "::error::no continuous run on main with a green 4-target build in the last 100 runs; refusing to cut a beta off an unbuilt tip"
               exit 1
             fi
           fi
