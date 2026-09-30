@@ -289,7 +289,7 @@ jobs:
         with:
           toolchain: "1.98.1"
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6cbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.target }}
       # The Windows runner images ship `python` (python3 is not a stable alias

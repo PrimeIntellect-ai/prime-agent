@@ -64,12 +64,16 @@ try {
     Start-Sleep -Seconds 2
     $base = 'http://localhost:8123'
 
-    # 5. Route A: install.ps1 (the PowerShell-native entry point).
+    # 5. Route A: install.ps1 (the PowerShell-native entry point). The local
+    #    channel rides the explicitly-named plaintext knob (the installers'
+    #    https rule has exactly this escape hatch; a real channel is always
+    #    https).
     $prefixA = Join-Path $scratch 'prefix-a'
     New-Item -ItemType Directory -Path $prefixA | Out-Null
     $env:PRIME_AGENT_DOWNLOAD_BASE_URL = $base
     $env:PRIME_AGENT_RELEASE_CHANNEL = 'stable'
     $env:PRIME_AGENT_RUST_PREFIX = $prefixA
+    $env:PRIME_AGENT_ALLOW_HTTP = '1'
     & pwsh -File (Join-Path $repo 'install.ps1')
     if ($LASTEXITCODE -ne 0) { throw 'install.ps1 failed' }
     $cmdLauncher = Join-Path $prefixA 'bin\prime-agent.cmd'
@@ -88,6 +92,7 @@ try {
     $env:PRIME_AGENT_DOWNLOAD_BASE_URL = $base
     $env:PRIME_AGENT_RELEASE_CHANNEL = 'stable'
     $env:PRIME_AGENT_RUST_PREFIX = $prefixB
+    $env:PRIME_AGENT_ALLOW_HTTP = '1'
     & $bash (Join-Path $repo 'install-rust.sh')
     if ($LASTEXITCODE -ne 0) { throw 'install-rust.sh failed under Git Bash' }
     $shLauncher = Join-Path $prefixB 'bin\prime-agent'
@@ -103,7 +108,7 @@ try {
         if (-not (Test-Path (Join-Path $prefixB $entry))) { throw "the sh route's payload is missing $entry" }
     }
 
-    Write-Host "WIN_INSTALL_E2E ps1=$versionA sh=$versionB: both routes installed the $version win32-x64 payload and answered --version"
+    Write-Host "WIN_INSTALL_E2E ps1=$versionA sh=${versionB}: both routes installed the ${version} win32-x64 payload and answered --version"
 } finally {
     Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue

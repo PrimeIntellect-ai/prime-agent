@@ -61,10 +61,25 @@ $channel = if ($env:PRIME_AGENT_RELEASE_CHANNEL) { $env:PRIME_AGENT_RELEASE_CHAN
 $versionPin = $env:PRIME_AGENT_VERSION
 $prefix = if ($env:PRIME_AGENT_RUST_PREFIX) { $env:PRIME_AGENT_RUST_PREFIX } else { Join-Path $HOME '.local' }
 
-if ($baseUrl -notmatch '^https://') { Fail "the download base URL must be an https URL: $baseUrl" }
+# THE HTTPS RULE: the channel is served over the R2-backed domain, and a
+# plaintext download base would let a network attacker swap the payload
+# the checksum then "verifies" into place. The one escape hatch is the
+# explicitly-named knob for local-channel/e2e use (install-rust.sh carries
+# the same rule + knob); it prints a loud warning when it is active.
+$allowHttp = $env:PRIME_AGENT_ALLOW_HTTP -eq '1'
+if ($baseUrl -notmatch '^https://') {
+    if ($allowHttp) {
+        Write-Warning "PRIME_AGENT_ALLOW_HTTP=1: the download base $baseUrl is NOT https - the download is plaintext; use this only for a local channel you control"
+    } else {
+        Fail "the download base URL must be an https URL: $baseUrl"
+    }
+}
 $baseUrl = $baseUrl.TrimEnd('/')
 if (@('stable', 'beta') -notcontains $channel) { Fail "unknown release channel: $channel (stable or beta)" }
-if (-not (Test-Path $prefix -PathType Container)) { Fail "the install prefix must be an existing directory: $prefix" }
+# The prefix does not need to exist (a fresh Windows profile has no
+# $HOME\.local; the share/bin creation below makes it), but it must name
+# a directory path, not an existing FILE.
+if (Test-Path $prefix -PathType Leaf) { Fail "the install prefix names an existing file: $prefix" }
 
 # The channel files: the pointer names the version, the manifest the rows.
 $manifestName = if ($channel -eq 'beta') { 'beta.json' } else { 'latest.json' }
@@ -75,39 +90,73 @@ $pointerName = $channel
 # fixed target, checked here so an ARM64 Windows machine fails loudly
 # instead of downloading a payload it cannot start.
 $platform = 'win32-x64'
-if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
-    Fail "this machine reports PROCESSOR_ARCHITECTURE '$env:PROCESSOR_ARCHITECTURE'; the Windows channel ships the x86_64 (win32-x64) build only"
+# The OS architecture, not the process's: 32-bit PowerShell on x64 Windows
+# (WOW64) reports PROCESSOR_ARCHITECTURE=x86 and the OS arm rides
+# PROCESSOR_ARCHITEW6432 — the 64-bit OS must not be refused (Macroscope:
+# the WOW64 shape).
+$effectiveArchitecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+if ($effectiveArchitecture -ne 'AMD64') {
+    Fail "this machine reports architecture '$effectiveArchitecture'; the Windows channel ships the x86_64 (win32-x64) build only"
+}
+
+# The channel naming contract gives the artifact row's file name: the row
+# the channel manifest must carry for this platform (the reader's own rule,
+# pa-core::update::release::parse_channel_manifest).
+function ExpectedFileName($version, $platform) {
+    return "prime-agent-$version-$platform.tar.gz"
 }
 
 # --- resolve the version (the channel pointer, or the pinned version) --------
+# A PINNED version skips the channel manifest entirely (install-rust.sh
+# parity): the manifest describes the channel's CURRENT release, and a
+# historical pin must install from its own versioned prefix — the row is
+# the channel naming contract, and the release prefix's SHA256SUMS verifies
+# the artifact. An unpinned install reads the pointer + the manifest as a
+# PAIR, retrying once on a version mismatch (the publish writes the
+# manifest first and the pointer second: a read between the two writes sees
+# the old pointer with the new manifest — a transient window, not a broken
+# channel — install-rust.sh's consistency retry).
+$manifest = $null
+$manifestVersion = $null
+$row = $null
 if ($versionPin) {
     $version = $versionPin.TrimStart('v')
     Write-Host "installing prime-agent $version (pinned) from the $channel channel ($platform)"
 } else {
-    $version = (Invoke-RestMethod -Uri "$baseUrl/$pointerName").ToString().Trim()
-    if (-not $version) { Fail "could not resolve the latest $channel version from $baseUrl/$pointerName" }
+    $attempt = 0
+    while ($true) {
+        $version = (Invoke-RestMethod -Uri "$baseUrl/$pointerName").ToString().Trim()
+        if (-not $version) { Fail "could not resolve the latest $channel version from $baseUrl/$pointerName" }
+        $manifest = Invoke-RestMethod -Uri "$baseUrl/$manifestName"
+        $manifestVersion = ($manifest.version).ToString().TrimStart('v')
+        if ($manifestVersion -eq $version) { break }
+        $attempt += 1
+        if ($attempt -gt 2) {
+            Fail "the $channel manifest's version $manifestVersion does not match the channel pointer $version (re-read twice; the channel looks inconsistent)"
+        }
+        Write-Host "the $channel pointer and manifest disagree (a publish's consistency window); re-reading the pair..."
+        Start-Sleep -Seconds 1
+    }
     Write-Host "installing prime-agent $version from the $channel channel ($platform)"
 }
 
-# --- the channel manifest row --------------------------------------------------
-$manifest = Invoke-RestMethod -Uri "$baseUrl/$manifestName"
-$expectedFile = "prime-agent-$version-$platform.tar.gz"
-$manifestVersion = ($manifest.version).ToString().TrimStart('v')
-if ($manifestVersion -ne $version) {
-    Fail "the $channel manifest's version $manifestVersion does not match the channel pointer $version"
-}
-$row = $null
-foreach ($candidate in @($manifest.binaries_v2) + @($manifest.binaries)) {
-    if ($candidate -and $candidate.platform -eq $platform) {
-        if ($candidate.file -ne $expectedFile) {
-            Fail "the manifest's $platform row names '$($candidate.file)' instead of the channel naming '$expectedFile'"
+# --- the channel manifest row (unpinned) / the naming contract (pinned) ------
+$expectedFile = ExpectedFileName $version $platform
+if (-not $versionPin) {
+    foreach ($candidate in @($manifest.binaries_v2) + @($manifest.binaries)) {
+        if ($candidate -and $candidate.platform -eq $platform) {
+            if ($candidate.file -ne $expectedFile) {
+                Fail "the manifest's $platform row names '$($candidate.file)' instead of the channel naming '$expectedFile'"
+            }
+            $row = $candidate
+            break
         }
-        $row = $candidate
-        break
     }
+    if (-not $row) { Fail "no artifact row for platform $platform in the $channel manifest" }
+    if ($row.sha256 -notmatch '^[0-9a-f]{64}$') { Fail "the channel manifest's sha256 for $expectedFile is malformed" }
+} else {
+    Write-Host "pinned ${version}: installing from the versioned release prefix (the channel naming contract names the row)"
 }
-if (-not $row) { Fail "no artifact row for platform $platform in the $channel manifest" }
-if ($row.sha256 -notmatch '^[0-9a-f]{64}$') { Fail "the channel manifest's sha256 for $expectedFile is malformed" }
 
 # --- the tarball + SHA256SUMS from the versioned release prefix ----------------
 $releasePrefix = "releases/v$version"
@@ -127,9 +176,9 @@ try {
 $sumsLine = Get-Content -LiteralPath $sumsPath | Where-Object { $_ -match "  $expectedFile$" } | Select-Object -First 1
 if (-not $sumsLine) { Fail "SHA256SUMS in $releasePrefix has no line for $expectedFile" }
 $sumsSha = ($sumsLine -split '\s+')[0]
-if ($sumsSha -ne $row.sha256) { Fail "checksum mismatch between the channel manifest and SHA256SUMS for $expectedFile: the channel is inconsistent" }
+if (-not $versionPin -and $sumsSha -ne $row.sha256) { Fail "checksum mismatch between the channel manifest and SHA256SUMS for ${expectedFile}: the channel is inconsistent" }
 $actualSha = (Get-FileHash -LiteralPath $tarball -Algorithm SHA256).Hash.ToLower()
-if ($actualSha -ne $sumsSha) { Fail "checksum mismatch for $expectedFile: the download is corrupt" }
+if ($actualSha -ne $sumsSha) { Fail "checksum mismatch for ${expectedFile}: the download is corrupt" }
 Write-Host "checksum verified: $expectedFile ($version, the $channel channel)"
 
 # --- extract to a staging dir inside the prefix (same volume: the final swap
@@ -181,28 +230,59 @@ try {
     Fail "another installer (pid $heldBy) or a stale publication lock owns $lockDir; if no installer is running, remove it and re-run"
 }
 Set-Content -LiteralPath (Join-Path $lockDir 'pid') -Value $PID
+$published = $false
 try {
     # The one-generation rollback: the previous payload (marker-checked —
-    # an unowned directory is never claimed) moves aside, the fresh stage
-    # swaps in, and the next install sweeps the rollback.
+    # an unowned directory is never claimed, and an unowned ROLLBACK name is
+    # never deleted) moves aside, the fresh stage swaps in, and the next
+    # install sweeps the rollback.
     $rollback = Join-Path (Join-Path $prefix 'share') 'prime-agent.old'
     if (Test-Path $share -PathType Container) {
         $markerPath = Join-Path $share '.prime-agent-install'
         if (-not (Test-Path $markerPath -PathType Leaf)) {
-            Fail "refusing to take ownership of $share: it is not a marked prime-agent payload tree (.prime-agent-install); move it aside and re-run"
+            Fail "refusing to take ownership of ${share}: it is not a marked prime-agent payload tree (.prime-agent-install); move it aside and re-run"
         }
-        if (Test-Path $rollback) { Remove-Item -Recurse -Force $rollback }
+        if (Test-Path $rollback) {
+            $rollbackMarker = Join-Path $rollback '.prime-agent-install'
+            if (-not (Test-Path $rollbackMarker -PathType Leaf)) {
+                Fail "refusing to delete the unmarked rollback directory: $rollback (move it aside and re-run)"
+            }
+            Remove-Item -Recurse -Force $rollback
+        }
         [IO.Directory]::Move($share, $rollback)
         Write-Host "rollback: $rollback (the previous payload, one generation)"
     }
     [IO.Directory]::Move($stage, $share)
+    $published = $true
 } finally {
+    # A failed publish never leaves the machine without its previous payload:
+    # the old tree returns to the live name before the lock releases (the sh
+    # installer's restore-on-exit discipline).
+    if (-not $published -and (Test-Path $rollback -PathType Container) -and -not (Test-Path $share)) {
+        [IO.Directory]::Move($rollback, $share)
+        Write-Warning "the publish failed; the previous payload was restored to $share"
+    }
     Remove-Item -Recurse -Force $lockDir -ErrorAction SilentlyContinue
 }
 
 # --- the launcher pair: the cmd shim (cmd.exe + PowerShell) and the sh
 # --- launcher (Git Bash) — the same payload, both shells, the same content
-# --- install-rust.sh writes.
+# --- install-rust.sh writes. The unowned-file discipline is the sh
+# --- installer's own: a launcher this script did not write is preserved
+# --- aside, never overwritten (an unrelated command is never destroyed).
+function Preserve-UnownedLauncher($path) {
+    if (-not (Test-Path $path -PathType Leaf)) { return }
+    $firstLine = (Get-Content -LiteralPath $path -TotalCount 2) -join ' '
+    if ($firstLine -match 'launcher written by install-rust\.sh') { return }
+    $preserved = "$path.pre-takeover"
+    while (Test-Path $preserved) { $preserved = "$preserved.$([Guid]::NewGuid().ToString('N').Substring(0,4))" }
+    [IO.File]::Move($path, $preserved)
+    Write-Host "note: an unrelated $(Split-Path -Leaf $path) existed at $path; it was preserved at $preserved"
+}
+Preserve-UnownedLauncher $launcher
+$shLauncher = Join-Path $bin 'prime-agent'
+Preserve-UnownedLauncher $shLauncher
+
 $cmdShim = @'
 @echo off
 rem prime-agent - launcher written by install-rust.sh.
@@ -211,7 +291,6 @@ if not defined PRIME_AGENT_CODING_AGENT_DIR set "PRIME_AGENT_CODING_AGENT_DIR=%U
 '@
 Set-Content -LiteralPath $launcher -Value $cmdShim
 
-$shLauncher = Join-Path $bin 'prime-agent'
 $shBody = @'
 #!/bin/sh
 # prime-agent — launcher written by install-rust.sh.

@@ -500,9 +500,16 @@ mkdir -p "${PREFIX}/share" "${PREFIX}/bin"
 # ${PREFIX}/bin that is a symlink into the shared store would otherwise let
 # the publish write under it while every lexical check passes. Resolving the
 # children (not refusing them) keeps legitimate out-of-store symlinked roots
-# installable while the resolved paths go through the same guard.
+# installable while the resolved paths go through the same guard. Windows
+# resolves in the MSYS form (physical_path) — a native python round-trips
+# through C:\... spelling the MSYS-form comparison can never match, which
+# would silently disarm this child-root guard (the bots' finding).
 for install_root in "${PREFIX}/share" "${PREFIX}/bin"; do
-  guard_preserved "$("$UVPY" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$install_root")"
+  if [ "$WINDOWS" = "yes" ]; then
+    guard_preserved "$(physical_path "$install_root")"
+  else
+    guard_preserved "$("$UVPY" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$install_root")"
+  fi
 done
 
 share_dir="${PREFIX}/share/prime-agent"
@@ -554,9 +561,22 @@ case "$CHANNEL" in
   beta) CHANNEL_MANIFEST="beta.json" ;;
   *) die "unknown release channel: ${CHANNEL} (stable or beta)" ;;
 esac
+# THE HTTPS RULE: the channel is served over the R2-backed domain, and a
+# plaintext download base would let a network attacker swap the payload the
+# checksum then "verifies" into place. The one escape hatch is the
+# explicitly-named knob for local-channel/e2e use (install.ps1 carries the
+# same rule + knob); it prints a loud warning when it is active.
 case "$BASE_URL" in
   https://*) ;;
-  *) die "the download base URL must be an https URL: ${BASE_URL}" ;;
+  *)
+    if [ "${PRIME_AGENT_ALLOW_HTTP:-}" = "1" ]; then
+      note "warning: PRIME_AGENT_ALLOW_HTTP=1 — the download base ${BASE_URL} is"
+      note "  NOT https; the download is plaintext. Use this only for a local"
+      note "  channel you control."
+    else
+      die "the download base URL must be an https URL: ${BASE_URL}"
+    fi
+    ;;
 esac
 BASE_URL="${BASE_URL%/}"
 
@@ -1350,6 +1370,8 @@ if [ "$WINDOWS" = "yes" ] && [ -f "$launcher" ]; then
 fi
 launcher_tmp=""
 cmd_tmp=""
+preserved_cmd_file=""
+windows_installed=""
 displaced_ts_root=""
 preserved_launcher=""
 migrated_old_layout=""
@@ -1369,6 +1391,24 @@ on_exit() {
       echo "note: the existing prime-agent command was restored to ${launcher} — the install did not complete" >&2
     fi
     preserved_launcher=""
+  fi
+  # The Windows .cmd twin's own preserve slot rides the same restore
+  # discipline (a failed install returns the user's unowned command).
+  if [ -n "${preserved_cmd_file:-}" ]; then
+    if mv "$preserved_cmd_file" "${bin_dir}/prime-agent.cmd" 2>/dev/null; then
+      echo "note: the existing prime-agent.cmd was restored to ${bin_dir}/prime-agent.cmd — the install did not complete" >&2
+    fi
+    preserved_cmd_file=""
+  fi
+  # THE FAILED-INSTALL DAEMON NOTE (the Windows stop-before-publish ruling):
+  # a failed install has restored every FILE it displaced, but a daemon
+  # stopped for the swap stays stopped — the sessions' state is on disk and
+  # the next prime-agent invocation boots the old payload's daemon again;
+  # the note names that recovery so the summary never leaves the user
+  # guessing (the bots' finding).
+  if [ "$WINDOWS" = "yes" ] && [ -n "$windows_stop_summary" ] && [ "${windows_installed:-}" != "yes" ]; then
+    echo "note: the daemon stopped for this failed install stays down until the next" >&2
+    echo "  prime-agent invocation boots it from the restored payload" >&2
   fi
   # A migrated old-layout tree goes home the same way: the pre-takeover
   # launcher (bin/prime-agent-rust) still points at the old name until this
@@ -1511,6 +1551,7 @@ if ! mv "$stage" "$share_dir"; then
   # (a failed migration restore is the EXIT trap's job: it holds the lock
   # until the tree is back, so no second installer can slip in between)
 fi
+windows_installed="yes"
 # A leftover old-layout tree when a new-layout tree also existed: it is
 # superseded by the fresh publish. The ownership rule is EXACTLY the
 # migration's (the pre-takeover payload always shipped the binary beside
@@ -1604,6 +1645,7 @@ if [ "$WINDOWS" = "yes" ]; then
     preserved_cmd_path="$(fresh_slot "${bin_dir}/prime-agent.cmd.pre-takeover")"
     mv "$cmd_launcher" "$preserved_cmd_path" \
       || die "could not preserve the existing file at ${cmd_launcher}; resolve it and re-run"
+    preserved_cmd_file="$preserved_cmd_path"
     note "note: an unrelated ${cmd_launcher} existed; it was preserved at ${preserved_cmd_path}"
   fi
   cmd_tmp="$(mktemp "${bin_dir}/.prime-agent-cmd.XXXXXX")"

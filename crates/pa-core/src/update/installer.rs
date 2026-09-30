@@ -368,16 +368,23 @@ async fn execute_script(
     // The interpreter: the trusted absolute /bin/sh on unix (never
     // PATH-resolved, so a poisoned PATH cannot substitute the interpreter
     // that runs the installer with the inherited credentials); on Windows
-    // the platform module's own Git Bash resolution (the install roots,
-    // `where bash.exe` with System32 demoted last - the same
-    // never-bare-PATH rule in the Windows vocabulary).
+    // the kernel shell resolver's TRUSTED Git Bash roots - hardcoded
+    // install-dir literals, never PATH and never `where bash.exe` (the
+    // get_shell_config fallback that serves the kernel shell would let a
+    // repo-controlled PATH place the interpreter that receives the
+    // inherited GITHUB_TOKEN; the funnel must not use it).
     #[cfg(windows)]
     let shell = {
-        match crate::platform::shell::get_shell_config(None) {
-            Ok(config) => config.shell,
-            Err(error) => {
+        match crate::platform::shell::resolve_kernel_bash_shell(None) {
+            Some(path) => path,
+            None => {
                 return Err(UpdateFailure {
-                    message: format!("could not run the installer: {error:#}"),
+                    message: "could not run the installer: no Git Bash found at \
+                              the trusted install roots \
+                              (C:\\Program Files\\Git\\bin\\bash.exe); install \
+                              Git for Windows (https://git-scm.com/download/win) \
+                              or set shellPath in settings.json"
+                        .to_string(),
                 });
             }
         }
