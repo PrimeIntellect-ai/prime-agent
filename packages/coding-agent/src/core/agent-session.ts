@@ -1754,6 +1754,8 @@ export class AgentSession {
 	private _currentRunAgentTriggered = false;
 	/** Digest inbox lane: agent messages from non-parent senders land in the inbox. */
 	private _agentMessageDigestMode: boolean;
+	/** User pin for the digest lane; "auto" lets the daemon controller decide. */
+	private _agentMessageDigestPin: "auto" | "push" | "digest" = "auto";
 	private readonly _agentMessageInbox: AgentMessageInbox;
 	private readonly _digestNoticeActionIds = new Set<string>();
 	/** Latest recap for this session, written by the daemon summarizer; read by a parent to label its child snapshots. */
@@ -5859,6 +5861,19 @@ export class AgentSession {
 
 	get agentMessageDigestMode(): boolean {
 		return this._agentMessageDigestMode;
+	}
+
+	get agentMessageDigestPin(): "auto" | "push" | "digest" {
+		return this._agentMessageDigestPin;
+	}
+
+	/**
+	 * Pin the digest lane for this session: "push"/"digest" fixes delivery and
+	 * suspends the daemon's dynamic controller; "auto" returns control to it.
+	 */
+	setAgentMessageDigestPin(pin: "auto" | "push" | "digest"): void {
+		this._agentMessageDigestPin = pin;
+		if (pin !== "auto") this._agentMessageDigestMode = pin === "digest";
 	}
 
 	agentMessageInbox(): AgentMessageInbox {
@@ -11112,6 +11127,18 @@ export class AgentSession {
 				const result = this._agentMessageInbox.read(ids);
 				if (result.unread === 0) this._cancelPendingDigestNotices();
 				return result as unknown as Record<string, unknown>;
+			},
+			"rlm.inbox.configure": async (payload: Record<string, unknown>) => {
+				const mode = payload?.mode;
+				if (mode !== "auto" && mode !== "push" && mode !== "digest") {
+					throw new Error('rlm.inbox.configure mode must be "auto", "push", or "digest"');
+				}
+				this.setAgentMessageDigestPin(mode);
+				return {
+					mode,
+					pinned: mode !== "auto",
+					digest: this._agentMessageDigestMode,
+				} as unknown as Record<string, unknown>;
 			},
 			"rlm.delete_subagent": createRlmDeleteSubagentHostHandler((target) => this.deleteRlmSubagent(target)),
 			"model.info": async () => ({
