@@ -694,7 +694,14 @@ impl Worker {
                 // the runs settled at this read is already queued: one
                 // more idle wait drains them before the barrier answers.
                 self.wait_until_idle().await;
-                break;
+                // A notice can start new child work during that drain (a
+                // child-settle hook spawning a descendant): re-read the
+                // runs before answering, so the barrier holds for the
+                // new work too instead of completing at the boundary.
+                if !children.any_running().await {
+                    break;
+                }
+                continue;
             }
             settled.await;
         }
