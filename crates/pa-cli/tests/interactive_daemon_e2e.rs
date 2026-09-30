@@ -5180,7 +5180,7 @@ async fn tui_anthropic_warning_warns_once_then_a_fresh_process_reattaches_silent
                     .join(", ")
             },
         );
-        panic!("the session file {}: {} ({listing})", file.display())
+        panic!("the session file {} ({listing})", file.display())
     });
     assert!(
         persisted.contains("anthropic_subscription_warning_shown"),
