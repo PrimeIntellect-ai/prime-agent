@@ -644,7 +644,7 @@ mod tests {
             serde_json::json!("rate_limit")
         );
         assert_eq!(properties["http_status"], serde_json::json!(429));
-        assert_eq!(properties["classifier_revision"], serde_json::json!(1));
+        assert_eq!(properties["classifier_revision"], serde_json::json!(2));
         assert!(!properties.contains_key("error_message"), "no raw message");
     }
 
@@ -689,8 +689,10 @@ mod tests {
             assert!(TOOL_CATEGORIES.contains(category));
         }
         assert!(ERROR_SUBTYPES.contains(&"rate_limited"));
+        assert!(ERROR_SUBTYPES.contains(&"stream_drop"));
         assert!(ERROR_CATEGORIES.contains(&"rate_limit"));
         assert!(ERROR_CODES.contains(&"unknown"));
+        assert!(ERROR_CODES.contains(&"stream_drop"));
         assert!(CLASSIFICATION_SOURCES.contains(&"http_status"));
         assert!(ERROR_COMPONENTS.contains(&"provider"));
         assert!(ERROR_OPERATIONS.contains(&"stream"));
