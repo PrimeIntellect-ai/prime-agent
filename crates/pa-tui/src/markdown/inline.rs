@@ -93,16 +93,9 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
                     if italic {
                         modifier |= style.italic;
                     }
-                    // The operator's hyperlink-observability ruling
-                    // (2026-09-30) supersedes the deployed-TS-binary shape
-                    // here: the label renders underlined — the standard
-                    // terminal link affordance — and the URL shows beside
-                    // it in the dim `link_url` slot, so the reader sees
-                    // where the link goes. (The TS source always styled
-                    // labels `theme.link(theme.underline(...))`, but the
-                    // deployed 0.9.5 binary dropped the chalk modifiers,
-                    // and its OSC 8 mode never printed the URL at all.)
-                    // `modifier` carries the emphasis context.
+                    // The label renders underlined (the standard
+                    // terminal link affordance); `modifier` carries the
+                    // emphasis context.
                     let href = crate::hyperlinks::resolve_link_href(&url);
                     let mut label_spans = render_inline_ctx(&label, style, true);
                     for s in &mut label_spans {
@@ -222,29 +215,26 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
             if italic {
                 m |= style.italic;
             }
-            // Every link render underlines (the observability ruling's
-            // standard link affordance), both capability forms.
-            let label = Span::styled(
+            // Every link render underlines (the standard link
+            // affordance), both capability forms.
+            let mut label = Span::styled(
                 token.text.clone(),
                 base.add_modifier(m | Modifier::UNDERLINED),
             );
             if crate::hyperlinks::hyperlinks_enabled() {
-                // OSC 8: the label is clickable. The URL never prints
-                // beside it: the label already is it.
                 let href = crate::hyperlinks::resolve_link_href(&token.href);
-                let mut content = label.content;
-                content.insert_str(0, &crate::hyperlinks::osc8_open(&href));
-                content.push_str(crate::hyperlinks::OSC8_CLOSE);
-                spans.push(Span::styled(content, label.style));
-            } else {
-                spans.push(label);
-                // The URL rides beside the label in the dim `link_url`
-                // slot when the label is not already it (mailto stripped
-                // for the comparison), TS token.href.
-                let comparison = token.href.strip_prefix("mailto:").unwrap_or(&token.href);
-                if token.text != token.href && token.text != comparison {
-                    spans.push(Span::styled(format!(" [{}]", token.href), style.link_url));
-                }
+                label
+                    .content
+                    .insert_str(0, &crate::hyperlinks::osc8_open(&href));
+                label.content.push_str(crate::hyperlinks::OSC8_CLOSE);
+            }
+            spans.push(label);
+            // The URL rides beside the label in the dim `link_url` slot
+            // unless the label already shows it (the mailto-stripped
+            // comparison, TS token.href).
+            let comparison = token.href.strip_prefix("mailto:").unwrap_or(&token.href);
+            if token.text != token.href && token.text != comparison {
+                spans.push(Span::styled(format!(" [{}]", token.href), style.link_url));
             }
             i += token.raw.chars().count();
             continue;
