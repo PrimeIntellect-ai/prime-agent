@@ -20,18 +20,23 @@
 #   pull_request against main — the same gates on the merge candidate,
 #   so the merge bar stops relying solely on review bots.
 #
+#   merge_group — full workspace tests on the queued merge candidate,
+#   not the PR's narrowed selection. Branch protection must separately
+#   enable merge queue and require the final gates.
+#
 # THE PR SMOKE MODEL (the touched-crate path filter): the PR wave narrows
-# the TEST phase to the touched crates' units (the `changes` job maps the
-# PR's changed files to crates; any path outside crates/<pkg>/** fails safe
+# the TEST phase to touched crates and their reverse dependents' units
+# (the `changes` job maps the PR's changed files to crates; any path
+# outside crates/<pkg>/** fails safe
 # to the full selection — CI/scripts/vendor/runtime changes affect the
 # whole suite, and docs-only waste is cheaper than a silent hole). The
 # stable crc32 shard assignment is untouched — only the unit selection
 # narrows — and the push wave keeps running the full union, so main is the
 # authority: the PR proves the touched crates' runtime behavior fast, the
 # merge proves the whole workspace. fmt + check/clippy stay full-scope on
-# PRs (the compile authority — a dependent-crate break fails the wave
-# regardless of the test narrowing). The shard manifests record the
-# selection scope and the summary job audits the union against it, so a
+# PRs (the compile authority); reverse-dep selection also runs tests of
+# crates affected by a dependency's behavior change. The shard manifests
+# record the selection scope and the summary job audits the union against it, so a
 # narrowed run can never masquerade as a full one and coverage can never
 # silently regress.
 #
@@ -64,15 +69,17 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  # PRs: a newer push supersedes the stale gates. Pushes: the newest tip
-  # supersedes the older run — under this fleet's merge cadence a queued
-  # (non-canceling) push run would lag hours behind and bill stale tips.
+  # PRs: a newer push supersedes stale gates. Queue entries use their own
+  # merge-group ref; a superseded entry's gates can be cancelled. Pushes:
+  # the newest tip supersedes the older run instead of billing stale tips.
   cancel-in-progress: true
 
 env:
@@ -97,15 +104,15 @@ env:
   SHARD_COUNT: "8"
 
 jobs:
-  # The touched-crate path filter (the PR smoke's selection). Push runs the
-  # full selection; PR runs map the changed files to crates and fail safe to
-  # the full selection on any non-crate path. The output feeds the test
-  # shard legs' --crates; empty means "the full union".
+  # The touched-crate path filter (the PR smoke's selection). Push and queue
+  # runs use the full selection; PR runs select crates plus reverse deps,
+  # failing safe to the full selection on any non-crate path. The output
+  # feeds test shards' --crates; empty means "the full union".
   changes:
-    name: touched crates (PR) / full selection (push)
+    name: touched crates (PR) / full selection (push + queue)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: github.event_name == 'push' || !github.event.pull_request.draft
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     outputs:
       crates: ${{ steps.select.outputs.crates }}
       scope: ${{ steps.select.outputs.scope }}
@@ -120,8 +127,8 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "push wave: the full selection (main is the authority)"
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "${{ github.event_name }} wave: the full selection"
             echo "crates=" >> "${GITHUB_OUTPUT}"
             echo "scope=all" >> "${GITHUB_OUTPUT}"
             exit 0
@@ -152,7 +159,7 @@ jobs:
     timeout-minutes: 30
     # Draft PRs do not gate (no billing on work-in-progress pushes); the
     # ready_for_review trigger runs the gates once a draft is marked ready.
-    if: github.event_name == 'push' || !github.event.pull_request.draft
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -167,7 +174,7 @@ jobs:
     name: check + clippy (workspace)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    if: github.event_name == 'push' || !github.event.pull_request.draft
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -208,7 +215,7 @@ jobs:
     name: test shard ${{ matrix.shard }}/${{ strategy.job-total }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    if: github.event_name == 'push' || !github.event.pull_request.draft
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     strategy:
       # One red shard must not cancel the others: their own conclusions are
       # the per-shard signal the summary merges.
@@ -276,7 +283,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: [test-shard]
-    if: always() && (github.event_name == 'push' || !github.event.pull_request.draft)
+    if: always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:

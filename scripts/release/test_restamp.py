@@ -228,6 +228,16 @@ class TheRestampCase(RestampTestCase):
     """The restamped set is the release shape at the beta version, built
     bytes unchanged."""
 
+    def test_the_continuous_artifact_passes_its_native_livecheck(self):
+        # The continuous matrix now runs this verifier on every native runner
+        # before uploading: exercise its --sha path on the assembled set.
+        verified = run_cli(VERIFIER, [
+            "--dist-dir", str(self.incoming / f"artifacts-{HOST_TARGET}"),
+            "--version", self.fixture.version, "--target", HOST_TARGET,
+            "--sha", self.commit])
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        self.assertIn("livecheck all OK", verified.stdout)
+
     def restamped_assertions(self, out: Path, version: str):
         target_dir = out / f"artifacts-{HOST_TARGET}"
         archive = target_dir / f"prime-agent-{version}-{HOST_ALIAS}.tar.gz"
@@ -290,8 +300,8 @@ class TheRestampCase(RestampTestCase):
         self.assertNotIn("decoders", manifest)
         sums = (target_dir / "SHA256SUMS").read_text().splitlines()
         self.assertEqual(len(sums), 1)
-        # The foreign-arch set cannot execute on this host: the livecheck
-        # must skip it (the continuous run's own gates are the evidence).
+        # The foreign-arch set cannot execute on this host: restamp skips its
+        # livecheck; continuous verified it earlier on its native runner.
         self.assertIn('"livecheck": null', result.stdout)
 
     def test_an_escaping_tar_member_is_refused_before_any_write(self):

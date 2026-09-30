@@ -4,7 +4,7 @@
 The contracts, pinned on real pulls/files-API shapes (the `filename` +
 `previous_filename` rows — the API's own field names, so a field-name
 regression fails safe instead of silently narrowing to nothing):
-  - a crate-only PR maps to exactly those crates;
+  - a crate-only PR maps to those crates and their transitive dependents;
   - ANY non-crate path - and a rename's removed side too - fails safe to
     the full selection;
   - an undecidable list (empty input, an empty filename row, the API's
@@ -56,8 +56,8 @@ class TheMappingTestCase(unittest.TestCase):
             "crates/pa-tui/src/view/runs.rs",
         ])
         self.assertEqual(rc, 0, out)
-        self.assertEqual(outputs["crates"], "pa-daemon,pa-tui")
-        self.assertIn("crates (2: pa-daemon, pa-tui)", outputs["scope"])
+        self.assertEqual(outputs["crates"], "pa-cli,pa-daemon,pa-tui")
+        self.assertIn("crates (3: pa-cli, pa-daemon, pa-tui)", outputs["scope"])
 
     def test_any_non_crate_path_fails_safe_to_the_full_selection(self):
         rc, out, outputs = run_mapper([
@@ -84,7 +84,29 @@ class TheMappingTestCase(unittest.TestCase):
             "crates/pa-tui/src/editor/selection.rs\tcrates/pa-tui/src/selection.rs",
         ])
         self.assertEqual(rc, 0, out)
-        self.assertEqual(outputs["crates"], "pa-tui")
+        self.assertEqual(outputs["crates"], "pa-cli,pa-tui")
+
+    def test_pa_types_only_runs_every_crate(self):
+        rc, out, outputs = run_mapper(["crates/pa-types/src/lib.rs"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(outputs["crates"], ",".join(sorted(ci_pr_crates.WORKSPACE_DEPS)))
+
+    def test_pa_tui_only_runs_pa_cli_too(self):
+        rc, out, outputs = run_mapper(["crates/pa-tui/src/lib.rs"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(outputs["crates"], "pa-cli,pa-tui")
+
+    def test_pa_telemetry_only_runs_all_dependents(self):
+        rc, out, outputs = run_mapper(["crates/pa-telemetry/src/lib.rs"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(outputs["crates"],
+                         "pa-cli,pa-core,pa-daemon,pa-telemetry,pa-tui")
+
+    def test_an_unknown_crate_fails_safe(self):
+        rc, out, outputs = run_mapper(["crates/pa-future/src/lib.rs"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(outputs["crates"], "")
+        self.assertIn("unknown crate pa-future", out)
 
     def test_an_empty_filename_row_fails_safe(self):
         # The field-name regression the reviewer demanded pinned: a row whose

@@ -241,8 +241,8 @@ def restamp_target(incoming: Path, out_dir: Path, version: str,
         #    binary's `--version` must report the release version (the runtime
         #    version manifest is what the update flow reads), and a GNU target
         #    re-proves the GLIBC baseline. The other targets' binaries cannot
-        #    execute here; their evidence is the continuous run's own green
-        #    gates on this exact commit (the manifest's `commit` row names it).
+        #    execute here; verify_release.py livechecked each on its native
+        #    continuous runner (the manifest's `commit` row names that build).
         livecheck = None
         if target == host_target():
             env = {k: v for k, v in os.environ.items() if k != "PI_PACKAGE_DIR"}

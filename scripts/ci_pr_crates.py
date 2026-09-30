@@ -2,9 +2,10 @@
 """Map a pull request's changed files to the crates its PR wave tests.
 
 ci.yml's `changes` job resolves the selection: the test phase narrows to the
-touched crates' units (scripts/ci_test_shard.py --crates) on PRs, and the
-push wave runs the full union. The mapping is fail-safe by construction: a
-selection that cannot be made is the FULL selection — a wrong guess can
+touched crates and their reverse dependencies (scripts/ci_test_shard.py
+--crates) on PRs; push and merge-queue waves run the full union. The
+mapping is fail-safe by construction: a selection that cannot be made is
+the FULL selection — a wrong guess can
 only cost runner minutes, never coverage.
 
 The input is the pull-requests files API (`GET /repos/{o}/{r}/pulls/{n}/files`,
@@ -37,6 +38,22 @@ from pathlib import Path
 # truncated and the mapping is not trustworthy, so the full selection runs.
 FILES_API_CEILING = 3000
 
+# Conservative CI impact graph: some edges cover behavior beyond a direct
+# Cargo.toml link. Over-selecting is safe; missing a dependent test is not.
+# The changes job must select without installing Rust or running Cargo.
+WORKSPACE_DEPS = {
+    "pa-types": set(),
+    "pa-telemetry": set(),
+    "pa-ai": {"pa-types"},
+    "pa-models": {"pa-ai"},
+    "pa-agent": {"pa-ai", "pa-types"},
+    "pa-core": {"pa-agent", "pa-ai", "pa-models", "pa-types", "pa-telemetry"},
+    "pa-daemon": {"pa-core"},
+    "pa-tui": {"pa-types", "pa-core"},
+    "pa-cli": {"pa-types", "pa-telemetry", "pa-ai", "pa-models",
+               "pa-agent", "pa-core", "pa-daemon", "pa-tui"},
+}
+
 
 def read_rows(path: Path) -> list[tuple[str, str]]:
     """The files-API rows, read raw: a leading-space path (` crates/...`)
@@ -53,13 +70,13 @@ def read_rows(path: Path) -> list[tuple[str, str]]:
 
 
 def select_crates(rows: list[tuple[str, str]]) -> list[str] | None:
-    """The touched crates, or None when the full selection must run.
+    """The touched crates and reverse dependencies, or None for a full wave.
 
-    Only `crates/<pkg>/**` narrows. Everything else — the workflows, the CI
-    tooling, vendor/, the runtime sidecar, workspace-level Cargo files, the
+    Only known `crates/<pkg>/**` narrows. Everything else — the workflows,
+    CI tooling, vendor/, the runtime sidecar, workspace-level Cargo files,
     install scripts, docs — affects more than any crate subset, and a rename
-    counts both sides: the PR removed the previous path too. An undecidable
-    list (empty rows, the API ceiling) fails safe to the full selection.
+    counts both sides. An undecidable list (empty rows, the API ceiling or
+    an unknown crate) fails safe to the full selection.
     """
     if not rows:
         return None
@@ -79,11 +96,25 @@ def select_crates(rows: list[tuple[str, str]]) -> list[str] | None:
                 continue  # an ordinary (non-rename) row has no removed side
             parts = candidate.split("/")
             if len(parts) >= 2 and parts[0] == "crates" and parts[1]:
+                if parts[1] not in WORKSPACE_DEPS:
+                    print(f"unknown crate {parts[1]}: the full selection runs")
+                    return None
                 crates.add(parts[1])
             else:
                 print(f"non-crate path {candidate}: the full selection runs")
                 return None
-    return sorted(crates)
+    # pa-types owns the shared wire vocabulary: run every workspace test for
+    # its changes, including the independent pa-telemetry leaf crate.
+    if "pa-types" in crates:
+        return sorted(WORKSPACE_DEPS)
+    # Walk upward through the DAG until no dependent is left unselected.
+    while True:
+        dependents = {crate for crate, deps in WORKSPACE_DEPS.items()
+                      if deps & crates}
+        expanded = crates | dependents
+        if expanded == crates:
+            return sorted(crates)
+        crates = expanded
 
 
 def write_outputs(crates: list[str] | None, output_path: str) -> None:
