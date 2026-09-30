@@ -3,8 +3,9 @@
 //! (parent/child edges, depths, names) is read back from this file instead of
 //! being re-derived from session files, so historical and non-resident
 //! children stay roster-visible after passivation. Mirrors the record
-//! grammar, bounds, replay semantics, and legacy-registry seeding of the
-//! TS `modes/daemon/rlm-ledger.ts`.
+//! grammar, bounds, and legacy-registry seeding of the TS
+//! `modes/daemon/rlm-ledger.ts`; unlike TS, replay logs and skips a
+//! malformed line instead of failing the whole read.
 //!
 //! Writers: the supervisor appends at admission moments (spawn at child
 //! create, rename at subagent rename, delete at subagent delete). Readers:
@@ -190,8 +191,8 @@ impl RlmSpawnLedger {
     /// Returns an error when the spawn input is invalid (an empty child
     /// id, parent, or child session path, or a zero depth), when another
     /// live edge already claims the child session path, when the ledger
-    /// replay fails (an oversized or malformed ledger), or when the
-    /// record cannot be appended.
+    /// replay fails (an oversized ledger), or when the record cannot
+    /// be appended.
     pub fn append_spawn(&self, input: &RlmSpawnInput) -> Result<()> {
         if input.child_id.is_empty()
             || input.parent.is_empty()
@@ -256,8 +257,8 @@ impl RlmSpawnLedger {
     ///
     /// # Errors
     ///
-    /// Returns an error when the replay fails (an oversized or malformed
-    /// ledger) or one of the rename records cannot be appended.
+    /// Returns an error when the replay fails (an oversized ledger)
+    /// or one of the rename records cannot be appended.
     pub fn append_rename_by_child_path(&self, child: &str, name: &str) -> Result<()> {
         let target = canonical_session_path(Path::new(child));
         let state = self.replay_cached()?;
@@ -324,7 +325,7 @@ impl RlmSpawnLedger {
         let child_path = canonical_session_path(Path::new(child));
         // The writer never records what the reader refuses: replay
         // rejects a negative or NaN usage cost outright, which would
-        // make the whole ledger unreadable. That includes negative
+        // drop the whole tombstone record. That includes negative
         // zero - `is_sign_negative()` is how replay reads it, and
         // `>= 0.0` alone would have passed `-0.0` through. A session
         // file may carry such a cost (the file's own summary read
@@ -413,8 +414,8 @@ impl RlmSpawnLedger {
     ///
     /// # Errors
     ///
-    /// Returns an error when the ledger replay fails (an oversized or
-    /// malformed ledger).
+    /// Returns an error when the ledger replay fails (an oversized
+    /// ledger).
     pub fn deleted_descendant_usage_by_parent(
         &self,
     ) -> Result<HashMap<String, crate::session_usage::SessionUsageSummary>> {
@@ -548,8 +549,8 @@ impl RlmSpawnLedger {
     ///
     /// # Errors
     ///
-    /// Returns an error when the ledger replay fails (an oversized or
-    /// malformed ledger); a missing ledger replays empty.
+    /// Returns an error when the ledger replay fails (an oversized
+    /// ledger); a missing ledger replays empty.
     pub fn edges(&self, include_deleted: bool) -> Result<Vec<RlmLedgerEdge>> {
         self.seed_once()?;
         let state = self.replay_cached()?;
@@ -572,9 +573,9 @@ impl RlmSpawnLedger {
     ///
     /// # Errors
     ///
-    /// Returns an error when the ledger replay fails (an oversized or
-    /// malformed ledger); a missing ledger replays empty, and only the
-    /// liveness resolution drops edges.
+    /// Returns an error when the ledger replay fails (an oversized
+    /// ledger); a missing ledger replays empty, and only the liveness
+    /// resolution drops edges.
     pub fn live_edges(&self) -> Result<Vec<RlmLedgerEdge>> {
         self.seed_once()?;
         let state = self.replay_cached()?;
@@ -607,8 +608,8 @@ impl RlmSpawnLedger {
     /// a seed was mid-read never writes its row. The child id is
     /// matched together with the child path: ids can be shared by
     /// edges with different paths, and only the exact edge a seed
-    /// snapshotted counts as live. A broken ledger reads as not-live,
-    /// like every other read here degrades to nothing.
+    /// snapshotted counts as live. An unreadable (oversized) ledger reads
+    /// as not-live.
     pub fn edge_is_live(&self, child_id: &str, child: &str) -> bool {
         let child = canonical_session_path(Path::new(child));
         self.seed_once().is_ok()
@@ -659,15 +660,18 @@ impl RlmSpawnLedger {
     }
 
     fn replay(&self) -> Result<ReplayState> {
-        let Ok(content) = fs::read_to_string(&self.path) else {
+        let Ok(bytes) = fs::read(&self.path) else {
             return Ok(ReplayState::default());
         };
-        if content.len() as u64 > RLM_LEDGER_MAX_BYTES {
+        if bytes.len() as u64 > RLM_LEDGER_MAX_BYTES {
             bail!(
                 "RLM ledger {} exceeds {RLM_LEDGER_MAX_BYTES} bytes; refusing to read",
                 self.path.display()
             );
         }
+        // A torn write inside a multibyte name must spoil one line, not
+        // the whole file.
+        let content = String::from_utf8_lossy(&bytes);
         let mut state = ReplayState::default();
         let mut records = 0usize;
         for (index, line) in content.lines().enumerate() {
@@ -681,14 +685,22 @@ impl RlmSpawnLedger {
                     self.path.display()
                 );
             }
-            let Some(record) = parse_ledger_line(line, index)
-                .with_context(|| format!("RLM ledger {}", self.path.display()))?
-            else {
-                self.log(&format!(
-                    "RLM ledger: skipped record with unknown op on line {}",
-                    index + 1
-                ));
-                continue;
+            let record = match parse_ledger_line(line, index) {
+                Ok(Some(record)) => record,
+                Ok(None) => {
+                    self.log(&format!(
+                        "RLM ledger: skipped record with unknown op on line {}",
+                        index + 1
+                    ));
+                    continue;
+                }
+                Err(error) => {
+                    self.log(&format!(
+                        "RLM ledger {}: skipped {error:#}",
+                        self.path.display()
+                    ));
+                    continue;
+                }
             };
             match record {
                 LedgerRecord::Spawn {

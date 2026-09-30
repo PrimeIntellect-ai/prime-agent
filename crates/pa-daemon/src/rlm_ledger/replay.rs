@@ -39,7 +39,7 @@ fn str_field(record: &Value, key: &str) -> Option<String> {
 
 /// Parse one delete record's usage snapshot (TS `SessionUsageSummary`
 /// wire shape). A present-but-malformed snapshot is a corrupt record: the
-/// ledger fails loudly rather than billing a partial number.
+/// record is rejected rather than billing a partial number.
 fn parse_deleted_usage(
     usage: &Value,
     line_no: usize,
@@ -73,8 +73,8 @@ fn parse_deleted_usage(
 
 /// Parse one ledger line: `v:1` records with a known op, `None` for a known
 /// version with an unknown op (forward compatibility), an error for anything
-/// else - silently skipping records a reader cannot understand would corrupt
-/// topology, so version violations fail loudly.
+/// else - which replay logs and skips: one bad line costs one record, never
+/// the ledger.
 pub(super) fn parse_ledger_line(line: &str, index: usize) -> Result<Option<LedgerRecord>> {
     let line_no = index + 1;
     let record: Value = serde_json::from_str(line.trim())

@@ -1,0 +1,1 @@
+- A corrupted line in the RLM spawn ledger is now skipped and logged instead of failing every ledger read, so session listings and new subagent spawns keep working.

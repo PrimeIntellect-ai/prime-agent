@@ -272,7 +272,7 @@ fn moved_edge_paths_resolve_through_the_session_id() {
 }
 
 #[test]
-fn duplicate_child_path_and_bad_records_fail_loudly() {
+fn duplicate_child_path_and_bad_spawn_inputs_fail_but_bad_lines_skip() {
     let dir = temp_dir("dup");
     let ledger = ledger_for(&dir);
     let parent = dir.join("p.jsonl");
@@ -304,12 +304,23 @@ fn duplicate_child_path_and_bad_records_fail_loudly() {
         name: "w".into(),
     });
     assert!(depth_zero.is_err());
-    // A malformed record corrupts topology: the read fails closed.
+    // A bad line costs that record only; the rest of the ledger still works.
     let path = ledger.ledger_path().to_path_buf();
     let mut content = fs::read_to_string(&path).unwrap();
-    content.push_str("{\"v\":1,\"op\":\"spawn\"}\n");
+    content.push_str("{\"v\":1,\"op\":\"spawn\"}\n{\"v\":1,\"op\":\"spa\n");
     fs::write(&path, content).unwrap();
-    assert!(ledger.edges(false).is_err());
+    ledger
+        .append_spawn(&RlmSpawnInput {
+            child_id: "sub-4".into(),
+            parent: parent.to_string_lossy().into(),
+            child: dir.join("c4.jsonl").to_string_lossy().into(),
+            depth: 1,
+            name: "w".into(),
+        })
+        .unwrap();
+    let edges = ledger.edges(false).unwrap();
+    let ids: Vec<_> = edges.into_iter().map(|edge| edge.child_id).collect();
+    assert_eq!(ids, ["sub-1", "sub-4"]);
 }
 
 #[test]
