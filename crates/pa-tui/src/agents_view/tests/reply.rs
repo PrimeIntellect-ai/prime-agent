@@ -468,11 +468,11 @@ fn a_target_gone_from_the_catalog_submits_as_a_resume() {
     assert_eq!(mode.status_text(), Some("Resuming session..."));
 }
 
-/// A paste parks the same suggestion request a keystroke does: the
-/// batch-end materialization answers it (the loop runs it after
-/// `handle_paste`, the same as after a key).
+/// A paste never opens the completion (TS `handlePaste` cancels
+/// autocomplete and inserts without a new request, editor.ts:1301);
+/// the menu waits for the next keystroke.
 #[test]
-fn a_pasted_slash_materializes_the_completion() {
+fn a_pasted_slash_never_opens_the_completion() {
     let mut mode = armed_live();
     mode.handle_paste("/");
     mode.materialize_composer_autocomplete();
@@ -480,11 +480,8 @@ fn a_pasted_slash_materializes_the_completion() {
         panic!("armed");
     };
     assert!(
-        reply
-            .editor
-            .autocomplete_state()
-            .is_some_and(|state| !state.items.is_empty()),
-        "the pasted slash suggests the commands"
+        reply.editor.autocomplete_state().is_none(),
+        "the paste leaves the completion closed"
     );
 }
 
