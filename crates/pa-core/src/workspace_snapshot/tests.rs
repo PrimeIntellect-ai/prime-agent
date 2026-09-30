@@ -6,16 +6,19 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
-use super::git::{
-    parse_status, read_head_tree, read_worktree_status, GitStatus, HeadTreeEntry, StatusEntry,
-};
+use super::git::{parse_status, GitStatus, HeadTreeEntry, StatusEntry};
+#[cfg(unix)]
+use super::git::{read_head_tree, read_worktree_status};
 use super::manifest::{is_safe_relative_path, symlink_target_stays_inside};
 use super::{
     build_manifest, capture_leaf, create_workspace_snapshot, git_blob_oid, is_secret_path,
-    open_leaf, verify_workspace_snapshot, Baseline, BaselineMode, CapturedEntry, ExcludeReason,
-    ExcludedEntry, LeafOutcome, OpenLeaf, SnapshotError, SnapshotLimits, SnapshotManifest,
+    verify_workspace_snapshot, Baseline, BaselineMode, CapturedEntry, ExcludeReason, ExcludedEntry,
+    LeafOutcome, SnapshotError, SnapshotLimits, SnapshotManifest,
 };
+#[cfg(unix)]
+use super::{open_leaf, OpenLeaf};
 
+#[cfg(unix)]
 fn git(dir: &Path, args: &[&str]) {
     let output = std::process::Command::new("git")
         .args(args)
@@ -29,12 +32,14 @@ fn git(dir: &Path, args: &[&str]) {
     );
 }
 
+#[cfg(unix)]
 fn init_repo(dir: &Path) {
     git(dir, &["init", "-q"]);
     git(dir, &["config", "user.email", "t@example.com"]);
     git(dir, &["config", "user.name", "t"]);
 }
 
+#[cfg(unix)]
 fn write(dir: &Path, rel: &str, content: &str) {
     let path = dir.join(rel);
     if let Some(parent) = path.parent() {
@@ -43,6 +48,7 @@ fn write(dir: &Path, rel: &str, content: &str) {
     std::fs::write(path, content).unwrap();
 }
 
+#[cfg(unix)]
 fn git_show(dir: &Path, revision: &str) -> String {
     let output = std::process::Command::new("git")
         .args(["show", revision])
@@ -57,6 +63,7 @@ fn git_show(dir: &Path, revision: &str) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+#[cfg(unix)]
 fn head_commit(dir: &Path) -> String {
     let output = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -112,6 +119,7 @@ fn bare_manifest(captured: Vec<CapturedEntry>, excluded: Vec<ExcludedEntry>) -> 
 
 /// The manifest a committed repository produces with a HEAD-tree
 /// baseline.
+#[cfg(unix)]
 fn repo_manifest(
     root: &Path,
     baseline: Baseline,
@@ -142,13 +150,29 @@ fn stage(manifest: &SnapshotManifest, blobs: &[(&str, &[u8])]) -> tempfile::Temp
     staging
 }
 
+#[cfg(unix)]
 fn read_blob(staging: &Path, sha256: &str) -> Vec<u8> {
     std::fs::read(staging.join("blobs").join(sha256)).unwrap()
+}
+
+/// Capture refuses before querying git or creating private-looking files
+/// when owner-only modes cannot be guaranteed by the platform wall.
+#[cfg(not(unix))]
+#[tokio::test]
+async fn capture_refuses_unsupported_platform_without_staging() {
+    let dir = tempfile::tempdir().unwrap();
+    let staging = dir.path().join("staging");
+    let error = create_workspace_snapshot(dir.path(), &staging, BaselineMode::External, &limits())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, SnapshotError::UnsupportedPlatform));
+    assert!(!staging.exists());
 }
 
 /// A SHA-256 repository snapshots and verifies the same as a SHA-1 one:
 /// the object ids follow the repository's own format, and the manifest's
 /// head commit is the repository's 64-character branch id.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_sha256_repository_snapshots_and_verifies() {
     let repo = tempfile::tempdir().unwrap();
@@ -194,6 +218,7 @@ async fn a_sha256_repository_snapshots_and_verifies() {
     assert_eq!(*bytes, 7);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn snapshot_collapses_a_path_git_lists_twice() {
     // `git rm --cached` leaves a staged deletion and an untracked row
@@ -223,6 +248,7 @@ async fn snapshot_collapses_a_path_git_lists_twice() {
     assert_eq!(verify_workspace_snapshot(staging.path()).unwrap(), expected);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn snapshot_captures_worktree_delta() {
     let repo = tempfile::tempdir().unwrap();
@@ -276,6 +302,7 @@ async fn snapshot_captures_worktree_delta() {
     assert_eq!(verify_workspace_snapshot(staging.path()).unwrap(), expected);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn snapshot_is_deterministic() {
     let repo = tempfile::tempdir().unwrap();
@@ -305,6 +332,7 @@ async fn snapshot_is_deterministic() {
     assert!(verify_workspace_snapshot(second.path()).is_ok());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn snapshot_excludes_secret_named_files_in_delta_and_baseline() {
     let repo = tempfile::tempdir().unwrap();
@@ -447,6 +475,7 @@ async fn snapshot_never_reads_behind_symlinked_ancestors() {
     assert!(verify_workspace_snapshot(staging.path()).is_ok());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn snapshot_excludes_nested_repositories() {
     let repo = tempfile::tempdir().unwrap();
@@ -481,6 +510,7 @@ async fn snapshot_excludes_nested_repositories() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn snapshot_records_gitlink_absence_and_excludes_present_submodules() {
     let repo = tempfile::tempdir().unwrap();
@@ -533,6 +563,7 @@ async fn snapshot_records_gitlink_absence_and_excludes_present_submodules() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn snapshot_captures_unmerged_conflict_worktree_content() {
     let repo = tempfile::tempdir().unwrap();
@@ -573,6 +604,7 @@ async fn snapshot_captures_unmerged_conflict_worktree_content() {
     assert!(verify_workspace_snapshot(staging.path()).is_ok());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn head_tree_baseline_ships_head_content_and_full_coverage() {
     let repo = tempfile::tempdir().unwrap();
@@ -666,6 +698,7 @@ async fn head_tree_baseline_ships_head_content_and_full_coverage() {
     assert!(verify_workspace_snapshot(staging.path()).is_ok());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn head_tree_pins_to_the_status_reported_commit() {
     let repo = tempfile::tempdir().unwrap();
@@ -789,6 +822,7 @@ fn baseline_rejects_concurrent_mutation_loudly() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn external_baseline_mode_records_the_choice() {
     let repo = tempfile::tempdir().unwrap();
@@ -817,6 +851,7 @@ async fn external_baseline_mode_records_the_choice() {
     assert!(verify_workspace_snapshot(staging.path()).is_ok());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn unborn_repository_snapshot_is_self_contained() {
     let repo = tempfile::tempdir().unwrap();
@@ -837,6 +872,7 @@ async fn unborn_repository_snapshot_is_self_contained() {
     assert!(verify_workspace_snapshot(staging.path()).is_ok());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn snapshot_drains_status_output_beyond_pipe_capacity() {
     // Regression guard for the child-process drain: `git status` writing
@@ -861,6 +897,7 @@ async fn snapshot_drains_status_output_beyond_pipe_capacity() {
     assert!(verify_workspace_snapshot(staging.path()).is_ok());
 }
 
+#[cfg(unix)]
 async fn capture_error(root: &Path, limits: &SnapshotLimits) -> String {
     let staging = tempfile::tempdir().unwrap();
     create_workspace_snapshot(root, staging.path(), BaselineMode::HeadTree, limits)
@@ -869,6 +906,7 @@ async fn capture_error(root: &Path, limits: &SnapshotLimits) -> String {
         .to_string()
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn snapshot_enforces_limits() {
     let repo = tempfile::tempdir().unwrap();
@@ -920,6 +958,7 @@ async fn snapshot_enforces_limits() {
     assert!(error.contains("max_baseline_entries"), "{error}");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn snapshot_rejects_unusable_staging_directories() {
     let repo = tempfile::tempdir().unwrap();
@@ -1036,6 +1075,7 @@ async fn staging_and_staged_files_are_owner_private() {
     assert_eq!(mode_of(&staging), 0o700);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn snapshot_requires_a_git_worktree() {
     let plain = tempfile::tempdir().unwrap();
@@ -1055,6 +1095,7 @@ async fn snapshot_requires_a_git_worktree() {
     assert!(staging.path().join("manifest.json").read_dir().is_err());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn snapshot_from_a_subdirectory_captures_the_whole_repository() {
     let repo = tempfile::tempdir().unwrap();

@@ -58,12 +58,18 @@ owner-private directory as content-addressed blobs plus a deterministic
 manifest that hashes them, with credential-shaped, symlink-ancestor,
 escaping-symlink, nested-repo, and submodule exclusions recorded in the
 manifest, hard entry/size bounds, race-free openat(O_NOFOLLOW) leaf reads
-(unix), and offline verification of a staged snapshot before upload. The
-baseline is an explicit caller choice (`BaselineMode`): HEAD's tree
-content staged through the same filters as the delta (each entry verified
-against HEAD's recorded object id and mode, no git history ships), or an
-explicit external reference the consumer must reach itself. Foundation
-plumbing only: nothing wires it to a user-facing cloud toggle yet.
+(Unix), and offline verification of a staged snapshot before upload. Capture
+refuses on non-Unix targets: owner-only 0700 staging and 0600 files cannot be
+enforced there. The baseline is an explicit caller choice (`BaselineMode`):
+HEAD's tree content staged through the same filters as the delta (each entry
+verified against HEAD's recorded object id and mode, no git history ships),
+or an explicit external reference the consumer must reach itself. The secret
+skip is a filename-shaped denylist only; ordinary-named files containing
+secrets stage verbatim. Snapshot directories are secret-bearing: every
+consumer must treat them as credentials. Capture does synchronous file I/O
+inside its async entry point; callers must offload the entire operation with
+`tokio::task::spawn_blocking` and `Handle::block_on`. Foundation plumbing
+only: nothing wires it to a user-facing cloud toggle yet.
 
 ## Non-goals
 No provider HTTP (pa-ai), no loop policy (pa-agent), no daemon supervision (pa-daemon), no TUI (pa-tui). No update coordination (the pa-cli coordinator owns the FSM; the update-flow seam here is the daemon-free support layer: `update::version` (semver/channel policy), `update::install` (the managed install-root layout), `update::release` (the channel manifest fetch), `update::download` (sha256-verified archive download + staging)). Event emission at the session seams, ctx-action binding, slash-command dispatch at the product surface, and reload/stale-ctx semantics are design stages 3+; the package manager installs sources and resolves resource paths only. No workspace snapshot upload, transport, or remote materialization (staging and verification live here; the cloud attach surface owns the transport when it ships).

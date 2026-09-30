@@ -137,6 +137,9 @@ pub enum SnapshotError {
     /// baseline that is not the stated commit.
     #[error("worktree changed during capture: {detail}")]
     ConcurrentMutation { detail: String },
+    /// Capture cannot enforce owner-only staging permissions on this platform.
+    #[error("workspace snapshot capture requires Unix owner-only file permissions")]
+    UnsupportedPlatform,
     /// A filesystem error at `path`.
     #[error("io error at {}: {source}", path.display())]
     Io {
@@ -167,9 +170,22 @@ pub enum SnapshotError {
 /// delta and - in [`BaselineMode::HeadTree`] - the HEAD-tree baseline;
 /// the manifest is written last, after everything it describes.
 ///
+/// This capture is supported only on Unix. On other platforms the
+/// permission wall cannot enforce owner-only modes, so capture refuses
+/// before creating the staging directory. The secret skip is a filename-
+/// shaped denylist only: ordinary-named files containing secrets stage
+/// verbatim. The snapshot directory is secret-bearing; every consumer
+/// must treat it as credentials.
+///
+/// Capture reads, hashes, and writes files synchronously inside this
+/// async function (up to the configured entry and byte caps). Callers
+/// must run the entire capture via `tokio::task::spawn_blocking` with
+/// `tokio::runtime::Handle::block_on` rather than block a Tokio worker.
+///
 /// # Errors
-/// Returns [`SnapshotError::NotAWorktree`] when `root` is not inside a
-/// git worktree, staging-guard errors for an unusable staging directory,
+/// Returns [`SnapshotError::UnsupportedPlatform`] on non-Unix targets,
+/// [`SnapshotError::NotAWorktree`] when `root` is not inside a git worktree,
+/// staging-guard errors for an unusable staging directory,
 /// [`SnapshotError::Limit`] when a bound is exceeded, and git/io errors
 /// for the enumeration, baseline, and capture steps.
 #[tracing::instrument(
@@ -184,6 +200,9 @@ pub async fn create_workspace_snapshot(
     baseline_mode: BaselineMode,
     limits: &SnapshotLimits,
 ) -> Result<WorkspaceSnapshot, SnapshotError> {
+    if !cfg!(unix) {
+        return Err(SnapshotError::UnsupportedPlatform);
+    }
     let worktree_root = git::resolve_worktree_root(root, limits.git_timeout_ms).await?;
     prepare_staging_dir(staging_dir, &worktree_root)?;
     let status = git::read_worktree_status(&worktree_root, limits.git_timeout_ms).await?;
