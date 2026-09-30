@@ -132,7 +132,6 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
     "get_system_prompt",
     "get_tool_definition",
     "set_session_entry_label",
-    "extension_ui_response",
     "prepare_update_restart",
     "retry_worker",
     "restart",
@@ -300,7 +299,6 @@ pub fn supported_client_capabilities() -> &'static [&'static str] {
     &[
         "attach_snapshot",
         "event_sequence",
-        "extension_ui",
         "slim_attach",
         "chunked_snapshot",
         "client_owned_sessions",
@@ -869,9 +867,6 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::SetSessionEntryLabel {
             active_session_id, ..
         }
-        | DaemonCommand::ExtensionUiResponse {
-            active_session_id, ..
-        }
         | DaemonCommand::RetryWorker {
             active_session_id, ..
         }
@@ -1040,7 +1035,6 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::GetSystemPrompt { .. } => "get_system_prompt",
         DaemonCommand::GetToolDefinition { .. } => "get_tool_definition",
         DaemonCommand::SetSessionEntryLabel { .. } => "set_session_entry_label",
-        DaemonCommand::ExtensionUiResponse { .. } => "extension_ui_response",
         DaemonCommand::AckResult { .. } => "ack_result",
         DaemonCommand::PrepareUpdateRestart { .. } => "prepare_update_restart",
         DaemonCommand::CommitUpdateRestart { .. } => "commit_update_restart",

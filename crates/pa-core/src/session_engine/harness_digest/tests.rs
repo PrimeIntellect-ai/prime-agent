@@ -182,7 +182,7 @@ fn append_replaces_older_digest_rows_and_strips_snapshot_blocks() {
     assert!(!is_digest_row(&plain, Some("older digest")));
     let unrelated = AgentMessage::Custom(pa_agent::types::CustomAgentMessage {
         role: "custom".to_string(),
-        payload: serde_json::json!({"customType": "extension_note"}),
+        payload: serde_json::json!({"customType": "arbitrary_note"}),
     });
     assert!(!is_digest_row(&unrelated, Some("older digest")));
 

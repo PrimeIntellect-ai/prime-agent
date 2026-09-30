@@ -200,7 +200,7 @@ pub fn update_git(
         &["reset", "--hard", &target.git_ref],
         Some(&target_dir),
     )?;
-    // Extension checkouts must be pristine after an update.
+    // Package checkouts must be pristine after an update.
     run_command("git", &["clean", "-fdx"], Some(&target_dir))?;
 
     if target_dir.join("package.json").exists() {

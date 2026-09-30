@@ -566,7 +566,7 @@ impl KeybindingsManager {
     }
 
     /// TS `getEffectiveConfig` / `getResolvedBindings`: the effective key
-    /// list per definition id (used by extension shortcut conflict rules).
+    /// list per definition id (used by shortcut conflict rules).
     #[must_use]
     pub fn get_effective_config(&self) -> BTreeMap<String, Vec<String>> {
         self.resolved.clone()

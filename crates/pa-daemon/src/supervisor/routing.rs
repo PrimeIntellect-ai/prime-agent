@@ -713,19 +713,10 @@ impl Supervisor {
         // supervisor's own bookkeeping; a hint-less one falls back to the
         // typed parse so the bookkeeping never silently changes shape.
         let client_wants_chunked = match command {
-            DaemonCommand::Attach {
-                capabilities,
-                supports_extension_ui,
-                ..
+            DaemonCommand::Attach { capabilities, .. }
+            | DaemonCommand::Reattach { capabilities, .. } => {
+                wants_chunked(&attach_client_capabilities(capabilities.as_deref()))
             }
-            | DaemonCommand::Reattach {
-                capabilities,
-                supports_extension_ui,
-                ..
-            } => wants_chunked(&attach_client_capabilities(
-                capabilities.as_deref(),
-                *supports_extension_ui,
-            )),
             _ => false,
         };
         let attach_family = matches!(
@@ -822,16 +813,8 @@ impl Supervisor {
                 if rebound_to.is_some() && type_name == "reattach" {
                     response.command = type_name.clone();
                 }
-                if let DaemonCommand::Attach {
-                    capabilities,
-                    supports_extension_ui,
-                    ..
-                }
-                | DaemonCommand::Reattach {
-                    capabilities,
-                    supports_extension_ui,
-                    ..
-                } = command
+                if let DaemonCommand::Attach { capabilities, .. }
+                | DaemonCommand::Reattach { capabilities, .. } = command
                 {
                     if response.success {
                         if let Some(data) = response.data.as_mut() {
@@ -867,10 +850,8 @@ impl Supervisor {
                             // The client's own capability set, not the
                             // supervisor's worker-facing one, is echoed in
                             // the attach result.
-                            let client_capabilities = attach_client_capabilities(
-                                capabilities.as_deref(),
-                                *supports_extension_ui,
-                            );
+                            let client_capabilities =
+                                attach_client_capabilities(capabilities.as_deref());
                             if let Some(client) = data.get_mut("client") {
                                 client["capabilities"] = json!(client_capabilities);
                             }

@@ -561,7 +561,6 @@ async fn direct_upgrade_routes_attach_and_streams_events() {
         .request_ok(DaemonCommand::Attach {
             id: None,
             active_session_id: "s1".to_string(),
-            supports_extension_ui: None,
             client_id: None,
             capabilities: None,
             resume_cursor: None,

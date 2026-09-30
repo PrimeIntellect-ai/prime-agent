@@ -13,6 +13,7 @@ mod clients;
 mod launch_budget;
 mod notes;
 mod options;
+mod root_identity;
 mod routing;
 mod sessions;
 mod signals_shutdown;

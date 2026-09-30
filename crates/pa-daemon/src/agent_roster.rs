@@ -328,6 +328,40 @@ impl AgentRoster {
             .collect()
     }
 
+    /// The rows a worker's root-slot swap retires (TS `flushRoster`'s
+    /// "swapped in place: also a removal" class): a whole-session
+    /// replacement (`new_session`/`switch_session`/`import_jsonl`/`fork`)
+    /// serves a NEW durable session under the SAME active session id, so
+    /// the row the worker previously owned for that active id describes a
+    /// session it no longer serves. The roster must not keep presenting
+    /// the superseded session as this worker's live root: the agents view
+    /// would show a session nobody serves, and a roster wake by address
+    /// would resolve the id against the wrong file. Only the worker's own
+    /// rows for the fresh entry's active id match — its subagent children
+    /// key under their own active ids and never ride a root swap.
+    pub(crate) fn swapped_out_root_rows(
+        &self,
+        worker_id: &str,
+        fresh: &AgentRosterEntry,
+    ) -> Vec<String> {
+        let Some(active) = fresh
+            .summary
+            .get("activeSessionId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            return Vec::new();
+        };
+        self.entries_for_worker(worker_id)
+            .into_iter()
+            .filter(|entry| entry.agent_id != fresh.agent_id)
+            .filter(|entry| {
+                entry.summary.get("activeSessionId").and_then(Value::as_str) == Some(active)
+            })
+            .map(|entry| entry.agent_id.clone())
+            .collect()
+    }
+
     /// All entries in stable (insertion) order for pushes and snapshots.
     pub(crate) fn entries(&self) -> Vec<AgentRosterEntry> {
         self.entries.values().cloned().collect()

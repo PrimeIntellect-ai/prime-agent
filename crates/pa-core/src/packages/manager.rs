@@ -615,7 +615,7 @@ impl PackageManager {
 }
 
 /// A settings `packages` entry: a plain source string or the filter object
-/// form (`{ source, extensions?, skills?, prompts?, themes? }`).
+/// form (`{ source, skills?, prompts?, themes? }`).
 pub(super) fn split_entry(entry: &serde_json::Value) -> (String, bool) {
     match entry {
         serde_json::Value::String(source) => (source.clone(), false),

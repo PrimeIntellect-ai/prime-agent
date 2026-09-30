@@ -5,18 +5,19 @@
 //! chains open one session after another. crossterm events are process
 //! global, so two concurrent reader threads race for the same bytes; the
 //! losing (older) thread can read a keypress after its channel is gone and
-//! drop it — the user's key vanishes. [`spawn_terminal_reader`] joins the
-//! still-running reader from the previous surface before starting the next
-//! one, so exactly one reader is alive at any time.
+//! drop it — the user's key vanishes. The reader joins the still-running
+//! reader from the previous surface before starting the next one, so
+//! exactly one reader is alive at any time.
 //!
-//! [`spawn_paste_aware_reader`] layers the TS `StdinBuffer` raw-paste
-//! heuristic on top for the editor-bearing session surface: a keystroke
-//! burst that arrives in one chunk shaped like multi-line text (text,
-//! newline, text — tmux 3.2 and older forward pastes without bracketed
-//! markers) is coalesced into one paste instead of submitting line by
-//! line. A zero-timeout poll after each read marks the chunk boundary:
-//! crossterm serves the rest of the same OS read without blocking, so a
-//! burst is exactly the events one terminal write carried.
+//! [`spawn_paste_aware_reader`] runs the TS `StdinBuffer` raw-paste
+//! heuristic for the editor-bearing surfaces (the session surface and the
+//! agents view's composers): a keystroke burst that arrives in one chunk
+//! shaped like multi-line text (text, newline, text — tmux 3.2 and older
+//! forward pastes without bracketed markers) is coalesced into one paste
+//! instead of submitting line by line. A zero-timeout poll after each
+//! read marks the chunk boundary: crossterm serves the rest of the same
+//! OS read without blocking, so a burst is exactly the events one
+//! terminal write carried.
 //!
 //! Both readers also run the [`SequenceGuard`] (TS `StdinBuffer`'s
 //! partial-sequence hold, ported in [`crate::sequence_guard`]):
@@ -84,10 +85,10 @@ pub(crate) fn stop_reader() {
 /// flagged reader observes the flag at its loop top, so the wake is what
 /// turns a parked (indefinite) poll into a prompt exit. The teardown
 /// paths call this BEFORE any drain that polls crossterm directly (the
-/// drain must own the reader lock), and the next surface's
-/// [`spawn_terminal_reader`] joins the already-exited thread, so a
-/// surface switch never waits on a poll tick and a dying reader cannot
-/// steal a keypress aimed at the new surface.
+/// drain must own the reader lock), and the next surface's reader spawn
+/// joins the already-exited thread, so a surface switch never waits on a
+/// poll tick and a dying reader cannot steal a keypress aimed at the new
+/// surface.
 pub(crate) fn request_reader_stop() {
     let guard = PREVIOUS_READER
         .lock()
@@ -117,45 +118,29 @@ pub(crate) enum ReaderInput {
     BurstPaste(String),
 }
 
-/// Start the terminal input reader. `on_event` runs for every crossterm
-/// event; returning `false` stops the reader (the caller stops it when its
-/// channel dies). The reader from the previous surface is stopped and joined
-/// first so it cannot steal events from the new one.
-pub(crate) fn spawn_terminal_reader<F>(mut on_event: F)
-where
-    F: FnMut(Event) -> bool + Send + 'static,
-{
-    spawn_reader(false, move |input| match input {
-        ReaderInput::Event(event) => on_event(event),
-        // Surfaces without a mouse dispatch consume reports; a
-        // reassembled report is terminal noise they must not type.
-        ReaderInput::Mouse(_) | ReaderInput::BurstPaste(_) => true,
-    });
-}
-
-/// The paste-aware variant for the interactive session surface: whole
-/// terminal writes that look like multi-line pastes (a marker-less burst
-/// with text on both sides of a newline) are delivered as one
-/// [`ReaderInput::BurstPaste`]; everything else arrives event by event.
+/// Start the terminal input reader: whole terminal writes that look like
+/// multi-line pastes (a marker-less burst with text on both sides of a
+/// newline) are delivered as one [`ReaderInput::BurstPaste`]; everything
+/// else arrives event by event. `on_input` returning `false` stops the
+/// reader (the caller stops it when its channel dies). The reader from the
+/// previous surface is stopped and joined first so it cannot steal events
+/// from the new one.
 pub(crate) fn spawn_paste_aware_reader<F>(on_input: F)
 where
     F: FnMut(ReaderInput) -> bool + Send + 'static,
 {
-    spawn_reader(true, on_input);
+    spawn_reader(on_input);
 }
 
 /// The shared reader body: one reader per process, joined across surfaces.
-/// `paste_aware` selects the burst coalescing; a plain reader forwards
-/// every event unchanged (surfaces without the editor's paste path would
-/// lose a coalesced burst they cannot consume). Each chunk — one
-/// terminal write — is repaired and classified before any of it reaches
-/// the surface: the macOS-Terminal meta repair
+/// Each chunk — one terminal write — is repaired and classified before
+/// any of it reaches the surface: the macOS-Terminal meta repair
 /// ([`merge_legacy_meta_escapes`]) rewrites the wrapped double-ESC
 /// shapes first (the [`SequenceGuard`] would otherwise hold their `Esc`
 /// head), the guard reassembles partial sequences into mouse reports
 /// and key events, and [`forward`] passes the TS dispatch filters
 /// ([`filter_enhanced_key_events`]) when it delivers.
-fn spawn_reader<F>(paste_aware: bool, mut on_input: F)
+fn spawn_reader<F>(mut on_input: F)
 where
     F: FnMut(ReaderInput) -> bool + Send + 'static,
 {
@@ -204,11 +189,7 @@ where
             });
             match crossterm::event::poll_opt(timeout) {
                 Ok(false) => {
-                    if !forward(
-                        guard.flush_expired(Instant::now()),
-                        paste_aware,
-                        &mut on_input,
-                    ) {
+                    if !forward(guard.flush_expired(Instant::now()), &mut on_input) {
                         return;
                     }
                 }
@@ -253,7 +234,7 @@ where
                     for event in events {
                         outputs.extend(guard.feed(event, Instant::now()));
                     }
-                    if !forward(outputs, paste_aware, &mut on_input) {
+                    if !forward(outputs, &mut on_input) {
                         return;
                     }
                 }
@@ -274,12 +255,8 @@ where
 /// else — plain events and reassembled mouse reports alike — passes the
 /// TS dispatch filters ([`filter_enhanced_key_events`]) and forwards
 /// input by input. Returns `false` when the surface stopped the reader.
-fn forward(
-    outputs: Vec<GuardOutput>,
-    paste_aware: bool,
-    on_input: &mut dyn FnMut(ReaderInput) -> bool,
-) -> bool {
-    if paste_aware && !outputs.is_empty() {
+fn forward(outputs: Vec<GuardOutput>, on_input: &mut dyn FnMut(ReaderInput) -> bool) -> bool {
+    if !outputs.is_empty() {
         let mut text = String::new();
         let mut burst_is_plain_text = true;
         for output in &outputs {
@@ -333,8 +310,8 @@ fn forward(
 /// The TS enhanced-key dispatch filters, applied to one terminal write:
 ///
 /// - Key releases are dropped before any surface sees them (TS tui.ts:
-///   `isKeyRelease(data) && !focusedComponent.wantsKeyRelease` — the only
-///   TS opt-ins are example extensions, which this port does not ship).
+///   `isKeyRelease(data) && !focusedComponent.wantsKeyRelease` — no TS
+///   surface opts in, and this port ships none either).
 /// - The kitty-printable dedup (TS `StdinBuffer`
 ///   `pendingKittyPrintableCodepoint`, stdin-buffer.ts:307): a
 ///   duplicate-reporting kitty terminal sends BOTH the plain CSI-u form
@@ -731,8 +708,7 @@ mod tests {
     }
 
     /// Key releases never reach a surface (TS tui.ts: the focused
-    /// component must opt in with wantsKeyRelease; no TS surface except
-    /// example extensions does).
+    /// component must opt in with wantsKeyRelease; no surface does).
     #[test]
     fn key_releases_are_dropped_in_both_kitty_modes() {
         let release = key_with_kind(
@@ -874,7 +850,7 @@ mod tests {
     /// `forward` against a capturing sink (the paste-aware surface).
     fn collect_forwarded(outputs: Vec<GuardOutput>) -> Vec<ReaderInput> {
         let mut inputs = Vec::new();
-        let ok = forward(outputs, true, &mut |input| {
+        let ok = forward(outputs, &mut |input| {
             inputs.push(input);
             true
         });

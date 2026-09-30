@@ -15,7 +15,6 @@
 
 pub mod ai;
 pub mod daemon;
-pub mod extension_rpc;
 pub mod goal;
 pub mod incident;
 pub mod memory_release;

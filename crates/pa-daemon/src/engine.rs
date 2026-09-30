@@ -542,10 +542,9 @@ pub trait SessionEngine: Send + Sync {
     }
 
     /// The connection-surface command catalog (TS
-    /// `createAgentConnectionCommands`): extension commands, prompt
-    /// templates, then skills. The core session and the extension
-    /// registry lock are async, so the engine answers through a boxed
-    /// future. Engines without a resource surface report none.
+    /// `createAgentConnectionCommands`): prompt templates, then skills.
+    /// The core session lock is async, so the engine answers through a
+    /// boxed future. Engines without a resource surface report none.
     fn connection_commands(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Value>> + Send + '_>> {
@@ -554,10 +553,9 @@ pub trait SessionEngine: Send + Sync {
 
     /// The connection resource snapshot (TS
     /// `createAgentConnectionResourceSnapshot`): context files, skills,
-    /// prompts, extensions, and their diagnostics. The core session and
-    /// the extension registry lock are async, so the engine answers
-    /// through a boxed future. Engines without a resource surface report
-    /// the empty snapshot.
+    /// prompts, and their diagnostics. The core session lock is async,
+    /// so the engine answers through a boxed future. Engines without a
+    /// resource surface report the empty snapshot.
     fn resource_snapshot(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send + '_>> {
