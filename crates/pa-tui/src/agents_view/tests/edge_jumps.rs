@@ -26,9 +26,8 @@ fn forest_roster(count: usize) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// The edge jump keys (home/end and their ctrl/super variants) select
-/// the first/last row in one press, the synced identity/key follow the
-/// landed row, and the arrows keep moving one row from either edge.
+/// The edge jump keys (home/end and their ctrl/super variants) select the first/last row in
+/// one press, and the arrows keep moving one row from either edge.
 #[test]
 fn home_and_end_jump_the_selection_to_the_list_edges() {
     let mut mode = fresh_mode(forest_roster(120));
@@ -56,9 +55,8 @@ fn home_and_end_jump_the_selection_to_the_list_edges() {
     assert_eq!(mode.selected, 1);
 }
 
-/// A user override moves the jump with the handler; the default key
-/// goes inert, and the hint slot renders the override (the #184
-/// binding-test pattern).
+/// A user override moves the jump with the handler; the default key goes inert, and the hint
+/// slot renders the override (the #184 binding-test pattern).
 #[test]
 fn edge_jump_keys_can_be_rebound() {
     let mut mode = mode_with_user_bindings(&[("tui.select.top", "ctrl+j")]);
@@ -74,8 +72,8 @@ fn edge_jump_keys_can_be_rebound() {
     );
 }
 
-/// The jump is an explicit user choice: it ends the entry anchor's
-/// wait, so a later anchor landing cannot override the jumped-to row.
+/// The jump is an explicit user choice: it ends the entry anchor's wait, so a later anchor
+/// landing cannot override the jumped-to row.
 #[test]
 fn edge_jump_ends_the_entry_anchor_wait() {
     let mut mode = mode_with_anchor(
@@ -91,9 +89,8 @@ fn edge_jump_ends_the_entry_anchor_wait() {
     assert_eq!(mode.rows[mode.selected].summary["sessionId"], "s2");
 }
 
-/// The render window follows the jump: on a large forest the landed
-/// row renders inside the viewport (the selected row's display index
-/// drives the window, TS `renderSessionRows`).
+/// The render window follows the jump: on a large forest the landed row renders inside the
+/// viewport (the selected row's display index drives the window).
 #[test]
 fn the_viewport_follows_the_edge_jump() {
     let mut mode = fresh_mode(forest_roster(80));

@@ -2,28 +2,20 @@
 //! the same box/table rows and the legacy `label [url]` link form the live
 //! path shows (the TS product under a plain tmux pane renders links the
 //! same way: the terminal-capability gate forces the legacy form there).
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use pa_tui::session::{parse_jsonl, JsonlSessionStream, SessionStream};
@@ -56,9 +48,8 @@ fn frame_text(session: &str, width: u16, height: u16) -> Vec<String> {
 fn replayed_table_renders_boxed_aligned_rows() {
     let rows = frame_text(TABLE_SESSION, 100, 30);
     let flat = rows.join("\n");
-    // The header and the CJK data cell drive the column widths: the first
-    // column fits `beta 数据` (9 display columns: 5 + two double-width
-    // glyphs), the third `wraps when narrow`.
+    // The header and the CJK data cell drive the column widths: the first column fits `beta 数据` (9
+    // display columns: 5 + two double-width glyphs), the third `wraps when narrow`.
     assert!(
         flat.contains("┌───────────┬─────────┬───────────────────┐"),
         "top border: {flat}"
@@ -90,9 +81,8 @@ fn replayed_table_renders_boxed_aligned_rows() {
 fn replayed_table_narrow_terminal_falls_back_to_raw() {
     let rows = frame_text(TABLE_SESSION, 12, 60);
     let flat = rows.join("\n");
-    // 3 columns need 10 border columns; at 12 terminal columns the block
-    // cannot fit a stable box, so it renders the raw markdown (wrapped),
-    // never a broken one.
+    // 3 columns need 10 border columns; at 12 terminal columns the block cannot fit a stable box,
+    // so it renders the raw markdown (wrapped), never a broken one.
     assert!(!flat.contains('┌'), "no box at 12 columns: {flat}");
     assert!(
         flat.contains("State"),

@@ -1,33 +1,22 @@
-//! Headless e2e for the persisted conversation-detail level (TS #2709
-//! "Keep the chat detail level across sessions"): Ctrl+O saves the cycled
-//! level as the `chatDetail` setting, and a later chat — the same session
-//! re-entered or a brand-new one, both a fresh process re-reading the
-//! settings store — opens at the saved level instead of resetting to the
-//! `overview` startup default (the collapse mode, operator directive
-//! 2026-09-28).
+//! Headless e2e for the persisted conversation-detail level (TS #2709):
+//! Ctrl+O saves the cycled level as the `chatDetail` setting, and a later
+//! chat — the same session re-entered or a fresh one — opens at the saved
+//! level instead of the `overview` startup default.
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -43,10 +32,8 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-/// The session identity one run attaches to: the second run of the
-/// regression uses a different id, so the saved level is shown to apply
-/// to another chat too (the setting is global; TS #2709's `createMode`
-/// opens a new client at the saved level).
+/// The session identity one run attaches to: the second run uses a different id, so the saved
+/// level is shown to apply to another chat too.
 struct MockSession {
     active: &'static str,
     wire: &'static str,
@@ -66,8 +53,6 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve one connection: attach an empty session, then answer the
-    /// loop's requests.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
         let write_stream = stream.try_clone().expect("clone mock socket");
@@ -178,9 +163,8 @@ fn attach_data(id: &str, session: &MockSession) -> Value {
     })
 }
 
-/// A minimal settings seam for the harness: every getter returns its TS
-/// default; the `chatDetail` pair is stateful — the store models the
-/// settings file a fresh process re-reads.
+/// A minimal settings seam for the harness: every getter returns its TS default; the `chatDetail`
+/// pair is stateful — the store models the settings file a fresh process re-reads.
 #[derive(Default)]
 struct StubSettings {
     chat_detail: Mutex<Option<String>>,
@@ -294,8 +278,8 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
         Ok(())
     }
     fn chat_detail(&self) -> String {
-        // `getChatDetail`: unset reads as the `overview` startup level
-        // (the collapse mode; operator directive 2026-09-28).
+        // `getChatDetail`: unset reads as the `overview` startup level (the collapse mode; operator
+        // directive 2026-09-28).
         self.stored().unwrap_or_else(|| "overview".to_string())
     }
     fn set_chat_detail(&self, detail: &str) -> Result<()> {
@@ -418,18 +402,13 @@ fn wait_label(label: &str) -> HeadlessStep {
     }
 }
 
-/// TS #2709's regression shape: pick a level with Ctrl+O in one chat;
-/// the pick is saved as the `chatDetail` setting, and a later run — a
-/// fresh process re-reading the settings store — opens at the saved
-/// level with no key pressed. The later run attaches to a DIFFERENT
-/// session id: the setting is global (the TS mechanism), so the saved
-/// level applies to that chat too.
+/// TS #2709's regression shape: pick a level with Ctrl+O in one chat; the pick is saved as the
+/// `chatDetail` setting, and a later run — a fresh process re-reading the store — opens at the
+/// saved level. The later run attaches to a DIFFERENT session id: the setting is global.
 #[test]
 fn ctrl_o_pick_persists_and_a_later_chat_reopens_at_it() {
-    // Run one: an unset store, so the chat starts at the `overview`
-    // startup level (the collapse mode - thinking hidden, every activity
-    // item rendered); one Ctrl+O reveals the thinking (the
-    // details-with-thinking level) and saves it.
+    // Run one: an unset store, so the chat starts at the `overview` startup level (the collapse
+    // mode); one Ctrl+O reveals the thinking (details-with-thinking) and saves it.
     let run_one = Arc::new(StubSettings::default());
     let frames = run_plan(
         run_one.clone(),
@@ -459,10 +438,8 @@ fn ctrl_o_pick_persists_and_a_later_chat_reopens_at_it() {
         "the ctrl+o pick saves the chatDetail setting"
     );
 
-    // Run two: a fresh process whose settings store carries the saved
-    // level (the file the first run wrote), opening a different chat.
-    // TS #2709 (`next = createMode(harness)`): it starts at `details`,
-    // with no key pressed, and nothing re-saves.
+    // Run two: a fresh process whose store carries the saved level, opening a different chat. TS
+    // #2709 (`next = createMode(harness)`): it starts at `details`, no key pressed.
     let run_two = Arc::new(StubSettings {
         chat_detail: Mutex::new(Some("details".to_string())),
     });
@@ -491,8 +468,6 @@ fn ctrl_o_pick_persists_and_a_later_chat_reopens_at_it() {
     );
 }
 
-/// The cycle saves every level, not just one hop: a chat opening at
-/// `all` wraps to `overview` on the next Ctrl+O and saves that too.
 #[test]
 fn the_cycle_saves_the_overview_wrap_too() {
     let settings = Arc::new(StubSettings {

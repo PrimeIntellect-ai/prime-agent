@@ -1,10 +1,7 @@
-//! The hover affordance (operator directive 2026-09-29): the row under
-//! the mouse carries the ONE light hover band — the "clickable"
-//! signal — on every row the click grammar covers (the agents-view
-//! rows, the inactive rows, the merged dropdown summary, and the
-//! children it expands). The one-color ruling: the keyboard selection
-//! paints the SAME band color; the two states distinguish by their
-//! cues (transient mouse vs sticky keyboard), never by color.
+//! The hover affordance (operator directive 2026-09-29): the row under the mouse carries the
+//! ONE light hover band — the "clickable" signal — on every row the click grammar covers. The
+//! one-color ruling: the keyboard selection paints the SAME band color; the two states
+//! distinguish by their cues (transient mouse vs sticky keyboard), never by color.
 
 use super::*;
 
@@ -28,9 +25,8 @@ fn row_of(lines: &[Line], needle: &str) -> Option<usize> {
     lines.iter().position(|line| flat(line).contains(needle))
 }
 
-/// A motion over one session row hovers it: the rendered row carries
-/// the light hover band over its full width, and the state rides the
-/// frame row the mouse is on.
+/// A motion over one session row hovers it: the rendered row carries the light hover band
+/// over its full width.
 #[test]
 fn a_motion_hovers_the_row_under_the_mouse() {
     let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
@@ -57,7 +53,6 @@ fn a_motion_hovers_the_row_under_the_mouse() {
         hovered.iter().any(|span| span.style.bg == band),
         "the hovered row carries the light hover band: {hovered:?}"
     );
-    // The band spans the row: the row's cells all carry it.
     assert!(
         hovered.iter().all(|span| span.style.bg == band),
         "the light band spans the hovered row: {hovered:?}"
@@ -79,23 +74,16 @@ fn a_motion_over_a_heading_or_hint_never_hovers() {
     let heading = row_of(&lines, "Idle (").expect("the section heading renders");
     mode.handle_mouse(&hover_motion(heading));
     assert_eq!(mode.hover_row, None, "a heading is not a click row");
-    // The row itself still hovers after the clear.
     let row = row_of(&lines, "plain roster").expect("the row renders");
     mode.handle_mouse(&hover_motion(row));
     assert_eq!(mode.hover_row, Some(row));
-    // The hint line at the frame's bottom is not a row either.
     mode.handle_mouse(&hover_motion(lines.len() - 1));
     assert_eq!(mode.hover_row, None);
     crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
 }
 
-/// The ONE band color (the operator's 2026-09-29 one-color ruling):
-/// the hover and the keyboard selection paint the SAME light band —
-/// the states distinguish by their cues (the hover is transient and
-/// rides the mouse position; the selection is sticky and rides the
-/// keyboard), never by color. The selected row keeps its band even
-/// under the mouse (the hover paint skips cells that already carry a
-/// background), and a hovered unselected row carries the same band.
+/// The ONE band color (the operator's 2026-09-29 one-color ruling): the hover and the keyboard
+/// selection paint the SAME light band; the selected row keeps its band under the mouse.
 #[test]
 fn the_hover_and_the_selection_share_the_one_band_color() {
     let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
@@ -113,8 +101,6 @@ fn the_hover_and_the_selection_share_the_one_band_color() {
         band, light,
         "the selection paints the hover's own color — the one-color ruling"
     );
-    // The selected row (the holder, the default selection) under the
-    // mouse keeps its band: the hover never demotes the focused state.
     mode.handle_mouse(&hover_motion(held));
     assert_eq!(mode.hover_row, Some(held));
     let (lines, _) = mode.render_frame(120, 24);
@@ -123,8 +109,6 @@ fn the_hover_and_the_selection_share_the_one_band_color() {
         selected.iter().all(|span| span.style.bg == band),
         "the hovered selected row keeps its band: {selected:?}"
     );
-    // The unselected hovered row carries the SAME band color — the
-    // hover's transient cue, one color for both states.
     mode.handle_mouse(&hover_motion(other));
     assert_eq!(mode.hover_row, Some(other));
     let (lines, _) = mode.render_frame(120, 24);
@@ -141,10 +125,8 @@ fn the_hover_and_the_selection_share_the_one_band_color() {
     crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
 }
 
-/// The dropdown's own rows hover like every other row: the merged
-/// `N subagents (M running)` summary and the children it expands both
-/// carry the light band under the mouse (their clicks expand and open,
-/// the mission's dropdown contract).
+/// The dropdown's own rows hover like every other row: the merged `N subagents (M running)`
+/// summary and the children it expands both carry the light band under the mouse.
 #[test]
 fn the_merged_dropdown_rows_hover_like_every_row() {
     let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
@@ -164,10 +146,6 @@ fn the_merged_dropdown_rows_hover_like_every_row() {
         "the merged summary row carries the light band: {:?}",
         lines[summary]
     );
-    // Expanding the dropdown keeps the child rows hoverable: the
-    // child under the mouse bands the same way (the summary row is
-    // selected here, so the child carries the band too — the same
-    // one color; the states distinguish by cue, never by color).
     mode.handle_key("down");
     mode.handle_key("enter");
     let (lines, _) = mode.render_frame(120, 36);
@@ -180,9 +158,8 @@ fn the_merged_dropdown_rows_hover_like_every_row() {
         "the expanded child row carries the light band: {:?}",
         lines[child]
     );
-    // A rebuild that scrolls the hovered row out of the window clears
-    // the band: content that moved under the mouse re-aims it, and a
-    // row that left never stays bright.
+    // A rebuild that scrolls the hovered row out of the window clears the band: content that
+    // moved under the mouse re-aims it, and a row that left never stays bright.
     mode.handle_mouse(&hover_motion(2));
     mode.roster.clear();
     mode.rebuild_rows();
@@ -195,10 +172,8 @@ fn the_merged_dropdown_rows_hover_like_every_row() {
     crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
 }
 
-/// The hover never disturbs the click grammar: motions across rows and
-/// headings, then a plain click — the click still opens the row under
-/// it (the press/release pair's own row, exactly like the session
-/// surface's card rows).
+/// The hover never disturbs the click grammar: motions across rows and headings, then a plain
+/// click — the click still opens the row under it.
 #[test]
 fn hover_motions_never_disturb_the_click_grammar() {
     let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
@@ -213,11 +188,9 @@ fn hover_motions_never_disturb_the_click_grammar() {
     });
     let (lines, _) = mode.render_frame(120, 24);
     let row = row_of(&lines, "click through the hover").expect("the row renders");
-    // Motions across the splash, the heading, and the row itself.
     mode.handle_mouse(&hover_motion(0));
     mode.handle_mouse(&hover_motion(row));
     mode.handle_mouse(&hover_motion(1));
-    // The plain click still opens.
     mode.handle_mouse(&mouse_report(row, true, false));
     mode.handle_mouse(&mouse_report(row, false, false));
     let opened = mode.opened.expect("the click opened the row");

@@ -1,13 +1,7 @@
-//! The branch row grammar for expanded content: the first content row
-//! of an expansion hangs off its event's header row on a dim
-//! `\u{2570}\u{2500} ` gutter, and every following row sits at the
-//! four-column continuation indent (the one-column chat margin plus the
-//! gutter's three columns) — the same geometry the expanded ipython cell
-//! code (TS `renderCode`) and the received agent-message body use.
-//!
-//! Expandable chat bodies render on this grammar (TS #2779's shared
-//! `guttered` layout), with one sanctioned divergence: the gutter hangs
-//! off the first non-blank row, not row 0.
+//! The branch row grammar for expanded content: the first content row of an expansion
+//! hangs off its event's header row on a dim `\u{2570}\u{2500} ` gutter, and every following
+//! row sits at the four-column continuation indent. One sanctioned divergence from the
+//! TS `guttered` layout: the gutter hangs off the first non-blank row, not row 0.
 
 use crate::{Line, Span};
 
@@ -16,12 +10,11 @@ use crate::{Line, Span};
 pub(crate) const BRANCH_GUTTER: &str = "\u{2570}\u{2500} ";
 
 /// The continuation indent: three plain spaces (the gutter's width) on
-/// every row after the first (TS `OUTPUT_INDENT`).
+/// every row after the first.
 pub(crate) const BRANCH_CONTINUATION: &str = "   ";
 
-/// The full continuation prefix: the one-column chat margin plus the
-/// three-column gutter depth — four plain spaces a continuation row (or a
-/// full-width diff block) starts its content at.
+/// The full continuation prefix: four plain spaces a continuation row
+/// (or a full-width diff block) starts its content at.
 pub(crate) const BRANCH_INDENT: &str = "    ";
 
 /// The content width under the branch: the full width minus the one-column
@@ -35,9 +28,8 @@ pub(crate) fn branch_content_width(width: usize) -> usize {
 /// continuation indent, both after the one-column chat margin.
 pub(crate) fn branch_rows(lines: Vec<Line>, theme: &crate::theme::Theme) -> Vec<Line> {
     let dim = theme.fg_style(crate::theme::ThemeColor::Dim);
-    // `render_markdown` can emit leading empty rows (a summary beginning
-    // with a blank line), so the gutter must hang off the first row that
-    // actually carries content, not the vector's first row.
+    // `render_markdown` can emit leading empty rows, so the gutter must hang off the
+    // first row that carries content, not the vector's first row.
     let mut first_content = true;
     lines
         .into_iter()
@@ -78,11 +70,9 @@ pub(crate) fn split_line_on_newlines(line: &Line) -> Vec<Line> {
     rows
 }
 
-/// One branch-indented block over pre-styled spans: empty content renders
-/// nothing; otherwise each newline-joined source line wraps at the branch
-/// content width (styles preserved through the wrap), the first rendered
-/// content row carries the dim gutter, the rest the continuation indent,
-/// and every row truncates to the full width.
+/// One branch-indented block over pre-styled spans: empty content renders nothing;
+/// otherwise each newline-joined source line wraps at the branch content width, the
+/// first rendered content row carries the dim gutter, the rest the continuation indent.
 pub(crate) fn branch_block(line: &Line, theme: &crate::theme::Theme, width: usize) -> Vec<Line> {
     let flat: String = line.iter().map(|span| span.content.as_str()).collect();
     if flat.trim().is_empty() {
@@ -99,9 +89,8 @@ pub(crate) fn branch_block(line: &Line, theme: &crate::theme::Theme, width: usiz
         .collect()
 }
 
-/// The row count of [`branch_block`]: the emptiness gate plus the wrapped
-/// row count at the branch content width (newlines split like the paint
-/// path).
+/// The row count of [`branch_block`]: the emptiness gate plus the wrapped row count
+/// at the branch content width (newlines split like the paint path).
 pub(crate) fn branch_block_count(text: &str, width: usize) -> usize {
     if text.trim().is_empty() {
         return 0;
@@ -109,10 +98,9 @@ pub(crate) fn branch_block_count(text: &str, width: usize) -> usize {
     crate::width::wrapped_text_count(text, branch_content_width(width))
 }
 
-/// Markdown under the branch: `text` renders at the branch content width,
-/// the rows take the branch grammar (gutter on the first non-blank row),
-/// and every row clips to the full width (TS #2779
-/// `guttered(width, Markdown.render)`).
+/// Markdown under the branch: `text` renders at the branch content width, the rows
+/// take the branch grammar (gutter on the first non-blank row), and every row clips
+/// to the full width.
 pub(crate) fn branch_markdown(
     text: &str,
     style: &crate::markdown::MarkdownStyle,
@@ -183,9 +171,8 @@ mod tests {
 
     #[test]
     fn gutter_hangs_off_the_first_nonblank_row() {
-        // A summary beginning with a blank line: `render_markdown` emits
-        // the leading empty row first, so the gutter must land on the
-        // first row that carries content, not the first vector row.
+        // A summary beginning with a blank line: the gutter must land on
+        // the first row that carries content, not the first vector row.
         let line = vec![Span::raw("\nthe session story")];
         let rows = branch_block(&line, &theme(), 40);
         let flat = flat(&rows);
@@ -225,10 +212,8 @@ mod tests {
         }
     }
 
-    /// The row-count twin of [`branch_markdown`]: for every input the
-    /// painted rows match the count at every width, and every painted row
-    /// clips to the width (the clip-before-overflow regression; a branch
-    /// prefix alone can outgrow a tiny viewport).
+    /// Painted rows match the count at every width, and clip to it (a branch prefix
+    /// alone can outgrow a tiny viewport).
     #[test]
     fn markdown_block_counts_and_clips() {
         let theme = theme();
