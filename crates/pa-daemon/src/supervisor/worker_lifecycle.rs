@@ -243,8 +243,6 @@ impl Supervisor {
             "appendSystemPrompt",
             "skills",
             "promptTemplates",
-            "extensions",
-            "tools",
             "autonomous",
         ] {
             if let Some(value) = config_object.and_then(|config| config.get(key)) {

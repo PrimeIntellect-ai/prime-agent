@@ -16,8 +16,8 @@ use super::discovery::collect_resource_files;
 use super::patterns::{apply_patterns, split_patterns};
 use super::{
     settings_array, to_resolved_paths, top_level_metadata, ConfiguredSource, MetadataSource,
-    MissingSourceAction, PackageFilter, PathMetadata, ResolveExtensionOptions, ResolvedPaths,
-    ResourceAccumulator, ResourceOrigin, ResourceType, RESOURCE_TYPES,
+    MissingSourceAction, PackageFilter, PathMetadata, ResolvedPaths, ResourceAccumulator,
+    ResourceOrigin, ResourceType, RESOURCE_TYPES,
 };
 
 /// Parse the object (filter) form of a `packages` settings entry.
@@ -36,7 +36,6 @@ fn parse_package_filter(entry: &serde_json::Value) -> Option<PackageFilter> {
         }
     };
     Some(PackageFilter {
-        extensions: strings(object.get("extensions")),
         skills: strings(object.get("skills")),
         prompts: strings(object.get("prompts")),
         themes: strings(object.get("themes")),
@@ -193,39 +192,6 @@ impl PackageManager {
         Ok(to_resolved_paths(accumulator))
     }
 
-    /// Resolve a caller-supplied list of package sources (CLI extension
-    /// sources) without touching settings. Unpinned temporary git sources
-    /// auto-refresh from their origin.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when one of the given sources cannot be parsed,
-    /// installed, or refreshed (npm/git failures, missing local paths).
-    pub fn resolve_extension_sources(
-        &mut self,
-        sources: &[String],
-        options: ResolveExtensionOptions,
-    ) -> Result<ResolvedPaths> {
-        let scope = if options.temporary {
-            SourceScope::Temporary
-        } else if options.local {
-            SourceScope::Project
-        } else {
-            SourceScope::User
-        };
-        let mut accumulator = ResourceAccumulator::default();
-        let configured: Vec<ConfiguredSource> = sources
-            .iter()
-            .map(|source| ConfiguredSource {
-                source: source.clone(),
-                scope,
-                filter: None,
-            })
-            .collect();
-        self.resolve_package_sources(configured, &mut accumulator, None)?;
-        Ok(to_resolved_paths(accumulator))
-    }
-
     fn resolve_package_sources(
         &mut self,
         sources: Vec<ConfiguredSource>,
@@ -243,7 +209,7 @@ impl PackageManager {
             match &parsed {
                 ParsedSource::Local(local) => {
                     let base_dir = self.base_dir_for_scope(configured.scope);
-                    Self::resolve_local_extension_source(
+                    Self::resolve_local_source(
                         &local.path,
                         accumulator,
                         configured.filter.as_ref(),
@@ -340,10 +306,10 @@ impl PackageManager {
         Ok(true)
     }
 
-    /// A local package source: a file binds as one extension; a directory
-    /// contributes its package resources (or binds as one extension when it
-    /// provides none).
-    fn resolve_local_extension_source(
+    /// Resolve one configured local package source: a directory's
+    /// resources collect through the manifest/convention scanners; a
+    /// bare file yields nothing.
+    fn resolve_local_source(
         path: &str,
         accumulator: &mut ResourceAccumulator,
         filter: Option<&PackageFilter>,
@@ -357,22 +323,9 @@ impl PackageManager {
         let Ok(stats) = std::fs::metadata(&resolved) else {
             return;
         };
-        if stats.is_file() {
-            metadata.base_dir = resolved.parent().map(Path::to_path_buf);
-            accumulator
-                .extensions
-                .add(&resolved, metadata.clone(), true);
-            return;
-        }
         if stats.is_dir() {
             metadata.base_dir = Some(resolved.clone());
-            let has_resources =
-                PackageManager::collect_package_resources(&resolved, accumulator, filter, metadata);
-            if !has_resources {
-                accumulator
-                    .extensions
-                    .add(&resolved, metadata.clone(), true);
-            }
+            PackageManager::collect_package_resources(&resolved, accumulator, filter, metadata);
         }
     }
 

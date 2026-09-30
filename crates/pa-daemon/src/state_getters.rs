@@ -193,8 +193,8 @@ impl Worker {
         );
     }
 
-    /// `get_commands` (TS `createAgentConnectionCommands`): extension
-    /// commands, prompt templates, then skills.
+    /// `get_commands` (TS `createAgentConnectionCommands`): prompt
+    /// templates, then skills.
     pub(crate) async fn handle_get_commands(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("get_commands") {
             return response;

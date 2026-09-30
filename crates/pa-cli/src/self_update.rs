@@ -31,8 +31,8 @@ pub fn settings_channel_wire_name(channel: pa_core::settings::UpdateChannel) -> 
 
 /// The nightly-switch confirmation (TS `handlePackageCommand`'s update
 /// case): warn, then confirm the switch unless `--force`. Declining — or a
-/// non-tty shell run without `--force` — changes nothing, not even
-/// extensions. Returns the abort exit code (75 for the interactive update
+/// non-tty shell run without `--force` — changes nothing. Returns the
+/// abort exit code (75 for the interactive update
 /// child so the TUI can tell an aborted switch from a failure, else 1) when
 /// the run must stop, or `None` to proceed (also when no explicit nightly
 /// switch is requested).

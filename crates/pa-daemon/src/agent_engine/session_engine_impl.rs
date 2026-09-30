@@ -1132,26 +1132,9 @@ impl SessionEngine for AgentSessionEngine {
             let Some(engine) = guard.as_deref() else {
                 return Vec::new();
             };
-            // TS `createAgentConnectionCommands` order: extension
-            // commands, then prompt templates, then skills. The Rust
-            // extension registry does not track per-command source info,
-            // so extension entries carry the TS fields minus
-            // `sourceInfo`.
+            // TS `createAgentConnectionCommands` order: prompt
+            // templates, then skills.
             let mut commands = Vec::new();
-            if let Some(runner) = &engine.extension_runner {
-                let registry = runner.registry().await;
-                for command in registry.commands() {
-                    let mut entry = json!({
-                        "name": command.invocation_name,
-                        "registeredName": command.name,
-                        "source": "extension",
-                    });
-                    if let Some(description) = &command.description {
-                        entry["description"] = json!(description);
-                    }
-                    commands.push(entry);
-                }
-            }
             for template in &engine.prompt_templates {
                 let mut entry = json!({
                     "name": template.name,
@@ -1260,16 +1243,10 @@ impl SessionEngine for AgentSessionEngine {
                 "contextFiles": context_files,
                 "skills": skills,
                 "prompts": prompts,
-                "extensions": [],
                 "themes": [],
                 "diagnostics": {
                     "skills": engine.skill_diagnostics,
                     "prompts": [],
-                    "extensions": engine
-                        .extension_diagnostics
-                        .iter()
-                        .map(|error| json!({ "type": "error", "message": error }))
-                        .collect::<Vec<_>>(),
                     "themes": [],
                 },
             })

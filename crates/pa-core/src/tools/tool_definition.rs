@@ -1,7 +1,7 @@
 //! Tool definition surface: the model-facing contract of a tool.
 //!
 //! Port of `packages/coding-agent/src/core/tools/tool-definition-wrapper.ts`
-//! plus the `ToolDefinition` shape from `core/extensions/types.ts`. TUI
+//! plus the TS `ToolDefinition` shape. TUI
 //! renderers stay in `pa-tui`; this layer owns the model-facing contract
 //! (name, schema, description) and execution.
 

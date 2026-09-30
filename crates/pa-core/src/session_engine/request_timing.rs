@@ -318,9 +318,9 @@ impl RequestTimingWiring {
 // Seam wrappers
 // ---------------------------------------------------------------------------
 
-/// The pass-through context transform (the stand-in for TS's extension
-/// `emitContext` transform, which the Rust engine has not ported yet): it
-/// exists so the instrumented seam can mark the turn's dispatch moment.
+/// The pass-through context transform (the Rust engine wires no context
+/// transform): it exists so the instrumented seam can mark the turn's
+/// dispatch moment.
 #[must_use]
 pub fn pass_through_transform() -> TransformContextFn {
     Arc::new(|messages, _signal| Box::pin(async move { Ok(messages) }))

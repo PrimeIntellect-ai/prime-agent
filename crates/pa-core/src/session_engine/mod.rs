@@ -402,8 +402,8 @@ async fn persist_event(
                 eprintln!("pa-core: message row not persisted: {error}");
             }
         }
-        // Git state is captured at both run boundaries, exactly like the TS
-        // extension-event path: a commit or branch switch made during the run
+        // Git state is captured at both run boundaries, exactly like the
+        // TS run-boundary event path: a commit or branch switch made during the run
         // (e.g. via the bash tool) lands in the session file at `agent_end`.
         // The persist check lives inside `record_git_state_if_changed`.
         AgentEvent::AgentStart | AgentEvent::AgentEnd { .. } => {

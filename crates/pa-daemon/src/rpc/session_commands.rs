@@ -624,26 +624,12 @@ async fn get_session_stats(state: &Arc<RpcState>) -> Result<ResponseData, String
     Ok(ResponseData::Present(session_stats))
 }
 
-/// `get_commands` (TS `createAgentConnectionCommands`): extension
-/// commands, prompt templates, then skills.
+/// `get_commands` (TS `createAgentConnectionCommands`): prompt
+/// templates, then skills.
 async fn get_commands(state: &Arc<RpcState>) -> Result<ResponseData, String> {
     let handle = state.session.handle().await;
     let engine = &handle.engine;
     let mut commands: Vec<Value> = Vec::new();
-    if let Some(runner) = &engine.extension_runner {
-        let registry = runner.registry().await;
-        for command in registry.commands() {
-            let mut entry = json!({
-                "name": command.invocation_name,
-                "registeredName": command.name,
-                "source": "extension",
-            });
-            if let Some(description) = &command.description {
-                entry["description"] = json!(description);
-            }
-            commands.push(entry);
-        }
-    }
     for template in &engine.prompt_templates {
         let mut entry = json!({
             "name": template.name,

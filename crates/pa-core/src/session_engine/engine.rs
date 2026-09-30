@@ -30,7 +30,7 @@ pub struct SessionEngineConfig {
     pub thinking_level: Option<ThinkingLevel>,
     /// Provider seam for the loop (required; wire a real provider here).
     pub stream_fn: Option<StreamFn>,
-    /// Pre-bridged loop tools (bash/edit/ipython + extensions).
+    /// Pre-bridged loop tools (bash/edit/ipython).
     pub tools: Vec<Arc<dyn pa_agent::types::AgentTool>>,
     /// Override the default system prompt.
     pub custom_system_prompt: Option<String>,
@@ -65,13 +65,6 @@ pub struct SessionEngineConfig {
     /// The full registry model (input modalities for `model.info`); the
     /// engine derives minimal facts from `model` when absent.
     pub model_info: Option<pa_types::ai::Model>,
-    /// CLI `--extension` sources (repeatable): resolved through the
-    /// package manager into the session's extension paths (temporary
-    /// scope, first-wins against configured/discovered extensions).
-    pub cli_extension_sources: Vec<String>,
-    /// Optional name allow-list for extension tools (`--tools`, TS
-    /// `isAllowedTool`); an absent list allows every registered tool.
-    pub extension_tool_allow_list: Option<Vec<String>>,
     /// Session telemetry wiring (`PostHog` client + execution mode). `None`
     /// (opt-out) installs nothing; non-depth-0 sessions never install.
     pub telemetry: Option<super::telemetry::TelemetryWiring>,
@@ -154,14 +147,6 @@ pub struct SessionEngine {
     /// this field (shared handle: the daemon worker and the engine gate
     /// prompts through one store).
     pub mcp_manager: std::sync::Arc<std::sync::Mutex<crate::mcp::McpManager>>,
-    /// The extension runner when any extension loaded (sidecar host +
-    /// registration mirror); `None` keeps the no-extension fast path
-    /// byte-identical (cache-prefix stability).
-    pub extension_runner: Option<Arc<crate::extensions::ExtensionRunner>>,
-    /// Non-fatal startup diagnostics from extension loading (missing
-    /// node, per-path load errors, spawn failures). TS surfaces these in
-    /// startup notices.
-    pub extension_diagnostics: Vec<String>,
     /// The turn-boundary request surface (`compact.*`/`refine.*`/
     /// `model.info` host requests and the pending requests the turn loop
     /// consumes after a settled turn).
@@ -294,7 +279,6 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         cwd: cwd.clone(),
         agent_dir: config.agent_dir.clone(),
         settings: Some(settings),
-        additional_extension_sources: config.cli_extension_sources.clone(),
         extra_builtin_skill_overrides,
         additional_skill_paths: config.additional_skill_paths.clone(),
         additional_prompt_paths: config.additional_prompt_paths.clone(),
@@ -487,47 +471,6 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         on_bootstrap_result,
     );
     let mut tools = config.tools.clone();
-    // Extension loading (design doc §3.2, stage 2): discovery already
-    // resolved the paths; the sidecar loads modules and lands the
-    // registrations. A session with zero extension paths never spawns the
-    // sidecar (fast-path parity) and nothing below changes.
-    let mut extension_diagnostics = Vec::new();
-    let extension_runner = if resources.extension_paths.is_empty() {
-        None
-    } else {
-        let mut spec =
-            crate::extensions::ExtensionHostSpec::new(cwd.clone(), config.agent_dir.clone());
-        spec.extension_paths = resources.extension_paths.clone();
-        match crate::extensions::ExtensionRunner::start(spec).await {
-            Ok(runner) => {
-                for error in runner.load_errors() {
-                    extension_diagnostics.push(format!(
-                        "Failed to load extension {}: {}",
-                        error.path, error.error
-                    ));
-                }
-                let tools_to_bridge = runner
-                    .bridge_tools(config.extension_tool_allow_list.as_deref())
-                    .await;
-                // TS `_refreshToolRegistry`: extension tools replace
-                // same-named tools (an extension may override a built-in).
-                for tool in tools_to_bridge {
-                    if let Some(existing) = tools.iter().position(|t| t.name() == tool.name()) {
-                        tools[existing] = tool;
-                    } else {
-                        tools.push(tool);
-                    }
-                }
-                Some(std::sync::Arc::new(runner))
-            }
-            Err(error) => {
-                // A spawn/handshake failure degrades to no extensions
-                // (design doc §2.4 crash isolation); it is never fatal.
-                extension_diagnostics.push(format!("Extensions unavailable: {error:#}"));
-                None
-            }
-        }
-    };
     if !tools.iter().any(|tool| tool.name() == "ipython") {
         let definition = crate::tools::ipython::create_ipython_tool_definition(
             &cwd.to_string_lossy(),
@@ -560,18 +503,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         provisioner.prewarm();
     }
 
-    // Extension tool prompt guidelines flow into the prompt exactly like
-    // TS `_rebuildSystemPrompt` (agent-session.ts L5091+): normalized
-    // guidelines of the active tools append to the configured ones.
-    let mut prompt_guidelines = config.prompt_guidelines.clone();
-    if let Some(runner) = &extension_runner {
-        let guidelines = runner.registry().await.prompt_guidelines();
-        for guideline in guidelines {
-            if !prompt_guidelines.contains(&guideline) {
-                prompt_guidelines.push(guideline);
-            }
-        }
-    }
+    let prompt_guidelines = config.prompt_guidelines.clone();
 
     // The per-model prompt layer keys on the resolved `provider/id`
     // selector; vision capability gates the image-input line. Both are
@@ -696,8 +628,8 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             super::messages::engine_convert_to_llm(),
         )),
         // TS wires the instrumented `transformContext` seam over the
-        // extension context transform; the Rust engine has no transform
-        // yet, so the instrumented seam wraps a pass-through that exists
+        // session context transform; the Rust engine wires no transform,
+        // so the instrumented seam wraps a pass-through that exists
         // to mark the turn's dispatch moment. Always wired like TS — the
         // wrapper's own per-request check keeps the disabled path free of
         // timestamps and entries, and a flag flipped on mid-session still
@@ -869,8 +801,6 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         goal_driver,
         queued_goal_context_purge: config.queued_goal_context_purge.clone(),
         mcp_manager,
-        extension_runner,
-        extension_diagnostics,
         turn_boundary,
         telemetry,
         rlm_usage: wiring.rlm_usage,

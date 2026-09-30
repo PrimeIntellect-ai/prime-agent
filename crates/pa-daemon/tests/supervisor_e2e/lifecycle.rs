@@ -40,7 +40,6 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
         serde_json::json!([
             "attach_snapshot",
             "event_sequence",
-            "extension_ui",
             "slim_attach",
             "chunked_snapshot",
             "client_owned_sessions",
