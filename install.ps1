@@ -44,6 +44,12 @@ $DownloadBaseUrlDefault = 'https://app.primeintellect.ai/prime-agent'
 $ReleaseChannelDefault = 'stable'
 
 function Fail($message) {
+    # The download scratch (the tarball + the sums) rides every exit path:
+    # Fail sweeps it before exiting (the bots' finding: accumulated release
+    # tarballs in the temp folder).
+    if (Get-Variable -Name download -Scope Script -ErrorAction SilentlyContinue) {
+        Remove-Item -Recurse -Force $script:download -ErrorAction SilentlyContinue
+    }
     Write-Error "install.ps1: $message"
     exit 1
 }
@@ -162,6 +168,15 @@ if (-not $versionPin) {
 $releasePrefix = "releases/v$version"
 $download = Join-Path ([IO.Path]::GetTempPath()) ("prime-agent-download-{0}" -f [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $download | Out-Null
+# THE DOWNLOAD SWEEP: the scratch (the tarball + the sums) is removed when
+# this script exits - success, a Fail, or a terminating error (install-
+# rust.sh's `rm -rf "$dl"` discipline; the bots' finding: accumulated
+# release tarballs in the temp folder). A script-scoped trap carries the
+# cleanup through the non-local Fail exits.
+trap {
+    Remove-Item -Recurse -Force $download -ErrorAction SilentlyContinue
+    break
+}
 $tarball = Join-Path $download $expectedFile
 $sumsPath = Join-Path $download 'SHA256SUMS'
 try {
@@ -220,30 +235,30 @@ try {
 }
 Set-Content -LiteralPath (Join-Path $lockDir 'pid') -Value $PID
 
-# --- stop the running daemon AFTER the lock, BEFORE the publish (the
-# --- Windows file-lock ruling: a running process holds its binary open, so
-# --- the old-tree rename below fails while it runs). THE TRUSTED STOP: the
-# --- previous payload's OWN BINARY (the marked share tree's
-# --- prime-agent.exe), never the launcher - a launcher this installer has
-# --- not verified is exactly the untrusted-execution shape (an unowned
-# --- command placed at bin\prime-agent.cmd would otherwise run with the
-# --- installer's inherited environment); the share's ownership marker
-# --- gates the stop, and a fresh install (no marked payload yet) has no
-# --- daemon the stop could reach.
-$payloadStopExe = Join-Path $share 'prime-agent.exe'
-$shareMarker = Join-Path $share '.prime-agent-install'
-if ((Test-Path $shareMarker -PathType Leaf) -and (Test-Path $payloadStopExe -PathType Leaf)) {
-    Write-Host 'stopping the running Rust daemon before the publish (a Windows process holds its binary open)'
-    & $payloadStopExe shutdown *> $null
-    if ($LASTEXITCODE -ne 0) {
-        & $payloadStopExe shutdown --force *> $null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "no daemon answered the shutdown requests; if a daemon is running, stop it by hand (prime-agent shutdown --force) and re-run"
-        }
-    }
-}
 $published = $false
 try {
+    # THE DAEMON STOP, inside the lock's try (a terminating error in the
+    # stop must still release the lock - the bots' finding: the stale lock
+    # otherwise left behind). THE TRUSTED STOP: the previous payload's own
+    # binary (the marked share tree's prime-agent.exe), never the launcher -
+    # a launcher this installer has not verified is the unowned-execution
+    # shape (an attacker-placed bin\prime-agent.cmd would otherwise run
+    # with the installer's inherited environment); the share's ownership
+    # marker gates the stop, and a fresh install (no marked payload yet)
+    # has no daemon the stop could reach.
+    $payloadStopExe = Join-Path $share 'prime-agent.exe'
+    $shareMarker = Join-Path $share '.prime-agent-install'
+    if ((Test-Path $shareMarker -PathType Leaf) -and (Test-Path $payloadStopExe -PathType Leaf)) {
+        Write-Host 'stopping the running Rust daemon before the publish (a Windows process holds its binary open)'
+        & $payloadStopExe shutdown *> $null
+        if ($LASTEXITCODE -ne 0) {
+            & $payloadStopExe shutdown --force *> $null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "no daemon answered the shutdown requests; if a daemon is running, stop it by hand (prime-agent shutdown --force) and re-run"
+            }
+        }
+    }
+
     # The one-generation rollback: the previous payload (marker-checked —
     # an unowned directory is never claimed, and an unowned ROLLBACK name is
     # never deleted) moves aside, the fresh stage swaps in, and the next
@@ -317,9 +332,13 @@ exec "$(dirname "$0")/../share/prime-agent/prime-agent.exe" "$@"
     [IO.File]::WriteAllText($shLauncher, $shBody.Replace("`r`n", "`n"))
 } catch {
     # A failed launcher write never leaves the machine without its command:
-    # every preserved file goes home before the failure surfaces.
+    # every preserved file goes home before the failure surfaces. The
+    # destination's PARTIAL file (Set-Content/WriteAllText can create or
+    # truncate before throwing) is removed first - the bots' finding: the
+    # broken new file otherwise blocks the restore.
     foreach ($pair in $script:preservedLaunchers) {
-        if (-not (Test-Path $pair[1])) { [IO.File]::Move($pair[0], $pair[1]) }
+        if (Test-Path $pair[1]) { Remove-Item -Force $pair[1] -ErrorAction SilentlyContinue }
+        [IO.File]::Move($pair[0], $pair[1])
     }
     throw
 }
@@ -362,3 +381,5 @@ Write-Host "payload:   $share"
 Write-Host "source:    the $channel channel at $baseUrl (prime-agent $version)"
 Write-Host 'next steps: the README''s Install section ships inside the payload:'
 Write-Host "  $share\README.md"
+
+Remove-Item -Recurse -Force $download -ErrorAction SilentlyContinue
