@@ -139,6 +139,10 @@ impl SessionUi {
             self.left_mouse_dragged = event.motion;
             if !event.motion {
                 self.pressed_hyperlink = view.hyperlink_at(row, col);
+                // A plain click re-arms the double-Esc tree shortcut the
+                // same way a non-Escape key does: a real interaction
+                // starts a fresh input chain.
+                self.escape_tree_shortcut_spent = false;
             }
         }
         // Wheel turns scroll only on the session surface; a pane owns the
@@ -406,6 +410,15 @@ impl SessionUi {
         view: &mut AgentView,
         running: &mut bool,
     ) -> Result<()> {
+        // Any non-Escape key re-arms the double-Esc tree shortcut (the
+        // gesture is one shot per input chain, not per session — see the
+        // arm site below): a real interaction anywhere on the surface —
+        // typing, navigation inside a mounted panel, a command — starts a
+        // fresh chain. Escape itself never resets, so a pure stream of
+        // Escape presses converges to the inert empty state.
+        if key_event_to_id(&key).is_some_and(|id| id != "escape") {
+            self.escape_tree_shortcut_spent = false;
+        }
         // The `/model` picker owns the frame while open: every key goes to
         // it, before the editor, the viewport keys, or Ctrl+C (which
         // cancels the picker instead of aborting a turn).
@@ -648,9 +661,16 @@ impl SessionUi {
             }
             // Double-Escape (TS `handleEscape`'s repeat window): the second
             // press within 500ms opens the tree when the session is idle or
-            // the editor empty, and clears the input otherwise.
+            // the editor empty, and clears the input otherwise. The repeat's
+            // tree action is one shot per input chain (the operator's
+            // 2026-09-29 Esc-overflow ruling): once the repeat-opened tree
+            // was dismissed, the empty state's pop loop terminates — the
+            // next Escape arms nothing, so a held or repeated Escape
+            // converges to the inert empty editor instead of cycling the
+            // selector open again every second press.
             if let Some(action) = self.take_escape_repeat_action() {
                 if action == "tree" {
+                    self.escape_tree_shortcut_spent = true;
                     self.open_tree_selector(view, None).await?;
                 } else {
                     view.editor.set_text("");
@@ -663,6 +683,13 @@ impl SessionUi {
             } else {
                 "clear"
             };
+            if action == "tree" && self.escape_tree_shortcut_spent {
+                // The gesture already fired: this press interrupts running
+                // work like every Escape, but arms no reopen — the pop loop
+                // stays terminated at the empty state.
+                self.interrupt_running_work(view);
+                return Ok(());
+            }
             self.arm_escape_repeat(action);
             // TS `handleEscape` arms the repeat, then fires
             // `interruptOrClearInput()` — the same abort ladder as the

@@ -19,9 +19,9 @@ members = [
 crossterm = { path = "vendor/crossterm" }
 
 [workspace.package]
-version = "0.9.7"
+version = "0.9.8"
 edition = "2021"
-license = "Apache-2.0"
+license = "MIT"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -41,6 +41,8 @@ pa-ai = { path = "crates/pa-ai" }
 pa-agent = { path = "crates/pa-agent" }
 thiserror = "2"
 futures = "0.3"
+# Dev-only; the default fork/timeout features are unused.
+proptest = { version = "1.11", default-features = false, features = ["std"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

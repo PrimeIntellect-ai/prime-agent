@@ -10,7 +10,7 @@
 #      into the root CHANGELOG.md (scripts/release/fold_changelog.py, the
 #      port of the TS scripts/lib/changelog-fragments.mjs fold), commits to
 #      `release/vX.Y.Z` and opens the release PR (title `release: vX.Y.Z`,
-#      base rust). The PR IS the release's review surface: this is where the
+#      base main). The PR IS the release's review surface: this is where the
 #      changelog gets its final read - where deno's humans "think relevancy
 #      and remove reverts" - and merging it is shipping.
 #
@@ -54,7 +54,7 @@ on:
   pull_request:
     types: [closed]
     # The pull_request branches filter applies to the PR's base branch.
-    branches: [rust]
+    branches: [main]
 
 permissions: {}
 
@@ -67,7 +67,7 @@ concurrency:
 jobs:
   prepare:
     if: github.event_name == 'workflow_dispatch'
-    name: "bump + fold, then open the release PR (base rust)"
+    name: "bump + fold, then open the release PR (base main)"
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -97,7 +97,7 @@ jobs:
       - name: "Check out the rust line (full history: the fold sorts fragments by add-date)"
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: rust
+          ref: main
           # The rust branch clones at ~94MB (measured 2026-09-29); a release
           # is rare, and the fold's add-date ordering reads fragment
           # add-commits anywhere in that history.
@@ -266,7 +266,7 @@ jobs:
           # must not fall through to a `gh pr edit` with an empty number
           # (the `|| ... &&` chain would do exactly that under set -u).
           if gh pr create \
-            --base rust \
+            --base main \
             --head "release/v${INPUT_VERSION}" \
             --title "release: v${INPUT_VERSION}" \
             --body-file "$RUNNER_TEMP/release-pr-body.md"; then
@@ -289,7 +289,7 @@ jobs:
     if: >-
       github.event_name == 'pull_request' &&
       github.event.pull_request.merged == true &&
-      github.event.pull_request.base.ref == 'rust' &&
+      github.event.pull_request.base.ref == 'main' &&
       startsWith(github.event.pull_request.title, 'release: v')
     name: "cut the annotated tag vX.Y.Z at the merge commit (GitHub API)"
     runs-on: ubuntu-latest

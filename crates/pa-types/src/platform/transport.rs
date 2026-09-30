@@ -203,14 +203,66 @@ impl TransportStream for tokio::net::windows::named_pipe::NamedPipeClient {
     }
 }
 
-/// The pipe name handed to `CreateNamedPipe`/`CreateFile`: the `\.\pipe\`
-/// names from `pa-daemon::platform` pass through unchanged (they must be
-/// UTF-8 for the Windows APIs).
+/// The pipe name handed to `CreateNamedPipe`/`CreateFile`: an existing
+/// pipe path passes through unchanged (it must be UTF-8 for the Windows
+/// APIs) - the local `\\.\pipe\`/`\\?\pipe\` forms and the remote
+/// `\\server\pipe\` form, matched case-insensitively because the pipe
+/// namespace itself is case-insensitive. Any other explicit path - a
+/// unix-style socket file path from `--daemon-socket` or
+/// `PRIME_AGENT_DAEMON_SOCKET` - is derived into the pipe namespace
+/// deterministically: a relative path resolves against the current
+/// directory first, and the resolved absolute spelling is lowercased
+/// (Windows paths are case-preserving but case-insensitive), so bind and
+/// connect run the same derivation and the explicit path names the same
+/// endpoint on every platform the way a socket file does on Unix.
 #[cfg(windows)]
 fn pipe_name(path: &Path) -> Result<String> {
-    path.to_str()
-        .map(str::to_string)
-        .with_context(|| format!("pipe name is not UTF-8: {}", path.display()))
+    let raw = path
+        .to_str()
+        .with_context(|| format!("pipe name is not UTF-8: {}", path.display()))?;
+    if is_pipe_path(&raw.to_ascii_lowercase()) {
+        return Ok(raw.to_string());
+    }
+    let absolute = if path.is_relative() {
+        std::env::current_dir()
+            .with_context(|| format!("resolve the relative socket path {}", path.display()))?
+            .join(path)
+    } else {
+        path.to_path_buf()
+    };
+    let normalized = absolute
+        .to_str()
+        .with_context(|| format!("pipe name is not UTF-8: {}", absolute.display()))?
+        .to_ascii_lowercase();
+    Ok(format!(
+        r"\\.\pipe\prime-agent-explicit-{:016x}",
+        fnv1a64(&normalized)
+    ))
+}
+
+/// Whether `raw` (already lowercased) is a pipe path the Windows APIs
+/// accept as-is: the local `\\.\pipe\`/`\\?\pipe\` forms or the remote
+/// `\\server\pipe\` form (any non-empty server name).
+#[cfg(windows)]
+fn is_pipe_path(raw: &str) -> bool {
+    if raw.starts_with(r"\\.\pipe\") || raw.starts_with(r"\\?\pipe\") {
+        return true;
+    }
+    raw.strip_prefix(r"\\")
+        .and_then(|rest| rest.split_once(['\\', '/']))
+        .is_some_and(|(server, tail)| {
+            !server.is_empty() && tail.split(['\\', '/']).next() == Some("pipe")
+        })
+}
+
+/// FNV-1a over the raw path bytes: the derivation key for [`pipe_name`]
+/// (dependency-free and stable, so the same explicit path names the same
+/// pipe in every process, on the bind and the connect side alike).
+#[cfg(windows)]
+fn fnv1a64(bytes: &str) -> u64 {
+    bytes.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 /// Bind a listening endpoint at `path` (a named pipe on Windows).
@@ -393,5 +445,120 @@ mod tests {
             .expect("no short address exists");
         assert!(error.to_string().contains("exceeds"), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod pipe_name_tests {
+    use super::{fnv1a64, pipe_name};
+    use std::path::Path;
+
+    #[test]
+    fn pipe_namespace_names_pass_through_unchanged() {
+        let fixed = Path::new(r"\\.\pipe\prime-agent-daemon");
+        assert_eq!(pipe_name(fixed).unwrap(), r"\\.\pipe\prime-agent-daemon");
+        let worker = Path::new(r"\\.\pipe\prime-agent-worker-abc123-0123456789ab");
+        assert_eq!(
+            pipe_name(worker).unwrap(),
+            r"\\.\pipe\prime-agent-worker-abc123-0123456789ab"
+        );
+    }
+
+    #[test]
+    fn explicit_file_paths_derive_the_same_pipe_on_both_sides() {
+        let socket = Path::new(r"C:\Users\runner\AppData\Local\Temp\.tmpacp\daemon.sock");
+        let a = pipe_name(socket).expect("derives");
+        let b = pipe_name(socket).expect("derives again");
+        assert_eq!(a, b, "the derivation is deterministic");
+        assert!(a.starts_with(r"\\.\pipe\prime-agent-explicit-"), "{a}");
+    }
+
+    #[test]
+    fn distinct_paths_derive_distinct_pipes() {
+        let a = pipe_name(Path::new(r"C:\tmp\one\daemon.sock")).expect("derives");
+        let b = pipe_name(Path::new(r"C:\tmp\two\daemon.sock")).expect("derives");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn fnv1a64_is_stable() {
+        // FNV-1a("a") with the 64-bit offset basis and prime, for the record.
+        assert_eq!(fnv1a64("a"), 0xaf63_dc4c_8601_ec8c);
+    }
+
+    #[test]
+    fn pipe_paths_match_case_insensitively_and_remote_forms_pass_through() {
+        let upper = Path::new(r"\\.\PIPE\prime-agent-daemon");
+        assert_eq!(pipe_name(upper).unwrap(), r"\\.\PIPE\prime-agent-daemon");
+        let remote = Path::new(r"\\fileserver\pipe\prime-agent");
+        assert_eq!(pipe_name(remote).unwrap(), r"\\fileserver\pipe\prime-agent");
+    }
+
+    #[test]
+    fn equivalent_path_spellings_derive_the_same_pipe() {
+        let a = pipe_name(Path::new(r"C:\Temp\daemon.sock")).expect("derives");
+        let b = pipe_name(Path::new(r"c:\temp\DAEMON.SOCK")).expect("derives");
+        assert_eq!(a, b, "case is normalized before hashing");
+    }
+
+    #[test]
+    fn relative_paths_derive_per_working_directory() {
+        // The current directory is process-global: hold the module's lock
+        // and restore the previous directory on scope exit - the drop
+        // guard covers the panic paths, so a failed assert never leaks
+        // the changed directory to the binary's other tests.
+        use std::sync::Mutex;
+        static CWD_LOCK: Mutex<()> = Mutex::new(());
+        let _lock = CWD_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = CwdGuard::capture();
+        let first = tempfile_dir();
+        std::env::set_current_dir(&first).expect("chdir first");
+        let here = pipe_name(Path::new("daemon.sock")).expect("derives");
+        let second = tempfile_dir();
+        std::env::set_current_dir(&second).expect("chdir second");
+        let elsewhere = pipe_name(Path::new("daemon.sock")).expect("derives");
+        assert_ne!(
+            here, elsewhere,
+            "the same relative name derives per working directory"
+        );
+        assert!(
+            here.starts_with(r"\\.\pipe\prime-agent-explicit-"),
+            "{here}"
+        );
+    }
+
+    /// The process working directory on scope exit (including panics):
+    /// a drop guard, so a failed assert or chdir cannot leak the changed
+    /// directory to the binary's other tests.
+    struct CwdGuard(std::path::PathBuf);
+
+    impl CwdGuard {
+        fn capture() -> Self {
+            Self(std::env::current_dir().expect("current dir"))
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
+    }
+
+    /// A fresh directory to chdir into for the relative-path pin.
+    fn tempfile_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("pa-pipe-name-cwd-{}", uuid_like()));
+        std::fs::create_dir_all(&dir).expect("create the cwd pin dir");
+        dir
+    }
+
+    /// A per-call unique suffix without a uuid dependency: the process id
+    /// plus a monotonic counter.
+    fn uuid_like() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let next = COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+        (u64::from(std::process::id()) << 32) | next
     }
 }

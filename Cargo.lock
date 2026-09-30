@@ -1215,7 +1215,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "pa-agent"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "anyhow",
  "futures",
@@ -1228,7 +1228,7 @@ dependencies = [
 
 [[package]]
 name = "pa-ai"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "anyhow",
  "base64",
@@ -1256,7 +1256,7 @@ dependencies = [
 
 [[package]]
 name = "pa-cli"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "anyhow",
  "base64",
@@ -1286,7 +1286,7 @@ dependencies = [
 
 [[package]]
 name = "pa-core"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "anyhow",
  "base64",
@@ -1304,6 +1304,7 @@ dependencies = [
  "pa-models",
  "pa-telemetry",
  "pa-types",
+ "proptest",
  "reqwest",
  "rsa",
  "serde",
@@ -1323,7 +1324,7 @@ dependencies = [
 
 [[package]]
 name = "pa-daemon"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "anyhow",
  "filetime",
@@ -1347,7 +1348,7 @@ dependencies = [
 
 [[package]]
 name = "pa-models"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "hex",
  "hmac",
@@ -1365,7 +1366,7 @@ dependencies = [
 
 [[package]]
 name = "pa-telemetry"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -1379,7 +1380,7 @@ dependencies = [
 
 [[package]]
 name = "pa-tui"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "anyhow",
  "base64",
@@ -1388,6 +1389,7 @@ dependencies = [
  "fancy-regex",
  "ignore",
  "pa-types",
+ "proptest",
  "ratatui",
  "regex",
  "serde",
@@ -1403,7 +1405,7 @@ dependencies = [
 
 [[package]]
 name = "pa-types"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "anyhow",
  "libc",
@@ -1511,6 +1513,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "proptest"
+version = "1.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b45fcc2344c680f5025fe57779faef368840d0bd1f42f216291f0dc4ace4744"
+dependencies = [
+ "bitflags",
+ "num-traits",
+ "rand 0.9.5",
+ "rand_chacha 0.9.0",
+ "rand_xorshift",
+ "regex-syntax",
+ "unarray",
 ]
 
 [[package]]
@@ -1673,6 +1690,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
 dependencies = [
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "rand_xorshift"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
+dependencies = [
+ "rand_core 0.9.5",
 ]
 
 [[package]]
@@ -2415,6 +2441,12 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "unarray"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
 
 [[package]]
 name = "unicode-ident"
