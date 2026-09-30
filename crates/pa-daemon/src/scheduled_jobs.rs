@@ -235,6 +235,7 @@ impl AgentCronSchedulerHooks for QueueHooks {
                     "follow_up_queued"
                 },
             },
+            None,
         );
         self.work_notify.notify_one();
         match tokio::time::timeout(
@@ -407,6 +408,7 @@ impl ScheduledJobs {
             crate::worker::QueueCheckpoint::Settle {
                 operation: "queue_purged",
             },
+            None,
         );
     }
 }

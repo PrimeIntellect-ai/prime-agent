@@ -20,13 +20,12 @@ use serde_json::{json, Value};
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::worker::Worker;
 
-/// One held pause: the session it gates, the owning client identity, and
-/// the lease key (the supervisor embeds `[connectionId, ownerClientId,
-/// leaseKey]`, so a reacquire from the same connection deduplicates).
+/// One held pause: a client-owned lease dedupes by session/owner/key;
+/// `None` is an internal lease that wire release and detach cannot clear.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InputPauseEntry {
     active_session_id: String,
-    owner_client_id: String,
+    owner_client_id: Option<String>,
     lease_key: String,
 }
 
@@ -38,7 +37,8 @@ pub(crate) struct InputPauseTable {
 }
 
 /// The release outcome (TS error strings surface through the arm).
-enum ReleaseOutcome {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReleaseOutcome {
     Released,
     Unknown,
     /// A foreign owner or session (the TS arm answers the same ownership
@@ -63,15 +63,21 @@ impl InputPauseTable {
     /// `acquire_session_input_pause`: dedupe on (owner, session, lease
     /// key) - an identical lease answers its existing pause id (TS
     /// `existing[0]`), otherwise a fresh id is minted and the admission
-    /// gate engages.
-    fn acquire(&self, active_session_id: &str, owner_client_id: &str, lease_key: &str) -> String {
+    /// gate engages. Cloud-keyed delivery instead holds an internal lease
+    /// so client detach cannot release its transaction gate.
+    pub(crate) fn acquire(
+        &self,
+        active_session_id: &str,
+        owner_client_id: &str,
+        lease_key: &str,
+    ) -> String {
         let mut pauses = self
             .pauses
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (pause_id, entry) in pauses.iter() {
             if entry.active_session_id == active_session_id
-                && entry.owner_client_id == owner_client_id
+                && entry.owner_client_id.as_deref() == Some(owner_client_id)
                 && entry.lease_key == lease_key
             {
                 return pause_id.clone();
@@ -82,17 +88,63 @@ impl InputPauseTable {
             pause_id.clone(),
             InputPauseEntry {
                 active_session_id: active_session_id.to_string(),
-                owner_client_id: owner_client_id.to_string(),
+                owner_client_id: Some(owner_client_id.to_string()),
                 lease_key: lease_key.to_string(),
             },
         );
         pause_id
     }
 
+    /// A worker-only lease. Client detach/release cannot remove this gate,
+    /// even if the client chooses the same string as an internal label.
+    pub(crate) fn acquire_internal(&self, active_session_id: &str, request_id: &str) -> String {
+        let pause_id = uuid::Uuid::new_v4().to_string();
+        self.pauses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                pause_id.clone(),
+                InputPauseEntry {
+                    active_session_id: active_session_id.to_string(),
+                    owner_client_id: None,
+                    lease_key: request_id.to_string(),
+                },
+            );
+        pause_id
+    }
+
+    pub(crate) fn release_internal(
+        &self,
+        pause_id: &str,
+        active_session_id: &str,
+        request_id: &str,
+    ) {
+        let mut pauses = self
+            .pauses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pauses.get(pause_id).is_some_and(|entry| {
+            entry.owner_client_id.is_none()
+                && entry.active_session_id == active_session_id
+                && entry.lease_key == request_id
+        }) {
+            pauses.remove(pause_id);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn internal_pause_id(&self) -> Option<String> {
+        self.pauses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find_map(|(pause_id, entry)| entry.owner_client_id.is_none().then(|| pause_id.clone()))
+    }
+
     /// `release_session_input_pause`: `Unknown` answers the plain TS
     /// success (an idempotent release), a foreign owner or session
     /// answers the TS ownership error, `Released` lifts the gate.
-    fn release(
+    pub(crate) fn release(
         &self,
         pause_id: &str,
         owner_client_id: &str,
@@ -105,7 +157,8 @@ impl InputPauseTable {
         let Some(entry) = pauses.get(pause_id) else {
             return ReleaseOutcome::Unknown;
         };
-        if entry.owner_client_id != owner_client_id || entry.active_session_id != active_session_id
+        if entry.owner_client_id.as_deref() != Some(owner_client_id)
+            || entry.active_session_id != active_session_id
         {
             return ReleaseOutcome::OwnedByAnotherClient;
         }
@@ -121,7 +174,7 @@ impl InputPauseTable {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let before = pauses.len();
-        pauses.retain(|_, entry| entry.owner_client_id != owner_client_id);
+        pauses.retain(|_, entry| entry.owner_client_id.as_deref() != Some(owner_client_id));
         before != pauses.len()
     }
 }

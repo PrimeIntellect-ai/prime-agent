@@ -8,8 +8,8 @@ use pa_types::daemon::cloud::{
 };
 
 use super::{
-    AgentMessageLookup, CloudFamilyDelivery, FamilyResultSubmitter, HandleOutcome,
-    IncomingCloudMessage,
+    AgentMessageLookup, CloudDeliveryError, CloudFamilyDelivery, FamilyResultSubmitter,
+    HandleOutcome, IncomingCloudMessage,
 };
 use crate::cloud_family::log::{Admission, FamilyResultLog};
 
@@ -98,12 +98,13 @@ impl CloudFamilyResponder {
                                 error: None,
                             },
                         },
-                        // The receiver has no idempotent record: the
-                        // delivery outcome is unknowable without
-                        // re-delivering, so the request stays uncertain —
-                        // the honest release-gate limit, surfaced for the
-                        // wiring layer.
-                        AgentMessageLookup::Unknown => {
+                        // No idempotent record (provably never
+                        // attempted) or an unresolvable outcome (the
+                        // receiver may already hold the message): either
+                        // way the request stays uncertain — the wiring
+                        // layer reconciles it through the seam and
+                        // records the answer, never this substrate.
+                        AgentMessageLookup::Unknown | AgentMessageLookup::Uncertain => {
                             return Ok(HandleOutcome::Uncertain);
                         }
                     }
@@ -164,7 +165,7 @@ impl CloudFamilyResponder {
                             error: None,
                         },
                     },
-                    Err(error) => CloudFamilyCommand {
+                    Err(CloudDeliveryError::Rejected(error)) => CloudFamilyCommand {
                         payload: CloudFamilyCommandPayload::AgentMessageResult {
                             request_id: request_id.clone(),
                             ok: false,
@@ -172,6 +173,9 @@ impl CloudFamilyResponder {
                             error: Some(truncate_utf16(error, 2000)),
                         },
                     },
+                    Err(CloudDeliveryError::Unresolved(_)) => {
+                        return Ok(HandleOutcome::Uncertain);
+                    }
                 }
             }
             CloudFamilyEventPayload::FamilyRosterRequest {

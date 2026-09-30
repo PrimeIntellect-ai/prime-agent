@@ -11,6 +11,22 @@ use serde_json::Value;
 
 use crate::protocol::{response_failure, DaemonResponse};
 
+/// One admitted agent-message delivery: the checkpoint operation name
+/// (TS's steer/follow-up queue string), the queue-projection snapshot to
+/// push, and the receipt the caller answers with (and, for cloud-keyed
+/// deliveries, durably records under the request id).
+struct AgentMessageAdmission {
+    operation: &'static str,
+    snapshot: crate::types::SessionActionSnapshot,
+    receipt: Value,
+    /// The sender's live id when this delivery is one of this session's
+    /// RLM children replying (the settle watcher's no-reply suppression).
+    /// The callers apply it: the unkeyed path at admission (its TS
+    /// acceptance semantics — no rollback exists), the keyed path only
+    /// after the durable commit.
+    child_reply: Option<String>,
+}
+
 impl Worker {
     pub(crate) async fn handle_prompt(&self, payload: &Value, wait: bool) -> DaemonResponse {
         if let Err(response) = self.require_created("prompt") {
@@ -243,15 +259,219 @@ impl Worker {
     /// queue it on the requested lane, carrying the `agent_message`
     /// custom row on the queued item (TS `acceptAgentSessionMessage` ->
     /// `acceptAgentMessagePrompt` with `customMessage`): the turn renders
-    /// the collapsed agent-message card while the model still runs on the
-    /// rendered prompt. Answers with the delivery receipt
+    /// the collapsed agent-message card while the model still runs on
+    /// the rendered prompt. Answers with the delivery receipt
     /// (`createAgentSessionMessageReceipt` shape): `queued` when a turn is
     /// running (`queueIfBusy` semantics), `delivered` when the prompt
     /// becomes the next run.
+    ///
+    /// A delivery carrying `cloudRequestId` (the cross-boundary family
+    /// exchange) is idempotent by that request id: the receiver inbox
+    /// durably admits the request id in the SAME flush as the queue
+    /// snapshot that made the message visible, so a replayed duplicate
+    /// answers the recorded receipt instead of enqueueing a second
+    /// visible message.
     pub(crate) fn handle_worker_deliver_message(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("worker_deliver_message") {
             return response;
         }
+        if let Some(request_id) = payload
+            .get("cloudRequestId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
+            return self.handle_worker_deliver_cloud_message(payload, request_id);
+        }
+        let admission = match self.admit_agent_message_into_lane(payload) {
+            Ok(admission) => admission,
+            Err(response) => return response,
+        };
+        // The local path's reply mark lands at admission (TS
+        // `acceptAgentSessionMessage` acceptance semantics — the local
+        // path has no rollback).
+        if let Some(child) = &admission.child_reply {
+            self.engine.mark_child_reply(child);
+        }
+        // The delivery checkpoint (busy=true): the queued agent message is
+        // admitted live work — a restart must revive the worker to
+        // deliver it (agent-to-agent messages have no client that
+        // reopens the session). The operation names are TS's steer/follow-up
+        // queue strings, matching the receipt's deliveryMode.
+        self.checkpoint_queue(QueueCheckpoint::Admitted {
+            operation: admission.operation,
+        });
+        self.finish_agent_message_delivery(admission)
+    }
+
+    /// The cloud-keyed delivery: the request-id admission check, the
+    /// enqueue, and the durable admission record are ONE critical section
+    /// under the recovery lock, so two concurrent deliveries under the
+    /// same request id cannot both become visible, and a crash can never
+    /// split the visible message from its request-id admission (the
+    /// snapshot and the admission ride one fsync).
+    ///
+    /// The idempotent answer outranks the admission gates: a replay of an
+    /// already-admitted request answers the recorded receipt even when
+    /// the session has since paused or filled its lanes — the message is
+    /// already admitted, and refusing the duplicate would claim it was
+    /// not.
+    fn handle_worker_deliver_cloud_message(
+        &self,
+        payload: &Value,
+        request_id: &str,
+    ) -> DaemonResponse {
+        let mut recovery = self
+            .recovery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The journal opens with the serve loop; a delivery that arrives
+        // before it (a directly-dispatched command) opens it now, so the
+        // keyed path is never untracked.
+        if recovery.is_none() {
+            match crate::journal::WorkerRecoveryJournal::open(&self.config.recovery_journal_path) {
+                Ok(journal) => *recovery = Some(journal),
+                Err(error) => {
+                    return response_failure(
+                        None,
+                        "worker_deliver_message",
+                        &format!(
+                            "{}: cloud inbox journal: {error:#}",
+                            crate::cloud_family::CLOUD_COMMIT_UNCERTAIN
+                        ),
+                        None,
+                    )
+                }
+            }
+        }
+        let Some(journal) = recovery.as_mut() else {
+            return response_failure(
+                None,
+                "worker_deliver_message",
+                "cloud inbox journal unavailable",
+                None,
+            );
+        };
+        if let Some(receipt) = journal.cloud_inbox_receipt(request_id) {
+            return response_success(None, "worker_deliver_message", Some(receipt.clone()));
+        }
+        // The transaction gate: hold the runner's input-pause through the
+        // enqueue and the durable commit, so the turn runner cannot
+        // consume an item whose admission has not landed (a rollback
+        // would then be impossible). The runner reads the pause without
+        // holding the core lock, so this ordering cannot deadlock with
+        // the recovery -> core discipline the checkpoint shares.
+        let pause_id = self
+            .input_pauses
+            .acquire_internal(&self.config.active_session_id, request_id);
+        let admission = match self.admit_agent_message_into_lane(payload) {
+            Ok(admission) => admission,
+            Err(response) => {
+                self.input_pauses.release_internal(
+                    &pause_id,
+                    &self.config.active_session_id,
+                    request_id,
+                );
+                return response;
+            }
+        };
+        // The commit: the lanes snapshot, the busy verdict, and the
+        // request-id admission ride ONE digest-sealed transaction line.
+        // No receipt is published until it is durable — a commit that
+        // reports sync failure is NEVER acknowledged, whatever a
+        // subsequent read would see (unsynced bytes are not durability).
+        match crate::worker::record_queue_checkpoint_locked(
+            journal,
+            &self.core,
+            QueueCheckpoint::Admitted {
+                operation: admission.operation,
+            },
+            Some((request_id, &admission.receipt)),
+        ) {
+            Ok(()) => {
+                drop(recovery);
+                self.input_pauses.release_internal(
+                    &pause_id,
+                    &self.config.active_session_id,
+                    request_id,
+                );
+                // The reply mark is post-commit: a delivery that
+                // committed is a real reply; one that rolls back never
+                // suppresses the child's no-reply notice.
+                if let Some(child) = &admission.child_reply {
+                    self.engine.mark_child_reply(child);
+                }
+                self.finish_agent_message_delivery(admission)
+            }
+            Err(error) => {
+                // The rollback runs BEFORE the recovery lock and the
+                // pause drop: under both, the runner cannot dequeue the
+                // uncommitted item and no concurrent checkpoint can
+                // snapshot the transient lane. The durable outcome of the
+                // failed commit is UNKNOWABLE (the write may or may not
+                // have landed) — the answer carries the uncertainty
+                // marker, never a receipt and never a plain refusal.
+                self.rollback_agent_message_delivery(&admission);
+                // Keep the pause held for this worker's remaining lifetime.
+                // Its journal is quarantined: the runner cannot consume any
+                // previously queued work until a fresh worker syncs and
+                // replays the original journal before accepting commands.
+                drop(recovery);
+                response_failure(
+                    None,
+                    "worker_deliver_message",
+                    &format!(
+                        "{}: cloud inbox journal: {error:#}",
+                        crate::cloud_family::CLOUD_COMMIT_UNCERTAIN
+                    ),
+                    None,
+                )
+            }
+        }
+    }
+
+    /// Roll back one not-yet-committed delivery admission: remove exactly
+    /// the item whose agent-message custom row carries this delivery's
+    /// receipt id, from the one lane it was enqueued on. Nothing else in
+    /// the lane is touched, and the order of the surviving items is
+    /// preserved.
+    fn rollback_agent_message_delivery(&self, admission: &AgentMessageAdmission) {
+        let Some(receipt_id) = admission.receipt.get("id").and_then(Value::as_str) else {
+            return;
+        };
+        let lane = match admission.operation {
+            "steer_queued" => Lane::Steering,
+            _ => Lane::FollowUp,
+        };
+        let mut core = self.core.lock().unwrap();
+        let item_is_delivery = |item: &QueuedItem| {
+            item.custom_message.as_ref().is_some_and(|row| {
+                row.get("customType").and_then(Value::as_str)
+                    == Some(pa_core::session_engine::agent_messaging::AGENT_MESSAGE_CUSTOM_TYPE)
+                    && row.get("details").and_then(|details| details.get("id"))
+                        == Some(&json!(receipt_id))
+            })
+        };
+        match lane {
+            Lane::Steering => {
+                core.steering.retain(|item| !item_is_delivery(item));
+            }
+            Lane::FollowUp => {
+                core.follow_up.retain(|item| !item_is_delivery(item));
+            }
+        }
+    }
+
+    /// The shared delivery admission (TS `sendAgentSessionMessage` ->
+    /// `acceptAgentSessionMessage`): the paused and suspended gates, the
+    /// sender label and relationship, the rendered prompt, the lane
+    /// capacity assert, and the enqueue. Returns the receipt the caller
+    /// answers with; the checkpoint (and, for cloud-keyed deliveries, the
+    /// request-id admission) is the caller's.
+    #[allow(clippy::result_large_err)]
+    fn admit_agent_message_into_lane(
+        &self,
+        payload: &Value,
+    ) -> Result<AgentMessageAdmission, DaemonResponse> {
         let message = payload
             .get("message")
             .and_then(Value::as_str)
@@ -259,13 +479,16 @@ impl Worker {
         if let Err(error) =
             pa_core::session_engine::agent_messaging::normalize_agent_session_message(message)
         {
-            return response_failure(None, "worker_deliver_message", &error.to_string(), None);
+            return Err(response_failure(
+                None,
+                "worker_deliver_message",
+                &error.to_string(),
+                None,
+            ));
         }
         // The paused gate (TS `sendAgentSessionMessage` refuses with the
         // same error while `agent_messages_pause` holds the flag).
-        if let Err(response) = self.refuse_delivery_if_paused() {
-            return response;
-        }
+        self.refuse_delivery_if_paused()?;
         // TS `acceptAgentMessagePrompt` runs with `resumeIfIdle: false`: on
         // a suspended idle session the delivery is rejected with the same
         // admission error as a plain prompt, and only the busy carve-out
@@ -274,24 +497,24 @@ impl Worker {
             let core = self.core.lock().unwrap();
             if core.queued_input_suspended && !core.busy && !core.compacting {
                 drop(core);
-                return response_failure(
+                return Err(response_failure(
                     None,
                     "worker_deliver_message",
                     QUEUED_INPUT_SUSPENDED,
                     None,
-                );
+                ));
             }
         }
         let sender = payload.get("sender").cloned().unwrap_or(Value::Null);
         // A delivery from one of this session's RLM children counts as the
-        // child's reply: the settle watcher withholds the no-reply notice.
-        if let Some(child) = sender
+        // child's reply: the settle watcher's no-reply suppression is
+        // applied by the CALLER (the unkeyed path at admission, the keyed
+        // path after the durable commit).
+        let child_reply = sender
             .get("activeSessionId")
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
-        {
-            self.engine.mark_child_reply(child);
-        }
+            .map(str::to_string);
         // Sender label precedence (TS `createAgentSessionMessagePrompt`):
         // session name, session id, active session id, client id.
         let sender_name = ["sessionName", "sessionId", "activeSessionId", "clientId"]
@@ -333,7 +556,12 @@ impl Worker {
                 )
             {
                 drop(core);
-                return response_failure(None, "worker_deliver_message", &error.to_string(), None);
+                return Err(response_failure(
+                    None,
+                    "worker_deliver_message",
+                    &error.to_string(),
+                    None,
+                ));
             }
             let id = pa_core::session_engine::agent_messaging::create_agent_session_message_id();
             let queued = core.busy;
@@ -401,19 +629,6 @@ impl Worker {
             let snapshot = Self::snapshot_locked(&core);
             (id, queued, snapshot, target)
         };
-        // The delivery checkpoint (busy=true): the queued agent message is
-        // admitted live work — a restart must revive the worker to
-        // deliver it (agent-to-agent messages have no client that
-        // reopens the session). The operation names are TS's steer/follow-up
-        // queue strings, matching the receipt's deliveryMode.
-        self.checkpoint_queue(QueueCheckpoint::Admitted {
-            operation: match lane {
-                Lane::Steering => "steer_queued",
-                Lane::FollowUp => "follow_up_queued",
-            },
-        });
-        let _ = self.emit_action_update(&snapshot);
-        self.work_notify.notify_one();
         let timestamp = crate::util::now_iso();
         let mut receipt = json!({
             "id": id,
@@ -434,6 +649,22 @@ impl Worker {
         if !sender.is_null() {
             receipt["from"] = json!(sender);
         }
-        response_success(None, "worker_deliver_message", Some(receipt))
+        Ok(AgentMessageAdmission {
+            operation: match lane {
+                Lane::Steering => "steer_queued",
+                Lane::FollowUp => "follow_up_queued",
+            },
+            snapshot,
+            receipt,
+            child_reply,
+        })
+    }
+
+    /// The post-checkpoint delivery tail: the queue-projection push, the
+    /// runner wake, and the receipt answer.
+    fn finish_agent_message_delivery(&self, admission: AgentMessageAdmission) -> DaemonResponse {
+        let _ = self.emit_action_update(&admission.snapshot);
+        self.work_notify.notify_one();
+        response_success(None, "worker_deliver_message", Some(admission.receipt))
     }
 }

@@ -480,7 +480,7 @@ impl Supervisor {
 
     /// Connect to the worker socket, authenticate, and wire the request pump.
     /// The auth handshake must complete inside the remaining connect budget.
-    pub(super) async fn connect_worker(
+    pub(crate) async fn connect_worker(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
         connect_deadline: tokio::time::Instant,

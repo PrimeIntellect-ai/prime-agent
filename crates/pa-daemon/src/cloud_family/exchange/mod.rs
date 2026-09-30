@@ -94,12 +94,31 @@ pub enum AgentMessageLookup {
     /// The receiver recorded this request id's admission: the receipt is
     /// its delivery truth, and an uncertain request reconciles to it.
     Admitted(CloudAgentMessageReceipt),
-    /// The receiver has no idempotent record for this request id. The
-    /// delivery outcome is unknowable here: the request stays uncertain
-    /// (never re-delivered) until the wiring resolves it. A receiver whose
-    /// inbox is not idempotent by request id answers `Unknown` — that is
-    /// the documented release blocker, not a license to re-deliver.
+    /// The receiver has no idempotent record for this request id. For a
+    /// receiver whose inbox is keyed by request id (the production
+    /// [`crate::cloud_family::LocalFamilyDelivery`]: the seam admits
+    /// durably BEFORE any delivery), `Unknown` proves no delivery was
+    /// ever attempted — which is what makes the wiring reconcile's
+    /// re-drive safe. A receiver whose inbox is not keyed by request id
+    /// answers `Unknown` for the unknowable case too: then the request
+    /// stays uncertain, never re-delivered.
     Unknown,
+    /// The receiver durably admitted this request id but its delivery
+    /// outcome could not be resolved: the receiver may already hold the
+    /// message (a crash interrupted the handling, and the resolve re-drive
+    /// failed — the target unreachable, the family reach now refused).
+    /// Nothing may record a negative answer from this state: the wiring
+    /// retries the resolve until a verified receipt or rejection exists,
+    /// and the request stays uncertain meanwhile.
+    Uncertain,
+}
+
+/// A definite pre-dispatch rejection versus an attempted delivery whose
+/// outcome is not yet known. Only `Rejected` may become durable `ok:false`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloudDeliveryError {
+    Rejected(String),
+    Unresolved(String),
 }
 
 /// The local-side delivery seam for cross-boundary family traffic: the
@@ -109,18 +128,23 @@ pub enum AgentMessageLookup {
 /// nothing in this substrate can claim delivery on its behalf.
 pub trait CloudFamilyDelivery: Send + Sync {
     /// Deliver one guest agent message into the local family. The returned
-    /// error is reported to the requester verbatim (TS slices it to 2000
-    /// UTF-16 units in the answer).
+    /// definite rejection is reported to the requester verbatim (TS slices
+    /// it to 2000 UTF-16 units). An unresolved attempt is NOT an answer.
     fn deliver_agent_message(
         &self,
         message: IncomingCloudMessage,
-    ) -> impl Future<Output = Result<CloudAgentMessageReceipt, String>> + Send;
+    ) -> impl Future<Output = Result<CloudAgentMessageReceipt, CloudDeliveryError>> + Send;
 
     /// Receiver-side idempotent receipt lookup by request id — the
     /// reconciliation seam for an uncertain request (durably admitted,
     /// answer unknown because a crash interrupted the handling): the
-    /// receiver that recorded the admission answers it, and the responder
-    /// journals the answer without re-delivering.
+    /// receiver that recorded the admission answers it
+    /// ([`AgentMessageLookup::Admitted`]); a request the seam never
+    /// admitted answers [`AgentMessageLookup::Unknown`] (provably never
+    /// attempted — safe to re-drive); a durably-admitted request whose
+    /// outcome the lookup could not resolve answers
+    /// [`AgentMessageLookup::Uncertain`] (the receiver may already hold
+    /// the message — never a negative answer from that state).
     fn lookup_agent_message(
         &self,
         request_id: &str,

@@ -12,6 +12,14 @@ use crate::protocol::DaemonResponse;
 
 impl Worker {
     pub(crate) async fn dispatch(&self, command_type: &str, payload: &Value) -> DaemonResponse {
+        if self.recovery_quarantined() {
+            return response_failure(
+                None,
+                command_type,
+                crate::cloud_family::CLOUD_COMMIT_UNCERTAIN,
+                None,
+            );
+        }
         // Only operations that inspect or change historical branches need hydration.
         // Cancellation is deliberately excluded: it must reach the live turn immediately.
         if matches!(
@@ -61,7 +69,7 @@ impl Worker {
             // top of the installed history: release its freed heap.
             pa_types::memory_release::trim_freed_heap();
         }
-        match command_type {
+        let response = match command_type {
             "create" => self.handle_create(payload).await,
             "attach" => self.handle_attach(payload),
             "detach" => self.handle_detach(payload),
@@ -191,7 +199,27 @@ impl Worker {
                 &format!("Unknown worker command: {other}"),
                 None,
             ),
+        };
+        // A command admitted just before the fsync failure must not send a
+        // success after the keyed delivery quarantined the worker. The
+        // journal itself also rejects every later checkpoint under its lock.
+        if response.success && self.recovery_quarantined() {
+            return response_failure(
+                None,
+                command_type,
+                crate::cloud_family::CLOUD_COMMIT_UNCERTAIN,
+                None,
+            );
         }
+        response
+    }
+
+    fn recovery_quarantined(&self) -> bool {
+        self.recovery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(crate::journal::WorkerRecoveryJournal::is_quarantined)
     }
 
     // DaemonResponse is the wire response struct and is deliberately wide; the

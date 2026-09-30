@@ -179,6 +179,43 @@ pub fn restrict_open_file(_file: &std::fs::File) -> std::io::Result<()> {
     Ok(())
 }
 
+/// True when the path's owner is the effective user (Unix); an unreadable
+/// path answers false. On Windows inherited ACLs govern access, so
+/// ownership is not a separate gate and the check is a no-op true.
+#[cfg(unix)]
+#[must_use]
+pub fn owned_by_effective_user(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.uid() == nix::unistd::Uid::effective().as_raw())
+}
+
+/// Windows arm of [`owned_by_effective_user`]: ownership cannot be
+/// established here (inherited ACLs are not an ownership proof), so the
+/// probe answers false and callers fail closed.
+#[cfg(not(unix))]
+#[must_use]
+pub fn owned_by_effective_user(_path: &Path) -> bool {
+    // Callers fail closed until a platform-proven private-ACL check exists.
+    false
+}
+
+/// The effective user id (Unix); None where the probe does not exist, so
+/// callers fail closed.
+#[cfg(unix)]
+#[must_use]
+pub fn effective_uid() -> Option<u32> {
+    Some(nix::unistd::Uid::effective().as_raw())
+}
+
+/// Windows arm of [`effective_uid`]: no uid-style owner probe exists, so
+/// callers fail closed.
+#[cfg(not(unix))]
+#[must_use]
+pub fn effective_uid() -> Option<u32> {
+    None
+}
+
 /// Create directories recursively with the private dir mode on platforms with
 /// mode bits; existing directories are left untouched (mkdir semantics).
 ///
@@ -225,5 +262,70 @@ mod windows_tests {
         assert!(is_readable(&file).is_ok());
         let _ = std::fs::remove_file(&file);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// The ownership probes fail closed: no ownership is claimed from
+    /// inherited ACLs, and there is no uid-style probe on this platform.
+    #[test]
+    fn ownership_probes_fail_closed() {
+        let dir = std::env::temp_dir().join(format!("pa-perms-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        assert_eq!(effective_uid(), None);
+        assert!(
+            !owned_by_effective_user(&dir),
+            "inherited ACLs are not an ownership proof"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod unix_tests {
+    use super::*;
+
+    /// The exact surface the private-journal contract enforces with: the
+    /// effective-uid probe, the ownership probe (own paths true,
+    /// unreadable paths false), the mode probe, private recursive
+    /// creation, the tighten, and the private file-creation mode.
+    #[test]
+    fn ownership_mode_and_private_creation_probes() {
+        let dir = std::env::temp_dir().join(format!("pa-perms-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        assert!(effective_uid().is_some(), "unix has the uid probe");
+        assert!(owned_by_effective_user(&dir), "an own directory is owned");
+        assert!(
+            !owned_by_effective_user(&dir.join("missing")),
+            "an unreadable path answers false"
+        );
+
+        create_dir_all_private(&dir.join("nested/inner")).expect("create private");
+        assert_eq!(
+            file_mode(&dir.join("nested/inner")),
+            Some(PRIVATE_DIR_MODE),
+            "the created chain is private"
+        );
+        assert_eq!(file_mode(&dir.join("nested")), Some(PRIVATE_DIR_MODE));
+
+        restrict_dir(&dir).expect("restrict");
+        assert_eq!(file_mode(&dir), Some(PRIVATE_DIR_MODE));
+
+        let file = dir.join("probe.ndjson");
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        set_private_mode(&mut options);
+        options
+            .open(&file)
+            .expect("open private")
+            .sync_all()
+            .expect("sync");
+        assert_eq!(
+            file_mode(&file),
+            Some(PRIVATE_FILE_MODE),
+            "the created file is private"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
