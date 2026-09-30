@@ -304,10 +304,10 @@ fn duplicate_child_path_and_bad_spawn_inputs_fail_but_bad_lines_skip() {
         name: "w".into(),
     });
     assert!(depth_zero.is_err());
-    // A bad line costs that record only; the rest of the ledger still works.
+    // A torn tail or bad line costs that record only; later appends still land.
     let path = ledger.ledger_path().to_path_buf();
     let mut content = fs::read_to_string(&path).unwrap();
-    content.push_str("{\"v\":1,\"op\":\"spawn\"}\n{\"v\":1,\"op\":\"spa\n");
+    content.push_str("{\"v\":1,\"op\":\"spawn\"}\n{\"v\":1,\"op\":\"spa");
     fs::write(&path, content).unwrap();
     ledger
         .append_spawn(&RlmSpawnInput {

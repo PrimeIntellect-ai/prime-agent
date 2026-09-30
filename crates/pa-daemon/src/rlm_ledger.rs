@@ -17,7 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -784,6 +784,7 @@ impl RlmSpawnLedger {
         line.push('\n');
         let mut file = OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(&self.path)
             .with_context(|| format!("open RLM ledger {}", self.path.display()))?;
@@ -797,6 +798,16 @@ impl RlmSpawnLedger {
             let mut header = serde_json::to_string(&meta)?;
             header.push('\n');
             file.write_all(header.as_bytes())?;
+        } else {
+            // A crash can leave the final record torn short of its
+            // newline: start on a fresh line so this record never glues
+            // onto it.
+            let mut last = [0u8; 1];
+            file.seek(SeekFrom::End(-1))?;
+            file.read_exact(&mut last)?;
+            if last[0] != b'\n' {
+                line.insert(0, '\n');
+            }
         }
         file.write_all(line.as_bytes())?;
         file.sync_all()?;
