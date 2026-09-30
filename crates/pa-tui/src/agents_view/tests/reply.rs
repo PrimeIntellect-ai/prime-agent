@@ -151,17 +151,18 @@ fn a_selection_move_off_the_target_disarms() {
 #[test]
 fn enter_submits_the_reply_and_the_outcomes_land() {
     let mut mode = armed_live();
-    for ch in "hello".chars() {
-        mode.handle_key(ch.to_string().as_str());
+    // A trailing backslash + Enter is the editor's newline (TS's
+    // shift+enter workaround), not a send; the plain Enter sends.
+    for key in ["f", "o", "o", "\\", "enter", "b", "a", "r", "enter"] {
+        mode.handle_key(key);
     }
-    mode.handle_key("enter");
     let request = mode.pending_reply.take().expect("the send dispatched");
     assert_eq!(
         request,
         ReplyRequest {
             key: "p-live".to_string(),
             summary: parent_summary("p"),
-            text: "hello".to_string(),
+            text: "foo\nbar".to_string(),
             behavior: None,
             resume_config: serde_json::json!({}),
             cwd_notice: None,
@@ -176,7 +177,7 @@ fn enter_submits_the_reply_and_the_outcomes_land() {
         Some("Failed to send reply: daemon down")
     );
     assert!(
-        matches!(&mode.composer, Composer::Reply(reply) if reply.editor.get_text() == "hello"),
+        matches!(&mode.composer, Composer::Reply(reply) if reply.editor.get_text() == "foo\nbar"),
         "the failure restores the draft"
     );
     // The success disarms (the empty-editor guard) and reports; the
@@ -325,12 +326,16 @@ fn view_commands_route_and_reject() {
         saved.status_text(),
         Some("/kill needs a running agent; this session is inactive")
     );
-    // /kill on the live target dispatches, and the landed outcome
-    // disarms with the stopped status.
+    // The run loop materializes the completion between keys: Enter on
+    // the typed-exact `/kill` falls through the open popup and submits.
     let mut live = armed_live();
     for ch in "/kill".chars() {
         live.handle_key(ch.to_string().as_str());
+        live.materialize_composer_autocomplete();
     }
+    assert!(
+        matches!(&live.composer, Composer::Reply(reply) if reply.editor.is_showing_autocomplete())
+    );
     live.handle_key("enter");
     assert_eq!(
         live.pending_kill,

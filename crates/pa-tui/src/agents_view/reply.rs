@@ -10,7 +10,7 @@ use super::rename::{Rename, RenameTarget};
 use super::status::{Status, StatusTone};
 use super::{AgentsViewMode, Composer, DaemonClient, UiInput};
 use crate::agents_view_forest::RowKind;
-use crate::editor::Editor;
+use crate::editor::{Editor, EditorEvent};
 use crate::theme::{Theme, ThemeColor};
 use crate::{Line, Span};
 use pa_types::daemon::{DaemonCommand, PromptInput, StreamingBehavior};
@@ -391,9 +391,9 @@ impl AgentsViewMode {
     /// The reply-mode key routing (TS `handleInput`'s gates while armed,
     /// :1127-1200, plus the editor's own app checks): the cancel keys
     /// disarm, the empty-editor gates run the view's row actions, the
-    /// follow-up key queues, Enter submits, and every other key goes to
-    /// the editor's grammar. The composer comes in owned (the caller
-    /// hands it over) and goes back only where the mode continues.
+    /// follow-up key queues, and every other key (Enter included) goes
+    /// to the editor, whose submit dispatches. The composer comes in owned
+    /// (the caller hands it over) and goes back only where the mode continues.
     pub(super) fn handle_reply_key(
         &mut self,
         mut reply: Box<ReplyComposer>,
@@ -473,29 +473,24 @@ impl AgentsViewMode {
             self.running = false;
             return;
         }
-        // Enter: an open completion owns the key first (TS's editor
-        // applies the selected item — the typed-exact fall-through is
-        // what submits), and a plain Enter submits (TS `submitValue`:
-        // the editor clears first, its paste markers expanded; the
-        // draft rides in_flight for the restore).
-        if self.keybindings.matches(key, "tui.select.confirm") {
-            if reply.editor.is_showing_autocomplete() {
-                reply.editor.handle_input(key);
-                let _ = reply.editor.take_events();
-                self.composer = Composer::Reply(reply);
-                return;
-            }
-            let value = reply.editor.get_expanded_text();
-            reply.editor.set_text("");
-            self.submit_reply(reply, value, None);
-            return;
-        }
+        // The editor owns Enter (TS `editor.handleInput` -> `onSubmit`): it
+        // applies an open completion (a typed-exact command falls through and
+        // submits), turns a trailing backslash into a newline, and a submit
+        // clears the buffer and hands over the trimmed, paste-expanded text.
+        // The other events (change/autocomplete/clipboard) have no host here.
         reply.editor.handle_input(key);
-        // The editor's events (change/autocomplete/clipboard) have no
-        // host here: the view re-renders per key anyway, the composer
-        // completes nothing, and the kill ring holds the cut itself.
-        let _ = reply.editor.take_events();
-        self.composer = Composer::Reply(reply);
+        let submitted = reply
+            .editor
+            .take_events()
+            .into_iter()
+            .find_map(|event| match event {
+                EditorEvent::Submitted(text) => Some(text),
+                _ => None,
+            });
+        match submitted {
+            Some(value) => self.submit_reply(reply, value, None),
+            None => self.composer = Composer::Reply(reply),
+        }
     }
 
     /// TS `submit` (the reply arm, :1585-1631): the trimmed text routes
@@ -511,9 +506,8 @@ impl AgentsViewMode {
     ) {
         let text = value.trim().to_string();
         // TS `parseAgentsViewCommand` (the builtin alias resolution over
-        // the one view-command name list): the raw draft restores on the
-        // command's own failures (TS restores `value`, never the trimmed
-        // text).
+        // the one view-command name list): the submitted `value` restores
+        // on the command's own failures (TS restores `value`, not `text`).
         if let Some((name, args)) = parse_view_command(&text) {
             if name == "name" {
                 self.submit_name_command(&mut reply, &value, &args);

@@ -131,8 +131,9 @@ fn program_key_shows_and_hides_the_spawn_program() {
 /// default ctrl+r): the composer owns the prompt and the key routing —
 /// the header and the save/cancel hint render, the prefill is the
 /// session's name, the editing grammar matches the search field, Enter
-/// submits the trimmed name with the live target, Esc exits with the
-/// query untouched, and a child row never enters.
+/// submits the trimmed name with the live target, a large paste saves
+/// expanded, Esc exits with the query untouched, and a child row never
+/// enters.
 #[test]
 fn rename_key_composes_edits_and_dispatches() {
     let mut mode = mode_with_parent_and_child();
@@ -209,6 +210,17 @@ fn rename_key_composes_edits_and_dispatches() {
     assert!(
         matches!(mode.composer, Composer::Search),
         "ctrl+c cancels rename mode (TS :1120)"
+    );
+    // A large paste shows as a marker; the save expands it (TS
+    // `submitValue`).
+    mode.handle_key("ctrl+r");
+    mode.handle_key("ctrl+u");
+    let pasted = "x".repeat(1200);
+    mode.handle_paste(&pasted);
+    mode.handle_key("enter");
+    assert_eq!(
+        mode.pending_rename.take().map(|rename| rename.name),
+        Some(pasted)
     );
     // A subagent row never enters rename mode (TS :1871: only
     // top-level agents rename). Expand the list so the child row is

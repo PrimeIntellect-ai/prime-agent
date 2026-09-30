@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use super::{AgentsViewMode, Composer, DaemonClient, UiInput};
 use crate::agents_view_forest::RowKind;
-use crate::editor::Editor;
+use crate::editor::{Editor, EditorEvent};
 use pa_types::daemon::DaemonCommand;
 use tokio::sync::mpsc;
 
@@ -101,10 +101,11 @@ impl AgentsViewMode {
     }
 
     /// The rename-mode key routing (TS `handleInput`'s rename branch,
-    /// :1119-1126): the cancel key exits back to search, the confirm key
-    /// submits the trimmed draft, and every other key goes to the
-    /// editor's own grammar (TS's `editor.handleInput` — the full
-    /// cursor/word/kill/undo editing, not the search field's subset).
+    /// :1119-1126): the cancel key exits back to search, the editor's
+    /// submit (Enter) dispatches the trimmed, paste-expanded draft,
+    /// and every other key goes to the editor's own grammar (TS's
+    /// `editor.handleInput` — the full cursor/word/kill/undo editing,
+    /// not the search field's subset).
     /// The composer comes in owned (the caller hands it over) and goes
     /// back only where the mode continues.
     pub(super) fn handle_rename_key(&mut self, mut rename: Box<RenameComposer>, key: &str) {
@@ -116,23 +117,29 @@ impl AgentsViewMode {
         if self.keybindings.matches(key, "tui.select.cancel") {
             return;
         }
-        if self.keybindings.matches(key, "tui.select.confirm") {
-            let name = rename.editor.get_text().trim().to_string();
-            if !name.is_empty() {
+        // The editor owns Enter (TS `editor.handleInput` -> `confirmRename`):
+        // its submit hands over the trimmed, paste-expanded draft; an empty
+        // name exits (TS `exitRenameMode`). Its other events have no host here.
+        rename.editor.handle_input(key);
+        let submitted = rename
+            .editor
+            .take_events()
+            .into_iter()
+            .find_map(|event| match event {
+                EditorEvent::Submitted(text) => Some(text),
+                _ => None,
+            });
+        match submitted {
+            Some(name) if !name.is_empty() => {
                 self.set_status("Renaming agent...");
                 self.pending_rename = Some(Rename {
                     target: rename.target,
                     name,
                 });
             }
-            return;
+            Some(_) => {}
+            None => self.composer = Composer::Rename(rename),
         }
-        rename.editor.handle_input(key);
-        // The editor's events (change/autocomplete/clipboard) have no
-        // host here: the view re-renders per key anyway, the composer
-        // completes nothing, and the kill ring holds the cut itself.
-        let _ = rename.editor.take_events();
-        self.composer = Composer::Rename(rename);
     }
 
     /// One landed rename outcome (TS `renameSession`'s report): the
