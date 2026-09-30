@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use pa_types::daemon::{
     DaemonCommand, DaemonCommandEnvelope, DaemonCommandFrameType, DaemonProtocolInfo,
-    DaemonResponse, DAEMON_PROTOCOL_NAME, DAEMON_PROTOCOL_VERSION,
+    DaemonResponse, DaemonSessionLifecycle, DAEMON_PROTOCOL_NAME, DAEMON_PROTOCOL_VERSION,
 };
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -553,7 +553,7 @@ async fn handle_session_new(
         // (settings + env); external clients never toggle telemetry.
         telemetry_disabled: None,
         runtime_metadata: None,
-        lifecycle: None,
+        lifecycle: Some(DaemonSessionLifecycle::ClientOwned),
         env: None,
         launch_env: None,
         rest: Map::default(),

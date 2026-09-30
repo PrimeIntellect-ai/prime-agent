@@ -962,11 +962,10 @@ async fn idle_passivation_requires_the_worker_token() {
 }
 
 #[tokio::test]
-async fn idle_passivation_refuses_client_owned_and_in_memory_workers() {
-    // The refusal gate (TS `canEvictWorker`'s `hasOwnerClient` arm,
-    // widened): a client-owned worker never passivates itself, and an
-    // in-memory (noSession) root has no file to wake from. An unowned
-    // sessioned root passes this gate; with a route in flight, its ask
+async fn idle_passivation_refuses_a_client_owned_worker() {
+    // The owner refusal (TS `canEvictWorker`'s `hasOwnerClient` arm):
+    // ownership alone carries it (TS `clientOwned: noSession`). An
+    // unowned root passes this gate; with a route in flight, its ask
     // defers instead of stopping the worker underneath it (the e2e
     // drives the pass side end to end).
     let dir = tempfile::TempDir::new().unwrap();
@@ -1011,14 +1010,6 @@ async fn idle_passivation_refuses_client_owned_and_in_memory_workers() {
         last_error: None,
         rest: Map::default(),
     };
-    let in_memory = {
-        let mut descriptor = descriptor.clone();
-        descriptor.worker_id = "w-mem".to_string();
-        descriptor.authentication_token = "mem-token".to_string();
-        descriptor.owner_client_id = None;
-        descriptor.create_command.no_session = Some(true);
-        descriptor
-    };
     let idle = pa_types::daemon::DaemonWorkerDescriptor {
         worker_id: "w-idle".to_string(),
         authentication_token: "idle-token".to_string(),
@@ -1036,22 +1027,8 @@ async fn idle_passivation_refuses_client_owned_and_in_memory_workers() {
             .error
             .as_deref()
             .unwrap_or("")
-            .contains("client-owned or in-memory (noSession) worker"),
+            .contains("client-owned worker"),
         "the client-owned worker's ask is refused: {response:?}"
-    );
-    let resident = ResidentWorker::new("w-mem".to_string(), in_memory, dir.path().join("w-mem.d"));
-    supervisor.registry.insert(resident).await;
-    let response = supervisor
-        .handle_worker_idle_passivation("c2", "worker_idle_passivation", "mem-token", Some(1))
-        .await;
-    assert!(!response.success);
-    assert!(
-        response
-            .error
-            .as_deref()
-            .unwrap_or("")
-            .contains("client-owned or in-memory (noSession) worker"),
-        "the in-memory worker's ask is refused: {response:?}"
     );
     // The eviction fence (TS `withEvictionFence`): a request in flight
     // when the ask arrives defers the passivation — no stop, no
