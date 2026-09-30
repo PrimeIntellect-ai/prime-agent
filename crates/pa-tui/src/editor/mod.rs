@@ -32,6 +32,7 @@ mod text_utils;
 mod wrap;
 
 pub use kill_ring::KillRing;
+pub(crate) use text_utils::decode_printable;
 pub use text_utils::normalize_text;
 pub use wrap::{is_atomic_marker, word_wrap_line, LayoutLine, Segment, TextChunk, VisualLine};
 
@@ -225,6 +226,14 @@ impl Editor {
     ) {
         self.cancel_autocomplete();
         self.autocomplete_provider = Some(provider);
+    }
+
+    /// Drop the installed autocomplete provider (TS `setAutocompleteProvider(undefined)`):
+    /// an editor that must not complete (`Editor::new()` installs the
+    /// builtin registry by default) answers nothing.
+    pub fn clear_autocomplete_provider(&mut self) {
+        self.cancel_autocomplete();
+        self.autocomplete_provider = None;
     }
 
     #[must_use]

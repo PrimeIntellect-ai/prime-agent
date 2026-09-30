@@ -584,7 +584,6 @@ async fn handle_session_new(
     let attach = DaemonCommand::Attach {
         id: None,
         active_session_id: daemon_active_session_id.clone(),
-        supports_extension_ui: Some(false),
         client_id: None,
         capabilities: None,
         resume_cursor: None,

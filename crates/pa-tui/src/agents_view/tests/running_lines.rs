@@ -28,6 +28,7 @@ fn scoped_view_keeps_the_first_row_default() {
         keybindings: crate::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
         incident_notice_state: None,
+        create_config: serde_json::json!({}),
     });
     mode.roster = vec![
         roster_entry("p", "idle", &parent_summary("p")),
@@ -73,6 +74,7 @@ fn childless_scope() -> AgentsViewMode {
         keybindings: crate::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
         incident_notice_state: None,
+        create_config: serde_json::json!({}),
     });
     mode.roster = vec![roster_entry("p", "idle", &parent_summary("p"))];
     mode.rebuild_rows();
@@ -187,6 +189,7 @@ fn mode_with_mixed_children() -> AgentsViewMode {
         keybindings: crate::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
         incident_notice_state: None,
+        create_config: serde_json::json!({}),
     });
     mode.roster = vec![
         roster_entry("p", "idle", &parent_summary("p")),

@@ -293,9 +293,8 @@ pub fn serialize_conversation(messages: &[AgentMessage]) -> String {
                     // result to its `#N`-prefixed entry in the [Assistant
                     // tool calls] lines even when the same tool is called
                     // repeatedly in one turn. Results whose call is not
-                    // part of the input (extension callers may pass
-                    // partial message lists) fall back to the name-only
-                    // label.
+                    // part of the input (callers may pass partial message
+                    // lists) fall back to the name-only label.
                     let index_suffix = tool_call_indices
                         .get(&result.tool_call_id)
                         .map(|index| format!(" #{index}"))
@@ -521,8 +520,8 @@ mod tests {
         assert_eq!(serialize_conversation(&messages), expected);
     }
 
-    /// A result whose call was not serialized (a partial message list from
-    /// an extension caller) falls back to the name-only label (TS #2424's
+    /// A result whose call was not serialized (a partial message list)
+    /// falls back to the name-only label (TS #2424's
     /// orphan arm).
     #[test]
     fn orphan_tool_result_falls_back_to_the_name_only_label() {

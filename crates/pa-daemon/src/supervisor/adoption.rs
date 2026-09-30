@@ -174,6 +174,14 @@ impl Supervisor {
         let pid = descriptor.pid;
         let journal_path = PathBuf::from(&descriptor.recovery_journal_path);
         let resident = ResidentWorker::new(worker_id.clone(), descriptor, path);
+        // The durable pending FIRST: a failed identity persist left a side
+        // record beside this descriptor carrying the moved-to identity —
+        // apply it before any routing, relaunch, or revival can act on the
+        // stale record (a revived worker replays the moved-to session's
+        // create path), and retry the record's persist: the repair removes
+        // the side record, a failure arms the resident's pending marker
+        // for the first roster write.
+        self.apply_identity_pending(&resident).await;
         // The stop tombstone outranks liveness (TS's stop ownership: the
         // stop was durable intent BEFORE the worker was told): a
         // supervisor that died between the tombstone and the worker's
@@ -196,6 +204,34 @@ impl Supervisor {
                 .connect_worker(&resident, worker_connect_deadline())
                 .await;
             if adopted.is_ok() {
+                // The boot reconciliation (the root-identity seam): the
+                // adopted worker already serves a session this supervisor
+                // has only ever seen through its PERSISTED record — and
+                // the record can name a superseded session (a whole-session
+                // replacement whose identity persist failed before the
+                // restart, or any descriptor the restart re-adopted
+                // mid-flight). Pull the live state BEFORE the routing
+                // opens: the roster write carries the identity follow, so
+                // the descriptor, the persisted record, and the binding
+                // re-bind onto the session the worker actually serves
+                // before a single client route can resolve them. A failed
+                // pull serves the persisted identity (logged) until the
+                // next roster write runs the follow from the live state.
+                if !self.refresh_roster_entry(&resident).await {
+                    // A failed pull is not proof the worker is dead: the
+                    // persisted identity is unreconciled, so the resident
+                    // is quarantined from every identity route until the
+                    // live word lands (a slow pull retries on the
+                    // backoff below; the worker's own roster push or a
+                    // later pull clears the fence). The routing refuses
+                    // (the conservative miss) instead of serving the
+                    // superseded identity.
+                    resident.mark_identity_quarantined();
+                    self.spawn_identity_reconciliation_retry(&resident);
+                    self.log_line(&format!(
+                        "session worker {worker_id}: the boot reconciliation pull failed; the resident is quarantined from routing until the live state lands"
+                    ));
+                }
                 // The adopted worker's session already exists (its create
                 // ran before the supervisor restart): routed client
                 // commands may reach it immediately.
@@ -555,6 +591,13 @@ impl Supervisor {
             descriptor,
             descriptor_path,
         );
+        // The durable pending (the same repair the descriptor adoption
+        // runs): the registration rebuilt the resident from the PERSISTED
+        // record — apply the failed follow's side record before the
+        // routing opens, so the in-memory identity serves the moved-to
+        // session even when the reconciliation pull below fails (the
+        // quarantine fences the routes until the live word lands).
+        self.apply_identity_pending(&resident).await;
         // A tombstoned identity is mid-stop (TS `adoptOrRecoverWorker`'s
         // stopRequestedAt branch): adoption finishes the stop — the
         // original command forwarded, the variant's finalize belt, the
@@ -595,12 +638,33 @@ impl Supervisor {
         }
         self.connect_worker(&resident, worker_connect_deadline())
             .await?;
+        // The boot reconciliation (the root-identity seam): registration
+        // rebuilt the resident from the PERSISTED record — and the worker
+        // already serves a whole-session replacement (a fork/switch the
+        // record never learned, or whose identity persist failed before
+        // this restart). Pull the live state BEFORE the resident joins the
+        // registry: the roster write carries the identity follow, so the
+        // descriptor, the persisted record, and the binding re-bind onto
+        // the session the worker actually serves before any client route
+        // can resolve them (the registration block above recorded the
+        // persisted identity — this heals it from the live truth).
+        if !self.refresh_roster_entry(&resident).await {
+            // A failed pull is not proof the worker is dead: the persisted
+            // identity is unreconciled, so the resident is quarantined
+            // from every identity route until the live word lands (a slow
+            // pull retries; the worker's own roster push or a later pull
+            // clears the fence).
+            resident.mark_identity_quarantined();
+            self.spawn_identity_reconciliation_retry(&resident);
+            self.log_line(&format!(
+                "session worker {worker_id}: the registration reconciliation pull failed; the resident is quarantined from routing until the live state lands"
+            ));
+        }
         // The self-registered worker's session already exists: routed
         // client commands may reach it immediately.
         resident.note_session_ready();
         self.registry.insert(Arc::clone(&resident)).await;
         self.spawn_monitor(Arc::clone(&resident), None, registration.pid);
-        self.refresh_roster_entry(&resident).await;
         self.log_line(&format!(
             "adopted session worker {worker_id} via self-registration"
         ));

@@ -182,8 +182,8 @@ impl Worker {
                 None,
             );
         };
-        // Claim the slot synchronously (TS claims before the extension
-        // dispatch could slip a second command through).
+        // Claim the slot synchronously (TS claims before the async dispatch
+        // could slip a second command through).
         if !self.user_bash.claim() {
             return response_failure(
                 None,

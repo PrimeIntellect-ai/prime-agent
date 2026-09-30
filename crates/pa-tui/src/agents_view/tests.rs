@@ -19,6 +19,7 @@ mod hover_band;
 mod key_bindings;
 mod notices;
 mod render_pulse;
+mod reply;
 mod running_lines;
 mod saved_catalog;
 mod selection_churn;
@@ -43,6 +44,7 @@ fn mode_with_row(title: &str, model: &str) -> (AgentsViewMode, usize) {
         keybindings: crate::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
         incident_notice_state: None,
+        create_config: serde_json::json!({}),
     });
     let row = |title: &str| AgentsViewRow {
         section: Section::Idle,
@@ -151,6 +153,7 @@ fn mode_with_parent_and_child() -> AgentsViewMode {
         keybindings: crate::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
         incident_notice_state: None,
+        create_config: serde_json::json!({}),
     });
     mode.roster = vec![
         roster_entry("p", "idle", &parent_summary("p")),
@@ -179,6 +182,7 @@ fn mode_with_anchor(anchor: Option<&str>, roster: Vec<serde_json::Value>) -> Age
         keybindings: crate::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
         incident_notice_state: None,
+        create_config: serde_json::json!({}),
     });
     mode.roster = roster;
     mode.rebuild_rows();
@@ -209,6 +213,7 @@ fn mode_with_user_bindings(bindings: &[(&str, &str)]) -> AgentsViewMode {
         keybindings: crate::keybindings::KeybindingsManager::with_user_bindings(cfg),
         show_hardware_cursor: false,
         incident_notice_state: None,
+        create_config: serde_json::json!({}),
     });
     mode.roster = vec![
         roster_entry("p", "idle", &parent_summary("p")),
@@ -235,6 +240,7 @@ fn fresh_mode(roster: Vec<serde_json::Value>) -> AgentsViewMode {
         keybindings: crate::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
         incident_notice_state: None,
+        create_config: serde_json::json!({}),
     });
     mode.roster = roster;
     mode.rebuild_rows();

@@ -425,26 +425,6 @@ pub enum DaemonOutbound {
         #[serde(flatten)]
         rest: JsonMap,
     },
-    ExtensionUiRequest {
-        active_session_id: String,
-        id: String,
-        method: String,
-        payload: JsonMap,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        meta: Option<DaemonEventMeta>,
-        #[serde(flatten)]
-        rest: JsonMap,
-    },
-    ExtensionError {
-        active_session_id: String,
-        extension_path: String,
-        event: String,
-        error: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        meta: Option<DaemonEventMeta>,
-        #[serde(flatten)]
-        rest: JsonMap,
-    },
 }
 
 #[cfg(test)]

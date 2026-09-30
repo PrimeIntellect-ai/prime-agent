@@ -495,6 +495,7 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         label: "task".to_string(),
         started_at_ms: 0,
         settled_status: None,
+        settled: false,
         answer_preview: None,
         answer_captured: false,
         replied_since_task: false,

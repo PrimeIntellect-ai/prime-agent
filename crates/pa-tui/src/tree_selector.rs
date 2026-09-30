@@ -37,10 +37,9 @@ enum Mode {
     Tree,
     /// The label input for one entry (TS `LabelInput`).
     LabelInput { entry_id: String, input: String },
-    /// "Summarize branch?" (TS `showExtensionSelector` with the three
-    /// options).
+    /// "Summarize branch?" (the TS three-option selector).
     Summarize { target_id: String, selected: usize },
-    /// Custom summarization instructions (TS `showExtensionEditor`).
+    /// Custom summarization instructions (the TS inline editor).
     CustomPrompt { target_id: String, input: String },
 }
 
@@ -382,8 +381,8 @@ impl TreeSelector {
     }
 }
 
-/// The key pair every inner pane's bottom hint renders (TS
-/// `ExtensionSelectorComponent`'s `keyHint` pair): each segment carries
+/// The key pair every inner pane's bottom hint renders (the TS selector
+/// component's `keyHint` pair): each segment carries
 /// its binding's first effective key — `tui.select.cancel` defaults to
 /// two keys, and the one-line hint shows the primary, the crate's
 /// `key_hint` grammar — and a user override that empties a binding

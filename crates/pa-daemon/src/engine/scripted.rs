@@ -273,16 +273,20 @@ impl SessionEngine for ScriptedEngine {
         &self,
         prompt_index: usize,
         request: PromptRequest,
-        _aborted: &dyn Fn() -> bool,
+        aborted: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) {
         let cancelled = || EngineEvent::Done(Err("prompt cancelled".to_string()));
         let scripted = self.responses.get(prompt_index).cloned();
         let text = match &scripted {
             Some(response) => {
-                let delay = Self::response_delay_ms(response);
-                if delay > 0 {
-                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                // The scripted hold honors the worker's cancel probe: a
+                // close on a held scripted child settles at the abort,
+                // not at the hold's end.
+                let delay = std::time::Duration::from_millis(Self::response_delay_ms(response));
+                if !abortable_sleep(delay, aborted) {
+                    emit(cancelled());
+                    return;
                 }
                 Self::response_text(response)
             }
@@ -516,7 +520,7 @@ impl SessionEngine for ScriptedEngine {
             Some(&signal),
             move |delay| {
                 let wait_signal = wait_signal.clone();
-                async move { abortable_sleep(delay, &wait_signal) }
+                async move { abortable_sleep(delay, &|| wait_signal.is_aborted()) }
             },
             move || {
                 let responses = StdArc::clone(&responses);
@@ -609,7 +613,11 @@ impl SessionEngine for ScriptedEngine {
             };
         }
         let delay_ms = Self::response_delay_ms(entry);
-        if delay_ms > 0 && !abortable_sleep(std::time::Duration::from_millis(delay_ms), signal) {
+        if delay_ms > 0
+            && !abortable_sleep(std::time::Duration::from_millis(delay_ms), &|| {
+                signal.is_aborted()
+            })
+        {
             return CompactionOutcome::Aborted;
         }
         if signal.is_aborted() {
@@ -674,7 +682,11 @@ impl SessionEngine for ScriptedEngine {
             };
         }
         let delay_ms = Self::response_delay_ms(entry);
-        if delay_ms > 0 && !abortable_sleep(std::time::Duration::from_millis(delay_ms), signal) {
+        if delay_ms > 0
+            && !abortable_sleep(std::time::Duration::from_millis(delay_ms), &|| {
+                signal.is_aborted()
+            })
+        {
             return BranchSummaryOutcome::Aborted;
         }
         if signal.is_aborted() {
@@ -770,7 +782,11 @@ fn scripted_side_question_turn(
         return message;
     }
     let delay_ms = ScriptedEngine::response_delay_ms(entry);
-    if delay_ms > 0 && !abortable_sleep(std::time::Duration::from_millis(delay_ms), signal) {
+    if delay_ms > 0
+        && !abortable_sleep(std::time::Duration::from_millis(delay_ms), &|| {
+            signal.is_aborted()
+        })
+    {
         set_text(&mut message, &text);
         message.stop_reason = StopReason::Aborted;
         return message;
@@ -784,17 +800,17 @@ fn scripted_side_question_turn(
     message
 }
 
-/// Sleep `delay` in slices, stopping early when `signal` aborts.
+/// Sleep `delay` in slices, stopping early when `aborted` turns true.
 /// Returns `false` when the wait ended aborted.
-fn abortable_sleep(delay: std::time::Duration, signal: &AbortSignal) -> bool {
+fn abortable_sleep(delay: std::time::Duration, aborted: &dyn Fn() -> bool) -> bool {
     let mut remaining = delay;
     while !remaining.is_zero() {
-        if signal.is_aborted() {
+        if aborted() {
             return false;
         }
         let slice = remaining.min(std::time::Duration::from_millis(25));
         std::thread::sleep(slice);
         remaining = remaining.saturating_sub(slice);
     }
-    !signal.is_aborted()
+    !aborted()
 }

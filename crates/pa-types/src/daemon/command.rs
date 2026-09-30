@@ -257,8 +257,6 @@ pub enum DaemonCommand {
         id: Option<String>,
         active_session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        supports_extension_ui: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         client_id: Option<DaemonClientId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         capabilities: Option<Vec<DaemonClientCapability>>,
@@ -280,8 +278,6 @@ pub enum DaemonCommand {
         id: Option<String>,
         active_session_id: String,
         target_active_session_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        supports_extension_ui: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_id: Option<DaemonClientId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1144,15 +1140,6 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
-    ExtensionUiResponse {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
-        active_session_id: String,
-        request_id: String,
-        response: DaemonExtensionUiResponse,
-        #[serde(flatten)]
-        rest: JsonMap,
-    },
     AckResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -1249,15 +1236,6 @@ pub enum ForkPosition {
     At,
 }
 
-/// Response payload of an `extension_ui_request` dialog.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum DaemonExtensionUiResponse {
-    Value { value: String },
-    Confirmed { confirmed: bool },
-    Cancelled { cancelled: bool },
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1277,12 +1255,5 @@ mod tests {
         rt::<DaemonCommand>(
             r#"{"type":"worker_register","activeSessionId":"abc123def456","sessionId":"s-uuid","socketPath":"/tmp/w.sock","workerInstanceId":"inst-1","token":"tok","pid":4242}"#,
         );
-    }
-
-    #[test]
-    fn extension_ui_response_variants() {
-        rt::<DaemonExtensionUiResponse>(r#"{"value":"pick"}"#);
-        rt::<DaemonExtensionUiResponse>(r#"{"confirmed":true}"#);
-        rt::<DaemonExtensionUiResponse>(r#"{"cancelled":true}"#);
     }
 }

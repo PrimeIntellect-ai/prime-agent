@@ -12,7 +12,7 @@ use super::{
 use crate::lease::is_process_alive;
 use crate::registry::WorkerRelay;
 
-const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+pub(super) const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 /// A crash-path child that lived at least this long proved health: its death
 /// resets the failure count (a fresh count) instead of accumulating toward
 /// the give-up cap. Below it, a spawn-dies-fast child counts as another
@@ -51,7 +51,7 @@ impl Supervisor {
         });
     }
 
-    async fn watch_worker(
+    pub(super) async fn watch_worker(
         self: Arc<Self>,
         resident: Arc<ResidentWorker>,
         mut child: Option<Child>,
@@ -105,6 +105,14 @@ impl Supervisor {
                 .map_or(0, |elapsed| elapsed.as_millis() as u64);
             let failures = Self::next_failure_count(&resident, now_ms);
             if failures > MAX_CONSECUTIVE_FAILURES {
+                // A stop that lands during the relaunch storm owns the
+                // terminal state: the give-up must not persist `Failed`
+                // over the stop's tombstone or recreate a descriptor the
+                // stop already deleted (the next boot would adopt a
+                // cleanly stopped worker as `GaveUp`).
+                if self.is_stopping(&resident) {
+                    return;
+                }
                 let mut descriptor = resident.descriptor.lock().await;
                 descriptor.lifecycle = DaemonWorkerLifecycle::Failed;
                 descriptor.last_failure_at = Some(util::now_iso());
@@ -182,6 +190,12 @@ impl Supervisor {
                     ));
                     child = None;
                     adopted_pid = 0;
+                    if self.is_stopping(&resident) {
+                        return;
+                    }
+                    // A failed relaunch has no lifetime of its own: clear
+                    // the spawn time so the count accumulates to the give-up cap.
+                    resident.spawned_at_ms.store(0, Ordering::SeqCst);
                 }
             }
         }

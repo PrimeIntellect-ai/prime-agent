@@ -63,28 +63,15 @@ impl TurnPolicy {
 /// The turn-execution class restored from a wire `restore_actions`
 /// payload (TS `restoreSessionActions` restores the full
 /// `executionPolicy`): `nextTurnContextTiming` "commit" is the
-/// client-queued policy; "preparation" with a preserved empty
-/// extension prompt is injected; "preparation" without it is the
-/// direct-prompt hand-off. An absent or unknown policy restores as the
-/// dominant queued class.
+/// client-queued policy; "preparation" is the direct-prompt hand-off.
+/// An absent or unknown policy restores as the dominant queued class.
 pub(crate) fn restored_turn_policy(payload: &Value) -> TurnPolicy {
     let timing = payload
         .get("executionPolicy")
         .and_then(|policy| policy.get("nextTurnContextTiming"))
         .and_then(Value::as_str);
     match timing {
-        Some("preparation") => {
-            let preserved = payload
-                .get("executionPolicy")
-                .and_then(|policy| policy.get("preserveEmptyExtensionPrompt"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            if preserved {
-                TurnPolicy::Injected
-            } else {
-                TurnPolicy::Direct
-            }
-        }
+        Some("preparation") => TurnPolicy::Direct,
         _ => TurnPolicy::Queued,
     }
 }

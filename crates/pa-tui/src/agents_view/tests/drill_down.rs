@@ -58,6 +58,7 @@ fn pending_ancestors_expand_and_selection_restores_after_reentry() {
         keybindings: crate::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
         incident_notice_state: None,
+        create_config: serde_json::json!({}),
     });
     mode.roster = vec![
         roster_entry("p", "idle", &parent_summary("p")),
@@ -93,6 +94,7 @@ fn scoped_left_returns_the_root_and_pops_the_scope() {
         keybindings: crate::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
         incident_notice_state: None,
+        create_config: serde_json::json!({}),
     });
     mode.roster = vec![
         roster_entry("p", "idle", &parent_summary("p")),

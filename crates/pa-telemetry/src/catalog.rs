@@ -302,7 +302,6 @@ pub const ERROR_COMPONENTS: &[&str] = &[
     "provider",
     "tools",
     "mcp",
-    "extensions",
     "daemon",
     "rpc",
     "acp",
@@ -388,18 +387,7 @@ pub const ERROR_MESSAGE_SOURCES: &[&str] = &["reviewed_literal", "system_templat
 
 /// The #2117 tool categories.
 pub const TOOL_CATEGORIES: &[&str] = &[
-    "read",
-    "write",
-    "edit",
-    "bash",
-    "grep",
-    "find",
-    "ls",
-    "ipython",
-    "mcp",
-    "extension",
-    "custom",
-    "unknown",
+    "read", "write", "edit", "bash", "grep", "find", "ls", "ipython", "mcp", "custom", "unknown",
 ];
 
 /// The #2117 terminal outcomes.

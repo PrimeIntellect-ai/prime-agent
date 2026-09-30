@@ -118,7 +118,6 @@ const TS_DAEMON_COMMAND_TYPES: &[&str] = &[
     "get_system_prompt",
     "get_tool_definition",
     "set_session_entry_label",
-    "extension_ui_response",
     "prepare_update_restart",
     "retry_worker",
     "restart",
@@ -488,10 +487,6 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
     (
         "set_session_entry_label",
         r#"{"type": "set_session_entry_label", "activeSessionId": "sess", "entryId": "e"}"#,
-    ),
-    (
-        "extension_ui_response",
-        r#"{"type": "extension_ui_response", "activeSessionId": "sess", "requestId": "r", "response": {"value": "pick"}}"#,
     ),
     (
         "prepare_update_restart",

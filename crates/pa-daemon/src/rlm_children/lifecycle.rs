@@ -433,7 +433,7 @@ impl SupervisorChildSessionsInner {
                 // A settled child releases an owed goal continuation (TS
                 // `_maybeResumeGoalContinuationAfterRlmWork` at the child
                 // settle sites).
-                self.fire_settle_hook();
+                self.fire_settle_hook(record).await;
                 return;
             }
             // Still running (a timed-out slice or a re-queued continuation):
@@ -456,7 +456,7 @@ impl SupervisorChildSessionsInner {
                     // holds; capture them before the terminal notice.
                     self.emit_child_usage(record).await;
                     self.deliver_settle_notice(record).await;
-                    self.fire_settle_hook();
+                    self.fire_settle_hook(record).await;
                     return;
                 }
             }

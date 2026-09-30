@@ -836,7 +836,6 @@ mod tests {
             "abort_branch_summary",
             "abort_compaction",
             "abort_retry",
-            "extension_ui_response",
         ] {
             assert!(
                 !update_gate_refuses(PrepareState::Draining, drain),

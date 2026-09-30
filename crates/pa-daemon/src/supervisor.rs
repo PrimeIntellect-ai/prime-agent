@@ -13,6 +13,7 @@ mod clients;
 mod launch_budget;
 mod notes;
 mod options;
+mod root_identity;
 mod routing;
 mod sessions;
 mod signals_shutdown;
@@ -38,7 +39,7 @@ mod tests;
 // STABLE_LIFETIME_MS is read only by this facade's in-file test modules (via the module's
 // pub(super) const); the lib-target import is flagged unused since only tests use it.
 #[allow(unused_imports)]
-use supervision::STABLE_LIFETIME_MS;
+use supervision::{MAX_CONSECUTIVE_FAILURES, STABLE_LIFETIME_MS};
 
 // The saved-session row builders are read only by this facade's in-file test
 // modules (via the module's pub(super) fns); the lib-target import is flagged

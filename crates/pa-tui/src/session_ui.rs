@@ -326,7 +326,7 @@ pub(crate) struct SessionUi {
     /// The OSC 52 channel for clipboard writes (TS `process.stdout`):
     /// stdout in the terminal, a captured buffer in headless runs.
     pub(crate) osc_sink: crate::clipboard::OscSink,
-    /// The question the open confirm panel answers (TS `showExtensionConfirm`).
+    /// The question the open confirm panel answers.
     pending_confirm: Option<PendingConfirm>,
     /// `/traces`: the settings + credential state the composition root
     /// owns (the trace upload subsystem itself stays unported).

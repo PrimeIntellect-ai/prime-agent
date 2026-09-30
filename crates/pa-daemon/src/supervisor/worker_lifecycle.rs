@@ -239,12 +239,13 @@ impl Supervisor {
             "rlmMaxDepth",
             "parentSessionPath",
             "models",
+            // The scripted-parent verification seam: a dropped key leaves
+            // spawned children scriptless.
+            "childScript",
             "systemPrompt",
             "appendSystemPrompt",
             "skills",
             "promptTemplates",
-            "extensions",
-            "tools",
             "autonomous",
         ] {
             if let Some(value) = config_object.and_then(|config| config.get(key)) {
@@ -818,6 +819,13 @@ impl Supervisor {
             }
             _ => {
                 let _ = std::fs::remove_file(&resident.descriptor_path);
+                // The identity-pending side record dies with the
+                // descriptor it shadows (an orphaned pending would
+                // shadow the next identity over the same worker id). A
+                // removal failure here is as inert as the descriptor
+                // removal beside it — the retire already provably killed
+                // the worker, so no later boot applies a shadowed record.
+                let _ = crate::descriptor::clear_identity_pending(&resident.descriptor_path);
             }
         }
     }

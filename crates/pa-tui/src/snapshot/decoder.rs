@@ -424,9 +424,10 @@ pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
 
 /// The loader note from a `tool_execution_update` partial result, if the
 /// tool owns one. The python-kernel bootstrap reports its startup stages as
-/// partial results with `details.status = "starting"` (TS `reportStartupProgress`),
-/// the same payload TS also hands its extension UI as the working message
-/// (TS `setWorkingMessage`), so the loader row mirrors the stage text. `None`
+/// partial results with `details.status = "starting"` (TS
+/// `reportStartupProgress`), the same payload TS also hands its working
+/// message surface (TS `setWorkingMessage`), so the loader row mirrors the
+/// stage text. `None`
 /// leaves any current note untouched: streamed cell output reports `ok`,
 /// which is not a note change.
 pub fn working_message_from_update(partial: &Value) -> Option<String> {

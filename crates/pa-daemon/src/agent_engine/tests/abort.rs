@@ -159,6 +159,93 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
     );
 }
 
+/// The abort-and-send idle race's engine seam (the gate-pool lane's solo
+/// finding, reproduced at rate): an abort landing after the delivery's
+/// pickup but before the agent run registers — the lazy session build and
+/// the policy reads widened TS's microscopic registration gap to the whole
+/// admission prefix — was entirely lost: `abort_in_flight_turn`'s
+/// `agent.abort()` found an empty run slot, the run registered fresh after
+/// it, and the turn ran its full provider hold (the session never went
+/// idle after the abort). The delivery's cancel flag (the worker's
+/// probe, armed by the abort after the pickup's clear) is consulted at
+/// the model-turn admission: the turn settles aborted BEFORE the provider
+/// call, no run registers, and the scripted response survives untouched —
+/// the next delivery serves it as its first reply (the served-path
+/// proof).
+#[test]
+fn abort_racing_the_admission_prefix_settles_the_turn_before_the_provider_call() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (engine, _engine_dir) = faux_engine_with_settings(
+        &serde_json::json!({ "responses": ["raced reply", "next reply"] }),
+        1,
+    );
+    // The racing abort, pinned exactly as the race arms it: the probe
+    // reads the delivery's cancel flag TRUE at the model-turn admission
+    // (cleared at the pickup, armed by the abort before the consult).
+    let mut events: Vec<EngineEvent> = Vec::new();
+    engine.run_prompt(
+        0,
+        PromptRequest {
+            batch: Vec::new(),
+            images: Vec::new(),
+            message: "held turn for the racing abort".to_string(),
+            source: "user".to_string(),
+            agent_message_id: None,
+            custom_message: None,
+        },
+        &|| true,
+        &mut |event| {
+            events.push(event);
+            true
+        },
+    );
+    // The accepted row persists; the turn settles the structural aborted
+    // (never a failure the retry backoff would re-issue).
+    assert!(
+        matches!(&events[0], EngineEvent::UserMessage(_)),
+        "the accepted row leads: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::DoneAborted)),
+        "the raced turn settles aborted: {events:?}"
+    );
+    // No run registered, so no assistant row ever streamed and no
+    // turn/agent boundary frames fired (the worker's settle synthesizes
+    // its own trailing `agent_end` fallback for runs without a model
+    // turn).
+    assert!(
+        events.iter().all(|event| !matches!(
+            event,
+            EngineEvent::AssistantMessage(_) | EngineEvent::AssistantUpdate { .. }
+        )),
+        "no assistant row streamed (the provider call never started): {events:?}"
+    );
+    assert!(
+        events.iter().all(|event| !matches!(
+            event,
+            EngineEvent::TurnEnd { .. } | EngineEvent::AgentEnd { .. }
+        )),
+        "no run boundary frames (no run registered): {events:?}"
+    );
+    // The served-path proof: the scripted response was never consumed —
+    // the next delivery receives it as its first reply.
+    let mut next_events: Vec<EngineEvent> = Vec::new();
+    admit(&engine, "the next turn".to_string(), &mut next_events);
+    assert!(
+        next_events.iter().any(|event| matches!(
+            event,
+            EngineEvent::AssistantMessage(message)
+                if message["content"]
+                    == serde_json::json!([{ "type": "text", "text": "raced reply" }])
+        )),
+        "the untouched first response served the next delivery: {next_events:?}"
+    );
+}
+
 /// The settled turn's terminal frame (TS `turn_end`): the loop's boundary
 /// event carries the final assistant message as its payload with the
 /// turn's (empty) tool-result list, positioned between the final
