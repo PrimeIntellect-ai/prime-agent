@@ -1,6 +1,5 @@
-//! Minimal structured logger shared by pa-ai and its consumers.
-//! Ported from `packages/ai/src/log.ts`: entries go to an injectable sink; the
-//! library never writes files and logging must never throw into the caller.
+//! Minimal structured logger shared by pa-ai and its consumers: entries go to an injectable sink;
+//! the library never writes files and logging must never throw into the caller.
 
 use std::sync::RwLock;
 
@@ -90,8 +89,8 @@ fn iso_timestamp() -> String {
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    // Howard Hinnant's algorithm: the era remainder is 0..=146_096, the year
-    // of era 0..=399, day 1..=31, and month 1..=12 for any input day count.
+    // Howard Hinnant's algorithm: the era remainder is 0..=146_096, the year of era 0..=399, day
+    // 1..=31, and month 1..=12 for any input day count.
     let doe = u64::try_from(z - era * 146_097).expect("day of era is 0..=146_096");
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
     let y = i64::try_from(yoe).expect("year of era is 0..=399") + era * 400;
