@@ -21,6 +21,7 @@ mod remote_source;
 mod service_catalog;
 mod url_checks;
 
+pub use catalog_plugin_views::{McpCredentialView, API_KEY_CREDENTIALS};
 pub use catalog_views::{
     mcp_credential_field_prompt_label, mcp_paste_credential, McpPasteCredential,
 };

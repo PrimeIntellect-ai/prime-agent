@@ -347,6 +347,21 @@ fn catalog_surfaces_and_paste_installs_through_the_daemon() {
         github["pasteToken"], true,
         "github is pasteable (alias pair)"
     );
+    // The api-key credential section serves the stored-key rows the view
+    // manages alongside the connections: the web-search entry, honestly
+    // unconfigured in the fresh agent dir.
+    let credentials = roster["data"]["credentials"]
+        .as_array()
+        .unwrap_or_else(|| panic!("credentials array: {roster}"));
+    let serper = credentials
+        .iter()
+        .find(|credential| credential["id"] == "serper")
+        .expect("the web-search credential row");
+    assert_eq!(serper["label"], "Serper (web search)");
+    assert_eq!(
+        serper["configured"], false,
+        "a fresh agent dir holds no serper key"
+    );
 
     // The paste flow installs end-to-end: the credential is stored bound to
     // the service endpoint and a record is persisted; verification against

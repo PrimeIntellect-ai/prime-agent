@@ -674,3 +674,83 @@ fn the_real_catalog_resolves_through_the_manager() {
         68
     );
 }
+
+/// The `/mcp` view's api-key credential rows: the catalog entry renders
+/// with its honest configured state from the shared auth store (the
+/// `serper` slot the websearch runtime reads), and only a stored API key
+/// marks it configured.
+#[test]
+fn api_key_credential_views_read_the_shared_store() {
+    let agent_dir = tempfile::tempdir().expect("tempdir");
+    let mut manager = McpManager::new(McpManagerOptions {
+        auth_storage: crate::auth::AuthStorage::create(agent_dir.path()),
+        get_user_servers: no_user_servers(),
+        begin_login: None,
+        agent_dir: Some(agent_dir.path().to_path_buf()),
+        get_catalog_sources: None,
+        remote_source: None,
+        probe_override: None,
+    });
+    manager.refresh();
+    // The web-search credential's row renders, honestly unconfigured.
+    let views = manager.api_key_credential_views();
+    assert_eq!(
+        views,
+        vec![McpCredentialView {
+            id: "serper".to_string(),
+            label: "Serper (web search)".to_string(),
+            configured: false,
+        }],
+        "the api-key credential catalog serves the web-search entry"
+    );
+    // A stored API key at the slot marks the row configured.
+    {
+        let storage = manager.auth_storage_handle();
+        let mut auth = futures::executor::block_on(storage.lock());
+        auth.set(
+            "serper",
+            AuthCredential::ApiKey {
+                key: "serper-key".to_string(),
+                prime_team: None,
+            },
+        );
+    }
+    manager.refresh();
+    assert!(
+        manager
+            .api_key_credential_views()
+            .first()
+            .expect("the serper row renders")
+            .configured,
+        "a stored API key marks the credential configured"
+    );
+    // A non-API-key value at the slot never reads configured.
+    {
+        let storage = manager.auth_storage_handle();
+        let mut auth = futures::executor::block_on(storage.lock());
+        auth.set(
+            "serper",
+            AuthCredential::Oauth {
+                access: "access".to_string(),
+                refresh: None,
+                expires: 0,
+                account_id: None,
+                endpoint: None,
+                token_endpoint: None,
+                client_id: None,
+                resource: None,
+                issuer: None,
+                enterprise_url: None,
+            },
+        );
+    }
+    manager.refresh();
+    assert!(
+        !manager
+            .api_key_credential_views()
+            .first()
+            .expect("the serper row renders")
+            .configured,
+        "only an API-key credential marks the row configured"
+    );
+}

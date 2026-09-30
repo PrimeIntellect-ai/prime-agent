@@ -1,10 +1,11 @@
-//! The worker arm behind the `get_mcp_connections` command: the roster
-//! and the resolved service catalog the interactive client's `/mcp`
-//! view renders — every configured connection (built-in catalog plus
-//! user-declared servers) with its connected state, and the
-//! service-catalog cards over the same fresh local state (the TS picker
-//! builds both from local reads on every open, never a kernel
-//! round-trip; connected rows carry their record-held tool count).
+//! The worker arm behind the `get_mcp_connections` command: the roster,
+//! the resolved service catalog, and the api-key credential catalog the
+//! interactive client's `/mcp` view renders — every configured connection
+//! (built-in catalog plus user-declared servers) with its connected state,
+//! the service-catalog cards and the stored-key credentials over the same
+//! fresh local state (the TS picker builds both from local reads on every
+//! open, never a kernel round-trip; connected rows carry their record-held
+//! tool count).
 
 use serde_json::{json, Value};
 
@@ -13,14 +14,15 @@ use crate::worker::Worker;
 
 impl Worker {
     /// `get_mcp_connections`: the roster from the session's MCP manager
-    /// (auth gating over settings plus the built-in catalog) and the
-    /// resolved service-catalog views, from ONE fresh local read — the
-    /// manager re-resolves its integrations and catalog first (TS
-    /// `buildServiceCatalogViews` re-reads the store and re-resolves the
-    /// catalog on every open), so an externally changed settings file or
-    /// a record another process wrote is visible on the next open. The
-    /// roster read gates through the auth store, whose snapshot takes a
-    /// blocking lock — never on the runtime.
+    /// (auth gating over settings plus the built-in catalog), the resolved
+    /// service-catalog views, and the api-key credential rows (the stored
+    /// keys the `/mcp` view manages alongside the connections), from ONE
+    /// fresh local read — the manager re-resolves its integrations and
+    /// catalog first (TS `buildServiceCatalogViews` re-reads the store and
+    /// re-resolves the catalog on every open), so an externally changed
+    /// settings file or a record another process wrote is visible on the
+    /// next open. The roster and credential reads gate through the auth
+    /// store, whose snapshot takes a blocking lock — never on the runtime.
     pub(crate) async fn handle_get_mcp_connections(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("get_mcp_connections") {
             return response;
@@ -34,38 +36,42 @@ impl Worker {
             );
         };
         let roster_manager = std::sync::Arc::clone(&manager);
-        let (roster, services, diagnostics) = match tokio::task::spawn_blocking(move || {
-            let mut manager = roster_manager.lock().unwrap();
-            manager.refresh();
-            (
-                manager.connection_roster(),
-                manager.service_catalog_views(),
-                manager.service_catalog_diagnostics().to_vec(),
-            )
-        })
-        .await
-        {
-            Ok(read) => read,
-            Err(error) => {
-                return response_failure(
-                    None,
-                    "get_mcp_connections",
-                    &format!("MCP roster read failed: {error}"),
-                    None,
-                );
-            }
-        };
+        let (roster, services, credentials, diagnostics) =
+            match tokio::task::spawn_blocking(move || {
+                let mut manager = roster_manager.lock().unwrap();
+                manager.refresh();
+                (
+                    manager.connection_roster(),
+                    manager.service_catalog_views(),
+                    manager.api_key_credential_views(),
+                    manager.service_catalog_diagnostics().to_vec(),
+                )
+            })
+            .await
+            {
+                Ok(read) => read,
+                Err(error) => {
+                    return response_failure(
+                        None,
+                        "get_mcp_connections",
+                        &format!("MCP roster read failed: {error}"),
+                        None,
+                    );
+                }
+            };
         let connections: Vec<Value> = roster
             .into_iter()
             .map(|entry| serde_json::to_value(&entry).unwrap_or(Value::Null))
             .collect();
         let services = serde_json::to_value(&services).unwrap_or(Value::Array(Vec::new()));
+        let credentials = serde_json::to_value(&credentials).unwrap_or(Value::Array(Vec::new()));
         response_success(
             None,
             "get_mcp_connections",
             Some(json!({
                 "connections": connections,
                 "services": services,
+                "credentials": credentials,
                 "catalogDiagnostics": diagnostics,
             })),
         )
