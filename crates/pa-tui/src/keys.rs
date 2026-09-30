@@ -43,7 +43,7 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let super_key = key.modifiers.contains(KeyModifiers::SUPER);
-    let base = match key.code {
+    match key.code {
         KeyCode::Char(c) => {
             if ctrl {
                 return Some(ctrl_char_id(c, alt, shift, super_key));
@@ -69,7 +69,7 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
                     return Some("alt+enter".into());
                 }
                 if c == ' ' {
-                    return Some("alt+space".into());
+                    return Some(modified_name("space", false, true, shift, false));
                 }
                 // rxvt-family alt+arrow encodings (TS `LEGACY_SEQUENCE_KEY_IDS`,
                 // keys.ts:460: those terminals send ESC p/n/b/f for
@@ -124,80 +124,27 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
             if c == ' ' && shift {
                 return Some("shift+space".into());
             }
-            return Some(c.to_string());
+            Some(c.to_string())
         }
-        KeyCode::Enter => {
-            // The super prefix keeps Cmd-modified keys their own identity
-            // (unbound combos match nothing instead of falling through to
-            // the bare action and submitting).
-            if super_key {
-                let mut s = String::new();
-                if shift {
-                    s.push_str("shift+");
-                }
-                if alt {
-                    s.push_str("alt+");
-                }
-                s.push_str("super+enter");
-                return Some(s);
-            }
-            if alt {
-                "alt+enter"
-            } else if shift {
-                "shift+enter"
-            } else {
-                "enter"
-            }
-        }
-        KeyCode::Tab => {
-            if super_key {
-                return Some(if shift {
-                    "shift+super+tab".into()
-                } else {
-                    "super+tab".into()
-                });
-            }
-            if shift {
-                "shift+tab"
-            } else {
-                "tab"
-            }
-        }
-        KeyCode::Backspace => {
-            if super_key {
-                return Some(match (ctrl, alt) {
-                    (true, true) => "ctrl+alt+super+backspace".into(),
-                    (true, false) => "ctrl+super+backspace".into(),
-                    (false, true) => "alt+super+backspace".into(),
-                    (false, false) => "super+backspace".into(),
-                });
-            }
-            if alt {
-                "alt+backspace"
-            } else if ctrl {
-                // ctrl+backspace: TS maps raw 0x08 to backspace except Windows Terminal.
-                return Some("ctrl+backspace".into());
-            } else {
-                "backspace"
-            }
-        }
-        KeyCode::Esc => {
-            if super_key {
-                return Some("super+escape".into());
-            }
-            "escape"
-        }
-        KeyCode::Left => return Some(modified_name("left", ctrl, alt, shift, super_key)),
-        KeyCode::Right => return Some(modified_name("right", ctrl, alt, shift, super_key)),
-        KeyCode::Up => return Some(modified_name("up", ctrl, alt, shift, super_key)),
-        KeyCode::Down => return Some(modified_name("down", ctrl, alt, shift, super_key)),
-        KeyCode::Home => return Some(modified_name("home", ctrl, alt, shift, super_key)),
-        KeyCode::End => return Some(modified_name("end", ctrl, alt, shift, super_key)),
-        KeyCode::PageUp => return Some(modified_name("pageUp", ctrl, alt, shift, super_key)),
-        KeyCode::PageDown => return Some(modified_name("pageDown", ctrl, alt, shift, super_key)),
-        KeyCode::Delete => return Some(modified_name("delete", ctrl, alt, shift, super_key)),
-        KeyCode::Insert => return Some(modified_name("insert", ctrl, alt, shift, super_key)),
-        KeyCode::F(n) => return Some(modified_name(&format!("f{n}"), ctrl, alt, shift, super_key)),
+        // The super prefix keeps Cmd-modified keys their own identity
+        // (unbound combos match nothing instead of falling through to the
+        // bare action and submitting); ctrl and alt do the same.
+        KeyCode::Enter => Some(modified_name("enter", ctrl, alt, shift, super_key)),
+        KeyCode::Tab => Some(modified_name("tab", ctrl, alt, shift, super_key)),
+        // A bare shift+backspace stays `backspace`.
+        KeyCode::Backspace => Some(modified_name("backspace", ctrl, alt, false, super_key)),
+        KeyCode::Esc => Some(modified_name("escape", ctrl, alt, shift, super_key)),
+        KeyCode::Left => Some(modified_name("left", ctrl, alt, shift, super_key)),
+        KeyCode::Right => Some(modified_name("right", ctrl, alt, shift, super_key)),
+        KeyCode::Up => Some(modified_name("up", ctrl, alt, shift, super_key)),
+        KeyCode::Down => Some(modified_name("down", ctrl, alt, shift, super_key)),
+        KeyCode::Home => Some(modified_name("home", ctrl, alt, shift, super_key)),
+        KeyCode::End => Some(modified_name("end", ctrl, alt, shift, super_key)),
+        KeyCode::PageUp => Some(modified_name("pageUp", ctrl, alt, shift, super_key)),
+        KeyCode::PageDown => Some(modified_name("pageDown", ctrl, alt, shift, super_key)),
+        KeyCode::Delete => Some(modified_name("delete", ctrl, alt, shift, super_key)),
+        KeyCode::Insert => Some(modified_name("insert", ctrl, alt, shift, super_key)),
+        KeyCode::F(n) => Some(modified_name(&format!("f{n}"), ctrl, alt, shift, super_key)),
         KeyCode::BackTab => {
             if super_key {
                 return Some(if alt {
@@ -212,7 +159,7 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
                 // matches the rest, so the wrapped identity keeps the ALT.
                 return Some("shift+alt+tab".into());
             }
-            return Some("shift+tab".into());
+            Some("shift+tab".into())
         }
         KeyCode::Null
         | KeyCode::CapsLock
@@ -223,11 +170,8 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
         | KeyCode::Menu
         | KeyCode::KeypadBegin
         | KeyCode::Modifier(_)
-        | KeyCode::Media(_) => {
-            return None;
-        }
-    };
-    Some(base.to_string())
+        | KeyCode::Media(_) => None,
+    }
 }
 
 /// The ctrl-modified character identities (TS parseKey/formatParsedKey):
@@ -252,11 +196,16 @@ fn ctrl_char_id(c: char, alt: bool, shift: bool, super_key: bool) -> String {
     let lower = c.to_ascii_lowercase();
     let shifted = shift || c.is_ascii_uppercase();
     let super_prefix = if super_key { "super+" } else { "" };
+    let name = if lower == ' ' {
+        "space".to_string()
+    } else {
+        lower.to_string()
+    };
     if shifted {
         return if alt {
-            format!("shift+ctrl+alt+{super_prefix}{lower}")
+            format!("shift+ctrl+alt+{super_prefix}{name}")
         } else {
-            format!("shift+ctrl+{super_prefix}{lower}")
+            format!("shift+ctrl+{super_prefix}{name}")
         };
     }
     if !alt && lower == 'j' {
@@ -273,7 +222,7 @@ fn ctrl_char_id(c: char, alt: bool, shift: bool, super_key: bool) -> String {
         };
     }
     if alt {
-        return format!("ctrl+alt+{super_prefix}{lower}");
+        return format!("ctrl+alt+{super_prefix}{name}");
     }
     if !crate::enhanced_keys::kitty_active() {
         match lower {
@@ -283,7 +232,7 @@ fn ctrl_char_id(c: char, alt: bool, shift: bool, super_key: bool) -> String {
             _ => {}
         }
     }
-    format!("ctrl+{super_prefix}{lower}")
+    format!("ctrl+{super_prefix}{name}")
 }
 
 fn modified_name(name: &str, ctrl: bool, alt: bool, shift: bool, super_key: bool) -> String {
@@ -742,5 +691,56 @@ mod tests {
         assert!(kb.matches("shift+ctrl+left", "tui.editor.selectWordLeft"));
         assert!(kb.matches("shift+home", "tui.editor.selectLineStart"));
         assert!(kb.matches("shift+ctrl+home", "tui.editor.selectDocStart"));
+    }
+
+    /// Special keys keep every modifier in their id, so a configurable
+    /// shortcut on a chord like Ctrl+Tab or Ctrl+Enter can match and the
+    /// chord never falls through to the bare key's action. The space key
+    /// uses its canonical `space` name in every modified id.
+    #[test]
+    fn modified_special_keys_keep_every_modifier() {
+        let _guard = crate::enhanced_keys::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::enhanced_keys::set_kitty_active_for_tests(false);
+        let ctrl = KeyModifiers::CONTROL;
+        let alt = KeyModifiers::ALT;
+        let shift = KeyModifiers::SHIFT;
+        let cases = [
+            (KeyCode::Tab, ctrl, "ctrl+tab"),
+            (KeyCode::Tab, alt, "alt+tab"),
+            (KeyCode::Tab, ctrl | shift, "shift+ctrl+tab"),
+            (KeyCode::Enter, ctrl, "ctrl+enter"),
+            (KeyCode::Enter, ctrl | alt, "ctrl+alt+enter"),
+            (KeyCode::Enter, shift | alt, "shift+alt+enter"),
+            (KeyCode::Char(' '), ctrl, "ctrl+space"),
+            (KeyCode::Char(' '), alt, "alt+space"),
+            (KeyCode::Char(' '), ctrl | alt, "ctrl+alt+space"),
+            (KeyCode::Char(' '), ctrl | shift, "shift+ctrl+space"),
+            (KeyCode::Esc, ctrl, "ctrl+escape"),
+            (KeyCode::Esc, alt, "alt+escape"),
+            (KeyCode::Esc, shift, "shift+escape"),
+            (KeyCode::Backspace, ctrl | alt, "ctrl+alt+backspace"),
+        ];
+        for (code, modifiers, expected) in cases {
+            let event = KeyEvent::new(code, modifiers);
+            assert_eq!(
+                key_event_to_id(&event).as_deref(),
+                Some(expected),
+                "{code:?} with {modifiers:?}"
+            );
+        }
+        // The unmodified and already-distinct ids are unchanged.
+        for (code, modifiers, expected) in [
+            (KeyCode::Tab, KeyModifiers::NONE, "tab"),
+            (KeyCode::Enter, KeyModifiers::NONE, "enter"),
+            (KeyCode::Esc, KeyModifiers::NONE, "escape"),
+            (KeyCode::Backspace, KeyModifiers::NONE, "backspace"),
+            (KeyCode::Backspace, alt, "alt+backspace"),
+            (KeyCode::Backspace, ctrl, "ctrl+backspace"),
+        ] {
+            let event = KeyEvent::new(code, modifiers);
+            assert_eq!(key_event_to_id(&event).as_deref(), Some(expected));
+        }
     }
 }
