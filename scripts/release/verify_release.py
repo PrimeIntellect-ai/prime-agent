@@ -82,12 +82,19 @@ def main() -> int:
     parser.add_argument("--target", required=True)
     parser.add_argument("--sha", default=None,
                          help="commit SHA the tarball must be stamped with")
+    parser.add_argument("--expect-package-json", default=None, metavar="VERSION",
+                        help="the consume-route restamp shape: a package.json "
+                             "carrying exactly this release version")
     args = parser.parse_args()
     if args.sha is not None:
         args.sha = args.sha.lower()
+    if args.expect_package_json and args.sha:
+        fail("--sha (the continuous stamp) and --expect-package-json "
+             "(the restamped release shape) are mutually exclusive")
 
     expected_top_level = EXPECTED_TOP_LEVEL | (
-        CONTINUOUS_EXTRA_TOP_LEVEL if args.sha else set()
+        CONTINUOUS_EXTRA_TOP_LEVEL if (args.sha or args.expect_package_json)
+        else set()
     )
 
     archive_name = (
@@ -158,6 +165,14 @@ def main() -> int:
         # The bundled catalog assets must be present and valid in the
         # installed layout (the full packer gates: no small-fixture waiver).
         catalog_facts = validate_bundled_catalog_dir(scratch)
+        if args.expect_package_json is not None:
+            stamped = json.loads((scratch / "package.json").read_text(encoding="utf-8"))
+            if stamped.get("version") != args.expect_package_json:
+                fail(f"package.json version is {stamped.get('version')!r}, "
+                     f"expected the restamped release version "
+                     f"{args.expect_package_json!r}")
+            if not str(stamped.get("commit", "")).strip():
+                fail("the restamped package.json lost its commit provenance")
         binary = scratch / "prime-agent"
         if not os.access(binary, os.X_OK):
             fail("staged prime-agent is not executable")
@@ -174,6 +189,8 @@ def main() -> int:
         expected_version = (
             f"{args.version}-{CONTINUOUS_SUFFIX}.{args.sha}" if args.sha else args.version
         )
+        if args.expect_package_json is not None:
+            expected_version = args.expect_package_json
         if version_out != expected_version:
             fail(
                 f"staged prime-agent reports {version_out!r}, "

@@ -17,8 +17,23 @@
 #   #2627's fork_from test-target errors land as latent compile breaks, and
 #   #2635's login-recovery test land red — none noticed by CI.
 #
-#   pull_request against main/rust — the same gates on the merge candidate,
+#   pull_request against main — the same gates on the merge candidate,
 #   so the merge bar stops relying solely on review bots.
+#
+# THE PR SMOKE MODEL (the touched-crate path filter): the PR wave narrows
+# the TEST phase to the touched crates' units (the `changes` job maps the
+# PR's changed files to crates; any path outside crates/<pkg>/** fails safe
+# to the full selection — CI/scripts/vendor/runtime changes affect the
+# whole suite, and docs-only waste is cheaper than a silent hole). The
+# stable crc32 shard assignment is untouched — only the unit selection
+# narrows — and the push wave keeps running the full union, so main is the
+# authority: the PR proves the touched crates' runtime behavior fast, the
+# merge proves the whole workspace. fmt + check/clippy stay full-scope on
+# PRs (the compile authority — a dependent-crate break fails the wave
+# regardless of the test narrowing). The shard manifests record the
+# selection scope and the summary job audits the union against it, so a
+# narrowed run can never masquerade as a full one and coverage can never
+# silently regress.
 #
 # The test phase is sharded: `cargo test --workspace` ran every test binary
 # serially in one job (~13 minutes; the per-PR wall-clock floor). It is now
@@ -82,6 +97,55 @@ env:
   SHARD_COUNT: "8"
 
 jobs:
+  # The touched-crate path filter (the PR smoke's selection). Push runs the
+  # full selection; PR runs map the changed files to crates and fail safe to
+  # the full selection on any non-crate path. The output feeds the test
+  # shard legs' --crates; empty means "the full union".
+  changes:
+    name: touched crates (PR) / full selection (push)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'push' || !github.event.pull_request.draft
+    outputs:
+      crates: ${{ steps.select.outputs.crates }}
+      scope: ${{ steps.select.outputs.scope }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Select the touched crates
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "push wave: the full selection (main is the authority)"
+            echo "crates=" >> "${GITHUB_OUTPUT}"
+            echo "scope=all" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          # The PR's exact change set: the pulls files API (merge-base
+          # semantics, renames carrying both sides), fully paginated —
+          # `gh pr view --json files` caps at 100 rows and would silently
+          # under-map a large PR, and its field names differ from the REST
+          # rows (`path` vs `filename`). The mapping itself is fail-safe
+          # by construction (scripts/ci_pr_crates.py + its battery): any
+          # non-crate path, a rename's removed side, an empty column, or
+          # the API's 3000-file ceiling means the FULL selection runs.
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+            --paginate --jq '.[] | [.filename, .previous_filename // ""] | @tsv' \
+            > "${RUNNER_TEMP}/pr-files.tsv"
+          python3 scripts/ci_pr_crates.py "${RUNNER_TEMP}/pr-files.tsv"
+      - name: Report the selection
+        run: |
+          set -euo pipefail
+          echo "wave selection: ${{ steps.select.outputs.scope }}"
+          if [ -n "${{ steps.select.outputs.crates }}" ]; then
+            echo "crates under test: ${{ steps.select.outputs.crates }}"
+          fi
+
   fmt:
     name: fmt
     runs-on: ubuntu-24.04
@@ -135,6 +199,10 @@ jobs:
   # ONLY its test subset. The union of the shards is exactly the old serial
   # `cargo test --workspace`.
   test-shard:
+    # The shard legs need the wave's selection (the changes job's crates
+    # output) before they can decide what to run — and whether the
+    # sibling-binary build is needed at all.
+    needs: [changes]
     # strategy.job-total (the matrix leg count) auto-derives the displayed
     # total; the env context is not reachable from a job name.
     name: test shard ${{ matrix.shard }}/${{ strategy.job-total }}
@@ -168,18 +236,30 @@ jobs:
         run: |
           python3 -m pip install --user uv
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # The wave's selection, resolved once per leg before anything builds:
+      # the narrowed selection's unit list decides whether the bins build
+      # below has any work to do (an empty selection runs no units and needs
+      # no sibling binaries).
+      - name: Resolve this shard's selection
+        id: selection
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_test_shard.py --shard ${{ matrix.shard }} --total ${{ env.SHARD_COUNT }}             --crates "${{ needs.changes.outputs.crates }}" --print-selection
       # Sibling-binary parity: the serial `cargo test --workspace` built every
       # workspace bin into the shared profile dir as a side effect, and the
       # e2e suites look each other's binaries up there (pa-cli's
       # daemon_commands_e2e spawns pa-daemon this way). A shard builds its
       # test subset only, so the bins are built explicitly once up front —
       # first measured on run 36085993711, where the missing pa-daemon bin
-      # failed exactly this suite.
+      # failed exactly this suite. A leg with no selected units skips this
+      # (and runs nothing below); the push wave always selects units, so its
+      # behavior is unchanged.
       - name: Build the workspace bins (sibling-binary parity for the e2e suites)
+        if: steps.selection.outputs.units != '0'
         run: cargo build --locked --workspace --bins
       - name: Run this shard's test subset
         run: |
-          python3 scripts/ci_test_shard.py --shard ${{ matrix.shard }} --total ${{ env.SHARD_COUNT }} --manifest "$RUNNER_TEMP/shard-manifest-${{ matrix.shard }}.json"
+          python3 scripts/ci_test_shard.py --shard ${{ matrix.shard }} --total ${{ env.SHARD_COUNT }}             --crates "${{ needs.changes.outputs.crates }}"             --manifest "$RUNNER_TEMP/shard-manifest-${{ matrix.shard }}.json"
       - name: Upload the shard manifest (always — the summary audits it)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

@@ -1,5 +1,25 @@
 # Release pipeline for Prime Agent (Rust).
 #
+# THE TWO BUILD ROUTES (one promote gate):
+#   - a plain vX.Y.Z tag (stable) BUILDS its own 4-target matrix: the stable
+#     cadence is rare, and its cut must not depend on a continuous run the
+#     staleness gate may have skipped (a superseded push builds nothing) or
+#     artifact retention may have evicted;
+#   - a vX.Y.Z-beta* tag (nightly) CONSUMES the continuous build's
+#     artifacts: continuous already built the exact parent commit the
+#     nightly tag names (nightly.yml waits out that run's green build
+#     matrix before cutting the tag), so rebuilding here would pay the
+#     full matrix twice per green merge for a tree that differs from its
+#     parent only by the version rows. The reuse-continuous job downloads
+#     that run's workflow artifacts (the download-by-run route the
+#     installer's old bootstrap used) and restamps them to the beta
+#     version — packaging only, no rebuild; the built bytes stay the
+#     continuous build's (the restamp re-proves what it can on the runner
+#     and asserts the continuous commit; the rest is continuous's own
+#     green gates on that commit). Both routes upload the same
+#     artifacts-<target> set into this run, so the promote gate consumes
+#     one shape from either route.
+#
 
 name: release
 
@@ -59,6 +79,9 @@ jobs:
 
   build-gnu:
     needs: tag-check
+    # Stable-only: a -beta* tag consumes the continuous build instead (the
+    # reuse-continuous job); exactly one of the two routes runs per tag.
+    if: ${{ !contains(github.ref_name, '-') }}
     name: build-${{ matrix.target }}
     runs-on: ${{ matrix.runs-on }}
     # GLIBC 2.35 build baseline: artifacts built on the ubuntu-24.04 runner
@@ -197,6 +220,9 @@ jobs:
 
   build-darwin:
     needs: tag-check
+    # Stable-only: a -beta* tag consumes the continuous build instead (the
+    # reuse-continuous job); exactly one of the two routes runs per tag.
+    if: ${{ !contains(github.ref_name, '-') }}
     name: build-${{ matrix.target }}
     runs-on: ${{ matrix.runs-on }}
     permissions:
@@ -259,8 +285,136 @@ jobs:
             target/${{ matrix.target }}/dist/manifest.json
           if-no-files-found: error
 
+  # THE BETA CHANNEL'S BUILD (the consume route): the continuous workflow
+  # already built the exact commit this beta names - nightly.yml waits out
+  # the pushed commit's continuous run (its whole build matrix green) before
+  # cutting the tag, so the tag-only commit's parent is a proven-built tip.
+  # This job resolves that parent, downloads ITS continuous run's workflow
+  # artifacts (the download-by-run route the installer's old bootstrap used),
+  # and restamps them to the beta version (scripts/release/restamp_continuous.py):
+  # the built bytes stay the continuous build's; the version-shaped facts move
+  # - the inner package.json (the runtime version manifest the shipped binary
+  # reports; the continuous stamp <version>-continuous.<sha> becomes the beta
+  # version), the archive/decoder names, and the manifest/SHA256SUMS rows (the
+  # manifest's `commit` provenance is KEPT). The result is re-uploaded as THIS
+  # run's artifacts-<target> set, so the promote gate consumes the same shape
+  # from either route. The gates the release build jobs ran on their own
+  # binaries (livecheck, GLIBC baseline) re-run here for the runner's own
+  # target; the other targets' evidence is the continuous run's own green
+  # build jobs on this exact commit (asserted via the manifest's commit row).
+  reuse-continuous:
+    needs: tag-check
+    if: ${{ contains(github.ref_name, '-') }}
+    name: consume the continuous build (no rebuild)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Cross-run workflow-artifact download: the continuous run's set.
+      actions: read
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Resolve the continuous run that built this beta's parent
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # THE ANNOTATED-TAG PEEL (the same ref-chain resolution the promote
+          # job's publish step uses): the tag names the tag-only commit
+          # nightly.yml created; its first parent is the continuous-built tip.
+          tag="${GITHUB_REF_NAME}"
+          ref_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")"
+          obj_type="$(printf '%s' "${ref_json}" | jq -r '.object.type')"
+          obj_sha="$(printf '%s' "${ref_json}" | jq -r '.object.sha')"
+          if [ "${obj_type}" = "tag" ]; then
+            tag_obj="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${obj_sha}")"
+            obj_sha="$(printf '%s' "${tag_obj}" | jq -r '.object.sha')"
+          fi
+          parent="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${obj_sha}" --jq '.parents[0].sha')"
+          # The run whose artifacts this beta consumes - the same query
+          # nightly.yml resolves the parent with. The cut is only created
+          # after that run concluded green with its whole build matrix,
+          # so the run must exist and be green here; anything else is a
+          # malformed tag (fail loudly, never fall back to a rebuild).
+          runs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/continuous.yml/runs?branch=main&per_page=1&head_sha=${parent}" 2>/dev/null || echo '{"workflow_runs":[]}')"
+          read -r status conclusion run_id < <(printf '%s\n' "${runs_json}" | jq -r \
+            '(.workflow_runs[0] // {}) | [(.status // "absent"), (.conclusion // "-"), (.id // "-")] | @tsv')
+          if [ "${status}" != "completed" ] || [ "${conclusion}" != "success" ]; then
+            echo "::error::no successful continuous run for ${parent} (${status}/${conclusion}): the beta cannot consume artifacts that do not exist - resolve the continuous run, then re-run this release"
+            exit 1
+          fi
+          echo "beta parent (the continuous-built commit): ${parent}"
+          echo "continuous run ${run_id} built ${parent}"
+          echo "parent=${parent}" >> "${GITHUB_OUTPUT}"
+          echo "run-id=${run_id}" >> "${GITHUB_OUTPUT}"
+      - name: Download the continuous build's artifacts (by run id)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          run-id: ${{ steps.resolve.outputs.run-id }}
+          github-token: ${{ github.token }}
+          pattern: artifacts-*
+          path: incoming
+      - name: Restamp the continuous set to the beta version (no rebuild)
+        run: |
+          set -euo pipefail
+          # The promote gate consumes exactly the 4-target set; a partial
+          # download must fail here, not at the channel manifest.
+          expected="artifacts-aarch64-apple-darwin artifacts-aarch64-unknown-linux-gnu artifacts-x86_64-apple-darwin artifacts-x86_64-unknown-linux-gnu"
+          actual="$(find incoming -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | tr '\n' ' ')"
+          if [ "${actual% }" != "${expected}" ]; then
+            echo "::error::the continuous run's artifact set is incomplete: ${actual% }"
+            exit 1
+          fi
+          python3 scripts/release/restamp_continuous.py \
+            --incoming incoming \
+            --version "${RELEASE_VERSION#v}" \
+            --expect-commit "${{ steps.resolve.outputs.parent }}" \
+            --out-dir restamped
+      - name: Upload the restamped set as this run's build artifacts
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: artifacts-aarch64-apple-darwin
+          path: restamped/artifacts-aarch64-apple-darwin/*
+          if-no-files-found: error
+      - name: Upload the restamped set as this run's build artifacts (aarch64-unknown-linux-gnu)
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: artifacts-aarch64-unknown-linux-gnu
+          path: restamped/artifacts-aarch64-unknown-linux-gnu/*
+          if-no-files-found: error
+      - name: Upload the restamped set as this run's build artifacts (x86_64-apple-darwin)
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: artifacts-x86_64-apple-darwin
+          path: restamped/artifacts-x86_64-apple-darwin/*
+          if-no-files-found: error
+      - name: Upload the restamped set as this run's build artifacts (x86_64-unknown-linux-gnu)
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: artifacts-x86_64-unknown-linux-gnu
+          path: restamped/artifacts-x86_64-unknown-linux-gnu/*
+          if-no-files-found: error
+
   promote:
-    needs: [build-gnu, build-darwin]
+    # One gate for both build routes: the stable build jobs (plain tags) or
+    # the reuse-continuous set (beta tags) upload the same artifacts-<target>
+    # set into this run. THE ROUTE GATE IS EXPLICIT: a job that needs a
+    # SKIPPED job is itself skipped unless its own `if` says otherwise (the
+    # GitHub documented default), so the default needs gate would strand
+    # promote on BOTH routes - each route deliberately skips the other two
+    # legs. The expression admits exactly the two healthy routes and nothing
+    # else: (stable) both build jobs succeeded, or (beta) the consume route
+    # succeeded; a failed leg, a cancelled run, or a failed tag-check leaves
+    # promote skipped, matching the pre-consume failure semantics. The
+    # artifact completeness assertion inside the gate is the belt behind the
+    # routing: an incomplete set fails the promotion loudly either way.
+    if: ${{ !cancelled() && (
+          (needs.build-gnu.result == 'success' && needs.build-darwin.result == 'success')
+          || needs.reuse-continuous.result == 'success') }}
+    needs: [build-gnu, build-darwin, reuse-continuous]
     name: promotion gate -> release attach
     runs-on: ubuntu-latest
     environment: release
@@ -314,6 +468,18 @@ jobs:
           python3 - <<'PY'
           import json, hashlib, pathlib, sys
           incoming = pathlib.Path("incoming")
+          # THE COMPLETENESS ASSERTION (the belt behind the route gate): the
+          # release publishes the whole 4-target matrix or nothing - a route
+          # that lost a leg fails here, not as a partial channel manifest.
+          expected_targets = {
+              "artifacts-aarch64-apple-darwin", "artifacts-aarch64-unknown-linux-gnu",
+              "artifacts-x86_64-apple-darwin", "artifacts-x86_64-unknown-linux-gnu",
+          }
+          entry_dirs = {p.name for p in incoming.iterdir() if p.is_dir()}
+          if entry_dirs != expected_targets:
+              sys.exit(
+                  "the build set is incomplete: present "
+                  f"{sorted(entry_dirs)} != expected {sorted(expected_targets)}")
           failures = []
           for entry_dir in sorted(p for p in incoming.iterdir() if p.is_dir()):
               manifest_path = entry_dir / "manifest.json"
@@ -328,7 +494,7 @@ jobs:
                       failures.append(f"{b['file']}: sha256 mismatch")
           if failures:
               sys.exit("hash continuity failed:\n" + "\n".join(failures))
-          print(f"hash continuity verified for all archives")
+          print(f"hash continuity verified for all {len(expected_targets)} target sets")
           PY
       - name: Verify Linux decoder integrity against installed tar ELF
         run: |
@@ -341,20 +507,32 @@ jobs:
           import json, pathlib, tarfile
           incoming = pathlib.Path("incoming")
           merged, decoders, sums, version = [], [], [], None
+          commits = set()
           for entry_dir in sorted(p for p in incoming.iterdir() if p.is_dir()):
               manifest = json.loads((entry_dir / "manifest.json").read_text())
               version = manifest["version"]
               merged.extend(manifest["binaries"])
               decoders.extend(manifest.get("decoders", []))
+              if manifest.get("commit"):
+                  commits.add(manifest["commit"])
               sums.extend(line for line in
                           (entry_dir / "SHA256SUMS").read_text().splitlines()
                           if line.strip())
+          # The consume route (beta) stamps every per-target manifest with the
+          # continuous commit it built; a set that names more than one commit
+          # is a broken restamp and must never merge into one release.
+          if len(commits) > 1:
+              raise SystemExit(f"per-target manifests name different commits: {sorted(commits)}")
           merged.sort(key=lambda b: b["file"])
           decoders.sort(key=lambda d: d["file"])
           sums.sort(key=lambda line: line.split(None, 1)[1])
           out = pathlib.Path("release-out")
           out.mkdir()
           result = {"version": version, "binaries": merged}
+          if commits:
+              # The build provenance rides the merged manifest (the stable
+              # rebuild route carries no commit row, as before).
+              result["commit"] = sorted(commits)[0]
           if decoders:
               result["decoders"] = decoders
           (out / "manifest.json").write_text(
