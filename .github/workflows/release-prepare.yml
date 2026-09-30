@@ -54,7 +54,7 @@ on:
   pull_request:
     types: [closed]
     # The pull_request branches filter applies to the PR's base branch.
-    branches: [rust]
+    branches: [main]
 
 permissions: {}
 
