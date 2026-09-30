@@ -131,7 +131,18 @@ impl Supervisor {
             ) {
                 return response_success(Some(command_id), type_name, None);
             }
-            let entry = roster.write_summary(summary, Some(&resident.worker_id), None);
+            let entry = roster.write_summary(summary.clone(), Some(&resident.worker_id), None);
+            // The worker's root slot can swap to a new durable session (a
+            // `new_session`/`switch_session`/`import_jsonl`/`fork`
+            // replacement serves a new file under the same address): the
+            // row it previously owned for that address described the
+            // superseded session, and the roster must not keep presenting
+            // it as the worker's live root (TS `flushRoster`'s
+            // swapped-in-place removal).
+            for swapped in roster.swapped_out_root_rows(&resident.worker_id, &entry) {
+                roster.delete(&swapped);
+                removed_ids.push(swapped);
+            }
             changed.push(entry);
             for agent_id in removed {
                 if roster.get(&agent_id).is_some() {
@@ -140,6 +151,12 @@ impl Supervisor {
                 }
             }
         }
+        // The roster write is the worker's live word on what it serves:
+        // the supervisor-side identity follows it (the fork-isolation
+        // seam — the descriptor, the persisted record, the durable create
+        // command, and the binding table all move onto the worker's
+        // current session).
+        self.sync_root_identity_from_roster(&resident).await;
         self.push_roster_update(changed, removed_ids);
         response_success(Some(command_id), type_name, None)
     }
@@ -194,14 +211,26 @@ impl Supervisor {
         let counter = summary
             .get("rosterDeltaSequence")
             .and_then(serde_json::Value::as_u64);
-        let entry = {
+        let (entry, swapped) = {
             let mut roster = self.roster.lock().unwrap();
             if !roster.accept_roster_pull(&resident.worker_id, &instance, counter) {
                 return None;
             }
-            roster.write_summary(summary.clone(), Some(&resident.worker_id), None)
+            let entry = roster.write_summary(summary.clone(), Some(&resident.worker_id), None);
+            // The pull sees the same root-slot swap the deltas do (a
+            // registration or refresh landing after a
+            // `new_session`/`switch_session`/`import_jsonl`/`fork`
+            // replacement): the superseded row retires with the write,
+            // and the identity follow below re-binds the supervisor-side
+            // identity onto the moved-to session.
+            let swapped = roster.swapped_out_root_rows(&resident.worker_id, &entry);
+            for agent_id in &swapped {
+                roster.delete(agent_id);
+            }
+            (entry, swapped)
         };
-        self.push_roster_update(vec![entry.clone()], Vec::new());
+        self.sync_root_identity_from_roster(resident).await;
+        self.push_roster_update(vec![entry.clone()], swapped);
         Some(entry)
     }
 
