@@ -178,6 +178,7 @@ pub fn ensure_cooked_tty() -> TtyCooked {
 }
 
 #[cfg(not(unix))]
+#[must_use]
 pub fn ensure_cooked_tty() -> TtyCooked {
     TtyCooked::Unavailable
 }
