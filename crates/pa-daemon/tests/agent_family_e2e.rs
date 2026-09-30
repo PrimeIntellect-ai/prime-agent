@@ -51,7 +51,7 @@ use pa_core::kernel::shared::{HostRequestHandlers, HostRequestPayload};
 use pa_core::session_engine::agent_messaging::{
     register_agent_message_host_handlers, AgentFamilyRelationship, AgentMessageController,
 };
-use pa_core::session_engine::rlm_host::{RlmSpawnRequest, RlmSubagentHost};
+use pa_core::session_engine::rlm_host::{RlmSpawnRequest, RlmSpawnTarget, RlmSubagentHost};
 use pa_daemon::agent_messaging::LinkAgentMessageController;
 use pa_daemon::rlm_children::{ParentIdentity, SupervisorChildSessions};
 use pa_daemon::supervisor_link::SupervisorLink;
@@ -469,6 +469,7 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
             name: Some("kid".to_string()),
             model: None,
             thinking: None,
+            target: RlmSpawnTarget::Local,
             cell_source_code: None,
         })
         .await
@@ -855,6 +856,7 @@ async fn family_edges_never_cross_families_end_to_end() {
                 name: Some(kid_name.to_string()),
                 model: None,
                 thinking: None,
+                target: RlmSpawnTarget::Local,
                 cell_source_code: None,
             })
             .await
@@ -1012,6 +1014,7 @@ async fn family_edges_never_cross_families_end_to_end() {
             name: Some("grandkid".to_string()),
             model: None,
             thinking: None,
+            target: RlmSpawnTarget::Local,
             cell_source_code: None,
         })
         .await

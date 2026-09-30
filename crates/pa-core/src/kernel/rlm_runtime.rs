@@ -92,6 +92,90 @@ pub fn normalize_requested_rlm_subagent_thinking_level(
     Ok(Some(matched))
 }
 
+/// Spawn placement targets `rlm.spawn` accepts for its `target` kwarg
+/// (the admission gate that refuses cloud until its backend exists lives
+/// in `session_engine::rlm_host`).
+pub const RLM_SPAWN_TARGETS: [&str; 2] = ["local", "cloud"];
+
+/// Typed spawn placement: where an admitted `rlm.spawn` child session runs.
+///
+/// Design note — the `target` placement contract (the cloud admission and
+/// messaging parity the future cloud backend must uphold):
+///
+/// * Omission is local and byte-identical. The kernel forwards `target`
+///   only when the caller passed one, so an omitted target reaches this
+///   module as `None` and resolves to [`RlmSpawnTarget::Local`]: the same
+///   wire payload, the same request, the same local spawn as before the
+///   contract existed. The prompt layers do not advertise `target` until
+///   the cloud backend ships, keeping the cache-stable prompt prefix
+///   byte-identical across this contract slice.
+/// * Cloud fails explicitly, never falls back. Admission (the
+///   `rlm.run` handler in `session_engine::rlm_host`) refuses
+///   [`RlmSpawnTarget::Cloud`] before any `RlmSubagentHost` is consulted,
+///   so no host implementation can silently run a cloud child locally.
+///   The error names the missing backend and the local alternative.
+/// * Cloud admission parity. The backend must admit into the exact
+///   `RLMSpawnHandle` wire shape (`rlm_child_id`/`name`/`session_dir`/
+///   `model` — `session_dir` stays the child's agent-visible session
+///   directory, through whatever interpretation the backend documents),
+///   enforce sibling name uniqueness with the same reservation
+///   semantics, count the child against the recursion depth limit, and
+///   surface it through `rlm.list_subagents`/`rlm.collect`/
+///   `rlm.delete_subagent` with the shared status vocabulary — a cloud
+///   child is a full family member, indistinguishable at those surfaces.
+/// * Cloud messaging parity. A cloud child must support bidirectional
+///   `agent_message` — parent-to-child (`receiver_role: "child"`) and
+///   child-to-parent (`receiver_role: "parent"`) — with the shared
+///   `delivered`/`queued` receipt vocabulary. Offline parent delivery is
+///   part of the contract: a cloud child's replies and progress notes
+///   sent while the parent is disconnected queue durably and deliver
+///   when the parent is reachable again, exactly like a local
+///   non-resident family member; nothing is silently dropped.
+/// * Telemetry. Nothing user-visible succeeds in this slice (the kwarg
+///   is not prompt-advertised and the refusal never reaches the daemon
+///   worker that owns telemetry clients), so no adoption event lands
+///   here; the backend PR ships the event with the surface it makes
+///   visible.
+///
+/// TS-parity note: the TS surface rejects `target` as an unsupported
+/// `rlm.spawn` kwarg. Accepting and typing it is a deliberate Rust-side
+/// divergence owned by this contract; omitted-target behavior stays
+/// TS-identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RlmSpawnTarget {
+    /// The daemon's local worker tree (the only placement today).
+    #[default]
+    Local,
+    /// The cloud child backend (contract only — no backend exists yet, so
+    /// admission refuses it explicitly instead of running locally).
+    Cloud,
+}
+
+/// Validate the requested spawn placement. `None` when absent (local).
+///
+/// # Errors
+///
+/// Returns an error, prefixed with `operation`, when the target is not one
+/// of the supported placement targets.
+pub fn normalize_requested_rlm_spawn_target(
+    value: Option<&str>,
+    operation: &str,
+) -> anyhow::Result<Option<RlmSpawnTarget>> {
+    let Some(value) = value else { return Ok(None) };
+    let target = value.trim().to_lowercase();
+    let matched = match target.as_str() {
+        "local" => RlmSpawnTarget::Local,
+        "cloud" => RlmSpawnTarget::Cloud,
+        _ => {
+            return Err(error(
+                operation,
+                &format!("target must be one of: {}", RLM_SPAWN_TARGETS.join(", ")),
+            ));
+        }
+    };
+    Ok(Some(matched))
+}
+
 /// Validate the requested model override. `None` when absent.
 ///
 /// # Errors
@@ -380,6 +464,33 @@ pub fn kwargs_from_payload(payload: &Value) -> serde_json::Map<String, Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalizes_spawn_target() {
+        assert_eq!(
+            normalize_requested_rlm_spawn_target(None, "rlm.spawn").unwrap(),
+            None
+        );
+        assert_eq!(
+            normalize_requested_rlm_spawn_target(Some("local"), "rlm.spawn").unwrap(),
+            Some(RlmSpawnTarget::Local)
+        );
+        // Case and surrounding whitespace normalize like thinking levels.
+        assert_eq!(
+            normalize_requested_rlm_spawn_target(Some(" Cloud "), "rlm.spawn").unwrap(),
+            Some(RlmSpawnTarget::Cloud)
+        );
+        assert!(
+            normalize_requested_rlm_spawn_target(Some("edge"), "rlm.spawn").is_err(),
+            "an unknown target is rejected instead of defaulting to local"
+        );
+        assert_eq!(
+            normalize_requested_rlm_spawn_target(Some("edge"), "rlm.spawn")
+                .unwrap_err()
+                .to_string(),
+            "rlm.spawn target must be one of: local, cloud"
+        );
+    }
 
     #[test]
     fn normalizes_session_name() {

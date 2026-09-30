@@ -39,7 +39,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pa_core::session_engine::rlm_host::{
-    RlmCreateSessionRequest, RlmSpawnRequest, RlmSubagentHost,
+    RlmCreateSessionRequest, RlmSpawnRequest, RlmSpawnTarget, RlmSubagentHost,
 };
 use pa_daemon::rlm_children::{ParentIdentity, SupervisorChildSessions};
 use pa_daemon::supervisor_link::SupervisorLink;
@@ -249,6 +249,7 @@ fn spawn_request(name: &str, prompt: &str) -> RlmSpawnRequest {
         name: Some(name.to_string()),
         model: None,
         thinking: None,
+        target: RlmSpawnTarget::Local,
         cell_source_code: None,
     }
 }

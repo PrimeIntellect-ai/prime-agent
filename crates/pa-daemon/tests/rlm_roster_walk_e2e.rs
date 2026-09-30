@@ -304,7 +304,7 @@ fn list_all_returns_the_full_synthetic_thousand_child_roster() {
 /// subscriber receives and in a fresh subscriber's snapshot.
 #[tokio::test]
 async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
-    use pa_core::session_engine::rlm_host::{RlmSpawnRequest, RlmSubagentHost};
+    use pa_core::session_engine::rlm_host::{RlmSpawnRequest, RlmSpawnTarget, RlmSubagentHost};
     use pa_daemon::rlm_children::{ParentIdentity, SupervisorChildSessions};
 
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -376,6 +376,7 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
             name: Some("worker-a".to_string()),
             model: None,
             thinking: None,
+            target: RlmSpawnTarget::Local,
             cell_source_code: None,
         })
         .await

@@ -94,6 +94,49 @@ class RlmSubagentRegistryTest(unittest.TestCase):
         self.assertEqual(result.name, "api-reviewer")
         self.assertEqual(result.model, "deepseek/deepseek-v4-flash")
 
+    def test_forwards_target_to_host_and_omission_stays_identical(self) -> None:
+        handle = {
+            "rlm_child_id": "sub-a1b2c3d4",
+            "name": "cloud-worker",
+            "session_dir": "/tmp/parent/sub-a1b2c3d4",
+            "model": "deepseek/deepseek-v4-flash",
+        }
+
+        # An explicit placement is forwarded in the kwargs.
+        forwarded = AsyncMock(return_value=handle)
+        with patch.object(rlm_module, "host_request", forwarded):
+            asyncio.run(
+                rlm_module.rlm.spawn(
+                    "run the lane in the cloud",
+                    name="cloud-worker",
+                    target="cloud",
+                )
+            )
+        forwarded.assert_awaited_once_with(
+            "rlm.run",
+            {
+                "prompt": "run the lane in the cloud",
+                "kwargs": {"name": "cloud-worker", "target": "cloud"},
+            },
+        )
+
+        # An omitted placement sends the byte-identical pre-contract payload:
+        # no "target" key appears in the kwargs.
+        omitted = AsyncMock(return_value=handle)
+        with patch.object(rlm_module, "host_request", omitted):
+            asyncio.run(rlm_module.rlm.spawn("run the lane", name="cloud-worker"))
+        omitted.assert_awaited_once_with(
+            "rlm.run",
+            {"prompt": "run the lane", "kwargs": {"name": "cloud-worker"}},
+        )
+
+    def test_rejects_non_string_target_before_the_host(self) -> None:
+        host_request = AsyncMock()
+        with patch.object(rlm_module, "host_request", host_request):
+            with self.assertRaisesRegex(TypeError, r"target must be str, got int"):
+                asyncio.run(rlm_module.rlm.spawn("run the lane", name="w", target=5))
+        host_request.assert_not_awaited()
+
     def test_requires_an_explicit_child_name(self) -> None:
         host_request = AsyncMock()
         with patch.object(rlm_module, "host_request", host_request):

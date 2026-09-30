@@ -16,10 +16,16 @@ use std::time::Instant;
 use serde_json::{json, Map, Value};
 use tokio::sync::Mutex;
 
+/// The typed spawn placement [`RlmSpawnRequest::target`] carries. Re-exported
+/// from the pure RLM-surface module (which owns the placement normalizer and
+/// the placement design note) so the request vocabulary imports from one
+/// place.
+pub use crate::kernel::rlm_runtime::RlmSpawnTarget;
 use crate::kernel::rlm_runtime::{
-    find_rlm_model_matches, kwargs_from_payload, normalize_requested_rlm_subagent_model,
-    normalize_requested_rlm_subagent_session_name, normalize_requested_rlm_subagent_thinking_level,
-    RlmModelInfo, DEFAULT_RLM_MODEL_SEARCH_LIMIT, MAX_RLM_MODEL_SEARCH_LIMIT,
+    find_rlm_model_matches, kwargs_from_payload, normalize_requested_rlm_spawn_target,
+    normalize_requested_rlm_subagent_model, normalize_requested_rlm_subagent_session_name,
+    normalize_requested_rlm_subagent_thinking_level, RlmModelInfo, DEFAULT_RLM_MODEL_SEARCH_LIMIT,
+    MAX_RLM_MODEL_SEARCH_LIMIT,
 };
 use crate::kernel::shared::{host_handler, HostRequestHandlers};
 use crate::models::registry::ModelRegistry;
@@ -139,6 +145,10 @@ pub struct RlmSpawnRequest {
     pub model: Option<String>,
     /// Validated thinking level; the host checks model support.
     pub thinking: Option<String>,
+    /// Typed placement (`target` kwarg; see [`RlmSpawnTarget`] for the
+    /// placement contract). `Local` when the kwarg is omitted — the only
+    /// placement a host admits until the cloud backend exists.
+    pub target: RlmSpawnTarget,
     pub cell_source_code: Option<String>,
 }
 
@@ -419,6 +429,18 @@ fn register_run(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>)
                 };
                 let mut request = spawn_request_from_payload(prompt, data)?;
                 request.cell_source_code = payload.cell_source_code.clone();
+                // Placement gate (see [`RlmSpawnTarget`]): cloud placement
+                // is refused here, before any `RlmSubagentHost` is
+                // consulted, so no host implementation can fall back to
+                // running a cloud child locally. The gate is removed by
+                // the cloud-backend change that implements placement.
+                if request.target == RlmSpawnTarget::Cloud {
+                    anyhow::bail!(
+                        "rlm.spawn target \"cloud\" is unsupported: no cloud child backend \
+                         exists yet, and the child is never run locally instead. \
+                         Omit target (or use \"local\") to spawn a local child."
+                    );
+                }
                 let handle = host.spawn(request).await?;
                 // TS `_findLastAssistantMessage` at spawn: the spawning
                 // assistant row (persisted at `message_end` before tool
@@ -437,7 +459,7 @@ fn register_run(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>)
 fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmSpawnRequest> {
     const OPERATION: &str = "rlm.spawn";
     let kwargs = kwargs_from_payload(data);
-    reject_unsupported_kwargs(&kwargs, OPERATION, &["name", "model", "thinking"])?;
+    reject_unsupported_kwargs(&kwargs, OPERATION, &["name", "model", "thinking", "target"])?;
     let name = optional_string_kwarg(&kwargs, "name", OPERATION)?;
     let name = normalize_requested_rlm_subagent_session_name(name, OPERATION)?;
     if let Some(name) = &name {
@@ -448,11 +470,17 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
     let thinking = optional_string_kwarg(&kwargs, "thinking", OPERATION)?;
     let thinking =
         normalize_requested_rlm_subagent_thinking_level(thinking, OPERATION)?.map(String::from);
+    // Typed placement: omitted (or "local") stays the pre-contract local
+    // spawn; "cloud" parses into the typed request the admission gate
+    // refuses until the backend exists.
+    let target = optional_string_kwarg(&kwargs, "target", OPERATION)?;
+    let target = normalize_requested_rlm_spawn_target(target, OPERATION)?;
     Ok(RlmSpawnRequest {
         prompt: prompt.to_string(),
         name,
         model,
         thinking,
+        target: target.unwrap_or_default(),
         cell_source_code: None,
     })
 }
@@ -1008,6 +1036,8 @@ mod tests {
         assert_eq!(requests[0].name.as_deref(), Some("worker"));
         assert_eq!(requests[0].model.as_deref(), Some("p/m"));
         assert_eq!(requests[0].thinking.as_deref(), Some("high"));
+        // Local regression: an omitted `target` lands as a local placement.
+        assert_eq!(requests[0].target, RlmSpawnTarget::Local);
         drop(requests);
 
         // Validation: prompt type, unsupported kwargs, name rules.
@@ -1064,6 +1094,66 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error.to_string(), "rlm.spawn name must be a string");
+    }
+
+    #[tokio::test]
+    async fn spawn_target_placement_contract() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let host = RecordingHost::new();
+        let spawn_requests = Arc::clone(&host.spawn_requests);
+        let wiring = wired(dir.path(), Some(host));
+
+        // Valid: explicit "local" admits through the host like an omitted
+        // target (case and whitespace normalize like thinking levels).
+        let admitted = call(
+            &wiring,
+            "rlm.run",
+            json!({ "type": "rlm.run", "prompt": "p", "kwargs": { "name": "w1", "target": " LOCAL " } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(admitted["rlm_child_id"], "sub-1");
+        assert_eq!(spawn_requests.lock().await[0].target, RlmSpawnTarget::Local);
+
+        // Cloud placement: refused before the host, with the explicit
+        // unsupported-backend error — never a silent local spawn.
+        let error = call(
+            &wiring,
+            "rlm.run",
+            json!({ "type": "rlm.run", "prompt": "p", "kwargs": { "name": "w2", "target": "cloud" } }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "rlm.spawn target \"cloud\" is unsupported: no cloud child backend exists yet, \
+             and the child is never run locally instead. \
+             Omit target (or use \"local\") to spawn a local child."
+        );
+        // The refused spawn never reached the host: only the local one.
+        assert_eq!(spawn_requests.lock().await.len(), 1);
+
+        // Invalid: unknown placement values and non-string targets.
+        let error = call(
+            &wiring,
+            "rlm.run",
+            json!({ "type": "rlm.run", "prompt": "p", "kwargs": { "name": "w3", "target": "edge" } }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "rlm.spawn target must be one of: local, cloud"
+        );
+        let error = call(
+            &wiring,
+            "rlm.run",
+            json!({ "type": "rlm.run", "prompt": "p", "kwargs": { "name": "w4", "target": 5 } }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "rlm.spawn target must be a string");
+        assert_eq!(spawn_requests.lock().await.len(), 1);
     }
 
     #[tokio::test]

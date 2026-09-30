@@ -22,7 +22,14 @@ logic of its own). The RLM recursion host seam
 (`session_engine::rlm_host`): the trait the kernel's `rlm.spawn`/
 `rlm.create_session`/`rlm.list_subagents`/`rlm.collect`/
 `rlm.delete_subagent` host requests call into, with the roster/collect/
-selector-error vocabulary the daemon implements over the supervisor link.
+selector-error vocabulary the daemon implements over the supervisor link,
+plus the typed `rlm.spawn` placement contract (`target` kwarg; the
+`RlmSpawnTarget` vocabulary and its design note live in
+`kernel::rlm_runtime`): omitted or `local` keeps the pre-contract local
+spawn byte-identically, `cloud` is refused at admission before any host is
+consulted until the cloud child backend exists (never a silent local
+fallback), and the note pins the admission/messaging parity the backend
+must uphold.
 Platform wall (`platform`): process control (signals/process groups), file locking, file permissions, and shell selection - every OS-specific behavior in the engine lives there behind cfg-gated implementations (the durable-write rename primitive is pa-telemetry's `rename_onto`, re-exported as `platform::rename_onto`). Scheduled jobs (`cron`, the `AgentCronJobStore` port of `core/cron-jobs.ts`): file-backed job state under session artifacts (`scheduled-jobs.json` partitions) with cross-process locking, plus the public read-only scan (`cron::store::read_scheduled_jobs_artifact`) the update flow's roster projection and boot re-arm read. Tools (bash, edit, ipython + internal rename/stdout), file mutation queue, truncation and rendering rules, RLM kernel lifecycle (IPython spawn/execute/revive), skills loading, system prompt assembly, compaction, harness refinement, settings/config, package manager (npm/git/local source install/remove/list/update against settings, plus `resolve()`: precedence-ranked session resource resolution over configured packages, settings arrays, auto-discovery, and bundled skills), session manager (persist/resume). Extension host (stage 1: Node sidecar process lifecycle - spawn/handshake/ping/orderly shutdown, NDJSON RPC client + framing, host script materialized content-addressed under <agentDir>/extension-host/; stage 2: module loading with vendored jiti 2.7.0 + pi API/import shims in the sidecar, registration landing in the registry mirror (first-wins tools, command collision suffixing, flag/shortcut rules), the `ExtensionRunner` facade, extension tools bridged into the loop tool surface over `tool_execute` RPC, session-engine assembly with prompt-guideline injection). Extension-runner stages 3-6 are descoped (operator decision 2026-09-17); the landed stages 1-2 remain as harmless machinery. origin/main
 
 Provider resilience policies in `session_engine`: the shared quick-retry

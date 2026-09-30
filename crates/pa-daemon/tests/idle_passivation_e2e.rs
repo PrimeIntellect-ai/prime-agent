@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use pa_core::session_engine::rlm_host::{RlmSpawnRequest, RlmSubagentHost};
+use pa_core::session_engine::rlm_host::{RlmSpawnRequest, RlmSpawnTarget, RlmSubagentHost};
 use pa_daemon::rlm_children::{ParentIdentity, SupervisorChildSessions};
 use pa_daemon::supervisor_link::SupervisorLink;
 
@@ -259,6 +259,7 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_prompt() {
             name: Some("parked-kid".to_string()),
             model: None,
             thinking: None,
+            target: RlmSpawnTarget::Local,
             cell_source_code: None,
         })
         .await
