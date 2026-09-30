@@ -563,6 +563,57 @@ fn a_persisted_scan_state_resumes_like_the_full_fold() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+/// The sidecar round trip through a real lease, for a session opened by
+/// a symlinked dir (macOS `/var`, a symlinked `~/.prime`): the release
+/// persists what the holder's raw-path reads cached, though the lease
+/// keys the file canonically. The next read then serves a valid sidecar
+/// (here a name the file does not carry - a cold scan cannot produce
+/// it), and scans cold past a corrupt one or one at another version.
+/// Unix-only like its sibling: only Unix certifies a state to persist.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_lease_release_persists_a_sidecar_the_next_read_serves() {
+    let dir = test_dir();
+    let real_dir = dir.join("real");
+    fs::create_dir_all(&real_dir).unwrap();
+    std::os::unix::fs::symlink(&real_dir, dir.join("linked")).unwrap();
+    let path = dir.join("linked").join("s.jsonl");
+    append_rows(
+        &path,
+        &[
+            json!({"type":"session","id":"sl","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"}),
+            json!({"type":"message","id":"u1","timestamp":"2026-09-23T00:00:00.000Z",
+                "message":{"role":"user","content":"hi","timestamp":1_790_110_000_000_u64}}),
+        ],
+    );
+    let lease = crate::lease::acquire_runtime_session_lease(&path, &dir).unwrap();
+    let cold = read_session_info(&path).unwrap();
+    drop(lease);
+    let sidecar = real_dir.join("s.info-cache.json");
+    assert!(sidecar.is_file(), "the release persists the raw-path state");
+    let mut valid: Value = serde_json::from_slice(&fs::read(&sidecar).unwrap()).unwrap();
+    valid["state"]["acc"]["name"] = json!("from the sidecar");
+    let mut other_version = valid.clone();
+    other_version["version"] = json!(valid["version"].as_u64().unwrap() + 1);
+    let served = SessionInfo {
+        name: Some("from the sidecar".to_string()),
+        ..cold.clone()
+    };
+    for (contents, expected) in [
+        (valid.to_string(), &served),
+        (other_version.to_string(), &cold),
+        ("{".to_string(), &cold),
+    ] {
+        fs::write(&sidecar, contents).unwrap();
+        super::session_info_cache()
+            .lock()
+            .unwrap()
+            .drop_state(&path);
+        assert_eq!(read_session_info(&path).as_ref(), Some(expected));
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn a_valid_unterminated_final_line_folds_into_the_snapshot() {
     let dir = test_dir();

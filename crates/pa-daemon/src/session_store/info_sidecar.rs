@@ -44,13 +44,14 @@ pub(super) fn load(path: &Path) -> Option<SessionScanState> {
 }
 
 /// The lease-release write: persist the cached scan state for `path` (the
-/// same path form the lease keys the session file by) so the next process
-/// that opens the file folds only what was appended since. A fresh temp
-/// file, then the rename - a torn write never replaces a loadable sidecar,
-/// and a reader that races the rename sees either the old or the new
-/// whole file. A miss writes nothing; a failed write costs the next open
-/// its warm resume, nothing more - the same error policy as the window
-/// sidecar's flush.
+/// path form the lease holder opened and read the file by - the scan
+/// cache's key, and the form the load derives the sidecar path from) so
+/// the next process that opens the file folds only what was appended
+/// since. A fresh temp file, then the rename - a torn write never
+/// replaces a loadable sidecar, and a reader that races the rename sees
+/// either the old or the new whole file. A miss writes nothing; a failed
+/// write costs the next open its warm resume, nothing more - the same
+/// error policy as the window sidecar's flush.
 pub(crate) fn persist_info_sidecar(path: &Path) {
     let Some(state) = session_info_cache().lock().ok().and_then(|cache| {
         cache
@@ -81,7 +82,7 @@ pub(crate) fn persist_info_sidecar(path: &Path) {
             },
         )?;
         file.flush()?;
-        std::fs::rename(&temp, sidecar_path(path))
+        pa_core::platform::rename_onto(&temp, &sidecar_path(path))
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);

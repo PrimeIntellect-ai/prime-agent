@@ -338,6 +338,11 @@ fn with_lease_guard<T>(
 #[derive(Debug)]
 pub struct SessionLease {
     pub session_path: PathBuf,
+    /// The path form the holder opened the file by: the process's window
+    /// and scan caches key the file by it, so the release flushes both
+    /// under it (`session_path` is the canonical identity; a symlinked
+    /// sessions dir or macOS `/var` makes the two differ).
+    opened_path: PathBuf,
     directory: PathBuf,
     token: String,
     released: std::sync::atomic::AtomicBool,
@@ -351,12 +356,12 @@ impl SessionLease {
         {
             return;
         }
-        let _ = pa_core::session::window::flush_cache(&self.session_path);
+        let _ = pa_core::session::window::flush_cache(&self.opened_path);
         // The usage-scan sidecar persists beside the window snapshot, in
         // the same lease-keyed, best-effort shape: only the lease holder
         // writes, and a failed write costs the next open its warm resume,
         // nothing more.
-        crate::session_store::persist_info_sidecar(&self.session_path);
+        crate::session_store::persist_info_sidecar(&self.opened_path);
         let _ = with_lease_guard(&self.directory, GuardWait::Fast, || {
             if let Ok(Some(owner)) = read_owner(&self.directory) {
                 if owner.token == self.token {
@@ -514,6 +519,7 @@ pub fn acquire_runtime_session_lease(
                 Ok(()) => {
                     return Ok(SessionLease {
                         session_path: canonical.clone(),
+                        opened_path: session_path.to_path_buf(),
                         directory: directory.clone(),
                         token,
                         released: std::sync::atomic::AtomicBool::new(false),
@@ -610,6 +616,7 @@ mod tests {
         .unwrap();
         let winner = SessionLease {
             session_path: canonical_session_path(&path),
+            opened_path: path.clone(),
             directory,
             token: replacement.token,
             released: std::sync::atomic::AtomicBool::new(false),
