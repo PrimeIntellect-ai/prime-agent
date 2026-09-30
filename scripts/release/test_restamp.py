@@ -294,6 +294,38 @@ class TheRestampCase(RestampTestCase):
         # must skip it (the continuous run's own gates are the evidence).
         self.assertIn('"livecheck": null', result.stdout)
 
+    def test_an_escaping_tar_member_is_refused_before_any_write(self):
+        """The tar-slip class: a member named `..`/absolute must never be
+        extracted outside the staging tree (the payload gate runs only
+        after the unpack, so the traversal guard is the unpack's own)."""
+        import tarfile
+        staging = self.root / "sneak"
+        staging.mkdir()
+        target = self.incoming / f"artifacts-{HOST_TARGET}"
+        archive = target / f"prime-agent-9.9.9-{HOST_ALIAS}.tar.gz"
+        with tarfile.open(archive) as tar:
+            tar.extractall(staging)
+        malicious = staging / "prime-agent-9.9.9-evil.tar.gz"
+        with tarfile.open(malicious, "w:gz") as tar:
+            info = tarfile.TarInfo("../escaped-payload")
+            payload = b"outside the staging tree"
+            info.size = len(payload)
+            tar.addfile(info, __import__("io").BytesIO(payload))
+        import hashlib
+        new_sha = hashlib.sha256(malicious.read_bytes()).hexdigest()
+        shutil.move(str(malicious), str(archive))
+        sums = (target / "SHA256SUMS").read_text().splitlines()
+        (target / "SHA256SUMS").write_text("\n".join(
+            new_sha + line[64:] if line.split()[1] == archive.name else line
+            for line in sums) + "\n")
+        manifest = json.loads((target / "manifest.json").read_text())
+        manifest["binaries"][0]["sha256"] = new_sha
+        (target / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        result, _ = self.restamp(expect=1)
+        self.assertIn("escaping member", result.stderr)
+        self.assertFalse((self.root / "escaped-payload").exists(),
+                          "no byte may land outside the staging tree")
+
     def test_repacking_is_deterministic(self):
         _, first = self.restamp(version="9.9.9-beta.3")
         first_archive = digest(first / f"artifacts-{HOST_TARGET}" /

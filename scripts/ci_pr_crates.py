@@ -39,12 +39,16 @@ FILES_API_CEILING = 3000
 
 
 def read_rows(path: Path) -> list[tuple[str, str]]:
+    """The files-API rows, read raw: a leading-space path (` crates/...`)
+    must stay the non-crate path it is, never be stripped into a crate
+    mapping — the fields are tab-separated TSV, @tsv-escaped by jq, so no
+    strip is needed or safe."""
     rows: list[tuple[str, str]] = []
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         name, _, previous = line.partition("\t")
-        rows.append((name.strip().strip('"'), previous.strip().strip('"')))
+        rows.append((name, previous))
     return rows
 
 

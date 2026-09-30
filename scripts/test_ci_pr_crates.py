@@ -116,6 +116,17 @@ class TheMappingTestCase(unittest.TestCase):
         self.assertEqual(outputs["crates"], "")
         self.assertEqual(outputs["scope"], "all")
 
+    def test_a_whitespace_prefixed_path_is_a_non_crate_path(self):
+        # The fields are read raw: a path with a leading space (or any
+        # non-crate prefix) must never be stripped into a crate mapping.
+        rc, out, outputs = run_mapper([
+            " crates/pa-core/src/lib.rs",
+            "crates/pa-tui/src/lib.rs",
+        ])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(outputs["crates"], "")
+        self.assertIn("non-crate path  crates/pa-core/src/lib.rs", out)
+
     def test_the_files_api_ceiling_fails_safe(self):
         rows = ["crates/pa-core/src/lib.rs"] * ci_pr_crates.FILES_API_CEILING
         rc, out, outputs = run_mapper(rows)

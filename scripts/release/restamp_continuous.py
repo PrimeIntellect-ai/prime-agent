@@ -91,6 +91,25 @@ def read_sums(path: Path) -> dict[str, str]:
     return sums
 
 
+def _member_target(archive: Path, staging: Path, member: tarfile.TarInfo) -> Path:
+    """The extraction path for one member, proven inside `staging` first.
+
+    A member name with an absolute path or a `..` component would write
+    OUTSIDE the staging tree (the tarfile tar-slip class); the payload gate
+    below runs only after the whole archive is read, so the traversal check
+    belongs here, before any byte is written.
+    """
+    candidate = staging / member.name
+    if member.name.startswith("/") or ".." in Path(member.name).parts:
+        fail(f"archive {archive.name} carries an escaping member {member.name!r}; "
+             "refusing to extract outside the staging tree")
+    resolved = candidate.resolve()
+    if staging.resolve() not in resolved.parents and resolved != staging.resolve():
+        fail(f"archive {archive.name} carries an escaping member {member.name!r}; "
+             "refusing to extract outside the staging tree")
+    return candidate
+
+
 def unpack_archive(archive: Path, staging: Path) -> list[str]:
     """Extract a plain-file archive to `staging`; return its top-level entries."""
     with tarfile.open(archive, "r:gz") as tar:
@@ -99,7 +118,7 @@ def unpack_archive(archive: Path, staging: Path) -> list[str]:
             if member.issym() or member.islnk():
                 fail(f"archive {archive.name} contains a link entry {member.name!r}; "
                      "refusing to restamp a payload the packer never produces")
-            target = staging / member.name
+            target = _member_target(archive, staging, member)
             if member.isdir():
                 target.mkdir(parents=True, exist_ok=True)
             else:
