@@ -1,50 +1,7 @@
 //! The daemon-boot predecessor reap (operator-directed product behavior,
 //! a sanctioned divergence from TS documented per the #289 precedent).
-//!
-//! A session worker outlives its supervisor by design (the TS daemon spawns
-//! it detached; [`crate::supervisor_lost`] garbage-collects it only after a
-//! five-minute unreachable-supervisor window). That window never fires for
-//! a worker whose supervisor died while a NEW daemon took over the same
-//! socket path: the worker's availability probe connects to the new
-//! daemon and resets the absence timer, so a leftover worker holds its
-//! runtime session lease forever - every open of its session bounces with
-//! `Session is already active in <leftover id>`, and nothing on the new
-//! daemon can reach it: its registration is refused (its descriptor was
-//! deleted at the predecessor's terminal stop, or never written), the
-//! adoption pass cannot adopt it (no descriptor), and the create-open
-//! reuse seam cannot reuse it (no resident).
-//!
-//! The operator's semantics: a daemon that boots on a socket owns that
-//! socket's lineage - same-socket predecessor leftovers die at boot, so
-//! their leases clear and opening a session post-restart works. Daemons -
-//! and workers - on DIFFERENT sockets are never touched (the two-daemons-
-//! one-store fleet; the mission-box containment rule): the scan matches
-//! the predecessor identity by the socket path alone.
-//!
-//! What the reap takes, exactly:
-//! - Worker processes (`worker` as the first argument of a product binary -
-//!   the argv the supervisor spawns) whose `PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET`
-//!   names THIS daemon's socket, minus the pids this daemon's own
-//!   descriptors name (those are the adoption pass's business: a crash
-//!   restart's live workers re-register and keep serving - the
-//!   must-not-lose-sessions invariant). The argv gate is load-bearing:
-//!   the supervisor-socket env var propagates to every process a session
-//!   worker spawns (kernels, bash children, tool servers), and an env-only
-//!   match would kill a session's whole process tree at the next daemon
-//!   boot - the `readoption_wake` regression this gate exists for. The
-//!   target's own endpoint path gates only the cleanup unlink (a
-//!   validated deterministic name); the kill never depends on the
-//!   endpoint file.
-//! - Supervisor processes of THIS socket path that are not this process:
-//!   a wedged predecessor (alive but unreachable - its socket was probed
-//!   stale and replaced) would otherwise keep its orphaned listener and
-//!   its workers' supervisor connections forever.
-//!
-//! The escalation is the CLI stop contract (`stop_tracked_process`):
-//! SIGTERM, a bounded grace, SIGKILL, a bounded verify - identity-gated by
-//! the process start id so a recycled pid is never signaled. Processes the
-//! platform cannot enumerate (non-Linux, no /proc) are not reaped here; the
-//! worker-side refused-registration self-heal covers those platforms.
+//! A daemon that boots on a socket owns that socket's lineage: same-socket
+//! predecessors die at boot; other sockets are never touched.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -54,42 +11,31 @@ use std::time::Duration;
 use crate::supervisor::Supervisor;
 
 /// Grace after SIGTERM before the force escalation (the CLI stop contract's
-/// worker grace; TS `stopWorkerUntracked`'s non-force graceful deadline).
+/// worker grace).
 const TERM_GRACE: Duration = Duration::from_secs(2);
 /// Verify window after SIGKILL before the reap reports the survivor.
 const KILL_VERIFY: Duration = Duration::from_secs(1);
-/// Hard deadline after SIGKILL on the intentional-stop path (Codex
-/// app-server-daemon's `STOP_FORCE_TIMEOUT`): the force window a killed
-/// worker's teardown may still take — a D-state exit, a huge address
-/// space — before the stop reports the survivor, so the stopped
-/// session's lease frees through the dead-owner reclaim inside one
-/// bounded stop instead of waiting out a false survivor to the next
-/// boot.
+/// Hard deadline after SIGKILL on the intentional-stop path (TS `STOP_FORCE_TIMEOUT`):
+/// a killed worker's teardown may still take before the stop reports the survivor.
 const STOP_FORCE_TIMEOUT: Duration = Duration::from_secs(10);
-/// The reap poll cadence.
 const POLL: Duration = Duration::from_millis(25);
 
 /// One reap target discovered on this socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReapTarget {
-    /// The target's pid.
     pub(crate) pid: u32,
     /// The process start id at discovery (the identity gate).
     pub(crate) start_id: Option<String>,
-    /// The target's own worker socket file, when known (a worker): removed
-    /// with the process so the socket dir keeps no stale endpoint.
+    /// The target's own worker socket file, when known: removed with the process.
     pub(crate) worker_socket: Option<PathBuf>,
-    /// What the process is (the log line names it).
     pub(crate) kind: ReapKind,
 }
 
-/// The kind of same-socket predecessor a target is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReapKind {
     /// A leftover session worker of a previous daemon on this socket.
     Worker,
-    /// A wedged supervisor process bound to this socket path. Constructed
-    /// only by the linux supervisor census.
+    /// A wedged supervisor process bound to this socket path (linux census only).
     #[cfg(target_os = "linux")]
     Supervisor,
 }
@@ -103,33 +49,16 @@ pub(crate) enum ReapOutcome {
     Term,
     /// The process died to SIGKILL.
     Kill,
-    /// The process outlived SIGKILL (a D-state wedged task): reported,
-    /// never hidden - its lease stays held; the operator-facing refusal
-    /// keeps naming the holder.
+    /// The process outlived SIGKILL (a D-state wedged task): its lease
+    /// stays held; the operator-facing refusal keeps naming the holder.
     Survived,
 }
 
-/// Reap the same-socket predecessors before the first client or adoption
-/// pass can race the reap (a create that lands mid-reap against a leftover
-/// holder answers the lease refusal; after the reap it succeeds).
+/// Reap the same-socket predecessors before a client or adoption races the reap.
 pub(crate) async fn reap_predecessors(supervisor: &Arc<Supervisor>) {
     let socket_path = supervisor.options.socket_path.clone();
-    // The adoption pass's business, never the reap's: the pids of the
-    // descriptors this SOCKET identity owns, protected while the identity
-    // still matches. Equivalent socket spellings resolve to the same
-    // identity (`/tmp/x/y/../daemon.sock` and `/tmp/x/daemon.sock` are
-    // ONE socket), but the on-disk descriptor directories are keyed by
-    // the RAW spelling each daemon started with - so the protected set
-    // loads EVERY spelling directory and keeps the descriptors whose
-    // supervisorSocketPath normalizes to THIS daemon's socket (the same
-    // identity the worker discovery matches; a live crash-restart worker
-    // under a predecessor's spelling stays protected either way).
-    // A RECORDED identity must match the live one (a recycled pid is a
-    // different process and never shields a leftover); a descriptor with
-    // NO identity recorded stays protected - the adoption pass owns it
-    // either way, and a conservative skip never kills a live
-    // descriptor-backed worker (a missed reap is recoverable, a wrong
-    // one is not).
+    // The adoption pass's business, never the reap's: this daemon's own descriptors,
+    // protected while the identity still matches (none recorded stays protected).
     let protected: HashSet<u32> =
         protected_worker_pids(&supervisor.options.agent_dir, &socket_path);
     let mut targets = same_socket_worker_targets(&socket_path, &protected, None);
@@ -141,8 +70,7 @@ pub(crate) async fn reap_predecessors(supervisor: &Arc<Supervisor>) {
         "boot reap: {} same-socket predecessor process(es) to clear",
         targets.len()
     ));
-    // Concurrent: a stuck target's bounded escalation must not serialize
-    // the reap (a box of leftovers still boots in one escalation window).
+    // Concurrent: a stuck target's escalation must not serialize the reap.
     let outcomes = futures::future::join_all(
         targets
             .iter()
@@ -164,13 +92,7 @@ pub(crate) async fn reap_predecessors(supervisor: &Arc<Supervisor>) {
             .collect::<Vec<_>>(),
     )
     .await;
-    // The dead workers' socket files leave with them (a killed process
-    // cannot clean up after itself; the ids never repeat, so a stale
-    // endpoint would linger past every spawn). The unlink stays inside the
-    // product's endpoint namespace: the path was validated as one of this
-    // supervisor's own worker sockets at discovery, and the last check
-    // re-verifies the socket-ness before the remove - a regular file at a
-    // matching name is never unlinked.
+    // The dead workers' socket files leave with them (a killed process cannot clean up).
     for (target, outcome) in outcomes {
         if let (Some(socket), ReapOutcome::Term | ReapOutcome::Kill) =
             (&target.worker_socket, outcome)
@@ -182,16 +104,9 @@ pub(crate) async fn reap_predecessors(supervisor: &Arc<Supervisor>) {
     }
 }
 
-/// Stop one worker process by identity: the supervisor's terminal-stop
-/// escalation (a worker that missed its routed `shutdown`). Same contract as
-/// [`reap_predecessors`]'s targets — identity-gated SIGTERM, grace, SIGKILL,
-/// verify — on the intentional stop's own budgets: the post-SIGKILL window
-/// is the Codex `STOP_FORCE_TIMEOUT` hard deadline, not the boot reap's
-/// fast verify (a killed worker's teardown may outlast a second, and
-/// reporting a still-tearing-down process as the survivor leaves the
-/// session lease held behind a worker that is provably dying). `None` as
-/// the start id trusts liveness alone (the same conservative gate the
-/// lease's stale-owner rule applies).
+/// Stop one worker process by identity: the terminal-stop escalation (a worker that missed
+/// its routed `shutdown`) on the `STOP_FORCE_TIMEOUT` budget, not the boot reap's fast
+/// verify. `None` as the start id trusts liveness alone.
 pub(crate) async fn stop_process(pid: u32, start_id: Option<String>) -> ReapOutcome {
     stop_target_within(
         &ReapTarget {
@@ -206,31 +121,13 @@ pub(crate) async fn stop_process(pid: u32, start_id: Option<String>) -> ReapOutc
     .await
 }
 
-/// The give-up belt: when the supervisor abandons a worker id (the
-/// exhausted-failure verdict), no live process of THIS daemon may outlive
-/// it under that id. The zombie-holder incident proved the hole: a failure
-/// loop that spawned duplicates of one id gave up on the id while one of
-/// its processes - the first, healthy one - still lived and held the
-/// session's runtime lease; the registry row left with the give-up, so
-/// every later create found no resident, launched a fresh worker, and
-/// bounced off the orphan's lease with the "already active in <id>"
-/// refusal, forever. The belt sweeps the abandoned id's same-socket
-/// worker processes (the supervisor stamped every spawn's environment
-/// with its active-session id) with the boot reap's own identity-gated
-/// escalation, so the hold the daemon gave up on actually releases: the
-/// last crashed child is already provably gone (the failure loop watched
-/// it die), and a dead holder's lease self-heals on the next acquire -
-/// the sweep exists for the ones nobody is watching anymore.
-///
-/// Never touched: other daemons' workers (different supervisor socket),
-/// other sessions' workers (different active-session id), and any pid a
-/// live resident still owns. Non-Linux platforms have no /proc census
-/// here - the same limitation the boot reap documents.
+/// The give-up belt: when the supervisor abandons a worker id, no live process of THIS daemon
+/// may outlive it under that id (the zombie-holder incident). Never touched: other daemons'
+/// workers and any pid a live resident still owns.
 pub(crate) async fn reap_abandoned_workers(supervisor: &Arc<Supervisor>, worker_id: &str) {
     let socket_path = supervisor.options.socket_path.clone();
     // Belt over the env filter: a pid a LIVE resident still owns is never
-    // signaled, whatever its environment says (a wrong signal is
-    // unrecoverable; a missed sweep is).
+    // signaled, whatever its environment says.
     let mut protected = HashSet::new();
     for resident in supervisor.registry.list().await {
         let pid = resident.descriptor.lock().await.pid as u32;
@@ -260,8 +157,7 @@ pub(crate) async fn reap_abandoned_workers(supervisor: &Arc<Supervisor>, worker_
             .collect::<Vec<_>>(),
     )
     .await;
-    // The reaped leftovers' endpoint files leave with them (the same
-    // deterministic-name gate the boot reap applies).
+    // The reaped leftovers' endpoint files leave with them (the same gate as the boot reap).
     for (target, outcome) in outcomes {
         if let (Some(socket), ReapOutcome::Term | ReapOutcome::Kill) =
             (&target.worker_socket, outcome)
@@ -274,11 +170,8 @@ pub(crate) async fn reap_abandoned_workers(supervisor: &Arc<Supervisor>, worker_
 }
 
 /// Whether the pid still names the discovered process (the identity gate: a
-/// recycled pid is a different process and is never signaled). An
-/// UNVERIFIABLE identity never signals: the conservative liveness rule the
-/// lease uses (an unobservable owner counts as alive) is safe for lease
-/// retention, not for termination - a pid whose identity cannot be proven
-// must not receive SIGTERM or SIGKILL on liveness alone.
+/// recycled pid is never signaled). An UNVERIFIABLE identity never signals -
+/// safe for lease retention, not for termination.
 fn identity_current(target: &ReapTarget) -> bool {
     match &target.start_id {
         Some(expected) => {
@@ -288,18 +181,14 @@ fn identity_current(target: &ReapTarget) -> bool {
     }
 }
 
-/// Stop one target on the boot reap's budgets (the TS
-/// `stopWorkerUntracked` force shapes: a two-second TERM grace, a
-/// one-second kill verify — the boot's predecessor cleanup stays fast).
+/// Stop one target on the boot reap's fast budgets.
 async fn stop_target(target: &ReapTarget) -> ReapOutcome {
     stop_target_within(target, TERM_GRACE, KILL_VERIFY).await
 }
 
 /// Stop one target with explicit escalation budgets: gone check, SIGTERM,
-/// grace, SIGKILL, verify. The signals ride the kernel-held process
-/// handle (pidfd): a numeric pid recycled in the check-then-signal window
-/// must never receive the signal meant for the process that exited - the
-/// fd pins the exact process, whatever the pid table does afterwards.
+/// grace, SIGKILL, verify. The signals ride the kernel-held pidfd: a pid
+/// recycled in the check-then-signal window never receives the signal.
 async fn stop_target_within(
     target: &ReapTarget,
     term_grace: Duration,
@@ -358,18 +247,9 @@ async fn await_gone(target: &ReapTarget, budget: Duration) -> bool {
     }
 }
 
-/// The same-socket leftover workers, identified by the WORKER PROCESS
-/// SHAPE, never by the environment alone: the supervisor-socket env var
-/// propagates to EVERY process a session worker spawns (its kernel, its
-/// bash children, its tools' children - 223 processes on the mission box
-/// name the default socket), so an env-only match would kill a session's
-/// whole process tree at the next daemon boot. A leftover worker is a
-/// process that (1) runs the product's worker role (`worker` as its first
-/// argument - the exact argv the supervisor spawns, `prime-agent worker`),
-/// (2) whose supervisor socket env names THIS daemon's socket, and
-/// (3) whose own worker socket env names its endpoint - minus the pids
-/// this daemon's own descriptors name (the adoption pass's business).
-/// Linux-only (the /proc census); other platforms answer nothing.
+/// The same-socket leftover workers, identified by the WORKER PROCESS SHAPE,
+/// never by the environment alone: an env-only match would kill a session's
+/// whole process tree (the `readoption_wake` regression). Linux-only (/proc).
 #[cfg(target_os = "linux")]
 fn same_socket_worker_targets(
     socket_path: &Path,
@@ -382,17 +262,10 @@ fn same_socket_worker_targets(
         if pid == std::process::id() || protected.contains(&pid) {
             continue;
         }
-        // The identity captures BEFORE every /proc read (the abandoned-id
-        // filter included) and re-verifies AFTER the qualification: a
-        // worker that exits mid-census and whose pid the kernel
-        // immediately recycles must never leave a target behind under
-        // the REPLACEMENT'S identity - a recycled worker of ANOTHER
-        // session would otherwise pass the late identity check with its
-        // own argv/exe/socket and take the abandoned id's signal.
+        // The identity captures BEFORE every /proc read and re-verifies AFTER the
+        // qualification: a recycled pid must never leave a target under the REPLACEMENT'S identity.
         let start_id = crate::lease::get_process_start_id(pid);
-        // The abandoned-id filter (the give-up belt's target class): only
-        // workers whose active-session env names the given-up id. `None`
-        // keeps the boot reap's whole-census shape.
+        // The abandoned-id filter: workers whose env names the given-up id; `None` = whole census.
         if let Some(active_session) = active_session {
             if !proc_environ_names_active_session(pid, active_session) {
                 continue;
@@ -404,12 +277,8 @@ fn same_socket_worker_targets(
         if !is_worker_argv(&argv) {
             continue;
         }
-        // The executable check rides the UNFORGEABLE identity: argv[0] can
-        // be forged (`exec -a prime-agent sleep worker 300` inherits the
-        // env and passes the argv gate), while /proc/<pid>/exe names the
-        // binary the kernel actually loaded. An unreadable exe link
-        // (permission, a dying process) is never a target - the
-        // conservative no-signal default.
+        // The executable check rides the UNFORGEABLE identity: argv[0] can be forged
+        // (`exec -a`); /proc/<pid>/exe names the binary the kernel actually loaded.
         if !exe_is_product_binary(pid) {
             continue;
         }
@@ -423,19 +292,12 @@ fn same_socket_worker_targets(
         }) {
             continue;
         }
-        // The post-qualification identity re-check: the pid must still
-        // name the same process the census qualified.
+        // The post-qualification identity re-check: the pid must still name the qualified process.
         if crate::lease::get_process_start_id(pid).as_deref() != start_id.as_deref() {
             continue;
         }
-        // The KILL decision rests on the worker role and the same-socket
-        // identity alone - a leftover whose own endpoint file was already
-        // removed (or whose env carries a stale socket-dir path from a
-        // TMPDIR change between boots) must still be reaped: it holds its
-        // session lease regardless of its endpoint file. The endpoint path
-        // only gates the unlink: the cleanup runs only for a path that is
-        // one of THIS supervisor's deterministic worker-socket names, so
-        // a forged or foreign value never names an arbitrary file.
+        // The KILL decision rests on the worker role and the same-socket identity alone - a
+        // leftover without its endpoint file still holds its lease.
         let worker_socket = environ
             .iter()
             .find_map(|entry| entry.strip_prefix(&format!("{}=", crate::worker::WORKER_SOCKET_ENV)))
@@ -452,11 +314,8 @@ fn same_socket_worker_targets(
 }
 
 /// One socket value's identity AS THE TARGET PROCESS SEES IT: a relative
-/// spelling resolves against the PROCESS's working directory (read from
-/// /proc/<pid>/cwd - never this daemon's), then normalizes. Two daemons
-/// started from different directories with the same relative socket
-/// argument are DIFFERENT sockets; a worker's inherited relative spelling
-/// resolves exactly where its daemon resolved it.
+/// spelling resolves against the PROCESS's working directory - the same
+/// relative argument from different directories names DIFFERENT sockets.
 #[cfg(target_os = "linux")]
 fn socket_spelling_of(pid: u32, value: &str) -> String {
     let path = Path::new(value);
@@ -469,12 +328,8 @@ fn socket_spelling_of(pid: u32, value: &str) -> String {
     }
 }
 
-/// The product's own binary names (the roles run from these): `prime-agent`
-/// (the release/install name) and `pa-daemon` (the workspace binary, also
-/// what the harnesses execute). A reap target's executable must be one of
-/// these - a session's arbitrary long-running command (`python worker`, a
-/// tool server) never qualifies, whatever it inherited.
-/// Unix only: the same linux/unix callers as [`is_worker_argv`].
+/// The product's own binary names: `prime-agent` (release/install) and
+/// `pa-daemon` (the workspace binary). Unix only, as [`is_worker_argv`].
 #[cfg(unix)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn is_product_binary(exe: &str) -> bool {
@@ -485,12 +340,7 @@ pub(crate) fn is_product_binary(exe: &str) -> bool {
 }
 
 /// Whether a command line is the product's worker role: a product binary
-/// with `worker` as its first argument (`prime-agent worker`,
-/// `pa-daemon worker` - the exact argv the supervisor spawns). The two
-/// hazard classes this gate exists for: a session kernel, bash child, or
-/// tool server that merely INHERITED the worker env, and a user's
-/// same-socket command that happens to carry a `worker` argument.
-/// Unix only: the linux census and the unix tests are its users.
+/// with `worker` as its first argument. Unix only.
 #[cfg(unix)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn is_worker_argv(argv: &[String]) -> bool {
@@ -498,11 +348,8 @@ pub(crate) fn is_worker_argv(argv: &[String]) -> bool {
         && argv.get(1).map(String::as_str) == Some("worker")
 }
 
-/// Whether a path is one of THIS supervisor's worker endpoints: under the
-/// shared socket dir, named with this socket's own key
-/// (`worker-<hash12(supervisor socket)>-*.sock`) - the deterministic name
-/// `worker_socket_path` mints, so a foreign or forged value never matches
-/// and the reap's endpoint unlink stays inside the product's namespace.
+/// Whether a path is one of THIS supervisor's worker endpoints: under the shared socket
+/// dir, named with this socket's own key - a foreign value never matches.
 #[cfg(target_os = "linux")]
 pub(crate) fn is_our_worker_socket(path: &str, supervisor_socket: &Path) -> bool {
     let Some(name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
@@ -524,10 +371,7 @@ fn same_socket_worker_targets(
     Vec::new()
 }
 
-/// Whether one process's environment names `active_session` as its worker
-/// active-session id (the supervisor stamps
-/// `WORKER_ACTIVE_SESSION_ID_ENV` on every spawn; an unreadable
-/// environment never matches - the conservative no-signal default).
+/// Whether one process's environment names `active_session` (unreadable never matches).
 #[cfg(target_os = "linux")]
 fn proc_environ_names_active_session(pid: u32, active_session: &str) -> bool {
     read_proc_environ(pid).is_some_and(|environ| {
@@ -549,11 +393,8 @@ fn proc_environ_names_active_session(_pid: u32, _active_session: &str) -> bool {
     false
 }
 
-/// The wedged supervisors of this socket path: a supervisor-shaped process
-/// whose command line names this socket (the CLI's `--mode daemon
-/// --daemon-socket <path>` product form, or the `supervisor --socket <path>`
-/// pa-daemon form), excluding this process. A healthy predecessor can never
-/// be here: its listener would have refused this daemon's bind.
+/// The wedged supervisors of this socket path, excluding this process. A healthy
+/// predecessor never reaches here: its listener refused this daemon's bind.
 #[cfg(target_os = "linux")]
 fn same_socket_supervisor_targets(socket_path: &Path) -> Vec<ReapTarget> {
     let socket = normalize_socket_spelling(socket_path);
@@ -562,22 +403,16 @@ fn same_socket_supervisor_targets(socket_path: &Path) -> Vec<ReapTarget> {
         if pid == std::process::id() {
             continue;
         }
-        // Identity-first capture (the same anti-recycling order as the
-        // worker census).
+        // Identity-first capture, as the worker census.
         let start_id = crate::lease::get_process_start_id(pid);
         let Some(mut argv) = read_proc_argv(pid) else {
             continue;
         };
-        // A RELATIVE socket token resolves against the PROCESS's own
-        // working directory (never this daemon's): two daemons started
-        // from different directories with the same relative argument are
-        // different sockets.
         resolve_relative_socket_tokens(pid, &mut argv);
         if !supervisor_argv_names_socket(&argv, &socket) {
             continue;
         }
-        // Same unforgeable-exe gate as the worker census: a forged argv
-        // never carries a signal.
+        // Same unforgeable-exe gate as the worker census.
         if !exe_is_product_binary(pid) {
             continue;
         }
@@ -600,10 +435,7 @@ fn same_socket_supervisor_targets(_socket_path: &Path) -> Vec<ReapTarget> {
     Vec::new()
 }
 
-/// Resolve the socket-flag tokens that are RELATIVE against the target
-/// process's own working directory (`/proc/<pid>/cwd`): the supervisor
-/// match compares absolute identities, and a relative token means what
-/// the TARGET resolved it to mean, not what this daemon's cwd would.
+/// Resolve RELATIVE socket-flag tokens against the target process's own working directory.
 #[cfg(target_os = "linux")]
 fn resolve_relative_socket_tokens(pid: u32, argv: &mut [String]) {
     let Ok(cwd) = std::fs::read_link(format!("/proc/{pid}/cwd")) else {
@@ -618,14 +450,9 @@ fn resolve_relative_socket_tokens(pid: u32, argv: &mut [String]) {
     }
 }
 
-/// Whether a command line is a supervisor of `socket`: a product binary
-/// (`prime-agent`/`pa-daemon`) running either the product form (`--mode
-/// daemon --daemon-socket <socket>`) or the pa-daemon binary form
-/// (`supervisor --socket <socket>`). The executable gate is
-/// load-bearing: an arbitrary inherited-socket command that merely carries
-/// the argument tokens is never a target. Unix only: the spelling it
-/// compares against is the unix socket spelling, and every caller (the
-/// linux supervisor census, the unix tests) sits behind a unix gate.
+/// Whether a command line is a supervisor of `socket`: a product binary running either
+/// the product form (`--mode daemon --daemon-socket <socket>`) or `supervisor --socket <socket>`.
+/// The executable gate is load-bearing. Unix only.
 #[cfg(unix)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn supervisor_argv_names_socket(argv: &[String], socket: &str) -> bool {
@@ -640,12 +467,8 @@ pub(crate) fn supervisor_argv_names_socket(argv: &[String], socket: &str) -> boo
             .find(|pair| pair[0] == flag)
             .map(|pair| pair[1].as_str())
     };
-    // Both spellings normalize: the caller passes this daemon's socket in
-    // its normalized form, and a predecessor's argv token may carry the
-    // symlink or `..` spelling of the very same socket. A RELATIVE token
-    // stays unmatched here (the argv-only view cannot know the
-    // predecessor's working directory); the scan resolves it against the
-    // process's /proc/<pid>/cwd before calling.
+    // Both spellings normalize: an argv token may carry the symlink or `..` spelling of
+    // the same socket; a RELATIVE token stays unmatched here.
     let names_socket = |named: &str| {
         if Path::new(named).is_absolute() {
             normalize_socket_spelling(Path::new(named)) == socket
@@ -675,20 +498,15 @@ fn is_unix_socket_file(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_socket())
 }
 
-/// Windows endpoints are named pipes, not files: no path the reap can
-/// see is ever a socket file, so the endpoint-unlink gate never fires
-/// (the TS `daemon-ps` census is empty on win32 for the same reason).
+/// Windows endpoints are named pipes, not files: the endpoint-unlink gate never fires.
 #[cfg(not(unix))]
 fn is_unix_socket_file(_path: &Path) -> bool {
     false
 }
 
 /// The pids the reap must never touch: the live-worker descriptors this
-/// SOCKET identity owns, across every raw-spelling directory on disk.
-/// (Discovery matches the normalized socket; this reads the same identity
-/// out of each descriptor's `supervisorSocketPath`, so a live
-/// crash-restart worker under a predecessor's equivalent spelling stays
-/// protected.)
+/// SOCKET identity owns. The descriptor directories are keyed by the RAW
+/// spelling each daemon started with, so every spelling directory is read.
 #[cfg(target_os = "linux")]
 fn protected_worker_pids(agent_dir: &Path, socket_path: &Path) -> HashSet<u32> {
     let ours = normalize_socket_spelling(socket_path);
@@ -717,13 +535,8 @@ fn protected_worker_pids(agent_dir: &Path, socket_path: &Path) -> HashSet<u32> {
             if descriptor.version != 2 || descriptor.pid == 0 {
                 continue;
             }
-            // The same normalized-socket identity the worker discovery
-            // matches (the descriptor's supervisor socket path) - a
-            // RELATIVE spelling resolves against the WORKER's own working
-            // directory (/proc/<pid>/cwd), exactly as discovery resolves
-            // the inherited env value: a relative spelling is what the
-            // daemon that wrote the descriptor resolved it to mean, never
-            // what this daemon's cwd would.
+            // A RELATIVE spelling resolves against the WORKER's own cwd
+            // (/proc/<pid>/cwd), exactly as discovery resolves the inherited env value.
             let spelling =
                 match socket_spelling_of(descriptor.pid as u32, &descriptor.supervisor_socket_path)
                 {
@@ -734,8 +547,7 @@ fn protected_worker_pids(agent_dir: &Path, socket_path: &Path) -> HashSet<u32> {
                 continue;
             }
             // A tombstoned descriptor is DURABLE STOP INTENT: its worker
-            // is something to finish stopping, never to adopt - the reap
-            // is the executor.
+            // is something to finish stopping, never to adopt.
             if descriptor.stop_requested_at.is_some() {
                 continue;
             }
@@ -814,14 +626,11 @@ fn read_proc_environ(pid: u32) -> Option<Vec<String>> {
 }
 
 /// The UNFORGEABLE executable check for one pid: /proc/<pid>/exe names the
-/// binary the kernel loaded (argv[0] is forgeable via `exec -a`). An
-/// unreadable link answers false - the conservative no-signal default.
+/// binary the kernel loaded (argv[0] is forgeable via `exec -a`).
 #[cfg(target_os = "linux")]
 fn exe_is_product_binary(pid: u32) -> bool {
     std::fs::read_link(format!("/proc/{pid}/exe"))
-        // The kernel appends " (deleted)" to a replaced binary's exe link
-        // (an in-place upgrade while the worker lives) - the product
-        // binary is still the product binary.
+        // The kernel appends " (deleted)" to a replaced binary's exe link (in-place upgrade).
         .is_ok_and(|exe| {
             let name = exe.to_string_lossy();
             let name = name.trim_end_matches(" (deleted)");
@@ -872,11 +681,6 @@ mod tests {
         }
     }
 
-    /// The abandoned-id filter (the give-up belt's target class): only a
-    /// process whose environment names the given-up id as its worker
-    /// active-session matches. A `sleep` child inherits the test's env
-    /// (never the worker var), and one stamped with the env answers true
-    /// only for its own id.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_abandoned_id_filter_matches_the_stamped_env_only() {
@@ -912,10 +716,8 @@ mod tests {
             .as_ref()
             .expect("guard holds the child")
             .id();
-        // The stamp is readable only once execve completes: between fork
-        // and exec the child's environment area still holds the parent's
-        // (parallel-test load widens that window), so the read retries a
-        // bounded budget instead of racing the kernel.
+        // The stamp is readable only once execve completes: between fork and exec the
+        // environment area still holds the parent's, so the read retries a bounded budget.
         let stamped_matches = {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             loop {
@@ -943,13 +745,6 @@ mod tests {
         );
     }
 
-    /// A reaped process is provably gone after the escalation: the reap's
-    /// own child (the same contract the CLI stop test uses) dies inside the
-    /// TERM grace and reports Term. The signal rides the kernel-held pidfd
-    /// (the open itself proves the handle is available on this kernel).
-    /// LINUX ONLY: the stop is real only where the pidfd opens - elsewhere
-    /// `stop_target` is the never-signal no-op, and the live `sleep` child
-    /// would never exit for the wait.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_real_process_stops_inside_the_term_grace() {
@@ -967,15 +762,8 @@ mod tests {
         assert_eq!(outcome, ReapOutcome::Term, "sleep must exit on SIGTERM");
     }
 
-    /// A worker that ignores the graceful stop dies to the intentional
-    /// stop's escalation: SIGTERM pends through the whole TERM grace, the
-    /// SIGKILL lands inside the post-kill hard deadline, and the stop
-    /// reports the kill. The `bash` ignores SIGTERM without spawning any
-    /// child (a leaked grandchild would outlive the guard's kill); its
-    /// marker file is the readiness barrier — a TERM that lands during
-    /// the shell's own startup kills it under the default disposition
-    /// before the trap line ever runs. LINUX ONLY: the signals ride the
-    /// pidfd, which opens only where the kernel provides it.
+    /// The `bash` ignores SIGTERM without spawning a child (a leaked grandchild would outlive
+    /// the guard's kill); its marker file is the readiness barrier.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_term_ignoring_process_dies_to_the_stop_escalation() {
@@ -1004,13 +792,6 @@ mod tests {
         );
     }
 
-    /// A SIGKILL-survivor (a stopped, unkillable task) reports Survived -
-    /// the boot log's honest line - and never claims a stop it did not
-    /// perform. A `sleep` in its own process group, stopped with SIGSTOP:
-    /// SIGTERM/`kill` cannot be delivered while it is stopped... SIGKILL
-    /// CAN (it cannot be caught, blocked, or ignored - but a STOPPED task
-    /// still answers SIGKILL immediately), so this verifies the dead-signal
-    /// path instead: an un-signaled pid (0) reports `AlreadyGone`.
     #[tokio::test]
     async fn a_vanished_pid_reports_already_gone() {
         let mut child = std::process::Command::new("true")
@@ -1021,11 +802,6 @@ mod tests {
         assert_eq!(stop_target(&target(pid)).await, ReapOutcome::AlreadyGone);
     }
 
-    /// The identity gate: a recycled pid (a different process now holding
-    /// the number) is never signaled - the discovery's start id decides.
-    /// An UNVERIFIABLE identity never signals either: the conservative
-    /// liveness rule the lease uses is safe for lease retention, not for
-    /// termination.
     #[tokio::test]
     async fn a_recycled_pid_is_never_signaled() {
         let mut child = std::process::Command::new("sleep")
@@ -1055,9 +831,6 @@ mod tests {
         let _ = child.wait();
     }
 
-    /// The worker argv gate (the env-propagation hazard): only the product's
-    /// worker role matches - a kernel, a bash child, or a tool server that
-    /// merely INHERITED the worker environment never does.
     #[test]
     fn worker_argv_shapes() {
         let worker = ["/bin/prime-agent", "worker"]
@@ -1116,16 +889,9 @@ mod tests {
         );
     }
 
-    /// The unforgeable-exe gate: a forged argv (`exec -a prime-agent sleep
-    /// worker 300`) never passes - the kernel's /proc/<pid>/exe link names
-    /// the real binary. (The live check runs per-pid in the census; the
-    /// helper is exercised through the product-binary predicate it reads.)
     #[cfg(target_os = "linux")]
     #[test]
     fn the_exe_gate_reads_the_kernel_binary() {
-        // A sleep process's exe link is /usr/bin/sleep (or a resolved
-        // alias) - never a product binary: the gate answers false for it
-        // and true only for the product binaries.
         let mut child = std::process::Command::new("sleep")
             .arg("2")
             .spawn()
@@ -1138,14 +904,8 @@ mod tests {
         let _ = child.wait();
     }
 
-    /// The replaced-binary gate: the kernel appends " (deleted)" to an
-    /// in-place-upgraded binary's exe link - the product binary is still
-    /// the product binary (a leftover of the replaced build is still a
-    /// leftover worker of this socket).
     #[test]
     fn the_exe_gate_accepts_replaced_binaries() {
-        // The predicate is the basename check the gate reads; simulate the
-        // kernel's deleted-suffix spelling.
         let replaced = "/opt/prime-agent/bin/prime-agent (deleted)";
         assert!(
             is_product_binary(replaced.trim_end_matches(" (deleted)")),
@@ -1153,9 +913,6 @@ mod tests {
         );
     }
 
-    /// The supervisor socket match normalizes BOTH spellings: a
-    /// predecessor started with a `..` or symlink spelling of this very
-    /// socket is still a wedged same-socket predecessor.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_supervisor_match_normalizes_both_spellings() {
@@ -1192,10 +949,6 @@ mod tests {
         );
     }
 
-    /// The endpoint gate: only this supervisor's deterministic worker-socket
-    /// names match - a foreign path, another socket's key, or a name
-    /// outside the shared socket dir never does (the reap's unlink stays
-    /// inside the product's endpoint namespace).
     #[cfg(target_os = "linux")]
     #[test]
     fn our_worker_socket_names_only() {
@@ -1224,8 +977,6 @@ mod tests {
         );
     }
 
-    /// The supervisor argv shape: both spawn forms name their socket, and
-    /// unrelated daemons (other sockets, plain CLIs) never match.
     #[test]
     fn supervisor_argv_shapes() {
         let product = [

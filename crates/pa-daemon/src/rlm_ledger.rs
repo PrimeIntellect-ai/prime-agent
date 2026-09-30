@@ -29,13 +29,6 @@ use serde_json::{json, Value};
 use crate::lease::canonical_session_path;
 use crate::util::now_iso;
 
-// The read-back machinery (the wire record grammar, the line parser, the
-// replay state + stat-identity cache records, the edge join keys, the
-// path canonicalizers, and the `live_edges` liveness resolver with its
-// session-artifacts index) moved to the child module at the same tree
-// position (rlm_ledger::replay); the use-binding keeps the facade
-// impl's bare-name resolution (the `replay`/`new`/`rlm_ledger_path`/
-// `edge_is_live`/`live_edges` callers).
 mod replay;
 
 use replay::{
@@ -43,14 +36,6 @@ use replay::{
     LedgerRecord, LivePathResolver, ReplaySnapshot, ReplayState,
 };
 
-// The legacy-registry concern (the pre-ledger per-parent registry
-// reader, its bounded header-line probe, and the per-child display
-// sidecar entry + atomic writer) moved to the child module at the same
-// tree position (rlm_ledger::legacy_registry); the re-exports keep the
-// facade's paths stable (rlm_roster.rs, update_roster.rs, and
-// supervisor/{adoption,worker_lifecycle}.rs), the pub(crate) binding
-// keeps the seed caller resolving, and the cfg(test) binding keeps the
-// tests glob resolving without a non-test unused import.
 mod legacy_registry;
 
 pub(crate) use legacy_registry::read_legacy_registry;
@@ -60,10 +45,6 @@ pub use legacy_registry::{
     read_rlm_subagent_display, write_rlm_subagent_display, LegacyRlmSubagentEntry,
     RlmSubagentDisplayEntry,
 };
-
-// The test mass (the ledger battery) moved to the child module at the
-// same tree position (rlm_ledger::tests); the #[cfg(test)] decl rides
-// at the facade tail.
 
 /// Ledger files live under `<agent-dir>/rlm-ledger/`, one per sessions dir.
 pub const RLM_LEDGER_DIR: &str = "rlm-ledger";
@@ -82,7 +63,6 @@ pub enum RlmLedgerDeleteReason {
 }
 
 impl RlmLedgerDeleteReason {
-    /// The wire names (`user`, `parent-teardown`, `revoked`, `gc`).
     #[must_use]
     pub fn from_wire(value: &str) -> Option<Self> {
         match value {
@@ -114,15 +94,12 @@ pub struct RlmLedgerEdge {
     pub depth: u32,
     pub name: String,
     pub deleted: Option<RlmLedgerDeleteReason>,
-    /// The child's captured own usage at deletion: the amendment delete
-    /// record's durable snapshot (TS `SessionUsageSummary` shape), which
-    /// keeps a tombstoned child's spend billable after its transcript is
-    /// gone. `None` on legacy tombstones and live edges.
+    /// The child's captured own usage at deletion, so a tombstoned child's
+    /// spend stays billable; `None` on legacy tombstones and live edges.
     pub deleted_usage: Option<crate::session_usage::SessionUsageSummary>,
 }
 
-/// Inputs for `append_spawn` (validated like a record the reader would
-/// refuse to read back).
+/// Inputs for `append_spawn` (validated like a record the reader would refuse to read back).
 #[derive(Debug, Clone)]
 pub struct RlmSpawnInput {
     pub child_id: String,
@@ -132,10 +109,8 @@ pub struct RlmSpawnInput {
     pub name: String,
 }
 
-/// The per-sessions-dir spawn ledger. Reads are guarded by a file stat
-/// snapshot; the first operation seeds a missing ledger from the legacy
-/// per-parent registries (a seeding failure degrades to an empty ledger and
-/// is never fail-closed).
+/// The per-sessions-dir spawn ledger. Reads are guarded by a file stat snapshot; a missing ledger
+/// is seeded from the legacy registries (seed failure degrades to empty, never fail-closed).
 pub struct RlmSpawnLedger {
     path: PathBuf,
     agent_dir: PathBuf,
@@ -145,8 +120,8 @@ pub struct RlmSpawnLedger {
     log: Box<dyn Fn(&str) + Send + Sync>,
 }
 
-/// Ledger path for one sessions dir (TS `rlmLedgerPath`): a 16-hex sha256 of
-/// the canonical sessions dir under `<agent-dir>/rlm-ledger/`.
+/// Ledger path for one sessions dir: a 16-hex sha256 of the canonical
+/// sessions dir under `<agent-dir>/rlm-ledger/`.
 #[must_use]
 pub fn rlm_ledger_path(agent_dir: &Path, sessions_dir: &Path) -> PathBuf {
     let canonical = canonicalize_dir(sessions_dir);
@@ -164,9 +139,8 @@ impl RlmSpawnLedger {
     ) -> Self {
         Self {
             path: rlm_ledger_path(agent_dir, sessions_dir),
-            // The artifact tree the path resolver walks anchors to the
-            // canonical agent dir (the same realpath form the sessions
-            // dir takes), so resolved edges carry one path form.
+            // Canonical agent dir: the resolver's tree anchor takes the
+            // same realpath form as the sessions dir (one path form).
             agent_dir: canonicalize_dir(agent_dir),
             canonical_sessions_dir: canonicalize_dir(sessions_dir),
             seed_attempted: AtomicBool::new(false),
@@ -184,7 +158,7 @@ impl RlmSpawnLedger {
     }
 
     /// Record a spawn admission. The child session path must be unique among
-    /// live edges (a per-process advisory check, exactly like the TS writer).
+    /// live edges (a per-process advisory check).
     ///
     /// # Errors
     ///
@@ -238,8 +212,7 @@ impl RlmSpawnLedger {
     ///
     /// # Errors
     ///
-    /// Returns an error when the rename record cannot be appended (the
-    /// ledger directory, open, serialization, write, or sync fails).
+    /// Returns an error when the rename record cannot be appended.
     pub fn append_rename(&self, child_id: &str, child: &str, name: &str) -> Result<()> {
         let child_path = canonical_session_path(Path::new(child));
         self.append_record(&json!({
@@ -281,9 +254,7 @@ impl RlmSpawnLedger {
     ///
     /// # Errors
     ///
-    /// Returns an error when the tombstone record cannot be appended
-    /// (the ledger directory, open, serialization, write, or sync
-    /// fails).
+    /// Returns an error when the tombstone record cannot be appended.
     pub fn append_delete(
         &self,
         child_id: &str,
@@ -301,20 +272,12 @@ impl RlmSpawnLedger {
         }))
     }
 
-    /// The deletion's durable usage amendment (TS has no equivalent: its
-    /// bucket re-reads the tombstoned child's transcript, which a normal
-    /// delete removes - the Macroscope race). The amendment is a second
-    /// delete record for the same edge carrying the captured own-usage
-    /// snapshot; replay's last-writer-wins merges it into the tombstoned
-    /// edge, so the spend survives the transcript's removal, a saved-
-    /// session delete, and daemon restarts.
+    /// The deletion's durable usage amendment (deliberate TS divergence: TS re-reads the
+    /// tombstoned transcript, which its delete removes): the captured usage rides a second record.
     ///
     /// # Errors
     ///
-    /// Returns an error when the usage snapshot cannot be serialized or
-    /// the tombstone record cannot be appended; a snapshot replay would
-    /// reject (a non-finite or negative cost) rides as absent — the
-    /// bare tombstone still lands.
+    /// Returns an error when the snapshot cannot be serialized or the tombstone cannot be appended.
     pub fn append_delete_with_usage(
         &self,
         child_id: &str,
@@ -348,14 +311,12 @@ impl RlmSpawnLedger {
         }))
     }
 
-    /// Tombstone every edge for one child session path (a path may hold
-    /// duplicate edges from raced or corrupt appends; a live one would
-    /// resurrect a later recreation at that path as a subagent).
+    /// Tombstone every edge for one child session path (duplicate edges from raced or corrupt
+    /// appends; a live one would resurrect a later recreation at that path as a subagent).
     ///
     /// # Errors
     ///
-    /// Returns an error when the replay fails or one of the tombstone
-    /// records cannot be appended.
+    /// Returns an error when the replay fails or one of the tombstone records cannot be appended.
     pub fn tombstone_child_path(
         &self,
         child: &str,
@@ -364,14 +325,12 @@ impl RlmSpawnLedger {
         self.tombstone_child_path_with_usage(child, reason, None)
     }
 
-    /// The saved-session delete's tombstone with the captured usage
-    /// snapshot (the file dies right after this, so the snapshot must ride
-    /// the tombstone: the bucket's lazy file fallback has nothing to read).
+    /// The saved-session delete's tombstone with the captured usage snapshot (the file dies right
+    /// after this, so the bucket's lazy file fallback has nothing to read).
     ///
     /// # Errors
     ///
-    /// Returns an error when the replay fails or one of the per-edge
-    /// tombstones cannot be appended.
+    /// Returns an error when the replay fails or a per-edge tombstone cannot be appended.
     pub fn tombstone_child_path_with_usage(
         &self,
         child: &str,
@@ -473,8 +432,7 @@ impl RlmSpawnLedger {
         };
         let add = |mut left: SessionUsageSummary, right: SessionUsageSummary| {
             // Saturating: the bucket feeds billable rollups — a huge
-            // snapshot must not panic in debug or wrap to an underbill in
-            // release (the same convention as every other usage sum).
+            // snapshot must not panic or wrap to an underbill in release.
             left.input_tokens = left.input_tokens.saturating_add(right.input_tokens);
             left.output_tokens = left.output_tokens.saturating_add(right.output_tokens);
             left.cost += right.cost;
@@ -575,14 +533,8 @@ impl RlmSpawnLedger {
             .collect())
     }
 
-    /// Live edges reconciled by liveness of their recorded endpoints: a
-    /// parent or child whose session file no longer exists drops the
-    /// edge. A recorded path whose file MOVED (a storage-root migration,
-    /// an artifacts re-parenting) resolves through its durable session id
-    /// first — the sessions dir and the session-artifacts tree hold the
-    /// same session under a different root — and the returned edge
-    /// carries the resolved path, so a restart-era child never anchors to
-    /// a stale path. Only a session with no live file anywhere is dead.
+    /// Live edges reconciled by liveness of their recorded endpoints: a dead endpoint drops the
+    /// edge; a MOVED path resolves through its durable session id first.
     ///
     /// # Errors
     ///
@@ -772,10 +724,8 @@ impl RlmSpawnLedger {
                     };
                     if let Some(at) = at {
                         state.edges[at].deleted = Some(reason);
-                        // The snapshot is sticky: a re-tombstone without a
-                        // usage block (an idempotent retry, a bulk path
-                        // tombstone) never clears a captured snapshot; a
-                        // fresh capture replaces it (last writer wins).
+                        // The snapshot is sticky: a re-tombstone without a usage
+                        // block never clears it; a fresh capture replaces it.
                         if let Some(usage) = usage {
                             state.edges[at].deleted_usage = Some(usage);
                         }
@@ -829,11 +779,8 @@ impl RlmSpawnLedger {
         Ok(())
     }
 
-    /// Seed a missing ledger from the legacy per-parent registries, then
-    /// publish atomically: the ledger file only exists once the seed is
-    /// complete, so an interrupted seed leaves nothing to mis-read, and a
-    /// concurrent append wins over the seed (its data is fresher than the
-    /// registries).
+    /// Seed a missing ledger from the legacy per-parent registries, then publish atomically (an
+    /// interrupted seed leaves nothing to mis-read; a concurrent append wins).
     fn seed(&self) -> Result<()> {
         if self.path.exists() {
             return Ok(());
@@ -869,8 +816,8 @@ impl RlmSpawnLedger {
                 }
                 visited.push(child_path.clone());
                 // A registry depth < 1 (legacy 0-depth entries exist in real
-                // data) is unwritable under the spawn invariants; derive
-                // parent depth + 1 instead of skipping the edge.
+                // data) is unwritable; derive parent depth + 1 instead of
+                // skipping the edge.
                 let child_depth = if entry.rlm_depth >= 1 {
                     entry.rlm_depth
                 } else {

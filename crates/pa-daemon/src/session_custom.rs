@@ -1,22 +1,19 @@
-//! The custom-message & session-command surface (protocol breadth wave
-//! b4): the worker arms for `append_custom_message`, `restore_next_turn`,
-//! `restore_actions`, `refine`, and `reload`
-//! (TS daemon-mode cases). Wire contracts are TS-verbatim; the durable rows
-//! and broadcasts go through the same paths the turn runner uses.
+//! The custom-message & session-command surface: the worker arms for
+//! `append_custom_message`, `restore_next_turn`, `restore_actions`, `refine`,
+//! and `reload`. Wire contracts are TS-verbatim; the durable rows and
+//! broadcasts go through the same paths the turn runner uses.
 
 use serde_json::{json, Value};
 
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::worker::Worker;
 
-/// The session-action recovery snapshot format this port restores (TS
-/// `SESSION_ACTION_RECOVERY_FORMAT_VERSION`).
+/// The session-action recovery snapshot format.
 const SESSION_ACTION_RECOVERY_FORMAT_VERSION: u64 = 1;
 
 impl Worker {
-    /// `append_custom_message { message }` (TS `session.sendCustomMessage`
-    /// default path): append the custom row durably, then broadcast its
-    /// `message_start`/`message_end` pair.
+    /// `append_custom_message { message }`: append the custom row durably, then
+    /// broadcast its `message_start`/`message_end` pair.
     pub(crate) fn handle_append_custom_message(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("append_custom_message") {
             return response;
@@ -33,10 +30,8 @@ impl Worker {
         response_success(None, "append_custom_message", None)
     }
 
-    /// `restore_next_turn { messages }` (TS
-    /// `restorePendingNextTurnMessages`): park the custom rows; the next
-    /// delivered turn replays them as prefix rows, in order, before the
-    /// accepted prompt.
+    /// `restore_next_turn { messages }`: park the custom rows; the next delivered
+    /// turn replays them as prefix rows, in order, before the accepted prompt.
     pub(crate) fn handle_restore_next_turn(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("restore_next_turn") {
             return response;
@@ -65,11 +60,8 @@ impl Worker {
         response_success(None, "restore_next_turn", None)
     }
 
-    /// `restore_actions { snapshot }` (TS `restoreSessionActions`): the
-    /// crash-recovery snapshot of queued session actions. The TS-verbatim
-    /// validation errors fail the command; every restored action lands in
-    /// its delivery lane (steering for `next_turn_boundary`, follow-up
-    /// for `when_run_idle`) and the response carries the restored count.
+    /// `restore_actions { snapshot }`: the crash-recovery snapshot of queued session
+    /// actions; the TS-verbatim validation errors fail the command.
     pub(crate) fn handle_restore_actions(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("restore_actions") {
             return response;
@@ -102,8 +94,7 @@ impl Worker {
                 None,
             );
         };
-        // Validation pass first (TS validates every action before
-        // admitting any): ids must be unique within the snapshot, and a
+        // Validation pass first: ids must be unique within the snapshot, and a
         // turn payload's delivery records must correlate to their action.
         let mut seen_ids = std::collections::HashSet::new();
         for action in actions {
@@ -142,12 +133,9 @@ impl Worker {
                     );
                 }
             }
-            // The reserved child-status kinds are daemon provenance (the
-            // queue-fold anti-spoof): a restored custom row claiming one
-            // is caller-supplied on this surface — answered loudly, the
-            // whole snapshot refused before any action admits. The
-            // daemon-written recovery journal is the only legitimate
-            // source of a parked reserved-kind row.
+            // The reserved child-status kinds are daemon provenance (the queue-fold
+            // anti-spoof): a restored row claiming one refuses the whole snapshot
+            // before any action admits; only the recovery journal may park one.
             if let Some(row) = payload.get("customMessage") {
                 if crate::child_status_notices::is_reserved_child_status_custom_type(row) {
                     return response_failure(
@@ -162,9 +150,8 @@ impl Worker {
                 }
             }
         }
-        // Restore pass: each action lands in its delivery lane (TS
-        // `_deliveryPolicy`: `next_turn_boundary` is the steering
-        // schedule, `when_run_idle` the follow-up one).
+        // Restore pass: each action lands in its delivery lane —
+        // `next_turn_boundary` is the steering schedule, `when_run_idle` the follow-up one.
         let restored = {
             let mut core = self.core.lock().unwrap();
             for action in actions {
@@ -191,17 +178,9 @@ impl Worker {
                         }
                         _ => crate::worker::QueuePriority::Human,
                     },
-                    // TS `restoreSessionActions` restores the labeled
-                    // preview with the payload (`...(recovered.payload.preview
-                    // ? { preview: recovered.payload.preview } : {})`), so
-                    // a restored heartbeat keeps its `Heartbeat prompt:`
-                    // queue row instead of falling back to the lane-labeled
-                    // raw text.
-                    // TS truthiness (`...(recovered.payload.preview ? {
-                    // preview: recovered.payload.preview } : {})`):
-                    // an empty-string preview restores as `None`, so the
-                    // queue row falls back to the action's text instead of
-                    // rendering blank.
+                    // The labeled `payload.preview` restores, so a heartbeat keeps
+                    // its `Heartbeat prompt:` queue row; TS truthiness: an
+                    // empty-string preview restores as `None`, falling back to the text.
                     preview: payload
                         .get("preview")
                         .and_then(Value::as_str)
@@ -217,11 +196,8 @@ impl Worker {
                         .filter(|message| !message.is_null())
                         .cloned(),
                     agent_message: None,
-                    // TS `restoreSessionActions` restores the action's
-                    // queue key (`...(recovered.queueKey ? { queueKey:
-                    // recovered.queueKey } : {})`), so a restored
-                    // heartbeat keeps its `heartbeat:<id>` replace-
-                    // instead-of-stack addressing.
+                    // The action's queue key restores, so a heartbeat keeps its
+                    // `heartbeat:<id>` replace-instead-of-stack addressing.
                     queue_key: action
                         .get("queueKey")
                         .and_then(Value::as_str)
@@ -229,19 +205,13 @@ impl Worker {
                     admission_id: None,
                     images: crate::worker::parse_prompt_images(payload),
                     done: None,
-                    // TS restores the action's own visibility flag
-                    // (`queueVisible: action.payload.queueVisible`);
-                    // the stored default is visible.
+                    // TS restores the action's own visibility flag; the stored default is visible.
                     queue_visible: payload
                         .get("queueVisible")
                         .and_then(Value::as_bool)
                         .unwrap_or(true),
-                    // TS restores the action's execution policy
-                    // (`executionPolicy`): the batch-gathering class maps
-                    // from its shape — `nextTurnContextTiming` "commit"
-                    // is the client-queued policy, "preparation" is the
-                    // direct-prompt hand-off. An absent policy restores
-                    // as the dominant queued class.
+                    // `nextTurnContextTiming` "commit" is the client-queued class,
+                    // "preparation" the direct hand-off; absent restores as queued.
                     policy: crate::worker::restored_turn_policy(payload),
                     forced_batch: false,
                 };
@@ -253,12 +223,9 @@ impl Worker {
             }
             actions.len()
         };
-        // TS records the worker recovery state once per successful restore
-        // with busy=true: restored lanes are undelivered live work. The
-        // claim must be true — the lane snapshot rides the same locked
-        // read as the verdict (one checkpoint), so a revived worker
-        // replays them and a concurrent queue clear cannot leave a
-        // stale snapshot behind.
+        // The recovery state records once per successful restore with busy=true:
+        // the lane snapshot rides the same locked read as the verdict, so a revived
+        // worker replays them and a concurrent queue clear cannot leave a stale snapshot.
         if restored > 0 {
             self.checkpoint_queue(crate::worker::QueueCheckpoint::Admitted {
                 operation: "actions_restored",
@@ -272,10 +239,8 @@ impl Worker {
         )
     }
 
-    /// `refine { instructions?, rollbackId?, global? }` (TS
-    /// `session.refine`): run the refinement (plan, apply, persist the
-    /// harness state), emit the durable outcome and notice rows, and
-    /// answer the `RefinementResult`.
+    /// `refine { instructions?, rollbackId?, global? }` (TS `session.refine`): run the
+    /// refinement, emit the durable outcome and notice rows, and answer the `RefinementResult`.
     pub(crate) async fn handle_refine(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("refine") {
             return response;
@@ -308,9 +273,8 @@ impl Worker {
                 return response_failure(None, "refine", &format!("{error:#}"), None);
             }
         };
-        // The refinement's durable rows: the TUI outcome, plus the
-        // model-facing notice when edits applied (TS emits both through
-        // the session's row flow).
+        // The refinement's durable rows: the TUI outcome, plus the model-facing
+        // notice when edits applied.
         if let Ok(typed) =
             serde_json::from_value::<pa_core::refinement::RefinementResult>(result.clone())
         {
@@ -341,12 +305,9 @@ impl Worker {
         response_success(None, "refine", Some(result))
     }
 
-    /// `reload` (TS `session.reload`): re-read the session's live inputs —
-    /// settings, provider auth, and the MCP user-server config. This port
-    /// resolves each of those per use (settings on every read, auth on
-    /// every model resolution, MCP user servers on every store resolve), so
-    /// the reload's observable state is already fresh and the command is
-    /// the TS success with no extra work to perform.
+    /// `reload`: re-read the session's live inputs — settings, provider auth,
+    /// the MCP user-server config. This port resolves each per use, so the
+    /// command answers the TS success.
     pub(crate) fn handle_reload(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("reload") {
             return response;
@@ -355,9 +316,8 @@ impl Worker {
     }
 }
 
-/// The wire `CustomMessage` form (TS `Pick<CustomMessage, "customType" |
-/// "content" | "display" | "details">` plus the row's timestamp): the
-/// durable row the session appends and broadcasts.
+/// The wire `CustomMessage` form plus the row's timestamp: the durable row
+/// the session appends and broadcasts.
 fn custom_message_value(message: Option<&Value>) -> Option<Value> {
     let message = message?.as_object()?;
     let custom_type = message.get("customType")?;
@@ -444,8 +404,6 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// `append_custom_message` records the durable custom row (the TS
-    /// `sendCustomMessage` default path) and rejects malformed messages.
     #[tokio::test]
     async fn append_custom_message_records_the_row() {
         let worker = created_worker().await;
@@ -575,9 +533,6 @@ mod tests {
         assert!(!response.success);
     }
 
-    /// `restore_actions` restores each action into its delivery lane and
-    /// answers the restored count; the TS-verbatim validation errors fail
-    /// the command without touching the lanes.
     #[tokio::test]
     async fn restore_actions_restores_and_validates() {
         let worker = created_worker().await;
@@ -783,11 +738,6 @@ mod tests {
         );
     }
 
-    /// The queue-fold anti-spoof on the restore surface: a custom row
-    /// claiming a reserved child-status kind is caller-supplied here, so
-    /// the whole snapshot is refused loudly before any action admits —
-    /// only the daemon-written recovery journal may restore a parked
-    /// reserved-kind row.
     #[tokio::test]
     async fn restore_actions_refuses_the_reserved_child_status_kinds() {
         let worker = created_worker().await;
@@ -844,10 +794,8 @@ mod tests {
         assert_eq!(lanes, (0, 0), "nothing parked from the refused snapshot");
     }
 
-    /// A restored action keeps its labeled preview (TS
-    /// `restoreSessionActions` restores `payload.preview`), so a restored
-    /// queued heartbeat still reads `Heartbeat prompt: <text>` in the
-    /// queue strip and still delivers as the `heartbeat_prompt` component.
+    /// A restored queued heartbeat still reads `Heartbeat prompt: <text>` and delivers as the
+    /// `heartbeat_prompt` component.
     #[tokio::test]
     async fn restore_actions_restores_the_labeled_preview() {
         let worker = created_worker().await;
@@ -905,8 +853,7 @@ mod tests {
             .await;
         assert!(response.success, "failed: {response:?}");
         assert_eq!(response.data, Some(json!({ "restored": 1 })));
-        // The queue strip serves the labeled preview (TS
-        // `queuedAgentMessagePreview`), not the lane-labeled raw text.
+        // The queue strip serves the labeled preview, not the lane-labeled raw text.
         let queue = worker.dispatch("get_queue", &json!({})).await;
         let data = queue.data.expect("queue data");
         assert_eq!(
@@ -926,15 +873,13 @@ mod tests {
                     .and_then(|row| row.get("customType")),
                 Some(&json!("heartbeat_prompt"))
             );
-            // The queue key rides the restored row (TS restores
-            // `recovered.queueKey`), so a later fire replaces it instead
-            // of stacking.
+            // The queue key rides the restored row, so a later fire replaces it instead of
+            // stacking.
             assert_eq!(item.queue_key.as_deref(), Some("heartbeat:hb-1"));
         }
 
-        // TS truthiness: an empty-string preview restores as `None`, so
-        // the queue row falls back to the action's text (never a blank
-        // row).
+        // TS truthiness: an empty-string preview restores as `None`, so the queue row falls back
+        // to the action's text.
         let plain_text = "recover me";
         let response = worker
             .dispatch(
@@ -981,9 +926,8 @@ mod tests {
         }
     }
 
-    /// `refine` on a session without refinement support answers the
-    /// failure the engine seam carries (the scripted harness has no
-    /// refiner).
+    /// The scripted harness has no refiner: `refine` answers the failure the engine seam
+    /// carries.
     #[tokio::test]
     async fn refine_surfaces_the_engine_failure() {
         let worker = created_worker().await;
@@ -1017,8 +961,6 @@ mod tests {
         );
     }
 
-    /// `reload` answers the TS success (the live inputs this port
-    /// re-reads are already fresh).
     #[tokio::test]
     async fn reload_answers_success() {
         let worker = created_worker().await;

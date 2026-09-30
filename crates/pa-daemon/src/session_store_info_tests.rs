@@ -112,11 +112,8 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
                             first_message = text;
                         }
                     }
-                    // TS `allMessagesText`: user and assistant text
-                    // content feeds the full-transcript search. The legacy
-                    // reference inlines the append (the product's helper
-                    // takes the fold's running char counter now), so the
-                    // oracle stays independent of the perf reshape.
+                    // User and assistant text content feeds the search; the
+                    // reference inlines the append, staying independent of the reshape.
                     if matches!(role, Some("user" | "assistant")) {
                         let text = message_text(message);
                         if !text.is_empty() {
@@ -137,10 +134,8 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
         }
     }
     let header = header?;
-    // Mirrors `build_info`: newest message timestamp, then the header's
-    // creation timestamp, then the file's mtime - never scan time. Zero is
-    // a real epoch timestamp; only the message arm filters it (a missing
-    // entry timestamp stamps 0, not activity). `None` renders blank.
+    // Mirrors `build_info`: newest message timestamp, then the header's creation
+    // timestamp, then the file's mtime - never scan time.
     let modified_ms = last_activity_ms
         .filter(|ms| *ms > 0)
         .or_else(|| crate::util::iso_to_unix_ms(&header.timestamp))
@@ -347,9 +342,7 @@ fn a_torn_trailing_line_folds_once_completed() {
         &[json!({"type":"session","id":"t","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"})],
     );
     // A torn trailing message - invalid JSON (the write is mid-line), no
-    // newline: the scan leaves it unconsumed and the row cannot fold it
-    // (TS snapshotSessionInfo's tornTail is lenient: a parse failure is
-    // skipped).
+    // newline: the scan leaves it unconsumed and the row cannot fold it.
     let torn_head = r#"{"type":"message","id":"torn","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"torn"#;
     {
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
@@ -383,8 +376,7 @@ fn a_same_size_rewrite_rescans_from_the_top() {
     );
     let first = read_session_info(&path).unwrap();
     assert_eq!(first.name.as_deref(), Some("before"));
-    // A same-size rewrite with different early content: the resume must not
-    // answer the stale row (TS resumes only strictly-grown files).
+    // A same-size rewrite with different early content: the resume must not answer the stale row.
     let line = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"after!"}).to_string();
     let before_line = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"before"}).to_string();
     assert_eq!(line.len(), before_line.len());
@@ -442,11 +434,8 @@ fn a_failed_prefix_check_rescans_from_byte_zero() {
     );
     let first = read_session_info(&path).unwrap();
     assert_eq!(first.name.as_deref(), Some("before"));
-    // An in-place rewrite of the consumed prefix's final line changes the
-    // resume tail window, so the grown-file path fails `prefix_intact` and
-    // must rescan from byte zero. A fresh scan that kept the shared cursor
-    // where `prefix_intact` left it would start mid-file, miss the session
-    // header, and return None (the bots' prefix-rewrite-then-append case).
+    // An in-place rewrite of the consumed prefix's final line changes the resume tail
+    // window, so the grown-file path fails `prefix_intact` and rescans from byte zero.
     let line = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"after!"}).to_string();
     let before_line = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"before"}).to_string();
     assert_eq!(line.len(), before_line.len());
@@ -622,9 +611,8 @@ fn a_valid_unterminated_final_line_folds_into_the_snapshot() {
         &path,
         &[json!({"type":"session","id":"u","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"})],
     );
-    // The final line is complete JSON with NO terminal newline: the row
-    // must fold it (TS snapshotSessionInfo's tornTail - the legacy
-    // str::lines oracle yields it too), without consuming it.
+    // The final line is complete JSON with NO terminal newline: the row must fold it
+    // without consuming it.
     let tail = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"tail-name"}).to_string();
     {
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
@@ -646,9 +634,8 @@ fn a_valid_unterminated_final_line_folds_into_the_snapshot() {
 #[test]
 fn zero_usage_states_are_capped_by_count_not_only_the_usage_budget() {
     let dir = test_dir();
-    // Zero-usage sessions: a timestamped user message each (no assistant
-    // usage block, so accounted entries stay 0 - only the count cap can
-    // evict; the message also passes the modified_ms > 0 store guard).
+    // Zero-usage sessions: a timestamped user message each (no assistant usage block, so
+    // only the count cap can evict; the message also passes the modified_ms > 0 store guard).
     for index in 0..(SESSION_SCAN_MAX_CACHED_STATES + 8) {
         let path = dir.join(format!("zero-{index}.jsonl"));
         append_rows(
@@ -661,8 +648,8 @@ fn zero_usage_states_are_capped_by_count_not_only_the_usage_budget() {
         let info = read_session_info(&path).unwrap();
         assert_eq!(info.message_count, 1);
     }
-    // The cache really populated past the cap and stayed capped: LRU-first
-    // eviction dropped the earliest-written files, the latest stay resident.
+    // The cache really populated past the cap and stayed capped: LRU-first eviction
+    // dropped the earliest-written files, the latest stay resident.
     let cache = super::session_info_cache().lock().unwrap();
     assert_eq!(
         super::SESSION_SCAN_MAX_CACHED_STATES,
@@ -724,12 +711,8 @@ fn scan_cache_recency_tracks_updates_and_removals_without_growth() {
     fs::remove_dir_all(dir).unwrap();
 }
 
-/// The old-record regression (the Mac bug's shape): a session created
-/// days ago whose messages carry no numeric timestamp. The fold's
-/// `modified` is the header's own creation timestamp - TS
-/// `getSessionModifiedDateFromLastActivity` - so the agents-view age
-/// column keeps reading the record's real age across re-enumeration
-/// (rescans and mtime cache busts), never a scan-time `now()`.
+/// The old-record regression (the Mac bug's shape): `modified` is the
+/// header's creation timestamp, never a scan-time `now()`.
 #[test]
 fn no_timestamp_record_modified_is_the_header_time_across_rescans() {
     let dir = test_dir();
@@ -740,14 +723,14 @@ fn no_timestamp_record_modified_is_the_header_time_across_rescans() {
             json!({"type":"session","id":"stub","timestamp":"2026-09-20T12:00:00.000Z","cwd":"/test","rlmDepth":1}),
         ],
     );
-    // A stamped mtime distinct from both the header time and the scan
-    // time: whichever value `modified` carries names its source.
+    // A stamped mtime distinct from both the header time and the scan time: whichever value
+    // `modified` carries names its source.
     filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(1_790_110_000, 0)).unwrap();
     let info = read_session_info(&path).unwrap();
     assert_eq!(info.created, "2026-09-20T12:00:00.000Z");
     assert_eq!(info.modified, "2026-09-20T12:00:00.000Z");
-    // The rescan (no-timestamp records never certify into the cache) and
-    // an mtime cache bust both keep the durable header value.
+    // The rescan (no-timestamp records never certify) and an mtime cache bust both keep the
+    // durable header value.
     assert_eq!(
         read_session_info(&path).unwrap().modified,
         "2026-09-20T12:00:00.000Z"
@@ -761,9 +744,7 @@ fn no_timestamp_record_modified_is_the_header_time_across_rescans() {
     fs::remove_dir_all(dir).unwrap();
 }
 
-/// A header timestamp no parser accepts: TS falls to `stats.mtime`, and
-/// the fold follows the file's own mtime - including after an mtime
-/// cache bust - never the scan time.
+/// TS falls to `stats.mtime` — including after an mtime cache bust — never the scan time.
 #[test]
 fn unparseable_header_modified_falls_back_to_the_file_mtime() {
     let dir = test_dir();
@@ -788,9 +769,6 @@ fn unparseable_header_modified_falls_back_to_the_file_mtime() {
     fs::remove_dir_all(dir).unwrap();
 }
 
-/// A record with real message timestamps keeps its live source: the
-/// newest user/assistant message timestamp wins over the header fallback
-/// and the file mtime.
 #[test]
 fn message_timestamps_still_win_over_the_header_fallback() {
     let dir = test_dir();
@@ -814,9 +792,8 @@ fn message_timestamps_still_win_over_the_header_fallback() {
     fs::remove_dir_all(dir).unwrap();
 }
 
-/// An impossible calendar date in the header (2026-02-31): the parser
-/// rejects it instead of normalizing it into March (TS `Date.parse`
-/// rejects it too), so the fold falls to the file's mtime.
+/// The parser rejects an impossible calendar date (2026-02-31) instead of normalizing it
+/// into March (TS `Date.parse` rejects it too).
 #[test]
 fn impossible_calendar_date_header_falls_back_to_the_file_mtime() {
     let dir = test_dir();
@@ -838,9 +815,7 @@ fn impossible_calendar_date_header_falls_back_to_the_file_mtime() {
     fs::remove_dir_all(dir).unwrap();
 }
 
-/// A real epoch mtime renders as the epoch date: a durable zero stays
-/// distinct from an unavailable value (blank), and neither is ever a
-/// fabricated scan-time age.
+/// A durable zero stays distinct from an unavailable value (blank).
 #[test]
 fn epoch_zero_mtime_renders_the_epoch_not_blank() {
     let dir = test_dir();
@@ -856,12 +831,6 @@ fn epoch_zero_mtime_renders_the_epoch_not_blank() {
     fs::remove_dir_all(dir).unwrap();
 }
 
-/// The corpus text reads the `content` span the typed parse borrows; the
-/// full-parse path (the legacy reference fold above) re-parses the entry
-/// and reads the same subtree through `message_text`. This matrix pins
-/// the two extractions together for every content shape the fold can
-/// meet on disk, then folds the same rows end to end: each row's text,
-/// the first-message pick, and the capped corpus must agree.
 #[test]
 fn content_borrow_matches_full_parse_across_content_matrix() {
     let header =
@@ -871,8 +840,7 @@ fn content_borrow_matches_full_parse_across_content_matrix() {
         // plain string content, user role
         (row("m0", json!({"role":"user","content":"hello"})), "hello"),
         // escaped string content: newlines, quotes, backslash, and unicode
-        // escapes at the JSON byte level (built from raw JSON so the
-        // escapes ride the bytes both extraction paths walk)
+        // escapes at the JSON byte level (raw JSON so the escapes ride the bytes)
         (
             row(
                 "m1",
@@ -947,8 +915,6 @@ fn content_borrow_matches_full_parse_across_content_matrix() {
         (row("m14", json!({"role":"user","content":true})), ""),
     ];
 
-    // Row-level differential: the borrowed-span extraction equals the
-    // full-parse `message_text` for every row in the matrix.
     for (entry, expected) in &messages {
         let line = entry.to_string();
         let full: SessionEntry = serde_json::from_str(&line).unwrap();
@@ -968,9 +934,8 @@ fn content_borrow_matches_full_parse_across_content_matrix() {
         assert_eq!(borrowed, reference, "differential: {line}");
     }
 
-    // Fold-level differential: the same rows through the production fold
-    // and the legacy full-parse reference, with cap-cut appends around
-    // the matrix (multibyte boundary cut, then past the cap).
+    // Fold-level differential with cap-cut appends around the matrix:
+    // a multibyte boundary cut, then past the cap.
     let dir = test_dir();
     let path = dir.join("session.jsonl");
     append_rows(&path, std::slice::from_ref(&header));
@@ -990,10 +955,8 @@ fn content_borrow_matches_full_parse_across_content_matrix() {
     );
     assert_fold_matches(&path);
 
-    // First-message pick: the first NON-EMPTY user text wins (m0), the
-    // empty-string user rows never claim it, and later users cannot
-    // replace it; the corpus holds every user/assistant text under the
-    // cap in fold order.
+    // First-message pick: the first NON-EMPTY user text wins (m0); the corpus
+    // holds every user/assistant text under the cap in fold order.
     let info = read_session_info(&path).unwrap();
     assert_eq!(info.first_message, "hello");
     assert!(info.all_messages_text.starts_with("hello line1"));
@@ -1022,21 +985,13 @@ fn content_borrow_matches_full_parse_across_content_matrix() {
     fs::remove_dir_all(empty_dir).unwrap();
 }
 
-/// The borrowed metadata reads match the full-parse `Value` reads for
-/// every shape the fold can meet on disk: the typed parse borrows the
-/// entry's scalar fields (`Cow`) and its object fields (raw spans), and
-/// each arm parses its span back only when the arm runs. This matrix pins
-/// the span's parse-back to the `Value` read per row, checks the typed
-/// parse still rejects exactly the rows the owned struct rejected, and
-/// folds the accepted rows end to end against the legacy full-parse
-/// reference.
 #[test]
 #[allow(clippy::used_underscore_binding)] // the envelope scalars the fold
-                                          // keeps only for acceptance (`_timestamp`, `_parent_id`) are READ here to
-                                          // pin that acceptance, which is exactly the matrix's point
+                                          // keeps only for acceptance (`_timestamp`, `_parent_id`)
+                                          // are READ here to pin that acceptance, which is exactly
+                                          // the matrix's point
 fn borrowed_metadata_reads_match_full_parse_across_shape_matrix() {
-    // Rows are written from raw JSON so the escapes ride the bytes both
-    // extraction paths walk.
+    // Rows are written from raw JSON so the escapes ride the bytes both extraction paths walk.
     let rows: Vec<&str> = vec![
         r#"{"type":"custom","id":"plain-id","timestamp":"2026-09-23T00:00:00.000Z"}"#,
         // escaped scalars: the type tag, id, timestamp, parentId
@@ -1093,11 +1048,8 @@ fn borrowed_metadata_reads_match_full_parse_across_shape_matrix() {
         r#"{"type":"message","id":"u0","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"assistant","content":"u","usage":{"inputTokens":1,"cost":{"input":0.5}}}}"#,
     ];
 
-    // Row-level differential: every borrowed span read equals the
-    // full-parse `Value` read for every row the typed parse accepts. The
-    // envelope scalars (`type`, `id`, `timestamp`, `parentId`) read from
-    // `SessionEntry`'s typed fields (serde `flatten` keeps them out of
-    // `fields`), the rest from the flattened map.
+    // Row-level differential: every borrowed span read equals the full-parse
+    // `Value` read; the envelope scalars read from `SessionEntry`'s typed fields.
     for row in &rows {
         let typed: Option<SessionInfoEntry> = serde_json::from_str(row).ok();
         let full: Option<SessionEntry> = serde_json::from_str(row).ok();
@@ -1187,11 +1139,8 @@ fn borrowed_metadata_reads_match_full_parse_across_shape_matrix() {
             }
             // Both envelopes reject a non-string envelope scalar.
             (None, None) => {}
-            // The borrowed struct rejects a non-object message or a
-            // non-string targetId exactly as the owned struct did (the
-            // row-level census over 177k real fixture lines pinned the
-            // two acceptance sets identical); the lenient envelope sees
-            // the shape the fold's arm would read as absent.
+            // The borrowed struct rejects a non-object message or a non-string targetId
+            // exactly as the owned struct did; the lenient envelope reads them as absent.
             (None, Some(full)) => {
                 let rejected = ["targetId"].iter().any(|field| {
                     matches!(
@@ -1210,19 +1159,13 @@ fn borrowed_metadata_reads_match_full_parse_across_shape_matrix() {
         }
     }
 
-    // Fold-level differential: the accepted rows fold end to end and the
-    // production fold matches the legacy full-parse reference.
     let header =
         json!({"type":"session","id":"s","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"});
     let dir = test_dir();
     let path = dir.join("session.jsonl");
     append_rows(&path, std::slice::from_ref(&header));
-    // The abort rows (15-17) would end the whole file's fold on both
-    // paths (they get their own files below); the non-object message row
-    // (32) is rejected by the typed parse on BOTH the owned and the
-    // borrowed struct while the lenient reference counts it — a
-    // pre-existing reference divergence outside this change's surface,
-    // so it stays row-level only.
+    // The abort rows (15-17) end the whole fold on both paths; row 32 (non-object
+    // message) counts only in the lenient reference — a pre-existing divergence.
     for (index, row) in rows.iter().enumerate() {
         if matches!(index, 15..=17 | 32) {
             continue;
@@ -1241,9 +1184,8 @@ fn borrowed_metadata_reads_match_full_parse_across_shape_matrix() {
         info.model.as_ref(),
         Some(&("p".to_string(), "m".to_string()))
     );
-    // every accepted message row counts, including the null-message and
-    // the missing-message rows; both paths count exactly the typed-parse
-    // accepted rows.
+    // Both paths count exactly the typed-parse accepted rows, including the null-message
+    // and missing-message rows.
     assert_eq!(info.message_count, 12);
     assert_eq!(info.first_message, "ts float");
     assert!(info.all_messages_text.contains("escaped role matches"));

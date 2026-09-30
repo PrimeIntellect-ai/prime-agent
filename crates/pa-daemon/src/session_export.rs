@@ -1,8 +1,7 @@
-//! Session export commands: the worker-side handlers for `export_html` and
-//! `export_jsonl` (the daemon-mode cases over `session.exportToHtml` /
-//! `exportToJsonl`). The HTML file is built by pa-core's exporter (the
-//! embedded template plus the session data); the JSONL export is the
-//! current branch re-chained into a linear file.
+//! Session export commands: the worker-side handlers for `export_html` and `export_jsonl`
+//! (TS `session.exportToHtml` / `exportToJsonl`). The HTML file is built by pa-core's
+//! exporter (the embedded template plus the session data); the JSONL export is the current
+//! branch re-chained into a linear file.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -14,9 +13,8 @@ use crate::engine::SessionEngine;
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::worker::SessionCore;
 
-/// The `export_*` command set, bound like the tree-navigation commands: the
-/// engine (system prompt), the session store (entries), the settings dirs
-/// (theme resolution), and the session cwd (relative output paths).
+/// The `export_*` command set: the engine (system prompt), the session store
+/// (entries), the settings dirs (theme resolution), the session cwd.
 pub(crate) struct ExportCommands {
     engine: Arc<dyn SessionEngine>,
     core: Arc<Mutex<SessionCore>>,
@@ -50,9 +48,8 @@ impl ExportCommands {
     }
 
     async fn export_html_impl(&self, output_path: Option<&str>) -> Result<String> {
-        // The store snapshot under the core lock: the std guard is not
-        // `Send`, so the engine reads below await outside the lock (the
-        // TS exporter reads its state without holding anything either).
+        // The store snapshot under the core lock: the std guard is not `Send`, so the
+        // engine reads below await outside the lock.
         let (header, entries, leaf_id, session_file, theme_name) = {
             let core = self.core.lock().unwrap();
             let store = core
@@ -65,8 +62,8 @@ impl ExportCommands {
             let header = serde_json::to_value(&store.header)?;
             let header = match header {
                 Value::Object(map) => {
-                    // The export's header is the `type: "session"` file line,
-                    // not just the typed struct.
+                    // The export's header is the `type: "session"` file line, not just
+                    // the typed struct.
                     let mut with_type = serde_json::Map::new();
                     with_type.insert("type".to_string(), Value::String("session".to_string()));
                     with_type.extend(map);
@@ -88,9 +85,8 @@ impl ExportCommands {
                 theme_name,
             )
         };
-        // The tools read comes first: an absent session builds here (the
-        // TS state exists from create), so the best-effort prompt read
-        // below then sees it too.
+        // The tools read comes first: an absent session builds here (the TS state
+        // exists from create), so the best-effort prompt read below then sees it too.
         let tools = self.engine.export_tools().await;
         let rendered_tools = self.engine.export_rendered_tools(&entries).await;
         let data = pa_core::export_html::SessionExportData {
@@ -195,14 +191,9 @@ impl ExportCommands {
     }
 }
 
-/// The export's custom-tool renderer (the TS `createToolHtmlRenderer`
-/// seam): resolves a tool by name against the session's live registry at
-/// render time. The Rust tool surface carries no render functions — the
-/// built-in `ipython` has none in either product — so a resolved tool
-/// reports no renderable representation and the export falls back to the
-/// template's generic tool rendering, exactly like the TS renderer for a
-/// tool without `renderCall`. The seam stays wired at the registry so a
-/// future line-oriented renderer slots in without touching the exporter.
+/// The export's custom-tool renderer: resolves a tool by name against the
+/// session's live registry. The Rust tool surface carries no render functions,
+/// so the export falls back to the template's generic tool rendering.
 pub(crate) struct ExportToolRenderer<'a> {
     /// The session's live tool registry (TS `getToolDefinition` source).
     pub tools: &'a [std::sync::Arc<dyn pa_agent::types::AgentTool>],
@@ -210,8 +201,8 @@ pub(crate) struct ExportToolRenderer<'a> {
 
 impl pa_core::export_html::ToolHtmlRenderer for ExportToolRenderer<'_> {
     fn render_call(&self, _tool_call_id: &str, tool_name: &str, _args: &Value) -> Option<String> {
-        // Registry lookup first (TS `getToolDefinition`): an unregistered
-        // tool never renders; a registered one has no render function.
+        // Registry lookup first (TS `getToolDefinition`): an unregistered tool never
+        // renders; a registered one has no render function.
         self.tools.iter().find(|tool| tool.name() == tool_name)?;
         None
     }
@@ -251,8 +242,6 @@ mod tests {
         SessionCore::test_core(Some(store), dir.display().to_string())
     }
 
-    /// A scripted-harness engine: exports carry entries, header, and the
-    /// current leaf, and the written HTML decodes back to them.
     #[tokio::test]
     async fn export_html_writes_the_session_data() {
         let dir = tempfile::TempDir::new().expect("temp dir");
@@ -276,8 +265,6 @@ mod tests {
         assert!(html.contains("--accent:"));
     }
 
-    /// The JSONL branch export re-chains the entries linearly under a fresh
-    /// header, and resolves relative paths against the session cwd.
     #[tokio::test]
     async fn export_jsonl_rechains_the_branch() {
         let dir = tempfile::TempDir::new().expect("temp dir");
@@ -308,8 +295,6 @@ mod tests {
         assert_eq!(second["parentId"], "e1");
     }
 
-    /// A session that has not loaded its store yet answers the TS
-    /// initializing error instead of exporting.
     #[tokio::test]
     async fn export_requires_the_session_store() {
         let dir = tempfile::TempDir::new().expect("temp dir");

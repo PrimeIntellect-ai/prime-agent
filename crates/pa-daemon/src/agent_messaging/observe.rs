@@ -1,6 +1,6 @@
-//! The `agent_observe.*` controller (moved with its concern): message
-//! previews and full session summaries from the supervisor, the
-//! nuclear-family roster derivation, and the preview text helpers.
+//! The `agent_observe.*` controller: message previews and full session
+//! summaries from the supervisor, the nuclear-family roster derivation, and
+//! the preview text helpers.
 use super::{
     json, row_is_child, row_is_parent, row_is_sibling, AgentFamilyRelationship, AgentFamilyStatus,
     AgentObserveActivity, AgentObserveController, AgentObserveMessagePreview, AgentObserveSummary,
@@ -9,17 +9,13 @@ use super::{
 
 /// `agent_observe.*` controller for daemon workers: message previews and
 /// full session summaries from the supervisor. The roster this controller
-/// reports is the caller's NUCLEAR FAMILY (its parent, siblings, and
-/// direct children — plus the caller's own row), derived from the same
-/// durable parent edges `agent_message.send` resolves through; a
-/// `list_agents()` never spans the whole daemon, and a relationship label
-/// never claims a family edge the recorded topology does not have.
+/// reports is the caller's NUCLEAR FAMILY, derived from the same durable
+/// parent edges `agent_message.send` resolves through — never the whole daemon.
 pub(crate) struct LinkAgentObserveController {
     link: Arc<SupervisorLink>,
     /// This worker's live active session id (the family-scope anchor).
     active_session_id: String,
-    /// This worker's own session summary, pushed at create and rename
-    /// (the durable identity the edge classification reads).
+    /// This worker's own session summary, pushed at create and rename.
     own_summary: Arc<std::sync::Mutex<Option<Value>>>,
     /// This session's resident RLM children (the registry join for Child
     /// rows the roster may not list).
@@ -44,10 +40,8 @@ impl LinkAgentObserveController {
     /// The full roster rows plus the caller's durable family identity.
     async fn roster_and_identity(&self) -> anyhow::Result<(Vec<Value>, FamilyIdentity)> {
         // The full session walk (`all: true`): live residents plus the
-        // passive ledger children, so a released child's durable row
-        // stays in the caller's nuclear family exactly like the TS
-        // roster (a live-residents-only join would drop it the moment
-        // its worker settles and releases).
+        // passive ledger children, so a released child's durable row stays
+        // in the caller's nuclear family exactly like the TS roster.
         let data = self
             .link
             .request_success(
@@ -69,9 +63,8 @@ impl LinkAgentObserveController {
         Ok((sessions, identity))
     }
 
-    /// This session's resident children's live active session ids (the
-    /// registry join; rows it owns are Children even before their durable
-    /// edges hydrate).
+    /// This session's resident children's live active session ids (rows the
+    /// registry owns are Children even before their durable edges hydrate).
     async fn registry_child_active_ids(&self) -> Vec<String> {
         match &self.children {
             Some(children) => children
@@ -151,13 +144,9 @@ impl AgentObserveController for LinkAgentObserveController {
     }
 }
 
-/// Flatten the supervisor's roster rows into observation summaries of the
-/// caller's NUCLEAR FAMILY: the caller's own row (`isCurrent`), its
-/// parent, its siblings, and its direct children — and nothing else. The
-/// relationship of each row derives from the recorded durable edges (the
-/// same classification `agent_message.send` resolves through), never from
-/// the row's runtime kind alone: a subagent spawned by a different parent
-/// is not a child here.
+/// Flatten the supervisor's roster rows into observation summaries of the caller's NUCLEAR
+/// FAMILY: the caller's own row, its parent, its siblings, and its direct children. The
+/// relationship derives from the durable edges, never the row's runtime kind.
 pub(super) fn summaries_from_roster(
     sessions: Vec<Value>,
     identity: &FamilyIdentity,
@@ -218,12 +207,8 @@ pub(super) fn summaries_from_roster(
                 .get("attachedClients")
                 .and_then(Value::as_u64)
                 .unwrap_or_default() as usize;
-            // TS #2493 `classifyAgentStatus`: residency is the row's LIVE
-            // `activeSessionId` — the `all: true` roster also carries
-            // passivated ledger children (the stop strips the live id and
-            // keys the durable session under `id`), which are INACTIVE
-            // family members (TS `resident: !!summary.activeSessionId`),
-            // never live quiet sessions.
+            // TS #2493 `classifyAgentStatus`: residency is the row's LIVE `activeSessionId`
+            // - the `all: true` roster's passivated children are INACTIVE, never live.
             let has_live_session = session
                 .get("activeSessionId")
                 .and_then(Value::as_str)
@@ -242,11 +227,8 @@ pub(super) fn summaries_from_roster(
             } else {
                 AgentFamilyStatus::Idle
             };
-            // TS #2493 `createAgentObserveSummary`: the live activity is
-            // its own axis (streaming tool work, streaming model work,
-            // compaction, queued/accepted work, an attached human, or
-            // quiet). The row's `isSessionActive` covers the session's own
-            // work; delegated child work is not a roster-row field.
+            // TS #2493 `createAgentObserveSummary`: the live activity is its own axis;
+            // `isSessionActive` covers the session's own work, not delegated child work.
             let activity = if is_streaming && is_running_tools {
                 AgentObserveActivity::Tool
             } else if is_streaming {

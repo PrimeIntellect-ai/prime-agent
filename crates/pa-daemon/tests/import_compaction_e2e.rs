@@ -1,44 +1,16 @@
-//! End-to-end verifier for the imported-session compaction view (the
-//! `import_jsonl` compact gap found by the perf wave, PR #272): a session
-//! grown through `import_jsonl` must compact on the next `compact` — TS is
-//! one-store, so the imported rows land in the same session manager the
-//! compaction walks.
-//!
-//! Root cause (verified against the TS binary with the perf-wave fixture
-//! shape): the Rust session-file parse degraded whole message rows to
-//! `Unknown` on fields the TS loader tolerates — an assistant row with the
-//! raw provider `stopReason: "tool_calls"`, a tool result without
-//! `toolName` — so the imported transcript silently lost two of every
-//! three rows. The provider request still carried the surviving rows (the
-//! perf wave's "rows reach the provider context"), but the compaction walk
-//! under-counted: no cut point with history before the default 20k-token
-//! keep window, so `compact` answered "Session is too short to compact"
-//! while the TS daemon compacted the same import. The pa-types wire parse
-//! keeps those rows (the `tool_calls` stop-reason alias, the defaulted
-//! `toolName`); this test locks the whole flow: the rows persist, the walk
-//! finds the cut inside the imported transcript, the compact runs, and the
-//! durable compaction row records the same cut (one-store id parity).
-//!
-//! Regression scope: the #259 import wire e2es (`protocol_breadth_b6_b9`
-//! wave b9) and the #243 recovery walk (`goal_recovery_e2e`) stay green in
-//! the same suites.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! Imported-session compaction (the `import_jsonl` compact gap, PR #272): a
+//! session grown through `import_jsonl` must compact on the next `compact`
+//! (TS is one-store). The gap: the Rust parse degraded rows the TS loader
+//! keeps (raw `stopReason: "tool_calls"`, missing `toolName`).
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -83,10 +55,9 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
         .stderr(Stdio::null())
         .env_remove("PRIME_API_KEY")
         .env_remove("PRIME_AGENT_CODING_AGENT_DIR")
-        // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit (TS
-        // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-        // instead of the 5-minute default.
+        // A supervisor killed at teardown must not leak its session workers: the worker's
+        // supervisor-lost exit (TS `exitIfSupervisorOrphanedForTooLong`) runs on this short
+        // window, not the 5-minute default.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -106,8 +77,8 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
-/// One client connection: request/response plus every session event that
-/// streamed while the response was outstanding.
+/// One client connection: request/response plus the session events that stream while a response is
+/// outstanding.
 struct Client {
     reader: BufReader<std::os::unix::net::UnixStream>,
     writer: std::os::unix::net::UnixStream,
@@ -162,7 +133,6 @@ impl Client {
             .unwrap_or_else(|error| panic!("write command {id}: {error}"));
     }
 
-    /// The response for `id`, skipping every session event on the way.
     fn request(&mut self, id: &str) -> Value {
         let deadline = Instant::now() + Duration::from_mins(5);
         loop {
@@ -175,9 +145,8 @@ impl Client {
     }
 }
 
-/// The harness: a supervisor, a faux-scripted session over the real agent
-/// engine (compaction enabled with a tiny keep window so a manual compact
-/// cuts), and the session dir the durable rows land in.
+/// The harness: a supervisor, a faux-scripted session over the real agent engine (compaction
+/// with a tiny keep window), and the session dir the durable rows land in.
 struct Harness {
     dir: tempfile::TempDir,
     _supervisor: Supervisor,
@@ -190,10 +159,8 @@ fn setup(name: &str) -> Harness {
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");
-    // Default compaction settings (keepRecentTokens 20000), like the perf
-    // wave's repro: the fixture must be big enough that the walk finds a
-    // cut with history to summarize — the default keep window is part of
-    // what the gap hid behind.
+    // Default compaction settings (keepRecentTokens 20000), like the perf wave's repro:
+    // the fixture must be big enough that the walk finds a cut with history to summarize.
     let responses: Vec<Value> = (0..8)
         .map(|index| json!({ "text": format!("scripted reply {index}") }))
         .collect();
@@ -233,18 +200,9 @@ fn setup(name: &str) -> Harness {
     }
 }
 
-/// The grown import fixture (the perf-wave scale-corpus shape, PR #272):
-/// a parent-chained transcript whose turns are a user message, an
-/// assistant message with thinking/text content blocks and a top-level
-/// `toolCalls` array, and a tool result — the row mix the perf wave
-/// imported when it found the compact gap. The assistant rows carry the
-/// raw provider `stopReason: "tool_calls"` and the tool results carry no
-/// `toolName`: both are shapes the TS loader keeps (its `buildSessionContext`
-/// pushes the raw rows), so the Rust session-file parse must keep them too
-/// or the imported transcript silently loses two of every three rows —
-/// the compaction walk then under-counts, finds no cut with history, and
-/// answers "Session is too short to compact" while the provider request
-/// still carries the surviving rows.
+/// The grown import fixture (the perf-wave shape, PR #272): a parent-chained transcript of
+/// user, assistant, and tool-result rows carrying the raw `stopReason: "tool_calls"` and no
+/// `toolName` — shapes the TS loader keeps, so the Rust parse must keep them too.
 fn grown_fixture(dir: &Path, turns: usize) -> PathBuf {
     let fixture = dir.join("grown-import.jsonl");
     let mut lines = vec![json!({
@@ -314,8 +272,7 @@ fn grown_fixture(dir: &Path, turns: usize) -> PathBuf {
     fixture
 }
 
-/// The durable session rows of `type`, re-read from the session dir's
-/// imported copy.
+/// The durable session rows of `type`, re-read from the imported copy.
 fn session_rows(harness: &Harness, type_: &str) -> Vec<Value> {
     let session_dir = harness.dir.path().join("agent").join("sessions");
     let file = std::fs::read_dir(&session_dir)
@@ -337,19 +294,13 @@ fn session_rows(harness: &Harness, type_: &str) -> Vec<Value> {
         .collect()
 }
 
-/// The compact runs on the imported session: the imported rows seed the
-/// engine's compaction view (TS one-store parity — `importFromJsonl` lands
-/// in the same session manager the compaction walks), so `compact` runs
-/// and produces the durable summary row instead of refusing with
-/// "Session is too short to compact".
 #[test]
 fn imported_session_compacts() {
     let mut harness = setup("import-compact");
-    // Big enough that the default 20k-token keep window still leaves
-    // history before the cut (the perf-wave corpus: 1500 turns).
+    // Big enough that the default 20k-token keep window still leaves history
+    // before the cut (the perf-wave corpus: 1500 turns).
     let fixture = grown_fixture(harness.dir.path(), 1200);
 
-    // Import the grown transcript onto the live session.
     harness.client.send_command(
         "i-1",
         &json!({
@@ -363,9 +314,8 @@ fn imported_session_compacts() {
     assert_eq!(imported["success"], true, "import failed: {imported}");
     assert_eq!(imported["data"], json!({ "cancelled": false }));
 
-    // The imported transcript is the session the compact walks: every
-    // row the TS loader keeps must persist, the assistant and tool-result
-    // rows included (a lossy parse drops two of every three rows here).
+    // The imported transcript is the session the compact walks: every row the TS
+    // loader keeps must persist (a lossy parse drops two of every three rows here).
     let rows = session_rows(&harness, "message");
     assert_eq!(rows.len(), 3600, "the imported rows persist: {rows:?}");
     assert!(
@@ -379,8 +329,8 @@ fn imported_session_compacts() {
         "the tool results without toolName survive the import: {rows:?}"
     );
 
-    // A turn on the imported session (the perf-wave repro: the provider
-    // request after the import carries the imported rows).
+    // A turn on the imported session (the perf-wave repro: the provider request after the import
+    // carries the imported rows).
     harness.client.send_command(
         "p-1",
         &json!({
@@ -392,7 +342,6 @@ fn imported_session_compacts() {
     let turned = harness.client.request("p-1");
     assert_eq!(turned["success"], true, "prompt failed: {turned}");
 
-    // Compact: must run (TS parity), not refuse as too short.
     harness.client.send_command(
         "cp-1",
         &json!({ "type": "compact", "activeSessionId": harness.session_id }),
@@ -406,11 +355,8 @@ fn imported_session_compacts() {
         compact["data"]["summary"].is_string(),
         "the compact answers the TS result shape: {compact}"
     );
-    // The cut must sit INSIDE the imported transcript (a walk that lost the
-    // imported rows has no history to summarize and refuses as too short).
-    // The cut may split a turn (an assistant row is a valid cut point when
-    // its trailing tool result stays kept), so any fixture row id past the
-    // first turn proves the walk traversed the imported rows.
+    // The cut must sit INSIDE the imported transcript (a walk that lost the rows refuses
+    // as too short); any fixture row id past the first turn proves the walk traversed them.
     let first_kept = compact["data"]["firstKeptEntryId"]
         .as_str()
         .unwrap_or_default();
@@ -422,7 +368,6 @@ fn imported_session_compacts() {
         "the cut keeps the recent tail of the imported transcript: {compact}"
     );
 
-    // The compaction landed durably on the imported session's file.
     let compactions = session_rows(&harness, "compaction");
     assert_eq!(
         compactions.len(),
