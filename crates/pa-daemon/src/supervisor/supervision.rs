@@ -51,7 +51,7 @@ impl Supervisor {
         });
     }
 
-    async fn watch_worker(
+    pub(super) async fn watch_worker(
         self: Arc<Self>,
         resident: Arc<ResidentWorker>,
         mut child: Option<Child>,
@@ -182,6 +182,12 @@ impl Supervisor {
                     ));
                     child = None;
                     adopted_pid = 0;
+                    if self.is_stopping(&resident) {
+                        return;
+                    }
+                    // A failed relaunch has no lifetime of its own: clear
+                    // the spawn time so the count accumulates to the give-up cap.
+                    resident.spawned_at_ms.store(0, Ordering::SeqCst);
                 }
             }
         }
