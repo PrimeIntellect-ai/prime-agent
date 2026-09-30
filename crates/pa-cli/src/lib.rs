@@ -183,6 +183,18 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
         return run_worker_mode();
     }
 
+    // The resident guest daemon of a cloud session (TS `isCloudDaemonProcess`,
+    // gated inside daemon mode the same way): one hidden internal mode,
+    // started only by the uploaded bridge inside a sandbox — the role env
+    // plus daemon-mode argv, before any supervisor starts. The bridge
+    // provisions every coordinate through the guest env; this process
+    // never touches a credential env of its own.
+    let is_cloud_guest_process =
+        std::env::var(pa_daemon::cloud_guest::GUEST_ROLE_ENV).unwrap_or_default() == "1";
+    if is_cloud_guest_process && args.windows(2).any(|pair| pair == ["--mode", "daemon"]) {
+        return run_cloud_guest_daemon_mode();
+    }
+
     if let Some(fork) = &parsed.fork {
         let mut conflicting_flags: Vec<&str> = Vec::new();
         if parsed.continue_ {
@@ -341,6 +353,20 @@ fn run_runtime_bootstrap() -> Result<i32, String> {
             println!("kernel python: {}", python.display());
             Ok(0)
         }
+        Err(error) => Err(format!("{error:#}")),
+    }
+}
+
+/// Run the resident guest daemon of a cloud session (TS
+/// `runCloudDaemonMode`): serve the cloud protocol over a VM-local
+/// transport until release stops the daemon.
+fn run_cloud_guest_daemon_mode() -> Result<i32, String> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    match runtime.block_on(pa_daemon::cloud_guest::run_guest_daemon()) {
+        Ok(()) => Ok(0),
         Err(error) => Err(format!("{error:#}")),
     }
 }

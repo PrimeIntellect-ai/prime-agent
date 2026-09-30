@@ -45,6 +45,7 @@ pub(crate) mod boot_reap;
 pub mod branch_navigation;
 pub(crate) mod child_status_notices;
 pub mod cloud_family;
+pub mod cloud_guest;
 mod compact_autorefine;
 pub mod compaction;
 mod compaction_outcome;
