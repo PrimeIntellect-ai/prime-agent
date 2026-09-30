@@ -1,11 +1,7 @@
 //! Transport pinning — the security invariant of the catalog.
-//!
-//! Ported from `parseProviderModelCatalog` in
-//! `provider-model-catalog.ts`: every remote model must match a compiled
-//! `(provider, api, baseUrl)` tuple. Non-matching entries drop silently;
-//! request headers come from the compiled transport templates
-//! (`template?.headers ?? transport.headers`), never from catalog data;
-//! prime-inference entries are skipped (that domain is fetched live).
+//! Every remote model must match a compiled `(provider, api, baseUrl)`
+//! tuple; request headers come from the compiled transport templates,
+//! never from catalog data.
 
 use std::collections::HashMap;
 
@@ -48,16 +44,14 @@ impl PinnedTemplates {
     }
 }
 
-/// Catalog data can select installed transports, but cannot change where
-/// credentials are sent: parse the payload with skip-invalid semantics and
-/// keep only entries whose `(provider, api, baseUrl)` matches a compiled
-/// tuple. `Err` means the catalog carried nothing this client supports.
+/// Catalog data can select installed transports, but cannot change where credentials are sent:
+/// parse the payload with skip-invalid semantics and keep only entries whose `(provider, api,
+/// baseUrl)` matches a compiled tuple. `Err` means the catalog carried nothing this client
+/// supports.
 ///
 /// # Errors
 ///
-/// Fails when the payload fails schema parsing (unsupported schema version,
-/// invalid model count, duplicates) or when no entry pins to a compiled
-/// transport.
+/// Fails when the payload fails schema parsing, or when no entry pins to a compiled transport.
 pub fn parse_provider_model_catalog(
     payload: &serde_json::Value,
     templates: &PinnedTemplates,
@@ -70,8 +64,7 @@ pub fn parse_provider_model_catalog(
 ///
 /// # Errors
 ///
-/// Fails when no entry pins to a compiled transport: the catalog carried
-/// nothing this client supports.
+/// Fails when no entry pins to a compiled transport.
 pub fn pin_catalog_models(
     catalog_models: Vec<Model>,
     templates: &PinnedTemplates,
