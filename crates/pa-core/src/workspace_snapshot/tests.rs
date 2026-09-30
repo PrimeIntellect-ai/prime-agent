@@ -147,6 +147,35 @@ fn read_blob(staging: &Path, sha256: &str) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn snapshot_collapses_a_path_git_lists_twice() {
+    // `git rm --cached` leaves a staged deletion and an untracked row
+    // for the same path in one `git status` run; the manifest carries
+    // the path once, and its own verify accepts the result.
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    init_repo(root);
+    write(root, "tracked.txt", "base\n");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    git(root, &["rm", "-q", "--cached", "tracked.txt"]);
+    let staging = tempfile::tempdir().unwrap();
+    let snapshot =
+        create_workspace_snapshot(root, staging.path(), BaselineMode::HeadTree, &limits())
+            .await
+            .unwrap();
+    let expected = repo_manifest(
+        root,
+        // The delta row covers the path, so the HEAD-tree baseline does not
+        // restate it.
+        head_tree(vec![]),
+        vec![file_entry("tracked.txt", "??", "base\n")],
+        vec![],
+    );
+    assert_eq!(snapshot.manifest, expected);
+    assert_eq!(verify_workspace_snapshot(staging.path()).unwrap(), expected);
+}
+
+#[tokio::test]
 async fn snapshot_captures_worktree_delta() {
     let repo = tempfile::tempdir().unwrap();
     let root = repo.path();
@@ -1121,6 +1150,11 @@ fn path_and_target_safety_rules() {
     assert!(!symlink_target_stays_inside("link", "/absolute"));
     assert!(!symlink_target_stays_inside("link", "C:/x"));
     assert!(!symlink_target_stays_inside("link", ""));
+    // Backslash forms climb or address a root on Windows (UNC,
+    // drive-root-relative), so a portable manifest never blesses them.
+    assert!(!symlink_target_stays_inside("link", "..\\..\\evil"));
+    assert!(!symlink_target_stays_inside("link", "\\\\server\\share\\x"));
+    assert!(!symlink_target_stays_inside("link", "\\root"));
 }
 
 #[test]
@@ -1410,6 +1444,19 @@ fn verification_rejects_bad_manifests() {
         .unwrap()
         .to_string();
     assert!(unreadable.contains("invalid JSON"), "{unreadable}");
+    // A manifest past the read cap is rejected before it is loaded: entry
+    // counts are bounded at capture, so a larger file is tampering.
+    let staging = tempfile::tempdir().unwrap();
+    std::fs::write(
+        staging.path().join("manifest.json"),
+        vec![b'x'; super::verify::MAX_MANIFEST_BYTES as usize + 1],
+    )
+    .unwrap();
+    let oversized = verify_workspace_snapshot(staging.path())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(oversized.contains("cap is"), "{oversized}");
     // Unsupported version.
     let future = SnapshotManifest {
         version: 3,

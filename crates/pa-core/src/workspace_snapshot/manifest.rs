@@ -147,10 +147,13 @@ pub(crate) fn is_safe_relative_path(path: &str) -> bool {
 }
 
 /// True when the symlink `target` of the entry at `entry_path` resolves
-/// inside the worktree: relative, colon-free (portable across platforms),
-/// and never climbing above the root via `..`.
+/// inside the worktree: relative, colon-free and backslash-free (portable
+/// across platforms: `\` is a Windows separator, so a UNC, drive-root, or
+/// `..\` climb has no faithful portable meaning here), and never climbing
+/// above the root via `..`.
 pub(crate) fn symlink_target_stays_inside(entry_path: &str, target: &str) -> bool {
-    if target.is_empty() || target.starts_with('/') || target.contains(':') {
+    if target.is_empty() || target.starts_with('/') || target.contains(':') || target.contains('\\')
+    {
         return false;
     }
     let base_dir = entry_path.rsplit_once('/').map_or("", |(parent, _)| parent);

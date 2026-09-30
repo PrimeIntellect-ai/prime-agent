@@ -219,7 +219,8 @@ pub async fn create_workspace_snapshot(
 /// a location inside the worktree (which would capture the snapshot into
 /// itself).
 fn prepare_staging_dir(staging_dir: &Path, worktree_root: &Path) -> Result<(), SnapshotError> {
-    std::fs::create_dir_all(staging_dir).map_err(|error| io_error(staging_dir, error))?;
+    crate::platform::perms::create_dir_all_private(staging_dir)
+        .map_err(|error| io_error(staging_dir, error))?;
     let is_empty = std::fs::read_dir(staging_dir)
         .map_err(|error| io_error(staging_dir, error))?
         .next()
@@ -277,12 +278,26 @@ fn build_manifest(
         ));
     }
     let blobs_dir = staging_dir.join(BLOBS_DIR);
-    std::fs::create_dir_all(&blobs_dir).map_err(|error| io_error(&blobs_dir, error))?;
+    crate::platform::perms::create_dir_all_private(&blobs_dir)
+        .map_err(|error| io_error(&blobs_dir, error))?;
     tighten_private(&blobs_dir)?;
     let mut captured: Vec<CapturedEntry> = Vec::new();
     let mut excluded: Vec<ExcludedEntry> = Vec::new();
     let mut total_bytes: u64 = 0;
-    for entry in &status.entries {
+    // One path, one row: `git rm --cached` leaves a tracked deletion and
+    // the same path back as untracked in one `git status` run. The later
+    // (untracked) row describes the worktree leaf that actually ships, so
+    // it replaces the tracked row; both classify the same leaf, and a
+    // duplicated path would trip verify's strictly-sorted check.
+    let mut delta_rows: Vec<&StatusEntry> = Vec::with_capacity(status.entries.len());
+    let mut seen: HashSet<&str> = HashSet::with_capacity(status.entries.len());
+    for entry in status.entries.iter().rev() {
+        if seen.insert(entry.path()) {
+            delta_rows.push(entry);
+        }
+    }
+    delta_rows.reverse();
+    for entry in delta_rows {
         let path = entry.path();
         if !is_safe_relative_path(path) {
             return Err(SnapshotError::MalformedStatus {
@@ -583,7 +598,7 @@ enum OpenLeaf {
 }
 
 #[cfg(not(unix))]
-fn open_leaf(root: &Path, path: &str, _max_bytes: usize) -> std::io::Result<OpenLeaf> {
+fn open_leaf(root: &Path, path: &str, max_bytes: usize) -> std::io::Result<OpenLeaf> {
     let components: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
     let mut prefix = PathBuf::new();
     for component in &components[..components.len().saturating_sub(1)] {
@@ -604,8 +619,24 @@ fn open_leaf(root: &Path, path: &str, _max_bytes: usize) -> std::io::Result<Open
         });
     }
     if metadata.is_file() {
+        let mut file = std::fs::File::open(&absolute)?;
+        let mut content = Vec::new();
+        let mut buffer = vec![0u8; 128 * 1024];
+        loop {
+            let read = std::io::Read::read(&mut file, &mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            content.extend_from_slice(&buffer[..read]);
+            // Past the caller's cap, stop reading: the caller's size
+            // check errors on the oversized capture instead of
+            // buffering an unbounded raced-grown file whole.
+            if content.len() > max_bytes {
+                break;
+            }
+        }
         return Ok(OpenLeaf::File {
-            content: std::fs::read(&absolute)?,
+            content,
             executable: false,
         });
     }
@@ -736,29 +767,14 @@ fn verify_against_head(
 
 /// Staged content files (blobs, the manifest) are tightened to
 /// owner-only (0600) regardless of umask, so a file later moved out of
-/// the private staging directory keeps no group/other access.
+/// the private staging directory keeps no group/other access. Both
+/// modes route through the platform permission wall.
 fn tighten_private(dir: &Path) -> Result<(), SnapshotError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-            .map_err(|error| io_error(dir, error))?;
-    }
-    #[cfg(not(unix))]
-    let _ = dir;
-    Ok(())
+    crate::platform::perms::restrict_dir(dir).map_err(|error| io_error(dir, error))
 }
 
 fn tighten_private_file(path: &Path) -> Result<(), SnapshotError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|error| io_error(path, error))?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
+    crate::platform::perms::restrict_file(path).map_err(|error| io_error(path, error))
 }
 
 fn limit_error(limit: &str, detail: String) -> SnapshotError {

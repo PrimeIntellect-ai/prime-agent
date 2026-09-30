@@ -4,6 +4,7 @@
 //! before it is uploaded anywhere.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Read as _;
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
@@ -19,6 +20,11 @@ const COMMIT_HEX_LEN: usize = 40;
 
 /// The length of a SHA-256 digest.
 const DIGEST_HEX_LEN: usize = 64;
+
+/// Hard cap on a manifest read into memory: entry counts are bounded at
+/// capture (`max_entries` + `max_baseline_entries`), so a manifest past
+/// this size is tampering, not payload.
+pub(crate) const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Whether a captured-entry list may record deletions: the worktree
 /// delta does (a tracked path may have been removed from the worktree),
@@ -53,7 +59,19 @@ fn read_manifest(path: &Path) -> Result<SnapshotManifest, SnapshotError> {
         path: path.to_path_buf(),
         detail,
     };
-    let bytes = std::fs::read(path).map_err(|error| reject(format!("unreadable: {error}")))?;
+    let metadata =
+        std::fs::metadata(path).map_err(|error| reject(format!("unreadable: {error}")))?;
+    if metadata.len() > MAX_MANIFEST_BYTES {
+        return Err(reject(format!(
+            "manifest is {} bytes, cap is {MAX_MANIFEST_BYTES}",
+            metadata.len()
+        )));
+    }
+    let file = std::fs::File::open(path).map_err(|error| reject(format!("unreadable: {error}")))?;
+    let mut bytes = Vec::new();
+    std::io::Read::take(file, MAX_MANIFEST_BYTES)
+        .read_to_end(&mut bytes)
+        .map_err(|error| reject(format!("unreadable: {error}")))?;
     let manifest: SnapshotManifest =
         serde_json::from_slice(&bytes).map_err(|error| reject(format!("invalid JSON: {error}")))?;
     if manifest.version != MANIFEST_VERSION {
@@ -285,9 +303,19 @@ fn verify_blobs(staging_dir: &Path, manifest: &SnapshotManifest) -> Result<(), S
                 metadata.len()
             )));
         }
-        let content = std::fs::read(&blob)
+        let mut blob = std::fs::File::open(&blob)
             .map_err(|error| reject(format!("unreadable blob {sha256}: {error}")))?;
-        let digest = format!("{:x}", Sha256::digest(&content));
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; 128 * 1024];
+        loop {
+            let read = std::io::Read::read(&mut blob, &mut buffer)
+                .map_err(|error| reject(format!("unreadable blob {sha256}: {error}")))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        let digest = format!("{:x}", hasher.finalize());
         if digest != *sha256 {
             return Err(reject(format!(
                 "blob {sha256} for {list} {path:?} hashes to {digest}"
