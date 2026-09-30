@@ -151,7 +151,7 @@ set -eu
 # vars.R2_PUBLIC_BASE_URL, and to <base>/install-beta.sh with the channel
 # default set to beta — the repo-file default IS the official domain, so
 # the raw repo copy installs out of the box too.
-DOWNLOAD_BASE_URL_DEFAULT="https://app.primeintellect.ai/prime-agent"
+DOWNLOAD_BASE_URL_DEFAULT="https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev"
 RELEASE_CHANNEL_DEFAULT="stable"
 BASE_URL="${PRIME_AGENT_DOWNLOAD_BASE_URL:-$DOWNLOAD_BASE_URL_DEFAULT}"
 CHANNEL="${PRIME_AGENT_RELEASE_CHANNEL:-$RELEASE_CHANNEL_DEFAULT}"
