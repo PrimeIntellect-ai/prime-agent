@@ -17,6 +17,8 @@ use super::SnapshotError;
 
 /// The length of a git commit id.
 const COMMIT_HEX_LEN: usize = 40;
+/// The alternate object format's commit id length (SHA-256 repositories).
+const SHA256_COMMIT_HEX_LEN: usize = 64;
 
 /// The length of a SHA-256 digest.
 const DIGEST_HEX_LEN: usize = 64;
@@ -96,7 +98,9 @@ fn verify_structure(staging_dir: &Path, manifest: &SnapshotManifest) -> Result<(
         detail,
     };
     if let Some(head) = &manifest.head_commit {
-        if !is_lower_hex(head, COMMIT_HEX_LEN) {
+        // Either object format's id is a well-formed commit: SHA-1 (40)
+        // or SHA-256 (64) repositories both publish a branch.oid here.
+        if !is_lower_hex(head, COMMIT_HEX_LEN) && !is_lower_hex(head, SHA256_COMMIT_HEX_LEN) {
             return Err(reject(format!("malformed head commit {head:?}")));
         }
     }

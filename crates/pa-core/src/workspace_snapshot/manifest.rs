@@ -138,9 +138,12 @@ pub struct SnapshotManifest {
 }
 
 /// True for a repo-relative POSIX path that is safe to join onto a root:
-/// non-empty, with no absolute, parent, or current-directory components.
+/// non-empty, backslash-free (a backslash is a Windows separator, so a
+/// portable manifest never records it inside a path either), with no
+/// absolute, parent, or current-directory components.
 pub(crate) fn is_safe_relative_path(path: &str) -> bool {
     !path.is_empty()
+        && !path.contains('\\')
         && Path::new(path)
             .components()
             .all(|component| matches!(component, Component::Normal(_)))

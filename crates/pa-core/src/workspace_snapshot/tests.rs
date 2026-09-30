@@ -146,6 +146,54 @@ fn read_blob(staging: &Path, sha256: &str) -> Vec<u8> {
     std::fs::read(staging.join("blobs").join(sha256)).unwrap()
 }
 
+/// A SHA-256 repository snapshots and verifies the same as a SHA-1 one:
+/// the object ids follow the repository's own format, and the manifest's
+/// head commit is the repository's 64-character branch id.
+#[tokio::test]
+async fn a_sha256_repository_snapshots_and_verifies() {
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    git(root, &["init", "-q", "--object-format=sha256", "."]);
+    git(root, &["config", "user.email", "t@example.com"]);
+    git(root, &["config", "user.name", "t"]);
+    write(root, "a.txt", "sha256\n");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    let staging = tempfile::tempdir().unwrap();
+    let snapshot =
+        create_workspace_snapshot(root, staging.path(), BaselineMode::HeadTree, &limits())
+            .await
+            .unwrap();
+    let manifest = verify_workspace_snapshot(staging.path()).unwrap();
+    assert_eq!(snapshot.manifest, manifest);
+    assert_eq!(
+        manifest.head_commit.as_deref().map(str::len),
+        Some(64),
+        "a SHA-256 repository publishes a 64-character head commit"
+    );
+    // The whole worktree is clean, so the HEAD-tree baseline carries it
+    // and the delta is empty: the baseline entry landing at all is the
+    // SHA-256 proof — the object-id cross-check passed, and a SHA-1 hash
+    // of the same content could never match the repository's
+    // 64-character tree ids.
+    assert!(manifest.captured.is_empty());
+    let Baseline::HeadTree { entries, .. } = manifest.baseline.as_ref().unwrap() else {
+        panic!("the HEAD-tree baseline");
+    };
+    let CapturedEntry::File {
+        path,
+        sha256,
+        bytes,
+        ..
+    } = &entries[0]
+    else {
+        panic!("the baseline file entry");
+    };
+    assert_eq!(path, "a.txt");
+    assert_eq!(*sha256, digest(b"sha256\n"));
+    assert_eq!(*bytes, 7);
+}
+
 #[tokio::test]
 async fn snapshot_collapses_a_path_git_lists_twice() {
     // `git rm --cached` leaves a staged deletion and an untracked row
@@ -574,7 +622,7 @@ async fn head_tree_baseline_ships_head_content_and_full_coverage() {
     assert!(hash_object.status.success());
     let head_content = std::fs::read(root.join("b.txt")).unwrap();
     assert_eq!(
-        git_blob_oid(&head_content),
+        git_blob_oid(&head_content, false),
         String::from_utf8(hash_object.stdout).unwrap().trim()
     );
     // Materializing = baseline plus delta blobs: the worktree's content,
@@ -648,7 +696,7 @@ async fn head_tree_pins_to_the_status_reported_commit() {
             path: "a.txt".to_string(),
             mode: "100644".to_string(),
             gitlink: false,
-            oid: git_blob_oid(b"A\n"),
+            oid: git_blob_oid(b"A\n", false),
         }]
     );
 }
@@ -669,7 +717,7 @@ fn baseline_rejects_concurrent_mutation_loudly() {
         oid: oid.to_string(),
     };
     // Matching content, mode, and object id stages the leaf.
-    let expected = head_entry(&git_blob_oid(b"right\n"), "100644");
+    let expected = head_entry(&git_blob_oid(b"right\n", false), "100644");
     let outcome = capture_leaf(
         root.path(),
         &blobs,
@@ -682,7 +730,7 @@ fn baseline_rejects_concurrent_mutation_loudly() {
     .unwrap();
     assert!(matches!(outcome, LeafOutcome::Entry(_)));
     // Content that no longer reproduces HEAD's object id fails loudly.
-    let mutated = head_entry(&git_blob_oid(b"other\n"), "100644");
+    let mutated = head_entry(&git_blob_oid(b"other\n", false), "100644");
     let error = capture_leaf(
         root.path(),
         &blobs,
@@ -699,7 +747,7 @@ fn baseline_rejects_concurrent_mutation_loudly() {
     );
     assert!(error.to_string().contains("hashes to object"), "{error}");
     // A mode that no longer matches HEAD fails loudly too.
-    let chmodded = head_entry(&git_blob_oid(b"right\n"), "100755");
+    let chmodded = head_entry(&git_blob_oid(b"right\n", false), "100755");
     let error = capture_leaf(
         root.path(),
         &blobs,
@@ -1141,7 +1189,7 @@ fn status_parser_rejects_unknown_records() {
 fn path_and_target_safety_rules() {
     assert!(is_safe_relative_path("a/b.txt"));
     assert!(is_safe_relative_path("nested/"));
-    for unsafe_path in ["", "/abs", "../up", "./cur", "a/../../b"] {
+    for unsafe_path in ["", "/abs", "../up", "./cur", "a/../../b", "a\\b.txt"] {
         assert!(!is_safe_relative_path(unsafe_path));
     }
     assert!(symlink_target_stays_inside("link", "a.txt"));

@@ -42,6 +42,10 @@ use manifest::{
     is_safe_relative_path, symlink_target_stays_inside, BLOBS_DIR, MANIFEST_FILE, MANIFEST_VERSION,
 };
 
+/// The hex length of a SHA-256 git object id (the alternate object
+/// format's length; SHA-1's 40 is the historical default).
+const SHA256_OID_HEX_LEN: usize = 64;
+
 /// Bounds that keep a snapshot small and predictable: a worktree past
 /// these fails loudly instead of staging an unbounded payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -437,14 +441,24 @@ fn build_manifest(
 }
 
 /// The git blob object id of `content` (`git hash-object` equivalent):
-/// sha1 of `blob <len>\0` followed by the bytes. The HEAD-tree baseline
-/// verifies every staged entry against the object id `ls-tree` recorded,
-/// so the manifest's baseline provably is the stated commit's content.
-pub(crate) fn git_blob_oid(content: &[u8]) -> String {
-    let mut hasher = Sha1::new();
-    hasher.update(format!("blob {}\0", content.len()).as_bytes());
-    hasher.update(content);
-    format!("{:x}", hasher.finalize())
+/// the object-format hash of `blob <len>\0` followed by the bytes. The
+/// HEAD-tree baseline verifies every staged entry against the object id
+/// `ls-tree` recorded, so the manifest's baseline provably is the stated
+/// commit's content; the format follows the repository (SHA-1 or SHA-256).
+pub(crate) fn git_blob_oid(content: &[u8], sha256: bool) -> String {
+    let header = format!("blob {}\0", content.len());
+    let digest = if sha256 {
+        let mut hasher = Sha256::new();
+        hasher.update(header.as_bytes());
+        hasher.update(content);
+        format!("{:x}", hasher.finalize())
+    } else {
+        let mut hasher = Sha1::new();
+        hasher.update(header.as_bytes());
+        hasher.update(content);
+        format!("{:x}", hasher.finalize())
+    };
+    digest
 }
 
 /// What a single path's worktree leaf turned out to be.
@@ -610,7 +624,14 @@ fn open_leaf(root: &Path, path: &str, max_bytes: usize) -> std::io::Result<OpenL
         }
     }
     let absolute = root.join(path);
-    let metadata = std::fs::symlink_metadata(&absolute)?;
+    let metadata = match std::fs::symlink_metadata(&absolute) {
+        Ok(metadata) => metadata,
+        // A tracked deletion or a leaf that vanished between the status
+        // run and this open is a missing leaf, not a capture error
+        // (the unix arm's ENOENT path, in the std error kind).
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(OpenLeaf::Missing),
+        Err(error) => return Err(error),
+    };
     if metadata.file_type().is_symlink() {
         return Ok(OpenLeaf::Symlink {
             target: std::fs::read_link(&absolute)?
@@ -676,7 +697,7 @@ fn capture_leaf(
                     verify_against_head(
                         path,
                         "120000",
-                        &git_blob_oid(target.as_bytes()),
+                        &git_blob_oid(target.as_bytes(), expected.oid.len() == SHA256_OID_HEX_LEN),
                         expected,
                     )?;
                 }
@@ -713,11 +734,22 @@ fn capture_leaf(
                     ),
                 ));
             }
+            #[cfg_attr(unix, allow(unused_mut))]
+            let mut executable = executable;
             if let Some(expected) = expected {
+                let oid = git_blob_oid(&content, expected.oid.len() == SHA256_OID_HEX_LEN);
+                #[cfg(not(unix))]
+                if expected.oid == oid {
+                    // core.filemode hosts carry the executable bit only
+                    // in the tree: a clean leaf restates HEAD's own mode
+                    // instead of the filesystem's absent bit, so a 100755
+                    // script stays executable in the manifest.
+                    executable = expected.mode == "100755";
+                }
                 verify_against_head(
                     path,
                     if executable { "100755" } else { "100644" },
-                    &git_blob_oid(&content),
+                    &oid,
                     expected,
                 )?;
             }
@@ -749,17 +781,21 @@ fn verify_against_head(
     oid: &str,
     expected: &HeadTreeEntry,
 ) -> Result<(), SnapshotError> {
-    if expected.mode != mode {
-        return Err(SnapshotError::ConcurrentMutation {
-            detail: format!("{path} is mode {mode} but HEAD records {}", expected.mode),
-        });
-    }
+    // The object id is the primary mutation detector; the mode is
+    // secondary (a host without an observable executable bit reports
+    // its derived mode as 100644, so a mutated file must fail on the
+    // content first, never on a mode it cannot observe).
     if expected.oid != oid {
         return Err(SnapshotError::ConcurrentMutation {
             detail: format!(
                 "{path} hashes to object {oid} but HEAD records {}",
                 expected.oid
             ),
+        });
+    }
+    if expected.mode != mode {
+        return Err(SnapshotError::ConcurrentMutation {
+            detail: format!("{path} is mode {mode} but HEAD records {}", expected.mode),
         });
     }
     Ok(())
