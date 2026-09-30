@@ -490,8 +490,12 @@ fn highlighted_code_lines(
 /// exactly what it paints.
 fn heading_spans(text: &str, style: &MarkdownStyle) -> Vec<Span> {
     let (mut spans, url_slots) = inline::render_inline_with_url_slots(text, style);
+    // The slot indices arrive ascending, so one cursor walks them in
+    // step with the span iteration — a link-heavy heading stays linear.
+    let mut url_slot = 0;
     for (i, s) in spans.iter_mut().enumerate() {
-        if url_slots.contains(&i) {
+        if url_slots.get(url_slot) == Some(&i) {
+            url_slot += 1;
             continue;
         }
         let underlined = s.style.add_modifier.contains(Modifier::UNDERLINED);

@@ -633,6 +633,43 @@ fn osc8_gated_link_row_wraps_the_label_in_a_hyperlink_and_shows_the_url() {
 }
 
 #[test]
+fn balanced_parens_in_a_link_destination_stay_intact() {
+    // CommonMark link destinations keep balanced parentheses (TS
+    // marked's lexer): the destination ends at its own closing `)`, so
+    // a Wikipedia-style url renders whole in the bracket and the OSC 8
+    // target, with no stray `)` leaking into the text.
+    crate::hyperlinks::set_hyperlinks_override(Some(false));
+    let style = MarkdownStyle::default();
+    let url = "https://en.wikipedia.org/wiki/Function_(mathematics)";
+    let spans = render_inline(&format!("[math]({url})"), &style);
+    assert_eq!(
+        spans,
+        vec![
+            Span::styled("math", style.body.add_modifier(Modifier::UNDERLINED)),
+            Span::styled(format!(" [{url}]"), style.link_url),
+        ]
+    );
+    crate::hyperlinks::set_hyperlinks_override(None);
+    crate::hyperlinks::set_hyperlinks_override(Some(true));
+    let spans = render_inline(&format!("[math]({url})"), &style);
+    assert_eq!(
+        spans,
+        vec![
+            Span::styled(
+                format!(
+                    "{}math{}",
+                    crate::hyperlinks::osc8_open(url),
+                    crate::hyperlinks::OSC8_CLOSE
+                ),
+                style.body.add_modifier(Modifier::UNDERLINED),
+            ),
+            Span::styled(format!(" [{url}]"), style.link_url),
+        ]
+    );
+    crate::hyperlinks::set_hyperlinks_override(None);
+}
+
+#[test]
 fn link_url_bracket_wraps_and_counts_like_text() {
     crate::hyperlinks::set_hyperlinks_override(Some(true));
     let style = MarkdownStyle::default();

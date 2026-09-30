@@ -8,11 +8,11 @@ pub fn render_inline(text: &str, style: &MarkdownStyle) -> Line {
 }
 
 /// The same inline render, plus the `link_url` slot indices: which
-/// spans of the returned line carry a link's `[url]` bracket.
-/// Style-tapering callers (headings) preserve those spans by origin —
-/// a code or body span that merely renders in the `link_url` style (a
-/// theme whose colors collide) is not a slot and tapers like any other
-/// span.
+/// spans of the returned line carry a link's `[url]` bracket, in
+/// ascending span order. Style-tapering callers (headings) preserve
+/// those spans by origin — a code or body span that merely renders in
+/// the `link_url` style (a theme whose colors collide) is not a slot
+/// and tapers like any other span.
 #[must_use]
 pub(crate) fn render_inline_with_url_slots(
     text: &str,
@@ -97,7 +97,20 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line,
             if j + 1 < bytes.len() && bytes[j] == ']' && bytes[j + 1] == '(' {
                 let mut k = j + 2;
                 let mut url = String::new();
-                while k < bytes.len() && bytes[k] != ')' {
+                // CommonMark link destination: parentheses ride only as
+                // a balanced pair (TS marked's lexer), so the destination
+                // ends at the `)` that closes it — not at the first `)`
+                // inside, which a Wikipedia-style url carries.
+                let mut paren_depth = 0usize;
+                while k < bytes.len() {
+                    if bytes[k] == ')' && paren_depth == 0 {
+                        break;
+                    }
+                    if bytes[k] == '(' {
+                        paren_depth += 1;
+                    } else if bytes[k] == ')' {
+                        paren_depth -= 1;
+                    }
                     url.push(bytes[k]);
                     k += 1;
                 }
