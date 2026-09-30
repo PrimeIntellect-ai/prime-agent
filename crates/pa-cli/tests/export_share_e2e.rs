@@ -1,13 +1,5 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack futures on hot paths by design. too_many_lines: style gate
+// only. Casts: 64-bit targets; narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -20,8 +12,7 @@
 //! End-to-end verifier for the TUI export/share commands: a scripted daemon
 //! session driven headlessly — `/export` (HTML and JSONL) writes the file and
 //! reports the TS success row, and `/share` uploads through a stub `gh` on
-//! PATH (no real upload ever leaves the box) and surfaces the share viewer
-//! URL. `Usage: /share` is the TS error row when arguments appear.
+//! PATH and surfaces the share viewer URL.
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
@@ -222,7 +213,6 @@ async fn tui_export_and_share_surface() {
     let previous_viewer_url = std::env::var("PI_SHARE_VIEWER_URL").ok();
     std::env::set_var("PATH", format!("{}:{}", stub_dir.display(), previous_path));
 
-    // A live scripted session: one prompt, one scripted answer.
     // The faux engine (`engine: "faux"`) drives the real agent engine, so
     // the export embeds the real session's tools section.
     let script = serde_json::json!({ "engine": "faux", "responses": [

@@ -1,13 +1,5 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack futures on hot paths by design. too_many_lines: style gate
+// only. Casts: 64-bit targets; narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -18,12 +10,10 @@
 )]
 
 //! The `prime-agent update` e2e (the TS->Rust migration path): the real
-//! binary, a mocked installer-script download (a local one-shot HTTP
-//! server the URL knob points at), and a sandboxed HOME — the command
-//! runs the downloaded script, the launcher lands under the sandbox
-//! prefix, the success line names the new build, and the session file
-//! in the sandbox `~/.prime/agent` is byte-identical. A failing script
-//! keeps the previous install and reports the error.
+//! binary, a mocked installer-script download (a local one-shot HTTP server),
+//! and a sandboxed HOME — the launcher lands under the sandbox prefix, the
+//! success line names the new build, and the sandbox session file is
+//! byte-identical. A failing script keeps the previous install.
 #![cfg(unix)]
 
 use std::io::{Read, Write};
@@ -35,9 +25,7 @@ const ENV_INSTALLER_URL: &str = "PRIME_AGENT_RUST_INSTALLER_URL";
 const ENV_PREFIX: &str = "PRIME_AGENT_RUST_PREFIX";
 
 /// The mock installer the command downloads: it installs a launcher that
-/// answers a stamped `--version` (the takeover's contract — the real
-/// script's own artifact download stays the installer-takeover lane's
-/// sandbox test).
+/// answers a stamped `--version` (the takeover's contract).
 const MOCK_INSTALLER: &str = r#"#!/bin/sh
 set -eu
 mkdir -p "${PRIME_AGENT_RUST_PREFIX}/bin"
@@ -168,9 +156,6 @@ fn prime_agent(args: &[&str], sandbox: &Sandbox) -> Command {
     command
 }
 
-/// `prime-agent update` downloads the script, runs it, the launcher
-/// lands, the success line names the new build, and the session store is
-/// untouched.
 #[test]
 fn update_runs_the_downloaded_installer_and_preserves_the_session_store() {
     let sandbox = Sandbox::new();
