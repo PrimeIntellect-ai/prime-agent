@@ -43,22 +43,28 @@ $ErrorActionPreference = 'Stop'
 $DownloadBaseUrlDefault = 'https://app.primeintellect.ai/prime-agent'
 $ReleaseChannelDefault = 'stable'
 
-# The installer-owned scratch bookkeeping, initialized BEFORE any Fail can
-# run (under `irm | iex` the script scope is the caller's session: ambient
+# The installer-owned bookkeeping, initialized BEFORE any Fail can run
+# (under `irm | iex` the script scope is the caller's session: ambient
 # variables must never be read as this installer's state, so the names are
-# unique to this script and both start cleared - the bots' finding).
+# unique to this script and all start cleared - the bots' finding).
 $script:primeAgentInstallScratch = $null
 $script:primeAgentInstallStage = $null
+$script:primeAgentInstallLock = $null
 
 function Fail($message) {
-    # The installer's own scratch (the download dir + the stage tree) rides
-    # every exit path: Fail sweeps exactly what THIS script created - the
-    # ambient caller's variables never enter the cleanup.
+    # The installer's own state (the download dir, the stage tree, and the
+    # publication lock it claimed) rides every exit path: Fail sweeps
+    # exactly what THIS script created - the ambient caller's variables
+    # never enter the cleanup, and a refused install never leaks its lock
+    # (the bots' finding: the preflight Fail path).
     if ($script:primeAgentInstallScratch) {
         Remove-Item -Recurse -Force $script:primeAgentInstallScratch -ErrorAction SilentlyContinue
     }
     if ($script:primeAgentInstallStage) {
         Remove-Item -Recurse -Force $script:primeAgentInstallStage -ErrorAction SilentlyContinue
+    }
+    if ($script:primeAgentInstallLock) {
+        Remove-Item -Recurse -Force $script:primeAgentInstallLock -ErrorAction SilentlyContinue
     }
     Write-Error "install.ps1: $message"
     exit 1
@@ -265,6 +271,9 @@ try {
     Remove-Item -Recurse -Force $lockDir -ErrorAction SilentlyContinue
     Fail "could not write the publication lock PID: $($_.Exception.Message)"
 }
+# The lock rides every exit path from here: Fail releases it, and the
+# publish's finally releases + clears it.
+$script:primeAgentInstallLock = $lockDir
 
 $published = $false
 $rollback = $null
@@ -328,13 +337,96 @@ try {
     }
     [IO.Directory]::Move($stage, $share)
     $script:primeAgentInstallStage = $null
+    # The payload is live: no later launcher failure rolls it back (the new
+    # tree is valid; the restored launchers point at ../share/prime-agent/
+    # prime-agent.exe - the new payload - and keep working).
     $published = $true
+
+    # --- the launcher pair: the cmd shim (cmd.exe + PowerShell) and the sh
+    # --- launcher (Git Bash) - the same payload, both shells, the same
+    # --- content install-rust.sh writes. THE LOCK STAYS HELD through the
+    # --- launcher transaction (the bots' finding: a second installer must
+    # --- not slip between the payload publish and the launcher write, or
+    # --- its launcher would pair with this payload and a later failure of
+    # --- EITHER installer would restore the other's .pre-takeover over
+    # --- it). The unowned-file discipline is the sh installer's own: a
+    # --- launcher this script did not write is preserved aside, never
+    # --- overwritten (an unrelated command is never destroyed) AND a
+    # --- failure after a preserve puts the user's file back. An
+    # --- INSTALLER-OWNED launcher is snapshotted first (an I/O failure at
+    # --- Set-Content can truncate a live, working launcher).
+    $preservedLaunchers = @()
+    $ownedLauncherBackups = @()
+    function Backup-ExistingLauncher($path) {
+        if (-not (Test-Path $path -PathType Leaf)) { return }
+        $backup = "$path.install-backup"
+        while (Test-Path $backup) { $backup = "$backup.$([Guid]::NewGuid().ToString('N').Substring(0,4))" }
+        Copy-Item -LiteralPath $path -Destination $backup -Force
+        $script:ownedLauncherBackups += ,@($backup, $path)
+    }
+    function Preserve-UnownedLauncher($path) {
+        if (-not (Test-Path $path -PathType Leaf)) { return }
+        $firstLine = (Get-Content -LiteralPath $path -TotalCount 2) -join ' '
+        if ($firstLine -match 'launcher written by install-rust\.sh') {
+            Backup-ExistingLauncher $path
+            return
+        }
+        $preserved = "$path.pre-takeover"
+        while (Test-Path $preserved) { $preserved = "$preserved.$([Guid]::NewGuid().ToString('N').Substring(0,4))" }
+        [IO.File]::Move($path, $preserved)
+        $script:preservedLaunchers += ,@($preserved, $path)
+        Write-Host "note: an unrelated $(Split-Path -Leaf $path) existed at $path; it was preserved at $preserved"
+    }
+    Preserve-UnownedLauncher $launcher
+    Preserve-UnownedLauncher $shLauncher
+
+    try {
+        $cmdShim = @'
+@echo off
+rem prime-agent - launcher written by install-rust.sh.
+if not defined PRIME_AGENT_CODING_AGENT_DIR set "PRIME_AGENT_CODING_AGENT_DIR=%USERPROFILE%\.prime\agent"
+"%~dp0..\share\prime-agent\prime-agent.exe" %*
+'@
+        Set-Content -LiteralPath $launcher -Value $cmdShim
+
+        $shBody = @'
+#!/bin/sh
+# prime-agent — launcher written by install-rust.sh.
+export PRIME_AGENT_CODING_AGENT_DIR="${PRIME_AGENT_CODING_AGENT_DIR:-$HOME/.prime/agent}"
+exec "$(dirname "$0")/../share/prime-agent/prime-agent.exe" "$@"
+'@
+        # LF endings + no BOM: the sh launcher must stay a POSIX file.
+        [IO.File]::WriteAllText($shLauncher, $shBody.Replace("`r`n", "`n"))
+
+        # The launchers are live: the owned-launcher snapshots (the failure
+        # restore points) sweep away - nothing lingers after a success.
+        foreach ($pair in $script:ownedLauncherBackups) {
+            Remove-Item -Force $pair[0] -ErrorAction SilentlyContinue
+        }
+    } catch {
+        # A failed launcher write never leaves the machine without its
+        # command: every preserved file goes home, and every OWNED
+        # launcher's pre-write snapshot is restored over its truncated
+        # form, before the failure surfaces. The destination's PARTIAL
+        # file (Set-Content/WriteAllText can create or truncate before
+        # throwing) is removed first - the broken new file otherwise
+        # blocks the restore.
+        foreach ($pair in $script:preservedLaunchers) {
+            if (Test-Path $pair[1]) { Remove-Item -Force $pair[1] -ErrorAction SilentlyContinue }
+            [IO.File]::Move($pair[0], $pair[1])
+        }
+        foreach ($pair in $script:ownedLauncherBackups) {
+            Copy-Item -LiteralPath $pair[0] -Destination $pair[1] -Force
+            Remove-Item -Force $pair[0] -ErrorAction SilentlyContinue
+        }
+        throw
+    }
 } finally {
     # A failed publish never leaves the machine without its previous payload:
     # the old tree returns to the live name before the lock releases (the sh
     # installer's restore-on-exit discipline). $rollback is pre-initialized:
     # a terminating error before its assignment must not turn the finally's
-    # own check into the leaked-lock failure (the bots' finding).
+    # own check into the leaked-lock failure.
     if (-not $published) {
         if ($rollback -and (Test-Path $rollback -PathType Container) -and -not (Test-Path $share)) {
             # The restore's own failure must not swallow the lock release
@@ -362,86 +454,7 @@ try {
         }
     }
     Remove-Item -Recurse -Force $lockDir -ErrorAction SilentlyContinue
-}
-
-# --- the launcher pair: the cmd shim (cmd.exe + PowerShell) and the sh
-# --- launcher (Git Bash) — the same payload, both shells, the same content
-# --- install-rust.sh writes. The unowned-file discipline is the sh
-# --- installer's own: a launcher this script did not write is preserved
-# --- aside, never overwritten (an unrelated command is never destroyed)
-# --- AND a failure after a preserve puts the user's file back (the sh
-# --- installer's restore-on-exit contract; the bots' finding).
-# The failure-restore contract: a launcher write that truncates its
-# destination mid-write must never leave the machine without its command.
-# An UNOWNED launcher is moved aside (never overwritten without a backup);
-# an INSTALLER-OWNED launcher is snapshotted to a backup slot first (an
-# I/O failure at the Set-Content can truncate a live, working launcher -
-# the bots' finding), and the catch block restores from either.
-$preservedLaunchers = @()
-$ownedLauncherBackups = @()
-function Backup-ExistingLauncher($path) {
-    if (-not (Test-Path $path -PathType Leaf)) { return }
-    $backup = "$path.install-backup"
-    while (Test-Path $backup) { $backup = "$backup.$([Guid]::NewGuid().ToString('N').Substring(0,4))" }
-    Copy-Item -LiteralPath $path -Destination $backup -Force
-    $script:ownedLauncherBackups += ,@($backup, $path)
-}
-function Preserve-UnownedLauncher($path) {
-    if (-not (Test-Path $path -PathType Leaf)) { return }
-    $firstLine = (Get-Content -LiteralPath $path -TotalCount 2) -join ' '
-    if ($firstLine -match 'launcher written by install-rust\.sh') {
-        Backup-ExistingLauncher $path
-        return
-    }
-    $preserved = "$path.pre-takeover"
-    while (Test-Path $preserved) { $preserved = "$preserved.$([Guid]::NewGuid().ToString('N').Substring(0,4))" }
-    [IO.File]::Move($path, $preserved)
-    $script:preservedLaunchers += ,@($preserved, $path)
-    Write-Host "note: an unrelated $(Split-Path -Leaf $path) existed at $path; it was preserved at $preserved"
-}
-Preserve-UnownedLauncher $launcher
-Preserve-UnownedLauncher $shLauncher
-
-try {
-    $cmdShim = @'
-@echo off
-rem prime-agent - launcher written by install-rust.sh.
-if not defined PRIME_AGENT_CODING_AGENT_DIR set "PRIME_AGENT_CODING_AGENT_DIR=%USERPROFILE%\.prime\agent"
-"%~dp0..\share\prime-agent\prime-agent.exe" %*
-'@
-    Set-Content -LiteralPath $launcher -Value $cmdShim
-
-    $shBody = @'
-#!/bin/sh
-# prime-agent — launcher written by install-rust.sh.
-export PRIME_AGENT_CODING_AGENT_DIR="${PRIME_AGENT_CODING_AGENT_DIR:-$HOME/.prime/agent}"
-exec "$(dirname "$0")/../share/prime-agent/prime-agent.exe" "$@"
-'@
-    # LF endings + no BOM: the sh launcher must stay a POSIX file.
-    [IO.File]::WriteAllText($shLauncher, $shBody.Replace("`r`n", "`n"))
-
-    # The launchers are live: the owned-launcher snapshots (the failure
-    # restore points) sweep away - nothing lingers after a success (the
-    # bots' finding: the .install-backup leftovers).
-    foreach ($pair in $script:ownedLauncherBackups) {
-        Remove-Item -Force $pair[0] -ErrorAction SilentlyContinue
-    }
-} catch {
-    # A failed launcher write never leaves the machine without its command:
-    # every preserved file goes home, and every OWNED launcher's pre-write
-    # snapshot is restored over its truncated form, before the failure
-    # surfaces. The destination's PARTIAL file (Set-Content/WriteAllText
-    # can create or truncate before throwing) is removed first - the broken
-    # new file otherwise blocks the restore.
-    foreach ($pair in $script:preservedLaunchers) {
-        if (Test-Path $pair[1]) { Remove-Item -Force $pair[1] -ErrorAction SilentlyContinue }
-        [IO.File]::Move($pair[0], $pair[1])
-    }
-    foreach ($pair in $script:ownedLauncherBackups) {
-        Copy-Item -LiteralPath $pair[0] -Destination $pair[1] -Force
-        Remove-Item -Force $pair[0] -ErrorAction SilentlyContinue
-    }
-    throw
+    $script:primeAgentInstallLock = $null
 }
 
 # --- the kernel pre-warm: uv + the Python venv (best-effort, install-rust.sh
