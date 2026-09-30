@@ -141,7 +141,8 @@ mod win32 {
         }
     }
 
-    /// Set the directory's last-write time.
+    /// Set the directory's last-write time. The `tv_sec`/`tv_nsec` pair
+    /// is the POSIX timespec vocabulary, same as `unix_to_filetime`.
     #[allow(clippy::similar_names)]
     pub(crate) fn set_last_write_time(path: &Path, tv_sec: i64, tv_nsec: i64) -> io::Result<()> {
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
