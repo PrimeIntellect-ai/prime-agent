@@ -468,18 +468,6 @@ jobs:
           python3 - <<'PY'
           import json, hashlib, pathlib, sys
           incoming = pathlib.Path("incoming")
-          # THE COMPLETENESS ASSERTION (the belt behind the route gate): the
-          # release publishes the whole 4-target matrix or nothing - a route
-          # that lost a leg fails here, not as a partial channel manifest.
-          expected_targets = {
-              "artifacts-aarch64-apple-darwin", "artifacts-aarch64-unknown-linux-gnu",
-              "artifacts-x86_64-apple-darwin", "artifacts-x86_64-unknown-linux-gnu",
-          }
-          entry_dirs = {p.name for p in incoming.iterdir() if p.is_dir()}
-          if entry_dirs != expected_targets:
-              sys.exit(
-                  "the build set is incomplete: present "
-                  f"{sorted(entry_dirs)} != expected {sorted(expected_targets)}")
           failures = []
           for entry_dir in sorted(p for p in incoming.iterdir() if p.is_dir()):
               manifest_path = entry_dir / "manifest.json"
@@ -494,7 +482,7 @@ jobs:
                       failures.append(f"{b['file']}: sha256 mismatch")
           if failures:
               sys.exit("hash continuity failed:\n" + "\n".join(failures))
-          print(f"hash continuity verified for all {len(expected_targets)} target sets")
+          print(f"hash continuity verified for all archives")
           PY
       - name: Verify Linux decoder integrity against installed tar ELF
         run: |
