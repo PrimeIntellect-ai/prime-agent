@@ -390,7 +390,7 @@ export function getKernelVenvDir(): string {
 	return path.join(os.homedir(), ".prime", "agent", "kernel-venv");
 }
 
-function getXdgKernelVenvDir(): string {
+export function getXdgKernelVenvDir(): string {
 	const dataHome = process.env.XDG_DATA_HOME
 		? path.resolve(expandHome(process.env.XDG_DATA_HOME))
 		: path.join(os.homedir(), ".local", "share");

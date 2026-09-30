@@ -40,7 +40,7 @@
 		"postinstall": "node postinstall.cjs",
 		"prepublishOnly": "npm run clean && npm run build",
 		"bundle": "node scripts/bundle.mjs",
-		"test:kernel": "vitest --run --no-file-parallelism --tagsFilter kernel-heavy test/acp-kernel-features.test.ts test/acp-cold-cli.test.ts test/kernel-goal-skill.test.ts test/repl-kernel-state-roundtrip.test.ts test/repl-kernel-mcp-shutdown.test.ts",
+		"test:kernel": "vitest --run --no-file-parallelism --tagsFilter kernel-heavy test/acp-kernel-features.test.ts test/acp-cold-cli.test.ts test/kernel-goal-skill.test.ts test/repl-kernel-state-roundtrip.test.ts test/repl-kernel-mcp-shutdown.test.ts test/factory-workflow-e2e.test.ts",
 		"catalog-assets": "node scripts/catalog-assets.mjs",
 		"catalog:assets": "node scripts/catalog-assets.mjs generate --out catalog"
 	},
