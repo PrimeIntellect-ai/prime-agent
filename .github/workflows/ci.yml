@@ -301,6 +301,13 @@ jobs:
       - name: Build the workspace bins (sibling-binary parity for the e2e suites)
         if: steps.selection.outputs.units != '0'
         run: cargo build --locked --workspace --bins
+      # The kernel e2e suites resolve the ambient kernel venv; left to
+      # bootstrap lazily, the first session prewarm starts it mid-shard and
+      # the next kernel unit fails against the half-built venv (run
+      # 36764911023). The installer's bootstrap handoff readies it first.
+      - name: Bootstrap the kernel venv (ready before the kernel e2e units)
+        if: steps.selection.outputs.units != '0'
+        run: ./target/debug/prime-agent --prime-agent-bootstrap
       - name: Run this shard's test subset
         run: |
           python3 scripts/ci_test_shard.py --shard ${{ matrix.shard }} --total ${{ env.SHARD_COUNT }}             --crates "${{ needs.changes.outputs.crates }}"             --manifest "$RUNNER_TEMP/shard-manifest-${{ matrix.shard }}.json"
