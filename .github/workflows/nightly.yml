@@ -191,6 +191,8 @@ jobs:
               exit 1
             fi
             while IFS="$(printf '\t')" read -r run_id candidate_sha; do
+              # the continue is the intended else arm
+              # shellcheck disable=SC2015
               [ -n "${run_id}" ] && [ -n "${candidate_sha}" ] || continue
               jobs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs" 2>/dev/null || echo '{"jobs":[]}')"
               read -r built total < <(printf '%s\n' "${jobs_json}" | jq -r \
