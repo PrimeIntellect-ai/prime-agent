@@ -218,8 +218,13 @@ async fn message_end_persist_failure_retains_the_row_and_swallows() {
         .get_all_entries()
         .to_vec()
         .len();
+    let delivered = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    let pre_synced_replies = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
     persist_event(
         &session.session,
+        &delivered,
+        &pre_synced_replies,
+        &session.terminal_test_gate,
         AgentEvent::MessageEnd {
             message: AgentMessage::user("retained after the failed write"),
         },

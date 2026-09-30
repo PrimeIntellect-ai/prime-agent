@@ -174,6 +174,11 @@ pub struct SessionEngine {
     /// the child-observation sink (the daemon children registry) onto it
     /// after the build.
     pub rlm_usage: std::sync::Arc<super::rlm_usage::RlmChildUsageAttributions>,
+    /// The session's RLM host bridge: the progress-note store an
+    /// in-process children host reads for its roster rows (the child's
+    /// latest `rlm.progress.note`), shared with the kernel's own
+    /// `rlm.*` handlers.
+    pub rlm: std::sync::Arc<super::rlm_host::RlmHostBridge>,
     /// The session's kernel provisioner. The engine is the STRONG owner on
     /// purpose: the `ipython` tool on the agent and the compaction
     /// kernel-state probe on the session hold weak references, because the
@@ -630,6 +635,9 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // them.
     let (existing_messages, has_thinking_entry, has_service_tier_entry) = {
         let session = wiring.session.lock().await;
+        // The in-process host removes and re-admits unconsumed notices at
+        // bind. An engine not bound to that host must keep its original
+        // context instead of silently hiding durable rows.
         let messages = super::compact_session::rebuilt_context_after_compaction(&session);
         let has_thinking_entry = session.has_thinking_level();
         let has_service_tier_entry = session.has_service_tier();
@@ -874,6 +882,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         turn_boundary,
         telemetry,
         rlm_usage: wiring.rlm_usage,
+        rlm: wiring.rlm,
         provisioner,
     })
 }

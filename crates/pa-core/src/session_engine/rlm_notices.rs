@@ -17,6 +17,17 @@ pub const RLM_CHILD_FAILURE_CUSTOM_TYPE: &str = "rlm_child_failure";
 /// (TS `rlm_child_terminal_notice`).
 pub const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE: &str = "rlm_child_terminal_notice";
 
+/// The parent generation and child identity are immutable through rebind.
+#[must_use]
+pub fn terminal_notice_key(message: &CustomMessage) -> Option<&str> {
+    if message.custom_type != RLM_CHILD_FAILURE_CUSTOM_TYPE
+        && message.custom_type != RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE
+    {
+        return None;
+    }
+    message.details.as_ref()?.get("noticeKey")?.as_str()
+}
+
 /// How a child run ended without an explicit reply (TS
 /// `RlmChildTerminalNoticeDetails`).
 #[derive(Debug, Clone, PartialEq, Eq)]

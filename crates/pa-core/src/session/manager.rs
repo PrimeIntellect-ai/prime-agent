@@ -32,8 +32,8 @@ mod append;
 // the durable append arm, and the atomic write) moved to the child module
 // at the same tree position (session::manager::persist); the pub(super)
 // bumps carry the cross-child callers (lifecycle/queries refresh +
-// build_index + rewrite_file; append persist_entry; repair atomic_write)
-// and the binding row serves the repair child bare call. on_persist,
+// build_index + rewrite_file; append persist_entry; repair atomic_write;
+// notices try_rewrite_file + notify_persist_listeners). on_persist,
 // is_persisted + flush_now keep their pub levels; try_rewrite_file +
 // notify_persist_listeners stay private (child-internal callers).
 mod persist;
@@ -100,6 +100,24 @@ mod repair;
 pub use repair::load_entries_from_file;
 use repair::serialize_entry;
 
+// The durable terminal-notice concern (the strict keyed append of an
+// RLM child terminal notice, the consumption marker, and the
+// file-backed unconsumed scan) lives in the child module at the same
+// tree position (session::manager::notices); the re-exports keep the
+// wire vocabulary stable for the engine's row factories (the canonical
+// factories live in session_engine::rlm_notices).
+mod notices;
+pub use notices::{
+    AGENT_MESSAGE_CUSTOM_TYPE, AGENT_MESSAGE_KEY_FIELD, NOTICE_CONSUMED_CUSTOM_TYPE,
+    NOTICE_CONSUMED_KEYS_FIELD, NOTICE_KEY_FIELD, TERMINAL_NOTICE_CUSTOM_TYPES,
+};
+// The test-build fault hooks for the strict notice append are pub(crate)
+// inside the child module; lift them so the engine's in-process host
+// tests can reach `crate::session::manager::fault_hooks::{arm, disarm,
+// Fault, take}` without the private module path.
+#[cfg(test)]
+pub(crate) use notices::fault_hooks;
+
 /// A persist observer; must not break session writes (panics are contained).
 pub type SessionPersistListener = Box<dyn Fn(&Path) + Send + Sync>;
 
@@ -135,6 +153,17 @@ pub struct SessionManager {
     label_timestamps_by_id: HashMap<String, String>,
     leaf_id: Option<String>,
     persist_listeners: Vec<SessionPersistListener>,
+    /// A failed notice-tail repair poisoned the writer: blind
+    /// single-line appends would splice onto an uncertain tail, so they
+    /// fail fast with the stored error until a successful wholesale
+    /// rewrite (the atomic replace from the consistent in-memory index)
+    /// clears it, or the session is reopened (open-time repair owns
+    /// the tail then).
+    write_poison: Option<std::sync::Arc<std::io::Error>>,
+    /// Test builds only: refuse every strict notice write before it
+    /// touches the file (`set_notice_append_fault`).
+    #[cfg(test)]
+    notice_append_fault: bool,
 }
 
 /// The refine transcript's consumed artifacts: the conversation

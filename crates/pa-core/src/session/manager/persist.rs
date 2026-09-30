@@ -53,7 +53,7 @@ impl SessionManager {
         }
     }
 
-    fn try_rewrite_file(&mut self) -> std::io::Result<()> {
+    pub(super) fn try_rewrite_file(&mut self) -> std::io::Result<()> {
         assert!(
             self.window.is_none(),
             "hydrate full session history before this operation"
@@ -77,10 +77,14 @@ impl SessionManager {
         }
         atomic_write(session_file, &content)?;
         self.notify_persist_listeners();
+        // A wholesale replace rebuilds the file from the consistent
+        // in-memory index: any uncertain tail is gone, so a poisoned
+        // writer is healed.
+        self.write_poison = None;
         Ok(())
     }
 
-    fn notify_persist_listeners(&self) {
+    pub(super) fn notify_persist_listeners(&self) {
         let Some(session_file) = &self.session_file else {
             return;
         };
@@ -133,6 +137,12 @@ impl SessionManager {
             self.try_rewrite_file()?;
             self.flushed = true;
         } else {
+            // A poisoned writer refuses blind single-line appends: the
+            // tail is uncertain and a spliced line corrupts the file
+            // (a wholesale rewrite - the arm above - is the heal).
+            if let Some(error) = &self.write_poison {
+                return Err(std::io::Error::new(error.kind(), error.to_string()));
+            }
             let entry = serialize_entry(&self.file_entries[index]);
             if let Some(session_file) = &self.session_file {
                 let mut line = entry.into_bytes();

@@ -138,6 +138,9 @@ impl SessionManager {
             label_timestamps_by_id: HashMap::new(),
             leaf_id: None,
             persist_listeners: Vec::new(),
+            write_poison: None,
+            #[cfg(test)]
+            notice_append_fault: false,
         };
         match session_file {
             Some(file) => manager.set_session_file(file, None),

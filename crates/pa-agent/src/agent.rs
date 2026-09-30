@@ -324,11 +324,58 @@ struct ActiveRun {
     controller: AbortController,
     idle_tx: watch::Sender<bool>,
     /// Model serving the run when it started; failures stay attributed to
-    /// it (TS `ActiveRun.model`).
-    model: Model,
+    /// it (TS `ActiveRun.model`). `None` only in the window between a
+    /// claimed admission and its executor's first snapshot: the admission
+    /// seam claims the run slot without awaiting the shared lock, and
+    /// failure attribution falls back to the override/session model there
+    /// (the executor backfills this field before the first request).
+    model: Option<Model>,
 }
 
-struct AgentInner {
+/// A claimed run slot (the admission seam's decision outcome): the slot is
+/// installed, so exactly one admitted caller owns the next run, and the
+/// executor built on the claim settles it through the shared finish path.
+pub(crate) struct RunClaim {
+    controller: AbortController,
+}
+
+/// The admission claim decision (see [`AgentInner::claim_or_enqueue`]):
+/// busy takes the batch as steering under the same lock section that
+/// observed the busy run; idle claims the slot and hands the batch back as
+/// the claimed run's seed.
+// The claimed batch rides inline like every other queue path (the
+// `AgentMessageBatch` precedent); boxing this one payload would complicate
+// the seam's only call site for no memory benefit here.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum ClaimOrEnqueue {
+    Claimed {
+        claim: RunClaim,
+        batch: AgentMessageBatch,
+    },
+    /// The batch was enqueued as steering for the active run.
+    Enqueued,
+}
+
+/// The pump-drain decision (see [`AgentInner::claim_or_drain`]).
+pub(crate) enum QueuedClaim {
+    /// The idle slot was claimed with the drained batches as the run seed.
+    Claimed {
+        claim: RunClaim,
+        messages: Vec<AgentMessage>,
+        /// Whether the seed came from the follow-up queue: a steering
+        /// seed skips the loop's initial steering poll (it IS the
+        /// steering, preserving the queue mode's batching); a follow-up
+        /// seed keeps polling steering at the turn's start, like
+        /// `continue`'s own drain always did.
+        drained_follow_ups: bool,
+    },
+    /// A run is active; nothing was drained.
+    Busy,
+    /// Nothing was queued at the claim.
+    Empty,
+}
+
+pub(crate) struct AgentInner {
     /// One lock serializes state reduction and listener awaits, mirroring the
     /// single-threaded TS event loop: emitted events are processed strictly in
     /// the order the loop emits them.
@@ -337,6 +384,17 @@ struct AgentInner {
     follow_up_queue: Mutex<PendingMessageQueue>,
     /// Active-run bookkeeping. A plain mutex: never held across awaits.
     run: Mutex<Option<ActiveRun>>,
+    /// Stateful idle-queued wake (the admission seam's pump signal): the
+    /// run-finish critical section reflects "leftover steering/follow-up
+    /// batches" into it, so a batch that missed the loop's final steering
+    /// poll cannot strand. A host-owned pump subscribes through
+    /// [`Agent::idle_queued_wake`]; pa-agent never spawns a watcher, so
+    /// the signal acts only when a pump is installed.
+    idle_queued_tx: watch::Sender<bool>,
+    /// Retained receiver keeping the wake channel open when no pump is
+    /// subscribed, so an arming is stored even with zero external
+    /// subscribers (a fresh clone starts at the current value).
+    pub(crate) idle_queued_rx: watch::Receiver<bool>,
     convert_to_llm: ConvertToLlmFn,
     transform_context: Option<TransformContextFn>,
     stream_fn: Option<StreamFn>,
@@ -358,7 +416,7 @@ struct AgentInner {
     /// across an await. The owner sets it right before starting a routed
     /// run and clears it before the next dispatch, so retries and
     /// post-compaction continuations of a routed turn keep serving it.
-    model_override: Mutex<Option<AgentModelOverride>>,
+    pub(crate) model_override: Mutex<Option<AgentModelOverride>>,
     session_id: Option<String>,
     tool_execution: ToolExecutionMode,
 }
@@ -445,7 +503,7 @@ impl AgentInner {
                 .lock()
                 .unwrap()
                 .as_ref()
-                .map(|run| run.model.clone())
+                .and_then(|run| run.model.clone())
                 .or_else(|| {
                     self.model_override
                         .lock()
@@ -594,16 +652,18 @@ impl AgentInner {
         F: FnOnce(AbortSignal, Option<AgentModelOverride>) -> Fut,
         Fut: std::future::Future<Output = anyhow::Result<()>>,
     {
-        let controller = AbortController::new();
-        let (idle_tx, _idle_rx) = watch::channel(false);
         // The run's model-override snapshot, read ONCE (TS `ActiveRun.model`
-        // + `createLoopConfig`'s `modelOverride` read the same value in the
-        // same synchronous block): every LLM request of the run, and its
+        // + `createLoopConfig`'s `modelOverride` read the same value in
+        // the same synchronous block): every LLM request of the run, and its
         // failure attribution, follow this one snapshot, so a concurrent
         // `set_model_override` cannot split the run's model from its
         // request fields or re-attribute an in-flight request to a model
-        // that never saw it. Read before taking the run lock: the shared
-        // lock awaits, and a std guard must never ride it.
+        // that never saw it. Read before claiming: this path expects an
+        // idle agent (its callers refuse busy agents first), while the
+        // admission seam must never await the shared lock inside its
+        // busy/idle decision — the shared lock is held across listener
+        // awaits, so a caller holding a serialization lock across an
+        // admission could otherwise wait out a live run.
         let run_override: Option<AgentModelOverride> = self.model_override.lock().unwrap().clone();
         let run_model = {
             let shared = self.shared.lock().await;
@@ -611,18 +671,112 @@ impl AgentInner {
                 .as_ref()
                 .map_or_else(|| shared.state.model.clone(), |routed| routed.model.clone())
         };
-        {
-            let mut run = self.run.lock().unwrap();
-            if run.is_some() {
-                anyhow::bail!("Agent is already processing.");
-            }
-            *run = Some(ActiveRun {
-                controller: controller.clone(),
-                idle_tx,
-                model: run_model,
-            });
+        let Some(claim) = self.claim_run_slot(Some(run_model)) else {
+            anyhow::bail!("Agent is already processing.");
+        };
+        self.execute_claimed_run(claim, run_override, executor)
+            .await
+    }
+
+    /// Claim the idle run slot (the busy/idle decision point): `None` when
+    /// a run is active. Synchronous, so a caller deciding busy-vs-idle
+    /// does so in ONE critical section on the slot — no second caller can
+    /// observe the same idle window (the check-then-act gap of the plain
+    /// pre-checks) — and no std guard rides an await.
+    pub(crate) fn claim_run_slot(&self, model: Option<Model>) -> Option<RunClaim> {
+        let mut run = self.run.lock().unwrap();
+        if run.is_some() {
+            return None;
         }
-        let run_signal = controller.signal();
+        Some(Self::install_run_locked(&mut run, model))
+    }
+
+    /// Install the claimed run into a known-idle slot.
+    fn install_run_locked(
+        run: &mut std::sync::MutexGuard<'_, Option<ActiveRun>>,
+        model: Option<Model>,
+    ) -> RunClaim {
+        let controller = AbortController::new();
+        let (idle_tx, _idle_rx) = watch::channel(false);
+        **run = Some(ActiveRun {
+            controller: controller.clone(),
+            idle_tx,
+            model,
+        });
+        RunClaim { controller }
+    }
+
+    /// The admission seam's atomic enqueue-or-admit decision (see
+    /// [`Agent::admit_or_enqueue`]): under the run-slot lock, a busy agent
+    /// takes the batch as steering right there — the enqueue cannot land
+    /// after a finishing run's queue re-check, which happens inside the
+    /// same lock — and an idle agent's slot is claimed on the spot.
+    pub(crate) fn claim_or_enqueue(&self, batch: AgentMessageBatch) -> ClaimOrEnqueue {
+        let mut run = self.run.lock().unwrap();
+        if run.is_some() {
+            self.steering_queue.lock().unwrap().enqueue(batch);
+            return ClaimOrEnqueue::Enqueued;
+        }
+        let claim = Self::install_run_locked(&mut run, None);
+        ClaimOrEnqueue::Claimed { claim, batch }
+    }
+
+    /// The pump drain's atomic decision (see [`Agent::admit_queued_turn`]):
+    /// a busy agent refuses without touching the queues (a refused drain
+    /// preserves every queued batch — never drain-then-lose), and an idle
+    /// agent's slot is claimed together with draining the queued batches
+    /// as the run's seed (steering first, then follow-ups). The
+    /// idle-queued wake reflects whatever survives the drain.
+    pub(crate) fn claim_or_drain(&self) -> QueuedClaim {
+        let mut run = self.run.lock().unwrap();
+        if run.is_some() {
+            return QueuedClaim::Busy;
+        }
+        let steering = self.steering_queue.lock().unwrap().drain();
+        if !steering.is_empty() {
+            let leftovers = self.steering_queue.lock().unwrap().has_items();
+            self.idle_queued_tx.send_modify(|armed| *armed = leftovers);
+            let claim = Self::install_run_locked(&mut run, None);
+            return QueuedClaim::Claimed {
+                claim,
+                messages: steering,
+                drained_follow_ups: false,
+            };
+        }
+        let follow_ups = self.follow_up_queue.lock().unwrap().drain();
+        if !follow_ups.is_empty() {
+            let leftovers = self.follow_up_queue.lock().unwrap().has_items();
+            self.idle_queued_tx.send_modify(|armed| *armed = leftovers);
+            let claim = Self::install_run_locked(&mut run, None);
+            return QueuedClaim::Claimed {
+                claim,
+                messages: follow_ups,
+                drained_follow_ups: true,
+            };
+        }
+        self.idle_queued_tx.send_modify(|armed| *armed = false);
+        QueuedClaim::Empty
+    }
+
+    /// The post-claim half of `runWithLifecycle`: register streaming, run
+    /// the executor, settle failures, then the finish critical section —
+    /// clear the slot and, under the same lock, reflect "leftover queued
+    /// batches" into the idle-queued wake, so a batch that missed the
+    /// loop's final steering poll (or a stop hook/abort that skipped the
+    /// polls) cannot strand between the final poll and the idle
+    /// transition. The wake is re-armed on every finish with a non-empty
+    /// queue, so a subscribed pump converges without spinning.
+    async fn execute_claimed_run<F, Fut>(
+        self: &Arc<Self>,
+        claim: RunClaim,
+        run_override: Option<AgentModelOverride>,
+        executor: F,
+    ) -> anyhow::Result<()>
+    where
+        F: FnOnce(AbortSignal, Option<AgentModelOverride>) -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<()>>,
+    {
+        let run_signal = claim.controller.signal();
 
         {
             let mut shared = self.shared.lock().await;
@@ -649,6 +803,9 @@ impl AgentInner {
         {
             let mut run = self.run.lock().unwrap();
             if let Some(active) = run.take() {
+                let has_queued = self.steering_queue.lock().unwrap().has_items()
+                    || self.follow_up_queue.lock().unwrap().has_items();
+                self.idle_queued_tx.send_modify(|armed| *armed = has_queued);
                 let _ = active.idle_tx.send(true);
             }
         }
@@ -706,6 +863,58 @@ impl AgentInner {
         .await
     }
 
+    /// The admission seam's executor: run the claimed slot with `messages`
+    /// as the turn's seed (`skip_initial_steering_poll` follows the
+    /// caller: a fresh admission polls like `prompt`, a drained admission
+    /// IS the steering). The shared-lock snapshot backfills the claimed
+    /// run's model first — the claim itself never awaits the shared lock —
+    /// then the loop takes over, and the run settles through
+    /// [`AgentInner::execute_claimed_run`]'s failure/finish paths like any
+    /// other run.
+    pub(crate) async fn execute_prompt_claim(
+        self: &Arc<Self>,
+        claim: RunClaim,
+        run_override: Option<AgentModelOverride>,
+        messages: Vec<AgentMessage>,
+        skip_initial_steering_poll: bool,
+    ) -> anyhow::Result<()> {
+        let inner = Arc::clone(self);
+        self.execute_claimed_run(claim, run_override, |signal, model_override| async move {
+            let (context, config) = {
+                let shared = inner.shared.lock().await;
+                let config =
+                    inner.loop_config(&shared, skip_initial_steering_poll, model_override.as_ref());
+                let context = AgentInner::snapshot_locked(&shared);
+                let model = config.model.clone();
+                drop(shared);
+                // Backfill the claimed run's model snapshot (failure
+                // attribution) from the same read that serves the run.
+                if let Some(active) = inner.run.lock().unwrap().as_mut() {
+                    active.model = Some(model);
+                }
+                (context, config)
+            };
+            let emit: AgentEventSink = {
+                let inner = Arc::clone(&inner);
+                Arc::new(move |event| {
+                    let inner = Arc::clone(&inner);
+                    Box::pin(async move { inner.process_events(event).await })
+                })
+            };
+            crate::agent_loop::run_agent_loop(
+                messages,
+                context,
+                &config,
+                emit,
+                Some(&signal),
+                inner.stream_fn.as_ref(),
+            )
+            .await
+            .map(|_| ())
+        })
+        .await
+    }
+
     async fn run_continuation(self: &Arc<Self>) -> anyhow::Result<()> {
         let inner = Arc::clone(self);
         self.run_with_lifecycle(|signal, model_override| async move {
@@ -737,24 +946,42 @@ impl AgentInner {
     }
 
     /// Drains queued steering/follow-up messages as a run, mirroring the
-    /// `runQueuedMessages` helper in `continue()`. Returns whether a run
+    /// `runQueuedMessages` helper in `continue()`. The drain and the
+    /// run-slot claim are ONE critical section (the admission seam's
+    /// atomic claim): a busy agent refuses with the typed continue
+    /// `Busy` error WITHOUT draining, so a prompt or the idle-wake pump
+    /// winning the slot can no longer make the drained batches vanish
+    /// between the drain and the run start (the design-cited
+    /// drain-then-lose race of the legacy path). Returns whether a run
     /// was started.
     async fn run_queued_messages(self: &Arc<Self>) -> anyhow::Result<bool> {
-        let queued_steering = self.steering_queue.lock().unwrap().drain();
-        if !queued_steering.is_empty() {
-            self.run_prompt_messages(queued_steering, true).await?;
-            return Ok(true);
+        match self.claim_or_drain() {
+            QueuedClaim::Busy => Err(anyhow::Error::new(AgentContinueError::new(
+                AgentContinueErrorCode::Busy,
+                "Agent is already processing. Wait for completion before continuing.",
+            ))),
+            QueuedClaim::Empty => Ok(false),
+            QueuedClaim::Claimed {
+                claim,
+                messages,
+                drained_follow_ups,
+            } => {
+                let run_override = self.model_override.lock().unwrap().clone();
+                let skip_initial_steering_poll = !drained_follow_ups;
+                self.execute_prompt_claim(
+                    claim,
+                    run_override,
+                    messages,
+                    skip_initial_steering_poll,
+                )
+                .await?;
+                Ok(true)
+            }
         }
-        let queued_follow_ups = self.follow_up_queue.lock().unwrap().drain();
-        if !queued_follow_ups.is_empty() {
-            self.run_prompt_messages(queued_follow_ups, false).await?;
-            return Ok(true);
-        }
-        Ok(false)
     }
 
     /// Port of `normalizePromptInput`.
-    fn normalize_prompt_input(input: AgentPromptInput) -> Vec<AgentMessage> {
+    pub(crate) fn normalize_prompt_input(input: AgentPromptInput) -> Vec<AgentMessage> {
         match input {
             AgentPromptInput::Messages(messages) => messages,
             AgentPromptInput::Text { text, images } => {
@@ -778,12 +1005,15 @@ impl AgentInner {
 
 /// The public `Agent` (TS `class Agent`).
 pub struct Agent {
-    inner: Arc<AgentInner>,
+    /// The shared internals, visible to the sibling admission module (the
+    /// admission seam's impl block lives in [`crate::admission`]).
+    pub(crate) inner: Arc<AgentInner>,
 }
 
 impl Agent {
     pub fn new(options: AgentOptions) -> Self {
         let initial = options.initial_state;
+        let (idle_queued_tx, idle_queued_rx) = watch::channel(false);
         let state = MutableAgentState {
             system_prompt: initial.system_prompt.unwrap_or_default(),
             model: initial.model.unwrap_or_else(Model::unknown),
@@ -805,6 +1035,8 @@ impl Agent {
                 options.follow_up_mode.unwrap_or(QueueMode::OneAtATime),
             )),
             run: Mutex::new(None),
+            idle_queued_tx,
+            idle_queued_rx,
             convert_to_llm: options
                 .convert_to_llm
                 .unwrap_or_else(AgentLoopConfig::default_convert_to_llm),
@@ -1564,5 +1796,122 @@ mod tests {
             .expect("the failure assistant row");
         assert_eq!(failure.model, "image-model");
         assert_eq!(failure.stop_reason, crate::types::StopReason::Error);
+    }
+
+    // The legacy queued-drain path (continue()'s `runQueuedMessages`): the
+    // drain and the run-slot claim are ONE critical section, so a drain
+    // against an active run refuses with the typed `Busy` error and never
+    // drops the queued batch (the design-cited drain-then-lose race).
+    #[tokio::test]
+    async fn run_queued_messages_busy_refusal_never_drains_the_queue() {
+        use crate::scripted::ScriptedProvider;
+
+        fn model(id: &str) -> Model {
+            Model {
+                id: id.to_string(),
+                name: id.to_string(),
+                api: "anthropic-messages".to_string(),
+                provider: "anthropic".to_string(),
+                base_url: String::new(),
+                reasoning: true,
+                cost: crate::types::UsageCost::default(),
+                context_window: 200_000,
+                max_tokens: 8_192,
+            }
+        }
+
+        let provider = Arc::new(ScriptedProvider::new(model("session-model")));
+        provider.push_stalled_turn("partial");
+        provider.push_text_turn("ok");
+        let agent = Agent::new(AgentOptions {
+            initial_state: AgentInitialState {
+                model: Some(model("session-model")),
+                thinking_level: Some(crate::types::ThinkingLevel::Off),
+                system_prompt: Some("s".to_string()),
+                ..Default::default()
+            },
+            stream_fn: Some(provider.stream_fn()),
+            ..Default::default()
+        });
+
+        // Synchronize on the run's first assistant message: the initial
+        // steering poll has passed, so a batch steered from here waits for
+        // a boundary poll that the stalled turn never reaches.
+        let (assistant_started_tx, assistant_started_rx) = {
+            let (tx, rx) = tokio::sync::watch::channel(false);
+            (Arc::new(tx), rx)
+        };
+        let subscription = agent
+            .subscribe(move |event, _| {
+                let assistant_started_tx = Arc::clone(&assistant_started_tx);
+                Box::pin(async move {
+                    if let crate::types::AgentEvent::MessageStart { message } = &event {
+                        if message.role() == "assistant" {
+                            assistant_started_tx.send_replace(true);
+                        }
+                    }
+                    Ok(())
+                })
+            })
+            .await;
+
+        let prompt_agent = agent.clone();
+        let prompt_task = tokio::spawn(async move {
+            prompt_agent
+                .prompt(AgentPromptInput::text("go"))
+                .await
+                .expect("run");
+        });
+        let mut assistant_started = assistant_started_rx;
+        while !*assistant_started.borrow_and_update() {
+            assistant_started
+                .changed()
+                .await
+                .expect("the stalled turn starts");
+        }
+
+        agent.steer(AgentMessage::user("queued"));
+        let error = agent
+            .inner
+            .run_queued_messages()
+            .await
+            .expect_err("busy refusal");
+        let continue_error = error
+            .downcast_ref::<AgentContinueError>()
+            .expect("typed continue error");
+        assert_eq!(continue_error.code, AgentContinueErrorCode::Busy);
+        assert!(
+            agent.has_queued_messages(),
+            "the busy refusal did not drain the queue"
+        );
+
+        agent.abort();
+        prompt_task.await.expect("prompt task alive");
+        agent.wait_for_idle().await;
+
+        // After the aborted run settles, the preserved batch still
+        // delivers through the ordinary continue path.
+        agent.continue_run().await.expect("queued continuation");
+        let state = agent.state().await;
+        let queued_delivered = state.messages.iter().any(|message| {
+            matches!(
+                message,
+                crate::types::AgentMessage::Standard(crate::types::Message::User(user))
+                    if matches!(&user.content, crate::types::UserContent::Text(text) if text == "queued")
+            )
+        });
+        assert!(
+            queued_delivered,
+            "the preserved batch reached the continuation turn"
+        );
+        assert_eq!(
+            state
+                .messages
+                .last()
+                .map(|message| message.role().to_string()),
+            Some("assistant".to_string())
+        );
+        assert!(!agent.has_queued_messages());
+        subscription.unsubscribe().await;
     }
 }

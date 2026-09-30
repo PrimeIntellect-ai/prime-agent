@@ -20,15 +20,48 @@ impl AgentSession {
         self.prompt_with_images(text, Vec::new(), options).await
     }
 
-    /// Admit an injected custom message as the turn's prompt (TS
-    /// `_promptInjectedMessage` -> `_createPreparedTurnAction(..., {
-    /// message })` -> `agent.prompt([customMessage])`): the loop context
-    /// and the transcript hold ONE representation of the turn — the
-    /// custom row itself, appended by the loop's `message_end` — while
-    /// the provider request carries its user-role view (the loop-boundary
-    /// `convert_to_llm` conversion, TS `convertToLlm`). The injected
-    /// content is never template-expanded or command-parsed (TS injected
-    /// turns skip `_normalizeSubmission`).
+    /// The injected turn's prompt messages (TS `_promptInjectedMessage`'s
+    /// prepared rows): the pending first-turn digest row, any next-turn
+    /// rows parked on the session, and the injected custom row. The
+    /// dispatch-time routing decision fires for every dispatched turn (TS
+    /// `_startPreparedTurnActions` runs it per prepared turn action): an
+    /// injected row never carries images, so it clears a route left
+    /// behind by the previous dispatched turn.
+    pub(super) async fn injected_prompt_messages(
+        &self,
+        message: &pa_types::session::CustomMessage,
+    ) -> anyhow::Result<Vec<pa_agent::types::AgentMessage>> {
+        let mut prompt_messages = Vec::new();
+        if let Some(digest_row) = self.pending_digest_prompt_row().await? {
+            prompt_messages.push(digest_row);
+        }
+        prompt_messages.extend(self.take_next_turn_rows().await);
+        let custom_row = session_message_to_loop(&SessionAgentMessage::Custom(message.clone()))
+            .ok_or_else(|| anyhow::anyhow!("injected custom message conversion failed"))?;
+        self.apply_image_model_routing(&[], &[]).await?;
+        prompt_messages.push(custom_row);
+        Ok(prompt_messages)
+    }
+
+    /// The idle-session admission probe the injected paths share: a busy
+    /// session refuses with the plain-prompt error (TS `_isBusyForSessionInput`).
+    async fn refuse_if_busy(&self) -> anyhow::Result<()> {
+        if self.agent.state().await.is_streaming {
+            anyhow::bail!(
+                "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message."
+            );
+        }
+        Ok(())
+    }
+
+    /// Admit an injected custom message as the turn's prompt and wait for
+    /// the whole run (TS `_promptInjectedMessage` -> `agent.prompt`):
+    /// the loop context and the transcript hold ONE representation of the
+    /// turn — the custom row itself, appended by the loop's `message_end`
+    /// — while the provider request carries its user-role view (the
+    /// loop-boundary `convert_to_llm` conversion, TS `convertToLlm`). The
+    /// injected content is never template-expanded or command-parsed (TS
+    /// injected turns skip `_normalizeSubmission`).
     ///
     /// # Errors
     ///
@@ -39,30 +72,53 @@ impl AgentSession {
         &self,
         message: &pa_types::session::CustomMessage,
     ) -> anyhow::Result<PromptOutcome> {
-        let state = self.agent.state().await;
-        let busy = state.is_streaming;
-        if busy {
-            anyhow::bail!(
-                "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message."
-            );
-        }
-        let mut prompt_messages = Vec::new();
-        if let Some(digest_row) = self.pending_digest_prompt_row().await? {
-            prompt_messages.push(digest_row);
-        }
-        prompt_messages.extend(self.take_next_turn_rows().await);
-        let custom_row = session_message_to_loop(&SessionAgentMessage::Custom(message.clone()))
-            .ok_or_else(|| anyhow::anyhow!("injected custom message conversion failed"))?;
-        // The dispatch-time routing decision fires for every dispatched
-        // turn (TS `_startPreparedTurnActions` runs it per prepared turn
-        // action): an injected row never carries images, so it clears a
-        // route left behind by the previous dispatched turn.
-        self.apply_image_model_routing(&[], &[]).await?;
-        prompt_messages.push(custom_row);
-        self.agent
-            .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
-            .await?;
+        let admission = self.terminal_admission.lock().await;
+        self.refuse_if_busy().await?;
+        let prompt_messages = self.injected_prompt_messages(message).await?;
+        let turn = self
+            .agent
+            .admit_prompt_or_busy(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))?;
+        drop(admission);
+        turn.settle().await?;
         Ok(PromptOutcome::Prompt)
+    }
+
+    /// The admission-only variant (TS `acceptAgentMessagePrompt` with
+    /// `returnAfterAccepted: true`): admit the injected custom row as its
+    /// own turn and return once the run registers — the turn settles on
+    /// its own and its events follow through the subscriptions. Agent
+    /// messages and RLM terminal notices deliver through this path so a
+    /// sender never waits out the receiver's model turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session is already busy, when the pending
+    /// digest row cannot be captured, or when the run refuses to start
+    /// after admission; a failure after the run registers rides the
+    /// events, not this result.
+    pub async fn prompt_injected_message_until_accepted(
+        &self,
+        message: &pa_types::session::CustomMessage,
+    ) -> anyhow::Result<PromptOutcome> {
+        let _admission = self.terminal_admission.lock().await;
+        self.refuse_if_busy().await?;
+        let prompt_messages = self.injected_prompt_messages(message).await?;
+        self.agent
+            .admit_prompt_or_busy(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))?;
+        Ok(PromptOutcome::Prompt)
+    }
+
+    /// Admit an ordinary injected custom row as an idle turn or steering
+    /// while busy. Unlike terminal notices, its `MessageEnd` remains the
+    /// ordinary persistence writer. The shared session admission lock
+    /// orders it against durable notice admission and user input.
+    pub(crate) async fn admit_injected_or_steer(
+        &self,
+        message: &pa_types::session::CustomMessage,
+    ) -> anyhow::Result<pa_agent::admission::AdmitStatus> {
+        let _admission = self.terminal_admission.lock().await;
+        let messages = self.injected_prompt_messages(message).await?;
+        Ok(self.agent.admit_or_enqueue(messages))
     }
 
     /// Classify a prompt as a session command without admitting it: the
@@ -110,6 +166,7 @@ impl AgentSession {
             return Ok(PromptOutcome::SessionCommand(command));
         }
 
+        let admission = self.terminal_admission.lock().await;
         let state = self.agent.state().await;
         let busy = state.is_streaming;
         // The `skill used` adoption event reports from the admission seam:
@@ -186,19 +243,32 @@ impl AgentSession {
                 };
                 prompt_messages.push(user_prompt_message(&row_text, &row.images));
             }
-            if options.return_after_accepted {
-                // TS `returnAfterAccepted: true` — the connection's prompt
-                // returns once the admitted turn delivers. The failure
-                // path unwinds the route exactly like the plain prompt
-                // branch below: this prompt never started, so its route
-                // must not survive (while no winner streams).
-                if let Err(error) = self
-                    .agent
-                    .prompt_until_accepted(pa_agent::agent::AgentPromptInput::Messages(
-                        prompt_messages,
-                    ))
-                    .await
+            let turn = match self.agent.admit_prompt_or_busy(
+                pa_agent::agent::AgentPromptInput::Messages(prompt_messages.clone()),
+            ) {
+                Ok(turn) => Some(turn),
+                Err(error)
+                    if error
+                        .downcast_ref::<pa_agent::admission::AgentBusyRefusal>()
+                        .is_some() =>
                 {
+                    // An unrelated direct agent admission took the run
+                    // slot before this session action. The losing item is
+                    // still owned by this caller; queue or refuse according
+                    // to the original streaming behavior, without dropping
+                    // the pending first-turn rows.
+                    if let Some(behavior) = options.streaming_behavior {
+                        let batch = pa_agent::agent::AgentMessageBatch::Batch(prompt_messages);
+                        match behavior {
+                            StreamingBehavior::Steer => self.agent.steer(batch),
+                            StreamingBehavior::FollowUp => self.agent.follow_up(batch),
+                        }
+                        None
+                    } else {
+                        anyhow::bail!("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.");
+                    }
+                }
+                Err(error) => {
                     if !self.agent.state().await.is_streaming {
                         if let Some(router) = self.image_model_router.as_ref() {
                             (router.swap_target)(None);
@@ -207,28 +277,12 @@ impl AgentSession {
                     }
                     return Err(error);
                 }
-            } else if let Err(error) = self
-                .agent
-                .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
-                .await
-            {
-                // A concurrent admission won the agent's run slot: this
-                // prompt never started, so its route must not survive. The
-                // unwind only happens while NO run streams - the winner's
-                // live run keeps its own serving target (an idle slot means
-                // our route never served a request; a streaming one belongs
-                // to the winner). TS decides per prepared action inside the
-                // same commit fence, so its single-threaded commit cannot
-                // observe this race at all; the headless surfaces serialize
-                // prompt admissions (one ACP prompt turn per session, the
-                // print loop's sequential awaits) besides.
-                if !self.agent.state().await.is_streaming {
-                    if let Some(router) = self.image_model_router.as_ref() {
-                        (router.swap_target)(None);
-                        self.agent.set_model_override(None);
-                    }
+            };
+            drop(admission);
+            if let Some(turn) = turn {
+                if !options.return_after_accepted {
+                    turn.settle().await?;
                 }
-                return Err(error);
             }
         }
         Ok(PromptOutcome::Prompt)

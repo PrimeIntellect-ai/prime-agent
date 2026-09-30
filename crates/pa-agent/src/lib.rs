@@ -30,6 +30,7 @@
 //! faux scripted provider used by tests and early integrations.
 
 pub mod abort;
+pub mod admission;
 pub mod agent;
 pub mod agent_loop;
 pub mod proxy;
