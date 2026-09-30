@@ -635,6 +635,9 @@ impl SupervisorChildSessions {
             let mut record = record.lock().await;
             if record.active_session_id == child_active_session_id {
                 record.settled_status = Some("done");
+                // The settle funnel's flag (`fire_settle_hook`): the
+                // quiescence predicate reads it, not the terminal status.
+                record.settled = true;
             }
         }
     }
