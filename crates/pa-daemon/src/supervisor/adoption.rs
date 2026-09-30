@@ -196,6 +196,24 @@ impl Supervisor {
                 .connect_worker(&resident, worker_connect_deadline())
                 .await;
             if adopted.is_ok() {
+                // The boot reconciliation (the root-identity seam): the
+                // adopted worker already serves a session this supervisor
+                // has only ever seen through its PERSISTED record — and
+                // the record can name a superseded session (a whole-session
+                // replacement whose identity persist failed before the
+                // restart, or any descriptor the restart re-adopted
+                // mid-flight). Pull the live state BEFORE the routing
+                // opens: the roster write carries the identity follow, so
+                // the descriptor, the persisted record, and the binding
+                // re-bind onto the session the worker actually serves
+                // before a single client route can resolve them. A failed
+                // pull serves the persisted identity (logged) until the
+                // next roster write runs the follow from the live state.
+                if !self.refresh_roster_entry(&resident).await {
+                    self.log_line(&format!(
+                        "session worker {worker_id}: the boot reconciliation pull failed; serving the persisted identity until the next roster write"
+                    ));
+                }
                 // The adopted worker's session already exists (its create
                 // ran before the supervisor restart): routed client
                 // commands may reach it immediately.
@@ -595,12 +613,26 @@ impl Supervisor {
         }
         self.connect_worker(&resident, worker_connect_deadline())
             .await?;
+        // The boot reconciliation (the root-identity seam): registration
+        // rebuilt the resident from the PERSISTED record — and the worker
+        // already serves a whole-session replacement (a fork/switch the
+        // record never learned, or whose identity persist failed before
+        // this restart). Pull the live state BEFORE the resident joins the
+        // registry: the roster write carries the identity follow, so the
+        // descriptor, the persisted record, and the binding re-bind onto
+        // the session the worker actually serves before any client route
+        // can resolve them (the registration block above recorded the
+        // persisted identity — this heals it from the live truth).
+        if !self.refresh_roster_entry(&resident).await {
+            self.log_line(&format!(
+                "session worker {worker_id}: the registration reconciliation pull failed; serving the persisted identity until the next roster write"
+            ));
+        }
         // The self-registered worker's session already exists: routed
         // client commands may reach it immediately.
         resident.note_session_ready();
         self.registry.insert(Arc::clone(&resident)).await;
         self.spawn_monitor(Arc::clone(&resident), None, registration.pid);
-        self.refresh_roster_entry(&resident).await;
         self.log_line(&format!(
             "adopted session worker {worker_id} via self-registration"
         ));

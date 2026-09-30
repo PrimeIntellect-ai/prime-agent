@@ -102,8 +102,11 @@ impl Supervisor {
         // the LIVE routing correct (the descriptor above already moved)
         // while the persisted identity lags — retry once here, then keep
         // the transition marked pending so the next roster write (any
-        // delta or refresh pull) repairs it from the live state before a
-        // restart can replay the superseded session.
+        // delta or refresh pull) repairs it from the live state. A
+        // restart in that window re-runs the reconciliation itself: the
+        // boot paths pull the live state BEFORE the routing opens, so the
+        // adoption/registration re-binds and re-persists the moved-to
+        // identity before a single client route can resolve it.
         // One in-transition retry: a transient write failure (a scan, an
         // fs flush) heals without waiting for the next roster write.
         let persisted = crate::descriptor::persist_worker(&resident.descriptor_path, descriptor)
@@ -352,8 +355,10 @@ mod tests {
 
     /// FINDING 3's pin: a failed durable-record write leaves the LIVE
     /// routing on the moved identity and marks the transition unresolved;
-    /// the next roster write repairs the record from the live state — a
-    /// restart between the two can never replay the superseded session.
+    /// the next roster write repairs the record from the live state. The
+    /// restart edge is covered by the boot reconciliation (the e2e restart
+    /// pin): the boot paths pull the live state before the routing opens,
+    /// so the stale persisted record never serves.
     #[tokio::test]
     async fn a_failed_identity_persist_is_repaired_by_the_next_roster_write() {
         let dir = std::env::temp_dir().join(format!("pa-root-id-{}", uuid::Uuid::new_v4()));

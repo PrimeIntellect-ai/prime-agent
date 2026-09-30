@@ -256,8 +256,12 @@ impl Supervisor {
     }
 
     /// Refresh one resident worker's entry from its live `get_state`
-    /// (registration, adoption, and create flows).
-    pub(crate) async fn refresh_roster_entry(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
+    /// (registration, adoption, and create flows). Returns whether the
+    /// live state landed: the write carries the root-identity follow, so
+    /// a `false` answer means the reconciliation did not run — the caller
+    /// logs it and the persisted identity keeps serving until the next
+    /// roster write.
+    pub(crate) async fn refresh_roster_entry(self: &Arc<Self>, resident: &Arc<ResidentWorker>) -> bool {
         let response = self
             .route_command_typed(
                 resident,
@@ -267,14 +271,18 @@ impl Supervisor {
                 RouteAdmission::SupervisorInternal,
             )
             .await;
-        if let Ok(response) = response {
-            if response.success {
-                if let Some(data) = response.data {
-                    self.write_roster_summary_for_resident(resident, &data)
-                        .await;
-                }
-            }
+        let Ok(response) = response else {
+            return false;
+        };
+        if !response.success {
+            return false;
         }
+        let Some(data) = response.data else {
+            return false;
+        };
+        self.write_roster_summary_for_resident(resident, &data)
+            .await
+            .is_some()
     }
 
     /// TS `flipWorkerRosterEntriesInactive` (the Rust form: one pass in

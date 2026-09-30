@@ -586,3 +586,304 @@ fn the_fork_is_a_fully_detached_session() {
 fn fork_file_text(path: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
 }
+
+/// Wait until the supervisor socket accepts connections (a restarted
+/// supervisor parks on the stale socket file for up to a second before
+/// replacing it, so file existence is not readiness).
+fn wait_socket_accepts(socket: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if UnixStream::connect(socket).is_ok() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the restarted supervisor never accepted connections"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// FINDING 3's restart pin: a daemon restart AFTER a failed identity
+/// persist, BEFORE any new roster write — the boot serves the NEW identity
+/// (never replays the old session) because the boot paths reconcile the
+/// resident from the live worker state before the routing opens.
+#[test]
+fn a_restart_after_a_failed_identity_persist_serves_the_moved_session() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("agent dir");
+
+    let script_path = dir.path().join("script.json");
+    std::fs::write(
+        &script_path,
+        serde_json::json!({ "responses": [
+            { "text": "original turn one", "delayMs": 10 },
+            { "text": "restart turn answer", "delayMs": 10 },
+        ] })
+        .to_string(),
+    )
+    .expect("write script");
+
+    // Supervisor A: the original session, the fork, the failed persist.
+    let mut supervisor_a = spawn_supervisor_raw(&socket, &agent_dir);
+    let mut client_a = Client::connect(&socket);
+    client_a.send_command(
+        "c1",
+        &serde_json::json!({ "type": "create", "config": {
+            "cwd": dir.path().to_string_lossy(),
+            "sessionDir": session_dir.to_string_lossy(),
+            "script": script_path.to_string_lossy(),
+        } }),
+    );
+    let created = client_a.read_response("c1");
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let address = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["sessionId"].as_str())
+        .expect("the worker address")
+        .to_string();
+    let original_durable = created["data"]["sessionId"]
+        .as_str()
+        .expect("the original's durable id")
+        .to_string();
+    let original_file = created["data"]["sessionFile"]
+        .as_str()
+        .expect("the original's file")
+        .to_string();
+    client_a.scripted_turn("p1", &address, "fork point message");
+
+    // The persisted record this boot owns: save the pre-fork record (the
+    // stale identity the restart must NOT serve), then break the record
+    // path so the fork's identity persist fails.
+    let descriptor_dir = pa_daemon::descriptor::descriptor_dir(&agent_dir, &socket);
+    let descriptor_path = descriptor_dir.join(format!("{address}.json"));
+    let stale_record = std::fs::read_to_string(&descriptor_path)
+        .expect("the worker's persisted record before the fork");
+    std::fs::remove_file(&descriptor_path).expect("remove the record file");
+    std::fs::create_dir_all(&descriptor_path).expect("the record path takes a directory");
+
+    // The fork: the worker moves onto the forked file; the identity
+    // persist fails against the directory (the in-memory identity moved,
+    // the marker armed).
+    client_a.send_command(
+        "g1",
+        &serde_json::json!({
+            "type": "get_user_messages_for_forking",
+            "activeSessionId": address,
+        }),
+    );
+    let points = client_a.read_response("g1");
+    let entry_id = points["data"]["messages"]
+        .as_array()
+        .and_then(|messages| {
+            messages
+                .iter()
+                .find(|message| message["text"] == "fork point message")
+                .map(|message| message["entryId"].clone())
+        })
+        .unwrap_or_else(|| panic!("the fork point message: {points}"));
+    client_a.send_command(
+        "f1",
+        &serde_json::json!({
+            "type": "fork",
+            "activeSessionId": address,
+            "entryId": entry_id,
+        }),
+    );
+    let forked = client_a.read_response("f1");
+    assert_eq!(forked["success"], true, "fork failed: {forked}");
+    client_a.send_command(
+        "s1",
+        &serde_json::json!({ "type": "get_session_stats", "activeSessionId": address }),
+    );
+    let stats = client_a.read_response("s1");
+    let fork_file = stats["data"]["sessionFile"]
+        .as_str()
+        .expect("the fork's file")
+        .to_string();
+    let fork_durable = stats["data"]["sessionId"]
+        .as_str()
+        .expect("the fork's durable id")
+        .to_string();
+    assert_ne!(fork_file, original_file, "the fork moved the worker");
+
+    // The LIVE isolation still holds with the failed persist (the
+    // in-memory identity follows the worker).
+    let mut prober = Client::connect(&socket);
+    prober.send_command(
+        "c2",
+        &serde_json::json!({
+            "type": "create",
+            "sessionPath": original_file,
+            "config": {
+                "cwd": dir.path().to_string_lossy(),
+                "sessionDir": session_dir.to_string_lossy(),
+                "script": script_path.to_string_lossy(),
+            },
+        }),
+    );
+    let reopened = prober.read_response("c2");
+    assert_eq!(reopened["success"], true, "re-open failed: {reopened}");
+    assert_eq!(
+        reopened["data"]["sessionId"], original_durable,
+        "the original's re-open serves the original, not the fork"
+    );
+    prober.send_command(
+        "k2",
+        &serde_json::json!({ "type": "kill", "activeSessionId": reopened["data"]["id"] }),
+    );
+    assert_eq!(prober.read_response("k2")["success"], true, "kill failed");
+
+    // THE RESTART: the stale record back on disk (the boot's only word on
+    // the worker is the pre-fork identity), the supervisor killed, the
+    // WORKER left alive, a fresh supervisor over the same agent dir.
+    std::fs::remove_dir_all(&descriptor_path).expect("clear the record path");
+    std::fs::write(&descriptor_path, &stale_record).expect("restore the stale record");
+    supervisor_a.kill().expect("kill supervisor A");
+    let _ = supervisor_a.wait();
+
+    let mut supervisor_b = spawn_supervisor_raw(&socket, &agent_dir);
+    let _daemon_guard = DaemonKillOnDrop {
+        child: &mut supervisor_b,
+    };
+    wait_socket_accepts(&socket);
+
+    // The boot adopts the live worker and reconciles from its live state
+    // BEFORE the routing opens: the address serves the FORK.
+    let mut client_b = Client::connect(&socket);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let restarted = loop {
+        assert!(Instant::now() < deadline, "the worker never re-registered");
+        client_b.send_command(
+            "s2",
+            &serde_json::json!({ "type": "get_session_stats", "activeSessionId": address }),
+        );
+        let stats = client_b.read_response("s2");
+        if stats["success"] == true {
+            break stats;
+        }
+        assert_eq!(stats["success"], false, "the failed stats answer: {stats}");
+    };
+    assert_eq!(
+        restarted["data"]["sessionFile"], fork_file,
+        "the restart serves the fork's file (the boot reconciled the identity)"
+    );
+    assert_eq!(restarted["data"]["sessionId"], fork_durable);
+
+    // The reconciliation re-persisted the repaired record: a future
+    // restart reads the FORK's identity, never the original's.
+    let repaired_record = std::fs::read_to_string(&descriptor_path).expect("the repaired record");
+    assert!(
+        repaired_record.contains(&fork_durable),
+        "the durable record names the fork: {repaired_record}"
+    );
+    assert!(
+        !repaired_record.contains(&format!("\"{original_durable}\"")),
+        "the durable record dropped the original's identity"
+    );
+
+    // THE ISOLATION AT BOOT: the original's routes still open the
+    // original, never the fork worker.
+    let mut client_c = Client::connect(&socket);
+    client_c.send_command(
+        "c3",
+        &serde_json::json!({
+            "type": "create",
+            "sessionPath": original_file,
+            "config": {
+                "cwd": dir.path().to_string_lossy(),
+                "sessionDir": session_dir.to_string_lossy(),
+                "script": script_path.to_string_lossy(),
+            },
+        }),
+    );
+    let reopened = client_c.read_response("c3");
+    assert_eq!(
+        reopened["success"], true,
+        "the boot re-open failed: {reopened}"
+    );
+    assert_eq!(
+        reopened["data"]["sessionId"], original_durable,
+        "the boot's create over the original opens the original, not the fork"
+    );
+    assert_ne!(
+        reopened["data"]["id"], address,
+        "the original's open never reuses the fork worker's address"
+    );
+    client_c.send_command(
+        "a3",
+        &serde_json::json!({ "type": "attach", "activeSessionId": reopened["data"]["id"] }),
+    );
+    let attached_c = client_c.read_response("a3");
+    assert_eq!(attached_c["success"], true, "attach C failed: {attached_c}");
+    let reopened_id = reopened["data"]["id"]
+        .as_str()
+        .expect("the re-opened id")
+        .to_string();
+    client_c.scripted_turn("p3", &reopened_id, "message for the original");
+    assert!(
+        !fork_file_text(&fork_file).contains("message for the original"),
+        "the original's message never reaches the fork's file"
+    );
+
+    // The fork's own sends still flow its own way after the restart.
+    client_b.scripted_turn("p4", &address, "message for the fork");
+    let fork_texts = message_texts(&mut client_b, "m1", &address);
+    assert!(
+        fork_texts
+            .iter()
+            .any(|text| text.contains("message for the fork")),
+        "the fork's own message reaches its transcript: {fork_texts:?}"
+    );
+    assert!(
+        !std::fs::read_to_string(&original_file)
+            .unwrap_or_default()
+            .contains("message for the fork"),
+        "the fork's message never reaches the original's file"
+    );
+}
+
+/// One raw supervisor child (no drop-time kill: the restart test manages
+/// the process itself). The timeout panic path cannot wait on the child;
+/// the test process exits immediately afterwards, reaping it.
+#[allow(clippy::zombie_processes)]
+fn spawn_supervisor_raw(socket: &std::path::Path, agent_dir: &std::path::Path) -> Child {
+    let binary = env!("CARGO_BIN_EXE_pa-daemon");
+    let child = Command::new(binary)
+        .arg("supervisor")
+        .arg("--socket")
+        .arg(socket)
+        .arg("--agent-dir")
+        .arg(agent_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env(
+            pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
+            "15000",
+        )
+        .spawn()
+        .expect("spawn pa-daemon supervisor");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if socket.exists() {
+            return child;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("supervisor socket never appeared");
+}
+
+/// Kills the supervisor at scope exit (the restart test's supervisor B).
+struct DaemonKillOnDrop<'a> {
+    child: &'a mut Child,
+}
+
+impl Drop for DaemonKillOnDrop<'_> {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
