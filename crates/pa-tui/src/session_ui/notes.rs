@@ -259,6 +259,8 @@ impl SessionUi {
     fn mark_anthropic_warning_shown(&self) {
         let client = self.client.clone();
         let active_session_id = self.active_session_id.clone();
+        let pending = self.anthropic_warning_mark_pending.clone();
+        pending.store(true, std::sync::atomic::Ordering::Release);
         tokio::spawn(async move {
             let _ = tokio::time::timeout(
                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
@@ -269,7 +271,17 @@ impl SessionUi {
                 }),
             )
             .await;
+            pending.store(false, std::sync::atomic::Ordering::Release);
         });
+    }
+
+    /// Whether the session's `mark_anthropic_warning_shown` write is still
+    /// in flight (the headless exit gate holds the run until the durable
+    /// write resolves — the mark is never a render dependency, but a
+    /// scripted run must not end with it un-acked).
+    pub(crate) fn anthropic_warning_mark_pending(&self) -> bool {
+        self.anthropic_warning_mark_pending
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// The TS `showError` row: `⚠ Error: <message>` in the error color.

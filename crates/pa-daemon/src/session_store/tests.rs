@@ -310,6 +310,92 @@ fn marking_the_warning_persists_and_both_reopens_hydrate_it() {
         .anthropic_warning_shown());
 }
 
+/// The bots' round on the full open (the PR's Medium): the gate rides
+/// the ACTIVE branch — a marker on an abandoned or sibling branch must
+/// never suppress the warning for the open leaf. The windowed walk
+/// already followed the active chain; the full open's all-entries scan
+/// disagreed, so the two reopen paths answered differently on the same
+/// file (and `install_full_history` could overwrite the windowed
+/// answer with the full scan's).
+#[test]
+fn an_off_branch_marker_never_hydrates_the_full_open_gate() {
+    let dir = temp_dir();
+    let row = |id: &str, parent: Option<&str>, message: Value| {
+        json!({
+            "type": "message", "id": id, "parentId": parent,
+            "timestamp": "2026-09-30T00:00:00.000Z",
+            "message": message,
+        })
+        .to_string()
+    };
+    let marker = |id: &str, parent: &str| {
+        json!({
+            "type": "custom", "id": id, "parentId": parent,
+            "timestamp": "2026-09-30T00:00:01.000Z",
+            "customType": "anthropic_subscription_warning_shown",
+            "data": { "shown": true },
+        })
+        .to_string()
+    };
+    let header = |id: &str| {
+        json!({"type": "session", "version": 3, "id": id, "timestamp": "2026-09-30T00:00:00.000Z", "cwd": "/tmp"}).to_string()
+    };
+
+    // The marker hangs off u1 as a SIBLING of the live branch: the open
+    // leaf (the last row, b1) walks u1 -> header and never meets it.
+    let path = dir.join("off-branch-marker.jsonl");
+    std::fs::write(
+        &path,
+        [
+            header("off-1"),
+            row("u1", None, json!({"role": "user", "content": "hi"})),
+            marker("m1", "u1"),
+            row(
+                "b1",
+                Some("u1"),
+                json!({"role": "user", "content": "the sibling turn"}),
+            ),
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    assert!(
+        !SessionFile::open(&path).unwrap().anthropic_warning_shown(),
+        "an off-branch marker never hydrates the full open's gate"
+    );
+    assert!(
+        !SessionFile::open_windowed(&path)
+            .unwrap()
+            .anthropic_warning_shown(),
+        "the windowed walk agrees: the active chain carries no marker"
+    );
+
+    // The same marker ON the active branch answers open — the sibling
+    // branch's rows stay irrelevant.
+    let path_on = dir.join("on-branch-marker.jsonl");
+    std::fs::write(
+        &path_on,
+        [
+            header("on-1"),
+            row("u1", None, json!({"role": "user", "content": "hi"})),
+            marker("m1", "u1"),
+            row(
+                "b1",
+                Some("m1"),
+                json!({"role": "user", "content": "after the marker"}),
+            ),
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    assert!(SessionFile::open(&path_on)
+        .unwrap()
+        .anthropic_warning_shown());
+    assert!(SessionFile::open_windowed(&path_on)
+        .unwrap()
+        .anthropic_warning_shown());
+}
+
 #[test]
 fn creates_and_loads_a_session() {
     let dir = temp_dir();

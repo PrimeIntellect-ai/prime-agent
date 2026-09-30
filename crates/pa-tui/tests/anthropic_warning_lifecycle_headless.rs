@@ -518,7 +518,10 @@ fn a_new_session_warns_once_and_marks_the_gate() {
     let (frames, commands) = run_plan(
         warning_settings(),
         MockSession::new("s1", Some(false)),
-        vec![wait_render(DETECTION_WARNING), HeadlessStep::WaitMs(1_500)],
+        // The exit gate holds the run until the fire-and-forget mark's
+        // write resolves, so the mark count reads completed state — no
+        // timing window guards the assertion.
+        vec![wait_render(DETECTION_WARNING)],
     );
     let all = frames.join("\n");
     assert!(
@@ -543,7 +546,10 @@ fn a_marked_session_reattach_never_rewarns() {
     let (frames, commands) = run_plan(
         warning_settings(),
         MockSession::new("s1", Some(true)),
-        vec![HeadlessStep::WaitMs(2_000)],
+        // The detection arm is awaited at open, so the first dock frame
+        // proves its decision baked in — the negative reads completed
+        // state, not a timing window.
+        vec![wait_render("subagents")],
     );
     let all = frames.join("\n");
     assert!(
@@ -569,7 +575,7 @@ fn the_settings_toggle_off_never_warns() {
     let (frames, commands) = run_plan(
         settings,
         MockSession::new("s1", Some(false)),
-        vec![HeadlessStep::WaitMs(1_500)],
+        vec![wait_render("subagents")],
     );
     let all = frames.join("\n");
     assert!(
@@ -595,9 +601,9 @@ fn a_fresh_login_rewarns_on_a_marked_session() {
         warning_settings(),
         MockSession::new("s1", Some(true)),
         vec![
-            // Let the open settle: the detection arm reads the open gate
-            // and draws nothing.
-            HeadlessStep::WaitMs(1_200),
+            // The detection arm is awaited at open: the first dock frame
+            // proves it read the open gate and drew nothing.
+            wait_render("subagents"),
             // The login: the selector mounts, Enter runs the panel flow,
             // the fake settles it, the login-completed arm draws the
             // product warning.
@@ -605,7 +611,6 @@ fn a_fresh_login_rewarns_on_a_marked_session() {
             wait_render("Anthropic"),
             enter(),
             wait_render(LOGIN_WARNING_NEEDLE),
-            HeadlessStep::WaitMs(1_200),
         ],
     );
     let all = frames.join("\n");
@@ -638,7 +643,7 @@ fn a_daemon_without_the_gate_field_fails_open_and_warns() {
     let (frames, commands) = run_plan(
         warning_settings(),
         MockSession::new("s1", None),
-        vec![wait_render(DETECTION_WARNING), HeadlessStep::WaitMs(1_500)],
+        vec![wait_render(DETECTION_WARNING)],
     );
     let all = frames.join("\n");
     assert!(

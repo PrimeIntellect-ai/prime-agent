@@ -183,7 +183,12 @@ impl SessionFile {
             }
         }
         fold_child_usage_attributions(&mut file.entries);
-        file.anthropic_warning_shown = file.entries.iter().any(is_warning_shown_row);
+        // The once-per-lifecycle gate rides the ACTIVE branch, exactly
+        // like the windowed walk below: a marker on an abandoned or
+        // sibling branch never suppresses the warning for the open leaf
+        // (fail-open — an off-path marker must not hide the warning on a
+        // branch that never showed it).
+        file.anthropic_warning_shown = file.branch().iter().copied().any(is_warning_shown_row);
         Ok(file)
     }
 
@@ -289,6 +294,11 @@ impl SessionFile {
         }
         full.leaf_id.clone_from(&self.leaf_id);
         full.lease.clone_from(&self.lease);
+        // The merged store's leaf is the window's leaf: re-derive the gate
+        // from the merged ACTIVE branch — the full open's own-leaf answer
+        // can disagree, a post-snapshot marker must hydrate, and an
+        // off-path one must not (the full scan never wins here).
+        full.anthropic_warning_shown = full.branch().iter().copied().any(is_warning_shown_row);
         *self = full;
     }
 

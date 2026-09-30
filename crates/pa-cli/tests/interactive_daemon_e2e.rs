@@ -5145,13 +5145,14 @@ async fn tui_anthropic_warning_warns_once_then_a_fresh_process_reattaches_silent
         pa_tui::interactive::SessionSelection::New,
     );
     let plan = pa_tui::interactive::HeadlessPlan {
-        steps: vec![
-            pa_tui::interactive::HeadlessStep::WaitRender {
-                needle: E2E_SUBSCRIPTION_WARNING.to_string(),
-                timeout_ms: 15_000,
-            },
-            pa_tui::interactive::HeadlessStep::WaitMs(1_500),
-        ],
+        // The exit gate holds the run until the fire-and-forget mark's
+        // write resolves (the worker persists the marker row before its
+        // ack), so the durable-row assertions below read completed state —
+        // no timing window guards them.
+        steps: vec![pa_tui::interactive::HeadlessStep::WaitRender {
+            needle: E2E_SUBSCRIPTION_WARNING.to_string(),
+            timeout_ms: 15_000,
+        }],
         width: 100,
         height: 30,
     };
@@ -5216,7 +5217,15 @@ async fn tui_anthropic_warning_warns_once_then_a_fresh_process_reattaches_silent
         pa_tui::interactive::SessionSelection::Attach(session.clone()),
     );
     let plan = pa_tui::interactive::HeadlessPlan {
-        steps: vec![pa_tui::interactive::HeadlessStep::WaitMs(2_500)],
+        // The detection arm is awaited at open, so the first dock frame
+        // proves its decision baked in — the reattach's negative reads
+        // completed state, not a timing window (a late warning cannot
+        // miss the window: the open either warned or skipped before the
+        // frame painted).
+        steps: vec![pa_tui::interactive::HeadlessStep::WaitRender {
+            needle: "subagents".to_string(),
+            timeout_ms: 15_000,
+        }],
         width: 100,
         height: 30,
     };

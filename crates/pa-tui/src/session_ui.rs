@@ -228,6 +228,11 @@ pub(crate) struct SessionUi {
     /// [`Self::anthropic_warning_already_shown`] and
     /// [`Self::mark_anthropic_warning_shown`].
     anthropic_subscription_warning_shown: bool,
+    /// The in-flight `mark_anthropic_warning_shown` fire-and-forget: set
+    /// when the mark task is spawned, cleared by the task itself at its
+    /// end (ack, error, or bound) — the headless exit gate reads it so a
+    /// scripted run never ends with the durable write still in flight.
+    anthropic_warning_mark_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The side-question run currently streaming (TS `activeSideQuestionId`):
     /// at most one run per client, exactly like the daemon enforces.
     active_side_question_id: Option<String>,

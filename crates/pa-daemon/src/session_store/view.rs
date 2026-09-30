@@ -52,7 +52,9 @@ impl SessionFile {
     /// a fork of a warned session answers its own file (the marker row
     /// rides the copied branch), not the source's live flag.
     pub(crate) fn hydrate_anthropic_warning_flag(&mut self) {
-        self.anthropic_warning_shown = self.entries.iter().any(is_warning_shown_row);
+        // The active branch, exactly like the reopen paths: a marker on a
+        // sibling row never flips the gate.
+        self.anthropic_warning_shown = self.branch().iter().copied().any(is_warning_shown_row);
     }
 
     #[must_use]
