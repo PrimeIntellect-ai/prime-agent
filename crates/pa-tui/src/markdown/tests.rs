@@ -313,6 +313,29 @@ fn heading_link_wraps_keeps_the_affordance_and_counts() {
 }
 
 #[test]
+fn heading_tapers_code_and_body_that_merely_match_the_link_url_style() {
+    // A theme can collide `mdCode`/`mdBody` onto the same color as
+    // `mdLinkUrl`; the taper reads the bracket slots by origin, not by
+    // style equality, so such spans take the heading color and only a
+    // genuine link's bracket keeps the `link_url` slot.
+    let mut style = MarkdownStyle::default();
+    style.code = style.link_url;
+    style.body = style.link_url;
+    crate::hyperlinks::set_hyperlinks_override(Some(false));
+    let lines = render_markdown("# `c` [d](https://x.dev/a)", 40, &style);
+    assert_eq!(
+        lines,
+        vec![vec![
+            Span::styled("c", style.heading),
+            Span::styled(" ", style.heading),
+            Span::styled("d", style.heading.add_modifier(Modifier::UNDERLINED)),
+            Span::styled(" [https://x.dev/a]", style.link_url),
+        ]]
+    );
+    crate::hyperlinks::set_hyperlinks_override(None);
+}
+
+#[test]
 fn paragraph_keeps_final_line_trailing_whitespace() {
     // The TS lexer's paragraph token carries the block's trailing
     // whitespace (probe vs the TS binary: the expanded compaction

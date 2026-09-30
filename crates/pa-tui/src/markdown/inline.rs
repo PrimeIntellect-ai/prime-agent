@@ -4,14 +4,31 @@ use ratatui::style::Modifier;
 /// Inline rendering: bold, italic, strikethrough, code, links.
 #[must_use]
 pub fn render_inline(text: &str, style: &MarkdownStyle) -> Line {
+    render_inline_with_url_slots(text, style).0
+}
+
+/// The same inline render, plus the `link_url` slot indices: which
+/// spans of the returned line carry a link's `[url]` bracket.
+/// Style-tapering callers (headings) preserve those spans by origin —
+/// a code or body span that merely renders in the `link_url` style (a
+/// theme whose colors collide) is not a slot and tapers like any other
+/// span.
+#[must_use]
+pub(crate) fn render_inline_with_url_slots(
+    text: &str,
+    style: &MarkdownStyle,
+) -> (Line, Vec<usize>) {
     render_inline_ctx(text, style, false)
 }
 
 /// `in_link` mirrors marked's `lexer.state.inLink`: set while a link
 /// label's tokens are produced, and the gfm bare-url rule is skipped
-/// inside one (the angle `autolink` rule is not).
-fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
+/// inside one (the angle `autolink` rule is not). The second return
+/// half lists the `[url]` bracket indices inside the returned spans,
+/// remapped across every recursive extend.
+fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line, Vec<usize>) {
     let mut spans: Vec<Span> = Vec::new();
+    let mut url_slots: Vec<usize> = Vec::new();
     let bytes: Vec<char> = text.chars().collect();
     // Byte offset per char index: the autolink rules run on a slice of the
     // original text (zero-copy) instead of a copy of the remaining tail,
@@ -97,7 +114,7 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
                     // terminal link affordance); `modifier` carries the
                     // emphasis context.
                     let href = crate::hyperlinks::resolve_link_href(&url);
-                    let mut label_spans = render_inline_ctx(&label, style, true);
+                    let (mut label_spans, mut label_slots) = render_inline_ctx(&label, style, true);
                     for s in &mut label_spans {
                         s.style = s.style.add_modifier(modifier | Modifier::UNDERLINED);
                     }
@@ -111,6 +128,11 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
                             last.content.push_str(crate::hyperlinks::OSC8_CLOSE);
                         }
                     }
+                    let offset = spans.len();
+                    for slot in &mut label_slots {
+                        *slot += offset;
+                    }
+                    url_slots.append(&mut label_slots);
                     spans.extend(label_spans);
                     // The URL rides beside every link, in both the OSC 8
                     // and legacy forms — after the wrap, so the region
@@ -119,6 +141,7 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
                     // for the comparison, like autolinked emails).
                     let comparison = url.strip_prefix("mailto:").unwrap_or(url.as_str());
                     if label != url && label != comparison {
+                        url_slots.push(spans.len());
                         spans.push(Span::styled(format!(" [{url}]"), style.link_url));
                     }
                     i = k + 1;
@@ -157,7 +180,13 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
                 flush!();
                 if doubled {
                     bold = !bold;
-                    let mut inner_spans = render_inline_ctx(&inner, style, in_link);
+                    let (mut inner_spans, mut inner_slots) =
+                        render_inline_ctx(&inner, style, in_link);
+                    let offset = spans.len();
+                    for slot in &mut inner_slots {
+                        *slot += offset;
+                    }
+                    url_slots.append(&mut inner_slots);
                     for s in &mut inner_spans {
                         s.style = s.style.add_modifier(style.bold);
                     }
@@ -165,7 +194,13 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
                     bold = !bold;
                 } else {
                     italic = !italic;
-                    let mut inner_spans = render_inline_ctx(&inner, style, in_link);
+                    let (mut inner_spans, mut inner_slots) =
+                        render_inline_ctx(&inner, style, in_link);
+                    let offset = spans.len();
+                    for slot in &mut inner_slots {
+                        *slot += offset;
+                    }
+                    url_slots.append(&mut inner_slots);
                     for s in &mut inner_spans {
                         s.style = s.style.add_modifier(style.italic);
                     }
@@ -181,7 +216,13 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
                 let inner: String = bytes[i + 2..close].iter().collect();
                 if !inner.trim().is_empty() {
                     flush!();
-                    let mut inner_spans = render_inline_ctx(&inner, style, in_link);
+                    let (mut inner_spans, mut inner_slots) =
+                        render_inline_ctx(&inner, style, in_link);
+                    let offset = spans.len();
+                    for slot in &mut inner_slots {
+                        *slot += offset;
+                    }
+                    url_slots.append(&mut inner_slots);
                     for s in &mut inner_spans {
                         s.style = s.style.add_modifier(style.strikethrough);
                     }
@@ -234,6 +275,7 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
             // comparison, TS token.href).
             let comparison = token.href.strip_prefix("mailto:").unwrap_or(&token.href);
             if token.text != token.href && token.text != comparison {
+                url_slots.push(spans.len());
                 spans.push(Span::styled(format!(" [{}]", token.href), style.link_url));
             }
             i += token.raw.chars().count();
@@ -246,7 +288,7 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
     if spans.is_empty() {
         spans.push(Span::raw(""));
     }
-    spans
+    (spans, url_slots)
 }
 
 /// Run the marked autolink rules on the text starting at `rest` (the

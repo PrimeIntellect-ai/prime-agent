@@ -482,13 +482,16 @@ fn highlighted_code_lines(
 
 /// Heading spans: inline-rendered, tapered to the heading color with
 /// the link affordance kept — an underlined label stays underlined and
-/// the URL bracket keeps its dim `link_url` slot. Shared by the paint
-/// path and the row count, so a wrapped heading counts exactly what it
-/// paints.
+/// the URL bracket keeps its dim `link_url` slot, tracked by origin
+/// (the inline pass reports the bracket indices). A code or body span
+/// that merely renders in the `link_url` style (a theme whose colors
+/// collide) tapers to the heading color like any other span. Shared by
+/// the paint path and the row count, so a wrapped heading counts
+/// exactly what it paints.
 fn heading_spans(text: &str, style: &MarkdownStyle) -> Vec<Span> {
-    let mut spans = render_inline(text, style);
-    for s in &mut spans {
-        if s.style == style.link_url {
+    let (mut spans, url_slots) = inline::render_inline_with_url_slots(text, style);
+    for (i, s) in spans.iter_mut().enumerate() {
+        if url_slots.contains(&i) {
             continue;
         }
         let underlined = s.style.add_modifier.contains(Modifier::UNDERLINED);
