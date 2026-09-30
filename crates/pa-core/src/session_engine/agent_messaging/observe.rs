@@ -1,10 +1,12 @@
-//! The agent-observe half (TS `agent-observe.ts`): the family status and
-//! activity enums, the observe summary and preview types, the controller
-//! trait, the limit clamps, and the host-handler registration.
+//! The agent-observe half: the family status and activity enums, the
+//! observe summary and preview types, the controller trait, the limit
+//! clamps, and the host-handler registration.
 use super::{host_handler, json, AgentFamilyRelationship, Future, HostRequestHandlers, Value};
 
-/// the agent has work in flight, `idle` for a resident-but-quiet session,
-/// `inactive` for a family member with no live session in this daemon.
+/// The family lifecycle status every observation row carries: `running`
+/// while the agent has work in flight, `idle` for a resident-but-quiet
+/// session, `inactive` for a family member with no live session in this
+/// daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentFamilyStatus {
     Running,
@@ -50,7 +52,6 @@ impl AgentObserveActivity {
     }
 }
 
-/// One roster row / agent summary.
 #[derive(Debug, Clone)]
 // The mirrored TS API shape is deliberate (the booleans are the
 // product's own surface, not a refactor target).
@@ -167,7 +168,6 @@ fn optional_integer(value: Option<&Value>, label: &str) -> anyhow::Result<Option
     }
 }
 
-/// Build one preview from a session message.
 #[must_use]
 pub fn create_agent_observe_message_preview(
     message: &pa_types::session::AgentMessage,

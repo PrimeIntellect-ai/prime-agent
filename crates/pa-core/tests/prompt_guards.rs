@@ -1,6 +1,4 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
-// crate root: the same bounded-boundary disposition as src/lib.rs
-// (large_futures/too_many_lines/the cast family; details there).
+// Pedantic-gate dispositions as src/lib.rs (large_futures/too_many_lines/casts).
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -10,16 +8,9 @@
     clippy::cast_precision_loss
 )]
 
-//! Prompt guard tests (the prompt linters):
-//!
-//! 1. **Cache safety**: the static layer files never contain dynamic
-//!    (session-specific) content, and the assembled prompt's cached prefix is
-//!    byte-identical across sessions with different dynamic tails.
-//! 2. **Tool surface**: the core layer's documented programmatic-tool
-//!    surface matches the real registered surface — kernel-bound names from
-//!    the bootstrap code, host-request handlers registered by the session
-//!    engine, and the bundled Python skills' public functions. Adding or
-//!    removing a tool without updating the prompt fails here.
+//! Prompt guard tests: cache safety (static layers never contain dynamic content; the cached prefix
+//! is byte-identical across sessions) and tool surface (the core layer's documented tools match the
+//! real registered surface; a tool change without a prompt update fails here).
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -49,13 +40,10 @@ fn sorted_bundled_skills() -> Vec<pa_core::skills::Skill> {
     loaded.skills
 }
 
-// ---------------------------------------------------------------------
 // Cache safety
-// ---------------------------------------------------------------------
 
-/// Strings that only dynamic segments generate. If one of these ever
-/// appears in a static layer file, the cached prefix has started leaking
-/// per-session content.
+/// Strings that only dynamic segments generate. If one of these ever appears in a static layer
+/// file, the cached prefix has started leaking per-session content.
 const DYNAMIC_ONLY_MARKERS: &[&str] = &[
     "Working directory:",
     "Conversation log:",
@@ -109,8 +97,6 @@ fn cached_prefix_is_stable_across_sessions() {
     options.append_system_prompt = Some("And one more thing.".into());
     let second = system_prompt_breakdown(&options);
 
-    // The cacheable prefix is byte-identical and exactly the layered static
-    // content; every per-session value lives after it.
     assert_eq!(first.cached_prefix_len, second.cached_prefix_len);
     assert_eq!(
         &first.assembled[..first.cached_prefix_len],
@@ -121,7 +107,6 @@ fn cached_prefix_is_stable_across_sessions() {
         layers::static_prefix(Some("mock/mock-1"))
     );
 
-    // The tails carry each session's own values.
     let first_tail = &first.assembled[first.cached_prefix_len..];
     assert!(first_tail.contains("Current date: "));
     assert!(first_tail.contains("Working directory: /first/cwd"));
@@ -137,7 +122,6 @@ fn cached_prefix_is_stable_across_sessions() {
     assert!(second_tail.contains("# Additional Guidance"));
     assert!(second_tail.ends_with("And one more thing."));
 
-    // Static segments all sit inside the cached prefix, dynamic ones after.
     for segment in &first.segments {
         let inside = first
             .assembled
@@ -152,9 +136,7 @@ fn cached_prefix_is_stable_across_sessions() {
     }
 }
 
-// ---------------------------------------------------------------------
 // Tool surface
-// ---------------------------------------------------------------------
 
 /// Host-request types that are host-internal plumbing, not model-facing
 /// programmatic tools (the prompt must not document them).
@@ -180,9 +162,8 @@ fn prompt_token_for_host_request(request: &str) -> Option<String> {
     )
 }
 
-/// Kernel-side programmatic tools implemented by the vendored
-/// `prime-agent-runtime` package (generic MCP calls). Update together with
-/// the runtime sidecar.
+/// Kernel-side programmatic tools implemented by the vendored `prime-agent-runtime` package
+/// (generic MCP calls). Update together with the runtime sidecar.
 const KERNEL_LOCAL_TOKENS: &[&str] = &[
     "mcp.list_tools",
     "mcp.call_tool",
@@ -353,10 +334,9 @@ fn python_skill_functions(package_path: &Path) -> Vec<String> {
     functions
 }
 
-/// Bundled skills that are auth-gated builtin MCP integrations: they are
-/// disabled in sessions whose user is not logged into the integration, so
-/// the prompt documents them only through the dynamic skills inventory (and
-/// its generic "additional skills may exist" note), not as API surface.
+/// Bundled skills that are auth-gated builtin MCP integrations: they are disabled in sessions whose
+/// user is not logged into the integration, so the prompt documents them only through the dynamic
+/// skills inventory (and its generic "additional skills may exist" note), not as API surface.
 fn auth_gated_bundled_skills() -> BTreeSet<String> {
     pa_core::mcp::BUILTIN_MCP_CATALOG
         .iter()
@@ -388,9 +368,8 @@ fn bundled_python_skills() -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
-/// The surface tokens the prompt is allowed to document: kernel-bound names,
-/// registered host requests, bundled Python skills, and the runtime-package
-/// (harness + generic MCP) API.
+/// The surface tokens the prompt is allowed to document: kernel-bound names, registered host
+/// requests, bundled Python skills, and the runtime-package (harness + generic MCP) API.
 fn allowed_surface_tokens() -> BTreeSet<String> {
     let mut allowed = BTreeSet::new();
     allowed.extend(kernel_bound_names());
@@ -411,9 +390,8 @@ fn allowed_surface_tokens() -> BTreeSet<String> {
     allowed
 }
 
-/// The surface tokens the prompt MUST document. Stricter than the allowed
-/// set: skill entry points (`run`/`status`) are callable through the module
-/// itself, so the module bullet suffices for them.
+/// The surface tokens the prompt MUST document. Stricter than the allowed set: skill entry points
+/// (`run`/`status`) are callable through the module itself, so the module bullet suffices for them.
 fn required_surface_tokens() -> BTreeSet<String> {
     let mut required = BTreeSet::new();
     for request in registered_host_requests() {
@@ -474,8 +452,6 @@ fn core_layer_documents_the_real_tool_surface() {
         "surface extraction produced nothing; the guard would be vacuous"
     );
 
-    // Nothing phantom: every documented token exists on the real surface
-    // (as the exact token, or an entry point of an allowed module).
     for token in &documented {
         let root = token.split('.').next().expect("non-empty token");
         let known = allowed.contains(token)
@@ -490,8 +466,6 @@ fn core_layer_documents_the_real_tool_surface() {
         );
     }
 
-    // Nothing missing: every registered surface entry is documented, either
-    // as its own bullet or through a documented member of its module.
     for token in &required {
         let documented_form = documented.contains(token)
             || documented
@@ -508,14 +482,11 @@ fn core_layer_documents_the_real_tool_surface() {
     }
 }
 
-// ---------------------------------------------------------------------
 // Packaged-set parity (TS packages/coding-agent/skills)
-// ---------------------------------------------------------------------
 
-/// The packaged skill set at TS tip `f62dae4d0`
-/// (`packages/coding-agent/skills/`): 12 skills — the generic `mcp` doc
-/// skill in, the per-service linear/notion pair out (TS removed theirs
-/// when the generic MCP surface landed).
+/// The packaged skill set at TS tip `f62dae4d0` (`packages/coding-agent/skills/`): 12 skills — the
+/// generic `mcp` doc skill in, the per-service linear/notion pair out (TS removed theirs when the
+/// generic MCP surface landed).
 const TS_PACKAGED_SKILL_SET: &[&str] = &[
     "agent-message",
     "agent-observe",
@@ -531,9 +502,8 @@ const TS_PACKAGED_SKILL_SET: &[&str] = &[
     "websearch",
 ];
 
-/// The bundled skills directory matches the TS packaged set name-for-name:
-/// the generic `mcp` skill is present and markdown-only, and the retired
-/// per-service pair (linear/notion) is gone.
+/// The bundled skills directory matches the TS packaged set name-for-name: the generic `mcp` skill
+/// is present and markdown-only, and the retired per-service pair (linear/notion) is gone.
 #[test]
 fn bundled_skills_match_the_ts_packaged_set() {
     let skills = sorted_bundled_skills();
@@ -562,10 +532,9 @@ fn bundled_skills_match_the_ts_packaged_set() {
     );
 }
 
-/// The generic mcp skill loads through the normal markdown discovery and
-/// renders in the `<available_skills>` inventory exactly like any other
-/// markdown skill: the `[skill name location]`-style XML the TS
-/// `formatSkillsForPrompt` emits, without a `python_import` line.
+/// The generic mcp skill loads through the normal markdown discovery and renders in the
+/// `<available_skills>` inventory exactly like any other markdown skill: the `[skill name
+/// location]`-style XML the TS `formatSkillsForPrompt` emits, without a `python_import` line.
 #[test]
 fn generic_mcp_skill_renders_in_the_prompt_inventory() {
     let mut options = BuildSystemPromptOptions {
@@ -599,7 +568,6 @@ fn generic_mcp_skill_renders_in_the_prompt_inventory() {
         !mcp_block.contains("python_import"),
         "a markdown skill never carries a python_import line"
     );
-    // The prompt documents the discovery surface the skill describes.
     options.generic_mcp_servers = vec!["notion".into()];
     let second = system_prompt_breakdown(&options);
     assert!(second

@@ -1,6 +1,5 @@
-//! The release manifest fetch (TS `version-check.ts` `getLatestPiRelease`
-//! port): the channel manifest at the download base URL, validated with
-//! the same rules so a malformed manifest can never stage a wrong binary.
+//! The release manifest fetch: the channel manifest at the download base URL,
+//! validated with the same rules so a malformed manifest can never stage a wrong binary.
 
 use std::fmt::Write as _;
 use std::time::Duration;
@@ -12,7 +11,6 @@ use sha2::{Digest, Sha256};
 use super::install::{current_platform_alias, KNOWN_PLATFORMS};
 use super::version::{normalize_release_version, UpdateChannel};
 
-/// One release artifact row (TS `NativeReleaseArtifact`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ReleaseArtifact {
     pub platform: String,
@@ -20,8 +18,6 @@ pub struct ReleaseArtifact {
     pub sha256: String,
 }
 
-/// The channel manifest (TS `LatestPiRelease`): the version plus the
-/// per-platform binary artifacts.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LatestRelease {
     pub version: String,
@@ -61,15 +57,13 @@ pub fn update_user_agent(version: &str) -> String {
     )
 }
 
-/// Fetch and validate the channel's latest release (TS `getLatestPiRelease`).
+/// Fetch and validate the channel's latest release.
 /// `PI_SKIP_VERSION_CHECK`/`PI_OFFLINE` short-circuit to `None`; a missing or
 /// malformed manifest is `None`, never an error - `Planning` decides skip.
 ///
 /// # Errors
 ///
-/// Returns an error only when the manifest body cannot be read after a
-/// successful fetch; network, timeout, and manifest problems yield
-/// `Ok(None)`.
+/// Returns an error only when the manifest body cannot be read after a successful fetch.
 pub async fn latest_release(
     current_version: &str,
     channel: Option<UpdateChannel>,
@@ -92,7 +86,7 @@ pub async fn latest_release(
     let response = match response {
         Ok(response) if response.status().is_success() => response,
         // Network, timeout, and malformed-manifest failures all mean the
-        // same thing here: nothing to install (TS parity).
+        // same thing here: nothing to install.
         _ => return Ok(None),
     };
     let body = response
@@ -102,16 +96,10 @@ pub async fn latest_release(
     Ok(parse_channel_manifest(&body))
 }
 
-/// Parse and validate one channel-manifest body — the manifest half of
-/// [`latest_release`] without the fetch. This is the byte contract the
-/// release pipeline's channel-manifest producer (`release.yml`'s promote
-/// job) must satisfy: the version normalizes to a non-empty string, the
-/// v2 `binaries_v2` list wins over the v1 `binaries` fallback, and an
-/// artifact row survives only when its platform is known, its `file` is
-/// exactly `prime-agent-<version>-<platform>.tar.gz`, its `sha256` is 64
-/// hex chars, and no supported platform repeats. A row that fails any of
-/// that empties the artifact list (never the whole release); a body that
-/// is not the manifest schema or carries no version is `None`.
+/// Parse and validate one channel-manifest body — the manifest half of [`latest_release`] without
+/// the fetch (the producer's byte contract): the v2 `binaries_v2` list wins over the v1 fallback,
+/// an unverifiable artifact row empties the artifacts (never the release), and a non-manifest body
+/// without a version is `None`.
 #[must_use]
 pub fn parse_channel_manifest(body: &[u8]) -> Option<LatestRelease> {
     let manifest: ManifestFile = match serde_json::from_slice(body) {
@@ -128,9 +116,6 @@ pub fn parse_channel_manifest(body: &[u8]) -> Option<LatestRelease> {
             artifacts: Vec::new(),
         });
     };
-    // Prefer the complete v2 schema, with v1 as a compatibility fallback.
-    // Structurally valid entries for future platforms are ignored; malformed
-    // or duplicate supported-platform entries reject the list (TS parity).
     let mut artifacts = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for artifact in raw {
@@ -159,8 +144,7 @@ pub fn parse_channel_manifest(body: &[u8]) -> Option<LatestRelease> {
 ///
 /// # Errors
 ///
-/// Returns an error when the release carries no verified archive for the
-/// running platform.
+/// Returns an error when the release carries no verified archive for the running platform.
 pub fn artifact_for_platform(release: &LatestRelease) -> Result<&ReleaseArtifact> {
     let platform = current_platform_alias();
     release
@@ -170,8 +154,6 @@ pub fn artifact_for_platform(release: &LatestRelease) -> Result<&ReleaseArtifact
         .ok_or_else(|| anyhow!("No verified compiled archive is available for {platform}."))
 }
 
-/// sha256 hex of one byte slice (shared by the download's streaming digest
-/// checks and tests that build fixture archives).
 #[must_use]
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
@@ -209,9 +191,8 @@ mod tests {
 
     #[test]
     fn parse_channel_manifest_accepts_the_producer_shape() {
-        // The shape release.yml's promote job emits: the version, a v1
-        // `binaries` list (the four installer platforms), and the full
-        // `binaries_v2` list whose rows are exactly the read-side contract.
+        // The shape release.yml's promote job emits: a v1 `binaries` list plus the
+        // full `binaries_v2` list whose rows are exactly the read-side contract.
         let sha = "a".repeat(64);
         let row = |platform: &str| {
             serde_json::json!({
@@ -227,7 +208,6 @@ mod tests {
         });
         let release = parse_channel_manifest(manifest.to_string().as_bytes()).unwrap();
         assert_eq!(release.version, "1.2.3");
-        // binaries_v2 wins over the v1 fallback.
         assert_eq!(release.artifacts.len(), 3);
         assert!(release
             .artifacts
@@ -237,9 +217,7 @@ mod tests {
 
     #[test]
     fn parse_channel_manifest_keeps_the_reader_guards() {
-        // A row the reader cannot verify empties the artifacts (TS parity);
-        // the release pipeline's producer gate refuses this shape upstream,
-        // which is what the workflow test pins.
+        // A row the reader cannot verify empties the artifacts (TS parity).
         let lying_row = serde_json::json!({
             "version": "v1.2.3",
             "binaries": [{
@@ -251,10 +229,8 @@ mod tests {
         let release = parse_channel_manifest(lying_row.to_string().as_bytes()).unwrap();
         assert_eq!(release.version, "1.2.3");
         assert!(release.artifacts.is_empty());
-        // Not the manifest schema, or no version: None, never an error.
         assert!(parse_channel_manifest(b"{").is_none());
         assert!(parse_channel_manifest(br#"{"binaries": []}"#).is_none());
-        // A version-only manifest is a release without verified artifacts.
         let version_only = parse_channel_manifest(br#"{"version": "v1.2.3"}"#).unwrap();
         assert_eq!(version_only.version, "1.2.3");
         assert!(version_only.artifacts.is_empty());
@@ -267,9 +243,8 @@ mod tests {
         assert!(agent.contains("; rust/"));
     }
 
-    /// Serve one HTTP request from a fake local release endpoint and return
-    /// the endpoint's base URL plus a channel carrying what the client sent
-    /// (the request head). No fixed ports: the listener binds `127.0.0.1:0`.
+    /// Serve one HTTP request from a fake local release endpoint and return the
+    /// endpoint's base URL plus a channel carrying what the client sent (the request head).
     async fn fake_release_endpoint(
         status: &'static str,
         body: String,

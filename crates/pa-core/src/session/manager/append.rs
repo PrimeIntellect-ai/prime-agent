@@ -1,6 +1,5 @@
-//! The append concern (moved with its concern): the append family -
-//! messages, retained variants, changes, compactions, customs,
-//! attributions, session info/state - and the leaf/label mutators.
+//! The append family: messages, retained variants, changes, compactions,
+//! customs, attributions, session info/state - and the leaf/label mutators.
 
 use super::{
     format_iso_now, generate_id, AgentMessage, ChildUsageOrigin, EntryBase, FileEntry,
@@ -52,12 +51,10 @@ impl SessionManager {
         }
     }
 
-    /// Append a conversation message; returns the new entry id.
-    ///
     /// # Errors
     ///
-    /// Returns the underlying I/O error when the durable append fails; the
-    /// entry is not kept in the in-memory index.
+    /// I/O error when the durable append fails; the entry is not kept in
+    /// the in-memory index.
     pub fn append_message(&mut self, message: AgentMessage) -> std::io::Result<String> {
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
@@ -65,12 +62,9 @@ impl SessionManager {
         Ok(id)
     }
 
-    /// Append a conversation message with the TS `_appendEntry`
-    /// retained-write contract (the `_agentEventQueue` subscriber arm): the
-    /// loop already owns the row in live agent state, so a failed disk write
-    /// keeps it in the live session index too — the two stores stay in sync —
-    /// and the error surfaces for logging only. [`Self::append_message`]
-    /// stays strict for callers that roll back on failure.
+    /// Append a conversation message with the TS `_appendEntry` retained-write
+    /// contract: a failed disk write keeps the row in the live index (the loop
+    /// already owns it), the error surfacing for logging only.
     pub fn append_message_retained(
         &mut self,
         message: AgentMessage,
@@ -94,8 +88,6 @@ impl SessionManager {
         (id, write_error)
     }
 
-    /// Append a thinking-level change; returns the new entry id.
-    ///
     /// # Errors
     ///
     /// Returns the underlying I/O error when the durable append fails.
@@ -114,8 +106,6 @@ impl SessionManager {
         Ok(id)
     }
 
-    /// Append a service-tier change; returns the new entry id.
-    ///
     /// # Errors
     ///
     /// Returns the underlying I/O error when the durable append fails.
@@ -132,8 +122,6 @@ impl SessionManager {
         Ok(id)
     }
 
-    /// Append a model change; returns the new entry id.
-    ///
     /// # Errors
     ///
     /// Returns the underlying I/O error when the durable append fails.
@@ -154,10 +142,9 @@ impl SessionManager {
         Ok(id)
     }
 
-    /// `appendCompaction`: persist the compaction record. The full typed
-    /// payload is stored (TS keeps `details`, `fromHook`,
-    /// `customInstructions`, `usage`, and `harnessDigest` on the durable
-    /// row; later compactions and branch summarization read them back).
+    /// `appendCompaction`: persist the compaction record with the full typed
+    /// payload (later compactions and branch summarization read `usage`,
+    /// `harnessDigest`, and friends back from the durable row).
     ///
     /// # Errors
     ///
@@ -172,8 +159,6 @@ impl SessionManager {
         Ok(id)
     }
 
-    /// Append a custom entry; returns the new entry id.
-    ///
     /// # Errors
     ///
     /// Returns the underlying I/O error when the durable append fails.
@@ -197,9 +182,7 @@ impl SessionManager {
 
     /// Append a custom entry with the TS `_appendEntry` retained-write
     /// contract: a failed disk write keeps the entry in the live index and
-    /// surfaces the error for the caller to log or report after the rest of
-    /// its TS-choreographed writes (the refine audit arm). [`Self::append_custom_entry`]
-    /// stays strict for callers that roll back on failure.
+    /// surfaces the error for the caller to log (the refine audit arm).
     pub fn append_custom_entry_retained(
         &mut self,
         custom_type: &str,
@@ -256,10 +239,9 @@ impl SessionManager {
     }
 
     /// Append a best-effort disclosure row: a failed disk write keeps the
-    /// entry indexed (the TS `_unpersistedOutcomes` guarantee — context
-    /// rebuilds must not drop the disclosure; the gap-bridged usage walk
-    /// tolerates the missing line on reload). The write error surfaces for
-    /// logging only.
+    /// entry indexed (context rebuilds must not drop the disclosure; the
+    /// gap-bridged usage walk tolerates the missing line on reload). The
+    /// write error surfaces for logging only.
     pub fn append_custom_message_retained(
         &mut self,
         custom_type: &str,
@@ -292,14 +274,12 @@ impl SessionManager {
         (id, write_error)
     }
 
-    /// Fold child usage into the target assistant message and record the
-    /// attribution entry.
+    /// Fold child usage into the target assistant and record the attribution.
     ///
     /// # Errors
     ///
-    /// Returns an invalid-input error when the target assistant message
-    /// entry is missing, or the underlying I/O error when the durable
-    /// append fails.
+    /// Invalid input when the target assistant message is missing, or the
+    /// durable append's I/O error.
     pub fn append_child_usage_attribution(
         &mut self,
         target_id: &str,
@@ -347,8 +327,7 @@ impl SessionManager {
         Ok(id)
     }
 
-    /// Append a session-info row (the session name); returns the new entry
-    /// id.
+    /// Append a session-info row (the session name).
     ///
     /// # Errors
     ///
@@ -368,8 +347,7 @@ impl SessionManager {
     ///
     /// # Panics
     ///
-    /// Asserts that the manager holds no windowed store: hydrate the full
-    /// session history first.
+    /// Asserts that the manager holds no windowed store: hydrate the full session history first.
     pub(crate) fn set_leaf_id(&mut self, leaf_id: Option<&str>) {
         assert!(
             self.window.is_none(),
@@ -396,8 +374,6 @@ impl SessionManager {
         }
     }
 
-    /// Append a session-state row; returns the new entry id.
-    ///
     /// # Errors
     ///
     /// Returns the underlying I/O error when the durable append fails.

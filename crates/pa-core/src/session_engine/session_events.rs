@@ -1,20 +1,15 @@
-//! The TS `session_event` wire shape of one agent-loop event.
-//!
-//! Shared by every host that surfaces raw loop events the way the TS
-//! product does (the json print stream's per-line events and the RPC
-//! mode's forwarded session events): one serializer, one source of truth
-//! for the wire shape.
+//! The TS `session_event` wire shape of one agent-loop event: one
+//! serializer, one source of truth (shared by the json print stream's
+//! per-line events and the RPC mode's forwarded session events).
 
 use pa_agent::stream::AssistantMessageEvent;
 use pa_agent::types::AgentEvent;
 
 use super::provider_adapter::json_round_trip;
 
-/// The wire shape of one streaming delta (the TS `AssistantMessageEvent`
-/// as the daemon wire carries it: `partial` dropped — the partial
-/// assistant message rides the event's `message` field already). Terminal
-/// `start`/`done`/`error` events never ride a `message_update` (the loop
-/// emits `message_start`/`message_end` for those), so they map to `None`.
+/// The wire shape of one streaming delta (the TS `AssistantMessageEvent` as the daemon
+/// wire carries it: `partial` dropped — the event's `message` field already carries it).
+/// Terminal `start`/`done`/`error` events never ride a `message_update`, so they map to `None`.
 #[must_use]
 pub fn assistant_message_event_json(event: &AssistantMessageEvent) -> Option<serde_json::Value> {
     use pa_agent::stream::AssistantMessageEvent as StreamEvent;
@@ -104,9 +99,8 @@ pub fn assistant_message_event_json(event: &AssistantMessageEvent) -> Option<ser
     })
 }
 
-/// The thinking text of one partial message block (the loop's thinking-end
-/// event drops the content when the pa-ai event crosses the crate
-/// boundary; the partial still carries the accumulated text).
+/// The thinking text of one partial message block (the loop's thinking-end event drops
+/// the content; the partial still carries the accumulated text).
 fn thinking_block_text(
     partial: &pa_agent::types::AssistantMessage,
     content_index: usize,
@@ -225,8 +219,6 @@ mod tests {
         }
     }
 
-    /// The `message_update` event wraps the partial message plus the slim
-    /// delta, in the TS field order.
     #[test]
     fn message_update_event_json_wraps_the_partial_and_delta() {
         let message = partial(vec![AssistantContent::Text(TextContent {
@@ -252,8 +244,6 @@ mod tests {
             serde_json::json!({"type": "text_delta", "contentIndex": 0, "delta": "first reply"})
         );
     }
-    /// The wire shapes of the streaming deltas (TS `AssistantMessageEvent`
-    /// as the daemon wire carries it — no nested `partial` copy).
     #[test]
     fn assistant_message_event_wire_shapes_match_ts() {
         let message = partial(Vec::new());

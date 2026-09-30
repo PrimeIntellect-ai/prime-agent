@@ -1,8 +1,6 @@
 //! Session discovery: header-only session scans and the `--resume` selector
-//! resolver. Port of `session-resolver.ts` plus the header scanning from
-//! `session-manager.ts` (`findMostRecentSessionForCwd`): the CLI turns a
-//! user selector into a concrete session file path, or a typed selector
-//! error the caller renders.
+//! resolver: the CLI turns a user selector into a concrete session file
+//! path, or a typed selector error the caller renders.
 
 use std::path::{Path, PathBuf};
 
@@ -83,7 +81,6 @@ impl std::fmt::Display for SessionSelectorError {
 
 impl std::error::Error for SessionSelectorError {}
 
-/// `normalizeSessionId`: strip id separators and lowercase.
 fn normalize_session_id(id: &str) -> String {
     id.replace('-', "").to_lowercase()
 }
@@ -95,7 +92,7 @@ fn normalize_hex_session_id(id: &str) -> Option<String> {
         .then_some(normalized)
 }
 
-/// `looksLikeSessionPath`: separators or a `.jsonl` suffix mean a path.
+/// Separators or a `.jsonl` suffix mean a path.
 #[must_use]
 pub fn looks_like_session_path(selector: &str) -> bool {
     selector.contains('/')
@@ -105,12 +102,11 @@ pub fn looks_like_session_path(selector: &str) -> bool {
             .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("jsonl"))
 }
 
-/// `normalizeCwd`: an absolute path without symlink resolution.
+/// An absolute path without symlink resolution.
 fn normalize_cwd(cwd: &Path) -> PathBuf {
     std::path::absolute(cwd).unwrap_or_else(|_| cwd.to_path_buf())
 }
 
-/// True when a session header's cwd matches the given cwd.
 fn header_matches_cwd(header: &SessionHeaderInfo, cwd: &Path) -> bool {
     !header.cwd.is_empty() && normalize_cwd(Path::new(&header.cwd)) == normalize_cwd(cwd)
 }
@@ -141,8 +137,7 @@ pub fn scan_session_headers(session_dir: &Path) -> Vec<SessionHeaderInfo> {
     headers
 }
 
-/// `findMostRecentSessionForCwd`: the newest session file in `session_dir`
-/// whose header cwd matches, or None.
+/// The newest session file in `session_dir` whose header cwd matches, or None.
 #[must_use]
 pub fn find_most_recent_session_for_cwd(session_dir: &Path, cwd: &Path) -> Option<PathBuf> {
     let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = scan_session_headers(session_dir)
@@ -159,8 +154,7 @@ pub fn find_most_recent_session_for_cwd(session_dir: &Path, cwd: &Path) -> Optio
     candidates.into_iter().map(|(_, path)| path).next()
 }
 
-/// `matchesSavedSessionSelector`: hex ids match by prefix or suffix; plain
-/// ids match by prefix only.
+/// Hex ids match by prefix or suffix; plain ids match by prefix only.
 fn matches_saved_session_selector(candidate: &str, selector: &str) -> bool {
     let normalized_candidate = normalize_hex_session_id(candidate);
     let normalized_selector = normalize_hex_session_id(selector);
@@ -170,8 +164,7 @@ fn matches_saved_session_selector(candidate: &str, selector: &str) -> bool {
     candidate.starts_with(selector)
 }
 
-/// Resolve one resolved session among the matching tier, erroring on ties
-/// like `resolveUniqueMatch`.
+/// Resolve one resolved session among the matching tier, erroring on ties.
 fn resolve_unique_match(
     selector: &str,
     matches: Vec<SessionHeaderInfo>,
@@ -186,15 +179,14 @@ fn resolve_unique_match(
     }
 }
 
-/// Resolve a `--resume` selector against the session directory, mirroring
-/// `resolveSessionPath`: path-like selectors pass through, then exact and
-/// partial matches are tried local-first, global second.
+/// Resolve a `--resume` selector against the session directory:
+/// path-like selectors pass through, then exact and partial matches are
+/// tried local-first, global second.
 ///
 /// # Errors
 ///
-/// Returns [`SessionSelectorError::Ambiguous`] when a match tier contains
-/// several sessions, and [`SessionSelectorError::NotFound`] when no session
-/// matches the selector.
+/// [`SessionSelectorError::Ambiguous`] on ties; `NotFound` when no
+/// session matches.
 pub fn resolve_session_path(
     selector: &str,
     cwd: &Path,
@@ -211,7 +203,6 @@ pub fn resolve_session_path(
         .cloned()
         .collect();
 
-    // Exact local, then exact global.
     let normalized_selector = normalize_session_id(selector);
     let exact_local = local
         .iter()
@@ -234,7 +225,6 @@ pub fn resolve_session_path(
         });
     }
 
-    // Partial local, then partial global.
     let partial_local = local
         .iter()
         .filter(|header| matches_saved_session_selector(&header.id, selector))
@@ -262,7 +252,7 @@ pub fn resolve_session_path(
     })
 }
 
-/// `findClosestSessionId`: the unique closest id within the tolerance, if any.
+/// The unique closest id within the tolerance, if any.
 fn find_closest_session_id(
     selector: &str,
     local: &[SessionHeaderInfo],
@@ -310,8 +300,7 @@ fn find_closest_session_id(
     }
 }
 
-/// Edit distance (`editDistance`), over char slices so multi-byte ids stay
-/// in-bounds.
+/// Edit distance over char slices, so multi-byte ids stay in-bounds.
 fn edit_distance(left: &[char], right: &[char]) -> usize {
     let left_len = left.len();
     let right_len = right.len();
