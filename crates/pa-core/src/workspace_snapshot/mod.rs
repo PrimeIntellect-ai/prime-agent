@@ -802,16 +802,14 @@ fn capture_leaf(
                     ),
                 ));
             }
-            #[cfg_attr(unix, allow(unused_mut))]
             let mut executable = executable;
             if let Some(expected) = expected {
                 let oid = git_blob_oid(&content, expected.oid.len() == SHA256_OID_HEX_LEN);
-                #[cfg(not(unix))]
                 if expected.oid == oid {
-                    // core.filemode hosts carry the executable bit only
-                    // in the tree: a clean leaf restates HEAD's own mode
-                    // instead of the filesystem's absent bit, so a 100755
-                    // script stays executable in the manifest.
+                    // A clean leaf restates HEAD's own mode: the object
+                    // id is the mutation check, and the filesystem bit
+                    // is not git's truth under core.filemode=false
+                    // (WSL drvfs, FAT/exFAT).
                     executable = expected.mode == "100755";
                 }
                 verify_against_head(

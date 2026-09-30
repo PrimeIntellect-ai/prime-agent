@@ -879,22 +879,6 @@ fn baseline_rejects_concurrent_mutation_loudly() {
         "{error}"
     );
     assert!(error.to_string().contains("hashes to object"), "{error}");
-    // A mode that no longer matches HEAD fails loudly too.
-    let chmodded = head_entry(&git_blob_oid(b"right\n", false), "100755");
-    let error = capture_leaf(
-        root.path(),
-        &blobs,
-        "a.txt",
-        "100644",
-        Some(&chmodded),
-        &limits,
-        &mut total_bytes,
-    )
-    .unwrap_err();
-    assert!(
-        matches!(error, SnapshotError::ConcurrentMutation { .. }),
-        "{error}"
-    );
     // A path HEAD records that vanished from the worktree is an error,
     // never a silent omission: drive it through build_manifest itself.
     let bare = tempfile::tempdir().unwrap();
@@ -1266,6 +1250,44 @@ async fn snapshot_records_executable_bits() {
     };
     assert!(executable("script.sh"));
     assert!(!executable("plain.txt"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn head_tree_baseline_restates_head_mode_under_core_filemode_false() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    init_repo(root);
+    write(root, "run.sh", "#!/bin/sh\n");
+    std::fs::set_permissions(root.join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    // What a FAT or WSL drvfs mount reports for the bit: the mode is
+    // gone from the filesystem and git is told to ignore mode drift, so
+    // a clean worktree stays a clean worktree.
+    git(root, &["config", "core.filemode", "false"]);
+    std::fs::set_permissions(root.join("run.sh"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    let staging = tempfile::tempdir().unwrap();
+    let snapshot =
+        create_workspace_snapshot(root, staging.path(), BaselineMode::HeadTree, &limits())
+            .await
+            .unwrap();
+    assert_eq!(
+        snapshot.manifest,
+        repo_manifest(
+            root,
+            head_tree(vec![CapturedEntry::File {
+                path: "run.sh".to_string(),
+                status: "100755".to_string(),
+                sha256: digest(b"#!/bin/sh\n"),
+                bytes: 10,
+                executable: true,
+            }]),
+            vec![],
+            vec![]
+        )
+    );
 }
 
 #[test]
