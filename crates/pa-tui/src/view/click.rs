@@ -72,8 +72,9 @@ pub(crate) struct EditorClickSurface {
     pub(crate) dock_row: usize,
     /// Content rows the surface shows.
     pub(crate) rows: usize,
-    /// Rows the queue-selection header inserts above the content.
-    pub(crate) queue_header_rows: usize,
+    /// Rows the header block inserts above the content (the queue-browse
+    /// header, an action composer's header; TS `getContentLineOffset`).
+    pub(crate) content_offset: usize,
     /// The rendered prompt's visible width (`> `, `! `, `!! `).
     pub(crate) prompt_width: usize,
     /// The width the editor's layout wrapped at.
@@ -265,7 +266,7 @@ impl AgentView {
         // The content rows follow the surface's top border and the
         // queue-selection header (TS `getClickRegions`'s line base).
         let content_row = dock_row
-            .checked_sub(editor.dock_row + 1 + editor.queue_header_rows)
+            .checked_sub(editor.dock_row + 1 + editor.content_offset)
             .filter(|row| *row < editor.rows)?;
         Some(ClickAction::PlaceCaret {
             row: content_row,

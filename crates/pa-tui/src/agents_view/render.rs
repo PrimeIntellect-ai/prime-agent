@@ -18,7 +18,6 @@ impl AgentsViewMode {
         // The frame height feeds the page step (TS reads
         // `ui.terminal.rows` live at key time instead).
         self.last_height = height;
-        let theme = &self.theme;
         let mut lines: Vec<Line> = Vec::new();
         // TS `getAgentCountsText` rides the splash as extra metadata. Like
         // TS `countRowsBySection`, it counts agent-kind rows only — nested
@@ -41,6 +40,7 @@ impl AgentsViewMode {
         if let Some(depth) = self.scope_depth {
             extra_metadata.push(("depth".to_string(), depth.to_string()));
         }
+        let theme = &self.theme;
         let chrome = crate::chrome::ChromeState {
             version: self.options.version.clone(),
             cwd: self.options.cwd.to_string_lossy().to_string(),
@@ -75,12 +75,16 @@ impl AgentsViewMode {
             }
         }
 
-        // TS `renderPrompt`: header lines go above the prompt row, before the
-        // cursor row is taken.
-        let (header, prompt, cursor_col) = self.render_prompt(theme, width);
+        // TS `renderPrompt`: the composer's header lines go above the box,
+        // before the cursor row is taken; the box's own rows follow, and
+        // the cursor rides inside them. The prompt's editor mutates its
+        // own scroll state, so the theme borrow above ends here and the
+        // frame re-borrows it for the list below.
+        let (header, prompt_rows, box_cursor) = self.render_prompt(width);
         lines.extend(header);
-        let cursor = Some((lines.len(), cursor_col));
-        lines.push(prompt);
+        let prompt_start = lines.len();
+        lines.extend(prompt_rows);
+        let cursor = box_cursor.map(|(row, col)| (prompt_start + row, col));
         lines.push(vec![]);
 
         // The notice panel (a multi-line refusal from the previous run)
@@ -127,13 +131,14 @@ impl AgentsViewMode {
     /// The prompt block (TS `renderPrompt`, :2917-2926): the search
     /// composer renders the transparent editor shape (the muted `> `
     /// prefix, the dim "Search sessions" placeholder) over the plain
-    /// surface; the rename composer renders the non-inline shape — the
-    /// warning header line above, the buffer in the text color on the
-    /// editor background (TS `getEditorBackgroundColor`), the dim
-    /// placeholder while empty. Returns the header lines (above the
-    /// prompt), the prompt row, and the cursor column.
-    fn render_prompt(&self, theme: &Theme, width: usize) -> (Vec<Line>, Line, usize) {
-        match &self.composer {
+    /// surface; the rename composer renders the real editor box (TS
+    /// `Editor.render` with the background) — the warning header block
+    /// inside it, the draft in the text color, the dim placeholder
+    /// while empty. Returns the lines above the box, the box's rows,
+    /// and the cursor's row within the box and its column.
+    fn render_prompt(&mut self, width: usize) -> (Vec<Line>, Vec<Line>, Option<(usize, usize)>) {
+        let theme = &self.theme;
+        match &mut self.composer {
             Composer::Search => {
                 let mut prompt: Line = vec![crate::Span::styled(
                     " >  ".to_string(),
@@ -153,51 +158,54 @@ impl AgentsViewMode {
                 }
                 (
                     Vec::new(),
-                    prompt,
+                    vec![prompt],
                     // The cursor caps at the same width the query
                     // displays (`truncate_text` keeps width - 5, the
-                    // rename arm's own cap): a longer query would
+                    // editor box's own cap): a longer query would
                     // otherwise park the caret past the last rendered
                     // cell, where the terminal frame skips it.
-                    4 + str_width(&self.query).min(width.saturating_sub(5)),
+                    Some((0, 4 + str_width(&self.query).min(width.saturating_sub(5)))),
                 )
             }
-            Composer::Rename(rename) => {
-                let header = vec![vec![
-                    // TS v0.9.7's renderPrompt header padding (the parity
-                    // run's a2 frame): the header indents two spaces.
-                    theme.fg(ThemeColor::Warning, "  Rename agent session".to_string()),
-                ]];
-                let mut prompt: Line = vec![crate::Span::styled(
-                    " >  ".to_string(),
-                    theme.fg_style(ThemeColor::Muted),
-                )];
-                prompt.push(crate::Span::styled(
-                    truncate_text(&rename.name, width.saturating_sub(5).max(1)),
-                    theme.fg_style(ThemeColor::Text),
-                ));
-                if rename.name.is_empty() {
-                    prompt.push(crate::Span::styled(
-                        " ".to_string(),
-                        theme.fg_style(ThemeColor::Muted),
-                    ));
-                    prompt.push(crate::Span::styled(
-                        "Name this agent session".to_string(),
-                        theme.fg_style(ThemeColor::Dim),
-                    ));
-                }
-                let prompt = theme.bg_paint(
-                    crate::theme::ThemeBg::UserMessageBg,
-                    pad_line(prompt, width),
+            // The reply composer's real editor box (the rename box's
+            // shape): the target's header line rides INSIDE the box, the
+            // placeholder names the action by the target's state, and
+            // the cursor comes from the box. An open completion renders
+            // its overlay panel above the box — the chat's stacking (TS
+            // draws the same dropdown through the editor's TUI overlay,
+            // editor.ts `showOverlay`, anchored over the box).
+            Composer::Reply(reply) => {
+                let overlay = crate::view::editor_surface::overlay(&reply.editor, theme, width);
+                let header = reply.header_line(theme);
+                let placeholder = reply.placeholder();
+                let surface = crate::view::editor_surface::render(
+                    &mut reply.editor,
+                    theme,
+                    width,
+                    u16::try_from(self.last_height).unwrap_or(u16::MAX),
+                    Some(header),
+                    Some(placeholder),
                 );
-                // The caret parks after the same clipped text budget it
-                // renders (a name that fills the field parks the caret on
-                // the last visible cell, never one past the frame edge).
-                (
-                    header,
-                    prompt,
-                    4 + str_width(&rename.name).min(width.saturating_sub(5).max(1)),
-                )
+                (overlay, surface.rows, surface.cursor)
+            }
+            // The rename composer's real editor box (TS `CustomEditor.render`
+            // over `Editor.render`): the warning header rides INSIDE the box
+            // (the header block under the top row, TS `getHeaderLine` via
+            // `renderHeaderContentLine`), the draft renders through the
+            // editor's own surface, and the cursor comes from the box —
+            // the #3117 SF1 2-row shape closes.
+            Composer::Rename(rename) => {
+                let header =
+                    vec![theme.fg(ThemeColor::Warning, "Rename agent session".to_string())];
+                let surface = crate::view::editor_surface::render(
+                    &mut rename.editor,
+                    theme,
+                    width,
+                    u16::try_from(self.last_height).unwrap_or(u16::MAX),
+                    Some(header),
+                    Some("Name this agent session"),
+                );
+                (Vec::new(), surface.rows, surface.cursor)
             }
         }
     }
@@ -634,11 +642,58 @@ impl AgentsViewMode {
             );
             return truncate_line(&vec![theme.fg(ThemeColor::Muted, hint)], width);
         }
-        if let Some(status) = status_override.or(self.status.as_deref()) {
-            return truncate_line(
-                &vec![theme.fg(ThemeColor::Error, status.to_string())],
-                width,
-            );
+        // TS `renderHints`: the status renders in its own tone (a
+        // failure reads error, a plain report muted). The truncation
+        // keeps the style: the row is one span, clipped to the width
+        // (`truncate_line` re-wraps plain text and would strip it — the
+        // tone is the row's whole point, the #3117 SF6 divergence).
+        if let Some(status) = self.status.as_ref() {
+            return vec![theme.fg(status.tone().color(), truncate_text(status.text(), width))];
+        }
+        // The notice fallback (the degenerate pane's first refusal
+        // line) is the error family it always was.
+        if let Some(status) = status_override {
+            return vec![theme.fg(ThemeColor::Error, truncate_text(status, width))];
+        }
+        // The reply composer's hints (TS `renderReplyComposerHints`,
+        // :2964-2978): the confirm key's word by the target's CURRENT
+        // state (steer while it streams, send live, resume & send
+        // saved), the queue hint while the draft has text, and cancel
+        // over the cancel binding's every key.
+        if let Composer::Reply(reply) = &self.composer {
+            let current = self.current_reply_summary(&reply.target);
+            let live = current
+                .get("activeSessionId")
+                .and_then(serde_json::Value::as_str)
+                .is_some();
+            let streaming = live
+                && current
+                    .get("isStreaming")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true);
+            let word = if streaming {
+                "steer"
+            } else if live {
+                "send"
+            } else {
+                "resume & send"
+            };
+            let mut hints = vec![format!(
+                "{} {word}",
+                self.keybindings.key_text("tui.select.confirm")
+            )];
+            if !reply.editor.get_text().trim().is_empty() {
+                hints.push(format!(
+                    "{} queue",
+                    self.keybindings.key_text("app.message.followUp")
+                ));
+            }
+            hints.push(format!(
+                "{} cancel",
+                self.keybindings.key_text("tui.select.cancel")
+            ));
+            let hint = hints.join("   ");
+            return truncate_line(&vec![theme.fg(ThemeColor::Muted, hint)], width);
         }
         // The rename composer's hint (TS :2942-2944): save/cancel over
         // the confirm/cancel bindings' every key (`keyText` — TS shows
@@ -703,6 +758,12 @@ impl AgentsViewMode {
             if let Some(keys) = all("app.agents.rename").filter(|_| self.rename_target().is_some())
             {
                 segments.push(format!("{keys} rename"));
+            }
+            // The reply slot (the operator's completeness directive: TS
+            // shows none — the space arm is undiscoverable without it):
+            // only while the selected row is replyable.
+            if let Some(keys) = all("app.agents.reply").filter(|_| self.reply_target().is_some()) {
+                segments.push(format!("{keys} reply"));
             }
             if let Some(pending) = self.delete_arm_target() {
                 if let Some(keys) = all("app.agents.delete") {
@@ -827,35 +888,58 @@ impl Renderer {
                 // Ctrl+C pairs for the exit guard: this thread stays alive
                 // when the view loop is wedged in a daemon request, so the
                 // force-quit contract holds regardless of loop state.
-                crate::input::spawn_terminal_reader(move |event| match event {
-                    crossterm::event::Event::Key(key) => {
-                        exit_guard.observe_key(&key);
-                        // The id door filters the way every session handler
-                        // does (`let Some(id) = key_event_to_id(&key)`): kitty
-                        // Release events and unmappable keys map to no id, and
-                        // a forwarded empty id would run handle_key's "any
-                        // other key" arm — clearing the armed exit hint
-                        // between the presses of a double Ctrl+C, so the
-                        // second press re-arms instead of exiting.
-                        let Some(id) = crate::keys::key_event_to_id(&key) else {
-                            return true;
-                        };
-                        ui_tx.send(UiInput::Key(id)).is_ok()
+                // The paste-aware variant (the session surface's reader):
+                // a marker-less multi-line keystroke burst coalesces into
+                // one paste — Enter submits in the composers, so a burst
+                // typed line by line would submit per line.
+                crate::input::spawn_paste_aware_reader(move |input| match input {
+                    crate::input::ReaderInput::BurstPaste(text) => {
+                        ui_tx.send(UiInput::Paste(text)).is_ok()
                     }
-                    crossterm::event::Event::Mouse(mouse) => {
-                        // Mouse reports are consumed even when tracking is
-                        // off (terminal noise downstream); an active surface
-                        // decodes and dispatches them.
-                        let report = crate::mouse_tracking::active()
-                            .then(|| crate::mouse::from_crossterm(mouse))
-                            .flatten();
-                        match report {
-                            Some(event) => ui_tx.send(UiInput::Mouse(event)).is_ok(),
-                            None => true,
+                    // A report the guard reassembled from a sequence the
+                    // reader split at a committed-`ESC` boundary: the same
+                    // contract as the terminal's own mouse events below —
+                    // consumed unless tracking is active.
+                    crate::input::ReaderInput::Mouse(report) => {
+                        if crate::mouse_tracking::active() {
+                            ui_tx.send(UiInput::Mouse(report)).is_ok()
+                        } else {
+                            true
                         }
                     }
-                    crossterm::event::Event::Resize(..) => ui_tx.send(UiInput::Resize).is_ok(),
-                    _ => true,
+                    crate::input::ReaderInput::Event(event) => match event {
+                        crossterm::event::Event::Key(key) => {
+                            exit_guard.observe_key(&key);
+                            // The id door filters the way every session handler
+                            // does (`let Some(id) = key_event_to_id(&key)`): kitty
+                            // Release events and unmappable keys map to no id, and
+                            // a forwarded empty id would run handle_key's "any
+                            // other key" arm — clearing the armed exit hint
+                            // between the presses of a double Ctrl+C, so the
+                            // second press re-arms instead of exiting.
+                            let Some(id) = crate::keys::key_event_to_id(&key) else {
+                                return true;
+                            };
+                            ui_tx.send(UiInput::Key(id)).is_ok()
+                        }
+                        crossterm::event::Event::Paste(text) => {
+                            ui_tx.send(UiInput::Paste(text)).is_ok()
+                        }
+                        crossterm::event::Event::Mouse(mouse) => {
+                            // Mouse reports are consumed even when tracking is
+                            // off (terminal noise downstream); an active surface
+                            // decodes and dispatches them.
+                            let report = crate::mouse_tracking::active()
+                                .then(|| crate::mouse::from_crossterm(mouse))
+                                .flatten();
+                            match report {
+                                Some(event) => ui_tx.send(UiInput::Mouse(event)).is_ok(),
+                                None => true,
+                            }
+                        }
+                        crossterm::event::Event::Resize(..) => ui_tx.send(UiInput::Resize).is_ok(),
+                        _ => true,
+                    },
                 });
                 let terminal = ratatui::Terminal::new(crate::hyperlinks::stdout_backend())?;
                 // The adopted buffer still holds the previous view's frame;

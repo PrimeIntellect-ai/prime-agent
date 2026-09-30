@@ -122,7 +122,7 @@ fn program_key_shows_and_hides_the_spawn_program() {
     mode.selected = 0;
     mode.handle_key("ctrl+o");
     assert_eq!(
-        mode.status.as_deref(),
+        mode.status_text(),
         Some("No program recorded for these subagents")
     );
 }
@@ -131,8 +131,9 @@ fn program_key_shows_and_hides_the_spawn_program() {
 /// default ctrl+r): the composer owns the prompt and the key routing —
 /// the header and the save/cancel hint render, the prefill is the
 /// session's name, the editing grammar matches the search field, Enter
-/// submits the trimmed name with the live target, Esc exits with the
-/// query untouched, and a child row never enters.
+/// submits the trimmed name with the live target, a large paste saves
+/// expanded, Esc exits with the query untouched, and a child row never
+/// enters.
 #[test]
 fn rename_key_composes_edits_and_dispatches() {
     let mut mode = mode_with_parent_and_child();
@@ -140,26 +141,45 @@ fn rename_key_composes_edits_and_dispatches() {
     let Composer::Rename(rename) = &mode.composer else {
         panic!("the composer entered rename mode");
     };
-    assert_eq!(rename.name, "p name", "the prefill is the session name");
-    // The rendered frame: the header; the hint: save/cancel.
+    assert_eq!(
+        rename.editor.get_text(),
+        "p name",
+        "the prefill is the session name"
+    );
+    // The rendered frame: the real editor box (TS SF1 closes: the
+    // warning header rides INSIDE the box, top and bottom bg rows
+    // included); the hint: save/cancel.
     let (frame, _) = mode.render_frame(120, 20);
     let rendered: Vec<String> = frame.iter().map(flat).collect();
+    let header_row = rendered
+        .iter()
+        .position(|row| row.starts_with("  Rename agent session"))
+        .expect("the rename header rendered with TS's two-space indent");
     assert!(
-        rendered
-            .iter()
-            .any(|row| row.starts_with("  Rename agent session")),
-        "the rename header rendered with TS's two-space indent:
-{}",
+        rendered[header_row - 1].trim().is_empty(),
+        "the box's top bg row rides above the header"
+    );
+    assert!(
+        rendered.iter().any(|row| row.contains("p name")),
+        "the prefilled draft renders in the box:\n{}",
         rendered.join("\n")
     );
     assert_eq!(
         flat(&mode.render_hints(120, None)),
         "Enter save   Esc/Ctrl+C cancel"
     );
-    // The editing grammar (the search field's): ctrl+u clears, the typed
-    // characters land, Enter submits the trimmed name with the live
-    // target.
+    // The editing grammar (the editor's own, TS's `editor.handleInput`):
+    // ctrl+u clears to the dim placeholder, the typed characters land,
+    // Enter submits the trimmed name with the live target.
     mode.handle_key("ctrl+u");
+    let (frame, _) = mode.render_frame(120, 20);
+    assert!(
+        frame
+            .iter()
+            .map(flat)
+            .any(|row| row.contains("Name this agent session")),
+        "the cleared editor shows the placeholder"
+    );
     mode.handle_key("n");
     mode.handle_key("e");
     mode.handle_key("w");
@@ -175,22 +195,32 @@ fn rename_key_composes_edits_and_dispatches() {
         }),
         "the confirmed rename dispatches"
     );
-    assert_eq!(mode.status.as_deref(), Some("Renaming agent..."));
+    assert_eq!(mode.status_text(), Some("Renaming agent..."));
     // The landed outcome reports TS's row (the dispatched request itself).
     mode.rename_result(rename.expect("the dispatched rename"), Ok(()));
-    assert_eq!(mode.status.as_deref(), Some("Renamed to new"));
+    assert_eq!(mode.status_text(), Some("Renamed to new"));
     // Esc exits back to search; the query stays untouched. Ctrl+C
     // cancels too (TS :1120 — the default cancel binding includes it;
     // the force-quit guard's handled note rides the routing).
     mode.handle_key("ctrl+r");
     mode.handle_key("escape");
-    assert_eq!(mode.composer, Composer::Search);
+    assert!(matches!(mode.composer, Composer::Search));
     mode.handle_key("ctrl+r");
     mode.handle_key("ctrl+c");
-    assert_eq!(
-        mode.composer,
-        Composer::Search,
+    assert!(
+        matches!(mode.composer, Composer::Search),
         "ctrl+c cancels rename mode (TS :1120)"
+    );
+    // A large paste shows as a marker; the save expands it (TS
+    // `submitValue`).
+    mode.handle_key("ctrl+r");
+    mode.handle_key("ctrl+u");
+    let pasted = "x".repeat(1200);
+    mode.handle_paste(&pasted);
+    mode.handle_key("enter");
+    assert_eq!(
+        mode.pending_rename.take().map(|rename| rename.name),
+        Some(pasted)
     );
     // A subagent row never enters rename mode (TS :1871: only
     // top-level agents rename). Expand the list so the child row is
@@ -200,7 +230,7 @@ fn rename_key_composes_edits_and_dispatches() {
     mode.handle_key("down");
     assert_eq!(mode.rows[mode.selected].kind, RowKind::Subagent);
     mode.handle_key("ctrl+r");
-    assert_eq!(mode.composer, Composer::Search);
+    assert!(matches!(mode.composer, Composer::Search));
 }
 
 #[test]

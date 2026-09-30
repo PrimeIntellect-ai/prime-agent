@@ -26,45 +26,23 @@ impl SessionEngine for AgentSessionEngine {
         }
     }
 
-    /// The engine-side gate mirror of the whole-worker idle
-    /// passivation (TS `canPassivateSession`, session-action-store
-    /// :411-419): `true` only when no non-passive descendants hold work
-    /// and no active-or-paused scheduled job is registered (the shared
-    /// store covers crons AND armed heartbeats — the wake-blind
-    /// substitution). This method only answers the gate; the caller
-    /// owns the residency decision (the kernel release and the
-    /// whole-worker stop each consume it separately).
-    fn can_passivate_settled_session(
+    /// The whole-worker idle passivation gate (the
+    /// `idleEvictionMinutes` consumer): the settled gates plus an
+    /// empty RLM child registry — the registry rule's rationale
+    /// lives on the trait method. The kernel release below does
+    /// NOT carry the registry rule: releasing a kernel keeps the
+    /// worker (and its registry) resident.
+    fn can_passivate_worker(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
         Box::pin(async move {
-            // `hasNonPassiveDescendants`: a busy descendant keeps the
-            // child resident (the TS policy).
-            if self.has_unsettled_rlm_work().await {
+            if !self.settled_passivation_gates_pass().await {
                 return false;
             }
-            // `hasRegisteredCronJob`: an active or paused scheduled job
-            // keeps the worker resident — for the whole-worker idle
-            // passivation this gate covers plain cron jobs AND armed
-            // heartbeats alike (the shared scheduled-jobs store holds
-            // both): the port has no relaunch-on-fire for a stopped
-            // worker's jobs, so unlike TS's tier-2 (which evicts
-            // cron-armed workers and lets the fire relaunch) the port
-            // BLOCKS while any job is armed — the wake-blind
-            // substitution, a disclosed deliberate divergence until a
-            // relaunch-on-fire port exists. An unwired probe stays open
-            // (a store-less embedding never passes the gate).
-            let probe = self
-                .registered_jobs_probe
-                .lock()
-                .expect("registered jobs probe lock")
-                .clone();
-            if let Some(probe) = probe {
-                if probe() {
-                    return false;
-                }
+            match self.children.clone() {
+                Some(children) => children.child_identities().await.is_empty(),
+                None => true,
             }
-            true
         })
     }
 
@@ -72,7 +50,7 @@ impl SessionEngine for AgentSessionEngine {
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
-            if !self.can_passivate_settled_session().await {
+            if !self.settled_passivation_gates_pass().await {
                 return;
             }
             // The release itself: best-effort (a failed stop leaves

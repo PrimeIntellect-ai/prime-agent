@@ -234,11 +234,11 @@ impl TurnRunner {
     /// pending-prompt-admissions arm) and the setting is a live
     /// threshold; `None` otherwise (roots, attached children, `"off"`,
     /// and any state the engine gates would reject stay parked without
-    /// a timer). The engine-side passivation gates
-    /// (unsettled descendants, registered active-or-paused scheduled
-    /// jobs) are re-checked at the fire inside
-    /// [`Self::maybe_request_idle_passivation`] — the fresh-snapshot
-    /// fence — so this window only decides whether to arm.
+    /// a timer). The engine gate
+    /// (`SessionEngine::can_passivate_worker`) is re-checked at the
+    /// fire inside [`Self::maybe_request_idle_passivation`] — the
+    /// fresh-snapshot fence — so this window only decides whether to
+    /// arm.
     pub(super) fn idle_passivation_window(&self) -> Option<std::time::Duration> {
         let (rlm_depth, attached, compacting, shutdown, queued, last_activity, cwd) = {
             let core = self.core.lock().unwrap();
@@ -341,10 +341,10 @@ impl TurnRunner {
         if crate::util::now_ms().saturating_sub(last_activity) < minutes.saturating_mul(60_000) {
             return;
         }
-        // The engine-side gates (no unsettled descendants, no registered
-        // active-or-paused scheduled job): a parked child with either
-        // stays resident.
-        if !self.engine.can_passivate_settled_session().await {
+        // The engine gate's one definition lives with the engine
+        // (`SessionEngine::can_passivate_worker`): a parked worker
+        // failing it stays resident.
+        if !self.engine.can_passivate_worker().await {
             return;
         }
         // The post-await revalidation (the fresh bots' race findings):

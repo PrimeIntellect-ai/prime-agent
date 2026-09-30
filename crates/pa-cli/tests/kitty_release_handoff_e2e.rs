@@ -117,6 +117,7 @@ fn kitty_child_mode() {
                 keybindings: options.keybindings.clone(),
                 show_hardware_cursor: false,
                 incident_notice_state: None,
+                create_config: serde_json::json!({}),
             };
             let view_run = pa_tui::agents_view::run_agents_view(
                 view_options,

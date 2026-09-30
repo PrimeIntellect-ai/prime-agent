@@ -90,7 +90,9 @@ impl Worker {
             }
             "set_auto_compaction" => self.handle_set_auto_compaction(payload),
             "wait_for_idle" => self.handle_wait_for_idle().await,
-            "wait_for_headless_completion" => self.handle_wait_for_headless_completion().await,
+            "wait_for_headless_completion" => {
+                self.handle_wait_for_headless_completion(payload).await
+            }
             "get_state" => self.handle_get_state(),
             "get_messages" => self.handle_get_messages(),
             "get_session_header" => self.handle_get_session_header(),

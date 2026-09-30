@@ -12,6 +12,7 @@ use crate::theme::Theme;
 use crate::Line;
 
 pub(crate) mod click;
+pub(crate) mod editor_surface;
 mod expansion;
 mod flush;
 mod frame;

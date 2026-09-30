@@ -6,17 +6,25 @@ use serde_json::Value;
 
 use super::{AgentsViewMode, Composer, DaemonClient, UiInput};
 use crate::agents_view_forest::RowKind;
+use crate::editor::{Editor, EditorEvent};
 use pa_types::daemon::DaemonCommand;
 use tokio::sync::mpsc;
 
-/// One rename request (TS `renameTarget`'s summary fields): the target
-/// session and the name. The same value is the draft (the `name` buffer
-/// while composing) and the dispatched request (the trimmed `name` at
-/// confirm time).
+/// One rename request (TS `confirmRename`'s trimmed value): the target
+/// session and the name the dispatch carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Rename {
     pub(super) target: RenameTarget,
     pub(super) name: String,
+}
+
+/// The rename composer's state (TS `renameTarget` + the editor): the
+/// editor owns the draft — the full cursor/word/kill/undo grammar, no
+/// autocomplete (TS's provider answers only while a reply is armed)
+/// — and the confirm dispatches the trimmed text.
+pub(super) struct RenameComposer {
+    pub(super) target: RenameTarget,
+    pub(super) editor: Editor,
 }
 
 /// Which session a rename targets (TS `renameSession`'s order: the live
@@ -81,20 +89,26 @@ impl AgentsViewMode {
                 .get(self.selected)
                 .is_some_and(|row| row.kind == RowKind::Agent)
             {
-                self.status = Some("This session cannot be renamed".to_string());
+                self.set_status("This session cannot be renamed");
             }
             return;
         };
-        self.composer = Composer::Rename(Rename { target, name });
+        let mut editor = Editor::new();
+        editor.set_keybindings(self.keybindings.clone());
+        editor.set_text(&name);
+        editor.clear_autocomplete_provider();
+        self.composer = Composer::Rename(Box::new(RenameComposer { target, editor }));
     }
 
     /// The rename-mode key routing (TS `handleInput`'s rename branch,
-    /// :1119-1126): the cancel key exits back to search, the confirm key
-    /// submits the trimmed name, and every other key edits the buffer —
-    /// the same grammar the search field supports — or is swallowed, as
-    /// TS's editor swallows it. The draft comes in owned (the caller
-    /// hands it over) and goes back only where the mode continues.
-    pub(super) fn handle_rename_key(&mut self, mut rename: Rename, key: &str) {
+    /// :1119-1126): the cancel key exits back to search, the editor's
+    /// submit (Enter) dispatches the trimmed, paste-expanded draft,
+    /// and every other key goes to the editor's own grammar (TS's
+    /// `editor.handleInput` — the full cursor/word/kill/undo editing,
+    /// not the search field's subset).
+    /// The composer comes in owned (the caller hands it over) and goes
+    /// back only where the mode continues.
+    pub(super) fn handle_rename_key(&mut self, mut rename: Box<RenameComposer>, key: &str) {
         // Every ctrl+c in rename mode counts as handled for the force-quit guard;
         // the default cancel binding includes ctrl+c.
         if key == "ctrl+c" {
@@ -103,31 +117,29 @@ impl AgentsViewMode {
         if self.keybindings.matches(key, "tui.select.cancel") {
             return;
         }
-        if self.keybindings.matches(key, "tui.select.confirm") {
-            let name = rename.name.trim().to_string();
-            if !name.is_empty() {
-                self.status = Some("Renaming agent...".to_string());
+        // The editor owns Enter (TS `editor.handleInput` -> `confirmRename`):
+        // its submit hands over the trimmed, paste-expanded draft; an empty
+        // name exits (TS `exitRenameMode`). Its other events have no host here.
+        rename.editor.handle_input(key);
+        let submitted = rename
+            .editor
+            .take_events()
+            .into_iter()
+            .find_map(|event| match event {
+                EditorEvent::Submitted(text) => Some(text),
+                _ => None,
+            });
+        match submitted {
+            Some(name) if !name.is_empty() => {
+                self.set_status("Renaming agent...");
                 self.pending_rename = Some(Rename {
                     target: rename.target,
                     name,
                 });
             }
-            return;
+            Some(_) => {}
+            None => self.composer = Composer::Rename(rename),
         }
-        if self
-            .keybindings
-            .matches(key, "tui.editor.deleteCharBackward")
-        {
-            rename.name.pop();
-        } else if self
-            .keybindings
-            .matches(key, "tui.editor.deleteToLineStart")
-        {
-            rename.name.clear();
-        } else if key.chars().count() == 1 {
-            rename.name.push_str(key);
-        }
-        self.composer = Composer::Rename(rename);
     }
 
     /// One landed rename outcome (TS `renameSession`'s report): the
@@ -136,9 +148,32 @@ impl AgentsViewMode {
     /// get no push; a live row's roster flush rides the rename's
     /// `session_info_changed` broadcast).
     pub(super) fn rename_result(&mut self, rename: Rename, outcome: Result<(), String>) {
+        // The reply composer's `/name` view command (TS
+        // `runAgentsViewCommand`'s name arm): the in-flight draft marks
+        // the composer that dispatched the rename (TS's
+        // `armedAtStart === replyTarget` object guard — a re-armed
+        // composer carries no in-flight draft). Success disarms it
+        // (`disarmIfUnchanged`, no editor check); failure restores the
+        // draft under the empty-editor guard.
+        if let Composer::Reply(reply) = &mut self.composer {
+            if reply.in_flight.is_some() {
+                match &outcome {
+                    Ok(()) => {
+                        self.disarm_reply();
+                    }
+                    Err(_) => {
+                        if reply.editor.get_text().is_empty() {
+                            if let Some(draft) = reply.in_flight.take() {
+                                reply.editor.set_text(&draft);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         match outcome {
             Ok(()) => {
-                self.status = Some(format!("Renamed to {}", rename.name));
+                self.set_status(&format!("Renamed to {}", rename.name));
                 self.actions.push("renamed");
                 if let RenameTarget::Saved { session_path } = rename.target {
                     if let Some(saved) = self.saved.iter_mut().find(|saved| {
@@ -150,7 +185,7 @@ impl AgentsViewMode {
                 }
             }
             Err(error) => {
-                self.status = Some(format!("Failed to rename agent: {error}"));
+                self.set_status(&format!("Failed to rename agent: {error}"));
             }
         }
     }
