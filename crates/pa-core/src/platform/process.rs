@@ -71,6 +71,58 @@ pub fn set_no_window(command: &mut Command) {
 #[cfg(not(windows))]
 pub fn set_no_window(_command: &mut Command) {}
 
+/// Raise the soft open-file limit to the hard limit and return the
+/// resulting soft limit (Node raises it the same way at startup). macOS
+/// refuses a soft limit above `kern.maxfilesperproc`, `RLIM_INFINITY`
+/// included, so the target is capped there.
+///
+/// # Errors
+///
+/// The OS error of a failed `getrlimit`, `sysctlbyname` or `setrlimit`.
+#[cfg(unix)]
+pub fn raise_open_file_limit() -> std::io::Result<Option<u64>> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    #[cfg(not(target_os = "macos"))]
+    let target = limit.rlim_max;
+    #[cfg(target_os = "macos")]
+    let target = {
+        let mut per_process: libc::c_int = 0;
+        let mut size = std::mem::size_of::<libc::c_int>();
+        let read = unsafe {
+            libc::sysctlbyname(
+                c"kern.maxfilesperproc".as_ptr(),
+                (&raw mut per_process).cast(),
+                &raw mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if read != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        limit.rlim_max.min(per_process.unsigned_abs().into())
+    };
+    if limit.rlim_cur < target {
+        limit.rlim_cur = target;
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(Some(limit.rlim_cur))
+}
+
+/// No per-process descriptor limit to raise.
+#[cfg(not(unix))]
+pub fn raise_open_file_limit() -> std::io::Result<Option<u64>> {
+    Ok(None)
+}
+
 /// Signal a single pid. Returns true only when the signal was delivered,
 /// proving the pid was alive at signal time.
 #[cfg(unix)]

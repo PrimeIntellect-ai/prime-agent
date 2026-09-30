@@ -10,7 +10,7 @@ use std::fmt::Write;
 /// `truncateTail` defaults): the last 2000 lines within 50KB win, so a
 /// pane-mounted run cannot seed a follow-up with unbounded output.
 const TAIL_MAX_LINES: usize = 2000;
-const TAIL_MAX_BYTES: usize = 50 * 1024;
+pub(crate) const TAIL_MAX_BYTES: usize = 50 * 1024;
 
 /// One `!`/`!!` submission: the command and whether the run is excluded
 /// from the session context.
@@ -116,7 +116,9 @@ pub fn bash_output_to_text(
 
 /// The tail truncation the side pane applies to a run's raw output before
 /// seeding a follow-up (TS `truncateTail`): the last `TAIL_MAX_LINES`
-/// lines within `TAIL_MAX_BYTES` win.
+/// lines within `TAIL_MAX_BYTES` win. The result (window and truncation
+/// flag) depends only on the input's last `TAIL_MAX_BYTES + 1` bytes, and
+/// the bash card trims its stream to that.
 #[must_use]
 pub fn truncate_tail(content: &str) -> (String, bool) {
     let total_bytes = content.len();

@@ -30,6 +30,7 @@ path = "src/bin/pa-tui-replay.rs"
 
 [dev-dependencies]
 tempfile = "3"
+proptest = { workspace = true }
 
 [lints]
 workspace = true
