@@ -817,11 +817,10 @@ jobs:
                   --endpoint-url "$R2_ENDPOINT_URL" \
                   --content-type text/x-shellscript \
                   --cache-control no-cache
-                render_installer stable
-                aws s3 cp /tmp/install-stable.sh "s3://${R2_BUCKET}/prime-agent/install.sh" \
-                  --endpoint-url "$R2_ENDPOINT_URL" \
-                  --content-type text/x-shellscript \
-                  --cache-control no-cache
+                # The stable installer (install.sh) moves ONLY on a stable
+                # release — a beta cut never touches the stable channel's
+                # surface (the TS version serves installs until the first
+                # Rust stable release replaces it).
                 echo "beta channel advanced to ${RELEASE_VERSION} at ${INSTALL_BASE_URL}"
               fi
             fi
