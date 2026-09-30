@@ -53,10 +53,10 @@ name: ci
 
 on:
   push:
-    branches: [main, rust]
+    branches: [main]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-    branches: [main, rust]
+    branches: [main]
 
 permissions:
   contents: read
