@@ -506,6 +506,11 @@ fn the_open_completion_renders_the_overlay_panel() {
 /// highlight left.
 #[test]
 fn a_click_off_the_target_disarms_like_a_key_move() {
+    let _guard = match crate::mouse_tracking::STATE_TEST_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    crate::mouse_tracking::enable(&mut std::io::stdout()).expect("enable");
     let mut mode = armed_live();
     mode.render_frame(120, 24);
     let clicked = mode
@@ -526,4 +531,5 @@ fn a_click_off_the_target_disarms_like_a_key_move() {
         matches!(mode.composer, Composer::Search),
         "the click off the target disarms the composer"
     );
+    crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
 }
