@@ -267,16 +267,18 @@ async fn done_aborted_arms_the_fallback_silence() {
     );
 }
 
-/// The suppressed-row class (the compact path's detached run): with
-/// `suppress_aborted_row` set, a row sighting with the flag up drops
-/// (never reaching the wire) and arms the silence.
+/// The suppressed-row class (the compact path's detached run): a settle
+/// frame that would forward on a plain flag sighting (the closer test's
+/// shape) drops when `suppress_aborted_row` is set - the arm is what the
+/// assertion discriminates on, not the flag: without the suppress term
+/// the same `ToolResultMessage` reaches the wire as its message pair.
 #[tokio::test]
 async fn the_suppressed_row_sighting_drops_and_arms_the_silence() {
     let events = gate_sighting_events(
         vec![
-            EngineEvent::AssistantMessage(json!({
-                "role": "assistant",
-                "text": "held reply",
+            EngineEvent::ToolResultMessage(json!({
+                "role": "toolResult",
+                "text": "the aborted tool's error result",
             })),
             EngineEvent::Done(Ok(())),
         ],
@@ -285,8 +287,9 @@ async fn the_suppressed_row_sighting_drops_and_arms_the_silence() {
     )
     .await;
     assert!(
-        positions_of(&events, "message_start").is_empty(),
-        "the suppressed row never reaches the wire: {events:?}"
+        positions_of(&events, "message_start").is_empty()
+            && positions_of(&events, "message_end").is_empty(),
+        "the suppressed settle frame never reaches the wire: {events:?}"
     );
     assert!(
         positions_of(&events, "agent_end").is_empty(),
