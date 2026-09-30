@@ -7,8 +7,7 @@ use super::{
 };
 use std::collections::HashMap;
 
-/// Compact duration for spans and gaps (TS `formatIncidentDuration`):
-/// seconds, then minutes+seconds, then hours+minutes.
+/// Compact duration for spans and gaps: seconds, then minutes+seconds, then hours+minutes.
 #[must_use]
 pub fn format_incident_duration(ms: i64) -> String {
     // `Math.round(ms / 1000)` with at least one second (a zero-span gap
@@ -45,11 +44,8 @@ fn max_severity(events: &[IncidentEvent]) -> IncidentSeverity {
         .unwrap_or(IncidentSeverity::Info)
 }
 
-/// The densest run of time-sorted events within `window_ms` of each other,
-/// returned as the run's start index and length (TS `densestWindowRun`).
-/// Shared by the stall and burst scans: only events close together form
-/// one incident, so isolated events far apart never merge, whatever the
-/// report window is.
+/// The densest run of time-sorted events within `window_ms` of each other (start index, length) (TS
+/// `densestWindowRun`); shared by the stall and burst scans.
 fn densest_window_run(items: &[IncidentEvent], window_ms: i64) -> (usize, usize) {
     let mut best_start = 0;
     let mut best_count = 0;
@@ -67,12 +63,10 @@ fn densest_window_run(items: &[IncidentEvent], window_ms: i64) -> (usize, usize)
     (best_start, best_count)
 }
 
-/// Compute stall, error-burst, and event-gap anomaly lines from classified
-/// events (TS `computeIncidentAnomalies`).
+/// Compute stall, error-burst, and event-gap anomaly lines (TS `computeIncidentAnomalies`).
 #[must_use]
 pub fn compute_incident_anomalies(events: &[IncidentEvent]) -> Vec<IncidentEvent> {
-    // Grouped in insertion order, like the TS `Map` iteration the
-    // anomalies are pushed under.
+    // Grouped in insertion order, like the TS `Map` iteration.
     let mut by_subject: Vec<(String, Vec<IncidentEvent>)> = Vec::new();
     for incident in events
         .iter()
@@ -97,9 +91,7 @@ pub fn compute_incident_anomalies(events: &[IncidentEvent]) -> Vec<IncidentEvent
             .cloned()
             .collect();
         if timeouts.len() >= 2 {
-            // Only timeouts within `TIMEOUT_STALL_WINDOW_MS` of each other
-            // form a stall; two isolated timeouts hours apart in a long
-            // window are not one.
+            // Only timeouts within `TIMEOUT_STALL_WINDOW_MS` of each other form a stall.
             let (start, count) = densest_window_run(&timeouts, TIMEOUT_STALL_WINDOW_MS);
             if count >= 2 {
                 let cluster = &timeouts[start..start + count];
@@ -122,9 +114,7 @@ pub fn compute_incident_anomalies(events: &[IncidentEvent]) -> Vec<IncidentEvent
             .cloned()
             .collect();
         if burst.len() >= ERROR_BURST_THRESHOLD {
-            // Only events within `ERROR_BURST_WINDOW_MS` of each other
-            // form a burst; three isolated warnings days apart in a long
-            // window are not one.
+            // Only events within `ERROR_BURST_WINDOW_MS` of each other form a burst.
             let (start, count) = densest_window_run(&burst, ERROR_BURST_WINDOW_MS);
             if count >= ERROR_BURST_THRESHOLD {
                 let cluster = &burst[start..start + count];
@@ -162,8 +152,7 @@ pub fn compute_incident_anomalies(events: &[IncidentEvent]) -> Vec<IncidentEvent
     anomalies
 }
 
-/// One synthesized anomaly line (TS `computeIncidentAnomalies`' local
-/// `push`).
+/// One synthesized anomaly line (TS `computeIncidentAnomalies`' local `push`).
 fn anomaly(
     time_ms: i64,
     severity: IncidentSeverity,
@@ -181,15 +170,12 @@ fn anomaly(
     }
 }
 
-/// Per subject, the latest timeout of the stall cluster
-/// [`compute_incident_anomalies`] reports — the densest run within
-/// `TIMEOUT_STALL_WINDOW_MS` (TS `latestIncidentStallTimeoutBySubject`).
-/// The agents-view notice anchors its dismissal horizon there, so the
-/// notice, its horizon, and the reported cluster always describe the same
-/// incident, even when the window holds several stalls on one subject.
+/// Per subject, the latest timeout of the densest stall cluster; the agents-view notice anchors
+/// its dismissal horizon there, so the notice and the reported cluster always describe the same
+/// incident.
 #[must_use]
 pub fn latest_incident_stall_timeout_by_subject(events: &[IncidentEvent]) -> HashMap<String, i64> {
-    // Grouped in insertion order, like the TS `Map` iteration below.
+    // Grouped in insertion order, like the TS `Map` iteration.
     let mut timeouts_by_subject: Vec<(String, Vec<IncidentEvent>)> = Vec::new();
     for incident in events
         .iter()
@@ -205,9 +191,7 @@ pub fn latest_incident_stall_timeout_by_subject(events: &[IncidentEvent]) -> Has
     }
     let mut latest_by_subject = HashMap::new();
     for (subject, timeouts) in &timeouts_by_subject {
-        // Callers pass time-sorted events; sort defensively so the run
-        // scan (which assumes ascending times) never sees them out of
-        // order.
+        // Callers pass time-sorted events; sort defensively (the run scan assumes ascending times).
         let mut timeouts = timeouts.clone();
         timeouts.sort_by_key(|incident| incident.time_ms);
         let (start, count) = densest_window_run(&timeouts, TIMEOUT_STALL_WINDOW_MS);
@@ -254,8 +238,7 @@ mod tests {
         assert_eq!(format_incident_duration(120_000), "2m");
         assert_eq!(format_incident_duration(1_158_000), "19m18s");
         assert_eq!(format_incident_duration(607_000), "10m7s");
-        // TS keeps only hours+minutes once hours overflow (the seconds
-        // arm is the minutes-only branch's).
+        // TS keeps only hours+minutes once hours overflow.
         assert_eq!(format_incident_duration(3_700_000), "1h1m");
         assert_eq!(format_incident_duration(86_400_000), "24h");
     }
@@ -347,10 +330,7 @@ mod tests {
 
     #[test]
     fn latest_stall_timeout_follows_the_densest_cluster() {
-        // The TS notice fixture: timeouts 200/190/180 minutes ago form one
-        // dense cluster (three events within 20m of each other), 30/29
-        // minutes ago a separate pair; the stall describes the first
-        // cluster and anchors at its LATEST timeout (180 minutes ago).
+        // The TS notice fixture: the first dense cluster wins and anchors at its LATEST timeout.
         let base = 1_789_070_400_000; // 2026-09-10T20:00:00Z
         let minute = 60_000;
         let spaced = "spaced";

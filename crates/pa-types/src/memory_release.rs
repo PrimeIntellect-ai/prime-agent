@@ -1,21 +1,11 @@
-//! Returning freed heap to the OS after large transient phases.
-//!
-//! Session loads and attach snapshots allocate several transient copies of
-//! the session body (parsed entry trees, wire JSON, replay contexts) that
-//! are dropped right after the phase ends. glibc keeps freed chunks in its
-//! arenas, so those phases' peaks stay resident in RSS forever. The helpers
-//! here are pure allocator plumbing: no data, capability, or protocol
-//! behavior changes, and they are no-ops wherever the platform has no
-//! glibc seam (every non-glibc/Linux build).
+//! Returning freed heap to the OS after large transient phases. Session loads and attach snapshots
+//! allocate transient copies of the session body that are dropped right after; glibc keeps freed
+//! chunks in its arenas, so the peaks stay resident in RSS. Pure allocator plumbing: a no-op
+//! wherever the platform has no glibc seam.
 
-/// Cap glibc's per-thread arenas.
-///
-/// The default arena limit (`8 * ncores`) lets a burst of allocation from
-/// tokio worker and blocking-pool threads grow one arena per thread; every
-/// arena keeps its high-water pages. A moderate cap leaves the parallel
-/// workers their arenas (a hard cap showed up as allocation contention in
-/// the 16-way parallel e2e suite) while collapsing the default's arena
-/// sprawl.
+/// Cap glibc's per-thread arenas. The default limit (`8 * ncores`) lets a burst from tokio threads
+/// grow one arena per thread, each keeping its high-water pages; a moderate cap leaves the parallel
+/// workers their arenas (a hard cap showed allocation contention in the 16-way e2e suite).
 pub fn cap_thread_arenas() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     unsafe {
@@ -39,8 +29,7 @@ pub fn trim_freed_heap_if_large(#[allow(unused_variables)] bytes: usize) {
     if bytes >= (1 << 20) {
         trim_freed_heap();
     }
-    // Non-glibc builds keep the parameter named: the threshold's only
-    // use sits in the linux arm above.
+    // Non-glibc builds keep the parameter named (used only in the linux arm).
     #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
     let _ = bytes;
 }

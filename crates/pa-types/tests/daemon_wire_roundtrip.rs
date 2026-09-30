@@ -1,10 +1,7 @@
-//! Round-trip tests over captured daemon wire data.
-//!
-//! The committed descriptor corpus in `tests/data/` is the verifier: every
-//! descriptor must deserialize into [`DaemonWorkerDescriptor`] and
-//! re-serialize losslessly. Live descriptors are real daemon state on the
-//! host, so they are only read when explicitly opted in with
-//! `PA_TYPES_LIVE_WORKERS=1`; the default test run is hermetic.
+//! Round-trip tests over captured daemon wire data: the committed descriptor corpus in
+//! `tests/data/`
+//! is the verifier. Live descriptors are real daemon state, opt-in with `PA_TYPES_LIVE_WORKERS=1`;
+//! the default run is hermetic.
 
 use pa_types::daemon::DaemonWorkerDescriptor;
 use serde_json::Value;
@@ -45,10 +42,8 @@ fn committed_fixture_roundtrips() {
     assert!(count > 0, "no worker descriptor fixtures found");
 }
 
-/// Live descriptors are opt-in: they are real daemon state whose presence
-/// varies per machine, so a default test run must not depend on them. Set
-/// `PA_TYPES_LIVE_WORKERS=1` (optionally with `PA_TYPES_WORKERS_DIR`
-/// pointing at a daemon-workers tree) to sweep them.
+/// Live descriptors are opt-in: real daemon state, presence varies per machine. Set
+/// `PA_TYPES_LIVE_WORKERS=1` (optionally `PA_TYPES_WORKERS_DIR`) to sweep them.
 #[test]
 fn live_worker_descriptors_roundtrip_losslessly() {
     if std::env::var_os("PA_TYPES_LIVE_WORKERS").as_deref() != Some(std::ffi::OsStr::new("1")) {

@@ -1,9 +1,8 @@
-//! The ai wire-type unit battery: the service tier eligibility, the
-//! round trips, and the serde shapes.
+//! The ai wire-type unit battery: tier eligibility, round trips, serde shapes.
 use super::*;
 
-/// A minimal model for the tier-eligibility predicate (TS #2144's
-/// gating tests run the same provider/api/id combinations).
+/// A minimal model for the tier-eligibility predicate (the same combinations as TS #2144's gating
+/// tests).
 fn tier_model(provider: &str, api: &str, id: &str) -> Model {
     let zero_cost = || ModelCost {
         input: JsNumber(0.0),
@@ -41,16 +40,14 @@ fn service_tier_eligibility_matches_ts() {
         let model = tier_model(provider, api, id);
         assert!(supports_service_tier(&model, Default));
     }
-    // OpenRouter accepts flex/priority for every completions model and
-    // nothing else.
+    // OpenRouter accepts flex/priority for every completions model and nothing else.
     let openrouter = tier_model("openrouter", "openai-completions", "openai/qwen-4.9");
     assert!(supports_service_tier(&openrouter, Flex));
     assert!(supports_service_tier(&openrouter, Priority));
     assert!(!supports_service_tier(&openrouter, Auto));
     assert!(!supports_service_tier(&openrouter, Scale));
     // The Responses APIs take auto/scale everywhere, priority on the
-    // eligible ids (gpt-6-astra joined the list with #2144), and flex
-    // only on the API-key (openai) backend's eligible ids.
+    // eligible ids (#2144), and flex only on the API-key backend's ids.
     let codex = tier_model("openai-codex", "openai-codex-responses", "gpt-5.5");
     assert!(supports_service_tier(&codex, Auto));
     assert!(supports_service_tier(&codex, Scale));
@@ -65,9 +62,7 @@ fn service_tier_eligibility_matches_ts() {
     // Completions models outside OpenRouter never take a tier.
     let direct = tier_model("openai", "openai-completions", "gpt-5.5");
     assert!(!supports_service_tier(&direct, Priority));
-    // supportsFastMode is the priority question — and #2144 makes the
-    // OpenRouter completions models fast-mode-eligible too (their
-    // priority tier is accepted).
+    // #2144 makes the OpenRouter completions models fast-mode-eligible too.
     assert!(supports_fast_mode(&codex));
     assert!(supports_fast_mode(&openrouter));
     assert!(!supports_fast_mode(&codex_ineligible));
@@ -145,7 +140,6 @@ fn model_with_compat_roundtrip() {
     assert_roundtrip::<Model>(
         r#"{"id":"m","name":"M","api":"anthropic-messages","provider":"anthropic","baseUrl":"https://x","reasoning":true,"input":["text","image"],"cost":{"input":3,"output":15,"cacheRead":0.3,"cacheWrite":3.75},"contextWindow":200000,"maxTokens":8192,"thinkingLevelMap":{"minimal":null,"low":"low"},"compat":{"supportsEagerToolInputStreaming":false},"headers":{"x":"y"},"featured":true}"#,
     );
-    // OpenAI-completions-flavored compat.
     assert_roundtrip::<Model>(
         r#"{"id":"m2","name":"M2","api":"openai-completions","provider":"p","baseUrl":"https://y","reasoning":false,"input":["text"],"cost":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0},"contextWindow":1000,"maxTokens":100,"compat":{"thinkingFormat":"openrouter","openRouterRouting":{"only":["a"],"sort":{"by":"price","partition":"model"},"max_price":{"prompt":"0.5","completion":2}}}}"#,
     );
@@ -153,17 +147,14 @@ fn model_with_compat_roundtrip() {
 
 #[test]
 fn user_content_untagged_text_block_roundtrips_losslessly() {
-    // Live session files carry user text blocks without a `type` tag
-    // (persisted by earlier daemon builds, e.g. session
-    // 01a0abe1-ab24-73c0-b363-0cc4e4d6cc5f.jsonl line 4). The block must
-    // deserialize and re-serialize verbatim, without injecting a tag.
+    // Live session files carry user text blocks without a `type` tag (earlier daemon builds); the
+    // block round-trips verbatim, no injected tag.
     assert_roundtrip::<Message>(r#"{"role":"user","content":[{"text":"hi"}],"timestamp":3}"#);
 }
 
 #[test]
 fn user_content_unknown_block_kind_is_preserved() {
-    // A block kind this version does not model (written by a newer
-    // build) must never fail the load; it round-trips verbatim.
+    // A newer build's block kind must never fail the load.
     assert_roundtrip::<Message>(
         r#"{"role":"user","content":[{"type":"video","url":"x","meta":{"a":1}}],"timestamp":4}"#,
     );
@@ -175,8 +166,7 @@ fn bare_block_payload_views() {
         r#"[{"text":"hi"},{"type":"image","data":"QQ==","mimeType":"image/png"},{"type":"file","id":"f"}]"#,
     )
     .unwrap();
-    // Tag-strict display text ignores un-modeled blocks, matching the TS
-    // text extraction (`block.type === "text"`).
+    // Tag-strict display text ignores un-modeled blocks (TS `block.type === "text"`).
     assert_eq!(content.text(), "");
     let UserContent::Blocks(blocks) = content else {
         panic!("expected blocks");

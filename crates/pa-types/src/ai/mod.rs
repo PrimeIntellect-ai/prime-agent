@@ -16,10 +16,6 @@ use serde_json::Value;
 
 use crate::{JsNumber, JsonMap};
 
-// ---------------------------------------------------------------------------
-// APIs and providers
-// ---------------------------------------------------------------------------
-
 /// APIs with first-class support in the TS provider registry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -38,8 +34,7 @@ pub enum KnownApi {
 /// TS `Api = KnownApi | (string & {})`. The wire value is an arbitrary string.
 pub type Api = String;
 
-/// The Prime Inference provider id (the bundled/live catalog's provider
-/// key; a wire identifier shared by every crate that names it).
+/// The Prime Inference provider id (the catalog's provider key).
 pub const PRIME_INFERENCE_PROVIDER_ID: &str = "prime-inference";
 
 /// Providers with well-known identifiers in the TS model registry.
@@ -99,10 +94,6 @@ pub enum KnownProvider {
 /// TS `Provider = KnownProvider | string`.
 pub type Provider = String;
 
-// ---------------------------------------------------------------------------
-// Thinking levels
-// ---------------------------------------------------------------------------
-
 /// Reasoning effort levels accepted by the model-facing surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -129,9 +120,8 @@ pub enum ModelThinkingLevel {
 }
 
 impl ModelThinkingLevel {
-    /// The wire name shared by the `thinkingLevelMap` keys, the CLI
-    /// `--thinking` values, and the daemon `create` config (`"off"`,
-    /// `"minimal"`, ...).
+    /// The wire name shared by the `thinkingLevelMap` keys, the CLI `--thinking` values, and the
+    /// daemon `create` config.
     #[must_use]
     pub fn wire_name(self) -> &'static str {
         match self {
@@ -146,12 +136,8 @@ impl ModelThinkingLevel {
     }
 }
 
-/// Maps Prime Agent thinking levels to provider/model-specific values.
-/// `None` values mark a level as unsupported.
-///
-/// Ordered (`BTreeMap`): the map serializes into wire JSON (the model
-/// catalog) and unordered iteration would leak random key order into the
-/// bytes.
+/// Maps thinking levels to provider/model-specific values; `None` marks a level as unsupported.
+/// Ordered (`BTreeMap`): serializes into wire JSON; unordered iteration would leak key order.
 pub type ThinkingLevelMap = std::collections::BTreeMap<ModelThinkingLevel, Option<String>>;
 
 /// Token budgets for each thinking level (token-based providers only).
@@ -167,10 +153,6 @@ pub struct ThinkingBudgets {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub high: Option<u64>,
 }
-
-// ---------------------------------------------------------------------------
-// Provider options
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -206,26 +188,18 @@ pub enum ServiceTier {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderResponse {
     pub status: u16,
-    /// Ordered (`BTreeMap`): response metadata can serialize into failure
-    /// diagnostics on the wire; unordered iteration would leak random key
-    /// order into the bytes.
+    /// Ordered (`BTreeMap`): can serialize into failure diagnostics on the wire.
     pub headers: std::collections::BTreeMap<String, String>,
 }
-
-// ---------------------------------------------------------------------------
-// Content blocks
-// ---------------------------------------------------------------------------
 
 /// Text content block (`type: "text"`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextContent {
     pub text: String,
-    /// `OpenAI` Responses message metadata: a legacy id string or a
-    /// [`TextSignatureV1`] JSON payload (TS wire key `textSignature`; the
-    /// camelCase rename keeps the provider signature attached to the block
-    /// across the pa-ai <-> pa-agent wire-shape round trips, which have no
-    /// catch-all field to carry a dropped key through).
+    /// `OpenAI` Responses metadata: a legacy id string or a [`TextSignatureV1`] JSON payload (TS
+    /// wire key `textSignature`; the camelCase rename keeps it attached across the pa-ai <->
+    /// pa-agent round trips, which have no catch-all).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_signature: Option<String>,
     #[serde(flatten)]
@@ -254,13 +228,9 @@ pub enum TextSignaturePhase {
 #[serde(rename_all = "camelCase")]
 pub struct ThinkingContent {
     pub thinking: String,
-    /// Provider reasoning item id (e.g. `OpenAI` Responses), or the encoded
-    /// reasoning-details payload for redacted blocks. TS wire key
-    /// `thinkingSignature`; the camelCase rename keeps the provider
-    /// signature attached to the block across the pa-ai <-> pa-agent
-    /// wire-shape round trips (pa-agent has no catch-all field, so a
-    /// `snake_case` key was silently dropped there) and matches the TS
-    /// product's session files and event frames.
+    /// Provider reasoning item id, or the encoded reasoning-details payload for redacted blocks (TS
+    /// wire key `thinkingSignature`; the camelCase rename keeps it attached across the pa-ai <->
+    /// pa-agent round trips, where a `snake_case` key was silently dropped).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_signature: Option<String>,
     /// True when the thinking content was redacted by safety filters.
@@ -288,30 +258,22 @@ pub struct ToolCall {
     pub name: String,
     pub arguments: JsonMap,
     /// Google-specific opaque signature for reusing thought context (TS
-    /// wire key `thoughtSignature`; see [`ThinkingContent`] for why the
-    /// camelCase rename must match pa-agent's).
+    /// wire key `thoughtSignature`; see [`ThinkingContent`] for the rename).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
     #[serde(flatten)]
     pub rest: JsonMap,
 }
 
-/// Content blocks allowed in user and tool-result messages.
-///
-/// The tagged forms (`type: "text"` / `type: "image"`) are the TS wire
-/// contract, but live session files also carry text blocks written without a
-/// `type` tag (earlier daemon builds persisted `{"text": ...}` directly), and
-/// newer builds may write block kinds this version does not model. Any block
-/// that is not a well-formed known variant is preserved verbatim as
-/// [`UserContentBlock::Raw`] so a session load never fails on an unknown
-/// shape and every entry round-trips losslessly - the same catch-all
-/// contract [`crate::session::FileEntry`] applies to whole entries.
+/// Content blocks allowed in user and tool-result messages. Live session files also carry untagged
+/// text blocks and unknown block kinds; those are preserved verbatim as [`UserContentBlock::Raw`]
+/// so
+/// a load never fails - the same catch-all contract [`crate::session::FileEntry`] applies.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UserContentBlock {
     Text(TextContent),
     Image(ImageContent),
-    /// Un-modeled block: a missing or unknown `type` tag, or any other JSON
-    /// shape that is not a known variant. Serialized verbatim.
+    /// Un-modeled block (missing/unknown `type` tag or other JSON shape); serialized verbatim.
     Raw(Value),
 }
 
@@ -326,7 +288,7 @@ impl Serialize for UserContentBlock {
 }
 
 /// Serialize a known block as its flat wire object: the content fields plus
-/// the `type` tag (same output as the derived `#[serde(tag = "type")]` form).
+/// the `type` tag (same output as the derived tagged form).
 fn serialize_tagged_block<T: Serialize, S: serde::Serializer>(
     tag: &str,
     content: &T,
@@ -363,8 +325,7 @@ impl<'de> Deserialize<'de> for UserContentBlock {
 }
 
 /// Copy of the block without its `type` tag, so the tag is not captured
-/// into the content catch-all map (the derived tagged form consumed it the
-/// same way and never exposed it in `rest`).
+/// into the content catch-all map.
 fn strip_block_tag(value: &Value) -> Value {
     let mut payload = value.clone();
     if let Some(map) = payload.as_object_mut() {
@@ -374,12 +335,10 @@ fn strip_block_tag(value: &Value) -> Value {
 }
 
 impl UserContentBlock {
-    /// Text carried by this block for provider payload conversion: the modeled
-    /// text, or the `text` string of an un-modeled block (live session files
-    /// carry bare `{"text": ...}` blocks with no `type` tag, and a provider
-    /// prompt must not silently lose them). Image blocks and raw blocks
-    /// without a `text` field return `None`. TS display paths stay
-    /// tag-strict ([`UserContent::text`] does not use this helper).
+    /// Text for provider payload conversion: modeled text, or the `text` string of an un-modeled
+    /// bare `{"text": ...}` block (a provider prompt must not silently lose them); image blocks and
+    /// raw blocks without `text` return `None`. TS display stays tag-strict ([`UserContent::text`]
+    /// does not use this helper).
     pub fn text(&self) -> Option<&str> {
         match self {
             Self::Text(content) => Some(content.text.as_str()),
@@ -388,9 +347,8 @@ impl UserContentBlock {
         }
     }
 
-    /// Base64 image data and mime type carried by this block for provider
-    /// payload conversion: the modeled image, or the `data`/`mimeType`
-    /// fields of an un-modeled block.
+    /// Base64 data and mime type for provider payload conversion: the
+    /// modeled image, or the `data`/`mimeType` fields of an un-modeled block.
     pub fn image(&self) -> Option<(&str, &str)> {
         match self {
             Self::Image(content) => Some((content.data.as_str(), content.mime_type.as_str())),
@@ -422,11 +380,9 @@ pub enum UserContent {
 }
 
 impl UserContent {
-    /// Concatenated text of all text blocks (string content is returned as-is).
-    ///
-    /// Tag-strict like the TS text extraction (`block.type === "text"`):
-    /// un-modeled [`UserContentBlock::Raw`] blocks contribute nothing here
-    /// even when they carry a bare `text` field.
+    /// Concatenated text of all text blocks (string content returned as-is).
+    /// Tag-strict like TS (`block.type === "text"`): Raw blocks contribute
+    /// nothing even when they carry a bare `text` field.
     #[must_use]
     pub fn text(&self) -> String {
         match self {
@@ -442,10 +398,6 @@ impl UserContent {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Usage and stop reasons
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -478,10 +430,9 @@ pub struct Usage {
 pub enum StopReason {
     Stop,
     Length,
-    /// Terminal reason of a turn that ended in tool calls. Deserialization
-    /// also accepts the raw `OpenAI` wire value `tool_calls` (TS's loader
-    /// keeps any `stopReason` string, so a session file written by the TS
-    /// product or a foreign tool never loses its assistant rows).
+    /// Terminal reason of a turn that ended in tool calls; also accepts the
+    /// raw `OpenAI` wire value `tool_calls` (TS keeps any `stopReason`
+    /// string, so foreign session files never lose assistant rows).
     #[serde(alias = "tool_calls")]
     ToolUse,
     Error,
@@ -504,10 +455,6 @@ pub enum ErrorStopReason {
     Aborted,
     Error,
 }
-
-// ---------------------------------------------------------------------------
-// Messages
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "camelCase")]
@@ -596,11 +543,9 @@ pub struct AssistantMessage {
 #[serde(rename_all = "camelCase")]
 pub struct ToolResultMessage {
     pub tool_call_id: String,
-    /// The tool's name. The product always writes it, but a session file
-    /// from a foreign tool or an older build may omit it — the TS loader
-    /// keeps such rows (an undefined name renders empty), so the field
-    /// defaults instead of degrading the whole entry. An empty name is not
-    /// re-serialized, keeping the round trip lossless against the source.
+    /// The tool's name. A session file from a foreign tool or older build
+    /// may omit it (the TS loader keeps such rows), so the field defaults;
+    /// an empty name is not re-serialized, keeping it lossless.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tool_name: String,
     pub content: Vec<UserContentBlock>,
@@ -614,10 +559,6 @@ pub struct ToolResultMessage {
     #[serde(flatten)]
     pub rest: JsonMap,
 }
-
-// ---------------------------------------------------------------------------
-// Tools and context
-// ---------------------------------------------------------------------------
 
 /// Tool definition sent to providers. `parameters` is a TypeBox/JSON schema.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -639,14 +580,8 @@ pub struct Context {
     pub tools: Option<Vec<Tool>>,
 }
 
-// ---------------------------------------------------------------------------
-// Stream events
-// ---------------------------------------------------------------------------
-
-/// Event protocol for assistant message streams.
-///
-/// Streams emit `start` before partial updates, then terminate with either
-/// `done` (success) or `error` (`stopReason` `"error"`/`"aborted"`).
+/// Event protocol for assistant message streams: `start` before partial
+/// updates, then `done` (success) or `error` (`stopReason` `"error"`/`"aborted"`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -709,10 +644,6 @@ pub enum AssistantMessageEvent {
     },
 }
 
-// ---------------------------------------------------------------------------
-// Models
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelCost {
@@ -731,21 +662,12 @@ pub enum ModelInput {
     Text,
     Image,
 }
-// The compatibility settings family (the OpenAI-completions compat block,
-// the three format enums, the OpenAI-responses and Anthropic compat
-// blocks, and ModelCompat/CompatKind) lives in the child module; every
-// member keeps its pub level and the pub use re-exports keep every
-// external ai:: path stable. ZERO bumps.
 mod compat;
 pub use compat::{
     AnthropicMessagesCompat, CacheControlFormat, CompatKind, MaxTokensField, ModelCompat,
     OpenAiCompletionsCompat, OpenAiResponsesCompat, ThinkingFormat,
 };
 
-// The routing family (the OpenRouter routing block with its sort/max-
-// price/threshold types and the Vercel gateway routing) lives in the
-// child module; every member keeps its pub level and the pub use
-// re-exports keep every external ai:: path stable. ZERO bumps.
 mod routing;
 pub use routing::{
     DataCollection, NumOrString, OpenRouterMaxPrice, OpenRouterRouting, OpenRouterSort,
@@ -773,9 +695,7 @@ pub struct Model {
     /// Flagship model surfaced above non-featured models of the same provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub featured: Option<bool>,
-    /// Extra request headers. Ordered (`BTreeMap`): the model serializes
-    /// into wire JSON (the model catalog) and unordered iteration would
-    /// leak random key order into the bytes.
+    /// Extra request headers. Ordered (`BTreeMap`): serializes into wire JSON (the model catalog).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<std::collections::BTreeMap<String, String>>,
     /// Compatibility overrides; auto-detected from `baseUrl` when absent.
@@ -783,11 +703,8 @@ pub struct Model {
     pub compat: Option<ModelCompat>,
 }
 
-/// TS `supportsServiceTier` over the eligibility fields: whether a
-/// provider accepts (and honors) a requested service tier. The
-/// Model-typed [`supports_service_tier`] delegates here so the surfaces
-/// that only hold the connection-state model metadata (provider, api, id)
-/// share one predicate.
+/// TS `supportsServiceTier` over the eligibility fields; the Model-typed [`supports_service_tier`]
+/// delegates here, so connection-state surfaces share one predicate.
 #[must_use]
 pub fn supports_service_tier_fields(
     provider: &str,
@@ -798,10 +715,8 @@ pub fn supports_service_tier_fields(
     if tier == ServiceTier::Default {
         return true;
     }
-    // OpenRouter accepts top-level service_tier (flex|priority) for every
-    // model, routes to matching tier endpoints where they exist, and bills
-    // by the tier that actually served the request:
-    // https://openrouter.ai/docs/guides/features/service-tiers
+    // OpenRouter accepts top-level service_tier (flex|priority) for every model and bills by the
+    // tier that served the request: https://openrouter.ai/docs/guides/features/service-tiers
     if provider == "openrouter" && api == "openai-completions" {
         return matches!(tier, ServiceTier::Flex | ServiceTier::Priority);
     }
@@ -810,9 +725,7 @@ pub fn supports_service_tier_fields(
     if !openai_responses && !codex_responses {
         return false;
     }
-    // "auto" defers the tier choice to OpenAI and is valid for every model
-    // there; "scale" is entitlement-gated, so pass it through for callers
-    // that have it.
+    // "auto" defers the tier choice to OpenAI; "scale" is entitlement-gated, so pass it through.
     if matches!(tier, ServiceTier::Auto | ServiceTier::Scale) {
         return true;
     }
@@ -824,24 +737,19 @@ pub fn supports_service_tier_fields(
     if tier == ServiceTier::Priority {
         return eligible_id;
     }
-    // Flex processing is an API-key feature; the ChatGPT (Codex OAuth)
-    // backend has no flex tier.
+    // Flex is an API-key feature; the ChatGPT (Codex OAuth) backend has no flex tier.
     tier == ServiceTier::Flex && eligible_id && openai_responses
 }
 
-/// TS `supportsServiceTier`: whether a model's provider accepts (and
-/// honors) a requested service tier. The single eligibility predicate
-/// behind the `/tier` command, the settings row, and the `/fast` toggle
-/// (the TS product keeps the same function in the shared AI package).
+/// TS `supportsServiceTier`: whether a provider accepts a requested service tier; the single
+/// predicate behind the `/tier` command, the settings row, and the `/fast` toggle.
 #[must_use]
 pub fn supports_service_tier(model: &Model, tier: ServiceTier) -> bool {
     supports_service_tier_fields(&model.provider, &model.api, &model.id, tier)
 }
 
-/// TS `clampServiceTier`: clamp a requested tier to `default` when the
-/// model does not support it. An absent model (a session with no resolved
-/// model) clamps every non-default tier, exactly like the TS
-/// `model == null` arm; an unset (`null`) preference passes through.
+/// Clamp a requested tier to `default` when the model does not support it; an absent model clamps
+/// every non-default tier (TS `model == null`), an unset preference passes through.
 #[must_use]
 pub fn clamp_service_tier(model: Option<&Model>, tier: Option<ServiceTier>) -> Option<ServiceTier> {
     match tier {
@@ -853,16 +761,12 @@ pub fn clamp_service_tier(model: Option<&Model>, tier: Option<ServiceTier>) -> O
     }
 }
 
-/// TS `supportsFastMode` (now `supportsServiceTier(model, "priority")`):
-/// the fast-mode (priority) tier exists on the eligible ids served over
-/// the `OpenAI` Responses APIs. Shared by the surfaces that gate the
-/// `/fast` command on model eligibility.
+/// TS `supportsFastMode` (now `supportsServiceTier(model, "priority")`): the
+/// fast-mode tier on the eligible ids over the `OpenAI` Responses APIs.
 #[must_use]
 pub fn supports_fast_mode(model: &Model) -> bool {
     supports_service_tier(model, ServiceTier::Priority)
 }
 
-// The unit battery lives in the child module (ai::tests); its use-super
-// glob resolves through this facade's bindings and re-exports.
 #[cfg(test)]
 mod tests;
