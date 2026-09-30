@@ -92,6 +92,7 @@ pub fn kill_pid(pid: i32, signal: Signal) -> bool {
 /// collapses there). Descendants are NOT killed: teardown paths that need
 /// tree kills use [`kill_process_group_or_pid`], like the TS callers.
 #[cfg(windows)]
+#[must_use]
 pub fn kill_pid(pid: i32, signal: Signal) -> bool {
     if pid <= 0 {
         return false;
@@ -131,6 +132,7 @@ pub fn kill_process_group_or_pid(pid: i32) -> bool {
 /// [`set_new_process_group`] are irrelevant here. True only when taskkill
 /// exited 0, the same proof TS's `result.status === 0` requires.
 #[cfg(windows)]
+#[must_use]
 pub fn kill_process_group_or_pid(pid: i32) -> bool {
     if pid <= 0 {
         return false;
@@ -200,6 +202,7 @@ pub fn open_pidfd(_pid: u32) -> Option<i32> {
 }
 
 #[cfg(not(unix))]
+#[must_use]
 pub fn open_pidfd(_pid: u32) -> Option<i32> {
     None
 }
@@ -241,6 +244,7 @@ pub fn pidfd_signal(_fd: i32, _signal: Signal) -> bool {
 }
 
 #[cfg(not(unix))]
+#[must_use]
 pub fn pidfd_signal(_fd: i32, _signal: Signal) -> bool {
     false
 }
@@ -260,6 +264,7 @@ pub fn close_pidfd(fd: i32) {
 /// checks the same `STILL_ACTIVE` exit code). A query that fails outright
 /// reads as gone.
 #[cfg(windows)]
+#[must_use]
 pub fn pid_exists(pid: u32) -> bool {
     pa_types::platform::process::is_process_alive(pid).unwrap_or(false)
 }
@@ -279,6 +284,7 @@ pub fn termination_signal(status: &std::process::ExitStatus) -> Option<i32> {
 }
 
 #[cfg(not(unix))]
+#[must_use]
 pub fn termination_signal(_status: &std::process::ExitStatus) -> Option<i32> {
     // Windows terminations surface as exit codes, not signals.
     None
