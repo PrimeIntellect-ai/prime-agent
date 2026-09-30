@@ -783,6 +783,11 @@ impl AgentsViewMode {
         self.anchor_selection_pending = false;
         self.clear_anchor_loading_hint();
         self.sync_selected_row_state();
+        // The click moves the selection like a direction key, so the
+        // keyboard rule applies before the open: a toggle-click (a
+        // subagent summary or code row) stays in the view, and the
+        // composer never stays armed against a row the highlight left.
+        self.disarm_reply_off_selected();
         self.open_selected();
     }
 }

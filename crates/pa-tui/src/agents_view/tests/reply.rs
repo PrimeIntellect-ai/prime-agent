@@ -499,3 +499,31 @@ fn the_open_completion_renders_the_overlay_panel() {
         "the completion panel renders above the box:\n{frame}"
     );
 }
+
+/// A click that moves the selection runs the keyboard rule (TS
+/// `moveSelection`'s reply guard): a toggle-click on a nested row stays
+/// in the view, and the composer never stays armed against a row the
+/// highlight left.
+#[test]
+fn a_click_off_the_target_disarms_like_a_key_move() {
+    let mut mode = armed_live();
+    mode.render_frame(120, 24);
+    let clicked = mode
+        .rows
+        .iter()
+        .position(|row| row.kind != RowKind::Agent)
+        .expect("a nested row renders");
+    let (row, _) = mode
+        .click_rows
+        .iter()
+        .find(|(_, index)| *index == clicked)
+        .copied()
+        .expect("the nested row is on screen");
+    mode.handle_mouse(&mouse_report(row, true, false));
+    mode.handle_mouse(&mouse_report(row, false, false));
+    assert_eq!(mode.selected, clicked, "the click selected the nested row");
+    assert!(
+        matches!(mode.composer, Composer::Search),
+        "the click off the target disarms the composer"
+    );
+}
