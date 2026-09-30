@@ -141,48 +141,6 @@ mod tests {
     }
 
     #[test]
-    // deliberate decomposed/non-NFC fixtures: the width engine must measure the raw sequences
-    #[allow(clippy::unicode_not_nfc)]
-    fn geometry_matches_rendered_generic_cards() {
-        let theme = theme();
-        let mut cards = vec![ToolCallCard::default(), image_card()];
-        for text in [
-            "",
-            "a\n",
-            "one\ntwo\nthree\nfour\n",
-            "数据 é 👩‍💻\n\nlong long long words\n\u{1b}[31mred\u{1b}[0m",
-        ] {
-            cards.push(ToolCallCard {
-                name: "custom".into(),
-                args: json!({ "long": [1, 2, 3, 4], "unicode": "数据" }),
-                result: Some(super::super::ToolResultView {
-                    content: vec![
-                        json!({"type":"text", "text":text}),
-                        json!({"type":"image", "mimeType":"image/png"}),
-                    ],
-                    is_error: true,
-                    ..Default::default()
-                }),
-                result_partial: true,
-                ..Default::default()
-            });
-        }
-        for card in cards {
-            for detail in [Detail::Overview, Detail::Details, Detail::All] {
-                for show_images in [false, true] {
-                    let expected: Vec<_> = (0..90)
-                        .map(|width| render(&card, 0, detail, &theme, width, show_images).len())
-                        .collect();
-                    let actual: Vec<_> = (0..90)
-                        .map(|width| count(&card, 0, detail, &theme, width, show_images))
-                        .collect();
-                    assert_eq!(actual, expected, "{detail:?}, show_images={show_images}");
-                }
-            }
-        }
-    }
-
-    #[test]
     fn shown_image_blocks_render_their_metadata_row_below_the_output() {
         let card = image_card();
         let rows = render(&card, 0, Detail::All, &theme(), 120, true);

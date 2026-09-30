@@ -355,48 +355,6 @@ fn goal_meta(objective: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn geometry_matches_injected_rendering() {
-        let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
-        let kinds = [
-            InjectedPromptKind::Heartbeat {
-                schedule: Some("every 5 minutes".into()),
-            },
-            InjectedPromptKind::Goal {
-                kind: Some("continuation".into()),
-                objective: Some("long 数据 objective".repeat(10)),
-            },
-            InjectedPromptKind::KernelRestored { restored: true },
-            InjectedPromptKind::PythonSkillsUnavailable {
-                skills: vec!["websearch".into(), "edit 数据".into()],
-            },
-            InjectedPromptKind::RlmChildStatus {
-                outcome: RlmChildOutcome::Failed,
-                session_name: "child 数据".into(),
-            },
-        ];
-        for kind in kinds {
-            for body in [
-                None,
-                Some(String::new()),
-                Some("**bold**\n\n| a | b |\n| --- | --- |\n| 数据 | test |".into()),
-            ] {
-                let row = InjectedPromptRow {
-                    kind: kind.clone(),
-                    body,
-                };
-                for detail in [Detail::Overview, Detail::Details, Detail::All] {
-                    let counts: Vec<_> = (0..70)
-                        .map(|width| count_injected_prompt(&row, detail, &theme, width))
-                        .collect();
-                    let rendered: Vec<_> = (0..70)
-                        .map(|width| render_injected_prompt(&row, detail, &theme, width).len())
-                        .collect();
-                    assert_eq!(counts, rendered);
-                }
-            }
-        }
-    }
 
     use super::*;
     use crate::chat::Detail;

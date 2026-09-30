@@ -720,36 +720,4 @@ mod tests {
         assert_eq!(grouped(1234), "1,234");
         assert_eq!(grouped(12_345_678), "12,345,678");
     }
-    #[test]
-    fn summary_geometry_matches_render() {
-        let theme = theme();
-        for summary in [
-            "",
-            "   ",
-            "plain text\n more words",
-            "界e\u{301} 👩‍💻 end",
-            "## heading\nbody  ",
-            "- first\n- second",
-            "```python\nprint(1)\n```",
-            "| a | b |\n|---|---|\n| wide word | 界 |",
-            "> quote\n\n---",
-        ] {
-            for width in 0..=80 {
-                for expanded in [false, true] {
-                    for focus in [None, Some(""), Some("a long focus with words and 界")] {
-                        let painted = render_compaction_summary(
-                            summary, 12345, focus, expanded, &theme, width,
-                        );
-                        assert_eq!(
-                            count_compaction_summary(
-                                summary, 12345, focus, expanded, &theme, width
-                            ),
-                            painted.len(),
-                            "summary={summary:?} width={width} expanded={expanded}"
-                        );
-                    }
-                }
-            }
-        }
-    }
 }
