@@ -160,7 +160,14 @@ mod win32 {
             return Err(io::Error::last_os_error());
         }
         let last_write = unix_to_filetime(tv_sec, tv_nsec);
-        let ok = unsafe { SetFileTime(handle, std::ptr::null(), std::ptr::null(), std::ptr::from_ref(&last_write)) };
+        let ok = unsafe {
+            SetFileTime(
+                handle,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::from_ref(&last_write),
+            )
+        };
         unsafe { CloseHandle(handle) };
         if ok == 0 {
             return Err(io::Error::last_os_error());
