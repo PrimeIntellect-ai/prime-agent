@@ -10,6 +10,10 @@ Every contributor (human or agent) must read this before working on this repo.
   authenticated as the correct account; commits must carry whatever identity the ambient
   auth provides — no custom author names, no custom emails, no exceptions. If a command
   fails for a missing identity, that is a bug to report, not a config to add.
+- **Never add `Co-authored-by` trailers** — not in commit messages, not in squash
+  suggestions, not as attribution for work merged from branches. A PR's commits carry
+  one identity: the ambient auth's. Fabricated or hand-written trailers (including
+  noreply forms) misattribute commits to unrelated GitHub accounts.
 - The repo is PrimeIntellect-ai/prime-agent; the Rust implementation lives on the `main` branch.
 - PRs go to the org repo with base `main`:
   `gh pr create --repo PrimeIntellect-ai/prime-agent --base main`.
