@@ -21,21 +21,18 @@ use serde_json::Value;
 
 use crate::properties::Properties;
 
-/// The current schema version stamped on every event. Bumped to 2 when the
-/// #2117 tracking vocabulary landed; additive property changes do not bump
-/// it.
+/// The current schema version stamped on every event; additive property
+/// changes do not bump it.
 pub const SCHEMA_VERSION: u64 = 2;
 
 // ---------------------------------------------------------------------------
 // Rule kinds
-// ---------------------------------------------------------------------------
 
-/// One property's validation rule (the #2117 `TelemetryPropertyRule`).
+/// One property's validation rule.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PropKind {
     /// Fixed vocabulary; an out-of-vocabulary value falls back to the
-    /// fallback, a null stays null when `nullable` (e.g. `error_category`
-    /// is null when the run did not error).
+    /// fallback, a null stays null when `nullable`.
     Enum {
         values: &'static [&'static str],
         fallback: &'static str,
@@ -155,8 +152,8 @@ impl PropKind {
 pub struct PropertyRule {
     /// The value rule.
     pub kind: PropKind,
-    /// True when the event is malformed without this property (the
-    /// builder-level contract; sanitize never invents required values).
+    /// True when the event is malformed without this property; sanitize
+    /// never invents required values.
     pub required: bool,
 }
 
@@ -171,11 +168,8 @@ pub struct EventRule {
     pub since: u64,
 }
 
-// ---------------------------------------------------------------------------
-// Shared vocabularies (#2117 enums + the v1 doc's fixed value sets)
-// ---------------------------------------------------------------------------
+// Shared vocabularies
 
-/// The legacy error categories (v1 `error_category`).
 pub const ERROR_CATEGORIES: &[&str] = &[
     "authentication",
     "rate_limit",
@@ -186,7 +180,6 @@ pub const ERROR_CATEGORIES: &[&str] = &[
     "other",
 ];
 
-/// The #2117 error subtypes.
 pub const ERROR_SUBTYPES: &[&str] = &[
     "credential_missing",
     "credential_invalid",
@@ -216,7 +209,6 @@ pub const TOOL_CATEGORIES: &[&str] = &[
     "read", "write", "edit", "bash", "grep", "find", "ls", "ipython", "mcp", "custom", "unknown",
 ];
 
-/// The #2117 terminal outcomes.
 pub const TERMINAL_OUTCOMES: &[&str] = &[
     "success",
     "error",
@@ -228,13 +220,10 @@ pub const TERMINAL_OUTCOMES: &[&str] = &[
 /// The #2117 run triggers.
 pub const RUN_TRIGGERS: &[&str] = &["prompt", "continuation", "unknown"];
 
-/// The legacy run outcomes.
 pub const RUN_OUTCOMES: &[&str] = &["success", "error", "aborted"];
 
-/// The #2117 stop reasons.
 pub const STOP_REASONS: &[&str] = &["stop", "length", "toolUse", "error", "aborted", "unknown"];
 
-/// The provider categories (v1 `telemetryProviderCategory`).
 pub const PROVIDER_CATEGORIES: &[&str] = &[
     "anthropic",
     "openai",
@@ -250,13 +239,11 @@ pub const PROVIDER_CATEGORIES: &[&str] = &[
     "unknown",
 ];
 
-/// The model categories (v1 `modelCategory`).
 pub const MODEL_CATEGORIES: &[&str] = &[
     "claude", "gpt", "o1", "o3", "o4", "gemini", "glm", "kimi", "qwen", "deepseek", "llama",
     "mistral", "custom", "unknown",
 ];
 
-/// The auth categories (v1 `telemetryAuthCategory`).
 pub const AUTH_CATEGORIES: &[&str] = &[
     "oauth",
     "api_key",
@@ -272,13 +259,11 @@ pub const AUTH_CATEGORIES: &[&str] = &[
     "unknown",
 ];
 
-/// The #2117 feature names.
 pub const FEATURE_NAMES: &[&str] = &[
     "model", "login", "logout", "effort", "goal", "new", "resume", "fork", "clone", "tree",
     "feedback",
 ];
 
-/// The #2117 feature outcomes.
 pub const FEATURE_OUTCOMES: &[&str] = &[
     "initiated",
     "completed",
@@ -298,7 +283,6 @@ pub const ONBOARDING_STAGES: &[&str] = &[
     "exit",
 ];
 
-/// The #2117 onboarding outcomes.
 pub const ONBOARDING_OUTCOMES: &[&str] = &[
     "initiated",
     "completed",
@@ -310,7 +294,6 @@ pub const ONBOARDING_OUTCOMES: &[&str] = &[
     "provider_switched",
 ];
 
-/// The #2117 onboarding entry reasons.
 pub const ONBOARDING_ENTRY_REASONS: &[&str] = &[
     "first_setup",
     "existing_configuration",
@@ -318,7 +301,6 @@ pub const ONBOARDING_ENTRY_REASONS: &[&str] = &[
     "reentered",
 ];
 
-/// The #2117 acquisition methods.
 pub const ACQUISITION_METHODS: &[&str] = &[
     "existing_configuration",
     "prime_browser",
@@ -329,7 +311,6 @@ pub const ACQUISITION_METHODS: &[&str] = &[
     "unknown",
 ];
 
-/// The #2117 validation scopes.
 pub const VALIDATION_SCOPES: &[&str] = &[
     "configuration",
     "identity_scope",
@@ -338,10 +319,8 @@ pub const VALIDATION_SCOPES: &[&str] = &[
     "unchecked",
 ];
 
-/// The #2117 timing scopes.
 pub const TIMING_SCOPES: &[&str] = &["system_work", "elapsed_including_user_wait"];
 
-/// The #2117 installation stages.
 pub const INSTALLATION_STAGES: &[&str] = &[
     "started",
     "requirements",
@@ -356,7 +335,6 @@ pub const INSTALLATION_STAGES: &[&str] = &[
     "completed",
 ];
 
-/// The #2117 installation outcomes.
 pub const INSTALLATION_OUTCOMES: &[&str] = &[
     "started",
     "success",
@@ -366,7 +344,6 @@ pub const INSTALLATION_OUTCOMES: &[&str] = &[
     "unavailable",
 ];
 
-/// The #2117 installation reasons.
 pub const INSTALLATION_REASONS: &[&str] = &[
     "up_to_date",
     "unsupported_install",
@@ -384,16 +361,12 @@ pub const INSTALLATION_REASONS: &[&str] = &[
     "unknown",
 ];
 
-/// The #2117 installation actions.
 pub const INSTALLATION_ACTIONS: &[&str] = &["install", "update"];
 
-/// The #2117 installation sources.
 pub const INSTALLATION_SOURCES: &[&str] = &["shell_installer", "cli", "interactive"];
 
-/// The #2117 ready kinds.
 pub const READY_KINDS: &[&str] = &["interactive", "headless"];
 
-/// The #2117 input stages.
 pub const INPUT_STAGES: &[&str] = &[
     "received",
     "queued",
@@ -416,21 +389,15 @@ pub const STARTUP_STAGES: &[&str] = &[
     "session_ui_rebind",
 ];
 
-/// The #2117 startup outcomes.
 pub const STARTUP_OUTCOMES: &[&str] = &["completed", "failed"];
 
-/// The #2117 startup kinds.
 pub const STARTUP_KINDS: &[&str] = &["cold", "warm_attach", "resumed", "unknown"];
 
-/// The #2117 build channels.
 pub const BUILD_CHANNELS: &[&str] = &["release", "prerelease", "development", "unknown"];
 
-/// The #2117 workload origins.
 pub const WORKLOAD_ORIGINS: &[&str] = &["interactive", "automated", "internal", "test", "unknown"];
 
-// ---------------------------------------------------------------------------
 // Rule constructors
-// ---------------------------------------------------------------------------
 
 const fn enum_rule(values: &'static [&'static str], fallback: &'static str) -> PropKind {
     PropKind::Enum {
@@ -470,9 +437,8 @@ const fn count() -> PropKind {
     }
 }
 
-/// The base properties merged under every event (the platform module
-/// stamps them): sanitize validates them against these rules instead of
-/// dropping them as uncatalogued.
+/// The base properties merged under every event (the platform module stamps them): sanitize
+/// validates them against these rules instead of dropping them as uncatalogued.
 pub const BASE_PROPERTIES: &[(&str, PropertyRule)] = &[
     ("version", optional(PropKind::Version)),
     (
@@ -564,13 +530,10 @@ const fn free_string(max: usize) -> PropKind {
     PropKind::BoundedString { max }
 }
 
-// ---------------------------------------------------------------------------
-// The catalog (schema v2): the #2117 events plus the v1 adoption events.
-// Every event the product emits has exactly one row here; the seams are the
-// complete emission set (privacy contract).
-// ---------------------------------------------------------------------------
+// The catalog: every event the product emits has exactly one row here; the
+// seams are the complete emission set (privacy contract).
 
-/// `agent started` (v1, enriched in v2): session creation, depth-0 only.
+/// Session creation, depth-0 only.
 const AGENT_STARTED: EventRule = EventRule {
     name: "agent started",
     since: 1,
@@ -617,7 +580,6 @@ const AGENT_RUN_COMPLETED: EventRule = EventRule {
             "error_category",
             optional(nullable_enum_rule(ERROR_CATEGORIES, "other")),
         ),
-        // v2 enrichment:
         ("run_id", optional(uuid())),
         ("run_index", optional(count())),
         ("trigger", optional(enum_rule(RUN_TRIGGERS, "unknown"))),
@@ -692,7 +654,7 @@ const AGENT_RUN_COMPLETED: EventRule = EventRule {
     ],
 };
 
-/// `agent session ended` (v1, enriched in v2): session dispose.
+/// Session dispose.
 const AGENT_SESSION_ENDED: EventRule = EventRule {
     name: "agent session ended",
     since: 1,
@@ -712,7 +674,6 @@ const AGENT_SESSION_ENDED: EventRule = EventRule {
         ("cache_read_tokens", optional(tokens())),
         ("cache_write_tokens", optional(tokens())),
         ("total_tokens", optional(tokens())),
-        // v2 enrichment:
         (
             "terminal_outcome",
             optional(enum_rule(TERMINAL_OUTCOMES, "unknown")),
@@ -800,7 +761,7 @@ const AGENT_COMMAND_USED: EventRule = EventRule {
     properties: &[("command_name", required(free_string(64)))],
 };
 
-/// `onboarding stage` (v2): the onboarding journey's real stages only.
+/// The onboarding journey's real stages only.
 const ONBOARDING_STAGE: EventRule = EventRule {
     name: "onboarding stage",
     since: 2,
@@ -835,7 +796,7 @@ const ONBOARDING_STAGE: EventRule = EventRule {
     ],
 };
 
-/// `onboarding completed` (v1): the onboarding flow's terminal outcome.
+/// The onboarding flow's terminal outcome.
 const ONBOARDING_COMPLETED: EventRule = EventRule {
     name: "onboarding completed",
     since: 1,
@@ -850,7 +811,6 @@ const ONBOARDING_COMPLETED: EventRule = EventRule {
             "provider_category",
             optional(enum_rule(PROVIDER_CATEGORIES, "unknown")),
         ),
-        // v2 enrichment:
         ("onboarding_id", optional(uuid())),
     ],
 };
@@ -930,7 +890,7 @@ const STARTUP: EventRule = EventRule {
     ],
 };
 
-/// `daemon event` (v1): supervision lifecycle, counts only.
+/// Supervision lifecycle, counts only.
 const DAEMON_EVENT: EventRule = EventRule {
     name: "daemon event",
     since: 1,
@@ -966,7 +926,7 @@ const DAEMON_EVENT: EventRule = EventRule {
     ],
 };
 
-/// `model refused` (v1): the settings allowlist guardrail.
+/// The settings allowlist guardrail.
 const MODEL_REFUSED: EventRule = EventRule {
     name: "model refused",
     since: 1,
@@ -1133,9 +1093,8 @@ const TUI_EXIT: EventRule = EventRule {
     ],
 };
 
-/// The update-flow events (v1): `update completed` plus the per-phase
-/// events (one per status transition, the same names the `phase` property
-/// carries).
+/// `update completed` plus the per-phase events (one per status
+/// transition, the same names the `phase` property carries).
 const UPDATE_EVENTS: &[EventRule] = &[
     EventRule {
         name: "update completed",
@@ -1301,21 +1260,17 @@ pub fn lookup(name: &str) -> Option<&'static EventRule> {
 /// Normalize one event's properties against its catalog rule: unknown
 /// keys are dropped, out-of-vocabulary enums fall back, numbers clamp to
 /// their caps, strings cap at their byte budget. Events outside the
-/// catalog pass through unchanged (forward compatibility).
+/// catalog pass through unchanged.
 ///
-/// Returns the number of properties adjusted or dropped (tests + the
-/// worker's debug log).
+/// Returns the number of properties adjusted or dropped.
 pub fn sanitize(name: &str, properties: &mut Properties) -> usize {
     let Some(rule) = lookup(name) else {
-        // Not catalogued: an existing or future vocabulary entry; the
-        // primitive-only boundary still applies.
+        // Not catalogued: the primitive-only boundary still applies.
         return 0;
     };
     let mut adjusted = 0usize;
     let mut normalized = Properties::new();
     for (key, value) in properties.iter() {
-        // The base properties ride every event; they validate against
-        // their own rules, never the event's table.
         if let Some((_, base_rule)) = BASE_PROPERTIES.iter().find(|(known, _)| known == key) {
             if let Some(value) = base_rule.kind.normalize(value.clone()) {
                 normalized.insert_validated(key, value);
@@ -1359,8 +1314,7 @@ fn value_ref<'a>(properties: &'a Properties, key: &str) -> &'a Value {
     properties.get(key).unwrap_or(&Value::Null)
 }
 
-/// True for a hex uuid in the canonical dashed shape (the install-id
-/// validation vocabulary).
+/// True for a hex uuid in the canonical dashed shape.
 pub(crate) fn is_uuid(value: &str) -> bool {
     let bytes = value.as_bytes();
     if bytes.len() != 36 {
