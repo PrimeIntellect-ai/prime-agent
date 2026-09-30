@@ -2069,8 +2069,7 @@ async fn tui_compact_on_a_short_session_warns_nothing_to_compact() {
 /// summary row renders (TS `CompactionSummaryMessageComponent`) at the head
 /// of the rebuilt transcript (TS `rebuildChatFromMessages`). The loader row
 /// is a soft evidence capture (its in-flight window is delayMs-paced and a
-/// loaded box can batch the whole window past the paint loop; the strict
-/// loader assertion is the f14 battery flow, `scripts/compact_parity.py`);
+/// loaded box can batch the whole window past the paint loop);
 /// the settled outcome — the summary row, the rebuilt transcript, and the
 /// retained tail — carries the hard asserts.
 #[tokio::test]
@@ -2089,7 +2088,7 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
     .expect("write settings");
     let supervisor = spawn_supervisor(dir.path());
 
-    // The compact_parity.py session shape (TS-binary-verified): a large
+    // The session shape (TS-binary-verified): a large
     // first turn gives the compactor history to summarize, the small
     // second turn crosses the 10-token keep-recent budget AT its user
     // message — a non-split cut that keeps the whole second turn — and
@@ -2201,9 +2200,8 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
     // compaction-finished events then apply in one batched iteration (the
     // loop drains the queued events before it paints), so no captured frame
     // ever shows the loader row. Any finite pacing window leaves that race,
-    // so the strict frame-level loader assertion lives in
-    // scripts/compact_parity.py (the f14 battery flow, run on an idle box
-    // or a sandbox). Here the observed loader row is evidence only; the hard
+    // so frame-level loader assertions belong in a sandboxed run on an
+    // idle box. Here the observed loader row is evidence only; the hard
     // asserts below pin the settled outcome — the parity-critical claims.
     let loader = "Compacting context (focus: focus on the goal)... (Ctrl+C to cancel)";
     let loader_frames = outcome
@@ -2212,7 +2210,7 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
         .filter(|frame| frame.contains(loader))
         .count();
     println!(
-        "compaction loader evidence: {loader_frames} frames captured the loader row (soft check; the strict assertion is scripts/compact_parity.py)"
+        "compaction loader evidence: {loader_frames} frames captured the loader row (soft check)"
     );
     // The summary row: the TS header plus the collapsed summary.
     assert!(

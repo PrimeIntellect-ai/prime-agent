@@ -19,9 +19,9 @@ Rust build misidentified as TS:
     import ts_identity  # noqa: E402
     ts_identity.assert_ts_side_is_the_ts_product()
 
-Harnesses with non-default binaries pass them explicitly (run_battery.py
-drives target/release/prime-agent rather than the debug build, and its
-flows accept --ts-bin/--rust-bin):
+Harnesses with non-default binaries pass them explicitly (perf_wave.py
+drives target/release/prime-agent rather than the debug build, and accepts
+--ts-bin/--rust-bin):
 
     ts_identity.assert_ts_side_is_the_ts_product(ts_bin, rust_bin)
 

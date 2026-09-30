@@ -207,8 +207,7 @@ worker coalesces them for broadcast in a single-slot coalescer with a
 parked update first and go out directly, so wire order and event-sequence
 order match uncoalesced streaming. The supervisor stays payload-free:
 deltas ride the worker -> client session-event stream (direct-attach or
-supervisor-routed). Verifier: `scripts/battery/streaming_render.py`
-(pane-growth acceptance + TS settled-frame differential).
+supervisor-routed).
 
 Autonomous
 continuation driving in the worker's engine: per-message usage accounting

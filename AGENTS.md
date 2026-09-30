@@ -82,7 +82,7 @@ Every contributor (human or agent) must read this before working on this repo.
 - **Parity-diff evidence is a merge gate** (the port's definition, not optional polish): every PR
   that touches a user-visible surface must include a "parity-diff evidence" section in its
   description showing the TS-binary comparison for what it changed: (1) rendered output —
-  frame-diff vs the TS binary (extend `scripts/visual_parity.py` or the specific harness); 
+  frame-diff vs the TS binary;
   (2) interactive behavior — the same input handled identically (keys, mouse, timing); 
   (3) wire parity — byte-compare the TS daemon's traffic for protocol changes; (4) user-visible
   invariants — every user action produces the same visible reaction as TS (`/compact` shows
