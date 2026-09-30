@@ -43,7 +43,7 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let super_key = key.modifiers.contains(KeyModifiers::SUPER);
-    match key.code {
+    let base = match key.code {
         KeyCode::Char(c) => {
             if ctrl {
                 return Some(ctrl_char_id(c, alt, shift, super_key));
@@ -59,10 +59,12 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
                     ""
                 };
                 let alt_prefix = if alt { "alt+" } else { "" };
-                return Some(format!(
-                    "{alt_prefix}{shift_prefix}super+{}",
-                    c.to_ascii_lowercase()
-                ));
+                let name = if c == ' ' {
+                    "space".to_string()
+                } else {
+                    c.to_ascii_lowercase().to_string()
+                };
+                return Some(format!("{alt_prefix}{shift_prefix}super+{name}"));
             }
             if alt {
                 if c == '\r' || c == '\n' {
@@ -124,43 +126,31 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
             if c == ' ' && shift {
                 return Some("shift+space".into());
             }
-            Some(c.to_string())
+            return Some(c.to_string());
         }
         // The super prefix keeps Cmd-modified keys their own identity
         // (unbound combos match nothing instead of falling through to the
         // bare action and submitting); ctrl and alt do the same.
-        KeyCode::Enter => Some(modified_name("enter", ctrl, alt, shift, super_key)),
-        KeyCode::Tab => Some(modified_name("tab", ctrl, alt, shift, super_key)),
+        KeyCode::Enter => modified_name("enter", ctrl, alt, shift, super_key),
+        KeyCode::Tab => modified_name("tab", ctrl, alt, shift, super_key),
         // A bare shift+backspace stays `backspace`.
-        KeyCode::Backspace => Some(modified_name("backspace", ctrl, alt, false, super_key)),
-        KeyCode::Esc => Some(modified_name("escape", ctrl, alt, shift, super_key)),
-        KeyCode::Left => Some(modified_name("left", ctrl, alt, shift, super_key)),
-        KeyCode::Right => Some(modified_name("right", ctrl, alt, shift, super_key)),
-        KeyCode::Up => Some(modified_name("up", ctrl, alt, shift, super_key)),
-        KeyCode::Down => Some(modified_name("down", ctrl, alt, shift, super_key)),
-        KeyCode::Home => Some(modified_name("home", ctrl, alt, shift, super_key)),
-        KeyCode::End => Some(modified_name("end", ctrl, alt, shift, super_key)),
-        KeyCode::PageUp => Some(modified_name("pageUp", ctrl, alt, shift, super_key)),
-        KeyCode::PageDown => Some(modified_name("pageDown", ctrl, alt, shift, super_key)),
-        KeyCode::Delete => Some(modified_name("delete", ctrl, alt, shift, super_key)),
-        KeyCode::Insert => Some(modified_name("insert", ctrl, alt, shift, super_key)),
-        KeyCode::F(n) => Some(modified_name(&format!("f{n}"), ctrl, alt, shift, super_key)),
-        KeyCode::BackTab => {
-            if super_key {
-                return Some(if alt {
-                    "shift+alt+super+tab".into()
-                } else {
-                    "shift+super+tab".into()
-                });
-            }
-            if alt {
-                // The merged meta-wrapped `ESC ESC [ Z` (Option+Shift+Tab with
-                // option-as-meta): TS's double-ESC branch strips alt and
-                // matches the rest, so the wrapped identity keeps the ALT.
-                return Some("shift+alt+tab".into());
-            }
-            Some("shift+tab".into())
-        }
+        KeyCode::Backspace => modified_name("backspace", ctrl, alt, false, super_key),
+        KeyCode::Esc => modified_name("escape", ctrl, alt, shift, super_key),
+        KeyCode::Left => return Some(modified_name("left", ctrl, alt, shift, super_key)),
+        KeyCode::Right => return Some(modified_name("right", ctrl, alt, shift, super_key)),
+        KeyCode::Up => return Some(modified_name("up", ctrl, alt, shift, super_key)),
+        KeyCode::Down => return Some(modified_name("down", ctrl, alt, shift, super_key)),
+        KeyCode::Home => return Some(modified_name("home", ctrl, alt, shift, super_key)),
+        KeyCode::End => return Some(modified_name("end", ctrl, alt, shift, super_key)),
+        KeyCode::PageUp => return Some(modified_name("pageUp", ctrl, alt, shift, super_key)),
+        KeyCode::PageDown => return Some(modified_name("pageDown", ctrl, alt, shift, super_key)),
+        KeyCode::Delete => return Some(modified_name("delete", ctrl, alt, shift, super_key)),
+        KeyCode::Insert => return Some(modified_name("insert", ctrl, alt, shift, super_key)),
+        KeyCode::F(n) => return Some(modified_name(&format!("f{n}"), ctrl, alt, shift, super_key)),
+        // With alt this is also the merged meta-wrapped `ESC ESC [ Z`
+        // (Option+Shift+Tab with option-as-meta): TS's double-ESC branch
+        // strips alt and matches the rest, so the identity keeps the ALT.
+        KeyCode::BackTab => return Some(modified_name("tab", ctrl, alt, true, super_key)),
         KeyCode::Null
         | KeyCode::CapsLock
         | KeyCode::ScrollLock
@@ -170,8 +160,11 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
         | KeyCode::Menu
         | KeyCode::KeypadBegin
         | KeyCode::Modifier(_)
-        | KeyCode::Media(_) => None,
-    }
+        | KeyCode::Media(_) => {
+            return None;
+        }
+    };
+    Some(base)
 }
 
 /// The ctrl-modified character identities (TS parseKey/formatParsedKey):
@@ -710,6 +703,7 @@ mod tests {
             (KeyCode::Tab, ctrl, "ctrl+tab"),
             (KeyCode::Tab, alt, "alt+tab"),
             (KeyCode::Tab, ctrl | shift, "shift+ctrl+tab"),
+            (KeyCode::BackTab, ctrl | shift, "shift+ctrl+tab"),
             (KeyCode::Enter, ctrl, "ctrl+enter"),
             (KeyCode::Enter, ctrl | alt, "ctrl+alt+enter"),
             (KeyCode::Enter, shift | alt, "shift+alt+enter"),
@@ -717,10 +711,14 @@ mod tests {
             (KeyCode::Char(' '), alt, "alt+space"),
             (KeyCode::Char(' '), ctrl | alt, "ctrl+alt+space"),
             (KeyCode::Char(' '), ctrl | shift, "shift+ctrl+space"),
+            (KeyCode::Char(' '), KeyModifiers::SUPER, "super+space"),
+            (KeyCode::Char(' '), shift | alt, "shift+alt+space"),
             (KeyCode::Esc, ctrl, "ctrl+escape"),
             (KeyCode::Esc, alt, "alt+escape"),
             (KeyCode::Esc, shift, "shift+escape"),
             (KeyCode::Backspace, ctrl | alt, "ctrl+alt+backspace"),
+            // The shift is dropped on purpose: bare shift+backspace stays `backspace`.
+            (KeyCode::Backspace, ctrl | shift, "ctrl+backspace"),
         ];
         for (code, modifiers, expected) in cases {
             let event = KeyEvent::new(code, modifiers);
