@@ -40,7 +40,51 @@ use crate::registry::ResidentWorker;
 
 use super::Supervisor;
 
+/// The reconciliation retry's backoff cadence: 250ms base doubling to a
+/// 5s cap, the registration loop's own shape (a slow-but-alive worker's
+/// boot pull times out; the retry converges on its answer).
+const RECONCILIATION_BACKOFF_MS: u64 = 250;
+const RECONCILIATION_BACKOFF_MAX_MS: u64 = 5_000;
+
 impl Supervisor {
+    /// The quarantine's retry path: a slow-but-alive worker's boot
+    /// reconciliation pull can time out, and no roster push is guaranteed
+    /// while it idles — re-run the reconciliation on a backoff until the
+    /// live word lands (an accepted roster write clears the quarantine
+    /// wherever it arrives: the pull below, the worker's own delta, or a
+    /// refresh) or the worker leaves the registry (the supervisor's own
+    /// death verdict — only then may the persisted identity serve, via
+    /// the lazy re-open).
+    pub(crate) fn spawn_identity_reconciliation_retry(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+    ) {
+        let supervisor = Arc::clone(self);
+        let resident = Arc::clone(resident);
+        tokio::spawn(async move {
+            let mut backoff_ms = RECONCILIATION_BACKOFF_MS;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(RECONCILIATION_BACKOFF_MAX_MS);
+                if !resident.identity_quarantined() {
+                    // The live word already landed elsewhere (the
+                    // worker's own roster push or a concurrent pull).
+                    return;
+                }
+                if supervisor.registry.get(&resident.worker_id).await.is_none() {
+                    // The death verdict: the persisted identity serves the
+                    // lazy re-open, never this quarantined resident.
+                    return;
+                }
+                if supervisor.refresh_roster_entry(&resident).await {
+                    // The pull landed: the roster write carried the
+                    // identity follow and cleared the quarantine.
+                    return;
+                }
+            }
+        });
+    }
+
     /// Follow the roster's root row for one worker's address, under the
     /// resident's descriptor guard the caller holds across the whole
     /// transition: when the row names a different durable session than
@@ -466,6 +510,92 @@ mod tests {
         assert_eq!(
             no_session, None,
             "the replay command drops the in-memory flag with the path"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// The boot-reconciliation quarantine pin (the final review finding): a
+    /// resident whose boot reconciliation pull failed — a timeout is not
+    /// proof the worker is dead — never serves ANY identity route on the
+    /// unreconciled persisted record: the selector resolution, the stale
+    /// file-stem selector, and the by-file reuse all refuse. The worker's
+    /// own roster push (the live word, no command channel needed) carries
+    /// the identity follow, reconciles the identity, and opens the
+    /// routing — on the reconciled identity, never the persisted one.
+    #[tokio::test]
+    async fn a_quarantined_resident_never_serves_until_the_live_word_lands() {
+        let dir = std::env::temp_dir().join(format!("pa-root-id-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let supervisor = supervisor_with_movable_worker(&dir).await;
+        let resident = supervisor.registry.get("w-a").await.expect("resident");
+        let stale_file = dir.join("s0.jsonl").to_string_lossy().to_string();
+
+        // The boot outcome: the reconciliation pull refused (the resident
+        // has no worker channel), the quarantine fenced it.
+        assert!(
+            !supervisor.refresh_roster_entry(&resident).await,
+            "the pull refuses on the channel-less resident"
+        );
+        resident.mark_identity_quarantined();
+        assert!(resident.identity_quarantined());
+
+        // THE FENCES: the address, the stale file stem, and the by-file
+        // reuse all refuse — the failure reads as the unknown session,
+        // never the stale identity.
+        assert!(
+            supervisor.registry.resolve("w-a").await.is_err(),
+            "the quarantined address never resolves"
+        );
+        assert!(
+            supervisor.registry.resolve("s0").await.is_err(),
+            "the stale persisted file stem never resolves"
+        );
+        assert!(
+            supervisor
+                .registry
+                .find_by_session_file(&stale_file)
+                .await
+                .is_none(),
+            "the stale persisted file never reuses the quarantined worker"
+        );
+
+        // THE LIVE WORD: the worker's own roster push (the delta path —
+        // no command channel involved) carries the identity follow.
+        drive_delta(&supervisor, swap_summary(&dir, "sA", "a.jsonl"), 1).await;
+        assert!(
+            !resident.identity_quarantined(),
+            "the accepted roster write cleared the quarantine"
+        );
+
+        // THE ROUTING OPENS on the reconciled identity.
+        let resolved = supervisor
+            .registry
+            .resolve("w-a")
+            .await
+            .expect("the address resolves once reconciled");
+        let (root_session_id, session_file) = {
+            let descriptor = resolved.descriptor.lock().await;
+            (
+                descriptor.root_session_id.clone(),
+                descriptor.session_file.clone(),
+            )
+        };
+        assert_eq!(root_session_id.as_deref(), Some("sA"));
+        assert_eq!(
+            session_file.as_deref(),
+            Some(dir.join("a.jsonl").to_string_lossy().to_string().as_str())
+        );
+        let reconciled_file = dir.join("a.jsonl").to_string_lossy().to_string();
+        assert!(
+            supervisor
+                .registry
+                .find_by_session_file(&reconciled_file)
+                .await
+                .is_some(),
+            "the reconciled file reuses the worker"
+        );
+        assert!(
+            supervisor.registry.resolve("s0").await.is_err(),
+            "the superseded persisted stem stays unresolvable"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -165,9 +165,11 @@ impl Supervisor {
             // same critical section (the fork-isolation seam — the
             // descriptor, the persisted record, the durable create
             // command, and the binding table all move onto the worker's
-            // current session).
+            // current session). The accepted write clears the boot
+            // reconciliation quarantine wherever it arrived from.
             self.sync_root_identity_from_roster(&resident, &mut descriptor);
         }
+        resident.clear_identity_quarantine();
         self.push_roster_update(changed, removed_ids);
         response_success(Some(command_id), type_name, None)
     }
@@ -251,6 +253,9 @@ impl Supervisor {
             self.sync_root_identity_from_roster(resident, &mut descriptor);
             (entry, swapped)
         };
+        // The accepted pull is the live word: the boot reconciliation
+        // quarantine opens with the identity it just reconciled.
+        resident.clear_identity_quarantine();
         self.push_roster_update(vec![entry.clone()], swapped);
         Some(entry)
     }

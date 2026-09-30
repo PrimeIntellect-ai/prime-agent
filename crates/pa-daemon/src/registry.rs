@@ -173,6 +173,16 @@ pub(crate) struct ResidentWorker {
     /// roster write re-runs the transition's persist from the live state
     /// before a restart can replay the superseded session.
     identity_persist_pending: AtomicBool,
+    /// The boot-reconciliation quarantine: a resident adopted from a
+    /// persisted record whose live reconciliation pull FAILED is fenced
+    /// from every identity-based route (the selector resolution, the
+    /// by-file reuse, the stale-id rebind) until the live word lands (an
+    /// accepted roster write) or the worker's death removes the resident.
+    /// A failed pull is not proof the worker is dead: routing on the
+    /// unreconciled persisted identity can deliver across sessions (the
+    /// fork leak's boot form), so the fence refuses — the conservative
+    /// miss, never a mis-delivery.
+    identity_quarantined: AtomicBool,
     /// Monotonic connection epoch: only the pumps of the current
     /// connection may flip `connected` false, so a superseded socket's
     /// late EOF cannot retire a live replacement.
@@ -232,6 +242,7 @@ impl ResidentWorker {
             heartbeat_snapshot_generation: AtomicU64::new(0),
             route_state_tx,
             identity_persist_pending: AtomicBool::new(false),
+            identity_quarantined: AtomicBool::new(false),
             connection_epoch: AtomicU64::new(0),
             compaction: crate::compaction_supervision::CompactionSupervision::default(),
         })
@@ -360,6 +371,28 @@ impl ResidentWorker {
     pub(crate) fn clear_identity_persist_pending(&self) {
         self.identity_persist_pending
             .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Fence this resident from every identity-based route (the
+    /// boot-reconciliation quarantine: the persisted identity was not
+    /// reconciled from the live worker).
+    pub(crate) fn mark_identity_quarantined(&self) {
+        self.identity_quarantined
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Open the routing again: an accepted roster write carried the
+    /// identity follow, so the live identity is reconciled.
+    pub(crate) fn clear_identity_quarantine(&self) {
+        self.identity_quarantined
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether this resident is fenced from identity-based routing (the
+    /// unreconciled quarantine).
+    pub(crate) fn identity_quarantined(&self) -> bool {
+        self.identity_quarantined
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Selector labels: root active session id, session-file stem, name.
@@ -526,6 +559,14 @@ impl SessionRegistry {
             );
         let mut matches = Vec::new();
         for resident in self.list().await {
+            // The boot-reconciliation quarantine: an unreconciled
+            // persisted identity never serves a by-file reuse (a create
+            // over the superseded file must launch fresh, and a create
+            // over the worker's own file answers the lease refusal —
+            // never this worker on the wrong session).
+            if resident.identity_quarantined() {
+                continue;
+            }
             let owned = resident
                 .descriptor
                 .lock()
@@ -580,13 +621,22 @@ impl SessionRegistry {
 
     /// Resolve one session worker by any accepted selector: the full root
     /// active session id, a suffix of it, the session-file stem, or the
-    /// session name. Errors for unknown and ambiguous selectors.
+    /// session name. Errors for unknown and ambiguous selectors. A
+    /// quarantined resident never resolves (the unreconciled boot
+    /// identity): the failure reads as the unknown session, and the
+    /// client's own retry drives the reconciliation retry — the
+    /// conservative miss, never a route on the persisted identity.
     pub(crate) async fn resolve(&self, selector: &str) -> Result<Arc<ResidentWorker>> {
         if let Some(resident) = self.get(selector).await {
-            return Ok(resident);
+            if !resident.identity_quarantined() {
+                return Ok(resident);
+            }
         }
         let mut matches: Vec<(Arc<ResidentWorker>, String, String)> = Vec::new();
         for resident in self.list().await {
+            if resident.identity_quarantined() {
+                continue;
+            }
             let (root_id, file_stem, name) = resident.labels().await;
             if selector_matches(&root_id, selector)
                 || selector_matches(&file_stem, selector)

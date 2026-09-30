@@ -210,8 +210,18 @@ impl Supervisor {
                 // pull serves the persisted identity (logged) until the
                 // next roster write runs the follow from the live state.
                 if !self.refresh_roster_entry(&resident).await {
+                    // A failed pull is not proof the worker is dead: the
+                    // persisted identity is unreconciled, so the resident
+                    // is quarantined from every identity route until the
+                    // live word lands (a slow pull retries on the
+                    // backoff below; the worker's own roster push or a
+                    // later pull clears the fence). The routing refuses
+                    // (the conservative miss) instead of serving the
+                    // superseded identity.
+                    resident.mark_identity_quarantined();
+                    self.spawn_identity_reconciliation_retry(&resident);
                     self.log_line(&format!(
-                        "session worker {worker_id}: the boot reconciliation pull failed; serving the persisted identity until the next roster write"
+                        "session worker {worker_id}: the boot reconciliation pull failed; the resident is quarantined from routing until the live state lands"
                     ));
                 }
                 // The adopted worker's session already exists (its create
@@ -624,8 +634,15 @@ impl Supervisor {
         // can resolve them (the registration block above recorded the
         // persisted identity — this heals it from the live truth).
         if !self.refresh_roster_entry(&resident).await {
+            // A failed pull is not proof the worker is dead: the persisted
+            // identity is unreconciled, so the resident is quarantined
+            // from every identity route until the live word lands (a slow
+            // pull retries; the worker's own roster push or a later pull
+            // clears the fence).
+            resident.mark_identity_quarantined();
+            self.spawn_identity_reconciliation_retry(&resident);
             self.log_line(&format!(
-                "session worker {worker_id}: the registration reconciliation pull failed; serving the persisted identity until the next roster write"
+                "session worker {worker_id}: the registration reconciliation pull failed; the resident is quarantined from routing until the live state lands"
             ));
         }
         // The self-registered worker's session already exists: routed
