@@ -111,6 +111,13 @@ impl Supervisor {
                 }
             }
         };
+        // A retired worker admits no client request (the
+        // retire-then-release order of the idle passivation fence): the
+        // check runs after admission, so a route that passed readiness
+        // before the retire cannot enqueue behind it.
+        if matches!(admission, RouteAdmission::ClientRequest) && resident.route_state().retired {
+            return Err(anyhow!(WORKER_NOT_CONNECTED));
+        }
         let (reply_tx, reply_rx) = oneshot::channel();
         let request_id = uuid::Uuid::new_v4().to_string();
         resident

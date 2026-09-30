@@ -358,4 +358,32 @@ mod tests {
             "a full queue never refuses internal traffic"
         );
     }
+
+    /// The retire-then-release straddle of the idle passivation fence
+    /// (a client route whose readiness check preceded the retire): a
+    /// retired worker refuses the client route after admission, before
+    /// anything is enqueued behind the stop.
+    #[tokio::test]
+    async fn a_retired_worker_admits_no_client_request() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let supervisor = supervisor(dir.path());
+        let resident = resident("w-retired");
+        let (_cmd_tx, mut cmd_rx) = wedged_worker(&resident).await;
+        resident.note_retired();
+        let error = supervisor
+            .route_command_typed(
+                &resident,
+                "cron_add",
+                serde_json::json!({}),
+                50,
+                RouteAdmission::ClientRequest,
+            )
+            .await
+            .expect_err("a retired worker refuses the client route");
+        assert_eq!(error.to_string(), crate::supervisor::WORKER_NOT_CONNECTED);
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "nothing was enqueued behind the retire"
+        );
+    }
 }
