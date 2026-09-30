@@ -798,7 +798,7 @@ async fn head_tree_pins_to_the_status_reported_commit() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn head_tree_baseline_excludes_skip_worktree_paths() {
+async fn head_tree_baseline_excludes_only_absent_skip_worktree_paths() {
     let repo = tempfile::tempdir().unwrap();
     let root = repo.path();
     init_repo(root);
@@ -831,6 +831,28 @@ async fn head_tree_baseline_excludes_skip_worktree_paths() {
         )
     );
     assert!(verify_workspace_snapshot(staging.path()).is_ok());
+    // Without a sparse checkout, git keeps the bit on a present file
+    // (`update-index --skip-worktree`): the leaf is on disk and must
+    // stage.
+    git(root, &["sparse-checkout", "disable"]);
+    git(root, &["update-index", "--skip-worktree", "keep.txt"]);
+    let staging = tempfile::tempdir().unwrap();
+    let snapshot =
+        create_workspace_snapshot(root, staging.path(), BaselineMode::HeadTree, &limits())
+            .await
+            .unwrap();
+    assert_eq!(
+        snapshot.manifest,
+        repo_manifest(
+            root,
+            head_tree(vec![
+                file_entry("keep.txt", "100644", "k\n"),
+                file_entry("sparse/x.txt", "100644", "x\n"),
+            ]),
+            vec![],
+            vec![]
+        )
+    );
 }
 
 #[test]

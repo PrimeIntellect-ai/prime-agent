@@ -16,7 +16,7 @@
 //! total size) and deliberately incomplete in a recorded way:
 //! credential-shaped file names, symlinks whose targets escape the
 //! worktree (and paths whose ancestors became symlinks), nested
-//! repositories, submodule gitlinks, and sparse-checkout
+//! repositories, submodule gitlinks, and absent sparse-checkout
 //! (skip-worktree) paths are excluded and listed in the manifest, so a
 //! materializer knows exactly what was and was not captured. This is
 //! foundation plumbing for cloud sessions; nothing wires it to a
@@ -419,13 +419,6 @@ fn build_manifest(
                     });
                     continue;
                 }
-                if tree_entry.skip_worktree {
-                    baseline_excluded.push(ExcludedEntry {
-                        path: tree_entry.path.clone(),
-                        reason: ExcludeReason::SkipWorktree,
-                    });
-                    continue;
-                }
                 match capture_leaf(
                     worktree_root,
                     &blobs_dir,
@@ -440,6 +433,12 @@ fn build_manifest(
                         path: tree_entry.path.clone(),
                         reason,
                     }),
+                    LeafOutcome::Missing if tree_entry.skip_worktree => {
+                        baseline_excluded.push(ExcludedEntry {
+                            path: tree_entry.path.clone(),
+                            reason: ExcludeReason::SkipWorktree,
+                        });
+                    }
                     // The path HEAD records is absent from the worktree
                     // (or turned into something unreadable): the baseline
                     // can no longer be the stated commit, so the snapshot

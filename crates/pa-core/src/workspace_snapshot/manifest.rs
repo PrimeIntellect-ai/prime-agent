@@ -83,9 +83,9 @@ pub enum ExcludeReason {
     /// A path whose ancestor directory is a symlink; the leaf resolves
     /// outside the worktree and is never read.
     SymlinkedAncestor,
-    /// A HEAD path the index marks skip-worktree (outside a sparse
-    /// checkout): git keeps no worktree state for it, so the baseline
-    /// neither stages nor verifies it.
+    /// A HEAD path the index marks skip-worktree that is absent from the
+    /// worktree (outside a sparse checkout): absent by design, so the
+    /// baseline records it instead of failing.
     SkipWorktree,
 }
 

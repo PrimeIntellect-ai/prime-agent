@@ -222,9 +222,9 @@ pub(crate) struct HeadTreeEntry {
     pub(crate) mode: String,
     /// A submodule gitlink rather than a file.
     pub(crate) gitlink: bool,
-    /// The index marks the path skip-worktree (outside a sparse
-    /// checkout): absent from the worktree by design and never reported
-    /// by `git status`.
+    /// The index marks the path skip-worktree (a sparse checkout, or
+    /// `update-index --skip-worktree`): `git status` never reports its
+    /// worktree state, so an absent leaf is by design, not a mutation.
     pub(crate) skip_worktree: bool,
     /// The object id HEAD records for the path (a blob id, or the
     /// gitlink commit id); the baseline verifies captured bytes against
@@ -240,8 +240,8 @@ pub(crate) struct HeadTreeEntry {
 /// a vanished or rewritten object fails `ls-tree` loudly here. The
 /// baseline stages these contents from the (unmodified) worktree, so
 /// this is enumeration only - no history, no object payloads. The
-/// index's skip-worktree bits ride along so the baseline can exclude
-/// sparse paths instead of reading absent leaves.
+/// index's skip-worktree bits ride along so the baseline can tell an
+/// absent sparse path from a vanished one.
 pub(crate) async fn read_head_tree(
     root: &Path,
     commit: &str,
