@@ -17,12 +17,14 @@ impl Worker {
     /// (auth gating over settings plus the built-in catalog), the resolved
     /// service-catalog views, and the api-key credential rows (the stored
     /// keys the `/mcp` view manages alongside the connections), from ONE
-    /// fresh local read — the manager re-resolves its integrations and
-    /// catalog first (TS `buildServiceCatalogViews` re-reads the store and
-    /// re-resolves the catalog on every open), so an externally changed
-    /// settings file or a record another process wrote is visible on the
-    /// next open. The roster and credential reads gate through the auth
-    /// store, whose snapshot takes a blocking lock — never on the runtime.
+    /// fresh local read — the manager reloads the auth store and
+    /// re-resolves its integrations and catalog first (TS
+    /// `buildServiceCatalogViews` re-reads the store and re-resolves the
+    /// catalog on every open), so an externally changed settings file, a
+    /// record another process wrote, or a key the interactive client just
+    /// stored is visible on the next open. The roster and credential reads
+    /// gate through the auth store, whose snapshot takes a blocking lock —
+    /// never on the runtime.
     pub(crate) async fn handle_get_mcp_connections(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("get_mcp_connections") {
             return response;
@@ -39,6 +41,11 @@ impl Worker {
         let (roster, services, credentials, diagnostics) =
             match tokio::task::spawn_blocking(move || {
                 let mut manager = roster_manager.lock().unwrap();
+                // The auth store re-read comes FIRST: the interactive client
+                // stores the api-key credentials through its own storage
+                // instance (the `/mcp` key flow runs client-side), so the
+                // view's reads must reload the store to see them.
+                manager.reload_auth_storage();
                 manager.refresh();
                 (
                     manager.connection_roster(),

@@ -754,3 +754,57 @@ fn api_key_credential_views_read_the_shared_store() {
         "only an API-key credential marks the row configured"
     );
 }
+
+#[test]
+fn api_key_credential_views_see_a_cross_instance_write_after_the_reload() {
+    let agent_dir = tempfile::tempdir().expect("tempdir");
+    let mut manager = McpManager::new(McpManagerOptions {
+        auth_storage: crate::auth::AuthStorage::create(agent_dir.path()),
+        get_user_servers: no_user_servers(),
+        begin_login: None,
+        agent_dir: Some(agent_dir.path().to_path_buf()),
+        get_catalog_sources: None,
+        remote_source: None,
+        probe_override: None,
+    });
+    manager.refresh();
+    assert!(
+        !manager
+            .api_key_credential_views()
+            .first()
+            .expect("the serper row renders")
+            .configured,
+        "the fresh store holds no key"
+    );
+    // The interactive client's `/mcp` key flow stores through its OWN
+    // storage instance (a different process writing the same auth.json).
+    {
+        let mut client_side = crate::auth::AuthStorage::create(agent_dir.path());
+        client_side.set(
+            "serper",
+            AuthCredential::ApiKey {
+                key: "serper-key".to_string(),
+                prime_team: None,
+            },
+        );
+    }
+    // Without the reload the manager's cached copy stays stale.
+    assert!(
+        !manager
+            .api_key_credential_views()
+            .first()
+            .expect("the serper row renders")
+            .configured,
+        "the cached copy does not see the other instance's write"
+    );
+    // The view open's reload picks the stored key up.
+    manager.reload_auth_storage();
+    assert!(
+        manager
+            .api_key_credential_views()
+            .first()
+            .expect("the serper row renders")
+            .configured,
+        "the reload sees the cross-instance write"
+    );
+}
