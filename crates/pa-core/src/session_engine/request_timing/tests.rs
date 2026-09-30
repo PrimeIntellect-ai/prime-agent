@@ -879,6 +879,7 @@ fn payload_calling_provider() -> StreamFn {
 /// payload hook hands the request's final outbound body — after every
 /// transform, exactly what the provider sees — to the capture's writer,
 /// with the identity fields the timeline entries correlate by.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_payload_capture_writes_the_exact_outbound_body() {
     let _writer_lock = super::payload::WRITER_TEST_LOCK.lock().await;
@@ -931,6 +932,7 @@ async fn the_payload_capture_writes_the_exact_outbound_body() {
 
 /// The capture rides the request-timing flag: disabled, the same request
 /// hands off no body (and writes no timeline entry).
+#[cfg(unix)]
 #[tokio::test]
 async fn the_payload_capture_writes_nothing_when_the_flag_is_off() {
     let dir = tempfile::tempdir().unwrap();
@@ -960,6 +962,7 @@ async fn the_payload_capture_writes_nothing_when_the_flag_is_off() {
 /// The engine path (the daemon workers' session build is this same
 /// `create_session`): the wiring the engine installs captures while the
 /// flag is on, and writes nothing while it is off.
+#[cfg(unix)]
 #[tokio::test]
 async fn engine_sessions_capture_the_outbound_payload_when_the_flag_is_on() {
     use crate::session_engine::engine::{create_session, SessionEngineConfig};

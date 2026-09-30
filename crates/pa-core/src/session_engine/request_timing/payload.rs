@@ -43,7 +43,10 @@ use serde_json::{json, Map, Value};
 use crate::platform::perms;
 use crate::session::manager::format_iso;
 
-#[cfg(test)]
+/// The capture's own battery: the capture is Unix-only (the
+/// confidentiality boundary is not enforceable elsewhere), so its tests
+/// are too.
+#[cfg(all(test, unix))]
 pub(crate) mod tests;
 
 /// Serializes the tests that record through the process's one writer:
@@ -51,7 +54,7 @@ pub(crate) mod tests;
 /// saturate each other's queues and drop each other's expected bodies.
 /// A tokio mutex so the async integration tests hold it across awaits
 /// (`lock().await`) while the sync unit tests take `blocking_lock()`.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) static WRITER_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// The newest-body ring the capture keeps: one file per request, so
