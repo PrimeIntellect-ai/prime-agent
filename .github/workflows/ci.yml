@@ -172,7 +172,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
-      allowed: ${{ github.event_name == 'push' || steps.vouch.outputs.vouched == 'true' }}
+      # merge_group auto-allows: the queued candidate already passed the
+      # vouch-gated pull_request wave (the queue only takes vouched PRs);
+      # the merge-group run is the full-selection validation of the
+      # already-vouched candidate.
+      allowed: ${{ github.event_name == 'push' || github.event_name == 'merge_group' || steps.vouch.outputs.vouched == 'true' }}
     steps:
       - name: Check pull request author
         id: vouch
