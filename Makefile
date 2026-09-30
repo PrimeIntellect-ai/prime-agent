@@ -22,6 +22,19 @@ windows-cross:
 	cargo check --workspace --target x86_64-pc-windows-gnu --all-targets
 	cargo clippy --workspace --target x86_64-pc-windows-gnu --all-targets -- -D warnings
 
+# Windows MSVC cross-check: the release target's own triple (release.yml's
+# build-windows job builds x86_64-pc-windows-msvc natively on windows-2022;
+# this gate type-checks the same target from a linux host). The check form
+# needs MSVC-side C tooling for the native build scripts (ring): cargo-xwin
+# wraps the build with the MSVC CRT + clang-cl/llvm-lib, so the gate fails
+# loudly when cargo-xwin (or the llvm tools) is missing instead of silently
+# skipping. The gnu gate above stays the cheap cfg-hygiene mirror; the
+# authoritative msvc build runs on the windows runner.
+windows-msvc-cross:
+	@rustup target list --installed | grep -q x86_64-pc-windows-msvc || { echo "x86_64-pc-windows-msvc target not installed (rustup target add x86_64-pc-windows-msvc)"; exit 1; }
+	@command -v cargo-xwin >/dev/null 2>&1 || { echo "cargo-xwin not installed (cargo install cargo-xwin --locked; it provisions the MSVC CRT + expects clang-cl/llvm-lib on PATH)"; exit 1; }
+	cargo xwin check --workspace --target x86_64-pc-windows-msvc --all-targets
+
 # Lints the live workflow files (.github/workflows/).
 actionlint:
 	@command -v actionlint >/dev/null 2>&1 || { echo "actionlint not installed (see rhysd/actionlint releases)"; exit 1; }

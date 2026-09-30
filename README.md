@@ -46,6 +46,14 @@ Install the latest build with the one-command installer (every push to the `rust
 curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 ```
 
+On Windows, install from PowerShell:
+
+```powershell
+irm https://app.primeintellect.ai/prime-agent/install.ps1 | iex
+```
+
+The sh one-liner also works under Git Bash on Windows. Both installers publish the same layout (the launcher under `$HOME\.local\bin`, the payload under `$HOME\.local\share\prime-agent`) and read the same release channel: darwin (arm64/x64), linux (arm64/x64), and windows (x86_64, `win32-x64`).
+
 The served installer and everything it downloads — the version pointers, the platform tarballs, the checksums — come from the same domain: no GitHub URL is on the user path.
 
 ## Why Prime Agent

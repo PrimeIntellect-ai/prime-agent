@@ -84,14 +84,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Windows cannot ride this matrix: the job-level `container:` pins the
+        # linux builds to the reviewed ubuntu:22.04 image (the digest-pinned
+        # glibc baseline), and a Windows runner cannot host that container.
+        # The MSVC target builds in its own `build-windows` job below (the
+        # build-darwin pattern).
         include:
           - target: x86_64-unknown-linux-gnu
             runs-on: ubuntu-24.04
           - target: aarch64-unknown-linux-gnu
             runs-on: ubuntu-24.04-arm
-          # Windows ships when the platform trait impls land:
-          # - target: x86_64-pc-windows-msvc
-          #   runs-on: windows-2022
     env:
       # AppleDouble resource forks must not leak into the archive; the
       # assembler additionally enforces plain-file payloads.
@@ -259,8 +261,83 @@ jobs:
             target/${{ matrix.target }}/dist/manifest.json
           if-no-files-found: error
 
+  # The Windows build: its own job (the build-darwin pattern), because the
+  # GNU builds pin their glibc baseline inside the digest-reviewed ubuntu:22.04
+  # container - a runner-level image a windows runner cannot host. The runner
+  # label is pinned to windows-2022 (never the mutable windows-latest) for the
+  # same reviewed-baseline reason as the container digest: a label that
+  # drifts under promote would drift the release baseline; it moves only
+  # through reviewed changes.
+  build-windows:
+    needs: tag-check
+    name: build-${{ matrix.target }}
+    runs-on: ${{ matrix.runs-on }}
+    permissions:
+      contents: read
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
+        with:
+          toolchain: "1.98.1"
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6cbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: ${{ matrix.target }}
+      # The Windows runner images ship `python` (python3 is not a stable alias
+      # there); the release scripts run under whichever spelling exists.
+      - name: Resolve the Python interpreter
+        shell: bash
+        run: echo "PY=$(command -v python3 || command -v python)" >> "$GITHUB_ENV"
+      - name: Build (release, locked)
+        run: cargo build --release --locked --target ${{ matrix.target }} -j 4
+      - name: "Livecheck gate: --version prints the tag version"
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Cargo's MSVC linker emits prime-agent.exe; the payload name the
+          # assembler stages and the installer extracts.
+          bin="target/${{ matrix.target }}/release/prime-agent.exe"
+          out="$("${bin}" --version)"
+          [[ "${out}" == "${RELEASE_VERSION#v}" ]]             || { echo "binary reports '${out}', expected '${RELEASE_VERSION#v}'"; exit 1; }
+      - name: Generate bundled catalog assets (fixture, offline-safe)
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${PY}" scripts/release/bundle_catalog.py generate --fixture \
+            --out "target/${{ matrix.target }}/catalog-assets"
+      - name: Assemble tarball + checksums + manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${PY}" scripts/release/assemble_artifacts.py \
+            --repo-root . \
+            --version "${RELEASE_VERSION#v}" \
+            --target "${{ matrix.target }}" \
+            --binary "target/${{ matrix.target }}/release/prime-agent.exe" \
+            --catalog-assets "target/${{ matrix.target }}/catalog-assets" \
+            --out-dir "target/${{ matrix.target }}/dist"
+          cat "target/${{ matrix.target }}/dist/manifest.json"
+      - name: Upload artifacts
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: artifacts-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/dist/prime-agent-*
+            target/${{ matrix.target }}/dist/SHA256SUMS
+            target/${{ matrix.target }}/dist/manifest.json
+          if-no-files-found: error
+
   promote:
-    needs: [build-gnu, build-darwin]
+    needs: [build-gnu, build-darwin, build-windows]
     name: promotion gate -> release attach
     runs-on: ubuntu-latest
     environment: release
@@ -449,6 +526,21 @@ jobs:
               rows.append(
                   {"platform": platform, "file": file_name, "sha256": sha}
               )
+          # COMPLETENESS: the channel's platform list must match the built set.
+          # The reader serves every known platform; a manifest that silently
+          # dropped one (a skipped matrix leg, a build-job regression) would
+          # strand that platform's installs on the old channel version, so a
+          # missing row fails the release here instead of publishing a
+          # shrunken channel. `promote` needs every build job, so the merged
+          # manifest carries every known platform by construction; this gate
+          # turns that invariant into an enforced contract.
+          missing = known - seen
+          if missing:
+              sys.exit(
+                  f"the release is missing artifact rows for {sorted(missing)}: "
+                  "the channel manifest must carry a row for every known "
+                  "platform (one build job per platform)"
+              )
           document = {"version": f"v{version}"}
           v1_rows = [row for row in rows if row["platform"] in v1_platforms]
           if v1_rows:
@@ -476,8 +568,8 @@ jobs:
       #   - HEADER FORM (TS parity): the version-prefixed artifacts
       #     (releases/v<version>/) are immutable (1y) with their content
       #     types; the root pointers (latest.json, stable, beta, beta.json,
-      #     install.sh, install-beta.sh) are no-cache — the user path is
-      #     always fresh.
+      #     install.sh, install-beta.sh, install.ps1, install-beta.ps1) are
+      #     no-cache — the user path is always fresh.
       #   - NO PATS, NO LEAKS: the GitHub side uses the workflow's own
       #     identity (github.token); the R2 keys are environment secrets
       #     scoped to this job; nothing is echoed.
@@ -521,12 +613,14 @@ jobs:
             --content-type text/plain \
             --cache-control 'public, max-age=31536000, immutable'
 
-          # The rendered installer pair: the repo file's defaults ARE the
+          # The rendered installer pairs: the repo files' defaults ARE the
           # official domain, so the publish render only stamps the build's
-          # R2 base + channel default into the served copies. Both renders
+          # R2 base + channel default into the served copies. All renders
           # publish on every cut (TS parity: a changed installer ships with
           # whichever channel publishes, so the served scripts never go
-          # stale between releases).
+          # stale between releases) — the sh pair (install.sh /
+          # install-beta.sh) and the Windows PowerShell pair (install.ps1 /
+          # install-beta.ps1).
           render_installer() {
             channel="$1"
             sed -e "s|^DOWNLOAD_BASE_URL_DEFAULT=.*|DOWNLOAD_BASE_URL_DEFAULT=\"${INSTALL_BASE_URL}\"|" \
@@ -534,6 +628,20 @@ jobs:
                 "verification-source/install-rust.sh" > "/tmp/install-${channel}.sh"
             grep -q "^DOWNLOAD_BASE_URL_DEFAULT=\"${INSTALL_BASE_URL}\"" "/tmp/install-${channel}.sh"
             grep -q "^RELEASE_CHANNEL_DEFAULT=${channel}$" "/tmp/install-${channel}.sh"
+          }
+
+          # The Windows-native render of the same installer (install.ps1):
+          # the same base + channel stamps, the same publish-every-cut rule.
+          # The Windows-idiomatic entry is
+          #   irm <base>/install.ps1 | iex
+          # while Git-Bash users run the install-rust.sh form above.
+          render_installer_ps1() {
+            channel="$1"
+            sed -e "s|^\$DownloadBaseUrlDefault = '.*'|\$DownloadBaseUrlDefault = '${INSTALL_BASE_URL}'|" \
+                -e "s|^\$ReleaseChannelDefault = '.*'|\$ReleaseChannelDefault = '${channel}'|" \
+                "verification-source/install.ps1" > "/tmp/install-${channel}.ps1"
+            grep -qF "\$DownloadBaseUrlDefault = '${INSTALL_BASE_URL}'" "/tmp/install-${channel}.ps1"
+            grep -qF "\$ReleaseChannelDefault = '${channel}'" "/tmp/install-${channel}.ps1"
           }
 
           # THE ANNOTATED-TAG PEEL: the nightly cuts create ANNOTATED tags,
@@ -650,10 +758,20 @@ jobs:
                   --endpoint-url "$R2_ENDPOINT_URL" \
                   --content-type text/x-shellscript \
                   --cache-control no-cache
+                render_installer_ps1 beta
+                aws s3 cp /tmp/install-beta.ps1 "s3://${R2_BUCKET}/install-beta.ps1" \
+                  --endpoint-url "$R2_ENDPOINT_URL" \
+                  --content-type text/plain \
+                  --cache-control no-cache
                 render_installer stable
                 aws s3 cp /tmp/install-stable.sh "s3://${R2_BUCKET}/install.sh" \
                   --endpoint-url "$R2_ENDPOINT_URL" \
                   --content-type text/x-shellscript \
+                  --cache-control no-cache
+                render_installer_ps1 stable
+                aws s3 cp /tmp/install-stable.ps1 "s3://${R2_BUCKET}/install.ps1" \
+                  --endpoint-url "$R2_ENDPOINT_URL" \
+                  --content-type text/plain \
                   --cache-control no-cache
                 echo "beta channel advanced to ${RELEASE_VERSION} at ${INSTALL_BASE_URL}"
               fi
@@ -672,10 +790,20 @@ jobs:
                 --endpoint-url "$R2_ENDPOINT_URL" \
                 --content-type text/x-shellscript \
                 --cache-control no-cache
+              render_installer_ps1 stable
+              aws s3 cp /tmp/install-stable.ps1 "s3://${R2_BUCKET}/install.ps1" \
+                --endpoint-url "$R2_ENDPOINT_URL" \
+                --content-type text/plain \
+                --cache-control no-cache
               render_installer beta
               aws s3 cp /tmp/install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
                 --endpoint-url "$R2_ENDPOINT_URL" \
                 --content-type text/x-shellscript \
+                --cache-control no-cache
+              render_installer_ps1 beta
+              aws s3 cp /tmp/install-beta.ps1 "s3://${R2_BUCKET}/install-beta.ps1" \
+                --endpoint-url "$R2_ENDPOINT_URL" \
+                --content-type text/plain \
                 --cache-control no-cache
               echo "stable channel advanced to ${RELEASE_VERSION} at ${INSTALL_BASE_URL}"
             fi

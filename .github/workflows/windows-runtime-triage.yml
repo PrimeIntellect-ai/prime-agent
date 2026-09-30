@@ -91,13 +91,26 @@ jobs:
             ForEach-Object { Remove-Item -Path ("Env:" + $_.Name) -ErrorAction SilentlyContinue }
           cargo test --locked -p pa-cli 2>&1 | Tee-Object -FilePath pa-cli_win.log
           exit $LASTEXITCODE
+      # The Windows install gates: both entry points (install.ps1 and
+      # install-rust.sh under Git Bash) install the REAL assembled
+      # win32-x64 artifact from a locally served channel and answer
+      # --version through their launchers (scripts/release/
+      # test_windows_install.ps1). This is the shipped-product proof: the
+      # build's artifact + the installers the channel serves.
+      - name: windows install e2e (ps1 + sh routes)
+        id: install_e2e
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File scripts/release/test_windows_install.ps1 2>&1 | Tee-Object -FilePath win-install-e2e.log
+          exit $LASTEXITCODE
       - name: Summary + the overall verdict
         shell: pwsh
         run: |
-          $summary = "WIN_BATTERY pa-types=${{ steps.pa_types.outcome }} pa-core=${{ steps.pa_core.outcome }} pa-daemon=${{ steps.pa_daemon.outcome }} pa-tui=${{ steps.pa_tui.outcome }} pa-cli=${{ steps.pa_cli.outcome }}"
+          $summary = "WIN_BATTERY pa-types=${{ steps.pa_types.outcome }} pa-core=${{ steps.pa_core.outcome }} pa-daemon=${{ steps.pa_daemon.outcome }} pa-tui=${{ steps.pa_tui.outcome }} pa-cli=${{ steps.pa_cli.outcome }} install-e2e=${{ steps.install_e2e.outcome }}"
           Add-Content -Path win_battery_summary.log -Value $summary
           Write-Output $summary
-          if (@("${{ steps.pa_types.outcome }}", "${{ steps.pa_core.outcome }}", "${{ steps.pa_daemon.outcome }}", "${{ steps.pa_tui.outcome }}", "${{ steps.pa_cli.outcome }}") -contains 'failure') { exit 1 }
+          if (@("${{ steps.pa_types.outcome }}", "${{ steps.pa_core.outcome }}", "${{ steps.pa_daemon.outcome }}", "${{ steps.pa_tui.outcome }}", "${{ steps.pa_cli.outcome }}", "${{ steps.install_e2e.outcome }}") -contains 'failure') { exit 1 }
       - name: Upload the per-crate logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -109,5 +122,6 @@ jobs:
             pa-daemon_win.log
             pa-tui_win.log
             pa-cli_win.log
+            win-install-e2e.log
             win_battery_summary.log
           if-no-files-found: warn

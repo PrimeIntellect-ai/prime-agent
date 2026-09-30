@@ -159,6 +159,47 @@ PREFIX="${PRIME_AGENT_RUST_PREFIX:-$HOME/.local}"
 
 die() { echo "install-rust.sh: $1" >&2; exit 1; }
 
+# --- platform detection ----------------------------------------------------
+# uname -m maps directly to the built target: an Apple-Silicon Mac whose
+# shell (and therefore binaries) run under Rosetta 2 reports x86_64 and
+# gets the x86_64 build, which is the correct build for that runtime.
+# Windows runs this script only from a POSIX shell (Git Bash / MSYS2 /
+# Cygwin): uname -s reports MINGW*_NT-*, MSYS_NT-*, or CYGWIN_NT-*, and
+# the x86_64 build is the MSVC target. The Windows-native route is
+# install.ps1 (irm | iex); this arm keeps the sh one-liner working for
+# Git Bash users. The detection rides FIRST: every later section reads
+# WINDOWS / BINARY_NAME (the path spellings, the payload check, the
+# launcher, the takeover gates).
+OS="$(uname -s)"
+ARCH="$(uname -m)"
+WINDOWS="no"
+# CHANNEL_PLATFORM is the channel manifest's platform alias (the TS
+# NATIVE_PLATFORMS spelling pa-core::update::install::current_platform_alias
+# reads); TARGET stays the rust triple the payload names its targets by.
+case "$OS:$ARCH" in
+  Darwin:arm64) TARGET=aarch64-apple-darwin; CHANNEL_PLATFORM=darwin-arm64 ;;
+  Darwin:x86_64) TARGET=x86_64-apple-darwin; CHANNEL_PLATFORM=darwin-x64 ;;
+  Linux:x86_64) TARGET=x86_64-unknown-linux-gnu; CHANNEL_PLATFORM=linux-x64 ;;
+  Linux:aarch64) TARGET=aarch64-unknown-linux-gnu; CHANNEL_PLATFORM=linux-arm64 ;;
+  MINGW64_NT*:x86_64|MINGW_NT*:x86_64|MSYS_NT*:x86_64|CYGWIN_NT*:x86_64)
+    TARGET=x86_64-pc-windows-msvc; CHANNEL_PLATFORM=win32-x64; WINDOWS=yes ;;
+  *)
+    die "no rust build is published for ${OS} ${ARCH} (detected via uname);
+the release channel builds aarch64-apple-darwin, x86_64-apple-darwin,
+aarch64-unknown-linux-gnu, x86_64-unknown-linux-gnu, and
+x86_64-pc-windows-msvc (the Windows build installs through this script
+under Git Bash/MSYS2/Cygwin — uname MINGW*_NT*/MSYS_NT*/CYGWIN_NT* — or
+through install.ps1 in PowerShell)"
+    ;;
+esac
+# The staged binary name: the MSVC build ships prime-agent.exe; the
+# extraction check, the launcher, and the manifest row all name it.
+if [ "$WINDOWS" = "yes" ]; then
+  BINARY_NAME="prime-agent.exe"
+else
+  BINARY_NAME="prime-agent"
+fi
+
 usage() {
   cat <<'USAGE'
 install-rust.sh — install the Rust build of Prime Agent under the prime-agent keyword.
@@ -392,7 +433,15 @@ python3 required), or install python3 yourself and re-run"
 # Resolved like PREFIX below: when $HOME is a symlink, a PREFIX spelled in the
 # physical form must still compare equal to the store, or the guard would
 # pass two different spellings of the same directory.
-PRESERVED_STORE="$("$UVPY" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${HOME}/.prime/agent")"
+# Windows/MSYS resolves in the POSIX (MSYS) spelling: a native python
+# round-trips the path through Windows form (realpath answers C:\...),
+# which would make every later MSYS-form comparison miss; the sh-native
+# physical_path() keeps the guard's spellings consistent end to end.
+if [ "$WINDOWS" = "yes" ]; then
+  PRESERVED_STORE="$(physical_path "${HOME}/.prime/agent")"
+else
+  PRESERVED_STORE="$("$UVPY" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${HOME}/.prime/agent")"
+fi
 guard_preserved() {
   for guarded_path in "$@"; do
     case "$guarded_path" in
@@ -421,12 +470,30 @@ fresh_slot() { # base name without suffix
 
 case "$PREFIX" in
   /*) ;;
-  *) die "PRIME_AGENT_RUST_PREFIX must be an absolute path: ${PREFIX}" ;;
+  *)
+    # Windows accepts the Windows drive-letter spelling too (a user passing
+    # C:\... in Git Bash): cygpath - the MSYS2/Cygwin core tool - rewrites
+    # it to the POSIX form every later step compares in.
+    if [ "$WINDOWS" = "yes" ] && command -v cygpath >/dev/null 2>&1; then
+      PREFIX="$(cygpath -u "$PREFIX" 2>/dev/null)"         || die "PRIME_AGENT_RUST_PREFIX must be an absolute path: ${PRIME_AGENT_RUST_PREFIX}"
+      case "$PREFIX" in
+        /*) ;;
+        *) die "PRIME_AGENT_RUST_PREFIX must be an absolute path: ${PRIME_AGENT_RUST_PREFIX}" ;;
+      esac
+    else
+      die "PRIME_AGENT_RUST_PREFIX must be an absolute path: ${PREFIX}"
+    fi
+    ;;
 esac
 # Resolve PREFIX FULLY (symlinks included) BEFORE creating anything under
 # it: a prefix whose spelling hides a symlink into the shared store must
-# abort before mkdir -p ever writes there, not after.
-PREFIX="$("$UVPY" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$PREFIX")"
+# abort before mkdir -p ever writes there, not after. Windows resolves in
+# the MSYS form (the guard's ruling above).
+if [ "$WINDOWS" = "yes" ]; then
+  PREFIX="$(physical_path "$PREFIX")"
+else
+  PREFIX="$("$UVPY" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$PREFIX")"
+fi
 guard_preserved "$PREFIX" "${PREFIX}/share" "${PREFIX}/bin"
 mkdir -p "${PREFIX}/share" "${PREFIX}/bin"
 # The guard must also see THROUGH symlinked child roots: a ${PREFIX}/share or
@@ -447,26 +514,6 @@ lock_link="${PREFIX}/share/.prime-agent-install.lock"
 legacy_lock="${PREFIX}/share/.prime-agent-rust-install.lock"
 guard_preserved "$share_dir" "$launcher" "$old_layout_dir" "$legacy_dir" "$lock_link"
 
-# --- platform detection ----------------------------------------------------
-# uname -m maps directly to the built target: an Apple-Silicon Mac whose
-# shell (and therefore binaries) run under Rosetta 2 reports x86_64 and
-# gets the x86_64 build, which is the correct build for that runtime.
-OS="$(uname -s)"
-ARCH="$(uname -m)"
-# CHANNEL_PLATFORM is the channel manifest's platform alias (the TS
-# NATIVE_PLATFORMS spelling pa-core::update::install::current_platform_alias
-# reads); TARGET stays the rust triple the payload names its targets by.
-case "$OS:$ARCH" in
-  Darwin:arm64) TARGET=aarch64-apple-darwin; CHANNEL_PLATFORM=darwin-arm64 ;;
-  Darwin:x86_64) TARGET=x86_64-apple-darwin; CHANNEL_PLATFORM=darwin-x64 ;;
-  Linux:x86_64) TARGET=x86_64-unknown-linux-gnu; CHANNEL_PLATFORM=linux-x64 ;;
-  Linux:aarch64) TARGET=aarch64-unknown-linux-gnu; CHANNEL_PLATFORM=linux-arm64 ;;
-  *)
-    die "no rust build is published for ${OS} ${ARCH} (detected via uname);
-the release channel builds aarch64-apple-darwin, x86_64-apple-darwin,
-aarch64-unknown-linux-gnu, and x86_64-unknown-linux-gnu"
-    ;;
-esac
 
 # --- glibc floor (Linux) ------------------------------------------------------
 # The continuous workflow builds the GNU/Linux targets inside an
@@ -680,10 +727,19 @@ say "checksum verified: ${asset_name} (${VERSION}, the ${CHANNEL} channel)"
 # socket stops answering).
 # ts_stop_summary accumulates the summary line(s); the success block
 # prints them with the other takeover facts.
+# WINDOWS (uname MINGW*/MSYS/CYGWIN): the TypeScript product never shipped a
+# Windows build, so no TS daemon, native install, or npm package can exist
+# here - the whole TS-takeover ladder below is a no-op by construction, and
+# this product's daemon runs a NAMED PIPE the unix-socket probe cannot see.
+# The Windows daemon stop is the product's own `shutdown` command, run in
+# the install section BEFORE the publish (a Windows process holds its
+# binary open - the payload swap needs the daemon down first; the unix
+# flow stops daemons after the publish, which a Windows file lock refuses).
 ts_stop_summary=""
 ts_stop_found_any=""
 ts_stop_refused=""
 ts_stop_rust_stopped=""
+windows_stop_summary=""
 ts_socket="${TMPDIR:-/tmp}/prime-agent-$(id -u)/daemon.sock"
 rust_socket="${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock"
 env_socket="${PRIME_AGENT_DAEMON_SOCKET:-}"
@@ -1220,8 +1276,8 @@ fi
 stage="$(mktemp -d "${PREFIX}/share/prime-agent.stage.XXXXXX")"
 guard_preserved "$stage"
 tar -xzf "$asset" -C "$stage"
-[ -x "${stage}/prime-agent" ] \
-  || die "the tarball did not contain an executable prime-agent payload"
+[ -x "${stage}/${BINARY_NAME}" ] \
+  || die "the tarball did not contain an executable ${BINARY_NAME} payload"
 # The ownership marker: the share tree this script publishes carries it, so
 # later installs recognize the tree as theirs BY MARKER, not by shape — an
 # unrelated directory that happens to contain a `prime-agent` entry is never
@@ -1243,15 +1299,57 @@ if [ -e "$legacy_lock" ] || [ -L "$legacy_lock" ]; then
   fi
   rm -f "$legacy_lock"
 fi
-until ln -s $$ "$lock_link" 2>/dev/null; do
-  held_by="$(readlink "$lock_link" 2>/dev/null || true)"
-  if [ -n "$held_by" ] && kill -0 "$held_by" 2>/dev/null; then
-    die "another install-rust.sh (pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"
-  fi
-  die "a previous install-rust.sh (pid ${held_by:-unknown}) left a stale publication lock (a crashed install; its cleanup trap cannot have run). Remove it and retry:
+# THE WINDOWS LOCK: MSYS `ln -s` deep-copies by default (a real symlink
+# needs Developer Mode + winsymlinks), so the symlink claim is not atomic
+# on Windows - a lock DIRECTORY is: `mkdir` is the single-winner claim,
+# the holder's pid rides a file inside it, and a dead holder is detected
+# by `kill -0` (MSYS pids) exactly like the unix link. The EXIT trap
+# sweeps the directory; a stale lock (a crashed install) is never
+# auto-stolen - the same manual-recovery contract as the link.
+if [ "$WINDOWS" = "yes" ]; then
+  lock_dir="${PREFIX}/share/.prime-agent-install.lock.d"
+  until mkdir "$lock_dir" 2>/dev/null; do
+    held_by="$(cat "$lock_dir/pid" 2>/dev/null || true)"
+    if [ -n "$held_by" ] && kill -0 "$held_by" 2>/dev/null; then
+      die "another install-rust.sh (pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"
+    fi
+    die "a previous install-rust.sh (pid ${held_by:-unknown}) left a stale publication lock (a crashed install; its cleanup trap cannot have run). Remove it and retry:
+  rm -rf ${lock_dir}"
+  done
+  printf '%s\n' $$ > "$lock_dir/pid"
+else
+  until ln -s $$ "$lock_link" 2>/dev/null; do
+    held_by="$(readlink "$lock_link" 2>/dev/null || true)"
+    if [ -n "$held_by" ] && kill -0 "$held_by" 2>/dev/null; then
+      die "another install-rust.sh (pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"
+    fi
+    die "a previous install-rust.sh (pid ${held_by:-unknown}) left a stale publication lock (a crashed install; its cleanup trap cannot have run). Remove it and retry:
   rm -f ${lock_link}"
-done
+  done
+fi
+# THE WINDOWS DAEMON STOP, before the publish (a Windows process holds its
+# own binary open, so the old-tree rename-aside below fails while a daemon
+# runs): the stop is the product's own clean shutdown over its named pipe -
+# the graceful request first, the forced one if it did not settle, never a
+# signal. A machine with no launcher yet (a fresh install) has no daemon
+# the stop could reach; that absence is the normal fresh-install path.
+if [ "$WINDOWS" = "yes" ] && [ -f "$launcher" ]; then
+  say "stopping the running Rust daemon before the publish (a Windows"
+  say "  process holds its binary open - the payload swap needs it down)"
+  if "$launcher" shutdown >/dev/null 2>&1; then
+    windows_stop_summary="daemon: stopped cleanly for this update (the shutdown request over the named pipe)"
+    say "the running daemon was shut down (the next invocation boots the new one)"
+  elif "$launcher" shutdown --force >/dev/null 2>&1; then
+    windows_stop_summary="daemon: force-stopped for this update (the forced shutdown request over the named pipe)"
+    say "the running daemon was shut down (forced; the next invocation boots the new one)"
+  else
+    windows_stop_summary="daemon: WARNING no shutdown answer (if a daemon is running, stop it by hand: prime-agent shutdown --force)"
+    note "warning: no daemon answered the shutdown requests; if a daemon is"
+    note "  running, stop it by hand (prime-agent shutdown --force) and re-run"
+  fi
+fi
 launcher_tmp=""
+cmd_tmp=""
 displaced_ts_root=""
 preserved_launcher=""
 migrated_old_layout=""
@@ -1261,6 +1359,7 @@ on_exit() {
   # to publish into share_dir while this one still restores state — the
   # restore would delete that fresh payload (cross-installer data loss).
   [ -n "$launcher_tmp" ] && rm -f "$launcher_tmp" 2>/dev/null || true
+  [ -n "${cmd_tmp:-}" ] && rm -f "$cmd_tmp" 2>/dev/null || true
   # The user's unowned command file goes home if the Rust launcher never
   # went live (the same restore discipline as the displaced TS tree): a
   # failed launcher write must not leave the machine without ANY
@@ -1283,6 +1382,11 @@ on_exit() {
   fi
   restore_ts_root
   rm -f "$lock_link"
+  # The Windows lock arm (the mkdir lock directory): the link removal is a
+  # no-op there, the directory removal is the release.
+  if [ "$WINDOWS" = "yes" ]; then
+    rm -rf "${PREFIX}/share/.prime-agent-install.lock.d"
+  fi
 }
 trap on_exit EXIT
 
@@ -1452,7 +1556,21 @@ if [ -e "$launcher" ] || [ -L "$launcher" ]; then
   fi
 fi
 launcher_tmp="$(mktemp "${bin_dir}/.prime-agent.XXXXXX")"
-cat > "$launcher_tmp" <<'EOF'
+if [ "$WINDOWS" = "yes" ]; then
+  # The Git Bash launcher: execs the payload's prime-agent.exe. NO daemon
+  # socket pin — this product's Windows daemon endpoint is the fixed named
+  # pipe (pa-daemon platform/paths), which is rust-only by construction:
+  # the TypeScript product never shipped a Windows build, so the unix
+  # cohabitation pin (a rust-only socket path that never collides with a
+  # TS daemon) has no TS daemon to avoid here.
+  cat > "$launcher_tmp" <<'EOF'
+#!/bin/sh
+# prime-agent — launcher written by install-rust.sh.
+export PRIME_AGENT_CODING_AGENT_DIR="${PRIME_AGENT_CODING_AGENT_DIR:-$HOME/.prime/agent}"
+exec "$(dirname "$0")/../share/prime-agent/prime-agent.exe" "$@"
+EOF
+else
+  cat > "$launcher_tmp" <<'EOF'
 #!/bin/sh
 # prime-agent — launcher written by install-rust.sh.
 # The session store is shared with the TypeScript product BY DESIGN: both
@@ -1470,9 +1588,33 @@ export PRIME_AGENT_CODING_AGENT_DIR="${PRIME_AGENT_CODING_AGENT_DIR:-$HOME/.prim
 export PRIME_AGENT_DAEMON_SOCKET="${PRIME_AGENT_DAEMON_SOCKET:-${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock}"
 exec "$(dirname "$0")/../share/prime-agent/prime-agent" "$@"
 EOF
+fi
 chmod 0755 "$launcher_tmp"
 mv -f "$launcher_tmp" "$launcher"
 launcher_tmp=""
+# The cmd/PowerShell launcher twin (Windows only): the same
+# ../share/prime-agent payload, resolved from the .cmd's own location, so
+# `prime-agent` answers from cmd.exe and PowerShell too (the sh launcher
+# above serves Git Bash). The same unowned-file discipline as the sh
+# launcher: a foreign .cmd is preserved aside, never destroyed.
+if [ "$WINDOWS" = "yes" ]; then
+  cmd_launcher="${bin_dir}/prime-agent.cmd"
+  if [ -f "$cmd_launcher" ] \
+     && ! grep -q 'launcher written by install-rust.sh' "$cmd_launcher" 2>/dev/null; then
+    preserved_cmd_path="$(fresh_slot "${bin_dir}/prime-agent.cmd.pre-takeover")"
+    mv "$cmd_launcher" "$preserved_cmd_path" \
+      || die "could not preserve the existing file at ${cmd_launcher}; resolve it and re-run"
+    note "note: an unrelated ${cmd_launcher} existed; it was preserved at ${preserved_cmd_path}"
+  fi
+  cmd_tmp="$(mktemp "${bin_dir}/.prime-agent-cmd.XXXXXX")"
+  cat > "$cmd_tmp" <<'EOF'
+@echo off
+rem prime-agent - launcher written by install-rust.sh.
+if not defined PRIME_AGENT_CODING_AGENT_DIR set "PRIME_AGENT_CODING_AGENT_DIR=%USERPROFILE%\.prime\agent"
+"%~dp0..\share\prime-agent\prime-agent.exe" %*
+EOF
+  mv -f "$cmd_tmp" "$cmd_launcher"
+fi
 # The Rust launcher is live: the takeover stands — the displaced TS tree
 # stays in its legacy slot (with the printed rollback commands) and the
 # preserved command file stays in its aside slot.
@@ -1508,18 +1650,24 @@ fi
 # invocation boots the new daemon).
 last_stop_recorded=""
 last_stop_was_rust=""
-stop_daemon_candidate "$ts_socket" ts
-ts_stop_stopped_ts="$last_stop_recorded"
-ts_stop_was_rust_ts="$last_stop_was_rust"
-if [ "$env_socket_probe" = "yes" ]; then
-  stop_daemon_candidate "$env_socket" ts
-  ts_stop_stopped_env="$last_stop_recorded"
-  ts_stop_was_rust_env="$last_stop_was_rust"
-fi
-if [ "$rust_socket_probe" = "yes" ]; then
-  stop_daemon_candidate "$rust_socket" ours
-  ts_stop_stopped_rust="$last_stop_recorded"
-  ts_stop_was_rust_rust="$last_stop_was_rust"
+# WINDOWS: no TS daemon can exist (the TS product never shipped a Windows
+# build) and this product's daemon runs a named pipe - the unix-socket
+# ladder below never applies. The Windows daemon stop already ran, before
+# the publish (the file-lock ruling).
+if [ "$WINDOWS" != "yes" ]; then
+  stop_daemon_candidate "$ts_socket" ts
+  ts_stop_stopped_ts="$last_stop_recorded"
+  ts_stop_was_rust_ts="$last_stop_was_rust"
+  if [ "$env_socket_probe" = "yes" ]; then
+    stop_daemon_candidate "$env_socket" ts
+    ts_stop_stopped_env="$last_stop_recorded"
+    ts_stop_was_rust_env="$last_stop_was_rust"
+  fi
+  if [ "$rust_socket_probe" = "yes" ]; then
+    stop_daemon_candidate "$rust_socket" ours
+    ts_stop_stopped_rust="$last_stop_recorded"
+    ts_stop_was_rust_rust="$last_stop_was_rust"
+  fi
 fi
 
 # THE VERIFY (the field contract: the TS daemon is DOWN before the install
@@ -1543,20 +1691,24 @@ verify_stopped_socket() {
 "
   fi
 }
-if [ "${ts_stop_stopped_ts:-}" = "yes" ]; then
-  verify_stopped_socket "$ts_socket" "$ts_stop_was_rust_ts"
-fi
-if [ "${ts_stop_stopped_env:-}" = "yes" ]; then
-  verify_stopped_socket "$env_socket" "$ts_stop_was_rust_env"
-fi
-if [ "${ts_stop_stopped_rust:-}" = "yes" ]; then
-  verify_stopped_socket "$rust_socket" "$ts_stop_was_rust_rust"
+if [ "$WINDOWS" != "yes" ]; then
+  if [ "${ts_stop_stopped_ts:-}" = "yes" ]; then
+    verify_stopped_socket "$ts_socket" "$ts_stop_was_rust_ts"
+  fi
+  if [ "${ts_stop_stopped_env:-}" = "yes" ]; then
+    verify_stopped_socket "$env_socket" "$ts_stop_was_rust_env"
+  fi
+  if [ "${ts_stop_stopped_rust:-}" = "yes" ]; then
+    verify_stopped_socket "$rust_socket" "$ts_stop_was_rust_rust"
+  fi
 fi
 
 # The TS npm package: uninstalled (operator directive — the Rust port owns the
 # keyword), with the restore command printed. Exact package `prime-agent`
-# only; best-effort — an npm failure warns and moves on.
-if command -v npm >/dev/null 2>&1; then
+# only; best-effort — an npm failure warns and moves on. Windows never had
+# a TS npm install (the TS product shipped darwin/linux only), so the whole
+# step is darwin/linux.
+if [ "$WINDOWS" != "yes" ] && command -v npm >/dev/null 2>&1; then
   npm_root="$(npm root -g 2>/dev/null || true)"
   if [ -n "$npm_root" ] && [ -f "${npm_root}/prime-agent/package.json" ]; then
     ts_version="$("$UVPY" -c 'import json, sys
@@ -1647,6 +1799,10 @@ case ":$PATH:" in
   *)
     echo "note: ${bin_dir} is not on your PATH; add it to your shell profile:"
     printf "  export PATH=\"%s:\$PATH\"\n" "$bin_dir"
+    if [ "$WINDOWS" = "yes" ]; then
+      echo "  (PowerShell/cmd: add the same directory to the user PATH, e.g. via"
+      echo "   [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';${bin_dir}', 'User'))"
+    fi
     ;;
 esac
 
@@ -1672,7 +1828,14 @@ elif [ -d "$old" ]; then
   echo "            once you no longer need the rollback)"
 fi
 echo "source:    the ${CHANNEL} channel at ${BASE_URL} (prime-agent ${VERSION})"
-if [ -n "$ts_stop_summary" ]; then
+if [ "$WINDOWS" = "yes" ]; then
+  # The Windows stop ran before the publish (the file-lock ruling); its
+  # summary rides here. A fresh install (no launcher yet) prints nothing —
+  # there was no daemon to stop.
+  if [ -n "$windows_stop_summary" ]; then
+    echo "$windows_stop_summary"
+  fi
+elif [ -n "$ts_stop_summary" ]; then
   printf '%s' "$ts_stop_summary"
 elif [ -z "$ts_stop_found_any" ] && [ -z "$ts_stop_refused" ]; then
   # No silent skips: a machine with no daemon anywhere says so, naming
