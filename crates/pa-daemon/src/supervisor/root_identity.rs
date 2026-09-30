@@ -62,12 +62,15 @@ impl Supervisor {
             return;
         };
         let mut descriptor = resident.descriptor.lock().await;
-        // The freshness gate: the side record only wins while its move is
-        // NEWER than the record — a later swap whose persist succeeded
-        // (and whose side-record removal failed) must never be rolled
-        // back onto this older pending. An obsolete record is cleared,
-        // not applied.
-        if descriptor.updated_at.as_str() > moved_at.as_str() {
+        // The freshness gate: the side record only wins while the record is
+        // STRICTLY OLDER than the move — a later swap whose persist
+        // succeeded (and whose side-record removal failed) must never be
+        // rolled back onto this older pending, including the same-
+        // millisecond case (a repair persist that lands at the exact
+        // moment of the move's stamp carries the moved identity, so the
+        // pending is obsolete at equality). An obsolete record is
+        // cleared, not applied.
+        if descriptor.updated_at.as_str() >= moved_at.as_str() {
             drop(descriptor);
             if let Err(error) = crate::descriptor::clear_identity_pending(&resident.descriptor_path)
             {
@@ -710,6 +713,34 @@ mod tests {
         assert!(
             crate::descriptor::read_identity_pending(&resident.descriptor_path).is_none(),
             "the obsolete pending is cleared, not applied"
+        );
+
+        // THE EQUAL-TIMESTAMP EDGE: a repair persist that lands at the
+        // exact moment of a stale pending's stamp carries the moved
+        // identity — the pending is obsolete at equality too, never
+        // applied (the rollback the equal comparison allowed).
+        let equal_stamped = newer.updated_at.clone();
+        {
+            let mut descriptor = resident.descriptor.lock().await;
+            descriptor.updated_at = equal_stamped.clone();
+        }
+        crate::descriptor::write_identity_pending(
+            &resident.descriptor_path,
+            "sOld",
+            &dir.join("old.jsonl").to_string_lossy(),
+            &equal_stamped,
+        )
+        .unwrap();
+        supervisor.apply_identity_pending(&resident).await;
+        let root_session_id = resident.descriptor.lock().await.root_session_id.clone();
+        assert_eq!(
+            root_session_id.as_deref(),
+            Some("sA"),
+            "an equal-timestamp pending never rolls the record back"
+        );
+        assert!(
+            crate::descriptor::read_identity_pending(&resident.descriptor_path).is_none(),
+            "the equal-timestamp pending is cleared, not applied"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
