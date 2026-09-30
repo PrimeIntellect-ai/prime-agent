@@ -266,7 +266,10 @@ impl Supervisor {
     /// a `false` answer means the reconciliation did not run — the caller
     /// logs it and the persisted identity keeps serving until the next
     /// roster write.
-    pub(crate) async fn refresh_roster_entry(self: &Arc<Self>, resident: &Arc<ResidentWorker>) -> bool {
+    pub(crate) async fn refresh_roster_entry(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+    ) -> bool {
         let response = self
             .route_command_typed(
                 resident,
