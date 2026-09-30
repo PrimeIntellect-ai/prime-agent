@@ -96,7 +96,10 @@ impl FileSink {
         self.set_private().await
     }
 
-    /// 0600 on unix; on other platforms the agent dir ACLs apply.
+    /// 0600 on unix; on other platforms the agent dir ACLs apply. The
+    /// signature stays async for the shared call site; the non-unix arm
+    /// is legitimately await-free (the ACLs carry the restriction).
+    #[cfg_attr(not(unix), allow(clippy::unused_async))]
     async fn set_private(&self) -> Result<()> {
         #[cfg(unix)]
         {
