@@ -2,7 +2,7 @@
 //! `role: "custom"` wire messages (TS `agent-message.ts`,
 //! `injected-prompt-message.ts`, `compaction-outcome-message.ts`,
 //! `refinement-outcome-message.ts`, `shell-completion.ts`, and the generic
-//! `custom-message.ts` box) plus the user-message skill-invocation card
+//! `custom-message.ts` panel) plus the user-message skill-invocation card
 //! (TS `skill-invocation-message.ts`, parsed out of a user message's
 //! `<skill>` block). Decode maps every custom type to the component
 //! the TS dispatch (`createDisplayedCustomMessageComponent` /
@@ -17,7 +17,7 @@
 //! (`createDisplayedCustomMessageComponent`): non-display rows render
 //! nothing, every displayed type without a dedicated component (engine
 //! bookkeeping like `harness_digest`, unknown types) renders the generic
-//! `[<customType>]` box. (The TS replay path `buildConversationComponents`
+//! `[<customType>]` panel. (The TS replay path `buildConversationComponents`
 //! drops unknown types instead; the live interactive path is the TUI ground
 //! truth, and the Rust engine persists those types with `display: false`.)
 
@@ -154,10 +154,11 @@ pub struct EditField {
     pub change: Option<(Vec<String>, Vec<String>)>,
 }
 
-/// One generic custom row (TS `CustomMessageComponent`): the
-/// `[<customType>]` label box on `customMessageBg` with the markdown body in
-/// `customMessageText`. Every display-true custom type without a dedicated
-/// component renders this way (e.g. `autonomous_status`).
+/// One generic custom row (TS `CustomMessageComponent`, after #2779's one
+/// shared layout): the bold `[<customType>]` label header with the
+/// guttered markdown body in `customMessageText`. Every display-true
+/// custom type without a dedicated component renders this way (e.g.
+/// `autonomous_status`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CustomPanelRow {
     pub custom_type: String,
@@ -170,7 +171,7 @@ pub struct CustomPanelRow {
 
 /// The transcript entries for one `custom`-role message, mirroring the TS
 /// dispatch order: slash rows, compaction and refinement outcomes, agent
-/// messages, shell completions, injected prompts, then the generic box.
+/// messages, shell completions, injected prompts, then the generic panel.
 /// Non-display rows render nothing.
 pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
     use pa_types::slash_commands::{
@@ -229,13 +230,14 @@ pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
         }
         // Everything else - engine bookkeeping (`harness_digest`,
         // `refinement_notice`, worker recovery) and unknown types - renders
-        // the generic box, exactly like the TS live dispatch fallthrough
+        // the generic panel, exactly like the TS live dispatch fallthrough
         // (those types persist with `display: false` and render nothing).
         _ => vec![generic_panel_entry(custom_type, message)],
     }
 }
 
-/// TS `CustomMessageComponent` fallthrough: the `[<customType>]` box row.
+/// TS `CustomMessageComponent` fallthrough: the `[<customType>]` guttered
+/// panel row.
 fn generic_panel_entry(custom_type: &str, message: &Value) -> ChatEntry {
     ChatEntry::CustomPanel(Box::new(CustomPanelRow {
         custom_type: custom_type.to_string(),
@@ -413,6 +415,7 @@ pub(crate) fn custom_content_text(message: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Line, Span};
     use serde_json::json;
 
     fn decoded(message: &serde_json::Value) -> Vec<ChatEntry> {
@@ -591,8 +594,24 @@ mod tests {
             [ChatEntry::InjectedPrompt(boxed)]
                 if matches!(boxed.kind, InjectedPromptKind::KernelRestored { restored: false })
         ));
-        // The RLM child rows decode the outcome and the session name (the
-        // render shapes live with the kind, in `injected_prompt`).
+        // The kernel-state row carries no expandable body.
+        let restored = decoded(&json!({
+            "role": "custom",
+            "customType": IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
+            "content": "[python-state-restored]",
+            "display": true,
+            "details": { "restored": true },
+        }));
+        assert!(matches!(
+            restored.as_slice(),
+            [ChatEntry::InjectedPrompt(boxed)] if boxed.body.is_none()
+        ));
+    }
+
+    /// The RLM child rows decode the outcome and the session name (the
+    /// render shapes live with the kind, in `injected_prompt`).
+    #[test]
+    fn rlm_child_and_unavailable_rows_decode() {
         let failed = decoded(&json!({
             "role": "custom",
             "customType": RLM_CHILD_FAILURE_CUSTOM_TYPE,
@@ -637,18 +656,6 @@ mod tests {
                 "outcome {outcome:?} of kind {kind:?} did not decode"
             );
         }
-        // The kernel-state row carries no expandable body.
-        let restored = decoded(&json!({
-            "role": "custom",
-            "customType": IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
-            "content": "[python-state-restored]",
-            "display": true,
-            "details": { "restored": true },
-        }));
-        assert!(matches!(
-            restored.as_slice(),
-            [ChatEntry::InjectedPrompt(boxed)] if boxed.body.is_none()
-        ));
         // The unavailable-skills row decodes the failed names and keeps
         // the full report as its expandable body.
         let unavailable = decoded(&json!({
@@ -775,5 +782,117 @@ mod tests {
                 if row.custom_type == "autonomous_status"
                     && row.content == "[autonomous-status: on]"
         ));
+    }
+
+    /// Flattened rows with the trailing padding trimmed (whole-vector
+    /// equality against the painted transcript text).
+    fn plain_rows(rows: &[Line]) -> Vec<String> {
+        rows.iter()
+            .map(|row| {
+                row.iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// One gutter for every expandable chat body, the Rust twin of TS
+    /// #2779's `expandable-event-message.test.ts`: the dim gutter row sits
+    /// right below the header, the rest on the four-column indent, and the
+    /// collapsed rows stay bare. The compaction metadata rides its header
+    /// row, and the skill name lives on the header only.
+    #[test]
+    fn expandable_bodies_hang_on_one_gutter() {
+        use crate::chat::Detail;
+        use crate::compaction_row::render_compaction_summary;
+        let theme = crate::theme::Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        let gutter = Span::styled(
+            crate::branch::BRANCH_GUTTER.to_string(),
+            theme.fg_style(ThemeColor::Dim),
+        );
+        // 57 columns wrap at the branch content width 56: one full row
+        // plus one.
+        let body = "w".repeat(57);
+        let head = format!(" {}{}", crate::branch::BRANCH_GUTTER, "w".repeat(56));
+        let tail = format!("{}w", crate::branch::BRANCH_INDENT);
+        let skill = SkillInvocationRow {
+            name: "review".to_string(),
+            content: body.clone(),
+        };
+        let goal = InjectedPromptRow {
+            kind: InjectedPromptKind::Goal {
+                kind: Some("continuation".to_string()),
+                objective: Some("Ship.".to_string()),
+            },
+            body: Some(body.clone()),
+        };
+        let shell = ShellCompletionRow {
+            pid: None,
+            exit_code: Some(0),
+            content: body.clone(),
+        };
+        let panel = CustomPanelRow {
+            custom_type: "notice".to_string(),
+            content: body.clone(),
+        };
+        let compacted = format!(" {body}");
+        // (collapsed rows + their expected text, expanded rows, expanded
+        // header text)
+        let cases = vec![
+            (
+                Some((
+                    skill_invocation::render_skill_invocation(
+                        &skill,
+                        Detail::Overview,
+                        &theme,
+                        60,
+                        false,
+                    ),
+                    vec![" [skill] review"],
+                )),
+                skill_invocation::render_skill_invocation(&skill, Detail::All, &theme, 60, false),
+                vec![" [skill] review"],
+            ),
+            (
+                Some((
+                    injected_prompt::render_injected_prompt(&goal, Detail::Overview, &theme, 60),
+                    vec!["", " Goal continuation \u{b7} Ship."],
+                )),
+                injected_prompt::render_injected_prompt(&goal, Detail::All, &theme, 60),
+                vec!["", " Goal continuation \u{b7} Ship."],
+            ),
+            (
+                Some((
+                    render::render_shell_completion(&shell, Detail::Overview, &theme, 60, false),
+                    vec![" \u{2713} Background shell command finished"],
+                )),
+                render::render_shell_completion(&shell, Detail::All, &theme, 60, false),
+                vec![" \u{2713} Background shell command finished"],
+            ),
+            (
+                None,
+                render::render_custom_panel(&panel, &theme, 60),
+                vec!["", " [notice]"],
+            ),
+            (
+                Some((
+                    render_compaction_summary(&body, 480, None, false, &theme, 60),
+                    vec![" \u{25c6} Context compacted", compacted.as_str()],
+                )),
+                render_compaction_summary(&body, 480, None, true, &theme, 60),
+                vec![" \u{25c6} Context compacted \u{b7} Compacted from 480 tokens"],
+            ),
+        ];
+        for (collapsed, expanded, header) in cases {
+            if let Some((rows, text)) = collapsed {
+                assert_eq!(plain_rows(&rows), text, "{rows:?}");
+            }
+            let mut text = header.clone();
+            text.extend([head.as_str(), tail.as_str()]);
+            assert_eq!(plain_rows(&expanded), text, "{expanded:?}");
+            assert_eq!(expanded[header.len()][1], gutter, "{expanded:?}");
+        }
     }
 }

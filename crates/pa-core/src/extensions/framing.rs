@@ -115,6 +115,8 @@ impl LineDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+    use proptest::test_runner::RngSeed;
     use serde_json::json;
 
     fn limits(max: usize) -> LineLimits {
@@ -136,22 +138,6 @@ mod tests {
         let big = "x".repeat(10);
         let err = encode_line(&json!({"data": big}), limits(8)).unwrap_err();
         assert!(err.to_string().contains("line limit"));
-    }
-
-    #[test]
-    fn decoder_handles_chunked_lines() {
-        let mut dec = LineDecoder::new(LineLimits::default());
-        assert!(dec.feed(b"{\"id\"").unwrap().is_empty());
-        let lines = dec.feed(b":1}\n{\"id\":2}\n").unwrap();
-        assert_eq!(lines, vec!["{\"id\":1}", "{\"id\":2}"]);
-        assert_eq!(dec.buffered_bytes(), 0);
-    }
-
-    #[test]
-    fn decoder_skips_blank_and_tolerates_crlf() {
-        let mut dec = LineDecoder::new(LineLimits::default());
-        let lines = dec.feed(b"\n{\"id\":1}\r\n\n").unwrap();
-        assert_eq!(lines, vec!["{\"id\":1}"]);
     }
 
     #[test]
@@ -187,5 +173,58 @@ mod tests {
             elapsed < std::time::Duration::from_secs(2),
             "4 MiB line took {elapsed:?}"
         );
+    }
+
+    // Any chunk partition decodes like `str::split('\n')`: one trailing `\r`
+    // stripped per line, blank lines dropped, the last segment buffered.
+    // Invalid UTF-8 and small byte limits stay with the example tests.
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            rng_seed: RngSeed::Fixed(0x4652_414d),
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn chunked_feeds_decode_like_split_lines(
+            lines in prop::collection::vec((prop_oneof![
+                4 => "[a-z{}\":, 界🙂\r]{0,24}",
+                1 => "[a-z界]{1,8}".prop_map(|unit| unit.repeat(4096)),
+            ], "\n|\r\n"), 0..16),
+            tail in "[a-z界\r]{0,16}",
+            cuts in prop::collection::vec((any::<prop::sample::Index>(), any::<bool>()), 0..24),
+        ) {
+            let text: String = lines
+                .iter()
+                .map(|(line, end)| format!("{line}{end}"))
+                .chain([tail])
+                .collect();
+            let newlines: Vec<usize> = text.match_indices('\n').map(|(at, _)| at).collect();
+            // Flagged cuts land on a `\n` byte: they split CRLF and line ends.
+            let mut edges: Vec<usize> = cuts
+                .iter()
+                .map(|(index, on_newline)| {
+                    if *on_newline && !newlines.is_empty() {
+                        newlines[index.index(newlines.len())]
+                    } else {
+                        index.index(text.len() + 1)
+                    }
+                })
+                .chain([0, text.len()])
+                .collect();
+            edges.sort_unstable();
+            let mut decoder = LineDecoder::new(LineLimits::default());
+            let mut decoded = Vec::new();
+            for window in edges.windows(2) {
+                decoded.extend(decoder.feed(&text.as_bytes()[window[0]..window[1]]).unwrap());
+            }
+            let mut segments = text.split('\n');
+            let tail = segments.next_back().unwrap();
+            let expected: Vec<&str> = segments
+                .map(|segment| segment.strip_suffix('\r').unwrap_or(segment))
+                .filter(|line| !line.is_empty())
+                .collect();
+            prop_assert_eq!(decoded, expected);
+            prop_assert_eq!(decoder.buffered_bytes(), tail.len());
+        }
     }
 }

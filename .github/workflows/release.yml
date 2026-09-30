@@ -459,6 +459,227 @@ jobs:
           out.write_text(json.dumps(document, indent=2) + "\n")
           print(f"channel manifest {out.name}: {document['version']}, {len(rows)} artifacts")
           PY
+      # THE R2 PUBLISH PHASE (the operator's distribution-model ruling: the
+      # user path is curl <domain>/install.sh and everything it reads comes
+      # from the same R2-backed base — nobody fetches a GitHub URL).
+      #
+      # THE SECURITY MODEL, in one block for every future reader:
+      #   - SEPARATION: the build jobs (build-gnu/build-darwin) produce and
+      #     attest the artifacts and hold NO R2 credentials; this promote job
+      #     — the protected 'release' environment, gated by the operator's
+      #     approval click — is the ONLY job that ever holds the R2 secrets.
+      #     The build is not the release: the approval gate IS the release
+      #     decision, and every s3 cp below runs only after it.
+      #   - CHECKSUM FIRST: sha256sum --check SHA256SUMS passes before any
+      #     upload — a corrupt or mismatched artifact never reaches the
+      #     bucket.
+      #   - HEADER FORM (TS parity): the version-prefixed artifacts
+      #     (releases/v<version>/) are immutable (1y) with their content
+      #     types; the root pointers (latest.json, stable, beta, beta.json,
+      #     install.sh, install-beta.sh) are no-cache — the user path is
+      #     always fresh.
+      #   - NO PATS, NO LEAKS: the GitHub side uses the workflow's own
+      #     identity (github.token); the R2 keys are environment secrets
+      #     scoped to this job; nothing is echoed.
+      #   - BETA SUPERSEDE: only the LATEST green commit gets a beta cut;
+      #     a newer rust push landing while this beta built means a newer
+      #     cut is coming — this publish keeps its versioned artifacts but
+      #     skips the beta channel pointers (beta.json/beta/install-beta.sh),
+      #     so the channel only ever advances forward.
+      #   - AUDIT SURFACE: the GitHub release below still attaches every
+      #     artifact (the TS order: the R2 publish first, GitHub second).
+      - name: Publish the R2 channel (the user path never touches GitHub)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test -n "$R2_BUCKET"
+          test -n "$R2_ENDPOINT_URL"
+          test -n "$R2_PUBLIC_BASE_URL"
+          INSTALL_BASE_URL="${R2_PUBLIC_BASE_URL%/}"
+          test -n "$INSTALL_BASE_URL"
+
+          # THE CHECKSUM GATE FIRST: the merged SHA256SUMS covers every
+          # tarball the build jobs produced; a mismatch never uploads.
+          (cd release-out && sha256sum --check SHA256SUMS)
+
+          RELEASE_PREFIX="releases/${RELEASE_VERSION}"
+          for artifact in release-out/prime-agent-*.tar.gz; do
+            aws s3 cp "$artifact" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$artifact")" \
+              --endpoint-url "$R2_ENDPOINT_URL" \
+              --content-type application/gzip \
+              --cache-control 'public, max-age=31536000, immutable'
+          done
+          aws s3 cp release-out/SHA256SUMS "s3://${R2_BUCKET}/${RELEASE_PREFIX}/SHA256SUMS" \
+            --endpoint-url "$R2_ENDPOINT_URL" \
+            --content-type text/plain \
+            --cache-control 'public, max-age=31536000, immutable'
+
+          # The rendered installer pair: the repo file's defaults ARE the
+          # official domain, so the publish render only stamps the build's
+          # R2 base + channel default into the served copies. Both renders
+          # publish on every cut (TS parity: a changed installer ships with
+          # whichever channel publishes, so the served scripts never go
+          # stale between releases).
+          render_installer() {
+            channel="$1"
+            sed -e "s|^DOWNLOAD_BASE_URL_DEFAULT=.*|DOWNLOAD_BASE_URL_DEFAULT=\"${INSTALL_BASE_URL}\"|" \
+                -e "s|^RELEASE_CHANNEL_DEFAULT=.*|RELEASE_CHANNEL_DEFAULT=${channel}|" \
+                "verification-source/install-rust.sh" > "/tmp/install-${channel}.sh"
+            grep -q "^DOWNLOAD_BASE_URL_DEFAULT=\"${INSTALL_BASE_URL}\"" "/tmp/install-${channel}.sh"
+            grep -q "^RELEASE_CHANNEL_DEFAULT=${channel}$" "/tmp/install-${channel}.sh"
+          }
+
+          # THE ANNOTATED-TAG PEEL: the nightly cuts create ANNOTATED tags,
+          # so GITHUB_SHA is the tag OBJECT, not the commit — resolve the
+          # commit (and its parent) through the ref chain instead of
+          # trusting the workflow sha.
+          resolve_commit_sha() {
+            ref_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}")"
+            obj_type="$(printf '%s' "${ref_json}" | jq -r '.object.type')"
+            obj_sha="$(printf '%s' "${ref_json}" | jq -r '.object.sha')"
+            if [ "${obj_type}" = "tag" ]; then
+              tag_obj="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${obj_sha}")"
+              obj_sha="$(printf '%s' "${tag_obj}" | jq -r '.object.sha')"
+            fi
+            printf '%s' "${obj_sha}"
+          }
+          tag_commit="$(resolve_commit_sha)"
+          built_parent="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${tag_commit}" --jq '.parents[0].sha')"
+
+          # THE CHANNEL-ADVANCE GUARD: the channel pointers only ever move
+          # FORWARD. The publish's writes are not atomic, so two tag
+          # promotions can interleave — the guard reads the channel's
+          # current version, refuses to write an OLDER one (an interleaved
+          # older promotion never regresses the channel), and heals a
+          # lost write race with a bounded re-read + rewrite.
+          version_gt() {
+            # semver-ish compare: v-prefix stripped, numeric dot fields.
+            a="${1#v}"; b="${2#v}"
+            [ "$a" = "$b" ] && return 1
+            a_n="${a%%-*}"; b_n="${b%%-*}"
+            awk -v an="$a_n" -v bn="$b_n" 'BEGIN {
+              split(an, A, "."); split(bn, B, ".")
+              for (i = 1; i <= 3; i++) { if (A[i] + 0 > B[i] + 0) exit 0; if (A[i] + 0 < B[i] + 0) exit 1 }
+              exit 1
+            }' && return 0
+            # same numeric base: the prerelease ordering (beta.N)
+            a_pre="${a#*-}"; b_pre="${b#*-}"
+            [ "$a_pre" != "$a" ] && [ "$(printf '%s\n' "$a_pre" "$b_pre" | sort -V | tail -1)" = "$a_pre" ] && [ "$a_pre" != "$b_pre" ]
+          }
+          publish_pointer_pair() {
+            # $1 = the manifest name (latest.json | beta.json), $2 = the
+            # pointer name (stable | beta), $3 = the manifest source file,
+            # $4 = the channel label. THE ORDER: the manifest first, then
+            # the version pointer — the pointer flip is the channel's
+            # commit act, and a reader landing between the writes re-reads
+            # the pair (the installer's consistency retry).
+            manifest_name="$1"; pointer_name="$2"; manifest_src="$3"; channel_label="$4"
+            aws s3 cp "$manifest_src" "s3://${R2_BUCKET}/${manifest_name}" \
+              --endpoint-url "$R2_ENDPOINT_URL" \
+              --content-type application/json \
+              --cache-control no-cache
+            printf '%s\n' "${RELEASE_VERSION#v}" > "/tmp/${pointer_name}-pointer"
+            aws s3 cp "/tmp/${pointer_name}-pointer" "s3://${R2_BUCKET}/${pointer_name}" \
+              --endpoint-url "$R2_ENDPOINT_URL" \
+              --content-type text/plain \
+              --cache-control no-cache
+            # THE HEAL: read the PAIR back (the manifest AND the pointer —
+            # an older job can lose the manifest race and still write its
+            # pointer after ours, leaving the pointer naming a version the
+            # manifest no longer carries); if either is behind, rewrite
+            # ours forward. A FAILED read is NEVER an empty channel: the
+            # heal rewrites only on reads that SUCCEEDED (a confirmed
+            # empty or below-version value); the aws error path skips the
+            # heal entirely — treating a transient read failure as an
+            # empty channel would let an older promotion overwrite a newer
+            # pair it could not even observe.
+            attempt=1
+            while [ "$attempt" -le 3 ]; do
+              if manifest_raw="$(aws s3 cp "s3://${R2_BUCKET}/${manifest_name}" - --endpoint-url "$R2_ENDPOINT_URL" 2>/dev/null)" \
+                 && pointer_raw="$(aws s3 cp "s3://${R2_BUCKET}/${pointer_name}" - --endpoint-url "$R2_ENDPOINT_URL" 2>/dev/null)"; then
+                readback="$(printf '%s' "${manifest_raw}" | jq -r '.version // empty' || true)"
+                pointer_readback="$(printf '%s' "${pointer_raw}" | tr -d '[:space:]')"
+              else
+                echo "heal: a read failed (a transient read error is never an empty channel) — skipping the heal; the advance guard above already published"
+                break
+              fi
+              if [ -z "${readback:-}" ] || [ -z "${pointer_readback:-}" ] \
+                 || version_gt "$RELEASE_VERSION" "$readback" \
+                 || version_gt "$RELEASE_VERSION" "$pointer_readback"; then
+                aws s3 cp "$manifest_src" "s3://${R2_BUCKET}/${manifest_name}" \
+                  --endpoint-url "$R2_ENDPOINT_URL" \
+                  --content-type application/json \
+                  --cache-control no-cache
+                aws s3 cp "/tmp/${pointer_name}-pointer" "s3://${R2_BUCKET}/${pointer_name}" \
+                  --endpoint-url "$R2_ENDPOINT_URL" \
+                  --content-type text/plain \
+                  --cache-control no-cache
+                attempt=$((attempt + 1))
+              else
+                break
+              fi
+            done
+            echo "${channel_label} channel pointers at ${RELEASE_VERSION}"
+          }
+
+          if [[ "$RELEASE_VERSION" == *-beta* ]]; then
+            # THE BETA CHANNEL: the rolling per-push cut. The supersede
+            # rule — only the newest proven commit advances the channel: a
+            # newer rust push landing while this beta built means a newer
+            # cut is already coming; this one keeps its versioned
+            # artifacts (immutable, still served to pinned installs) but
+            # leaves the channel pointers alone.
+            branch_head="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')"
+            if [ "$built_parent" != "$branch_head" ]; then
+              echo "superseded: this beta built ${built_parent} but main is at ${branch_head}; a newer cut is coming — the versioned artifacts publish, the beta channel pointers do not"
+            else
+              current_beta="$(aws s3 cp "s3://${R2_BUCKET}/beta.json" - --endpoint-url "$R2_ENDPOINT_URL" 2>/dev/null | jq -r '.version // empty' || true)"
+              if [ -n "$current_beta" ] && version_gt "$current_beta" "$RELEASE_VERSION"; then
+                echo "beta channel already at ${current_beta} (>= ${RELEASE_VERSION}); the channel never regresses — the versioned artifacts publish, the pointers stay"
+              else
+                render_installer beta
+                publish_pointer_pair beta.json beta release-out/beta.json beta
+                aws s3 cp /tmp/install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
+                  --endpoint-url "$R2_ENDPOINT_URL" \
+                  --content-type text/x-shellscript \
+                  --cache-control no-cache
+                render_installer stable
+                aws s3 cp /tmp/install-stable.sh "s3://${R2_BUCKET}/install.sh" \
+                  --endpoint-url "$R2_ENDPOINT_URL" \
+                  --content-type text/x-shellscript \
+                  --cache-control no-cache
+                echo "beta channel advanced to ${RELEASE_VERSION} at ${INSTALL_BASE_URL}"
+              fi
+            fi
+          else
+            # THE STABLE CHANNEL: the operator's release act is the
+            # approval click that opened this job; the publish is
+            # unconditional (a re-publish of the same version proceeds).
+            current_stable="$(aws s3 cp "s3://${R2_BUCKET}/latest.json" - --endpoint-url "$R2_ENDPOINT_URL" 2>/dev/null | jq -r '.version // empty' || true)"
+            if [ -n "$current_stable" ] && version_gt "$current_stable" "$RELEASE_VERSION"; then
+              echo "stable channel already at ${current_stable} (> ${RELEASE_VERSION}); the stable channel never regresses"
+            else
+              render_installer stable
+              publish_pointer_pair latest.json stable release-out/latest.json stable
+              aws s3 cp /tmp/install-stable.sh "s3://${R2_BUCKET}/install.sh" \
+                --endpoint-url "$R2_ENDPOINT_URL" \
+                --content-type text/x-shellscript \
+                --cache-control no-cache
+              render_installer beta
+              aws s3 cp /tmp/install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
+                --endpoint-url "$R2_ENDPOINT_URL" \
+                --content-type text/x-shellscript \
+                --cache-control no-cache
+              echo "stable channel advanced to ${RELEASE_VERSION} at ${INSTALL_BASE_URL}"
+            fi
+          fi
       - name: Install syft
         uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
       - name: Generate SPDX SBOM per target (unpacked artifact tree)

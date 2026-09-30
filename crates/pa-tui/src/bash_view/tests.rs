@@ -5,7 +5,6 @@
 use super::*;
 use crate::keybindings::KeybindingsManager;
 use crate::theme::{ColorMode, Theme};
-use ratatui::style::Modifier;
 use serde_json::json;
 
 fn kb() -> KeybindingsManager {
@@ -201,8 +200,8 @@ fn the_selection_wash_spans_the_whole_width() {
 /// The selected row paints the ONE shared selection style (the
 /// operator's 2026-09-28 consistency rule: the shell-runs selection's
 /// background is IDENTICAL to the agents view's and the heartbeats
-/// picker's selected rows and the dock's group band): the accent
-/// purple at full opacity with bold text — one style constant
+/// picker's selected rows and the dock's group band): the hover
+/// band's own color, no modifiers — one style constant
 /// (`Theme::selection_row_style`), not a per-surface copy.
 #[test]
 fn the_selected_row_paints_the_shared_selection_style() {
@@ -215,13 +214,12 @@ fn the_selected_row_paints_the_shared_selection_style() {
     let band = theme.selection_row_style();
     assert!(
         selected.iter().all(|span| span.style.bg == band.bg),
-        "every span of the selected row carries the shared purple band: {selected:?}"
+        "every span of the selected row carries the shared band: {selected:?}"
     );
-    assert!(
-        selected
-            .iter()
-            .all(|span| span.style.add_modifier.contains(Modifier::BOLD)),
-        "every span of the selected row carries the bold modifier: {selected:?}"
+    assert_eq!(
+        band.bg,
+        theme.hover_row_style().bg,
+        "the shared selection paints the hover's own color — the one-color ruling"
     );
 }
 

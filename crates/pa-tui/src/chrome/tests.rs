@@ -317,14 +317,13 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
 }
 
 /// The focused dock's selection reads as the ONE shared selection
-/// band (the operator's 2026-09-28 visibility and consistency
-/// directives): the accent purple restored as a FULLY OPAQUE
-/// background — the 2026-09-26 dark-green `ToolSuccessBg` band read
-/// near-invisible — with the selected group's text bold, across
-/// exactly the group's spans, while each span keeps its own status
-/// color (the selection never repaints the text).
+/// band (the operator's 2026-09-29 one-color ruling): the selection
+/// paints the hover band's own light color — the same ONE color on
+/// the dock's tab and the agents view's rows — never the accent,
+/// across exactly the group's spans, while each span keeps its own
+/// status color (the selection never repaints the text).
 #[test]
-fn activity_dock_selection_is_the_purple_opaque_bold_band() {
+fn activity_dock_selection_is_the_hover_colored_band() {
     let theme = Theme::builtin("prime", ColorMode::TrueColor);
     let dock = ActivityDock {
         subagents_running_direct: 1,
@@ -338,40 +337,32 @@ fn activity_dock_selection_is_the_purple_opaque_bold_band() {
     };
     let frame = render_activity_dock(&dock, &theme, 120);
     let row = &frame[1];
-    // The band is the theme's accent purple (prime #7c6faf — the
-    // original selection shade) at FULL opacity, with bold text:
-    // the ONE style every activity surface's selected row paints
-    // (`theme::selection_row_style`), never the 2026-09-26
-    // dark-green panel background.
+    // The band is the theme's hover color (`Theme::hover_row_style`,
+    // the one light wash — the operator's one-color ruling) with no
+    // extra modifiers: the ONE style every activity surface's
+    // selected row paints (`theme::selection_row_style`), never the
+    // accent.
     let band = theme.selection_row_style();
-    assert_eq!(band.bg, Some(Color::Rgb(0x7c, 0x6f, 0xaf)));
-    assert!(band.add_modifier.contains(Modifier::BOLD));
+    assert_eq!(band.bg, theme.hover_row_style().bg);
+    assert_ne!(band.bg, theme.fg_style(ThemeColor::Accent).fg);
+    assert!(band.add_modifier.is_empty());
     let span = |text: &str| {
         row.iter()
             .find(|span| span.content == text)
             .unwrap_or_else(|| panic!("missing span {text:?}"))
     };
-    // The whole selected group carries the band and the bold
-    // modifier while keeping its own status colors: the running
-    // count stays success green, the paused cluster stays amber,
-    // the in-group separator stays dim.
+    // The whole selected group carries the band while keeping its
+    // own status colors: the running count stays success green, the
+    // paused cluster stays amber, the in-group separator stays dim.
     let success = theme.fg_style(ThemeColor::Success).fg;
     let warning = theme.fg_style(ThemeColor::Warning).fg;
     let dim = theme.fg_style(ThemeColor::Dim).fg;
     assert_eq!(span("\u{25f7} 3 heartbeats").style.bg, band.bg);
     assert_eq!(span("\u{25f7} 3 heartbeats").style.fg, success);
-    assert!(span("\u{25f7} 3 heartbeats")
-        .style
-        .add_modifier
-        .contains(Modifier::BOLD));
     assert_eq!(span(" \u{b7} ").style.bg, band.bg);
     assert_eq!(span(" \u{b7} ").style.fg, dim);
     assert_eq!(span("\u{25d0} 1 paused").style.bg, band.bg);
     assert_eq!(span("\u{25d0} 1 paused").style.fg, warning);
-    assert!(span("\u{25d0} 1 paused")
-        .style
-        .add_modifier
-        .contains(Modifier::BOLD));
     // The band rides exactly the selected group: the other groups
     // and the separators between them carry no band.
     let selected = ["\u{25f7} 3 heartbeats", " \u{b7} ", "\u{25d0} 1 paused"];
@@ -383,6 +374,10 @@ fn activity_dock_selection_is_the_purple_opaque_bold_band() {
             span.content
         );
     }
+    // The accent never rides the row as the band (the selection is
+    // the hover's own light color).
+    let accent = theme.fg_style(ThemeColor::Accent).fg;
+    assert!(row.iter().all(|span| span.style.bg != accent));
     // The band is a focus-owned signal: the same dock without focus
     // renders no band at all.
     let unfocused = ActivityDock {
@@ -532,7 +527,7 @@ fn dock_goal_group_unmounts_with_its_row() {
 }
 
 /// Entering an empty group still renders it: the focused selection's
-/// band — the ONE shared purple selection style — rides the group's
+/// band — the ONE shared selection style — rides the group's
 /// zero-count segment on the row — the dock-level empty state is
 /// the zero readout itself (the view the group opens carries the
 /// pane's own empty-state row).
@@ -551,8 +546,8 @@ fn dock_renders_the_focused_empty_group() {
         .collect::<String>();
     assert_eq!(text, " ◆ 0 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
     // The selection's band rides exactly the entered empty group's
-    // zero readout, which keeps its own muted color and gains the
-    // shared style's bold (the selection never repaints the text).
+    // zero readout, which keeps its own muted color (the selection
+    // never repaints the text).
     let band = theme.selection_row_style();
     let muted = theme.fg_style(ThemeColor::Muted).fg;
     let heartbeat = frame[1]
@@ -561,7 +556,6 @@ fn dock_renders_the_focused_empty_group() {
         .unwrap_or_else(|| panic!("the empty heartbeats readout renders: {text}"));
     assert_eq!(heartbeat.style.bg, band.bg);
     assert_eq!(heartbeat.style.fg, muted);
-    assert!(heartbeat.style.add_modifier.contains(Modifier::BOLD));
 }
 
 /// The `/speed` footer row (TS `FooterComponent::render`): one dim row
@@ -587,7 +581,6 @@ fn speed_footer_is_one_dim_row_truncated_to_width() {
 
 use super::*;
 use crate::theme::{ColorMode, Theme};
-use ratatui::style::{Color, Modifier};
 use serde_json::json;
 
 fn theme() -> Theme {
