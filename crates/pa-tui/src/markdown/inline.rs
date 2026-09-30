@@ -303,11 +303,15 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line,
             spans.push(label);
             // The URL rides beside the label in the dim `link_url` slot
             // unless the label already shows it (the mailto-stripped
-            // comparison, TS token.href).
+            // comparison, TS token.href). The bare-url regex tail only
+            // excludes whitespace, so an escape byte can ride a bare
+            // url token's href into this visible span — the bracket gets
+            // the same control-byte hardening the OSC 8 target gets.
             let comparison = token.href.strip_prefix("mailto:").unwrap_or(&token.href);
             if token.text != token.href && token.text != comparison {
+                let shown = crate::hyperlinks::sanitize_control_bytes(token.href.clone());
                 url_slots.push(spans.len());
-                spans.push(Span::styled(format!(" [{}]", token.href), style.link_url));
+                spans.push(Span::styled(format!(" [{shown}]"), style.link_url));
             }
             i += token.raw.chars().count();
             continue;

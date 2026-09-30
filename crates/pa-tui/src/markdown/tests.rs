@@ -704,6 +704,12 @@ fn the_url_bracket_scrubs_terminal_control_bytes() {
     let spans = render_inline(&format!("[a]({url})"), &style);
     let bracket = spans.last().expect("bracket span");
     assert_eq!(bracket.content, " [https://x.dev/%1B]52;c;base64]");
+    // The bare-url autolink form hardens the same way: the regex tail
+    // only excludes whitespace, so the escape byte rides the token's
+    // href (the www form's href gains its scheme, so the bracket shows).
+    let www = render_inline("www.x.dev/\u{1b}]52;c=base64", &style);
+    let bracket = www.last().expect("bracket span");
+    assert_eq!(bracket.content, " [http://www.x.dev/%1B]52;c=base64]");
     assert!(
         !bracket.content.contains('\u{1b}'),
         "no raw escape byte in the visible bracket"
