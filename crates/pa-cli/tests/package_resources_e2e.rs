@@ -1,13 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack-resident futures on hot paths by design.
+// too_many_lines: style gate, not correctness. Casts: 64-bit targets;
+// narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -19,10 +12,8 @@
 
 //! Binary-level e2e: a settings-configured package provides a skill that
 //! appears in a created session's skill list. The scripted faux provider
-//! answers with the request's system prompt (the `<available_skills>`
-//! inventory), so the full pipeline is exercised: CLI parse -> settings
-//! load -> package resolution -> resource loading -> system-prompt assembly
-//! -> provider request -> event emission.
+//! answers with the request's system prompt, exercising the full
+//! pipeline from CLI parse to event emission.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

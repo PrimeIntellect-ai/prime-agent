@@ -1,19 +1,10 @@
-//! End-to-end verifier for the agents-view round trip's layout handoff
-//! (the tui-switch-layout-reuse cut): a chat run that exits through the
-//! agents-back handoff holds its visible-window entry packs (the
-//! `view::handoff` store), the agents view's Enter opens the same
-//! session, and the re-entry's chat run renders the same transcript rows
-//! over them. The served-path oracles (the packs reused, no re-render;
-//! every changed transcript re-rendering) live in the unit tests; this
-//! e2e pins the REAL flow — one daemon, one worker, one session — the
-//! re-entry attaches the unchanged session, adopts the held handoff on
-//! the matching attach cursor, and its frames carry the identical
-//! transcript content.
-// Pedantic-gate dispositions for THIS test root (each tied to its own
-// sites): the two round-trip flows are intentionally linear harness
-// scripts (the fn-length gate is style, not correctness), and their
-// async test futures are stack-resident by shape - boxing a test
-// future for a lint tick is churn with no correctness gain.
+//! End-to-end verifier for the agents-view round trip's layout handoff:
+//! a chat run that exits through the agents-back handoff holds its
+//! visible-window entry packs, the agents view's Enter opens the same
+//! session, and the re-entry adopts the handoff and renders the same rows.
+// Pedantic-gate dispositions: the round-trip flows are intentionally
+// linear (fn-length is style, not correctness), and their async test
+// futures are stack-resident by shape.
 #![allow(clippy::large_futures, clippy::too_many_lines)]
 #![cfg(unix)]
 
@@ -31,10 +22,9 @@ use pa_tui::interactive::{
 };
 
 /// The layout handoff store is process-wide: the two round-trip tests
-/// serialize through this lock so one test's stash is never adopted (or
-/// overwritten) by the other's - the unit tests' `HANDOFF_TEST_LOCK`
-/// discipline applied to the e2e pair (the slot lives inside pa-tui and
-/// cannot be reset from this crate's tests).
+/// serialize through this lock so one test's stash is never adopted by
+/// the other's (the slot lives inside pa-tui and cannot be reset from
+/// this crate).
 static HANDOFF_E2E_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 struct Supervisor {
@@ -118,8 +108,7 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
-/// One saved-session fixture: header, display name, and a user/assistant
-/// exchange.
+/// One saved-session fixture: header, display name, and a user/assistant exchange.
 fn write_fixture(dir: &Path, id: &str, name: &str, turns: &[(&str, &str)]) -> PathBuf {
     let path = dir.join(format!("{id}.jsonl"));
     let mut content = format!(
@@ -142,10 +131,10 @@ fn write_fixture(dir: &Path, id: &str, name: &str, turns: &[(&str, &str)]) -> Pa
     path
 }
 
-/// The scripted faux provider's script file (the `interactive_daemon_e2e`
-/// pattern): one scripted reply drives a REAL turn through the worker, so
-/// the transcript grows and the worker's event sequence advances during
-/// the chat run — the class the layout handoff's live-sequence key serves.
+/// The scripted faux provider's script file: one scripted reply drives a
+/// REAL turn through the worker, so the transcript grows and the event
+/// sequence advances — the class the layout handoff's live-sequence key
+/// serves.
 fn write_faux_script(dir: &Path, replies: &[&str]) -> PathBuf {
     let responses: Vec<serde_json::Value> = replies
         .iter()
@@ -195,12 +184,8 @@ fn chat_options(socket: PathBuf, cwd: PathBuf) -> InteractiveOptions {
     }
 }
 
-/// The real round trip over one daemon: chat (agents-back handoff) ->
-/// agents view (Enter on the anchored session) -> the chat re-entry. The
-/// re-entry attaches the SAME unchanged session, so the held layout
-/// handoff's key matches and the re-entry renders the same transcript
-/// rows (the adopt is output-neutral; the frames prove the flow and the
-/// content, the unit tests prove the packs were the source).
+/// The real round trip over one daemon: chat (agents-back) -> view -> the re-entry adopts
+/// the held handoff and renders the same rows.
 #[tokio::test]
 async fn the_roundtrip_reentry_renders_the_same_transcript() {
     let _handoff_guard = HANDOFF_E2E_LOCK.lock().await;
@@ -219,8 +204,7 @@ async fn the_roundtrip_reentry_renders_the_same_transcript() {
         ],
     );
 
-    // The first chat run: open the fixture, wait for its rows, exit
-    // through the agents-back LEFT handoff.
+    // The first chat run exits through the agents-back LEFT handoff.
     let mut first = chat_options(supervisor.socket.clone(), dir.path().to_path_buf());
     first.session = SessionSelection::Resume(fixture.clone());
     let first_outcome = pa_tui::interactive::run_interactive(
@@ -299,10 +283,10 @@ async fn the_roundtrip_reentry_renders_the_same_transcript() {
         .selection
         .expect("Enter selected a session");
 
-    // The re-entry: the same session opens again — the held handoff's
-    // key matches this attach (the worker, the generation, the event
-    // sequence, and the entry count all unchanged), and the re-entry
-    // renders the same transcript rows over the adopted packs.
+    // The re-entry: the held handoff's key matches this attach (the
+    // worker, the generation, the event sequence, and the entry count all
+    // unchanged), and the re-entry renders the same transcript rows over
+    // the adopted packs.
     let mut reentry = chat_options(supervisor.socket.clone(), dir.path().to_path_buf());
     reentry.session = selection;
     let reentry_outcome = pa_tui::interactive::run_interactive(
@@ -332,10 +316,8 @@ async fn the_roundtrip_reentry_renders_the_same_transcript() {
             .any(|frame| frame.contains("flow audit clean")),
         "the re-entry rendered the same transcript rows over the adopted handoff"
     );
-    // The served-path assertion (the frames are byte-identical either way —
-    // the frozen-surface property itself — so the reuse needs its own
-    // observable): this idle round trip's re-entry SERVED the window from
-    // the held packs.
+    // The served-path assertion (the frames are byte-identical either way, so
+    // the reuse needs its own observable): the re-entry SERVED the held packs.
     assert!(
         reentry_outcome.handoff_seeds > 0,
         "the idle round trip's re-entry served its first draw from the held packs"
@@ -370,9 +352,8 @@ async fn a_post_turn_sojourn_reentry_still_serves_the_held_packs() {
     );
     let script_path = write_faux_script(dir.path(), &["the live turn reply"]);
 
-    // The first chat run opens the fixture, runs a REAL scripted turn (the
-    // worker's event sequence advances past this run's attach value), then
-    // exits through the agents-back LEFT handoff.
+    // The first chat run runs a REAL scripted turn (the event sequence advances
+    // past this run's attach value), then exits through the agents-back handoff.
     let mut first = chat_options(supervisor.socket.clone(), dir.path().to_path_buf());
     first.session = SessionSelection::Resume(fixture.clone());
     first.script_path = Some(script_path.clone());
@@ -461,11 +442,10 @@ async fn a_post_turn_sojourn_reentry_still_serves_the_held_packs() {
         .expect("Enter selected a session");
 
     // The re-entry over the transcript-unchanged sojourn: the stash was
-    // keyed under the LATEST event sequence (the live tracker), so this
-    // attach — reporting the same post-turn value — adopts, and the
-    // re-entry's first draw serves the held packs instead of re-rendering
-    // the window (the post-turn class the stale attach-sequence key
-    // always missed).
+    // keyed under the LATEST event sequence, so this attach — reporting
+    // the same post-turn value — adopts, and the re-entry's first draw
+    // serves the held packs (the post-turn class the stale
+    // attach-sequence key always missed).
     let mut reentry = chat_options(supervisor.socket.clone(), dir.path().to_path_buf());
     reentry.session = selection;
     reentry.script_path = Some(script_path);

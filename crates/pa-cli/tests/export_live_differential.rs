@@ -1,13 +1,5 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack futures on hot paths by design. too_many_lines: style gate
+// only. Casts: 64-bit targets; narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -18,17 +10,12 @@
 )]
 
 //! Differential parity for the live-session HTML export: the same fixture
-//! session (a custom-tool call that no renderer covers) resumed and
-//! exported through the TS daemon and the Rust daemon produces the same
-//! export data — the tools section (TS `state.tools` embedded
-//! name/description/parameters), the entries, the header, and the
-//! pre-render section's omission. `systemPrompt` presence is compared,
-//! not content: the layered prompt supersedes TS-prompt byte parity.
-//!
-//! Both sides run the export where the product runs it: the daemon
-//! worker's `export_html` wire command (TS `session.exportToHtml` with
-//! the tool renderer; the Rust worker's `ExportCommands`). The TS daemon
-//! is ground truth; the test skips when the TS binary is not installed.
+//! session (a custom-tool call that no renderer covers) resumed and exported
+//! through the TS daemon and the Rust daemon produces the same export data —
+//! the tools section, the entries, the header, and the pre-render section's
+//! omission. `systemPrompt` presence is compared, not content (the layered
+//! prompt supersedes TS-prompt byte parity). The export runs through the
+//! daemon worker's `export_html` wire command; the TS daemon is ground truth.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -396,11 +383,6 @@ fn live_export(binary: &Path, base: &Path, ts_side: bool) -> Value {
     data
 }
 
-/// Differential: the live-session export of the same fixture through the
-/// TS daemon (ground truth) and the Rust daemon carries the same tools
-/// section, the same fixture entries, the same header, and the same
-/// omitted pre-render — the custom-tool call renders through the
-/// template's generic fallback in both.
 #[test]
 fn differential_live_export_matches_ts_binary() {
     let Some(ts) = ts_binary() else {
