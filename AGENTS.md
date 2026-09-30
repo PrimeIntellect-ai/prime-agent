@@ -5,6 +5,11 @@ Every contributor (human or agent) must read this before working on this repo.
 
 ## Repository
 
+- **Never set git identity yourself.** Do not pass `-c user.name=...`, `-c user.email=...`,
+  `GIT_AUTHOR_*`, `GIT_COMMITTER_*`, or any identity config. The environment is already
+  authenticated as the correct account; commits must carry whatever identity the ambient
+  auth provides — no custom author names, no custom emails, no exceptions. If a command
+  fails for a missing identity, that is a bug to report, not a config to add.
 - The repo is PrimeIntellect-ai/prime-agent; the Rust implementation lives on the `main` branch.
 - PRs go to the org repo with base `main`:
   `gh pr create --repo PrimeIntellect-ai/prime-agent --base main`.
