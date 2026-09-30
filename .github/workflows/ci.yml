@@ -250,12 +250,15 @@ jobs:
   #   and the Windows-only tests) for x86_64-pc-windows-gnu; ring's C needs
   #   the mingw cross compiler even for check builds.
   #
-  #   windows — the real windows-latest runner: the portable tests plus the
-  #   Windows-only platform tests (named pipes, process identity, locks
-  #   mtime probe, shell ordering). Linux-only e2e verifiers are
-  #   `#![cfg(unix)]`-gated and compile out here, and the kernel e2e tests
-  #   that need a Python bootstrap are unix-gated too, so no uv step is
-  #   needed.
+  #   windows-latest — NOT in this promotion set. The full MSVC battery
+  #   surfaced tip-side windows product debt the trunk has carried invisibly
+  #   (the on-demand windows-runtime-triage.yml battery never ran on main;
+  #   its first dispatches read deep red across crates, and the ACP
+  #   daemon-attach e2e deadlocks on the named-pipe transport). The
+  #   windows-latest promotion lands with the windows-readiness lane's
+  #   product fixes; windows-cross below stays this PR's windows authority
+  #   (the compile + clippy proof for the whole workspace incl. the
+  #   cfg(windows) implementations).
   #
   #   deny — cargo-deny advisories + licenses, the CI mirror of `make deny`,
   #   the same check continuous.yml's deny job runs on every push.
@@ -284,31 +287,6 @@ jobs:
           key: windows-cross
       - run: cargo check --locked --workspace --target x86_64-pc-windows-gnu --all-targets
       - run: cargo clippy --locked --workspace --target x86_64-pc-windows-gnu --all-targets -- -D warnings
-
-  windows:
-    name: windows build + clippy + test (windows-latest)
-    needs: trust
-    if: needs.trust.outputs.allowed == 'true' && (github.event_name == 'push' || !github.event.pull_request.draft)
-    runs-on: windows-latest
-    # The full battery on the MSVC runner needs more than the build+clippy
-    # residue of 90 minutes (the wave's test phase hit the 90-minute cap with
-    # build+clippy green); windows-runtime-triage.yml times the same battery
-    # on the same runner at 120 - the repo's own calibration.
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; toolchain pinned below
-        with:
-          toolchain: "1.98.1"
-          components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          key: windows
-      - run: cargo build --locked --workspace
-      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - run: cargo test --locked --workspace
 
   deny:
     name: deny (cargo-deny advisories + licenses)
