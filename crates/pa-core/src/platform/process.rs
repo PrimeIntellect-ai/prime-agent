@@ -118,8 +118,11 @@ pub fn raise_open_file_limit() -> std::io::Result<Option<u64>> {
 }
 
 /// No per-process descriptor limit to raise.
+///
+/// # Errors
+///
+/// Never: the not-unix arm has no descriptor limit to raise.
 #[cfg(not(unix))]
-#[must_use]
 pub fn raise_open_file_limit() -> std::io::Result<Option<u64>> {
     Ok(None)
 }
