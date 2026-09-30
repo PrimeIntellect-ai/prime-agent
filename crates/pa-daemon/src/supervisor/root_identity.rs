@@ -47,6 +47,44 @@ const RECONCILIATION_BACKOFF_MS: u64 = 250;
 const RECONCILIATION_BACKOFF_MAX_MS: u64 = 5_000;
 
 impl Supervisor {
+    /// The boot's durable-pending repair (the descriptor store's own
+    /// fallback for a failed identity persist): a side record beside the
+    /// descriptor carries the moved-to identity — apply it to the
+    /// resident BEFORE any routing or relaunch can use the stale record
+    /// (a revived worker replays the moved-to session's create path, not
+    /// the superseded one), then retry the record's persist; the first
+    /// roster write that persists the repaired record removes the side
+    /// record. The in-memory marker arms while the record still lags.
+    pub(crate) async fn apply_identity_pending(&self, resident: &Arc<ResidentWorker>) {
+        let Some((session_id, session_file)) =
+            crate::descriptor::read_identity_pending(&resident.descriptor_path)
+        else {
+            return;
+        };
+        let mut descriptor = resident.descriptor.lock().await;
+        if descriptor.root_session_id.as_deref() != Some(session_id.as_str())
+            || descriptor.session_file.as_deref() != Some(session_file.as_str())
+        {
+            descriptor.root_session_id = Some(session_id.clone());
+            descriptor.session_file = Some(session_file.clone());
+            descriptor.create_command.session_path = Some(session_file.clone());
+            descriptor.create_command.no_session = None;
+        }
+        match crate::descriptor::persist_worker(&resident.descriptor_path, &descriptor) {
+            Ok(()) => {
+                resident.clear_identity_persist_pending();
+                crate::descriptor::clear_identity_pending(&resident.descriptor_path);
+            }
+            Err(error) => {
+                resident.mark_identity_persist_pending();
+                self.log_line(&format!(
+                    "the boot applied worker {}'s pending identity but the record persist failed (repairing on the first roster write): {error:#}",
+                    resident.worker_id
+                ));
+            }
+        }
+    }
+
     /// The quarantine's retry path: a slow-but-alive worker's boot
     /// reconciliation pull can time out, and no roster push is guaranteed
     /// while it idles — re-run the reconciliation on a backoff until the
@@ -103,11 +141,17 @@ impl Supervisor {
     /// live summary. Idempotent: a row matching the persisted descriptor
     /// moves nothing, so the registration/adoption/create refresh pulls
     /// stay no-ops.
+    /// Returns whether the worker's root row carries the live identity (a
+    /// root-identity-bearing write): `false` means the write that ran was
+    /// NOT the root's own (a subagent/child summary keying under its own
+    /// address, before the root's first push landed), so the boot
+    /// reconciliation quarantine must stay — a child delta never lifts
+    /// the root's fence.
     pub(crate) fn sync_root_identity_from_roster(
         &self,
         resident: &Arc<ResidentWorker>,
         descriptor: &mut MutexGuard<'_, DaemonWorkerDescriptor>,
-    ) {
+    ) -> bool {
         let summary = {
             let roster = self.roster.lock().unwrap();
             roster
@@ -118,7 +162,7 @@ impl Supervisor {
             // The roster holds no root row for this worker's address: the
             // registration/adoption seeding has not landed it yet, and
             // the next write triggers the follow.
-            return;
+            return false;
         };
         let (session_id, session_file) = match (
             summary.get("sessionId").and_then(Value::as_str),
@@ -130,14 +174,16 @@ impl Supervisor {
                 (session_id.to_string(), session_file.to_string())
             }
             // A row without a durable identity (an in-memory `no_session`
-            // session) names no file to follow: its worker never had one.
-            _ => return,
+            // session) names no file to follow: its worker never had one —
+            // but the row IS the root's own live word, so the quarantine
+            // lifts with it (the follow has nothing durable to move).
+            _ => return true,
         };
         if descriptor.root_session_id.as_deref() == Some(session_id.as_str())
             && descriptor.session_file.as_deref() == Some(session_file.as_str())
             && !resident.identity_persist_pending()
         {
-            return;
+            return true;
         }
         descriptor.root_session_id = Some(session_id.clone());
         descriptor.session_file = Some(session_file.clone());
@@ -172,11 +218,36 @@ impl Supervisor {
                 }
             });
         match persisted {
-            Ok(()) => resident.clear_identity_persist_pending(),
+            Ok(()) => {
+                resident.clear_identity_persist_pending();
+                // The repair landed: the descriptor itself carries the
+                // moved-to identity, and the side record's job is done.
+                crate::descriptor::clear_identity_pending(&resident.descriptor_path);
+            }
             Err(error) => {
                 resident.mark_identity_persist_pending();
+                // The durable pending (the descriptor store's own
+                // fallback): record the moved-to identity beside the
+                // descriptor so a restart applies it before any routing
+                // or relaunch — the in-memory marker alone dies with the
+                // process, and the stale record would serve the
+                // superseded session.
+                if let Err(pending_error) = crate::descriptor::write_identity_pending(
+                    &resident.descriptor_path,
+                    &session_id,
+                    &session_file,
+                ) {
+                    // The last resort: the side record could not land
+                    // either. The boot's live reconciliation (a worker
+                    // still alive) or the death verdict (a lazy re-open)
+                    // remain the safety nets — surface both failures.
+                    self.log_line(&format!(
+                        "session identity move for {} persisted neither record nor pending side record: {pending_error:#}",
+                        resident.worker_id
+                    ));
+                }
                 self.log_line(&format!(
-                    "session identity move for {} did not persist (repairing on the next roster write): {error:#}",
+                    "session identity move for {} did not persist (the pending side record carries it; repairing on the next roster write): {error:#}",
                     resident.worker_id
                 ));
                 self.note_daemon_event("root_identity_persist_failed", None);
@@ -193,10 +264,14 @@ impl Supervisor {
             Some(session_id.as_str()),
             Some(session_file.as_str()),
         );
+        // The durable ids never ride the log (the logging discipline);
+        // the worker's address — the established log id — identifies the
+        // move, and the roster surfaces the identity.
         self.log_line(&format!(
-            "session identity moved: worker {} now serves session {session_id} (file {session_file})",
+            "session identity moved: worker {} now serves its current session (the root-identity follow ran)",
             resident.worker_id
         ));
+        true
     }
 }
 
@@ -441,6 +516,14 @@ mod tests {
                 .is_some_and(|binding| binding.session_id.as_deref() == Some("sA")),
             "the binding follows the live identity (the routing is correct while the record lags)"
         );
+        assert_eq!(
+            crate::descriptor::read_identity_pending(&resident.descriptor_path),
+            Some((
+                "sA".to_string(),
+                dir.join("a.jsonl").to_string_lossy().to_string()
+            )),
+            "the double-failed persist durably recorded the moved-to identity beside the record"
+        );
 
         // The repair: the next write re-runs the transition's persist from
         // the live state — even a NO-CHANGE row (the identity already
@@ -459,6 +542,165 @@ mod tests {
         assert_eq!(
             record.session_file.as_deref(),
             Some(dir.join("a.jsonl").to_string_lossy().to_string().as_str())
+        );
+        assert!(
+            crate::descriptor::read_identity_pending(&resident.descriptor_path).is_none(),
+            "the repair removed the pending side record"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The durable pending across a restart (the bot-wave finding): the
+    /// record's persist failed on both attempts, so the side record
+    /// carries the moved-to identity — a boot reading the STALE record
+    /// applies the pending identity BEFORE any routing or relaunch can
+    /// act on it, and retries the record's persist: the routing serves
+    /// the moved identity, never the superseded one, and the side record
+    /// dies with the repair.
+    #[tokio::test]
+    async fn a_durable_pending_moves_the_boot_identity_before_any_routing() {
+        let dir = std::env::temp_dir().join(format!("pa-root-id-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let supervisor = supervisor_with_movable_worker(&dir).await;
+        let resident = supervisor.registry.get("w-a").await.expect("resident");
+
+        // The double-failed persist leaves the durable pending beside the
+        // stale record.
+        std::fs::remove_file(&resident.descriptor_path).ok();
+        std::fs::create_dir_all(&resident.descriptor_path).unwrap();
+        drive_delta(&supervisor, swap_summary(&dir, "sA", "a.jsonl"), 1).await;
+        assert!(
+            resident.identity_persist_pending(),
+            "the in-memory marker armed"
+        );
+        assert!(
+            crate::descriptor::read_identity_pending(&resident.descriptor_path).is_some(),
+            "the side record landed"
+        );
+
+        // THE RESTART: the stale record back on disk (the boot's only word
+        // on the worker), the side record still carrying the moved-to
+        // identity. The boot's application moves the resident onto the
+        // moved-to identity — never the superseded one — and its own
+        // persist retry repairs the record.
+        std::fs::remove_dir_all(&resident.descriptor_path).unwrap();
+        let stale_record = std::fs::read_to_string(dir.join("stale.json"))
+            .ok()
+            .unwrap_or_else(|| {
+                // The fixture's stale record: the original identity
+                // (s0 / s0.jsonl) the restart must not serve.
+                serde_json::json!({
+                    "version": 2,
+                    "workerId": "w-a",
+                    "pid": 0,
+                    "socketPath": "/tmp/none.sock",
+                    "recoveryJournalPath": "/tmp/none.jsonl",
+                    "supervisorSocketPath": "/tmp/none.sock",
+                    "authenticationToken": "token-a",
+                    "rootActiveSessionId": "w-a",
+                    "rootSessionId": "s0",
+                    "sessionFile": dir.join("s0.jsonl").to_string_lossy(),
+                    "createdAt": "2026-09-30T00:00:00Z",
+                    "updatedAt": "2026-09-30T00:00:00Z",
+                    "lifecycle": "ready",
+                    "createCommand": { "sessionPath": dir.join("s0.jsonl").to_string_lossy() },
+                    "consecutiveFailures": 0,
+                })
+                .to_string()
+            });
+        std::fs::write(&resident.descriptor_path, &stale_record).unwrap();
+        supervisor.apply_identity_pending(&resident).await;
+        let (root_session_id, session_file) = {
+            let descriptor = resident.descriptor.lock().await;
+            (
+                descriptor.root_session_id.clone(),
+                descriptor.session_file.clone(),
+            )
+        };
+        assert_eq!(
+            root_session_id.as_deref(),
+            Some("sA"),
+            "the boot applies the moved-to identity, never the superseded one"
+        );
+        assert_eq!(
+            session_file.as_deref(),
+            Some(dir.join("a.jsonl").to_string_lossy().to_string().as_str())
+        );
+        assert!(
+            crate::descriptor::read_identity_pending(&resident.descriptor_path).is_none(),
+            "the boot's repair removed the side record"
+        );
+        assert!(
+            !resident.identity_persist_pending(),
+            "the repair cleared the marker"
+        );
+        let record: DaemonWorkerDescriptor =
+            serde_json::from_str(&std::fs::read_to_string(&resident.descriptor_path).unwrap())
+                .unwrap();
+        assert_eq!(record.root_session_id.as_deref(), Some("sA"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A subagent/child roster delta never lifts the root's boot
+    /// reconciliation quarantine (the bot-wave finding): the child's
+    /// summary rows key under its own address, so the root's follow
+    /// answers false — only the root's own roster write (or the
+    /// reconciliation pull) lifts the fence.
+    #[tokio::test]
+    async fn a_child_roster_delta_never_lifts_the_root_quarantine() {
+        let dir = std::env::temp_dir().join(format!("pa-root-id-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let supervisor = supervisor_with_movable_worker(&dir).await;
+        let resident = supervisor.registry.get("w-a").await.expect("resident");
+        resident.mark_identity_quarantined();
+        assert!(resident.identity_quarantined());
+
+        // The worker's roster link delivers a CHILD summary under the
+        // root's token (the adopted family's first push): the row keys
+        // under the child's address, and the root's quarantine holds.
+        let child_summary = json!({
+            "id": "child-1",
+            "lifecycle": "live",
+            "activity": "idle",
+            "isSessionActive": false,
+            "activeSessionId": "child-1",
+            "sessionId": "s-child",
+            "sessionFile": dir.join("c.jsonl").to_string_lossy(),
+            "sessionName": "child",
+            "cwd": dir.to_string_lossy(),
+            "rlmDepth": 1,
+            "runtimeKind": "subagent",
+            "rlmChildId": "c1",
+            "parentActiveSessionId": "w-a",
+            "messageCount": 0,
+            "attachedClients": 0,
+            "thinkingLevel": "default",
+            "workerState": "ready",
+        });
+        let response = supervisor
+            .handle_worker_roster_delta(
+                "d1",
+                "worker_roster_delta",
+                WorkerRosterDelta {
+                    worker_token: "token-a".to_string(),
+                    summary: child_summary,
+                    removed: Vec::new(),
+                    sequence: Some(1),
+                    worker_instance_id: Some("i1".to_string()),
+                },
+            )
+            .await;
+        assert!(response.success, "the child delta applied: {response:?}");
+        assert!(
+            resident.identity_quarantined(),
+            "a child delta never lifts the root's quarantine"
+        );
+
+        // The root's own roster write lifts the fence.
+        drive_delta(&supervisor, swap_summary(&dir, "sA", "a.jsonl"), 2).await;
+        assert!(
+            !resident.identity_quarantined(),
+            "the root's own write lifts the quarantine"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

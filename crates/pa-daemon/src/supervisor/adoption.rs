@@ -174,6 +174,14 @@ impl Supervisor {
         let pid = descriptor.pid;
         let journal_path = PathBuf::from(&descriptor.recovery_journal_path);
         let resident = ResidentWorker::new(worker_id.clone(), descriptor, path);
+        // The durable pending FIRST: a failed identity persist left a side
+        // record beside this descriptor carrying the moved-to identity —
+        // apply it before any routing, relaunch, or revival can act on the
+        // stale record (a revived worker replays the moved-to session's
+        // create path), and retry the record's persist: the repair removes
+        // the side record, a failure arms the resident's pending marker
+        // for the first roster write.
+        self.apply_identity_pending(&resident).await;
         // The stop tombstone outranks liveness (TS's stop ownership: the
         // stop was durable intent BEFORE the worker was told): a
         // supervisor that died between the tombstone and the worker's

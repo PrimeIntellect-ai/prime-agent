@@ -818,6 +818,10 @@ impl Supervisor {
             }
             _ => {
                 let _ = std::fs::remove_file(&resident.descriptor_path);
+                // The identity-pending side record dies with the
+                // descriptor it shadows (an orphaned pending would
+                // shadow the next identity over the same worker id).
+                crate::descriptor::clear_identity_pending(&resident.descriptor_path);
             }
         }
     }
