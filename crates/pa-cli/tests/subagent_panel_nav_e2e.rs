@@ -542,8 +542,9 @@ async fn the_title_bills_a_passive_subagents_spend() {
 /// The attached parent's top bar bills a deleted subagent's spend: the
 /// RLM-deleted child keeps its transcript under session-artifacts (no
 /// catalog row exists for it), so its captured spend rides the parent's
-/// roster row through the deleted-descendant bucket - the title and the
-/// agents-view row bill the same number with the child gone.
+/// roster row through the deleted-descendant bucket. This test asserts
+/// the top bar; the agents-view row reads the same row through the same
+/// `compute_rollups`, so it bills the same number.
 #[tokio::test]
 async fn the_title_bills_a_deleted_subagents_spend() {
     let dir = tempfile::TempDir::new().expect("temp dir");

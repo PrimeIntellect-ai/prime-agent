@@ -224,11 +224,14 @@ impl Supervisor {
         self: &Arc<Self>,
     ) -> Option<(u64, HashMap<String, SessionUsageSummary>)> {
         let ticket = self.roster.lock().unwrap().begin_bucket_fold();
-        let ledger = self.rlm_spawn_ledger_for(None).await.ok()?;
-        let bucket =
-            tokio::task::spawn_blocking(move || ledger.deleted_descendant_usage_by_parent())
-                .await
-                .unwrap_or_else(|error| Err(anyhow::anyhow!(error)));
+        let bucket = match self.rlm_spawn_ledger_for(None).await {
+            Ok(ledger) => {
+                tokio::task::spawn_blocking(move || ledger.deleted_descendant_usage_by_parent())
+                    .await
+                    .unwrap_or_else(|error| Err(anyhow::anyhow!(error)))
+            }
+            Err(error) => Err(error),
+        };
         match bucket {
             Ok(bucket) => Some((ticket, bucket)),
             Err(error) => {
