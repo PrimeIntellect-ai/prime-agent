@@ -60,10 +60,3 @@ Files:
 - `../ts_faux_extension.js` — the faux-provider driver extension the TS
   side loads (scripted responses read from PRIME_AGENT_FAUX_SCRIPT);
   verification harness only, never installed for real users
-
-The parity battery that used to live here (the TS-vs-Rust differential
-flows f1-f24, `run_battery.py`) and the standalone parity harnesses that
-shared this directory were removed by the scripts purge: they had no
-live references (the port era closed; the crates' own test suites are
-the standing verification), and their recorded run outputs were never
-code. See the purge PR for the full keep/kill table.
