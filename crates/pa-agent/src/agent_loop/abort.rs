@@ -1,17 +1,12 @@
-//! Abort and settlement helpers for the agent loop: the local
-//! `raceWithAbort` wrapper, `settlePostTurn` (abort rejections collapse into
-//! `Aborted`), `pollMessagesUnlessAborted`, and aborted assistant-message
-//! construction. Section of the port of `packages/agent/src/agent-loop.ts`.
+//! Abort and settlement helpers for the agent loop: the `raceWithAbort`
+//! wrapper, `settlePostTurn`, `pollMessagesUnlessAborted`, and aborted
+//! assistant-message construction.
 
 use crate::abort::{is_abort_error, AbortSignal, ABORT_ERROR_MESSAGE};
 use crate::types::{AgentMessage, AssistantContent, AssistantMessage, StopReason};
 use std::future::Future;
 
 use super::{AgentLoopConfig, PollMessagesFn};
-
-// ---------------------------------------------------------------------------
-// Abort / settlement helpers (ports of raceWithAbort & settlePostTurn)
-// ---------------------------------------------------------------------------
 
 pub(crate) async fn race_with_abort<T>(
     operation: impl Future<Output = anyhow::Result<T>>,
@@ -30,8 +25,7 @@ pub(crate) enum PostTurnResult<T> {
     Aborted,
 }
 
-/// Port of `settlePostTurn`: abort rejections collapse into `Aborted`; every
-/// other error propagates.
+/// Abort rejections collapse into `Aborted`; every other error propagates.
 pub(crate) async fn settle_post_turn<T>(
     operation: impl Future<Output = anyhow::Result<T>>,
     signal: Option<&AbortSignal>,
@@ -48,7 +42,6 @@ pub(crate) async fn settle_post_turn<T>(
     }
 }
 
-/// Port of `pollMessagesUnlessAborted`.
 pub(crate) async fn poll_messages_unless_aborted(
     poll: Option<&PollMessagesFn>,
     signal: Option<&AbortSignal>,
@@ -61,10 +54,6 @@ pub(crate) async fn poll_messages_unless_aborted(
     }
     race_with_abort(poll(), signal).await
 }
-
-// ---------------------------------------------------------------------------
-// Aborted assistant message construction
-// ---------------------------------------------------------------------------
 
 fn clone_assistant_content(content: &[AssistantContent]) -> Vec<AssistantContent> {
     content
@@ -79,7 +68,6 @@ fn clone_assistant_content(content: &[AssistantContent]) -> Vec<AssistantContent
         .collect()
 }
 
-/// Port of `createAbortedAssistantMessage`.
 pub(crate) fn create_aborted_assistant_message(
     config: &AgentLoopConfig,
     partial_message: Option<&AssistantMessage>,
