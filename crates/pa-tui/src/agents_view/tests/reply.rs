@@ -441,3 +441,49 @@ fn an_open_completion_owns_enter() {
         "nothing dispatched behind the popup"
     );
 }
+
+/// A persisted target that left the live catalog resumes as saved: the
+/// stale runtime id leaves the summary (TS drops it with the archived
+/// lifecycle), so the steer gate and the resuming status read it as
+/// saved even when the captured summary still says streaming.
+#[test]
+fn a_target_gone_from_the_catalog_submits_as_a_resume() {
+    let mut mode = mode_with_parent_and_child();
+    mode.roster[0]["summary"]["isStreaming"] = serde_json::json!(true);
+    mode.rebuild_rows();
+    mode.handle_key("space");
+    assert!(matches!(&mode.composer, Composer::Reply(_)));
+    mode.roster = Vec::new();
+    mode.rebuild_rows();
+    for ch in "hi".chars() {
+        mode.handle_key(ch.to_string().as_str());
+    }
+    mode.handle_key("enter");
+    let request = mode.pending_reply.take().expect("the send dispatched");
+    assert_eq!(request.behavior, None, "an archived target never steers");
+    assert!(
+        request.summary.get("activeSessionId").is_none(),
+        "the stale runtime id left the summary"
+    );
+    assert_eq!(mode.status_text(), Some("Resuming session..."));
+}
+
+/// A paste parks the same suggestion request a keystroke does: the
+/// batch-end materialization answers it (the loop runs it after
+/// `handle_paste`, the same as after a key).
+#[test]
+fn a_pasted_slash_materializes_the_completion() {
+    let mut mode = armed_live();
+    mode.handle_paste("/");
+    mode.materialize_composer_autocomplete();
+    let Composer::Reply(reply) = &mode.composer else {
+        panic!("armed");
+    };
+    assert!(
+        reply
+            .editor
+            .autocomplete_state()
+            .is_some_and(|state| !state.items.is_empty()),
+        "the pasted slash suggests the commands"
+    );
+}

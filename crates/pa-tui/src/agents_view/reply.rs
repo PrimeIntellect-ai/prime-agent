@@ -376,8 +376,12 @@ impl AgentsViewMode {
         if summary.get("sessionFile").is_some() && summary.get("activeSessionId").is_some() {
             // A persisted target missing from the live catalog can still
             // resume from its captured file, but its captured runtime id
-            // is stale (TS drops it with the archived lifecycle).
-            summary["activeSessionId"] = Value::Null;
+            // is stale (TS drops it with the archived lifecycle) — the key
+            // leaves entirely, so the presence checks (the steer gate, the
+            // resuming status) read it as saved.
+            if let Some(object) = summary.as_object_mut() {
+                object.remove("activeSessionId");
+            }
             summary["lifecycle"] = serde_json::json!("archived");
             summary["activity"] = serde_json::json!("idle");
         }

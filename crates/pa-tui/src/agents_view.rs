@@ -1107,6 +1107,10 @@ async fn run_agents_view_surface(
                 }
                 UiInput::Paste(text) => {
                     mode.handle_paste(&text);
+                    // The paste's edits land like a keystroke batch: the
+                    // parked suggestion request materializes here too (TS
+                    // resolves suggestions per turn, not per input kind).
+                    mode.materialize_composer_autocomplete();
                 }
                 // `Settled` is the plan's own settle no-op;
                 // `WaitRender` never reaches the batch pop (the
