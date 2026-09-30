@@ -962,10 +962,11 @@ async fn idle_passivation_requires_the_worker_token() {
 }
 
 #[tokio::test]
-async fn idle_passivation_refuses_a_root_worker() {
-    // The parent-owned gate: only a child worker (rlmDepth > 0 in the
-    // create command) may ask; a root worker's lease is client-owned
-    // policy and the ask is refused.
+async fn idle_passivation_refuses_a_client_owned_worker() {
+    // The owner gate (TS `canEvictWorker`'s `hasOwnerClient` arm): a
+    // client-owned worker never passivates itself; its owner's
+    // disconnect cleanup owns the stop. An unowned root passes this
+    // gate (the e2e drives the pass side end to end).
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
@@ -978,17 +979,17 @@ async fn idle_passivation_refuses_a_root_worker() {
     );
     let descriptor = pa_types::daemon::DaemonWorkerDescriptor {
         version: 1,
-        worker_id: "w-root".to_string(),
+        worker_id: "w-owned".to_string(),
         pid: 4242,
         process_start_id: None,
         socket_path: "/tmp/none.sock".to_string(),
         recovery_journal_path: "/tmp/none.jsonl".to_string(),
         orphan_process_journal_path: None,
         supervisor_socket_path: "/tmp/none.sock".to_string(),
-        authentication_token: "root-token".to_string(),
+        authentication_token: "owned-token".to_string(),
         worker_instance_id: None,
-        root_active_session_id: "w-root".to_string(),
-        owner_client_id: None,
+        root_active_session_id: "w-owned".to_string(),
+        owner_client_id: Some("client-1".to_string()),
         root_session_id: Some("root-1".to_string()),
         session_file: None,
         session_dir: None,
@@ -1008,10 +1009,10 @@ async fn idle_passivation_refuses_a_root_worker() {
         last_error: None,
         rest: Map::default(),
     };
-    let resident = ResidentWorker::new("w-root".to_string(), descriptor, dir.path().join("w.d"));
+    let resident = ResidentWorker::new("w-owned".to_string(), descriptor, dir.path().join("w.d"));
     supervisor.registry.insert(resident).await;
     let response = supervisor
-        .handle_worker_idle_passivation("c1", "worker_idle_passivation", "root-token", Some(1))
+        .handle_worker_idle_passivation("c1", "worker_idle_passivation", "owned-token", Some(1))
         .await;
     assert!(!response.success);
     assert!(
@@ -1019,81 +1020,8 @@ async fn idle_passivation_refuses_a_root_worker() {
             .error
             .as_deref()
             .unwrap_or("")
-            .contains("child-worker policy"),
-        "the root worker's ask is refused: {response:?}"
-    );
-}
-
-#[tokio::test]
-async fn idle_passivation_accepts_a_parent_owned_revived_child() {
-    // The parent-owned gate's pass side (Macroscope's/Bugbot's revival
-    // identity finding): a worker relaunched by a WAKE whose create's
-    // rest carries the child's rlmDepth passes the gate - the revived
-    // child stays passivation-eligible (its park window arms on the
-    // persisted header depth; the fence reads the create identity).
-    let dir = tempfile::TempDir::new().unwrap();
-    let agent_dir = dir.path().join("agent");
-    std::fs::create_dir_all(&agent_dir).unwrap();
-    let supervisor = Arc::new(
-        Supervisor::new(SupervisorOptions {
-            socket_path: dir.path().join("daemon.sock"),
-            agent_dir: agent_dir.clone(),
-        })
-        .expect("supervisor"),
-    );
-    let descriptor = pa_types::daemon::DaemonWorkerDescriptor {
-        version: 1,
-        worker_id: "w-child".to_string(),
-        pid: 4245,
-        process_start_id: None,
-        socket_path: "/tmp/none.sock".to_string(),
-        recovery_journal_path: "/tmp/none.jsonl".to_string(),
-        orphan_process_journal_path: None,
-        supervisor_socket_path: "/tmp/none.sock".to_string(),
-        authentication_token: "child-token".to_string(),
-        worker_instance_id: None,
-        root_active_session_id: "w-child".to_string(),
-        owner_client_id: None,
-        root_session_id: Some("kid".to_string()),
-        session_file: None,
-        session_dir: None,
-        telemetry_disabled: None,
-        created_at: "t".to_string(),
-        updated_at: "t".to_string(),
-        lifecycle: DaemonWorkerLifecycle::Ready,
-        create_command: pa_types::daemon::DurableDaemonCreateCommand {
-            session_path: None,
-            no_session: None,
-            rest: Map::from_iter([
-                ("rlmDepth".to_string(), json!(1)),
-                ("rlmChildId".to_string(), json!("sub-kid")),
-            ]),
-        },
-        consecutive_failures: 0,
-        stop_requested_at: None,
-        archive_on_stop: None,
-        last_failure_at: None,
-        last_error: None,
-        rest: Map::default(),
-    };
-    let resident = ResidentWorker::new("w-child".to_string(), descriptor, agent_dir);
-    supervisor
-        .registry
-        .insert(std::sync::Arc::clone(&resident))
-        .await;
-    let response = supervisor
-        .handle_worker_idle_passivation("c1", "worker_idle_passivation", "child-token", Some(1))
-        .await;
-    // The gate passes: the answer is NOT the child-worker-policy refusal
-    // (the stop path itself answers with its own outcome - the gate is
-    // what this test pins).
-    assert!(
-        !response
-            .error
-            .as_deref()
-            .unwrap_or("")
-            .contains("child-worker policy"),
-        "the parent-owned revived child's ask must pass the gate: {response:?}"
+            .contains("client-owned worker"),
+        "the client-owned worker's ask is refused: {response:?}"
     );
 }
 

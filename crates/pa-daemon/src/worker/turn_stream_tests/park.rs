@@ -303,7 +303,7 @@ fn passivation_settings(dir: &std::path::Path, value: &serde_json::Value) {
 }
 
 #[tokio::test]
-async fn idle_passivation_window_arms_only_for_idle_parent_owned_children() {
+async fn idle_passivation_window_arms_only_for_idle_unattached_sessions() {
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
     passivation_settings(&agent_dir, &serde_json::json!(1));
@@ -312,18 +312,15 @@ async fn idle_passivation_window_arms_only_for_idle_parent_owned_children() {
     // The shared PassivationContext with a live settings dir.
     runner.passivation.agent_dir = agent_dir.clone();
 
-    // A root session (rlm_depth 0): no window.
-    assert!(runner.idle_passivation_window().is_none());
-
-    // A parent-owned child under a live threshold: the window arms.
+    // An idle root session under a live threshold: the window arms (TS
+    // `canEvictWorker` reaches roots; the depth fence is gone).
     {
         let mut core = runner.core.lock().unwrap();
-        core.rlm_depth = 1;
         core.cwd = dir.path().to_string_lossy().to_string();
         core.last_activity_ms = crate::util::now_ms();
     }
     let window = runner.idle_passivation_window();
-    assert!(window.is_some(), "a parent-owned idle child must arm");
+    assert!(window.is_some(), "an unattached idle root must arm");
     // A 1-minute threshold from now: the remaining window is under a
     // minute (the clock already ran during the test).
     assert!(

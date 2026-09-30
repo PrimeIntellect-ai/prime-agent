@@ -618,18 +618,20 @@ impl Supervisor {
     }
 
     /// The worker-driven idle passivation (TS's `idleEvictionMinutes`
-    /// tier, whole-worker): a parent-owned child worker whose park arm
-    /// proved the idle state and crossed the threshold asks for its own
-    /// graceful stop over the supervisor link. The supervisor verifies
-    /// the worker token, re-verifies the parent-owned descriptor (a root
-    /// worker can never ask its way out), and re-reads the setting — the
-    /// supervisor's own fresh-snapshot fence: a setting flipped to
-    /// `"off"` (or past the threshold) between the worker's ask and the
-    /// stop cancels the passivation. The stop itself is the existing
+    /// tier, whole-worker): an unowned worker whose park arm proved the
+    /// idle state and crossed the threshold asks for its own graceful
+    /// stop over the supervisor link — TS `canEvictWorker` reaches roots
+    /// and children alike. The supervisor verifies the worker token,
+    /// refuses a client-owned descriptor (TS `hasOwnerClient`: the
+    /// owner's disconnect cleanup owns that stop), and re-reads the
+    /// setting — the supervisor's own fresh-snapshot fence: a setting
+    /// flipped to `"off"` (or past the threshold) between the worker's
+    /// ask and the stop cancels the passivation. The stop itself is the existing
     /// graceful path (`stop_worker`: durable tombstone, routed shutdown,
     /// process-retirement wait, registry removal, roster passivation),
-    /// so a passivated child's row stays visible and family-addressable
-    /// and its next prompt wakes a fresh worker over the session file.
+    /// so the passivated worker's row stays visible and its next
+    /// prompt (or an attach by durable id) wakes a fresh worker over
+    /// the session file.
     pub(crate) async fn handle_worker_idle_passivation(
         self: &Arc<Self>,
         command_id: &str,
@@ -645,23 +647,14 @@ impl Supervisor {
                 None,
             );
         };
-        // The parent-owned gate: only a child worker (rlmDepth > 0) may
-        // ask; a root worker's resident lease is client-owned policy.
-        let parent_owned = {
-            let descriptor = resident.descriptor.lock().await;
-            descriptor
-                .create_command
-                .rest
-                .get("rlmDepth")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0)
-                > 0
-        };
-        if !parent_owned {
+        // The owner gate (TS `canEvictWorker`'s `hasOwnerClient` arm):
+        // a client-owned worker never passivates itself; its owner's
+        // disconnect cleanup owns the stop.
+        if resident.descriptor.lock().await.owner_client_id.is_some() {
             return response_failure(
                 Some(command_id),
                 type_name,
-                "Idle passivation is a child-worker policy; the root worker stays resident",
+                "Idle passivation is refused for a client-owned worker; its owner's disconnect cleanup owns the stop",
                 None,
             );
         }
