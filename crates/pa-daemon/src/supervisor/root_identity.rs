@@ -56,12 +56,28 @@ impl Supervisor {
     /// roster write that persists the repaired record removes the side
     /// record. The in-memory marker arms while the record still lags.
     pub(crate) async fn apply_identity_pending(&self, resident: &Arc<ResidentWorker>) {
-        let Some((session_id, session_file)) =
+        let Some((session_id, session_file, moved_at)) =
             crate::descriptor::read_identity_pending(&resident.descriptor_path)
         else {
             return;
         };
         let mut descriptor = resident.descriptor.lock().await;
+        // The freshness gate: the side record only wins while its move is
+        // NEWER than the record — a later swap whose persist succeeded
+        // (and whose side-record removal failed) must never be rolled
+        // back onto this older pending. An obsolete record is cleared,
+        // not applied.
+        if descriptor.updated_at.as_str() > moved_at.as_str() {
+            drop(descriptor);
+            if let Err(error) = crate::descriptor::clear_identity_pending(&resident.descriptor_path)
+            {
+                self.log_line(&format!(
+                    "the obsolete identity-pending record for worker {} did not clear: {error:#}",
+                    resident.worker_id
+                ));
+            }
+            return;
+        }
         if descriptor.root_session_id.as_deref() != Some(session_id.as_str())
             || descriptor.session_file.as_deref() != Some(session_file.as_str())
         {
@@ -73,7 +89,14 @@ impl Supervisor {
         match crate::descriptor::persist_worker(&resident.descriptor_path, &descriptor) {
             Ok(()) => {
                 resident.clear_identity_persist_pending();
-                crate::descriptor::clear_identity_pending(&resident.descriptor_path);
+                if let Err(error) =
+                    crate::descriptor::clear_identity_pending(&resident.descriptor_path)
+                {
+                    self.log_line(&format!(
+                        "the identity-pending record for worker {} did not clear after the boot repair: {error:#}",
+                        resident.worker_id
+                    ));
+                }
             }
             Err(error) => {
                 resident.mark_identity_persist_pending();
@@ -221,8 +244,17 @@ impl Supervisor {
             Ok(()) => {
                 resident.clear_identity_persist_pending();
                 // The repair landed: the descriptor itself carries the
-                // moved-to identity, and the side record's job is done.
-                crate::descriptor::clear_identity_pending(&resident.descriptor_path);
+                // moved-to identity, and the side record's job is done. A
+                // failed removal leaves a stale record a later boot could
+                // roll back onto — surface it (the next repair retries).
+                if let Err(clear_error) =
+                    crate::descriptor::clear_identity_pending(&resident.descriptor_path)
+                {
+                    self.log_line(&format!(
+                        "the identity-pending record for worker {} did not clear after the repair (retrying on the next roster write): {clear_error:#}",
+                        resident.worker_id
+                    ));
+                }
             }
             Err(error) => {
                 resident.mark_identity_persist_pending();
@@ -236,6 +268,7 @@ impl Supervisor {
                     &resident.descriptor_path,
                     &session_id,
                     &session_file,
+                    &crate::util::now_iso(),
                 ) {
                     // The last resort: the side record could not land
                     // either. The boot's live reconciliation (a worker
@@ -516,12 +549,12 @@ mod tests {
                 .is_some_and(|binding| binding.session_id.as_deref() == Some("sA")),
             "the binding follows the live identity (the routing is correct while the record lags)"
         );
+        let pending = crate::descriptor::read_identity_pending(&resident.descriptor_path)
+            .expect("the durable pending landed");
+        assert_eq!(pending.0, "sA");
         assert_eq!(
-            crate::descriptor::read_identity_pending(&resident.descriptor_path),
-            Some((
-                "sA".to_string(),
-                dir.join("a.jsonl").to_string_lossy().to_string()
-            )),
+            pending.1,
+            dir.join("a.jsonl").to_string_lossy().to_string(),
             "the double-failed persist durably recorded the moved-to identity beside the record"
         );
 
@@ -638,6 +671,46 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&resident.descriptor_path).unwrap())
                 .unwrap();
         assert_eq!(record.root_session_id.as_deref(), Some("sA"));
+
+        // THE FRESHNESS GATE (the stale-rollback class): an OLDER side
+        // record left behind by a failed removal must never roll a newer
+        // persisted identity back onto its move — the boot ignores it
+        // and clears it.
+        let mut newer = record.clone();
+        newer.updated_at = crate::util::now_iso();
+        std::fs::write(
+            &resident.descriptor_path,
+            serde_json::to_string(&newer).unwrap(),
+        )
+        .unwrap();
+        crate::descriptor::write_identity_pending(
+            &resident.descriptor_path,
+            "sOld",
+            &dir.join("old.jsonl").to_string_lossy(),
+            "2020-01-01T00:00:00.000Z",
+        )
+        .unwrap();
+        supervisor.apply_identity_pending(&resident).await;
+        let (root_session_id, session_file) = {
+            let descriptor = resident.descriptor.lock().await;
+            (
+                descriptor.root_session_id.clone(),
+                descriptor.session_file.clone(),
+            )
+        };
+        assert_eq!(
+            root_session_id.as_deref(),
+            Some("sA"),
+            "the newer persisted identity wins over an older pending"
+        );
+        assert_eq!(
+            session_file.as_deref(),
+            Some(dir.join("a.jsonl").to_string_lossy().to_string().as_str())
+        );
+        assert!(
+            crate::descriptor::read_identity_pending(&resident.descriptor_path).is_none(),
+            "the obsolete pending is cleared, not applied"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

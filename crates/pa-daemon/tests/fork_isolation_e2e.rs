@@ -630,6 +630,17 @@ fn a_restart_after_a_failed_identity_persist_serves_the_moved_session() {
     // Supervisor A: the original session, the fork, the failed persist.
     let mut supervisor_a = spawn_supervisor_raw(&socket, &agent_dir);
     let mut client_a = Client::connect(&socket);
+    // The roster observer: the fork's supervisor-side convergence signal
+    // (the worker's roster push carries the identity follow; the pins
+    // assert the settled state, so the test waits for the row like every
+    // other roster-observing surface).
+    let mut observer = Client::connect(&socket);
+    observer.send_command("r1", &serde_json::json!({ "type": "roster_subscribe" }));
+    assert_eq!(
+        observer.read_response("r1")["success"],
+        true,
+        "roster_subscribe failed"
+    );
     client_a.send_command(
         "c1",
         &serde_json::json!({ "type": "create", "config": {
@@ -709,6 +720,18 @@ fn a_restart_after_a_failed_identity_persist_serves_the_moved_session() {
         .expect("the fork's durable id")
         .to_string();
     assert_ne!(fork_file, original_file, "the fork moved the worker");
+    // The supervisor-side convergence wait: the fork's roster push carries
+    // the identity follow (the worker's response does NOT wait for its
+    // landing — the TS-parity async flush — so the pins assert the
+    // settled identity, never the in-flight window).
+    let _ = observer.next_roster_update(|line| {
+        line["changed"].as_array().is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry["summary"]["sessionId"] == fork_durable.as_str()
+                    && entry["summary"]["activeSessionId"] == address.as_str()
+            })
+        })
+    });
 
     // The LIVE isolation still holds with the failed persist (the
     // in-memory identity follows the worker).

@@ -591,6 +591,13 @@ impl Supervisor {
             descriptor,
             descriptor_path,
         );
+        // The durable pending (the same repair the descriptor adoption
+        // runs): the registration rebuilt the resident from the PERSISTED
+        // record — apply the failed follow's side record before the
+        // routing opens, so the in-memory identity serves the moved-to
+        // session even when the reconciliation pull below fails (the
+        // quarantine fences the routes until the live word lands).
+        self.apply_identity_pending(&resident).await;
         // A tombstoned identity is mid-stop (TS `adoptOrRecoverWorker`'s
         // stopRequestedAt branch): adoption finishes the stop — the
         // original command forwarded, the variant's finalize belt, the
