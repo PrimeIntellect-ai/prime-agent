@@ -76,6 +76,8 @@ fn fd_classes(targets: &[String]) -> Vec<(String, usize)> {
     rows
 }
 
+const DAEMON: &str = env!("CARGO_BIN_EXE_pa-daemon");
+
 struct Daemon {
     child: Child,
     #[expect(dead_code)]
@@ -92,9 +94,8 @@ impl Drop for Daemon {
 // The timeout panic path cannot wait on the child; the test process exits
 // immediately afterwards, reaping it.
 #[allow(clippy::zombie_processes)]
-fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
-    let binary = env!("CARGO_BIN_EXE_pa-daemon");
-    let child = Command::new(binary)
+fn spawn_daemon(mut launcher: Command, socket: &Path, agent_dir: &Path) -> Daemon {
+    let child = launcher
         .arg("supervisor")
         .arg("--socket")
         .arg(socket)
@@ -245,7 +246,7 @@ fn supervisor_fd_count_stable_across_session_cycles() {
     let socket = dir.path().join("daemon.sock");
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
-    let daemon = spawn_daemon(&socket, &agent_dir);
+    let daemon = spawn_daemon(Command::new(DAEMON), &socket, &agent_dir);
     let supervisor_pid = daemon.child.id();
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
@@ -374,7 +375,7 @@ fn worker_fd_count_stable_across_prompts() {
     let socket = dir.path().join("daemon.sock");
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
-    let daemon = spawn_daemon(&socket, &agent_dir);
+    let daemon = spawn_daemon(Command::new(DAEMON), &socket, &agent_dir);
     let supervisor_pid = daemon.child.id();
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
@@ -559,7 +560,7 @@ fn worker_fd_table_stable_across_client_connection_churn() {
     let socket = dir.path().join("daemon.sock");
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
-    let daemon = spawn_daemon(&socket, &agent_dir);
+    let daemon = spawn_daemon(Command::new(DAEMON), &socket, &agent_dir);
     let supervisor_pid = daemon.child.id();
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
@@ -672,7 +673,7 @@ fn supervisor_restart_loop_leaves_no_orphan_workers() {
     let socket = dir.path().join("daemon.sock");
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
-    let daemon = spawn_daemon(&socket, &agent_dir);
+    let daemon = spawn_daemon(Command::new(DAEMON), &socket, &agent_dir);
     let supervisor_pid = daemon.child.id();
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
@@ -755,4 +756,29 @@ fn supervisor_restart_loop_leaves_no_orphan_workers() {
         baseline.len(),
         final_fds.len()
     );
+}
+
+/// A supervisor started under a low soft fd limit raises it to the hard
+/// limit before it binds its socket (macOS starts every process at 256).
+#[cfg(target_os = "linux")]
+#[test]
+fn supervisor_raises_a_low_soft_fd_limit_to_the_hard_limit() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let mut launcher = Command::new("sh");
+    launcher.args(["-c", r#"ulimit -Sn 64 && exec "$0" "$@""#, DAEMON]);
+    let daemon = spawn_daemon(launcher, &socket, &agent_dir);
+    let limits = std::fs::read_to_string(format!("/proc/{}/limits", daemon.child.id()))
+        .expect("read supervisor limits");
+    let open_files: Vec<&str> = limits
+        .lines()
+        .find(|line| line.starts_with("Max open files"))
+        .expect("open files row")
+        .split_whitespace()
+        .skip(3)
+        .take(2)
+        .collect();
+    assert_eq!(open_files[0], open_files[1], "{limits}");
 }
