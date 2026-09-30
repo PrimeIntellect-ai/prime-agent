@@ -63,6 +63,7 @@ pub const IMAGE_DIMENSIONS_PREFIX_BYTES: usize = 1024;
 /// never decode the whole string. `None` for unsupported mime types,
 /// payloads whose quantum-aligned prefix does not decode, or headers that
 /// spill past [`IMAGE_DIMENSIONS_PREFIX_BYTES`].
+#[must_use]
 pub fn get_image_dimensions_prefix(
     data: &str,
     mime_type: &str,

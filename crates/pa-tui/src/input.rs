@@ -61,6 +61,25 @@ static PREVIOUS_READER: Mutex<Option<Reader>> = Mutex::new(None);
 /// when no wake handle exists (a source that failed to open the tty).
 const POLL_TIMEOUT_MS: u64 = 10;
 
+/// Stop the running reader and join it (the external-editor handoff):
+/// unlike a surface switch, the reader must be GONE before the child
+/// editor runs — it keeps polling the tty and would steal the editor's
+/// keystrokes and terminal query replies. The stop goes through
+/// [`request_reader_stop`]: the #3126 reader parks edge-driven (its
+/// waker breaks an indefinite park), so the flag's release store plus
+/// the wake is the one stop sequence — the flag alone would never wake
+/// a parked poll — and the entry is then taken and joined.
+pub(crate) fn stop_reader() {
+    request_reader_stop();
+    let reader = PREVIOUS_READER
+        .lock()
+        .expect("the input-reader registry lock is poisoned")
+        .take();
+    if let Some(reader) = reader {
+        let _ = reader.handle.join();
+    }
+}
+
 /// Flag the previous surface's reader for stop and break its park: the
 /// flagged reader observes the flag at its loop top, so the wake is what
 /// turns a parked (indefinite) poll into a prompt exit. The teardown

@@ -95,7 +95,11 @@ fn capture_writer() -> Option<&'static CaptureWriter> {
             let writer_queued = Arc::clone(&queued);
             std::thread::Builder::new()
                 .name("request-payload-capture".to_string())
-                .spawn(move || drain_writer(writer_queued, receiver))
+                .spawn(move || {
+                    let writer_queued = writer_queued;
+                    let receiver = receiver;
+                    drain_writer(&writer_queued, &receiver);
+                })
                 .map(|_| CaptureWriter { sender, queued })
                 .map_err(|error| {
                     tracing::debug!(%error, "payload capture writer thread failed to spawn");
@@ -187,7 +191,7 @@ impl RequestPayloadCapture {
 /// The writer thread: release the job's queue slot as it is taken, then
 /// serialize the capture, write it through a private temp file, rename it
 /// into place (a reader never sees a partial body), and prune the ring.
-fn drain_writer(queued: Arc<AtomicUsize>, jobs: Receiver<CaptureJob>) {
+fn drain_writer(queued: &Arc<AtomicUsize>, jobs: &Receiver<CaptureJob>) {
     while let Ok(job) = jobs.recv() {
         queued.fetch_sub(1, Ordering::Relaxed);
         if let Err(error) = write_capture(&job.dir, job.keep, &job) {

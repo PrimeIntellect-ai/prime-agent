@@ -8,7 +8,7 @@ use super::{
     AgentSessionEngine, Arc, BranchSummaryOutcome, BranchSummaryRequest, BranchSummaryRun,
     CompactionOutcome, CompactionRequest, CompactionRun, EngineEvent, EngineModelSelection,
     ParentIdentity, PromptRequest, ProviderTarget, SessionEngine, SideQuestionOutcome,
-    SideQuestionRequest, TurnPrompt, Value, DEFAULT_RLM_MAX_DEPTH,
+    SideQuestionRequest, StartupScope, TurnPrompt, Value, DEFAULT_RLM_MAX_DEPTH,
 };
 
 impl SessionEngine for AgentSessionEngine {
@@ -236,7 +236,7 @@ impl SessionEngine for AgentSessionEngine {
         &self,
         handle: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) {
-        AgentSessionEngine::release_goal_continuation_handle(self, handle);
+        AgentSessionEngine::release_goal_continuation_handle(handle.as_ref());
     }
 
     fn autonomous_status(
@@ -606,6 +606,26 @@ impl SessionEngine for AgentSessionEngine {
             };
             pa_core::export_html::pre_render_custom_tools(&entries, &renderer)
         })
+    }
+
+    fn configure_startup_scope(
+        &self,
+        scoped_models: Vec<pa_core::models::ScopedModel>,
+        is_continuing: bool,
+    ) {
+        *self.startup_scope.lock().unwrap() = Some(StartupScope {
+            scoped_models,
+            is_continuing,
+        });
+        // The scope changes the startup decisions (the picked model, the
+        // entry's `:thinking` link in `effective_thinking`), so the level
+        // the create-model seam resolved a moment ago — before the scope
+        // registered — is stale: drop it the same way `configure_model`
+        // does; the next read re-resolves against the scope.
+        *self
+            .effective_thinking
+            .write()
+            .expect("effective thinking lock") = None;
     }
 
     fn model_metadata(&self) -> Option<Value> {

@@ -4,6 +4,10 @@
 //! four-column continuation indent (the one-column chat margin plus the
 //! gutter's three columns) — the same geometry the expanded ipython cell
 //! code (TS `renderCode`) and the received agent-message body use.
+//!
+//! Expandable chat bodies render on this grammar (TS #2779's shared
+//! `guttered` layout), with one sanctioned divergence: the gutter hangs
+//! off the first non-blank row, not row 0.
 
 use crate::{Line, Span};
 
@@ -105,6 +109,34 @@ pub(crate) fn branch_block_count(text: &str, width: usize) -> usize {
     crate::width::wrapped_text_count(text, branch_content_width(width))
 }
 
+/// Markdown under the branch: `text` renders at the branch content width,
+/// the rows take the branch grammar (gutter on the first non-blank row),
+/// and every row clips to the full width (TS #2779
+/// `guttered(width, Markdown.render)`).
+pub(crate) fn branch_markdown(
+    text: &str,
+    style: &crate::markdown::MarkdownStyle,
+    theme: &crate::theme::Theme,
+    width: usize,
+) -> Vec<Line> {
+    branch_rows(
+        crate::markdown::render_markdown(text, branch_content_width(width), style),
+        theme,
+    )
+    .into_iter()
+    .map(|row| crate::width::truncate_line(&row, width, ""))
+    .collect()
+}
+
+/// The row count of [`branch_markdown`].
+pub(crate) fn branch_markdown_count(
+    text: &str,
+    style: &crate::markdown::MarkdownStyle,
+    width: usize,
+) -> usize {
+    crate::markdown::markdown_row_count(text, branch_content_width(width), style)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,7 +199,7 @@ mod tests {
     #[test]
     fn empty_block_renders_nothing() {
         assert!(branch_block(&vec![Span::raw("   ")], &theme(), 40).is_empty());
-        assert!(branch_block(&vec![], &theme(), 40).is_empty());
+        assert!(branch_block(&Vec::new(), &theme(), 40).is_empty());
         assert_eq!(branch_block_count("  ", 40), 0);
     }
 
@@ -189,6 +221,44 @@ mod tests {
                     branch_block_count(text, width),
                     "text={text:?} width={width}"
                 );
+            }
+        }
+    }
+
+    /// The row-count twin of [`branch_markdown`]: for every input the
+    /// painted rows match the count at every width, and every painted row
+    /// clips to the width (the clip-before-overflow regression; a branch
+    /// prefix alone can outgrow a tiny viewport).
+    #[test]
+    fn markdown_block_counts_and_clips() {
+        let theme = theme();
+        let style = crate::markdown::MarkdownStyle::from_theme(&theme);
+        for text in [
+            "",
+            "  \n\n",
+            "one",
+            "## Heading\nbody",
+            "| a | b |\n|---|---|\n| wide | 界 |",
+            "```rust\nfn main() {}\n```",
+            "word ".repeat(40).as_str(),
+        ] {
+            for width in 0..40usize {
+                let rows = branch_markdown(text, &style, &theme, width);
+                assert_eq!(
+                    rows.len(),
+                    branch_markdown_count(text, &style, width),
+                    "text={text:?} width={width}"
+                );
+                for row in &rows {
+                    let used: usize = row
+                        .iter()
+                        .map(|span| crate::width::str_width(&span.content))
+                        .sum();
+                    assert!(
+                        used <= width,
+                        "text={text:?} width={width} row is {used} wide"
+                    );
+                }
             }
         }
     }

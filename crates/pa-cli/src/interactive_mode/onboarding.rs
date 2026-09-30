@@ -3,7 +3,7 @@
 //! sink behind the pa-tui onboarding trait, and the startup task
 //! assembly the interactive launch mounts.
 
-use super::*;
+use super::{PathBuf, Result, RunOptions};
 
 /// The startup-model resolution inputs (TS `findInitialModel`'s chain),
 /// captured at task construction: the onboarding flow re-resolves the

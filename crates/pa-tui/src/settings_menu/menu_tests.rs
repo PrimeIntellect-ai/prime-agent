@@ -453,7 +453,7 @@ fn the_strip_lists_the_tabs_and_marks_the_active_one() {
     assert_eq!(strip_blank_below, "");
     // The active tab renders white bold (the operator's 2026-09-28
     // selection ruling — the theme's text color, not the dock's
-    // accent purple).
+    // background band).
     let active = lines[4]
         .iter()
         .find(|span| span.content == "General")

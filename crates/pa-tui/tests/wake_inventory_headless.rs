@@ -148,6 +148,7 @@ fn run_boot_plan(steps: Vec<HeadlessStep>) -> pa_tui::interactive::InteractiveOu
 
 fn options(socket: PathBuf) -> InteractiveOptions {
     InteractiveOptions {
+        models: None,
         socket_path: socket,
         cwd: PathBuf::from("/tmp"),
         session_dir: None,

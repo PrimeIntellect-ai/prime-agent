@@ -329,6 +329,7 @@ fn slave_as_stdio(slave: &OwnedFd) -> Stdio {
 
 fn child_options(socket: PathBuf) -> InteractiveOptions {
     InteractiveOptions {
+        models: None,
         socket_path: socket,
         cwd: PathBuf::from("/tmp"),
         session_dir: None,

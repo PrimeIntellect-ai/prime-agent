@@ -48,6 +48,7 @@ pub enum GoalBranchReload {
 /// fold and charges only active-status wall clock. The creation-based
 /// ruling is simpler and deliberately different: a paused or idle goal
 /// still displays its age, and the timer never depends on any anchor.
+#[must_use]
 pub fn creation_elapsed_seconds(created_at: Option<u64>, now: u64) -> u64 {
     created_at.map_or(0, |created| now.saturating_sub(created) / 1000)
 }
@@ -276,6 +277,7 @@ impl GoalDriver {
     /// compounds, and a paused goal shows its age). A state without
     /// `created_at` (a pre-contract row normalized before the backfill)
     /// keeps its last persisted `time_used_seconds`.
+    #[must_use]
     pub fn state_with_creation_elapsed(&self) -> GoalState {
         match self.state.created_at {
             Some(created_at) => GoalState {
@@ -769,6 +771,7 @@ impl GoalDriver {
 
     /// Whether a minted continuation is still waiting for its surface's
     /// admission (the pending-never-re-arms guard).
+    #[must_use]
     pub fn pending_continuation(&self) -> bool {
         self.pending_continuation
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -779,6 +782,7 @@ impl GoalDriver {
     /// `block_on`, the worker's abort-cancel) release the guard through
     /// it (`store(false)`) — the driver's own mint sites still read and
     /// set it under the driver lock.
+    #[must_use]
     pub fn pending_continuation_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
         std::sync::Arc::clone(&self.pending_continuation)
     }

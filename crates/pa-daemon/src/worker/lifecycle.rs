@@ -1,9 +1,9 @@
 //! Session lifecycle on the worker: shutdown, replacement handoff,
 //! resume, compaction triggers, and the wait-for-settled arms.
 use super::{
-    json, queue_lanes, response_failure, response_success, session_snapshot, DaemonResponse,
-    QueueCheckpoint, QueuePriority, QueuedItem, SessionFile, TurnPolicy, Value, Worker,
-    SIDE_QUESTION_SETTLE_TIMEOUT,
+    json, queue_lanes, response_failure, response_success, session_snapshot, AgentSessionEngine,
+    DaemonResponse, QueueCheckpoint, QueuePriority, QueuedItem, SessionFile, TurnPolicy, Value,
+    Worker, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 impl Worker {
@@ -481,8 +481,9 @@ impl Worker {
                         // (logged, never silent): the mint's own captured
                         // handle releases so a later boundary may mint —
                         // the goal loop never wedges on the lost turn.
-                        self.engine
-                            .release_goal_continuation_handle(&mint_pending_handle);
+                        AgentSessionEngine::release_goal_continuation_handle(
+                            mint_pending_handle.as_ref(),
+                        );
                         None
                     });
                     if let Some(continuation) = continuation {
@@ -544,8 +545,9 @@ impl Worker {
                         // (the owed flag clears at the queue) — never the
                         // mutable mirror, which a core rebuild may have
                         // re-swapped onto a replacement session's guard.
-                        self.engine
-                            .release_goal_continuation_handle(&continuation.pending_handle);
+                        AgentSessionEngine::release_goal_continuation_handle(
+                            continuation.pending_handle.as_ref(),
+                        );
                     }
                 }
                 // The resume site: clears the suspension and wakes the

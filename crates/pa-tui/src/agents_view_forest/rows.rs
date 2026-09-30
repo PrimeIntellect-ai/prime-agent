@@ -36,13 +36,16 @@ struct BaseRow {
 /// its ONE subagents line (`N subagents (M running)` — N = the full
 /// roster, M = the running subset — expanding to the whole roster in
 /// one group, running rows first). `expanded` holds the parent row
-/// identities whose lines are open; `rollups` carries the unfiltered
-/// hierarchy totals; a scope excludes its root and lifts its direct
-/// children to top-level rows.
-pub fn build_rows<S: std::hash::BuildHasher + Default>(
+/// identities whose lines are open; `program_shown` holds the parent
+/// identities whose spawn programs render inside the open list (TS
+/// `programShownParents`); `rollups` carries the unfiltered hierarchy
+/// totals; a scope excludes its root and lifts its direct children to
+/// top-level rows.
+pub(crate) fn build_rows<S: std::hash::BuildHasher + Default>(
     records: &[UnifiedRecord],
     scope: Option<&AgentsViewScope>,
     expanded: &HashSet<String, S>,
+    program_shown: &HashSet<String, S>,
     rollups: &HashMap<String, Rollup, S>,
     anchor: Option<&str>,
 ) -> Vec<AgentsViewRow> {
@@ -239,6 +242,7 @@ pub fn build_rows<S: std::hash::BuildHasher + Default>(
         base: &base,
         children_by_parent: &children_by_parent,
         expanded,
+        program_shown,
         anchor,
     };
     let mut rows: Vec<AgentsViewRow> = Vec::new();
@@ -253,6 +257,9 @@ struct RowForest<'a, S: std::hash::BuildHasher + Default> {
     base: &'a [BaseRow],
     children_by_parent: &'a HashMap<usize, Vec<usize>>,
     expanded: &'a HashSet<String, S>,
+    /// The parents whose spawn programs render inside their open list
+    /// (TS `programShownParents`).
+    program_shown: &'a HashSet<String, S>,
     anchor: Option<&'a str>,
 }
 
@@ -279,7 +286,11 @@ impl<S: std::hash::BuildHasher + Default> RowForest<'_, S> {
             return;
         }
         let is_expanded = self.expanded.contains(&row.identity);
-        rows.push(merged_summary_row(row, depth + 1, is_expanded));
+        let mut summary_row = merged_summary_row(row, depth + 1, is_expanded);
+        summary_row.has_spawn_code = children
+            .iter()
+            .any(|child| spawn_code(&self.base[*child].summary).is_some());
+        rows.push(summary_row);
         if !is_expanded {
             return;
         }
@@ -293,8 +304,31 @@ impl<S: std::hash::BuildHasher + Default> RowForest<'_, S> {
             .iter()
             .copied()
             .partition(|child| self.base[*child].section == Section::Running);
-        for child in running_kids.into_iter().chain(other_kids) {
-            self.emit(child, depth + 1, Some(&row.identity), rows);
+        let ordered: Vec<usize> = running_kids.into_iter().chain(other_kids).collect();
+        // TS `groupChildrenBySpawnCode`: while the program shows, each spawn cell's
+        // code renders once above the children it launched. Hidden keeps the flat
+        // running-first order.
+        let groups: Vec<(Option<&str>, Vec<usize>)> = if self.program_shown.contains(&row.identity)
+        {
+            let mut groups: Vec<(Option<&str>, Vec<usize>)> = Vec::new();
+            for child in ordered {
+                let code = spawn_code(&self.base[child].summary);
+                match groups.iter_mut().find(|(group, _)| *group == code) {
+                    Some((_, kids)) => kids.push(child),
+                    None => groups.push((code, vec![child])),
+                }
+            }
+            groups
+        } else {
+            vec![(None, ordered)]
+        };
+        for (group_index, (code, kids)) in groups.into_iter().enumerate() {
+            if let Some(code) = code {
+                rows.extend(spawn_code_rows(row, code, depth + 1, group_index));
+            }
+            for child in kids {
+                self.emit(child, depth + 1, Some(&row.identity), rows);
+            }
         }
     }
 }
@@ -316,6 +350,7 @@ fn agents_row(row: &BaseRow, depth: usize, parent_identity: Option<&str>) -> Age
         descendant_count: row.descendant_count,
         running_subagent_count: row.running_subagent_count,
         expanded: false,
+        has_spawn_code: false,
     }
 }
 
@@ -353,7 +388,74 @@ fn merged_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsV
         descendant_count: 0,
         running_subagent_count: running,
         expanded,
+        has_spawn_code: false,
     }
+}
+
+/// TS `hasSpawnCode` (agents-view-state.ts:1021-1023): the summary's
+/// `spawnCode` is a string with a non-blank trim. The ONE predicate —
+/// and the value the program rows render, never a second read.
+fn spawn_code(summary: &Value) -> Option<&str> {
+    let code = summary.get("spawnCode").and_then(Value::as_str)?;
+    (!code.trim().is_empty()).then_some(code)
+}
+
+/// TS `MAX_SPAWN_CODE_LINES` (agents-view-state.ts:67): the program
+/// body's row cap, so a long spawn cell cannot flood the view.
+const MAX_SPAWN_CODE_LINES: usize = 10;
+
+/// TS `buildSpawnCodeRows` (agents-view-state.ts:1051-1083): one spawn
+/// cell's program as read-only rows — the code's lines (trailing
+/// whitespace stripped, capped, the remainder counted), wrapped in
+/// blank pad rows. Each row reuses the parent's section and summary and
+/// carries the code line in `title` (code rows are never selected,
+/// searched, or deleted, so no separate code field exists).
+fn spawn_code_rows(
+    parent: &BaseRow,
+    code: &str,
+    depth: usize,
+    group_index: usize,
+) -> Vec<AgentsViewRow> {
+    let make_row = |title: &str, line_index: &str| AgentsViewRow {
+        kind: RowKind::Code,
+        section: parent.section,
+        identity: format!("code:{}:{group_index}:{line_index}", parent.identity),
+        parent_identity: Some(parent.identity.clone()),
+        summary: parent.summary.clone(),
+        title: title.to_string(),
+        model: String::new(),
+        cost: 0.0,
+        age: String::new(),
+        depth,
+        descendant_count: 0,
+        running_subagent_count: 0,
+        expanded: false,
+        has_spawn_code: false,
+    };
+    // TS `spawnCode.replace(/\s+$/, "")`: strip the trailing whitespace
+    // editors leave, then split the program into its lines — the cap
+    // reads the first lines and counts the rest from the one iterator,
+    // with no intermediate collection.
+    let mut lines = code.trim_end().split('\n');
+    let mut rows: Vec<AgentsViewRow> = Vec::new();
+    // A blank panel line above and below pads the program into a clean
+    // block (TS :1081-1082).
+    rows.push(make_row("", "pad-top"));
+    for (line_index, line) in lines.by_ref().take(MAX_SPAWN_CODE_LINES).enumerate() {
+        rows.push(make_row(line, &line_index.to_string()));
+    }
+    let hidden = lines.count();
+    if hidden > 0 {
+        rows.push(make_row(
+            &format!(
+                "\u{2026} +{hidden} more {}",
+                if hidden == 1 { "line" } else { "lines" }
+            ),
+            "more",
+        ));
+    }
+    rows.push(make_row("", "pad-bottom"));
+    rows
 }
 
 /// TS `compareAgentsViewRows`: section rank, then empty sessions sink,

@@ -709,7 +709,7 @@ mod tests {
                 json!({
                     "id": format!("mock-{index}"), "name": format!("Mock {index}"),
                     "api": "openai-completions", "baseUrl": "http://127.0.0.1:9/v1",
-                    "contextWindow": 128_000, "maxTokens": 4096,
+                    "contextWindow": 128_000, "maxTokens": 4096, "reasoning": true,
                 })
             })
             .collect();
@@ -807,6 +807,166 @@ mod tests {
         assert!(
             !error.contains("does not support model switching"),
             "{error}"
+        );
+    }
+
+    /// The create's `models` config resolves into the session's scoped
+    /// list (TS main.ts:838-851: `config.models ?? enabledModels` →
+    /// `resolveModelScope`): the connection state carries the entries in
+    /// the request's order, a fresh session starts on the first scoped
+    /// model (no explicit model flags, TS main.ts:548-568), and a create
+    /// without `models` falls back to the settings `enabledModels`.
+    #[tokio::test]
+    async fn create_resolves_the_models_scope_for_the_session() {
+        let dir = std::env::temp_dir().join(format!("pa-worker-scope-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        models_fixture(&dir, 2);
+        // The real engine (no script): the startup chain resolves the
+        // session's model against the registry.
+        let mut config = worker_config(&dir);
+        config.script = None;
+        let worker = Arc::new(Worker::new(config, None));
+        let created = worker
+            .dispatch(
+                "create",
+                &json!({
+                    "noSession": true,
+                    "cwd": dir,
+                    "models": ["prime-inference/mock-2:high", "prime-inference/mock-1"],
+                }),
+            )
+            .await;
+        assert!(created.success, "create failed: {created:?}");
+        let state = worker
+            .dispatch(
+                "get_connection_state",
+                &json!({ "activeSessionId": "switch-session" }),
+            )
+            .await;
+        let data = state.data.expect("state data");
+        let scoped = data["scopedModels"].as_array().expect("scopedModels");
+        let scoped_keys = scoped
+            .iter()
+            .map(|entry| {
+                format!(
+                    "{}/{}",
+                    entry["model"]["provider"].as_str().unwrap_or_default(),
+                    entry["model"]["id"].as_str().unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            scoped_keys,
+            vec!["prime-inference/mock-2", "prime-inference/mock-1"],
+            "the scope keeps the request's order: {data}"
+        );
+        // No explicit model flags, a fresh session: the startup chain
+        // starts on the first scoped model.
+        assert_eq!(data["model"]["id"], "mock-2", "the state's model: {data}");
+        // The scoped entry's `:thinking` rides the picked startup model
+        // (TS main.ts:556-566; `--thinking` stays absent here).
+        assert_eq!(
+            data["thinkingLevel"], "high",
+            "the scoped entry's level set the startup thinking: {data}"
+        );
+
+        // The settings `enabledModels` fallback (TS `config.models ??
+        // settingsManager.getEnabledModels()`): a create without
+        // `models` resolves the same way.
+        std::fs::write(
+            dir.join("agent").join("settings.json"),
+            json!({ "enabledModels": ["prime-inference/mock-1", "prime-inference/mock-2"] })
+                .to_string(),
+        )
+        .unwrap();
+        let mut config = worker_config(&dir);
+        config.script = None;
+        let fallback = Arc::new(Worker::new(config, None));
+        let created = fallback
+            .dispatch("create", &json!({ "noSession": true, "cwd": dir }))
+            .await;
+        assert!(created.success, "fallback create failed: {created:?}");
+        let state = fallback
+            .dispatch(
+                "get_connection_state",
+                &json!({ "activeSessionId": "switch-session" }),
+            )
+            .await;
+        let data = state.data.expect("state data");
+        let ids = data["scopedModels"]
+            .as_array()
+            .expect("scopedModels")
+            .iter()
+            .map(|entry| entry["model"]["id"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![json!("mock-1"), json!("mock-2")],
+            "the settings fallback resolved the same scope: {data}"
+        );
+    }
+
+    /// A fresh, file-backed `--models` create persists the SCOPED startup
+    /// pick in its creation prefix: the file's `model_change` and
+    /// `thinking_level_change` entries must resolve through the registered
+    /// scope (the scoped entry's `:thinking` level included), because a
+    /// resume, a worker respawn, and every session-file reader restore
+    /// from the file — an unscoped prefix would reopen the session on the
+    /// default model instead of the scoped one. The create also must not
+    /// treat its brand-new `sessionPath` as a continuing session (the
+    /// pre-create existence check the scope reads), or the scope would be
+    /// skipped for the startup model entirely.
+    #[tokio::test]
+    async fn a_fresh_scoped_create_persists_the_scoped_startup_pick_in_its_file() {
+        let dir =
+            std::env::temp_dir().join(format!("pa-worker-scope-file-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        models_fixture(&dir, 2);
+        let mut config = worker_config(&dir);
+        config.script = None;
+        let worker = Arc::new(Worker::new(config, None));
+        // A session path that does NOT exist yet: the fresh file-backed
+        // arm (the exact path class the review flagged — a post-create
+        // existence check would see the file this create just wrote).
+        let session_path = dir.join("fresh-scoped-session.jsonl");
+        let created = worker
+            .dispatch(
+                "create",
+                &json!({
+                    "sessionPath": session_path,
+                    "cwd": dir,
+                    "models": ["prime-inference/mock-2:high", "prime-inference/mock-1"],
+                }),
+            )
+            .await;
+        assert!(created.success, "create failed: {created:?}");
+        // The live startup state starts scoped (the same pick the
+        // in-memory test pins): mock-2 with its `:high` entry.
+        let state = worker
+            .dispatch(
+                "get_connection_state",
+                &json!({ "activeSessionId": "switch-session" }),
+            )
+            .await;
+        let data = state.data.expect("state data");
+        assert_eq!(data["model"]["id"], "mock-2", "the state's model: {data}");
+        assert_eq!(
+            data["thinkingLevel"], "high",
+            "the state's thinking: {data}"
+        );
+        // The FILE agrees: the creation prefix's entries carry the scoped
+        // pick, so the session restores scoped after a reopen or respawn.
+        let file = std::fs::read_to_string(&session_path).expect("the session file");
+        assert!(
+            file.contains("\"type\":\"model_change\"")
+                && file.contains("\"provider\":\"prime-inference\"")
+                && file.contains("\"modelId\":\"mock-2\""),
+            "the prefix's model_change carries the scoped pick: {file}"
+        );
+        assert!(
+            file.contains("\"type\":\"thinking_level_change\"")
+                && file.contains("\"thinkingLevel\":\"high\""),
+            "the prefix's thinking_level_change carries the scoped level: {file}"
         );
     }
 

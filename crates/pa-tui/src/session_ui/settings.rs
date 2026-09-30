@@ -186,9 +186,9 @@ impl SessionUi {
         self.rebuild_transcript(view).await;
         self.refresh_stats().await;
         // The transcript rebuild ran before the refresh, so the refreshed
-        // pair rides the chrome through this tray rebuild — without it
-        // the title keeps the pre-import own cost and subagent aggregate
-        // until the next settled turn.
+        // context usage rides the chrome through this tray rebuild —
+        // without it the tray keeps the pre-import usage until the next
+        // settled turn.
         self.rebuild_tray(view);
         self.note(&format!("Session imported from: {input_path}"), view);
         Ok(())

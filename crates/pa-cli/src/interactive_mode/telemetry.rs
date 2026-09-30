@@ -2,7 +2,7 @@
 //! one-shot client wrapper and the adoption events the pa-tui
 //! interactive loop reports through the `InteractionTelemetry` trait.
 
-use super::*;
+use super::{Future, PathBuf, Pin};
 
 /// `tui scroll used` / `tui exit` adoption telemetry: a one-shot client per
 /// event, tracked and flushed at the emission point (the `startup`-event
@@ -121,6 +121,38 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
             properties.set("action", serde_json::Value::from(action));
             properties.set("had_images", serde_json::Value::from(had_images));
             client.track("tui prompt stash", properties);
+            let _ = client.shutdown().await;
+        })
+    }
+
+    fn external_editor_used(
+        &self,
+        outcome: &'static str,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let Some(client) = self.client() else {
+                return;
+            };
+            let mut properties = pa_telemetry::base_properties("interactive");
+            properties.set("outcome", serde_json::Value::from(outcome));
+            client.track("tui external editor used", properties);
+            let _ = client.shutdown().await;
+        })
+    }
+
+    fn scoped_models_used(
+        &self,
+        action: &'static str,
+        scoped: bool,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let Some(client) = self.client() else {
+                return;
+            };
+            let mut properties = pa_telemetry::base_properties("interactive");
+            properties.set("action", serde_json::Value::from(action));
+            properties.set("scoped", serde_json::Value::from(scoped));
+            client.track("tui scoped models used", properties);
             let _ = client.shutdown().await;
         })
     }
@@ -327,6 +359,21 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
             let mut properties = pa_telemetry::base_properties("interactive");
             properties.set("outcome", serde_json::Value::from(outcome));
             client.track("tui suspend used", properties);
+            let _ = client.shutdown().await;
+        })
+    }
+
+    fn agents_view_action(
+        &self,
+        action: &'static str,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let Some(client) = self.client() else {
+                return;
+            };
+            let mut properties = pa_telemetry::base_properties("interactive");
+            properties.set("action", serde_json::Value::from(action));
+            client.track("tui agents action", properties);
             let _ = client.shutdown().await;
         })
     }

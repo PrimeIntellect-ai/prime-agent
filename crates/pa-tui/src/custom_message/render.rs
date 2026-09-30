@@ -10,7 +10,7 @@ use super::{
     AgentMessageDirection, AgentMessageRow, CustomPanelRow, ShellCompletionRow, AGENT_MESSAGE_LABEL,
 };
 use crate::chat::Detail;
-use crate::theme::{Theme, ThemeBg, ThemeColor};
+use crate::theme::{Theme, ThemeColor};
 use crate::width::{pad_line, str_width, truncate_line, wrap_line, wrap_text};
 use crate::{Line, Span};
 use ratatui::style::Style;
@@ -18,6 +18,18 @@ use ratatui::style::Style;
 /// One blank row (`Spacer(1)`).
 pub(crate) fn spacer() -> Line {
     Vec::new()
+}
+
+/// TS `customMessageLabel`: the bold `[<name>]` label in
+/// `customMessageLabel` — the shared header label of the skill card and
+/// the generic custom panel.
+pub(crate) fn custom_message_label(name: &str, theme: &Theme) -> Span {
+    Span::styled(
+        format!("[{name}]"),
+        theme
+            .fg_style(ThemeColor::CustomMessageLabel)
+            .add_modifier(ratatui::style::Modifier::BOLD),
+    )
 }
 
 /// A `Text(spans, 1, 0)` row set: content wrapped at `width - 2`, one margin
@@ -33,27 +45,6 @@ pub(crate) fn text_rows(spans: &Line, width: usize) -> Vec<Line> {
         .map(|wrapped| {
             let mut row: Line = vec![Span::raw(" ")];
             row.extend(wrapped);
-            pad_line(row, width)
-        })
-        .collect()
-}
-
-/// Markdown rows at `Markdown(text, 1, 0)` geometry (the assistant-block
-/// layout): rendered at `width - 2`, one margin column, padded with the
-/// default style.
-pub(crate) fn markdown_rows(
-    text: &str,
-    body_color: ThemeColor,
-    theme: &Theme,
-    width: usize,
-) -> Vec<Line> {
-    let content_width = width.saturating_sub(2).max(1);
-    let md = super::geometry::markdown_style(body_color, theme);
-    crate::markdown::render_markdown(text, content_width, &md)
-        .into_iter()
-        .map(|line| {
-            let mut row: Line = vec![Span::raw(" ")];
-            row.extend(line);
             pad_line(row, width)
         })
         .collect()
@@ -170,7 +161,9 @@ pub(crate) fn truncate_text(text: &str, width: usize, ellipsis: &str) -> String 
         .collect::<String>()
 }
 
-/// One shell-completion row (TS `ShellCompletionComponent`, standalone form).
+/// One shell-completion row (TS `ShellCompletionComponent`, standalone
+/// form): the header mark, then the raw content under the branch gutter
+/// when expanded (TS #2779 `guttered(width, Text(raw, 0, 0))`).
 pub(crate) fn render_shell_completion(
     row: &ShellCompletionRow,
     detail: Detail,
@@ -201,15 +194,11 @@ pub(crate) fn render_shell_completion(
     }
     out.push(header);
     if detail.tool_output_expanded() {
-        // TS `Text(raw, 1, 0)`: one row per input line at the content width;
-        // an empty line keeps its margins-only row.
-        for line in row.content.split('\n') {
-            if line.trim().is_empty() {
-                out.push(vec![Span::raw(" ".repeat(width))]);
-            } else {
-                out.extend(text_rows(&vec![Span::raw(line.to_string())], width));
-            }
-        }
+        out.extend(crate::branch::branch_block(
+            &vec![Span::raw(row.content.clone())],
+            theme,
+            width,
+        ));
     }
     out
 }
@@ -224,43 +213,24 @@ pub(crate) fn pad_with(mut line: Line, width: usize, base: Style) -> Line {
     line
 }
 
-/// One generic custom row (TS `CustomMessageComponent`): a leading blank,
-/// then a `Box(1,1)` on `customMessageBg` holding the bold `[<customType>]`
-/// label in `customMessageLabel` and the markdown body in
-/// `customMessageText`.
+/// One generic custom row (TS `CustomMessageComponent`, after #2779's one
+/// shared layout): a leading blank, the bold `[<customType>]` label in
+/// `customMessageLabel`, then the always-shown markdown body in
+/// `customMessageText` under the branch gutter.
 pub(crate) fn render_custom_panel(row: &CustomPanelRow, theme: &Theme, width: usize) -> Vec<Line> {
-    let bg = theme.bg_style(ThemeBg::CustomMessageBg);
-    let blank = vec![Span::styled(" ".repeat(width), bg)];
-    let mut out = vec![spacer(), blank.clone()];
-    let content_width = width.saturating_sub(2).max(1);
-    let label = Span::styled(
-        format!("[{}]", row.custom_type),
-        theme
-            .fg_style(ThemeColor::CustomMessageLabel)
-            .add_modifier(ratatui::style::Modifier::BOLD),
-    );
-    out.push(box_row(vec![label], bg, width));
-    // The box's internal `Spacer(1)`: one blank surface row.
-    out.push(blank.clone());
-    if !row.content.trim().is_empty() {
-        let md = super::geometry::custom_panel_style(theme);
-        for line in crate::markdown::render_markdown(&row.content, content_width, &md) {
-            out.push(box_row(line, bg, width));
-        }
-    }
-    out.push(blank);
+    let md = super::geometry::markdown_style(ThemeColor::CustomMessageText, theme);
+    let mut out = vec![spacer()];
+    out.extend(text_rows(
+        &vec![custom_message_label(&row.custom_type, theme)],
+        width,
+    ));
+    out.extend(crate::branch::branch_markdown(
+        &row.content,
+        &md,
+        theme,
+        width,
+    ));
     out
-}
-
-/// One box content row: left padding column, content spans (bg-patched),
-/// padded to the full width on the box background (TS `Box.applyBg` covers
-/// the whole row, trailing padding included).
-fn box_row(spans: Line, bg: Style, width: usize) -> Line {
-    let mut row: Line = vec![Span::styled(" ".to_string(), bg)];
-    for span in spans {
-        row.push(Span::styled(span.content, span.style.patch(bg)));
-    }
-    pad_with(row, width, bg)
 }
 
 #[cfg(test)]
@@ -421,37 +391,56 @@ mod tests {
             theme().fg_style(ThemeColor::Error),
             "error when failed"
         );
+        // The expanded body is the raw content under the branch gutter
+        // (TS #2193's expectation, the same layout #2779 mandates): the
+        // gutter on the first content row, the four-column continuation
+        // on the blank source line.
+        let row = ShellCompletionRow {
+            pid: Some(99),
+            exit_code: Some(0),
+            content: "[bash-done pid:99 exit:0]\n\nCommand: \"printf done\"".to_string(),
+        };
+        let rows = render_shell_completion(&row, Detail::All, &theme(), 60, true);
+        let trimmed: Vec<String> = rows
+            .iter()
+            .map(|row| flat(row).trim_end().to_string())
+            .collect();
+        assert_eq!(
+            trimmed,
+            vec![
+                "",
+                " \u{2713} Background shell command finished",
+                " \u{2570}\u{2500} [bash-done pid:99 exit:0]",
+                "",
+                "    Command: \"printf done\"",
+            ],
+            "{rows:?}"
+        );
     }
 
+    /// The un-boxed panel's label is the shared `customMessageLabel`
+    /// span with no box background; the body carries `customMessageText`.
     #[test]
-    fn custom_panel_box_shape() {
+    fn custom_panel_guttered_shape() {
         let row = CustomPanelRow {
             custom_type: "autonomous_status".to_string(),
             content: "[autonomous-status: on]".to_string(),
         };
         let rows = render_custom_panel(&row, &theme(), 40);
-        // Blank, bg row, label row, blank, content row, bg row.
-        assert_eq!(rows.len(), 6, "{rows:?}");
-        assert!(rows[0].is_empty());
-        let bg = theme().bg_style(ThemeBg::CustomMessageBg);
-        assert_eq!(rows[1][0].style, bg);
-        let label_row = flat(&rows[2]);
-        assert_eq!(label_row.trim_end(), " [autonomous_status]");
-        assert!(
-            rows[2][0].style.bg.is_some(),
-            "label row carries the box bg"
-        );
-        assert!(rows[2][1]
-            .style
-            .add_modifier
-            .contains(ratatui::style::Modifier::BOLD));
+        // The label is the shared `customMessageLabel` span, whole (bold
+        // on the label fg) — no box background anywhere on the row.
         assert_eq!(
-            rows[2][1].style.fg,
-            theme().fg_style(ThemeColor::CustomMessageLabel).fg
+            rows[1][1],
+            custom_message_label("autonomous_status", &theme())
         );
-        assert_eq!(flat(&rows[4]).trim_end(), " [autonomous-status: on]");
+        assert!(rows[1].iter().all(|span| span.style.bg.is_none()));
+        // The body span carries the `customMessageText` foreground.
+        let body = rows[2]
+            .iter()
+            .find(|span| span.content.contains("[autonomous-status: on]"))
+            .expect("the body text renders");
         assert_eq!(
-            rows[4][1].style.fg,
+            body.style.fg,
             theme().fg_style(ThemeColor::CustomMessageText).fg
         );
     }

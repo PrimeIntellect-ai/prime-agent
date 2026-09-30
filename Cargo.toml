@@ -19,7 +19,7 @@ members = [
 crossterm = { path = "vendor/crossterm" }
 
 [workspace.package]
-version = "0.9.7"
+version = "0.9.8"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -41,11 +41,20 @@ pa-ai = { path = "crates/pa-ai" }
 pa-agent = { path = "crates/pa-agent" }
 thiserror = "2"
 futures = "0.3"
+# Dev-only; the default fork/timeout features are unused.
+proptest = { version = "1.11", default-features = false, features = ["std"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]
+# The pedantic gate the five clippy campaigns earned (pa-daemon #3029,
+# pa-cli #3050, pa-core #3093, the small crates #3110, pa-tui #3134):
+# every workspace member is pedantic-clean; CI's -D warnings bar turns
+# this warn class into errors, and the per-crate #![allow] exceptions
+# (the design-choice classes, each with its in-code justification) keep
+# their force under the manifest route.
+pedantic = "warn"
 redundant_clone = "warn"
 clone_on_copy = "warn"
 assigning_clones = "warn"

@@ -189,6 +189,22 @@ impl Worker {
         // rewrite: the shared post-match name persist must not append a
         // second `session_info` line for that arm.
         let mut name_persisted_by_fresh_arm = false;
+        // Set by the continuing arm when it OPENED an existing session
+        // file: the startup scope's `is_continuing` reads this arm fact,
+        // never a post-create existence check — the fresh arms rewrite
+        // their file before any later `path.exists()` would run, so such
+        // a check would read the file the create just made and mark a
+        // brand-new session continuing (skipping the `--models` scope
+        // for its startup model and scoped `:thinking` suffix).
+        let mut opened_existing_session = false;
+        // The fresh arms defer their creation prefix to after the startup
+        // scope registers (the block right after
+        // `configure_startup_scope`): the prefix's
+        // `model_change`/`thinking_level_change` entries must resolve
+        // through the scope, so a fresh `--models` session persists the
+        // scoped startup pick — not the pre-scope default that a resume,
+        // a worker respawn, and every file reader would then restore.
+        let mut fresh_prefix = FreshPrefixPlan::None;
         let mut store = match (&session_path, no_session) {
             (Some(path), false) if path.exists() => {
                 let loaded = {
@@ -206,6 +222,7 @@ impl Worker {
                 };
                 match loaded {
                     Ok(mut opened) => {
+                        opened_existing_session = true;
                         // The engine owns the file from here on (the open
                         // succeeded): the session-model restore binds the
                         // engine and records its decision only for a path
@@ -269,6 +286,15 @@ impl Worker {
                         if let Err(error) = persisted {
                             return response_failure(None, "create", &error.to_string(), None);
                         }
+                        // Prime the usage fold on the file's final identity
+                        // (the full-reader fallback's rewrite replaces the
+                        // inode), off the runtime and before the core lock:
+                        // summaries under the lock fold only the appended tail.
+                        let primed = path.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            crate::session_store::read_session_info(&primed)
+                        })
+                        .await;
                         opened
                     }
                     Err(error) => return crate::hold_refusal::create_failure_response(&error),
@@ -298,33 +324,17 @@ impl Worker {
                 if let Err(error) = created.rewrite() {
                     return response_failure(None, "create", &error.to_string(), None);
                 }
-                append_creation_prefix(
-                    &mut created,
-                    self.engine.as_ref(),
-                    &self.config.agent_dir,
-                    &cwd,
-                    true,
-                );
-                let _ = created.append_session_state("active");
-                if let Err(error) = created.rewrite() {
-                    return response_failure(None, "create", &error.to_string(), None);
-                }
+                fresh_prefix = FreshPrefixPlan::PathBacked { fold_name: false };
                 created
             }
             // In-memory session: no file, like the TS `noSession` create.
             (None, true) => {
-                let mut created = SessionFile::create(
+                let created = SessionFile::create(
                     &cwd,
                     parent_session_path.as_deref(),
                     rlm_depth.unwrap_or(0),
                 );
-                append_creation_prefix(
-                    &mut created,
-                    self.engine.as_ref(),
-                    &self.config.agent_dir,
-                    &cwd,
-                    true,
-                );
+                fresh_prefix = FreshPrefixPlan::InMemory;
                 created
             }
             (None, false) => {
@@ -351,29 +361,18 @@ impl Worker {
                 }
                 // One durable write instead of three: the prefix, the
                 // `active` state, and the session name are appended in
-                // memory and land in a single rewrite. The dropped first
-                // rewrite persisted a header-only intermediate that no
-                // reader consumes — the durable create stays pathless
-                // until this create succeeds, so no replay, scan, or
-                // registration reads the file mid-create — and the final
-                // bytes are identical to the sequential writes (same
-                // entries, same order; the name's line is the exact
-                // `persist_entry` construction via `append_session_info`).
-                append_creation_prefix(
-                    &mut created,
-                    self.engine.as_ref(),
-                    &self.config.agent_dir,
-                    &cwd,
-                    true,
-                );
-                let _ = created.append_session_state("active");
-                if let Some(name) = name.filter(|n| !n.trim().is_empty()) {
-                    created.append_session_info(name);
-                    name_persisted_by_fresh_arm = true;
-                }
-                if let Err(error) = created.rewrite() {
-                    return response_failure(None, "create", &error.to_string(), None);
-                }
+                // memory and land in a single rewrite (all of it after
+                // the startup scope registers below, so the prefix's
+                // model/thinking entries resolve through the scope). The
+                // dropped first rewrite persisted a header-only
+                // intermediate that no reader consumes — the durable
+                // create stays pathless until this create succeeds, so
+                // no replay, scan, or registration reads the file
+                // mid-create — and the final bytes are identical to the
+                // sequential writes (same entries, same order; the
+                // name's line is the exact `persist_entry` construction
+                // via `append_session_info`).
+                fresh_prefix = FreshPrefixPlan::PathBacked { fold_name: true };
                 created
             }
             (Some(_), true) => {
@@ -385,6 +384,92 @@ impl Worker {
                 )
             }
         };
+
+        // TS main.ts:838-851: the `models` patterns (else settings
+        // `enabledModels`) resolve once into the session's scoped list,
+        // which `cycle_model` reads. The resolution sits AFTER the store
+        // open — the continuing path's bounded catalog-readiness wait (the
+        // saved-model restore just awaited it) is the one wait the create
+        // already owns, so a cold boot's in-flight catalog fetch has had
+        // its window before the scope resolves: resolving before it could
+        // store an empty scope.
+        let model_patterns = match payload.get("models").and_then(Value::as_array) {
+            Some(patterns) => patterns
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<String>>(),
+            None => pa_core::settings::SettingsManager::create(&cwd, &self.config.agent_dir)
+                .get_enabled_models()
+                .unwrap_or_default(),
+        };
+        let scoped_models = if model_patterns.is_empty() {
+            Vec::new()
+        } else {
+            let registry = crate::state_getters::worker_model_registry(&self.config.agent_dir);
+            let available: Vec<pa_types::ai::Model> =
+                registry.get_available().into_iter().cloned().collect();
+            pa_core::models::resolve_model_scope_from_models(&model_patterns, &available)
+        };
+        let is_continuing = opened_existing_session;
+        self.engine
+            .configure_startup_scope(scoped_models.clone(), is_continuing);
+        // The fresh arms' deferred creation prefix runs here, against the
+        // registered scope: the file's `model_change` and
+        // `thinking_level_change` carry the scoped startup model and the
+        // scoped `:thinking` level (an explicit `--thinking` still wins,
+        // and an explicit `--model` keeps its own resolution), so a
+        // resume, a worker respawn, and every session-file reader see
+        // the session's scoped start. The continuing arm wrote its own
+        // prefix above — a continuing file pins the model and thinking
+        // of the session it was already running on, and the scope
+        // deliberately does not change them.
+        match fresh_prefix {
+            FreshPrefixPlan::None => {}
+            FreshPrefixPlan::InMemory => {
+                append_creation_prefix(
+                    &mut store,
+                    self.engine.as_ref(),
+                    &self.config.agent_dir,
+                    &cwd,
+                    true,
+                );
+            }
+            FreshPrefixPlan::PathBacked { fold_name } => {
+                append_creation_prefix(
+                    &mut store,
+                    self.engine.as_ref(),
+                    &self.config.agent_dir,
+                    &cwd,
+                    true,
+                );
+                let _ = store.append_session_state("active");
+                if fold_name {
+                    if let Some(name) = name.filter(|n| !n.trim().is_empty()) {
+                        store.append_session_info(name);
+                        name_persisted_by_fresh_arm = true;
+                    }
+                }
+                if let Err(error) = store.rewrite() {
+                    return response_failure(None, "create", &error.to_string(), None);
+                }
+            }
+        }
+        // The wire shape `set_scoped_models` stores (the connection state
+        // surface and the cycler's input): `{ model, thinkingLevel? }`.
+        let scoped_entries: Vec<Value> = scoped_models
+            .iter()
+            .map(|scoped| {
+                let mut entry = json!({ "model": scoped.model });
+                // The pattern's `:thinking` suffix (TS `ScopedModel`
+                // `thinkingLevel`); the wire name is the serde-lowercase
+                // level the cycler and the state readers parse back.
+                if let Some(level) = scoped.thinking_level {
+                    entry["thinkingLevel"] = json!(level);
+                }
+                entry
+            })
+            .collect();
 
         if !name_persisted_by_fresh_arm {
             if let Some(name) = name.filter(|n| !n.trim().is_empty()) {
@@ -512,7 +597,7 @@ impl Worker {
             core.steering_mode.clone_from(&steering_mode);
             core.follow_up_mode.clone_from(&follow_up_mode);
             core.forced_all_steering = false;
-            core.scoped_models = Vec::new();
+            core.scoped_models.clone_from(&scoped_entries);
             core.retry_abort_requested = false;
             // The session's depth falls back to the opened file's header (TS
             // `config.rlmDepth ?? header.rlmDepth`): a resumed saved subagent
@@ -674,6 +759,21 @@ fn create_payload_rlm_depth(payload: &Value) -> Result<(Option<u32>, Option<u32>
 /// effective one — the create-config flag (else settings default/medium)
 /// clamped to the model's supported levels; engines without a model
 /// resolution (the scripted harness) record "off".
+/// Which fresh create arm still owes its creation prefix: the prefix runs
+/// after the startup scope registers (see [`Worker::create`]), so the plan
+/// tells the post-scope block how the arm's writes land.
+enum FreshPrefixPlan {
+    /// Nothing pending: the continuing arm wrote its own prefix before
+    /// the scope (its file pins the session it was already running on).
+    None,
+    /// The in-memory `noSession` create: the prefix stays in memory, no
+    /// rewrite.
+    InMemory,
+    /// A file-backed fresh session: prefix, `active` state, the optional
+    /// single-write name fold, then one rewrite.
+    PathBacked { fold_name: bool },
+}
+
 fn append_creation_prefix(
     store: &mut SessionFile,
     engine: &dyn SessionEngine,

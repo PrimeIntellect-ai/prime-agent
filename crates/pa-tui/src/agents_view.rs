@@ -4,8 +4,7 @@
 //! (attach a live session) and resume (reopen a saved file); `n` starts a
 //! new session. Roster pushes arrive live over `roster_subscribe`; the
 //! saved catalog loads once on open (TS parity: it feeds the Inactive
-//! section). The reply composer, rename, delete, and kill-subagent actions
-//! wait on the Stage-3 reply machinery.
+//! section). The reply composer waits on the Stage-3 reply machinery.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -50,6 +49,9 @@ mod delete;
 #[cfg(test)]
 use delete::no_effect_summary;
 use delete::{spawn_delete_dispatch, DeleteAction, PendingDelete};
+
+mod rename;
+use rename::{spawn_rename_dispatch, Rename};
 
 /// Options for one agents-view run.
 #[derive(Debug, Clone)]
@@ -208,6 +210,11 @@ pub struct AgentsViewOutcome {
     /// `statusMessage` on the open result): the unattachable-child
     /// fallback surfaces it in the next view run.
     pub status_message: Option<String>,
+    /// The view actions this run performed (`program_shown`, when a
+    /// ctrl+o turned a spawn program on; `renamed`, when a rename
+    /// landed): the composition root emits the `tui agents action`
+    /// adoption events at the run's end.
+    pub actions: Vec<&'static str>,
     /// The incident notice state this run ended with, for the caller to
     /// restore on re-entry (TS `persistentState.incidentNoticeState`):
     /// dismissal horizons and the consumed log offset survive.
@@ -271,6 +278,12 @@ enum UiInput {
         /// The deleted saved session's path (the catalog key for the
         /// immediate row removal); `None` for the other arms.
         deleted_saved_path: Option<String>,
+    },
+    /// One rename dispatch landed (the ctrl+r flow): the status line
+    /// reports the outcome and a saved target's row patches in place.
+    RenameResult {
+        rename: Rename,
+        outcome: Result<(), String>,
     },
 }
 
@@ -351,6 +364,13 @@ struct AgentsViewMode {
     /// arms it over the selected row, the second press on the same row
     /// executes, any other key clears it.
     pending_delete: Option<PendingDelete>,
+    /// The prompt's composition state (TS the editor's composer modes):
+    /// the search field, or the rename composer while a rename composes.
+    composer: Composer,
+    /// The confirmed rename the run loop dispatches (the rename flow's
+    /// `pending_delete_action` shape: the wire call runs off the key
+    /// loop with the client).
+    pending_rename: Option<Rename>,
     /// The executed delete the run loop takes (the dispatch runs off the
     /// key loop with the client, the saved-catalog fetch's pattern).
     pending_delete_action: Option<DeleteAction>,
@@ -373,6 +393,12 @@ struct AgentsViewMode {
     /// `expandedSubagentParents`): the one summary line per parent
     /// reads a single set.
     expanded_parents: std::collections::HashSet<String>,
+    /// Parent row identities whose spawn programs render inside their
+    /// open list (TS `programShownParents`). Like `expanded_parents`,
+    /// it never carries across view runs (a shown program without its
+    /// expansion is meaningless — TS persists both, an inherited
+    /// divergence).
+    program_shown_parents: std::collections::HashSet<String>,
     /// Session ids to expand on the next rebuild (TS
     /// `pendingExpandedAncestorSessionIds`, consumed once).
     pending_ancestors: Option<Vec<String>>,
@@ -457,6 +483,11 @@ struct AgentsViewMode {
     /// grammar): the pressed row and whether the press turned into a
     /// drag — a dragged release never opens.
     pressed_click: Option<PressedMouseClick>,
+    /// The view actions this run performed (reported on the outcome so
+    /// the composition root emits the adoption events at the run's
+    /// end — the view owns no telemetry handle): `program_shown`,
+    /// `renamed`.
+    actions: Vec<&'static str>,
 }
 
 /// The press state of one left click on the agents view (TS
@@ -466,6 +497,15 @@ struct AgentsViewMode {
 struct PressedMouseClick {
     row: usize,
     dragged: bool,
+}
+
+/// The prompt's composition state (TS the editor's composer modes): the
+/// plain search field, or one action's composer that owns the prompt
+/// and the key routing. The reply composer (C3) adds its variant here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Composer {
+    Search,
+    Rename(Rename),
 }
 
 impl AgentsViewMode {
@@ -517,12 +557,15 @@ impl AgentsViewMode {
             status,
             notice,
             pending_delete: None,
+            composer: Composer::Search,
+            pending_rename: None,
             pending_delete_action: None,
             deleted_saved_paths: std::collections::HashSet::default(),
             scope_depth: None,
             scope_active: false,
             scope_dropped: false,
             expanded_parents: std::collections::HashSet::default(),
+            program_shown_parents: std::collections::HashSet::default(),
             pending_ancestors,
             selected_identity,
             selected_key,
@@ -543,6 +586,7 @@ impl AgentsViewMode {
             click_rows: Vec::new(),
             hover_row: None,
             pressed_click: None,
+            actions: Vec::new(),
         }
     }
 }
@@ -835,12 +879,9 @@ async fn run_agents_view_surface(
     // arms it, the flush closes it (TS `refreshSavedSessions`'s
     // `savedCatalogReconcileTimer`).
     let mut saved_flush: Option<tokio::time::Instant> = None;
-    // The in-flight stop-or-delete dispatches: the view's teardown
-    // waits for them (bounded, one window for all) so an exit right
-    // after a confirmed ctrl+x cannot drop a request on the floor (the
-    // loop's client close would take the connection down before a
-    // detached task ever sent).
-    let mut delete_dispatches: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    // In-flight delete/rename dispatches; teardown waits for them so an exit
+    // right after a confirmed action does not drop the request.
+    let mut action_dispatches: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     // The headless plan's render barrier (`AgentsStep::WaitRender`, the
     // interactive harness's condition-wait contract): an armed hold's
     // deadline, and the frames captured at arming (the condition scans
@@ -952,10 +993,19 @@ async fn run_agents_view_surface(
                     // line (the roster push refreshes the rows behind
                     // it).
                     if let Some(action) = mode.take_delete_action() {
-                        delete_dispatches.push(spawn_delete_dispatch(
+                        action_dispatches.push(spawn_delete_dispatch(
                             &client,
                             ui_tx.clone(),
                             action,
+                        ));
+                    }
+                    // The confirmed rename, dispatched off the key loop; its outcome lands
+                    // as a `RenameResult` status.
+                    if let Some(rename) = mode.pending_rename.take() {
+                        action_dispatches.push(spawn_rename_dispatch(
+                            &client,
+                            ui_tx.clone(),
+                            rename,
                         ));
                     }
                 }
@@ -974,6 +1024,9 @@ async fn run_agents_view_surface(
                     deleted_saved_path,
                 } => {
                     mode.delete_result(message, deleted_saved_path);
+                }
+                UiInput::RenameResult { rename, outcome } => {
+                    mode.rename_result(rename, outcome);
                 }
                 // The saved-catalog scan landed (TS `armSavedSearchFetch`
                 // applying its result): the Inactive section builds now.
@@ -1178,30 +1231,26 @@ async fn run_agents_view_surface(
     // concurrently, so the exit wait stays the same size no matter
     // how many confirms are outstanding.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-    for dispatch in delete_dispatches {
+    for dispatch in action_dispatches {
         let _ = tokio::time::timeout_at(deadline, dispatch).await;
     }
-    // An in-flight delete's result (sent before its dispatch resolved, or
-    // still queued behind the exit) applies before the link snapshots the
-    // catalog: the carried rows must not resurrect the deleted path in
-    // the next view run, which skips its own fetch behind a loaded
-    // catalog.
-    while let Ok(input) = ui_rx.try_recv() {
-        if let UiInput::DeleteResult {
-            message,
-            deleted_saved_path,
-        } = input
-        {
-            mode.delete_result(message, deleted_saved_path);
-        }
-    }
-    for input in std::mem::take(&mut pending) {
-        if let UiInput::DeleteResult {
-            message,
-            deleted_saved_path,
-        } = input
-        {
-            mode.delete_result(message, deleted_saved_path);
+    // Apply queued delete/rename results before the catalog snapshot, so the
+    // next view run does not show a deleted path or the old saved name.
+    for input in std::mem::take(&mut pending)
+        .into_iter()
+        .chain(std::iter::from_fn(|| ui_rx.try_recv().ok()))
+    {
+        match input {
+            UiInput::DeleteResult {
+                message,
+                deleted_saved_path,
+            } => {
+                mode.delete_result(message, deleted_saved_path);
+            }
+            UiInput::RenameResult { rename, outcome } => {
+                mode.rename_result(rename, outcome);
+            }
+            _ => {}
         }
     }
     // The force-quit deadline arms only after the drain: the drain
@@ -1256,6 +1305,7 @@ async fn run_agents_view_surface(
                 .and_then(|row| row.cwd.clone())
                 .map(std::path::PathBuf::from),
             status_message: opened.as_ref().and_then(|row| row.status_message.clone()),
+            actions: std::mem::take(&mut mode.actions),
             incident_notice_state: mode.incident_notice_state,
         },
     })
@@ -1285,7 +1335,10 @@ fn advance_running_pulse(
 fn is_daemon_answer(input: &UiInput) -> bool {
     matches!(
         input,
-        UiInput::SavedLoaded { .. } | UiInput::SavedFailed { .. } | UiInput::DeleteResult { .. }
+        UiInput::SavedLoaded { .. }
+            | UiInput::SavedFailed { .. }
+            | UiInput::DeleteResult { .. }
+            | UiInput::RenameResult { .. }
     )
 }
 

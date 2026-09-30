@@ -19,7 +19,7 @@ and the list window follows the selection (TS `renderSessionRows`: the
 slice centers on the selected row and clips the overflow behind
 leading/trailing ellipses, so arrowing below the fold keeps the
 selection on-screen instead of the view snapping back to the top of the
-list).
+list), ctrl+o's spawn-program surface (`app.agents.program`: the selected row's target — the row itself for a top-level agent, its parent otherwise — expands its list and shows the program rows, one code block per spawn cell above the children it launched, capped at 10 lines with the remainder marker, on the tool-panel background, skipped by the selection and the click surface, a second press hides it, and collapsing the list clears it), ctrl+r's rename mode (`app.agents.rename`: the prompt becomes the "Rename agent session" header over the name buffer — the search grammar, Enter submits the trimmed name through the daemon `rename`/`rename_saved_session`, Esc cancels back to the untouched query — a saved rename patches the catalog row in place), and the `tui agents action` adoption events (`program_shown`, `renamed`) that ride the view outcome out of the run.
 
 ## Non-goals
 No session logic, no providers, no loop policy. The interactive UI renders daemon events and sends user intents (prompts, abort, switch) as daemon commands; the session loop itself lives in the pa-daemon worker. It never computes agent behavior and never spawns the supervisor (launch semantics live in pa-cli).

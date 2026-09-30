@@ -6,8 +6,8 @@
 use super::{
     build_rows, compute_rollups, filter_empty_sessions, filter_unified_sessions,
     parse_search_query, reconcile_unified_sessions, resolve_selection, scope_ancestors,
-    scope_depth, scope_to_subtree, AgentsViewMode, AgentsViewScope, PressedMouseClick, RowKind,
-    SelectionEdge, Value, ANCHOR_LOADING_HINT,
+    scope_depth, scope_to_subtree, AgentsViewMode, AgentsViewScope, Composer, PressedMouseClick,
+    RowKind, SelectionEdge, Value, ANCHOR_LOADING_HINT,
 };
 
 impl AgentsViewMode {
@@ -71,11 +71,15 @@ impl AgentsViewMode {
             let parsed = parse_search_query(self.query.trim());
             filter_unified_sessions(&filtered, &parsed)
         };
-        let rollups = compute_rollups(&filtered);
+        // TS `computeRecursiveRollups(this.unifiedRecords)`: the rollup
+        // runs over the full reconciled set, so a filter never changes a
+        // row's total.
+        let rollups = compute_rollups(&records);
         let mut rows = build_rows(
             &filtered,
             self.options.scope.as_ref(),
             &self.expanded_parents,
+            &self.program_shown_parents,
             &rollups,
             self.options.anchor_session_id.as_deref(),
         );
@@ -125,6 +129,7 @@ impl AgentsViewMode {
                         &filtered,
                         self.options.scope.as_ref(),
                         &self.expanded_parents,
+                        &self.program_shown_parents,
                         &rollups,
                         self.options.anchor_session_id.as_deref(),
                     );
@@ -436,6 +441,13 @@ impl AgentsViewMode {
         self.exit_armed = false;
         let was_delete_armed = self.pending_delete.take();
         let has_query = !self.query.is_empty();
+        // TS `handleInput`'s rename branch (:1119-1126): the rename
+        // composer owns every key before the app-level handlers. The
+        // draft comes out owned; a non-rename composer parks Search.
+        if let Composer::Rename(rename) = std::mem::replace(&mut self.composer, Composer::Search) {
+            self.handle_rename_key(rename, key);
+            return;
+        }
         // TS `app.clear` (default ctrl+c): the first press arms the exit
         // hint, a second press while armed exits the view (TS
         // `handleCtrlC`). One handled Ctrl+C press: the force-quit guard
@@ -467,6 +479,12 @@ impl AgentsViewMode {
             && self.keybindings.matches(key, "tui.select.cancel")
             && self.dismiss_incident_notice()
         {
+            return;
+        }
+        // TS `app.agents.rename` (default ctrl+r, empty editor only,
+        // before the delete arm — TS :1153): enter the rename composer.
+        if !has_query && self.keybindings.matches(key, "app.agents.rename") {
+            self.enter_rename_mode();
             return;
         }
         // TS `app.agents.delete` (default ctrl+x, empty editor only — TS
@@ -501,6 +519,13 @@ impl AgentsViewMode {
             self.opened = None;
             self.running = false;
             self.new_session = true;
+            return;
+        }
+        // TS `app.agents.program` (default ctrl+o, empty editor only,
+        // after the new-session action): show or hide the selected
+        // row's target spawn program.
+        if !has_query && self.keybindings.matches(key, "app.agents.program") {
+            self.cycle_program_for_selected();
             return;
         }
         // TS `app.agents.expand` (default alt+right, search empty): toggle

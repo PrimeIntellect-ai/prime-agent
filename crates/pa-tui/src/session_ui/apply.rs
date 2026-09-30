@@ -220,6 +220,14 @@ impl SessionUi {
         std::mem::take(&mut self.suspend_requested)
     }
 
+    /// Take a pending `app.editor.external` request (TS
+    /// `openExternalEditor`): the interactive loop performs the editor
+    /// child's terminal handoff (the reader stop, the renderer suspend);
+    /// only the loop owns those.
+    pub(crate) fn take_external_editor_request(&mut self) -> Option<String> {
+        self.external_editor_request.take()
+    }
+
     /// Report the run's first suspend cycle (`tui suspend used`),
     /// fire-and-forget like the scroll event: the keypress never waits on
     /// the telemetry flush. `outcome` is `resumed` (the SIGCONT

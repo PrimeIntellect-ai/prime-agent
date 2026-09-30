@@ -3,7 +3,12 @@
 //! stat-identity cache records, the edge join keys, the path
 //! canonicalizers, and the `live_edges` liveness resolver with its
 //! session-artifacts index.
-use super::*;
+use anyhow::Context as _;
+
+use super::{
+    bail, canonical_session_path, fs, json, HashMap, Path, PathBuf, Result, RlmLedgerDeleteReason,
+    RlmLedgerEdge, Value,
+};
 
 /// One replayed ledger record (`meta` records carry no edge and are skipped).
 #[derive(Debug, Clone, PartialEq)]
