@@ -1362,15 +1362,18 @@ if [ "$WINDOWS" = "yes" ] \
    && [ -f "${share_dir}/${BINARY_NAME}" ]; then
   say "stopping the running Rust daemon before the publish (a Windows"
   say "  process holds its binary open - the payload swap needs it down)"
-  if "${share_dir}/${BINARY_NAME}" shutdown >/dev/null 2>&1; then
-    windows_stop_summary="daemon: stopped cleanly for this update (the shutdown request over the named pipe)"
+  # THE SCRIPTED FORM: the CLI's bare `shutdown` prompts for confirmation
+  # in an interactive terminal and REFUSES a non-interactive one ("Shutdown
+  # requires confirmation in an interactive terminal. Use prime-agent
+  # shutdown --force") - the installer's context is the scripted one, so
+  # --force is the documented non-interactive stop (the daemon's own forced
+  # shutdown drains its workers with its internal budgets).
+  if "${share_dir}/${BINARY_NAME}" shutdown --force >/dev/null 2>&1; then
+    windows_stop_summary="daemon: stopped cleanly for this update (the forced shutdown request, the scripted non-interactive form)"
     say "the running daemon was shut down (the next invocation boots the new one)"
-  elif "${share_dir}/${BINARY_NAME}" shutdown --force >/dev/null 2>&1; then
-    windows_stop_summary="daemon: force-stopped for this update (the forced shutdown request over the named pipe)"
-    say "the running daemon was shut down (forced; the next invocation boots the new one)"
   else
     windows_stop_summary="daemon: WARNING no shutdown answer (if a daemon is running, stop it by hand: prime-agent shutdown --force)"
-    note "warning: no daemon answered the shutdown requests; if a daemon is"
+    note "warning: no daemon answered the shutdown request; if a daemon is"
     note "  running, stop it by hand (prime-agent shutdown --force) and re-run"
   fi
 fi

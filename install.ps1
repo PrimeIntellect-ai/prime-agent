@@ -249,6 +249,7 @@ try {
 
 $published = $false
 $rollback = $null
+$script:daemonStopped = $false
 try {
     # THE DAEMON STOP, inside the lock's try (a terminating error in the
     # stop must still release the lock - the bots' finding: the stale lock
@@ -263,12 +264,18 @@ try {
     $shareMarker = Join-Path $share '.prime-agent-install'
     if ((Test-Path $shareMarker -PathType Leaf) -and (Test-Path $payloadStopExe -PathType Leaf)) {
         Write-Host 'stopping the running Rust daemon before the publish (a Windows process holds its binary open)'
-        & $payloadStopExe shutdown *> $null
-        if ($LASTEXITCODE -ne 0) {
-            & $payloadStopExe shutdown --force *> $null
-            if ($LASTEXITCODE -ne 0) {
-                Write-Warning "no daemon answered the shutdown requests; if a daemon is running, stop it by hand (prime-agent shutdown --force) and re-run"
-            }
+        # THE SCRIPTED FORM: the CLI's bare `shutdown` prompts for
+        # confirmation in an interactive terminal and REFUSES a
+        # non-interactive one ("Shutdown requires confirmation in an
+        # interactive terminal. Use prime-agent shutdown --force") - the
+        # installer's context is the scripted one, so `--force` is the
+        # documented non-interactive stop (the daemon's own forced
+        # shutdown drains its workers with its internal budgets).
+        & $payloadStopExe shutdown --force *> $null
+        if ($LASTEXITCODE -eq 0) {
+            $script:daemonStopped = $true
+        } else {
+            Write-Warning "no daemon answered the shutdown request; if a daemon is running, stop it by hand (prime-agent shutdown --force) and re-run"
         }
     }
 
@@ -300,10 +307,22 @@ try {
     # installer's restore-on-exit discipline). $rollback is pre-initialized:
     # a terminating error before its assignment must not turn the finally's
     # own check into the leaked-lock failure (the bots' finding).
-    if ($rollback -and (Test-Path $rollback -PathType Container) -and -not (Test-Path $share)) {
-        if (-not $published) {
+    if (-not $published) {
+        if ($rollback -and (Test-Path $rollback -PathType Container) -and -not (Test-Path $share)) {
             [IO.Directory]::Move($rollback, $share)
             Write-Warning "the publish failed; the previous payload was restored to $share"
+        }
+        # A failed install sweeps its stage tree (the bots' finding: the
+        # accumulated prime-agent.stage-* directories).
+        if (Test-Path $stage -PathType Container) {
+            Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+        }
+        # A daemon stopped for a FAILED install stays down (its sessions'
+        # state is on disk; nothing here restarts it): name the recovery so
+        # the user never guesses - the next invocation boots the old
+        # payload's daemon again.
+        if ($script:daemonStopped) {
+            Write-Warning "the daemon stopped for this failed install stays down until the next prime-agent invocation boots it from the restored payload"
         }
     }
     Remove-Item -Recurse -Force $lockDir -ErrorAction SilentlyContinue
@@ -364,6 +383,13 @@ exec "$(dirname "$0")/../share/prime-agent/prime-agent.exe" "$@"
 '@
     # LF endings + no BOM: the sh launcher must stay a POSIX file.
     [IO.File]::WriteAllText($shLauncher, $shBody.Replace("`r`n", "`n"))
+
+    # The launchers are live: the owned-launcher snapshots (the failure
+    # restore points) sweep away - nothing lingers after a success (the
+    # bots' finding: the .install-backup leftovers).
+    foreach ($pair in $script:ownedLauncherBackups) {
+        Remove-Item -Force $pair[0] -ErrorAction SilentlyContinue
+    }
 } catch {
     # A failed launcher write never leaves the machine without its command:
     # every preserved file goes home, and every OWNED launcher's pre-write
