@@ -1,11 +1,8 @@
 //! The worker-side half of worker-to-worker peer delivery: a one-shot
-//! private-frame client for another worker's direct socket (thin-supervisor
-//! stage 3). The supervisor mints a single-use `worker` grant; this client
-//! burns it with `peer_auth` and delivers `worker_deliver_message` straight
-//! to the target worker, bypassing the supervisor's route plane (the
-//! delivery keeps flowing when the supervisor is mid-restart, and the
-//! route plane never sees agent-message traffic). The connection is
-//! short-lived by design: one delivery round trip, then close.
+//! private-frame client for another worker's direct socket. The supervisor
+//! mints a single-use `worker` grant; this client burns it and delivers
+//! `worker_deliver_message` straight to the target, one round trip then
+//! close.
 
 use anyhow::{anyhow, Context, Result};
 use pa_types::daemon::DaemonPeerTransportTicket;

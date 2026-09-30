@@ -1,37 +1,16 @@
-//! Latency regression guard for the operator's `/context` timeout class
-//! ("timed out after 10000ms waiting for the Prime Agent daemon response",
-//! 2026-09-24): `get_context_tree` must answer from memory — the root
-//! usage from the in-memory store, the children from the background cache
-//! (`pa-daemon/src/context_tree_cache.rs`) — never by walking the session
-//! artifact tree inline.
-//!
-//! The fixture mirrors the grown fleet store the operator hit: a session
-//! with real entries plus a seeded artifact tree of `sub-*` child dirs,
-//! each carrying a multi-megabyte child session file. Before the cache,
-//! every `get_context_tree` re-read and re-parsed the whole tree inline
-//! (measured live on the devbox: 14-19s per call, a 66-persisted-children
-//! store over 553MB; `get_session_stats` over the same in-memory store
-//! answered in 0.1s). The guard: every `get_context_tree` round trip
-//! stays under the sub-second ceiling, and the seeded persisted children
-//! DO appear (the cache's background refresh fills them), so the fix can
-//! never quietly degrade into an empty-but-fast tree either.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! Latency guard for the operator's `/context` timeout (2026-09-24):
+//! `get_context_tree` must answer from memory, never by walking the artifact
+//! tree inline (measured 14-19s per call before the cache). Every round trip
+//! stays under the sub-second ceiling, and the seeded children DO appear.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -48,25 +27,18 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// The generous-but-bounded response ceiling: `/context` is in-memory
-/// data (the artifact walk is a background refresh), so a healthy
-/// round trip is milliseconds — 750ms is the regression ceiling, an
-/// order of magnitude under the operator's 10s client timeout, and
-/// calibrated so the seeded tree's INLINE walk (the pre-cache code,
-/// ~1.5s/61MB on the gate VM) cannot squeeze under it.
+/// The response ceiling: `/context` is in-memory data, so a healthy round trip is
+/// milliseconds — 750ms is an order of magnitude under the 10s client timeout,
+/// calibrated so the seeded tree's INLINE walk cannot squeeze under it.
 const CONTEXT_RESPONSE_CEILING: Duration = Duration::from_millis(750);
 
-/// How long the test waits for the background refresh to fill the cache
-/// with the seeded persisted children (the warm fires at create/attach;
-/// the walk is a bounded disk read of the seeded tree).
+/// How long the test waits for the background refresh to fill the cache (the
+/// warm fires at create/attach; the walk is a bounded disk read).
 const CACHE_FILL_DEADLINE: Duration = Duration::from_secs(30);
 
-/// The seeded tree: enough child session bytes (~300MB) that an inline
-/// walk blows the ceiling by a wide margin (the pre-cache code parsed
-/// every child file per request; observed 0.8-1.7s at 160MB on the gate
-/// VM across runs — the seed keeps the pristine-run RED well clear of
-/// VM variance), while the seeded write stays a bounded test-setup
-/// cost.
+/// The seeded tree: enough child session bytes (~300MB) that an inline walk blows
+/// the ceiling by a wide margin (the pre-cache code parsed every child file per
+/// request), while the seeded write stays a bounded test-setup cost.
 const SEEDED_CHILDREN: usize = 60;
 const SEEDED_MESSAGES_PER_CHILD: usize = 800;
 const SEEDED_ASSISTANT_CONTENT_KB: usize = 12;
@@ -84,8 +56,7 @@ impl Drop for Daemon {
     }
 }
 
-// The timeout panic path cannot wait on the child; the test process exits
-// immediately afterwards, reaping it.
+// The timeout panic path cannot wait on the child; the test process exits and reaps it.
 #[allow(clippy::zombie_processes)]
 fn spawn_daemon(socket: &std::path::Path, agent_dir: &std::path::Path) -> Daemon {
     let binary = env!("CARGO_BIN_EXE_pa-daemon");
@@ -163,8 +134,7 @@ impl Client {
         serde_json::from_str(line.trim()).expect("a valid daemon line")
     }
 
-    /// One command round trip with its elapsed wall time. Non-response
-    /// frames (events, progress) flow on the same stream and are skipped.
+    /// One command round trip with its elapsed wall time; non-response frames are skipped.
     fn read_response(&mut self, id: &str) -> (Duration, serde_json::Value) {
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
@@ -178,8 +148,8 @@ impl Client {
     }
 }
 
-/// One scripted turn: prompt then drain the turn's stream events until the
-/// turn-done boundary (the same contract `session_tree_e2e` uses).
+/// One scripted turn: prompt then drain until the turn-done boundary (the `session_tree_e2e`
+/// contract).
 fn scripted_turn(client: &mut Client, session_id: &str, text: &str, id: &str) {
     client.send_command(
         id,
@@ -193,9 +163,9 @@ fn scripted_turn(client: &mut Client, session_id: &str, text: &str, id: &str) {
     );
 }
 
-/// Seed one persisted child session file: a version-3 session header plus
-/// a parent-chained message run with usage records, sized in the
-/// megabytes so an inline walk pays a real parse cost per child.
+/// Seed one persisted child session file: a version-3 header plus a parent-
+/// chained message run with usage records, sized in the megabytes so an inline
+/// walk pays a real parse cost per child.
 fn seed_child_session(dir: &std::path::Path, child_id: &str) {
     std::fs::create_dir_all(dir).expect("child dir");
     let file = dir.join(format!("{child_id}.jsonl"));
@@ -280,7 +250,6 @@ fn get_context_tree_answers_from_memory_on_a_grown_store() {
         .expect("durable session id")
         .to_string();
 
-    // Real entries in the worker's own store.
     scripted_turn(&mut client, &active_session_id, "first question", "p1");
     scripted_turn(&mut client, &active_session_id, "second question", "p2");
 
@@ -305,8 +274,8 @@ fn get_context_tree_answers_from_memory_on_a_grown_store() {
         })
         .sum();
 
-    // The attach warms the cache (the background walk fires here), like
-    // the operator's chat surface attaching at open.
+    // The attach warms the cache (the background walk fires here), like the
+    // operator's chat surface attaching at open.
     client.send_command(
         "a1",
         &serde_json::json!({
@@ -318,10 +287,8 @@ fn get_context_tree_answers_from_memory_on_a_grown_store() {
     let (_, attached) = client.read_response("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
 
-    // Every read must answer under the ceiling, cold or warm: the root is
-    // in-memory data and the children come from the cache (a cold cache
-    // serves the live rows alone; the background refresh fills the
-    // persisted tree for the next read).
+    // Every read must answer under the ceiling, cold or warm: the root is in-memory
+    // and the children come from the cache (a cold cache serves the live rows alone).
     let mut saw_seeded_children = false;
     let deadline = Instant::now() + CACHE_FILL_DEADLINE;
     let mut reads = 0;
@@ -350,8 +317,8 @@ fn get_context_tree_answers_from_memory_on_a_grown_store() {
              seeded tree: {seeded_bytes} bytes",
         );
         if children.len() >= SEEDED_CHILDREN {
-            // The persisted rows carry the seeded files' real usage (the
-            // background walk parsed them, not the request path).
+            // The persisted rows carry the seeded files' real usage (the background walk parsed
+            // them, not the request path).
             let with_usage = children
                 .iter()
                 .filter(|node| node["totalUsage"]["input"].as_u64().unwrap_or(0) > 0)

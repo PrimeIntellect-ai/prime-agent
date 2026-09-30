@@ -18,12 +18,9 @@ use super::super::prompt::handle_session_prompt;
 use super::super::session::AcpSession;
 use super::super::{AcpModeState, ConnectionState, SessionEntry};
 
-/// The ACP meta namespace on the wire.
 const META: &str = "ai.primeintellect.prime-agent";
 
-/// One armed ACP prompt turn over an in-process faux engine. The faux
-/// provider registry is process-global, so every test holds the
-/// shared lock like the daemon engine tests.
+/// One armed ACP prompt turn over an in-process faux engine.
 struct AcpTestBed {
     mode: AcpModeState,
     state: std::sync::Arc<Mutex<ConnectionState>>,
@@ -36,9 +33,6 @@ struct AcpTestBed {
     _dir: tempfile::TempDir,
 }
 
-/// Build one bed: the faux script drives the provider, the compaction
-/// settings come from the agent dir, and the ACP session wraps the
-/// engine exactly like `session/new` does.
 async fn acp_test_bed(
     script: serde_json::Value,
     reserve_tokens: u64,
@@ -229,11 +223,10 @@ impl AcpTestBed {
     }
 }
 
-/// The TS overflow error shape: an Anthropic token-overflow message.
-/// The retry-turn entry paces the stream (`delayMs`) so its settled
-/// message timestamp lands strictly after the compaction entry's (the
-/// `assistantIsFromBeforeCompaction` guard compares millisecond
-/// timestamps; a real provider round-trip spans more than one).
+/// The overflow error shape: an Anthropic token-overflow message. The
+/// retry-turn entry paces the stream so its settled timestamp lands
+/// strictly after the compaction entry's (the stale-overflow guard
+/// compares millisecond timestamps).
 fn overflow_error(delay_ms: u64) -> serde_json::Value {
     let mut entry = json!({
         "text": "",
@@ -246,13 +239,10 @@ fn overflow_error(delay_ms: u64) -> serde_json::Value {
     entry
 }
 
-/// The threshold arm on the ACP turn path: a settled turn whose usage
-/// crosses the reserve headroom runs one compaction at the boundary
-/// and publishes the `compaction` meta (tokensBefore + summary), and
-/// the turn still settles with `end_turn`. The faux provider
-/// estimates usage from the serialized context, so the probe measures
-/// one seed turn's usage and the reserve sits between the two turns'
-/// usage (the daemon engine tests' environment-independent recipe).
+/// A settled turn whose usage crosses the reserve headroom runs one
+/// compaction and publishes the `compaction` meta. The faux provider
+/// estimates usage from the serialized context, so the reserve sits
+/// between the two turns'.
 #[tokio::test]
 async fn threshold_arm_compacts_and_publishes_the_acp_meta() {
     let _faux = FAUX_TEST_LOCK
@@ -271,8 +261,7 @@ async fn threshold_arm_compacts_and_publishes_the_acp_meta() {
     drop(probe);
 
     // The crossing prompt adds ~2000 tokens; the headroom sits
-    // between the two turns' usage (500-token margins on both
-    // sides).
+    // between the two turns' usage (500-token margins).
     let crossing_delta = (8_000 + "seed turn  crossing".len() as u64).div_ceil(4);
     let mut bed = acp_test_bed(
         json!({
@@ -288,7 +277,6 @@ async fn threshold_arm_compacts_and_publishes_the_acp_meta() {
         10,
     )
     .await;
-    // The seed turn stays below the headroom: no compaction.
     let (response, notifications) = bed
         .prompt(format!("seed turn {}", "x".repeat(48_000)))
         .await;
@@ -314,7 +302,6 @@ async fn threshold_arm_compacts_and_publishes_the_acp_meta() {
     );
 }
 
-/// Below the headroom nothing fires: no compaction meta, no entry.
 #[tokio::test]
 async fn below_headroom_no_arm_fires() {
     let _faux = FAUX_TEST_LOCK
@@ -331,9 +318,7 @@ async fn below_headroom_no_arm_fires() {
         .any(|entry| matches!(entry, pa_types::session::FileEntry::Compaction { .. })));
 }
 
-/// The overflow arm on the ACP turn path: an overflow error turn
-/// compacts once (the compact-and-retry) and the retried turn settles
-/// the prompt with `end_turn` instead of the error.
+/// The retried turn settles `end_turn` instead of the error.
 #[tokio::test]
 async fn overflow_arm_compacts_and_retries_the_turn() {
     let _faux = FAUX_TEST_LOCK
@@ -365,7 +350,7 @@ async fn overflow_arm_compacts_and_retries_the_turn() {
     assert_eq!(metas[0]["summary"], "the summary");
     assert!(metas[0]["tokensBefore"].as_u64().unwrap() > 0);
     // The retried turn is the settled outcome: no failure rows on the
-    // recovered run (the daemon worker's contract).
+    // recovered run.
     let latest = super::super::session::latest_assistant_message(bed.engine.session.agent())
         .await
         .expect("an assistant message");
@@ -379,10 +364,6 @@ async fn overflow_arm_compacts_and_retries_the_turn() {
     );
 }
 
-/// A retry that still overflows reports once (the TS failure text) and
-/// ends the run with the overflow error: the successful
-/// compact-and-retry publishes the result meta, the report publishes
-/// the empty payload, and the prompt errors.
 #[tokio::test]
 async fn overflow_retry_that_overflows_again_reports_once() {
     let _faux = FAUX_TEST_LOCK
@@ -437,10 +418,8 @@ async fn overflow_retry_that_overflows_again_reports_once() {
     );
 }
 
-/// The requested arm on the ACP turn path: a scheduled `compact.run`
-/// request is consumed at the next admitted prompt's pre-turn boundary
-/// (TS `_runPreTurnCompaction` runs the requested arm too), publishes
-/// the compaction meta, and stops the turn loop on purpose (the run
+/// A scheduled `compact.run` request is consumed at the next prompt's
+/// pre-turn boundary and stops the turn loop on purpose (the run
 /// still settles `end_turn`); the request is taken regardless of
 /// outcome.
 #[tokio::test]
@@ -467,10 +446,9 @@ async fn requested_arm_consumes_the_scheduled_compaction() {
     assert_eq!(response["result"]["stopReason"], "end_turn");
     let (response, _) = bed.prompt(format!("turn two {}", "x".repeat(2_000))).await;
     assert_eq!(response["result"]["stopReason"], "end_turn");
-    // Schedule a requested compaction (the `compact.run` write path):
-    // the next prompt's pre-turn boundary consumes it. The session
-    // carries two settled turns, so the keep-recent cut leaves the
-    // first turn summarizable.
+    // Schedule a requested compaction: the next prompt's pre-turn
+    // boundary consumes it. The session carries two settled turns, so
+    // the keep-recent cut leaves the first turn summarizable.
     bed.engine
         .turn_boundary
         .schedule_compaction(Some("keep the checklist".to_string()))
@@ -490,10 +468,8 @@ async fn requested_arm_consumes_the_scheduled_compaction() {
     );
 }
 
-/// A skipped requested compaction still consumes the request and
-/// publishes the empty payload (the TS `compaction_end` with
-/// `result: undefined`), plus the durable disclosure row with the
-/// requested-skip message.
+/// The skip still consumes the request and publishes the requested-skip
+/// disclosure row.
 #[tokio::test]
 async fn requested_arm_skip_publishes_the_empty_payload() {
     let _faux = FAUX_TEST_LOCK
@@ -531,11 +507,6 @@ async fn requested_arm_skip_publishes_the_empty_payload() {
     );
 }
 
-/// The overflow machine resets at a user row that starts an agent run
-/// (TS `startsAgentRun` at `message_start`): the reported state from
-/// the previous prompt's failed recovery never suppresses the next
-/// prompt's fresh attempt, and the fresh turn's overflow recovers at
-/// its own boundary.
 #[tokio::test]
 async fn overflow_state_resets_per_agent_run() {
     let _faux = FAUX_TEST_LOCK
@@ -561,8 +532,7 @@ async fn overflow_state_resets_per_agent_run() {
         .prompt(format!("seed turn {}", "x".repeat(48_000)))
         .await;
     assert_eq!(response["result"]["stopReason"], "end_turn");
-    // Prompt two: attempt, the retry overflows, reported — the run
-    // ends with the error.
+
     let (response, notifications) = bed
         .prompt(format!("overflow probe {}", "x".repeat(2_000)))
         .await;
@@ -572,9 +542,7 @@ async fn overflow_state_resets_per_agent_run() {
         2,
         "the run + the report"
     );
-    // Prompt three: the fresh user row reset the machine, so the
-    // turn's own overflow gets a fresh attempt and the retry
-    // recovers.
+
     let (response, notifications) = bed.prompt("second prompt".to_string()).await;
     assert_eq!(response["result"]["stopReason"], "end_turn");
     let metas = AcpTestBed::compaction_metas(&notifications);
@@ -582,9 +550,6 @@ async fn overflow_state_resets_per_agent_run() {
     assert_eq!(metas[0]["summary"], "the second summary");
 }
 
-/// The overflow retry re-issues without re-adding the user message (TS
-/// `agent.continue()`): the durable chain carries the seed and probe
-/// rows only.
 #[tokio::test]
 async fn overflow_retry_turn_adds_no_user_row() {
     let _faux = FAUX_TEST_LOCK

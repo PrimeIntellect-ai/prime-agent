@@ -1,13 +1,7 @@
-//! Supervisor arms for the scheduling catalog (protocol breadth wave b10):
-//! the TS daemon-supervisor cases `cron_list`, `heartbeats_list`,
-//! `heartbeat_manage`, `cron_add`, `cron_cancel`, and `heartbeat_set`
-//! (the pure forwards `heartbeat_get` / `heartbeat_update` stay on the
-//! generic route). The TS arms merge the live workers' catalogs with the
-//! passive jobs stored in the session-artifacts tree (TS
-//! `collectPassiveScheduledJobs`), manage passive jobs against their
-//! durable store (no worker wake just to flip a status), search for a
-//! job's owning worker when a cancel carries no selector, and promote an
-//! owned session when a `cron_add`/`heartbeat_set` asks for it.
+//! Supervisor arms for the scheduling catalog: `cron_list`, `heartbeats_list`,
+//! `heartbeat_manage`, `cron_add`, `cron_cancel`, `heartbeat_set` — the live workers' catalogs
+//! merged with the passive jobs in the session-artifacts tree; passive jobs mutate their
+//! durable store, a selector-less cancel searches for the owning worker.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -29,43 +23,30 @@ use crate::scheduled_jobs::session_artifact_dir;
 use crate::session_store::read_session_info;
 use crate::supervisor::{client_command_payload, Supervisor};
 
-/// The catalog merge forwards (TS `forwardToWorker(worker, command, 5000)`).
 const CATALOG_FORWARD_TIMEOUT_MS: u64 = 5000;
 
-/// One passive scheduled job: a job in the session-artifacts tree whose
-/// session has no live worker (TS `{ rootSessionFile, job, info }`; the
-/// root-session walk feeds the TS wake timers, which this port keeps out
-/// of the protocol arms).
+/// One passive scheduled job: a job in the session-artifacts tree whose session has no live worker.
 #[derive(Clone)]
 pub(crate) struct PassiveJob {
     pub(crate) job: AgentCronJob,
     pub(crate) info: crate::session_store::SessionInfo,
 }
 
-/// The supervisor-side passive scheduled-jobs snapshot the catalog READ
-/// paths serve (TS #2487 `passiveScheduledJobs`): the artifacts-tree scan
-/// runs once per generation instead of once per request, so N concurrent
-/// catalog requests share one scan instead of enqueuing N. Daemon-owned
-/// mutations drop it; a served snapshot older than
-/// [`PASSIVE_CATALOG_REFRESH_MS`] re-scans in the background
-/// (stale-while-revalidate: requests that arrive during the refresh keep
-/// answering from bounded-stale rows).
+/// The supervisor-side passive snapshot the catalog READ paths serve: the artifacts-tree
+/// scan runs once per generation instead of per request; a snapshot older than
+/// [`PASSIVE_CATALOG_REFRESH_MS`] re-scans in the background (stale-while-revalidate).
 pub(crate) struct PassiveCatalogSnapshot {
     /// Every passive job the scan saw, before the active-status filter:
-    /// `include_inactive` callers filter per read, so one snapshot serves
-    /// both catalog spellings.
+    /// `include_inactive` callers filter per read, so one snapshot serves both spellings.
     pub(crate) rows: Vec<PassiveJob>,
-    /// When the scan completed.
     pub(crate) scanned_at: std::time::Instant,
 }
 
-/// How long a served passive snapshot may stay served before a background
-/// refresh re-scans (TS `PASSIVE_SCHEDULED_JOBS_REFRESH_MS`).
+/// How long a served snapshot may stay served before a background refresh re-scans.
 const PASSIVE_CATALOG_REFRESH_MS: u64 = 5_000;
 
-/// TS `sortCronJobs`: by next run time, jobs without one last. The ISO
-/// timestamps share one format, so the string compare matches the TS
-/// epoch compare.
+/// By next run time, jobs without one last; the ISO timestamps share one format,
+/// so the string compare matches the TS epoch compare.
 fn sort_cron_jobs(jobs: &mut [AgentCronJob]) {
     jobs.sort_by(
         |left, right| match (&left.next_run_at, &right.next_run_at) {
@@ -77,8 +58,7 @@ fn sort_cron_jobs(jobs: &mut [AgentCronJob]) {
     );
 }
 
-/// The TS heartbeat-management action vocabulary: pause/stop are explicit,
-/// anything else resumes.
+/// The TS vocabulary: pause/stop are explicit, anything else resumes.
 fn heartbeat_manage_action(action: &Value) -> HeartbeatManagementAction {
     match action.as_str() {
         Some("pause") => HeartbeatManagementAction::Pause,
@@ -88,10 +68,8 @@ fn heartbeat_manage_action(action: &Value) -> HeartbeatManagementAction {
 }
 
 impl Supervisor {
-    /// `collectPassiveScheduledJobs`: the scheduled jobs stored under the
-    /// session-artifacts tree whose session file still exists, is still
-    /// active, and has no live worker. Live workers own their jobs; the
-    /// supervisor only merges what no worker can list.
+    /// Jobs stored under the session-artifacts tree whose session file exists, is
+    /// active, and has no live worker: the supervisor only merges what no worker can list.
     async fn collect_passive_scheduled_jobs(&self, include_inactive: bool) -> Vec<PassiveJob> {
         let mut out = Vec::new();
         for job in crate::update_roster::scan_scheduled_jobs(&self.options.agent_dir) {
@@ -121,19 +99,15 @@ impl Supervisor {
         out
     }
 
-    /// The passive rows a catalog READ serves (TS #2487
-    /// `catalogPassiveScheduledJobs`): the shared snapshot when present
-    /// (re-scanning in the background once past the refresh window), or
-    /// one shared in-flight scan when cold. Mutation arms keep the fresh
-    /// scan (TS `collectPassiveScheduledJobs` durable truth).
+    /// The passive rows a catalog READ serves: the shared snapshot when present
+    /// (re-scanning in the background once past the refresh window), or one shared
+    /// in-flight scan when cold; mutation arms keep the fresh scan.
     pub(crate) async fn passive_catalog_rows(
         self: &Arc<Self>,
         include_inactive: bool,
     ) -> Vec<PassiveJob> {
-        // The snapshot decision and the serve-side filter read under ONE
-        // lock: an invalidation that lands between them cannot turn a
-        // cached hit into an empty catalog (the cold scan below is the
-        // only way to a `None` read).
+        // The snapshot decision and the serve-side filter read under ONE lock:
+        // an invalidation between them cannot turn a cached hit into an empty catalog.
         {
             let snapshot = self.passive_catalog.lock().unwrap();
             if let Some(snapshot) = snapshot.as_ref() {
@@ -141,10 +115,8 @@ impl Supervisor {
                     >= std::time::Duration::from_millis(PASSIVE_CATALOG_REFRESH_MS)
                     && !self.shutting_down.load(Ordering::SeqCst)
                 {
-                    // Stale-while-revalidate (TS #2487): serve the
-                    // bounded-stale rows now, refresh in the background
-                    // without dropping them; a failure only logs, the
-                    // next read retries.
+                    // Stale-while-revalidate: serve the bounded-stale rows now,
+                    // refresh in the background; a failure only logs, the next read retries.
                     self.spawn_shared_passive_scan();
                 }
                 return Self::filter_passive_rows_with(include_inactive, &snapshot.rows);
@@ -154,9 +126,8 @@ impl Supervisor {
         Self::filter_passive_rows_with(include_inactive, &rows)
     }
 
-    /// The active-status cut over a worker slice's unfiltered jobs (the
-    /// worker's own default `cron_list` rule): the default spelling keeps
-    /// active and paused rows, `include_inactive` keeps everything.
+    /// The active-status cut (the worker's own default `cron_list` rule):
+    /// the default keeps active and paused rows, `include_inactive` keeps everything.
     fn filter_cron_rows(include_inactive: bool, jobs: Vec<AgentCronJob>) -> Vec<AgentCronJob> {
         if include_inactive {
             return jobs;
@@ -166,9 +137,7 @@ impl Supervisor {
             .collect()
     }
 
-    /// The active-status filter over raw scan rows (TS
-    /// `activeScheduledJobs`): the default spelling keeps active and
-    /// paused rows, `include_inactive` keeps everything.
+    /// The same active-status cut over raw scan rows.
     fn filter_passive_rows_with(include_inactive: bool, rows: &[PassiveJob]) -> Vec<PassiveJob> {
         if include_inactive {
             return rows.to_vec();
@@ -179,17 +148,13 @@ impl Supervisor {
             .collect()
     }
 
-    /// The shared passive scan (TS `passiveScheduledJobsScan ??=`): one
-    /// scan at a time; callers that waited behind the first scan's gate
-    /// serve the snapshot it just stored instead of scanning again. The
-    /// scan claims the publish epoch when it starts (TS
-    /// `claimPassiveScheduledJobsEpoch`): it may store only while it still
-    /// owns the newest epoch, so a scan that raced an invalidation never
-    /// republishes its pre-mutation rows as a fresh snapshot.
+    /// The shared passive scan: one scan at a time; waiters behind the first scan's gate
+    /// serve the snapshot it just stored. The scan claims the publish epoch when it starts
+    /// and may store only while it still owns the newest epoch.
     async fn shared_passive_scan(self: &Arc<Self>) -> Vec<PassiveJob> {
         let _gate = self.passive_scan_gate.lock().await;
-        // Double-check: the scan that finished while this caller waited on
-        // the gate refreshed the snapshot already.
+        // Double-check: the scan that finished while this caller waited on the gate refreshed
+        // the snapshot already.
         let still_fresh = self
             .passive_catalog
             .lock()
@@ -206,14 +171,10 @@ impl Supervisor {
         }
         let epoch = self.passive_catalog_epoch.fetch_add(1, Ordering::SeqCst) + 1;
         let rows = self.collect_passive_scheduled_jobs(true).await;
-        // Compare-and-swap publish (TS `storePassiveScheduledJobs`): a
-        // newer epoch means an invalidation raced the scan; the caller
-        // keeps its rows for this response, but the snapshot does not
-        // republish them. The epoch check runs UNDER the snapshot lock:
-        // the TS site is single-threaded, so its check-and-store is
-        // atomic — an invalidation that claims a newer epoch between the
-        // check and the store would otherwise let this scan republish
-        // its pre-mutation rows over the invalidation's cleared snapshot.
+        // Compare-and-swap publish: a newer epoch means an invalidation raced the scan —
+        // the caller keeps its rows, the snapshot does not republish them. The epoch check
+        // runs UNDER the snapshot lock (TS is single-threaded there): outside the lock, a
+        // check/store race would republish pre-mutation rows over the cleared snapshot.
         {
             let mut snapshot = self.passive_catalog.lock().unwrap();
             if self.passive_catalog_epoch.load(Ordering::SeqCst) == epoch {
@@ -226,10 +187,8 @@ impl Supervisor {
         rows
     }
 
-    /// Kick the background stale-while-revalidate refresh (TS `??=`'s one
-    /// in-flight scan): a reader that arrives while a refresh is already
-    /// queued shares it instead of spawning another task; a failure only
-    /// logs, the next read retries.
+    /// Kick the background stale-while-revalidate refresh: a reader arriving
+    /// while a refresh is queued shares it; a failure only logs.
     fn spawn_shared_passive_scan(self: &Arc<Self>) {
         if self.passive_scan_pending.swap(true, Ordering::SeqCst) {
             return;
@@ -243,21 +202,15 @@ impl Supervisor {
         });
     }
 
-    /// Invalidate the passive snapshot (TS #2487
-    /// `invalidatePassiveScheduledJobs`): claim the publish epoch so an
-    /// in-flight scan can no longer store, then drop the snapshot — every
-    /// daemon-owned scheduled-job mutation, the saved-session
-    /// delete/rename paths, and a worker-residency change call this, so
-    /// the next read rescans instead of serving pre-mutation rows.
+    /// Invalidate the passive snapshot: claim the publish epoch so an in-flight
+    /// scan can no longer store, then drop it — the next read rescans.
     pub(crate) fn invalidate_passive_catalog(&self) {
         self.passive_catalog_epoch.fetch_add(1, Ordering::SeqCst);
         *self.passive_catalog.lock().unwrap() = None;
     }
 
-    /// A passive job's artifact store (TS `AgentCronJobStore
-    /// .forSessionArtifacts()` + `registerSessionArtifact`): the same
-    /// partitioned store the owning worker uses, so a passive mutation is
-    /// the durable write a woken worker would have made.
+    /// A passive job's artifact store: the same partitioned store the owning worker
+    /// uses, so a passive mutation is the durable write a woken worker would have made.
     fn passive_job_store(info: &crate::session_store::SessionInfo) -> AgentCronJobStore {
         let store = AgentCronJobStore::for_session_artifacts();
         if let Some(dir) = session_artifact_dir(&info.path, &info.id) {
@@ -266,14 +219,9 @@ impl Supervisor {
         store
     }
 
-    /// `broadcastHeartbeatsChanged` (TS #2487): every daemon-owned
-    /// scheduled-job mutation AND a worker-residency change lands here —
-    /// the passive snapshot drops (claiming its epoch) so the next read
-    /// rescans instead of serving pre-mutation rows, and every connected
-    /// client re-reads the catalog (the TS site writes the
-    /// `heartbeats_changed` frame to each client in its set, with no
-    /// scheduling-surface filter: a re-read that arrives on any
-    /// connection is what keeps a session-scoped catalog view fresh too).
+    /// Every daemon-owned scheduled-job mutation and a worker-residency change lands
+    /// here: the passive snapshot drops (claiming its epoch), and every connected
+    /// client re-reads the catalog (keeps a session-scoped view fresh too).
     pub(crate) fn broadcast_heartbeats_changed(&self) {
         self.invalidate_passive_catalog();
         let _ = self.events.send((
@@ -282,8 +230,7 @@ impl Supervisor {
         ));
     }
 
-    /// Forward one command to a resident with the catalog timeout,
-    /// answering its response (TS `forwardToWorker(worker, command, 5000)`).
+    /// Forward one command to a resident with the catalog timeout.
     pub(crate) async fn forward_with_catalog_timeout(
         &self,
         resident: &Arc<ResidentWorker>,
@@ -312,8 +259,7 @@ impl Supervisor {
         }
     }
 
-    /// Selector-less `cron_list` (TS supervisor arm): merge every live
-    /// worker's jobs with the passive ones and answer the sorted catalog.
+    /// Selector-less `cron_list`: merge every live worker's jobs with the passive ones, sorted.
     pub(crate) async fn handle_cron_list_catalog(
         self: &Arc<Self>,
         command: &DaemonCommand,
@@ -329,13 +275,9 @@ impl Supervisor {
         };
         let mut jobs: Vec<AgentCronJob> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
-        // The slice stores the worker's UNFILTERED answer (the passive
-        // snapshot's pattern: one row set serves every caller's filter), so
-        // the listing forward opens the inactive cut — exactly like the
-        // `cron_cancel` owner search — and the serve-side filter below
-        // applies the request's `include_inactive` (the worker's own
-        // default cut is the same Active|Paused rule, so a served slice is
-        // byte-identical to a fresh default forward).
+        // The slice stores the worker's UNFILTERED answer (one row set serves every
+        // caller's filter), so the listing forward opens the inactive cut and the
+        // serve-side filter below applies the request's `include_inactive`.
         let listing_command = DaemonCommand::CronList {
             id: None,
             active_session_id: None,
@@ -343,10 +285,8 @@ impl Supervisor {
             rest: Map::default(),
         };
         for resident in self.live_workers_in_creation_order().await {
-            // TS #2487: the supervisor serves each worker's own catalog
-            // slice while it is current, so a `cron_list` consults a worker
-            // at most once per generation (the worker's `heartbeats_changed`
-            // bumps the generation and forces the next consult).
+            // The supervisor serves each worker's own catalog slice while it is
+            // current, so a `cron_list` consults a worker at most once per generation.
             let generation = resident
                 .heartbeat_snapshot_generation
                 .load(Ordering::Relaxed);
@@ -354,12 +294,8 @@ impl Supervisor {
                 let snapshot = resident.cron_snapshot.lock().await;
                 snapshot
                     .as_ref()
-                    // The freshness test re-reads the generation while the
-                    // snapshot lock is held: an invalidation that landed
-                    // between the capture above and this lock cannot be
-                    // served as current (the stored generation was
-                    // captured before the forward, so the STORE keeps the
-                    // generation-discipline against mid-read mutations).
+                    // The freshness test re-reads the generation while the snapshot lock
+                    // is held: an invalidation between capture and lock never serves as current.
                     .filter(|snapshot| {
                         snapshot.generation
                             == resident
@@ -429,16 +365,10 @@ impl Supervisor {
         )
     }
 
-    /// Selector-less `heartbeats_list` (TS supervisor arm): merge every
-    /// live worker's heartbeats with the passive heartbeat jobs; the
-    /// passive rows carry the saved session's name and first message.
-    ///
-    /// Each worker serves its last-good snapshot when it cannot answer a
-    /// fresh list (TS `worker.heartbeatSnapshot`): a busy turn must not
-    /// empty the merged catalog while the worker's scheduler keeps firing.
-    /// A worker with no usable snapshot fails the whole response (TS
-    /// `failed`), so the client keeps its own last catalog instead of
-    /// reading a partial merge as an emptied one.
+    /// Selector-less `heartbeats_list`: merge every live worker's heartbeats with the
+    /// passive heartbeat jobs. Each worker serves its last-good snapshot when busy; a
+    /// worker with no usable snapshot fails the whole response, so the client keeps its
+    /// last catalog instead of reading a partial merge as an emptied one.
     pub(crate) async fn handle_heartbeats_list_catalog(
         self: &Arc<Self>,
         command: &DaemonCommand,
@@ -450,21 +380,13 @@ impl Supervisor {
         let mut seen: HashSet<String> = HashSet::new();
         let mut failed: Option<DaemonResponse> = None;
         for resident in self.live_workers_in_creation_order().await {
-            // The generation this read captures (TS queues one more refresh
-            // pass when `heartbeats_changed` lands mid-read; Rust instead
-            // never lets an in-flight read publish over a newer
-            // invalidation): a stored snapshot is only fresh while its
-            // generation is still current.
+            // The generation this read captures: a stored snapshot is only fresh
+            // while its generation is current.
             let generation = resident
                 .heartbeat_snapshot_generation
                 .load(Ordering::Relaxed);
-            // TS #2487: the supervisor serves the worker's own catalog
-            // slice while its generation is current, so a `heartbeats_list`
-            // consults a worker at most once per generation (the worker's
-            // `heartbeats_changed` bumps the generation and forces the
-            // next consult). A stale or missing slice forwards once —
-            // under the generation-discipline store below — and the
-            // busy-worker fallback keeps serving the last-good rows.
+            // The supervisor serves the worker's own slice while its generation is
+            // current, so a `heartbeats_list` consults a worker at most once per generation.
             let served_slice = {
                 let snapshot = resident.heartbeat_snapshot.lock().await;
                 snapshot
@@ -483,8 +405,8 @@ impl Supervisor {
                 let response = self
                     .forward_with_catalog_timeout(&resident, command, client_id)
                     .await;
-                // TS `heartbeatsFromResponse`: a success without a rows array is
-                // an empty catalog (a good snapshot), not a failure.
+                // A success without a rows array is an empty catalog (a good
+                // snapshot), not a failure.
                 let list = if response.success {
                     Some(
                         response
@@ -519,14 +441,9 @@ impl Supervisor {
                     }
                 }
             };
-            // The stored snapshot carries the generation captured before
-            // the forward: an invalidation that landed during the read bumps
-            // the current generation past it, so the store lands already
-            // stale instead of clearing the newer invalidation. The store
-            // itself is generation-monotonic: an older in-flight read
-            // returning after a newer read already stored never replaces
-            // the stored snapshot, so a late read cannot retag it as stale
-            // and busy-worker fallbacks keep serving the last-good rows.
+            // The stored snapshot carries the generation captured before the forward:
+            // an invalidation during the read makes the store land already stale, and an
+            // older in-flight read never replaces a newer stored snapshot.
             resident
                 .store_heartbeat_snapshot(list.clone(), generation)
                 .await;
@@ -544,16 +461,12 @@ impl Supervisor {
                 }
             }
         }
-        // A worker with no usable snapshot fails the response (TS
-        // `failed`): the client keeps its last catalog instead of reading a
-        // partial merge as an emptied one.
         if let Some(mut response) = failed {
             response.id = Some(command_id.to_string());
             return (vec![response_line(&response)], false);
         }
-        // Passivated sessions keep their armed heartbeats; no worker can
-        // list them (the snapshot-served passive rows, TS #2487: the scan
-        // runs once per generation, not per request).
+        // Passivated sessions keep their armed heartbeats; no worker can list them (the
+        // snapshot-served passive rows).
         for passive in self.passive_catalog_rows(false).await {
             if !is_heartbeat_cron_job(&passive.job) || !seen.insert(passive.job.id.clone()) {
                 continue;
@@ -579,9 +492,8 @@ impl Supervisor {
         )
     }
 
-    /// `heartbeat_manage` (TS supervisor arm): a passive job is managed
-    /// against its durable store - no worker wake just to flip a status;
-    /// anything else resolves the live worker and forwards.
+    /// `heartbeat_manage`: a passive job is managed against its durable store — no
+    /// worker wake just to flip a status; anything else forwards to the live worker.
     pub(crate) async fn handle_heartbeat_manage_catalog(
         self: &Arc<Self>,
         command: &DaemonCommand,
@@ -616,8 +528,7 @@ impl Supervisor {
             });
         if let Some(passive) = passive {
             let store = Self::passive_job_store(&passive.info);
-            // A passive row that cannot be managed falls through to the
-            // live-worker route (TS: the same `if (heartbeat)` guard).
+            // A passive row that cannot be managed falls through to the live-worker route.
             if let Ok(Some(heartbeat)) = store.manage_heartbeat(
                 active_session_id,
                 job_id,
@@ -650,9 +561,8 @@ impl Supervisor {
         .await
     }
 
-    /// `cron_add` (TS supervisor arm): forward to the resolved worker and
-    /// promote the owned session when the command asks for it (TS
-    /// `promoteOwnedWorker` after a successful add).
+    /// `cron_add`: forward to the resolved worker and promote the owned session
+    /// when the command asks for it.
     pub(crate) async fn handle_cron_add_catalog(
         self: &Arc<Self>,
         command: &DaemonCommand,
@@ -665,8 +575,7 @@ impl Supervisor {
             .await
     }
 
-    /// `heartbeat_set` (TS supervisor arm): the same forward-plus-promote
-    /// path as `cron_add`.
+    /// `heartbeat_set`: the same forward-plus-promote path as `cron_add`.
     pub(crate) async fn handle_heartbeat_set_catalog(
         self: &Arc<Self>,
         command: &DaemonCommand,
@@ -679,9 +588,8 @@ impl Supervisor {
             .await
     }
 
-    /// The shared `cron_add`/`heartbeat_set` supervisor path: resolve and
-    /// forward, then promote the owner when the command carried
-    /// `promoteOwnedSession` and the worker answered success.
+    /// The shared `cron_add`/`heartbeat_set` path: resolve and forward, then promote the
+    /// owner when the command carried `promoteOwnedSession` and the worker answered success.
     async fn route_scheduled_add(
         self: &Arc<Self>,
         command: &DaemonCommand,
@@ -741,8 +649,8 @@ impl Supervisor {
         outcome
     }
 
-    /// `promoteOwnedWorker` (TS supervisor helper): clear this client's
-    /// ownership, persist the descriptor, and stamp the promotion marker.
+    /// Clear this client's ownership, persist the descriptor, and stamp the
+    /// promotion marker.
     async fn promote_owned_worker(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
@@ -773,10 +681,8 @@ impl Supervisor {
         }
     }
 
-    /// Selector-less `cron_cancel` (TS supervisor arm): find the live
-    /// worker that owns the job (by listing its catalog, inactive
-    /// included), else cancel the passive job in its durable store, else
-    /// answer the TS unknown-job error.
+    /// Selector-less `cron_cancel`: find the live worker that owns the job (listing its
+    /// catalog, inactive included), else cancel the passive job, else the unknown-job error.
     pub(crate) async fn handle_cron_cancel_catalog(
         self: &Arc<Self>,
         command: &DaemonCommand,
@@ -795,8 +701,7 @@ impl Supervisor {
                 false,
             );
         };
-        // The owner search lists each worker's catalog with the inactive
-        // cut open (TS forwards `{ type: "cron_list", includeInactive: true }`).
+        // The owner search lists each worker's catalog with the inactive cut open.
         let listing_command = DaemonCommand::CronList {
             id: None,
             active_session_id: None,

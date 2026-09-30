@@ -1,16 +1,8 @@
-//! The session input-pause surface (protocol breadth wave b8): the
-//! worker arms for `acquire_session_input_pause` and
-//! `release_session_input_pause` (TS daemon-mode `case
-//! "acquire_session_input_pause"` / `case "release_session_input_pause"`)
-//! plus the pause itself - the input-admission gate the turn runner
-//! consults before it admits queued work (TS `acquireSessionInputPause`'s
-//! `_sessionInputAdmissionPauses` token set).
-//!
-//! While any pause is held, the session's queued input (prompts, steering,
-//! follow-ups) stays queued; releasing wakes the runner. A pause is leased
-//! to one owner identity: reacquiring the same session with the same lease
-//! key answers the existing pause id, and releasing a pause another client
-//! holds answers the TS ownership error.
+//! The session input-pause surface: the worker arms plus the input-admission
+//! gate the turn runner consults before it admits queued work. While any pause
+//! is held, queued input stays queued; a pause is leased to one owner identity:
+//! reacquiring with the same lease key answers the existing id, and a foreign
+//! release answers the TS ownership error.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -21,8 +13,7 @@ use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::worker::Worker;
 
 /// One held pause: the session it gates, the owning client identity, and
-/// the lease key (the supervisor embeds `[connectionId, ownerClientId,
-/// leaseKey]`, so a reacquire from the same connection deduplicates).
+/// the lease key (a reacquire from the same connection deduplicates).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InputPauseEntry {
     active_session_id: String,
@@ -60,10 +51,8 @@ impl InputPauseTable {
             .is_empty()
     }
 
-    /// `acquire_session_input_pause`: dedupe on (owner, session, lease
-    /// key) - an identical lease answers its existing pause id (TS
-    /// `existing[0]`), otherwise a fresh id is minted and the admission
-    /// gate engages.
+    /// `acquire_session_input_pause`: dedupe on (owner, session, lease key) —
+    /// an identical lease answers its existing pause id, else a fresh id.
     fn acquire(&self, active_session_id: &str, owner_client_id: &str, lease_key: &str) -> String {
         let mut pauses = self
             .pauses
@@ -89,9 +78,8 @@ impl InputPauseTable {
         pause_id
     }
 
-    /// `release_session_input_pause`: `Unknown` answers the plain TS
-    /// success (an idempotent release), a foreign owner or session
-    /// answers the TS ownership error, `Released` lifts the gate.
+    /// `release_session_input_pause`: `Unknown` answers the plain TS success
+    /// (idempotent), a foreign owner the TS ownership error, `Released` lifts the gate.
     fn release(
         &self,
         pause_id: &str,
@@ -161,10 +149,8 @@ impl Worker {
         )
     }
 
-    /// `release_session_input_pause`: the TS outcome ladder - an unknown
-    /// pause id answers the plain success, a foreign owner answers the
-    /// ownership error, a correct release lifts the admission gate and
-    /// wakes the turn runner.
+    /// `release_session_input_pause`: the TS outcome ladder — an unknown id
+    /// answers the plain success, a foreign owner the ownership error.
     pub(crate) fn handle_release_session_input_pause(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("release_session_input_pause") {
             return response;
@@ -188,10 +174,8 @@ impl Worker {
             .release(pause_id, &owner_client_id, &active_session_id)
         {
             ReleaseOutcome::Released => {
-                // The gate lifted: queued input admits again, and the
-                // release is a TS `_maybeResumeGoalContinuationAfterRlmWork`
-                // site (the deferral held while the pause owned admission
-                // re-evaluates).
+                // The gate lifted: queued input admits again, and the held
+                // goal-continuation deferral re-evaluates.
                 self.work_notify.notify_one();
                 if let Some(engine) = self.agent_engine.as_ref() {
                     engine.retry_owed_goal_continuation();
@@ -248,8 +232,6 @@ mod tests {
         worker
     }
 
-    /// Wire shape: acquire answers `{ pauseId }`, the same lease
-    /// deduplicates to the same id, a different lease mints a new one.
     #[tokio::test]
     async fn acquire_dedupes_on_the_lease_key() {
         let worker = created_worker().await;
@@ -292,9 +274,6 @@ mod tests {
         assert_ne!(other.data.unwrap()["pauseId"], pause_id);
     }
 
-    /// Wire shape: release answers the plain TS success for an unknown
-    /// id, the ownership error for a foreign client, and lifts the gate
-    /// for the owner.
     #[tokio::test]
     async fn release_answers_the_ts_outcome_ladder() {
         let worker = created_worker().await;
@@ -344,8 +323,6 @@ mod tests {
         assert!(!worker.input_pauses.paused());
     }
 
-    /// The admission gate: held pauses keep queued input queued, a release
-    /// admits it again.
     #[tokio::test]
     async fn the_gate_holds_queued_input_until_released() {
         let worker = created_worker().await;

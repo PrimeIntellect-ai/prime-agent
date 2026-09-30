@@ -22,8 +22,6 @@ use super::stop_reason_response;
 use super::types::PromptParams;
 use super::{events, jsonrpc, producer, AcpModeState, AcpStopReason, ConnectionState};
 
-/// The `_meta.autonomous` accounting for a completion update: shared with
-/// the daemon-attached settlement (meta.rs).
 fn autonomous_meta(status: &AgentAutonomousStatus) -> PrimeAgentAutonomousMeta {
     meta::autonomous_meta(status)
 }
@@ -36,7 +34,6 @@ pub(super) async fn handle_session_prompt(
     tx: producer::FrameSink,
 ) {
     let params = PromptParams::parse(&params);
-    // Admission: one prompt turn at a time, behind any started cancellation.
     let (session, turn_id) = {
         let mut state = state.lock().await;
         let closing = state.session_close_in_flight;
@@ -85,8 +82,6 @@ pub(super) async fn handle_session_prompt(
         }
     };
 
-    // The turn runs as its own task so the reader loop can keep serving
-    // session/cancel and session/close while it settles.
     let task = tokio::spawn(run_prompt_turn(
         id,
         params.session_id.clone(),
@@ -105,9 +100,6 @@ pub(super) async fn handle_session_prompt(
     }
 }
 
-/// One prompt turn: admission into the engine (a model turn or a session
-/// command), the autonomous continuation loop, and the correlated boundary /
-/// completion envelope in front of the response.
 #[allow(clippy::too_many_arguments)]
 async fn run_prompt_turn(
     id: Value,
@@ -120,13 +112,9 @@ async fn run_prompt_turn(
     tx: producer::FrameSink,
 ) {
     let boundary = TurnBoundary::capture(mode.engine.session.agent()).await;
-    // The pre-turn compaction arms (TS `_runPreTurnCompaction`,
-    // `beforeModelSelection`): a stale overflow from the previous run
-    // recovers on the newly admitted prompt, then a threshold crossing
-    // compacts before the turn runs. Session commands never reach the
-    // prompt commit in TS, so they never fire the arms; a busy agent
-    // queues the prompt below without a session-level boundary (the
-    // settled-turn check after the drain covers the turn).
+    // Session commands never fire the pre-turn compaction arms; a busy
+    // agent queues the prompt without a pre-turn boundary (the
+    // settled-turn check after the drain covers it).
     if mode
         .engine
         .session
@@ -169,15 +157,14 @@ async fn run_prompt_turn(
     let ran_model_turn;
 
     match admission {
-        // Session commands (compact/refine/goal/autonomous) never admit a
-        // model turn: the durable echo row replaces the user row. Execute
-        // them and publish their namespaced events.
+        // Session commands never admit a model turn: the durable echo
+        // row replaces the user row.
         Ok(PromptOutcome::SessionCommand(command)) => {
             match run_session_command_segment(&mode, &session, &command, &mut turn_failure).await {
                 Ok(ran) => ran_model_turn = ran,
                 Err(error) => {
-                    // Command execution could not start (no resolved model):
-                    // an admission-style error boundary, never an invented
+                    // Command execution could not start: an
+                    // admission-style error boundary, never a
                     // terminal-quiescence update.
                     let _ = session::publish_response_boundary(
                         &session,
@@ -218,11 +205,9 @@ async fn run_prompt_turn(
     }
 
     // The turn-settlement loop: classify each settled turn, run the
-    // automatic compaction arms at its boundary (TS `_checkCompaction` at
-    // `agent_end`), consume the requested refinement (TS
-    // `_consumePendingRequestedRefine`), then ask the autonomous driver
-    // what follows. A continuation runs as the next turn of the same
-    // prompt, so every boundary in the run hosts its arms.
+    // compaction arms, consume the requested refinement, then ask the
+    // autonomous driver what follows. A continuation runs as the next
+    // turn of the same prompt, so every boundary hosts its arms.
     loop {
         if session.cancel_requested() || !ran_model_turn {
             break;
@@ -237,47 +222,33 @@ async fn run_prompt_turn(
         if boundary.contains_wire(&final_message) {
             break;
         }
-        // An aborted turn never services its boundary requests (TS
-        // `_checkCompaction`'s abort arm): drop the pending compaction
-        // and refine requests, reset the overflow machine, and settle.
+        // An aborted turn never services its boundary requests.
         if final_message.stop_reason == pa_types::ai::StopReason::Aborted {
             session.reset_overflow_recovery();
             session.clear_turn_boundary_requests(&mode.engine).await;
             break;
         }
         // A settled non-error assistant message resets the overflow
-        // machine (TS resets `_overflowRecovery` at every non-error
-        // assistant `message_end`) and counts into the auto-refine
-        // review prompt's turn line (TS `_assistantTurnsSinceAutoRefine`'s
-        // message_end increment), then the boundary check runs.
+        // machine and counts into the auto-refine review's turn line.
         if final_message.stop_reason != pa_types::ai::StopReason::Error {
             session.reset_overflow_recovery();
             mode.engine
                 .session
                 .note_settled_turn_since_auto_refine_review();
         }
-        // TS `_checkCompaction` at `agent_end`: the overflow arm (Case 1,
-        // with its compact-and-retry), then the requested arm (which
-        // stops the run on purpose), then the threshold arm (which, under
-        // the settled boundary's queue policy, mints the goal continuation
-        // before it compacts — the held turn runs after the boundary like
-        // the TS post-compaction continue).
         let (check, threshold_continuation) = session
             .check_compaction(&mode, &final_message, ThresholdGoalQueue::Queue)
             .await;
         if session.cancel_requested() {
             if threshold_continuation.is_some() {
                 // A cancellation between the mint and the run withdraws
-                // the queued continuation (the TS cancel clears the
-                // queue and rolls the slot back).
+                // the queued continuation.
                 goal_continuation::rollback_goal_mint(&mode).await;
             }
             break;
         }
         if check == CompactionCheckRun::OverflowRetry {
-            // The compacted context re-issues the turn without a new
-            // user message (TS `agent.continue()`); the settled retry
-            // re-enters this loop through its own boundary.
+            // Re-issue without a new user row; the settled retry re-enters this loop.
             if let Err(error) = mode.engine.session.agent().continue_run().await {
                 turn_failure = Some(format!("{error:#}"));
                 break;
@@ -285,24 +256,16 @@ async fn run_prompt_turn(
             mode.engine.session.agent().wait_for_idle().await;
             continue;
         }
-        // TS consumes the requested refinement whenever the compaction
-        // check did not report a will-retry (`_consumePendingRequestedRefine`
-        // at `agent_end`), then the serialized checkpoint's compact step
-        // services an armed compact-trigger review (autorefine.rs). The
-        // compact-trigger round defers behind a held goal continuation
-        // (TS `_scheduleAutoRefineAfterCompaction(willContinue)`): the
-        // continuation turn's own boundary services it.
+        // Consume the requested refinement (never at a will-retry), then
+        // service an armed compact-trigger review (autorefine.rs); the
+        // round defers behind a held goal continuation.
         session.consume_requested_refine(&mode).await;
         if threshold_continuation.is_none() {
             session.consume_compact_auto_refine(&mode).await;
         }
-        // A failed turn ends the run with its error once the boundary
-        // check could not save it (an overflow recovery that re-issued
-        // handled it above).
+        // A failed turn ends the run with its error (an overflow
+        // recovery that re-issued handled it above).
         if final_message.stop_reason == pa_types::ai::StopReason::Error {
-            // TS `_finishGoalForTerminalAssistantMessage` at `agent_end`:
-            // the failed turn fails an active goal (the state change
-            // publishes before the response settles).
             goal_continuation::fail_goal_for_terminal_error(
                 &mode,
                 &session,
@@ -317,16 +280,9 @@ async fn run_prompt_turn(
             );
             break;
         }
-        // A requested compaction stops the run on purpose: the model
-        // resumes on the next prompt.
         if check == CompactionCheckRun::RequestedStop {
             break;
         }
-        // The threshold arm's held goal continuation runs as the
-        // post-compaction turn (TS `_schedulePostCompactionContinue` over
-        // the queued follow-up): the pre-turn compaction arms run before
-        // it like any admitted prompt, and its own settled boundary
-        // re-enters this loop.
         if let Some(message) = threshold_continuation {
             session.run_pre_turn_compaction(&mode).await;
             if let Err(error) = mode.engine.session.prompt_injected_message(&message).await {
@@ -339,14 +295,8 @@ async fn run_prompt_turn(
         if session.cancel_requested() {
             break;
         }
-        // TS `_getContinuationMessages` at the agent loop's natural turn
-        // end: the goal arm runs before the autonomous arm with exclusive
-        // priority — the budget-limit wrap-up steer first (the turn that
-        // crossed the goal budget), then the natural continuation mint
-        // (an active goal mints one continuation per settled boundary).
-        // A minted turn runs as the next turn of the same prompt (the
-        // pre-turn compaction arms run before it like any admitted
-        // prompt); no active goal falls through to the autonomous arm.
+        // The goal arm has exclusive priority; no active goal falls
+        // through to the autonomous arm.
         match goal_continuation::goal_follow_up(&mode, &session).await {
             goal_continuation::GoalFollowUp::Turn(message) => {
                 let message = *message;
@@ -361,11 +311,6 @@ async fn run_prompt_turn(
                 match session.autonomous_follow_up(&final_message).await {
                     AutonomousFollowUp::Inactive => break,
                     AutonomousFollowUp::Continue { text } => {
-                        // An injected continuation runs as the next turn
-                        // of the same prompt (a fresh user row: the
-                        // pre-turn compaction arms run before it, like
-                        // any admitted prompt); its failure settles the
-                        // prompt.
                         session.run_pre_turn_compaction(&mode).await;
                         if let Err(error) = mode
                             .engine
@@ -386,9 +331,8 @@ async fn run_prompt_turn(
                         mode.engine.session.agent().wait_for_idle().await;
                     }
                     AutonomousFollowUp::Stop { reason, status } => {
-                        // The stop writes no row (the TS shape): the stop
-                        // reason and status ride the completion update and
-                        // the response's stop reason.
+                        // The stop writes no row: the stop reason and status ride the
+                        // completion update and the response's stop reason.
                         autonomous_stop = Some((reason, status));
                         break;
                     }
@@ -410,30 +354,24 @@ async fn run_prompt_turn(
     .await;
 }
 
-/// Execute one session command and publish its namespaced events:
-/// compaction and refinement outcomes, plus any goal state change. A goal
+/// Execute one session command and publish its namespaced events; a goal
 /// start/resume schedules its continuation context as the turn's model
-/// segment after the command settles.
+/// segment.
 async fn run_session_command_segment(
     mode: &AcpModeState,
     session: &Arc<AcpSession>,
     command: &pa_core::session_engine::slash_commands::SessionSlashCommand,
     turn_failure: &mut Option<String>,
 ) -> anyhow::Result<bool> {
-    // The command executor runs on one model/key pair read through the
-    // config queue: a concurrent picker switch cannot hand `/compact`
-    // or `/refine` the pre-switch model with the switched provider's
-    // key.
     let (model, api_key) = mode.model_and_api_key().await;
     let Some(model) = model else {
         // Unreachable in practice (the engine assembly requires a model);
         // fail as a request error instead of a turn failure.
         anyhow::bail!("No model available to run the session command");
     };
-    // The autonomous guard scopes tightly around the executor call: a
-    // scheduled continuation prompts the model below, and the event
-    // listener's per-message accounting must be able to take the same
-    // mutex while that turn runs.
+    // The autonomous guard scopes tightly around the executor call: the
+    // event listener's per-message accounting must take the same mutex
+    // while a scheduled continuation turn runs.
     let execution = {
         let mut autonomous = session.autonomous.lock().await;
         let mut params = SessionCommandParams {
@@ -445,9 +383,8 @@ async fn run_session_command_segment(
         execute_session_command(&mode.engine, &mut params, command).await
     };
 
-    // A compaction publishes its namespaced event whether it ran (result
-    // fields present) or skipped (the TS compaction_end with an undefined
-    // result): the skip is observable, not silent.
+    // A compaction publishes its namespaced event whether it ran or
+    // skipped: the skip is observable, not silent.
     let compaction_event = if command.name == "compact" {
         Some(match &execution.compaction {
             Some(compaction) => events::AcpEngineEvent::CompactionEnd {
@@ -465,20 +402,13 @@ async fn run_session_command_segment(
     if let Some(event) = compaction_event {
         publish_engine_event(session, &event).await;
     }
-    // TS `compact()` schedules the compact-trigger auto-refine review
-    // after every successful compaction: a session command never runs a
-    // turn, so the armed trigger waits for the next serialized checkpoint
-    // or the session-close drain (autorefine.rs).
+    // Every successful compaction arms the compact-trigger review; a
+    // session command never runs a turn, so it waits for the next serialized
+    // checkpoint or the session-close drain (autorefine.rs).
     if command.name == "compact" && execution.compaction.is_some() {
         mode.engine.session.mark_compact_auto_refine_pending();
-        // TS `compact()`'s `didCompact` + active-goal finally arm: a
-        // successful manual compact with an active goal mints the owed
-        // continuation (the `||= !hasQueuedMessages()` arm — the direct
-        // ACP never queues work behind a session command) and the
-        // continuation runs as the turn's model segment, the scheduled
-        // continue over the queued follow-up. The compact-trigger review
-        // defers behind it (the continuation turn's boundary services
-        // it, like the goal-start segment below).
+        // The minted continuation runs as the turn's model segment, and the
+        // compact-trigger review defers behind it.
         if let Some(message) = goal_continuation::mint_goal_continuation(mode, session).await {
             return run_goal_continuation_segment(mode, session, message, turn_failure).await;
         }
@@ -521,23 +451,14 @@ async fn run_session_command_segment(
         .await;
     }
 
-    // Any goal state change (start/status/clear/pause/resume) publishes.
     session.publish_goal_update().await;
 
-    // A scheduled goal continuation runs as the turn's model segment; its
-    // settled turn participates in the settle loop like any model turn.
     if let Some(message) = execution.continuation_message {
         return run_goal_continuation_segment(mode, session, message, turn_failure).await;
     }
     Ok(false)
 }
 
-/// Run one goal-continuation segment (a goal-context row minted by the
-/// goal commands or the compact-with-active-goal continue) as the turn's
-/// model segment: the pre-turn compaction arms run before it like any
-/// admitted prompt (TS `_runPreTurnCompaction`), the injected custom row
-/// is the turn's one representation (TS's prepared-turn primary record),
-/// and the settled turn's boundary re-enters the settle loop.
 async fn run_goal_continuation_segment(
     mode: &AcpModeState,
     session: &Arc<AcpSession>,
@@ -553,8 +474,6 @@ async fn run_goal_continuation_segment(
     Ok(true)
 }
 
-/// Publish one adapter event through the session producer at the active
-/// turn.
 async fn publish_engine_event(session: &Arc<AcpSession>, event: &events::AcpEngineEvent) {
     let turn_id = session.producer().active_prompt_turn().await;
     let mut mapping = events::MappingState::default();
@@ -567,11 +486,10 @@ async fn publish_engine_event(session: &Arc<AcpSession>, event: &events::AcpEngi
     }
 }
 
-/// Settle one finished turn: the correlated boundary envelope, the response,
-/// and the slot bookkeeping. The autonomous status rides the completion
-/// update while a run is enabled, and the stop reason maps the driver's
-/// stop outcome (`max_tokens` for token exhaustion, `max_turn_requests`
-/// for every other limit, `end_turn` otherwise).
+/// Settle one finished turn: the correlated boundary envelope, the
+/// response, and the slot bookkeeping. The stop reason maps the driver's
+/// stop outcome: `max_tokens` for token exhaustion, `max_turn_requests`
+/// for every other limit, `end_turn` otherwise.
 #[allow(clippy::too_many_arguments)]
 async fn settle_turn(
     state: &Arc<Mutex<ConnectionState>>,
@@ -628,8 +546,7 @@ async fn settle_turn(
         status.enabled.then_some(status)
     };
     let autonomous_meta = autonomous_status.as_ref().map(autonomous_meta);
-    // The remaining continuation slots the quiescence observation reports:
-    // the configured budget minus what the run consumed (zero when no
+    // The configured budget minus what the run consumed (zero when no
     // autonomous run is active).
     let remaining_continuations = autonomous_status.as_ref().map_or(0, |status| {
         status

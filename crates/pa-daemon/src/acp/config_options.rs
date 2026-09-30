@@ -1,18 +1,7 @@
-//! ACP session-config pickers (the TS #2455 port): `session/new`
-//! advertises standard `model` and `thought_level` select options, and
-//! `session/set_config_option` applies a client selection — validated
-//! against the discovered models and the current model's supported
-//! levels — republishing `config_option_update` whenever the observed
-//! options change. Model values are opaque serialized
-//! `[provider, model-id]` pairs, exactly like the TS product (Zed
-//! round-trips the value it was handed); effort choices follow the
-//! selected model's supported levels.
-//!
-//! Both transports serve the same computation: the in-process mode
-//! reads the live agent state (plus the switchable provider target), the
-//! daemon-attached transport rides the `get_connection_state` /
-//! `get_available_models` / `set_model` / `set_thinking_level` wire
-//! commands — the rust forms of the TS `AgentConnection` seams.
+//! ACP session-config pickers: `session/new` advertises `model` and
+//! `thought_level` select options, and `session/set_config_option` applies
+//! a validated selection, republishing `config_option_update` on change.
+//! Model values are opaque serialized `[provider, model-id]` pairs.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -45,11 +34,8 @@ pub struct SessionConfigOption {
     pub options: Vec<SessionConfigSelectOption>,
 }
 
-/// The current model as the pickers present it (the TS `state.model`):
-/// identity plus the coarse `reasoning` flag (the no-registry-entry
-/// ladder's only capability signal on the agent-model shape, which
-/// carries no thinking-level map). The daemon-attached transport parses
-/// the same shape off the `get_connection_state` wire.
+/// The current model as the pickers present it: identity plus the coarse
+/// `reasoning` flag (the no-registry-entry ladder's only capability signal).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PickerModel {
     pub id: String,
@@ -100,16 +86,15 @@ impl PickerModel {
 }
 
 /// The opaque model value the picker hands to clients: the serialized
-/// `[provider, model-id]` pair (TS `modelValue`).
+/// `[provider, model-id]` pair.
 pub fn model_value(provider: &str, model_id: &str) -> String {
     serde_json::json!([provider, model_id]).to_string()
 }
 
-/// Build the session's configuration options (TS `sessionConfigOptions`):
-/// a `model` select over the discovered models (the current model always
-/// selectable), plus a `thought_level` select when the model has
-/// selectable levels (#2858's map-driven capability — see the gate below).
-/// No model resolves to no options, exactly like the TS builder.
+/// Build the session's configuration options: a `model` select over the
+/// discovered models (the current model always selectable), plus a
+/// `thought_level` select when the model has selectable levels. No model
+/// resolves to no options.
 pub fn session_config_options(
     model: Option<PickerModel>,
     thinking_level: &str,
@@ -152,13 +137,10 @@ pub fn session_config_options(
             })
             .collect(),
     }];
-    // #2858's map-driven capability: the levels list is the capability on
-    // both transports (the in-process side computes
-    // `get_supported_thinking_levels`, the daemon side carries the
-    // worker's #2858-computed `availableThinkingLevels`), so a model with
-    // an addressable thinking-level map shows its effort picker even when
-    // the coarse `reasoning` flag is false. A list without a non-`off`
-    // entry (the `["off"]`-only or empty shape) is no selectable surface.
+    // #2858's map-driven capability: a model with an addressable
+    // thinking-level map serves its effort picker even when the coarse
+    // `reasoning` flag is false; a list without a non-`off` entry is no
+    // selectable surface.
     if available_levels.iter().any(|level| level != "off") {
         options.push(SessionConfigOption {
             id: "thought_level".to_string(),
@@ -184,9 +166,8 @@ pub fn config_options_value(options: &[SessionConfigOption]) -> Value {
 }
 
 /// Publish the options as a `config_option_update` when they actually
-/// changed (TS `refreshConfig`'s JSON-compare gate), stamping the new
-/// set as the published state either way. Connection-scoped: the update
-/// rides origin turn 0, exactly like the TS publish call.
+/// changed, stamping the new set as the published state either way.
+/// Connection-scoped: the update rides origin turn 0.
 pub async fn publish_config_options(
     producer: &Arc<UpdateProducer>,
     published: &tokio::sync::Mutex<Vec<SessionConfigOption>>,
@@ -223,9 +204,8 @@ pub(crate) fn acp_model_registry(agent_dir: &Path) -> pa_core::models::ModelRegi
     registry
 }
 
-/// The in-process transport's discovery result (TS
-/// `getAvailableModels`): `Err` carries the discovery failure the
-/// caller reports as "unavailable, try again later".
+/// The in-process transport's discovery result: `Err` carries the
+/// discovery failure the caller reports as "unavailable, try again later".
 pub(crate) fn discover_available_models(agent_dir: &Path) -> anyhow::Result<Vec<Model>> {
     let registry = acp_model_registry(agent_dir);
     // A malformed models.json must surface as a discovery failure (the
@@ -239,7 +219,7 @@ pub(crate) fn discover_available_models(agent_dir: &Path) -> anyhow::Result<Vec<
 
 /// The switchable provider target the in-process session's stream reads
 /// per call: the type the composition passes in so a picker model switch
-/// swaps the live target (TS `setModel`'s stream re-registration).
+/// swaps the live target.
 pub type ProviderTargetSlot =
     Arc<std::sync::RwLock<Option<pa_core::session_engine::provider_adapter::ProviderTarget>>>;
 
@@ -287,11 +267,6 @@ mod tests {
         assert!(session_config_options(None, "medium", &levels(&["off"]), &[]).is_empty());
     }
 
-    /// #2858's map-driven capability: the effort picker follows the
-    /// model's addressable levels, not the coarse `reasoning` flag — a
-    /// `reasoning: false` model whose map addresses levels serves the
-    /// picker, and a list without a non-`off` entry (the `["off"]`-only
-    /// or empty shape) hides it.
     #[test]
     fn the_effort_picker_follows_the_map_driven_capability() {
         let flagged_false =
@@ -368,8 +343,8 @@ mod tests {
     #[test]
     fn duplicate_values_collapse_and_the_current_model_wins_its_slot() {
         let current = PickerModel::from_model(&model("faux", "shared", "Live Name", false));
-        // A discovered model with the same (provider, id): the current
-        // model replaces the discovered entry in place (TS `Map.set`).
+        // A discovered model with the same (provider, id): the current model
+        // replaces the discovered entry in place.
         let models = vec![model("faux", "shared", "Discovered Name", false)];
         let options = session_config_options(Some(current), "off", &levels(&["off"]), &models);
         assert_eq!(options[0].options.len(), 1);

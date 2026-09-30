@@ -6,12 +6,8 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
-/// The gated fake supervisor: every `create` reports itself through
-/// `create_seen_tx` and then parks until the shared verdict channel
-/// answers `true` (the admission succeeds) or `false` (the admission
-/// fails). Everything else answers like the watcher tests' scripted
-/// supervisor: a prompt is admitted, the child goes idle with a final
-/// answer, and a kill succeeds.
+/// The gated fake supervisor: every `create` reports through `create_seen_tx` and parks until the
+/// shared verdict channel answers; everything else answers like the watcher tests' supervisor.
 async fn spawn_gated_supervisor(
     socket: std::path::PathBuf,
     create_seen_tx: mpsc::UnboundedSender<Value>,
@@ -51,12 +47,8 @@ async fn spawn_gated_supervisor(
                             match verdict {
                                 Some(true) => {
                                     // The real supervisor echoes the
-                                    // requested name in its create
-                                    // summary; the record takes the
-                                    // supervisor's answer over the
-                                    // request, so the fake must echo
-                                    // too or the registry never sees
-                                    // the spawned name.
+                                    // requested name; the record takes the
+                                    // supervisor's answer over the request.
                                     let session_name = command["name"].as_str().unwrap_or_default();
                                     response_success(
                                         Some(&id),
@@ -150,11 +142,8 @@ fn spawn_request(name: &str, prompt: &str) -> RlmSpawnRequest {
     }
 }
 
-/// The reservation lifecycle (TS's own test sequence): the name is
-/// held across the parked admission - a racing same-name spawn fails
-/// closed with the TS unavailability error - and freed at the
-/// admission settle, after which the live registry owns the name and
-/// a respawn fails on the registry check with the same error.
+/// The reservation lifecycle: the name is held across the parked admission — a racing same-name
+/// spawn fails closed — and freed at the settle, after which the live registry owns the name.
 #[tokio::test]
 async fn holds_a_spawn_name_reservation_until_admission_settles_then_frees_it() {
     let (create_seen_tx, mut create_seen_rx) = mpsc::unbounded_channel();
@@ -195,10 +184,7 @@ async fn holds_a_spawn_name_reservation_until_admission_settles_then_frees_it() 
 }
 
 /// A cancelled admission frees the reserved name: the boxed
-/// `RlmHostFuture` is a cancellable future, so the kernel can drop a
-/// spawn mid-admission - the reservation must release with the future
-/// or every later same-name spawn is rejected for the host's
-/// lifetime.
+/// `RlmHostFuture` is cancellable, so the reservation must release with it.
 #[tokio::test]
 async fn a_cancelled_spawn_admission_frees_the_reserved_name() {
     let (create_seen_tx, mut create_seen_rx) = mpsc::unbounded_channel();
@@ -233,8 +219,7 @@ async fn a_cancelled_spawn_admission_frees_the_reserved_name() {
 }
 
 /// The failure path: a failed admission (the create errors after the
-/// reservation was held) frees the name, so the same name spawns
-/// again.
+/// reservation was held) frees the name, so the same name spawns again.
 #[tokio::test]
 async fn a_failed_admission_frees_the_reserved_name() {
     let (create_seen_tx, mut create_seen_rx) = mpsc::unbounded_channel();
@@ -254,7 +239,6 @@ async fn a_failed_admission_frees_the_reserved_name() {
         .expect_err("the failed admission surfaces");
     assert!(!sessions.spawn_name_reserved("doomed"));
 
-    // The failed admission freed the name: the same name spawns again.
     verdict_tx.send(true).expect("admit the retry");
     let handle = sessions
         .spawn(spawn_request("doomed", "retry after the failure"))

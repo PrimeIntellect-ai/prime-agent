@@ -59,10 +59,8 @@ impl Supervisor {
         }
     }
 
-    /// Emit the parent-death child close's `daemon event` (schema v1,
-    /// kind `worker_children_closed`): a count only, never session
-    /// payload. Zero closes never emit (no children died with the
-    /// worker).
+    /// Emit the parent-death child close's `daemon event`: a count only. Zero closes
+    /// never emit (no children died with the worker).
     pub(crate) fn note_children_closed(&self, count: usize) {
         if count == 0 {
             return;
@@ -86,9 +84,8 @@ impl Supervisor {
         }
     }
 
-    /// Emit the deleted-child usage capture's `daemon event` (schema v1,
-    /// kind `deleted_child_usage_captured`): source + count, primitives
-    /// only.
+    /// Emit the deleted-child usage capture's `daemon event` (kind
+    /// `deleted_child_usage_captured`): source + count, primitives only.
     pub(crate) fn note_deleted_child_usage_captured(&self, source: &str, count: usize) {
         if !self.telemetry_recording_on() {
             return;
@@ -165,11 +162,8 @@ impl Supervisor {
         let _ = client.shutdown().await;
     }
 
-    /// Publish one session event to the session's attached connections
-    /// (the send-time delivery pass — TS `handleWorkerFrame`'s fan-out
-    /// evaluates the attached set in the same pass that writes). A full
-    /// queue drops the frame and the stall-cycle transition lands in the
-    /// daemon log (finding 4a visibility).
+    /// Publish one session event to the session's attached connections. A full queue
+    /// drops the frame; the stall-cycle transition lands in the daemon log.
     pub(crate) fn publish_session_event(&self, active_session_id: &str, payload: &Arc<Value>) {
         let outcome = self.session_subscribers.publish(active_session_id, payload);
         if !outcome.lagged.is_empty() {

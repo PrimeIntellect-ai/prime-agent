@@ -1,13 +1,7 @@
-//! Daemon session-event mapping: the TS `acpUpdatesForSessionEvent` port
-//! for the wire shapes a daemon worker streams (`message_start/update/end`,
-//! `tool_execution_*`, `compaction_end`, `goal_update`, ...). The
-//! daemon-attached ACP transport rides this instead of the in-process
+//! Daemon session-event mapping: the wire shapes a daemon worker streams.
+//! The daemon-attached ACP transport rides this instead of the in-process
 //! loop-event projection (`events.rs`): same ACP frames, different producer
-//! side.
-//!
-//! Events with no ACP counterpart (`turn_end`, `auto_retry_*`,
-//! `agent_begin/end`, `session_action_update`) map to nothing, exactly like
-//! the TS switch's default arm.
+//! side. Events with no ACP counterpart map to nothing.
 
 use serde_json::{json, Value};
 
@@ -42,8 +36,7 @@ impl WireMappingState {
 }
 
 /// The newest assistant stop reason carried by a `message_end` event (the
-/// transport reads it after the turn for the stop-reason response); also
-/// captures an error message on a failed turn.
+/// transport reads it after the turn for the stop-reason response).
 pub struct AssistantStop {
     pub stop_reason: Option<String>,
 }
@@ -236,8 +229,7 @@ pub fn wire_updates(event: &Value, state: &mut WireMappingState) -> Vec<AcpSessi
     }
 }
 
-/// TS `toolResultText`: the text of a tool result, wherever the engine
-/// carries it.
+/// The text of a tool result, wherever the engine carries it.
 fn tool_result_text(result: Option<&Value>) -> Option<String> {
     let result = result?;
     if let Some(text) = result.as_str() {
@@ -273,7 +265,7 @@ fn base64_byte_length(data: &str) -> u64 {
     (data.len() as u64 * 3 / 4).saturating_sub(padding)
 }
 
-/// TS `ipythonRichOutput`: media and diffs ride the namespaced meta.
+/// Media and diffs ride the namespaced meta.
 fn ipython_rich_output(result: Option<&Value>) -> Option<Value> {
     let details = result?.get("details")?;
     let attachments = details
@@ -356,8 +348,8 @@ mod tests {
 
     #[test]
     fn goal_update_maps_to_the_namespaced_goal_meta() {
-        // TS acp-events.ts `case "goal_update"`: the GoalState fields the
-        // meta carries, nothing else.
+        // The GoalState fields the meta carries,
+        // nothing else.
         let mut state = WireMappingState::default();
         let updates = wire_updates(
             &json!({
