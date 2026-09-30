@@ -1347,19 +1347,25 @@ else
   rm -f ${lock_link}"
   done
 fi
-# THE WINDOWS DAEMON STOP, before the publish (a Windows process holds its
-# own binary open, so the old-tree rename-aside below fails while a daemon
-# runs): the stop is the product's own clean shutdown over its named pipe -
-# the graceful request first, the forced one if it did not settle, never a
-# signal. A machine with no launcher yet (a fresh install) has no daemon
-# the stop could reach; that absence is the normal fresh-install path.
-if [ "$WINDOWS" = "yes" ] && [ -f "$launcher" ]; then
+# THE WINDOWS DAEMON STOP, after the lock, before the publish (a Windows
+# process holds its own binary open, so the old-tree rename-aside below
+# fails while a daemon runs). THE TRUSTED STOP: the previous payload's OWN
+# BINARY (the marked share tree's prime-agent.exe), never the launcher - an
+# unowned regular file at ${launcher} is precisely the untrusted-execution
+# shape (the ownership check that later preserves it has not run yet), and
+# exec'ing it would hand a foreign command the installer's inherited
+# environment. The share tree's ownership marker gates the stop; a machine
+# with no marked payload yet (a fresh install) has no daemon the stop could
+# reach - that absence is the normal fresh-install path.
+if [ "$WINDOWS" = "yes" ] \
+   && [ -f "${share_dir}/.prime-agent-install" ] \
+   && [ -f "${share_dir}/${BINARY_NAME}" ]; then
   say "stopping the running Rust daemon before the publish (a Windows"
   say "  process holds its binary open - the payload swap needs it down)"
-  if "$launcher" shutdown >/dev/null 2>&1; then
+  if "${share_dir}/${BINARY_NAME}" shutdown >/dev/null 2>&1; then
     windows_stop_summary="daemon: stopped cleanly for this update (the shutdown request over the named pipe)"
     say "the running daemon was shut down (the next invocation boots the new one)"
-  elif "$launcher" shutdown --force >/dev/null 2>&1; then
+  elif "${share_dir}/${BINARY_NAME}" shutdown --force >/dev/null 2>&1; then
     windows_stop_summary="daemon: force-stopped for this update (the forced shutdown request over the named pipe)"
     say "the running daemon was shut down (forced; the next invocation boots the new one)"
   else
@@ -1656,6 +1662,11 @@ if not defined PRIME_AGENT_CODING_AGENT_DIR set "PRIME_AGENT_CODING_AGENT_DIR=%U
 "%~dp0..\share\prime-agent\prime-agent.exe" %*
 EOF
   mv -f "$cmd_tmp" "$cmd_launcher"
+  # The takeover stands for the .cmd twin too: the preserved aside slot is
+  # NOT restored on the success path (the EXIT trap restores only what a
+  # failed install displaced - the bots' finding: the stale slot would
+  # clobber the fresh .cmd at exit).
+  preserved_cmd_file=""
 fi
 # The Rust launcher is live: the takeover stands — the displaced TS tree
 # stays in its legacy slot (with the printed rollback commands) and the

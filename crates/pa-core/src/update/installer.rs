@@ -379,11 +379,14 @@ async fn execute_script(
             Some(path) => path,
             None => {
                 return Err(UpdateFailure {
+                    // No shellPath guidance here: the funnel, like its unix
+                    // side (the hardcoded /bin/sh), resolves only the trusted
+                    // roots - the settings key serves the kernel shell, not
+                    // this privileged execution (the promise would lie).
                     message: "could not run the installer: no Git Bash found at \
                               the trusted install roots \
                               (C:\\Program Files\\Git\\bin\\bash.exe); install \
-                              Git for Windows (https://git-scm.com/download/win) \
-                              or set shellPath in settings.json"
+                              Git for Windows (https://git-scm.com/download/win)                               to update from this machine"
                         .to_string(),
                 });
             }

@@ -200,26 +200,15 @@ $channelLine = "install-rust.sh channel $channel"
 $marker = "$channelLine`nversion $version"
 Set-Content -LiteralPath (Join-Path $stage '.prime-agent-install') -Value $marker -NoNewline
 
-# --- stop the running daemon BEFORE the publish (the Windows file-lock
-# --- ruling: a running process holds its binary open, so the old-tree
-# --- rename below fails while it runs). The stop is the product's own clean
-# --- shutdown over its named pipe — graceful first, then forced; a fresh
-# --- install (no launcher yet) has no daemon the stop could reach.
+# The launcher paths (the section below the publish writes both).
 $launcher = Join-Path $bin 'prime-agent.cmd'
-if (Test-Path $launcher -PathType Leaf) {
-    Write-Host 'stopping the running Rust daemon before the publish (a Windows process holds its binary open)'
-    & $launcher shutdown *> $null
-    if ($LASTEXITCODE -ne 0) {
-        & $launcher shutdown --force *> $null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "no daemon answered the shutdown requests; if a daemon is running, stop it by hand (prime-agent shutdown --force) and re-run"
-        }
-    }
-}
+$shLauncher = Join-Path $bin 'prime-agent'
 
 # --- the publication lock (one writer): a lock DIRECTORY is the atomic
 # --- claim on Windows (mkdir wins exactly once); the holder's pid rides a
-# --- file inside, and a stale lock is never auto-stolen.
+# --- file inside, and a stale lock is never auto-stolen. THE LOCK COMES
+# --- FIRST: a failed lock claim must never have stopped a daemon (the
+# --- bots' finding - the stop-for-nothing downtime).
 $lockDir = Join-Path (Join-Path $prefix 'share') '.prime-agent-install.lock.d'
 try {
     New-Item -ItemType Directory -Path $lockDir -ErrorAction Stop | Out-Null
@@ -230,6 +219,29 @@ try {
     Fail "another installer (pid $heldBy) or a stale publication lock owns $lockDir; if no installer is running, remove it and re-run"
 }
 Set-Content -LiteralPath (Join-Path $lockDir 'pid') -Value $PID
+
+# --- stop the running daemon AFTER the lock, BEFORE the publish (the
+# --- Windows file-lock ruling: a running process holds its binary open, so
+# --- the old-tree rename below fails while it runs). THE TRUSTED STOP: the
+# --- previous payload's OWN BINARY (the marked share tree's
+# --- prime-agent.exe), never the launcher - a launcher this installer has
+# --- not verified is exactly the untrusted-execution shape (an unowned
+# --- command placed at bin\prime-agent.cmd would otherwise run with the
+# --- installer's inherited environment); the share's ownership marker
+# --- gates the stop, and a fresh install (no marked payload yet) has no
+# --- daemon the stop could reach.
+$payloadStopExe = Join-Path $share 'prime-agent.exe'
+$shareMarker = Join-Path $share '.prime-agent-install'
+if ((Test-Path $shareMarker -PathType Leaf) -and (Test-Path $payloadStopExe -PathType Leaf)) {
+    Write-Host 'stopping the running Rust daemon before the publish (a Windows process holds its binary open)'
+    & $payloadStopExe shutdown *> $null
+    if ($LASTEXITCODE -ne 0) {
+        & $payloadStopExe shutdown --force *> $null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "no daemon answered the shutdown requests; if a daemon is running, stop it by hand (prime-agent shutdown --force) and re-run"
+        }
+    }
+}
 $published = $false
 try {
     # The one-generation rollback: the previous payload (marker-checked —
@@ -269,7 +281,10 @@ try {
 # --- launcher (Git Bash) — the same payload, both shells, the same content
 # --- install-rust.sh writes. The unowned-file discipline is the sh
 # --- installer's own: a launcher this script did not write is preserved
-# --- aside, never overwritten (an unrelated command is never destroyed).
+# --- aside, never overwritten (an unrelated command is never destroyed)
+# --- AND a failure after a preserve puts the user's file back (the sh
+# --- installer's restore-on-exit contract; the bots' finding).
+$preservedLaunchers = @()
 function Preserve-UnownedLauncher($path) {
     if (-not (Test-Path $path -PathType Leaf)) { return }
     $firstLine = (Get-Content -LiteralPath $path -TotalCount 2) -join ' '
@@ -277,28 +292,37 @@ function Preserve-UnownedLauncher($path) {
     $preserved = "$path.pre-takeover"
     while (Test-Path $preserved) { $preserved = "$preserved.$([Guid]::NewGuid().ToString('N').Substring(0,4))" }
     [IO.File]::Move($path, $preserved)
+    $script:preservedLaunchers += ,@($preserved, $path)
     Write-Host "note: an unrelated $(Split-Path -Leaf $path) existed at $path; it was preserved at $preserved"
 }
 Preserve-UnownedLauncher $launcher
-$shLauncher = Join-Path $bin 'prime-agent'
 Preserve-UnownedLauncher $shLauncher
 
-$cmdShim = @'
+try {
+    $cmdShim = @'
 @echo off
 rem prime-agent - launcher written by install-rust.sh.
 if not defined PRIME_AGENT_CODING_AGENT_DIR set "PRIME_AGENT_CODING_AGENT_DIR=%USERPROFILE%\.prime\agent"
 "%~dp0..\share\prime-agent\prime-agent.exe" %*
 '@
-Set-Content -LiteralPath $launcher -Value $cmdShim
+    Set-Content -LiteralPath $launcher -Value $cmdShim
 
-$shBody = @'
+    $shBody = @'
 #!/bin/sh
 # prime-agent — launcher written by install-rust.sh.
 export PRIME_AGENT_CODING_AGENT_DIR="${PRIME_AGENT_CODING_AGENT_DIR:-$HOME/.prime/agent}"
 exec "$(dirname "$0")/../share/prime-agent/prime-agent.exe" "$@"
 '@
-# LF endings + no BOM: the sh launcher must stay a POSIX file.
-[IO.File]::WriteAllText($shLauncher, $shBody.Replace("`r`n", "`n"))
+    # LF endings + no BOM: the sh launcher must stay a POSIX file.
+    [IO.File]::WriteAllText($shLauncher, $shBody.Replace("`r`n", "`n"))
+} catch {
+    # A failed launcher write never leaves the machine without its command:
+    # every preserved file goes home before the failure surfaces.
+    foreach ($pair in $script:preservedLaunchers) {
+        if (-not (Test-Path $pair[1])) { [IO.File]::Move($pair[0], $pair[1]) }
+    }
+    throw
+}
 
 # --- the kernel pre-warm: uv + the Python venv (best-effort, install-rust.sh
 # --- parity — an offline machine still installs; the first session retries
@@ -325,7 +349,11 @@ if ($userPath -notlike "*$bin*") {
 # --- verify: the launcher must answer --version -----------------------------------
 try {
     $versionOut = (& $launcher --version) 2>$null | Select-Object -First 1
-    Write-Host "installed: $versionOut"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "the installed launcher failed --version (exit code $LASTEXITCODE; the first run bootstraps the kernel venv — re-run it)"
+    } else {
+        Write-Host "installed: $versionOut"
+    }
 } catch {
     Write-Warning "the first --version run failed (the first run bootstraps the kernel venv — re-run it): $($_.Exception.Message)"
 }
