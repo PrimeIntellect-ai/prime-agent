@@ -65,7 +65,7 @@ impl CapturedEntry {
     }
 }
 
-/// Why a path present in `git status` was deliberately left uncaptured.
+/// Why a path was deliberately left uncaptured.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExcludeReason {
@@ -83,6 +83,10 @@ pub enum ExcludeReason {
     /// A path whose ancestor directory is a symlink; the leaf resolves
     /// outside the worktree and is never read.
     SymlinkedAncestor,
+    /// A HEAD path the index marks skip-worktree (outside a sparse
+    /// checkout): git keeps no worktree state for it, so the baseline
+    /// neither stages nor verifies it.
+    SkipWorktree,
 }
 
 /// A path excluded from capture, with the reason it was left out.

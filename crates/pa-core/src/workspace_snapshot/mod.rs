@@ -16,11 +16,12 @@
 //! total size) and deliberately incomplete in a recorded way:
 //! credential-shaped file names, symlinks whose targets escape the
 //! worktree (and paths whose ancestors became symlinks), nested
-//! repositories, and submodule gitlinks are excluded and listed in the
-//! manifest, so a materializer knows exactly what was and was not
-//! captured. This is foundation plumbing for cloud sessions; nothing
-//! wires it to a user-facing toggle yet, and there is no transport here -
-//! staging and verification only.
+//! repositories, submodule gitlinks, and sparse-checkout
+//! (skip-worktree) paths are excluded and listed in the manifest, so a
+//! materializer knows exactly what was and was not captured. This is
+//! foundation plumbing for cloud sessions; nothing wires it to a
+//! user-facing toggle yet, and there is no transport here - staging and
+//! verification only.
 
 mod git;
 mod manifest;
@@ -415,6 +416,13 @@ fn build_manifest(
                     baseline_excluded.push(ExcludedEntry {
                         path: tree_entry.path.clone(),
                         reason: ExcludeReason::Submodule,
+                    });
+                    continue;
+                }
+                if tree_entry.skip_worktree {
+                    baseline_excluded.push(ExcludedEntry {
+                        path: tree_entry.path.clone(),
+                        reason: ExcludeReason::SkipWorktree,
                     });
                     continue;
                 }

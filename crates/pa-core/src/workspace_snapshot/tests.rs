@@ -729,9 +729,47 @@ async fn head_tree_pins_to_the_status_reported_commit() {
             path: "a.txt".to_string(),
             mode: "100644".to_string(),
             gitlink: false,
+            skip_worktree: false,
             oid: git_blob_oid(b"A\n", false),
         }]
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn head_tree_baseline_excludes_skip_worktree_paths() {
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    init_repo(root);
+    write(root, "keep.txt", "k\n");
+    write(root, "sparse/x.txt", "x\n");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    // A cone-mode sparse checkout keeps only root-level files: git
+    // status reports nothing for the absent path, but the index still
+    // marks it skip-worktree.
+    git(root, &["sparse-checkout", "set", "--cone"]);
+    let staging = tempfile::tempdir().unwrap();
+    let snapshot =
+        create_workspace_snapshot(root, staging.path(), BaselineMode::HeadTree, &limits())
+            .await
+            .unwrap();
+    assert_eq!(
+        snapshot.manifest,
+        repo_manifest(
+            root,
+            Baseline::HeadTree {
+                entries: vec![file_entry("keep.txt", "100644", "k\n")],
+                excluded: vec![ExcludedEntry {
+                    path: "sparse/x.txt".to_string(),
+                    reason: ExcludeReason::SkipWorktree,
+                }],
+            },
+            vec![],
+            vec![]
+        )
+    );
+    assert!(verify_workspace_snapshot(staging.path()).is_ok());
 }
 
 #[test]
@@ -747,6 +785,7 @@ fn baseline_rejects_concurrent_mutation_loudly() {
         path: "a.txt".to_string(),
         mode: mode.to_string(),
         gitlink: false,
+        skip_worktree: false,
         oid: oid.to_string(),
     };
     // Matching content, mode, and object id stages the leaf.

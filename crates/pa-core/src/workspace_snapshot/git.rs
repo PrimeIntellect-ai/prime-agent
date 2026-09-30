@@ -2,6 +2,7 @@
 //! yields the worktree delta (tracked modifications and deletions, plus
 //! nonignored untracked paths) and the HEAD commit.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::SnapshotError;
@@ -221,6 +222,10 @@ pub(crate) struct HeadTreeEntry {
     pub(crate) mode: String,
     /// A submodule gitlink rather than a file.
     pub(crate) gitlink: bool,
+    /// The index marks the path skip-worktree (outside a sparse
+    /// checkout): absent from the worktree by design and never reported
+    /// by `git status`.
+    pub(crate) skip_worktree: bool,
     /// The object id HEAD records for the path (a blob id, or the
     /// gitlink commit id); the baseline verifies captured bytes against
     /// it, `git hash-object` equivalent.
@@ -234,19 +239,32 @@ pub(crate) struct HeadTreeEntry {
 /// can no longer pair the old head commit with a newer HEAD's tree, and
 /// a vanished or rewritten object fails `ls-tree` loudly here. The
 /// baseline stages these contents from the (unmodified) worktree, so
-/// this is enumeration only - no history, no object payloads.
+/// this is enumeration only - no history, no object payloads. The
+/// index's skip-worktree bits ride along so the baseline can exclude
+/// sparse paths instead of reading absent leaves.
 pub(crate) async fn read_head_tree(
     root: &Path,
     commit: &str,
     timeout_ms: u64,
 ) -> Result<Vec<HeadTreeEntry>, SnapshotError> {
     let output = run_git(&["ls-tree", "-r", "-z", commit], root, timeout_ms).await?;
-    parse_head_tree(&output)
+    let index = run_git(&["ls-files", "-t", "-z"], root, timeout_ms).await?;
+    let text = String::from_utf8(index).map_err(|_| SnapshotError::MalformedStatus {
+        detail: "ls-files output is not UTF-8".to_string(),
+    })?;
+    let skip_worktree: HashSet<&str> = text
+        .split('\0')
+        .filter_map(|record| record.strip_prefix("S "))
+        .collect();
+    parse_head_tree(&output, &skip_worktree)
 }
 
 /// Parse NUL-separated `git ls-tree -r -z` records:
 /// `<mode> <type> <object>\t<path>`.
-fn parse_head_tree(output: &[u8]) -> Result<Vec<HeadTreeEntry>, SnapshotError> {
+fn parse_head_tree(
+    output: &[u8],
+    skip_worktree: &HashSet<&str>,
+) -> Result<Vec<HeadTreeEntry>, SnapshotError> {
     let text = std::str::from_utf8(output).map_err(|_| SnapshotError::MalformedStatus {
         detail: "ls-tree output is not UTF-8".to_string(),
     })?;
@@ -276,6 +294,7 @@ fn parse_head_tree(output: &[u8]) -> Result<Vec<HeadTreeEntry>, SnapshotError> {
             path: path.to_string(),
             mode: mode.to_string(),
             gitlink: kind == "commit",
+            skip_worktree: skip_worktree.contains(path),
             oid: oid.to_string(),
         });
     }
