@@ -678,12 +678,12 @@ jobs:
 
           RELEASE_PREFIX="releases/${RELEASE_VERSION}"
           for artifact in release-out/prime-agent-*.tar.gz; do
-            aws s3 cp "$artifact" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$artifact")" \
+            aws s3 cp "$artifact" "s3://${R2_BUCKET}/prime-agent/${RELEASE_PREFIX}/$(basename "$artifact")" \
               --endpoint-url "$R2_ENDPOINT_URL" \
               --content-type application/gzip \
               --cache-control 'public, max-age=31536000, immutable'
           done
-          aws s3 cp release-out/SHA256SUMS "s3://${R2_BUCKET}/${RELEASE_PREFIX}/SHA256SUMS" \
+          aws s3 cp release-out/SHA256SUMS "s3://${R2_BUCKET}/prime-agent/${RELEASE_PREFIX}/SHA256SUMS" \
             --endpoint-url "$R2_ENDPOINT_URL" \
             --content-type text/plain \
             --cache-control 'public, max-age=31536000, immutable'
@@ -748,12 +748,12 @@ jobs:
             # commit act, and a reader landing between the writes re-reads
             # the pair (the installer's consistency retry).
             manifest_name="$1"; pointer_name="$2"; manifest_src="$3"; channel_label="$4"
-            aws s3 cp "$manifest_src" "s3://${R2_BUCKET}/${manifest_name}" \
+            aws s3 cp "$manifest_src" "s3://${R2_BUCKET}/prime-agent/${manifest_name}" \
               --endpoint-url "$R2_ENDPOINT_URL" \
               --content-type application/json \
               --cache-control no-cache
             printf '%s\n' "${RELEASE_VERSION#v}" > "/tmp/${pointer_name}-pointer"
-            aws s3 cp "/tmp/${pointer_name}-pointer" "s3://${R2_BUCKET}/${pointer_name}" \
+            aws s3 cp "/tmp/${pointer_name}-pointer" "s3://${R2_BUCKET}/prime-agent/${pointer_name}" \
               --endpoint-url "$R2_ENDPOINT_URL" \
               --content-type text/plain \
               --cache-control no-cache
@@ -769,8 +769,8 @@ jobs:
             # pair it could not even observe.
             attempt=1
             while [ "$attempt" -le 3 ]; do
-              if manifest_raw="$(aws s3 cp "s3://${R2_BUCKET}/${manifest_name}" - --endpoint-url "$R2_ENDPOINT_URL" 2>/dev/null)" \
-                 && pointer_raw="$(aws s3 cp "s3://${R2_BUCKET}/${pointer_name}" - --endpoint-url "$R2_ENDPOINT_URL" 2>/dev/null)"; then
+              if manifest_raw="$(aws s3 cp "s3://${R2_BUCKET}/prime-agent/${manifest_name}" - --endpoint-url "$R2_ENDPOINT_URL" 2>/dev/null)" \
+                 && pointer_raw="$(aws s3 cp "s3://${R2_BUCKET}/prime-agent/${pointer_name}" - --endpoint-url "$R2_ENDPOINT_URL" 2>/dev/null)"; then
                 readback="$(printf '%s' "${manifest_raw}" | jq -r '.version // empty' || true)"
                 pointer_readback="$(printf '%s' "${pointer_raw}" | tr -d '[:space:]')"
               else
@@ -780,11 +780,11 @@ jobs:
               if [ -z "${readback:-}" ] || [ -z "${pointer_readback:-}" ] \
                  || version_gt "$RELEASE_VERSION" "$readback" \
                  || version_gt "$RELEASE_VERSION" "$pointer_readback"; then
-                aws s3 cp "$manifest_src" "s3://${R2_BUCKET}/${manifest_name}" \
+                aws s3 cp "$manifest_src" "s3://${R2_BUCKET}/prime-agent/${manifest_name}" \
                   --endpoint-url "$R2_ENDPOINT_URL" \
                   --content-type application/json \
                   --cache-control no-cache
-                aws s3 cp "/tmp/${pointer_name}-pointer" "s3://${R2_BUCKET}/${pointer_name}" \
+                aws s3 cp "/tmp/${pointer_name}-pointer" "s3://${R2_BUCKET}/prime-agent/${pointer_name}" \
                   --endpoint-url "$R2_ENDPOINT_URL" \
                   --content-type text/plain \
                   --cache-control no-cache
@@ -807,18 +807,18 @@ jobs:
             if [ "$built_parent" != "$branch_head" ]; then
               echo "superseded: this beta built ${built_parent} but main is at ${branch_head}; a newer cut is coming — the versioned artifacts publish, the beta channel pointers do not"
             else
-              current_beta="$(aws s3 cp "s3://${R2_BUCKET}/beta.json" - --endpoint-url "$R2_ENDPOINT_URL" 2>/dev/null | jq -r '.version // empty' || true)"
+              current_beta="$(aws s3 cp "s3://${R2_BUCKET}/prime-agent/beta.json" - --endpoint-url "$R2_ENDPOINT_URL" 2>/dev/null | jq -r '.version // empty' || true)"
               if [ -n "$current_beta" ] && version_gt "$current_beta" "$RELEASE_VERSION"; then
                 echo "beta channel already at ${current_beta} (>= ${RELEASE_VERSION}); the channel never regresses — the versioned artifacts publish, the pointers stay"
               else
                 render_installer beta
                 publish_pointer_pair beta.json beta release-out/beta.json beta
-                aws s3 cp /tmp/install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
+                aws s3 cp /tmp/install-beta.sh "s3://${R2_BUCKET}/prime-agent/install-beta.sh" \
                   --endpoint-url "$R2_ENDPOINT_URL" \
                   --content-type text/x-shellscript \
                   --cache-control no-cache
                 render_installer stable
-                aws s3 cp /tmp/install-stable.sh "s3://${R2_BUCKET}/install.sh" \
+                aws s3 cp /tmp/install-stable.sh "s3://${R2_BUCKET}/prime-agent/install.sh" \
                   --endpoint-url "$R2_ENDPOINT_URL" \
                   --content-type text/x-shellscript \
                   --cache-control no-cache
@@ -829,18 +829,18 @@ jobs:
             # THE STABLE CHANNEL: the operator's release act is the
             # approval click that opened this job; the publish is
             # unconditional (a re-publish of the same version proceeds).
-            current_stable="$(aws s3 cp "s3://${R2_BUCKET}/latest.json" - --endpoint-url "$R2_ENDPOINT_URL" 2>/dev/null | jq -r '.version // empty' || true)"
+            current_stable="$(aws s3 cp "s3://${R2_BUCKET}/prime-agent/latest.json" - --endpoint-url "$R2_ENDPOINT_URL" 2>/dev/null | jq -r '.version // empty' || true)"
             if [ -n "$current_stable" ] && version_gt "$current_stable" "$RELEASE_VERSION"; then
               echo "stable channel already at ${current_stable} (> ${RELEASE_VERSION}); the stable channel never regresses"
             else
               render_installer stable
               publish_pointer_pair latest.json stable release-out/latest.json stable
-              aws s3 cp /tmp/install-stable.sh "s3://${R2_BUCKET}/install.sh" \
+              aws s3 cp /tmp/install-stable.sh "s3://${R2_BUCKET}/prime-agent/install.sh" \
                 --endpoint-url "$R2_ENDPOINT_URL" \
                 --content-type text/x-shellscript \
                 --cache-control no-cache
               render_installer beta
-              aws s3 cp /tmp/install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
+              aws s3 cp /tmp/install-beta.sh "s3://${R2_BUCKET}/prime-agent/install-beta.sh" \
                 --endpoint-url "$R2_ENDPOINT_URL" \
                 --content-type text/x-shellscript \
                 --cache-control no-cache
