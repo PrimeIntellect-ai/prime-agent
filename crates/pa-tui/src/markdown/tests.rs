@@ -260,6 +260,34 @@ fn heading_and_paragraph() {
 }
 
 #[test]
+fn heading_link_keeps_the_affordance_and_the_single_row() {
+    crate::hyperlinks::set_hyperlinks_override(Some(true));
+    let style = MarkdownStyle::default();
+    let lines = render_markdown("# [docs](https://x.dev/a)", 20, &style);
+    // Headings stay one unwrapped row in both products (TS
+    // `lines.push(headingText)`); the count==paint row math holds.
+    assert_eq!(
+        lines.len(),
+        markdown_row_count("# [docs](https://x.dev/a)", 20, &style)
+    );
+    assert_eq!(lines.len(), 1);
+    let visible: String = lines[0]
+        .iter()
+        .map(|s| crate::hyperlinks::strip_osc8_content(&s.content))
+        .collect();
+    assert_eq!(visible, "docs [https://x.dev/a]");
+    // The heading color is the baseline, but the link affordance
+    // survives the taper: the label underlines (heading-colored), the
+    // bracket keeps the dim `link_url` slot.
+    let label = &lines[0][0];
+    assert!(label.style.add_modifier.contains(Modifier::UNDERLINED));
+    assert_eq!(label.style.fg, style.heading.fg);
+    let bracket = lines[0].last().expect("bracket span");
+    assert_eq!(bracket.style.fg, style.link_url.fg);
+    crate::hyperlinks::set_hyperlinks_override(None);
+}
+
+#[test]
 fn paragraph_keeps_final_line_trailing_whitespace() {
     // The TS lexer's paragraph token carries the block's trailing
     // whitespace (probe vs the TS binary: the expanded compaction
@@ -479,13 +507,13 @@ fn list_render() {
 
 #[test]
 fn inline_bold_code_link() {
-    // Pin the terminal-capability gate: a link renders the legacy
-    // `label (url)` form when OSC 8 hyperlinks are unavailable.
+    // Pin the terminal-capability gate: without OSC 8 support the link
+    // renders the legacy `label [url]` observability form (no wrap).
     crate::hyperlinks::set_hyperlinks_override(Some(false));
     let style = MarkdownStyle::default();
     let spans = render_inline("a **b** `c` [d](http://e)", &style);
     let texts: Vec<&str> = spans.iter().map(|s| s.content.as_str()).collect();
-    assert_eq!(texts, vec!["a ", "b", " ", "c", " ", "d", " (http://e)"]);
+    assert_eq!(texts, vec!["a ", "b", " ", "c", " ", "d", " [http://e]"]);
     crate::hyperlinks::set_hyperlinks_override(None);
 }
 
@@ -500,12 +528,13 @@ fn legacy_link_row_is_underlined_and_shows_the_url() {
         vec![
             "see ".to_string(),
             "docs".to_string(),
-            " (https://x.dev/a)".to_string()
+            " [https://x.dev/a]".to_string()
         ]
     );
-    // The observed TS binary output styles the label with the body
-    // color only (the underline wrapper never reaches the wire).
-    assert!(!spans[1].style.add_modifier.contains(Modifier::UNDERLINED));
+    // The observability ruling underlines the label on every link render
+    // (superseding the deployed-TS-binary parity that dropped the
+    // underline wrapper); the label keeps the body color.
+    assert!(spans[1].style.add_modifier.contains(Modifier::UNDERLINED));
     assert_eq!(spans[1].style.fg, style.body.fg);
     assert_eq!(spans[2].style.fg, style.link_url.fg);
     // The URL is not repeated when the label is the URL, and mailto
@@ -520,31 +549,118 @@ fn legacy_link_row_is_underlined_and_shows_the_url() {
 }
 
 #[test]
-fn osc8_gated_link_row_wraps_the_label_in_a_hyperlink() {
+fn osc8_gated_link_row_wraps_the_label_in_a_hyperlink_and_shows_the_url() {
     crate::hyperlinks::set_hyperlinks_override(Some(true));
     let style = MarkdownStyle::default();
     let spans = render_inline("see [docs](https://x.dev/a)", &style);
     let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+    // The observability ruling: the OSC 8 region wraps the label (the
+    // escape bytes intact, the label underlined) and the URL shows after
+    // the region, outside it, in the dim `link_url` slot.
     assert_eq!(
         joined,
         format!(
-            "see {}docs{}",
+            "see {}docs{} [https://x.dev/a]",
             crate::hyperlinks::osc8_open("https://x.dev/a"),
             crate::hyperlinks::OSC8_CLOSE
         )
     );
-    // The sequences are zero-width: the row measures like the plain text
-    // and never prints the URL inline.
-    assert_eq!(
-        joined.chars().filter(|&c| c == '(').count(),
-        0,
-        "osc8 rows must not inline the url: {joined}"
+    assert!(
+        spans[1].style.add_modifier.contains(Modifier::UNDERLINED),
+        "the label underlines: {joined}"
     );
-    assert_eq!(str_width(&joined), str_width("see docs"));
-    // Windows drive-letter targets classify as file paths.
+    assert_eq!(spans[2].style.fg, style.link_url.fg);
+    // The sequences are zero-width: the row measures like the plain
+    // text plus the bracketed URL.
+    assert_eq!(str_width(&joined), str_width("see docs [https://x.dev/a]"));
+    // Windows drive-letter targets classify as file paths; the label is
+    // the URL, so no bracket follows it.
     let drive = render_inline("[c:\\src](c:\\src)", &style);
     let joined: String = drive.iter().map(|s| s.content.as_str()).collect();
     assert!(joined.contains("file:///c:/src"), "drive path: {joined}");
+    assert!(
+        !joined.contains(" ["),
+        "no bracket when the label is the url: {joined}"
+    );
+    crate::hyperlinks::set_hyperlinks_override(None);
+}
+
+#[test]
+fn link_url_bracket_wraps_and_counts_like_text() {
+    crate::hyperlinks::set_hyperlinks_override(Some(true));
+    let style = MarkdownStyle::default();
+    let text = "see [docs](https://x.dev/a) tail";
+    // The bracketed URL is visible text: the width accounting includes
+    // it, so the row count and the painted rows agree at every width
+    // (the count==paint invariant, the layout math).
+    for width in 1..48 {
+        let rows = markdown_row_count(text, width, &style);
+        let painted = render_markdown(text, width, &style);
+        assert_eq!(painted.len(), rows, "count==paint at width {width}");
+    }
+    // At width 18 the bracket cannot share the row with "see docs"
+    // (8 + 17 > 18), so it wraps onto its own row; the tail follows it.
+    let rows = render_markdown(text, 18, &style);
+    let visible: Vec<String> = rows
+        .iter()
+        .map(|l| {
+            l.iter()
+                .map(|s| crate::hyperlinks::strip_osc8_content(&s.content))
+                .collect::<String>()
+        })
+        .collect();
+    assert_eq!(
+        visible,
+        vec![
+            "see docs".to_string(),
+            "[https://x.dev/a]".to_string(),
+            "tail".to_string()
+        ],
+        "the bracket wraps like normal text"
+    );
+    crate::hyperlinks::set_hyperlinks_override(None);
+}
+
+#[test]
+fn long_link_url_wraps_without_breaking_the_clickable_region() {
+    crate::hyperlinks::set_hyperlinks_override(Some(true));
+    let style = MarkdownStyle::default();
+    let url = format!("https://x.dev/{}", "a".repeat(40));
+    let rows = render_markdown(&format!("[docs]({url})"), 12, &style);
+    // The bracket word is far over the wrap width: it breaks across
+    // rows at the width, every row within it.
+    assert!(rows.len() >= 4, "rows: {rows:?}");
+    for row in &rows {
+        let joined: String = row.iter().map(|s| s.content.as_str()).collect();
+        assert!(str_width(&joined) <= 12, "row over the width: {joined:?}");
+    }
+    // The clickable region survives the wrap intact: exactly the label
+    // cells link (the escape bytes never split mid-sequence; the
+    // bracket part rides outside the region).
+    let ranges = crate::hyperlinks::frame_link_ranges(&rows);
+    assert_eq!(ranges.len(), 1, "one clickable region: {ranges:?}");
+    assert_eq!(ranges[0].row, 0);
+    assert_eq!(ranges[0].start_col, 0);
+    assert_eq!(ranges[0].end_col, str_width("docs"));
+    assert_eq!(ranges[0].url, url);
+    // The full URL shows beside the label, across the wrapped rows.
+    let visible: String = rows
+        .iter()
+        .flat_map(|l| l.iter())
+        .map(|s| crate::hyperlinks::strip_osc8_content(&s.content))
+        .collect();
+    // The wrap drops the boundary gap (a wrapped row never carries its
+    // leading/trailing space), so the bracket word begins at the row
+    // start: `docs` then the bracketed URL across the rows.
+    assert_eq!(visible, format!("docs[{url}]"));
+    // Count==paint with the long bracket at every wrap width.
+    for width in 1..40 {
+        assert_eq!(
+            markdown_row_count(&format!("[docs]({url})"), width, &style),
+            render_markdown(&format!("[docs]({url})"), width, &style).len(),
+            "count==paint at width {width}"
+        );
+    }
     crate::hyperlinks::set_hyperlinks_override(None);
 }
 
@@ -563,8 +679,15 @@ fn bare_url_autolinks_osc8() {
         )
     );
     // The label is one zero-width-wrapped run; the URL never prints
-    // twice and no legacy suffix appears.
+    // twice and no bracket follows it (the label already is the URL).
     assert_eq!(str_width(&joined), str_width("see https://x.dev/a?b=1 now"));
+    assert!(!joined.contains(" ["), "no bracket on a bare url: {joined}");
+    // The clickable bare label underlines (the observability ruling's
+    // standard link affordance; the bracket part is redundant here).
+    assert!(
+        spans[1].style.add_modifier.contains(Modifier::UNDERLINED),
+        "the bare autolink label underlines: {joined}"
+    );
     crate::hyperlinks::set_hyperlinks_override(None);
 }
 
@@ -628,15 +751,22 @@ fn bare_url_autolink_forms() {
 #[test]
 fn www_autolink_gains_scheme_and_legacy_suffix() {
     // Legacy form: token.text != token.href for a www autolink, so the
-    // resolved href shows after the label (TS legacy branch).
+    // resolved href shows beside the label in the dim bracket slot; the
+    // label underlines like every link render (the observability
+    // ruling's affordance, both capability forms).
     crate::hyperlinks::set_hyperlinks_override(Some(false));
     let style = MarkdownStyle::default();
     let spans = render_inline("www.example.com/path", &style);
     let texts: Vec<&str> = spans.iter().map(|s| s.content.as_str()).collect();
     assert_eq!(
         texts,
-        vec!["www.example.com/path", " (http://www.example.com/path)"]
+        vec!["www.example.com/path", " [http://www.example.com/path]"]
     );
+    assert!(
+        spans[0].style.add_modifier.contains(Modifier::UNDERLINED),
+        "the legacy autolink label underlines"
+    );
+    assert_eq!(spans[1].style.fg, style.link_url.fg);
     crate::hyperlinks::set_hyperlinks_override(None);
 }
 
@@ -701,7 +831,7 @@ fn bare_url_is_not_autolinked_inside_a_link_label() {
     let style = MarkdownStyle::default();
     let spans = render_inline("[see https://in.dev/x](https://out.dev/y)", &style);
     let texts: Vec<&str> = spans.iter().map(|s| s.content.as_str()).collect();
-    assert_eq!(texts, vec!["see https://in.dev/x", " (https://out.dev/y)"]);
+    assert_eq!(texts, vec!["see https://in.dev/x", " [https://out.dev/y]"]);
     crate::hyperlinks::set_hyperlinks_override(None);
 }
 

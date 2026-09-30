@@ -1,5 +1,5 @@
 //! Replay-path markdown rendering: a session with a table and links renders
-//! the same box/table rows and the legacy `label (url)` link form the live
+//! the same box/table rows and the legacy `label [url]` link form the live
 //! path shows (the TS product under a plain tmux pane renders links the
 //! same way: the terminal-capability gate forces the legacy form there).
 // Pedantic-gate exceptions (every other pedantic warning in this crate is
@@ -75,14 +75,15 @@ fn replayed_table_renders_boxed_aligned_rows() {
         flat.contains("└───────────┴─────────┴───────────────────┘"),
         "bottom border: {flat}"
     );
-    // Links render the legacy form under the gate (tmux parity).
+    // Links render the legacy observability form under the gate (tmux
+    // parity): the label, then the bracketed URL in the dim slot.
     assert!(
-        flat.contains("docs (https://example.com/docs)"),
+        flat.contains("docs [https://example.com/docs]"),
         "link row: {flat}"
     );
     // The second link wraps mid-row at this width, so only its URL tail
     // stays contiguous.
-    assert!(flat.contains("example.com/log)"), "link row 2: {flat}");
+    assert!(flat.contains("example.com/log]"), "link row 2: {flat}");
 }
 
 #[test]

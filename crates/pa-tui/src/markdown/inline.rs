@@ -93,19 +93,23 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
                     if italic {
                         modifier |= style.italic;
                     }
-                    // The observed TS binary output (0.9.5, the parity ground
-                    // truth) renders the link label with the body color only:
-                    // the link color is shadowed by the body color applied
-                    // inside the label, and the underline wrapper never
-                    // reaches the wire. `modifier` carries the emphasis context.
+                    // The operator's hyperlink-observability ruling
+                    // (2026-09-30) supersedes the deployed-TS-binary shape
+                    // here: the label renders underlined — the standard
+                    // terminal link affordance — and the URL shows beside
+                    // it in the dim `link_url` slot, so the reader sees
+                    // where the link goes. (The TS source always styled
+                    // labels `theme.link(theme.underline(...))`, but the
+                    // deployed 0.9.5 binary dropped the chalk modifiers,
+                    // and its OSC 8 mode never printed the URL at all.)
+                    // `modifier` carries the emphasis context.
                     let href = crate::hyperlinks::resolve_link_href(&url);
                     let mut label_spans = render_inline_ctx(&label, style, true);
                     for s in &mut label_spans {
-                        s.style = s.style.add_modifier(modifier);
+                        s.style = s.style.add_modifier(modifier | Modifier::UNDERLINED);
                     }
                     if crate::hyperlinks::hyperlinks_enabled() {
-                        // OSC 8: the label is clickable, the URL never
-                        // printed inline (TS `hyperlink()`).
+                        // OSC 8: the label stays clickable (TS `hyperlink()`).
                         let open = crate::hyperlinks::osc8_open(&href);
                         if let Some(first) = label_spans.first_mut() {
                             first.content.insert_str(0, &open);
@@ -113,16 +117,16 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
                         if let Some(last) = label_spans.last_mut() {
                             last.content.push_str(crate::hyperlinks::OSC8_CLOSE);
                         }
-                        spans.extend(label_spans);
-                    } else {
-                        spans.extend(label_spans);
-                        // Legacy form: the URL shows after the text unless
-                        // the label is the URL (mailto stripped for the
-                        // comparison, like autolinked emails).
-                        let comparison = url.strip_prefix("mailto:").unwrap_or(url.as_str());
-                        if label != url && label != comparison {
-                            spans.push(Span::styled(format!(" ({url})"), style.link_url));
-                        }
+                    }
+                    spans.extend(label_spans);
+                    // The URL rides beside every link, in both the OSC 8
+                    // and legacy forms — after the wrap, so the region
+                    // covers the label only — in the dim `link_url` slot,
+                    // unless the label already is the URL (mailto stripped
+                    // for the comparison, like autolinked emails).
+                    let comparison = url.strip_prefix("mailto:").unwrap_or(url.as_str());
+                    if label != url && label != comparison {
+                        spans.push(Span::styled(format!(" [{url}]"), style.link_url));
                     }
                     i = k + 1;
                     continue;
@@ -209,8 +213,8 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
             flush!();
             // The token carries one plain text token, so the label is a
             // single body-colored run carrying the current emphasis (the
-            // theme.link/underline wrapper never reaches the wire in the
-            // deployed binary, like explicit link labels).
+            // theme.link color never reaches the wire, like explicit link
+            // labels).
             let mut m = Modifier::empty();
             if bold {
                 m |= style.bold;
@@ -218,10 +222,15 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
             if italic {
                 m |= style.italic;
             }
-            let label = Span::styled(token.text.clone(), base.add_modifier(m));
+            // Every link render underlines (the observability ruling's
+            // standard link affordance), both capability forms.
+            let label = Span::styled(
+                token.text.clone(),
+                base.add_modifier(m | Modifier::UNDERLINED),
+            );
             if crate::hyperlinks::hyperlinks_enabled() {
-                // OSC 8: the label is clickable, the URL never printed
-                // inline (TS `hyperlink()`).
+                // OSC 8: the label is clickable. The URL never prints
+                // beside it: the label already is it.
                 let href = crate::hyperlinks::resolve_link_href(&token.href);
                 let mut content = label.content;
                 content.insert_str(0, &crate::hyperlinks::osc8_open(&href));
@@ -229,11 +238,12 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
                 spans.push(Span::styled(content, label.style));
             } else {
                 spans.push(label);
-                // Legacy form: the URL shows after the label unless the
-                // label already is it (mailto stripped), TS token.href.
+                // The URL rides beside the label in the dim `link_url`
+                // slot when the label is not already it (mailto stripped
+                // for the comparison), TS token.href.
                 let comparison = token.href.strip_prefix("mailto:").unwrap_or(&token.href);
                 if token.text != token.href && token.text != comparison {
-                    spans.push(Span::styled(format!(" ({})", token.href), style.link_url));
+                    spans.push(Span::styled(format!(" [{}]", token.href), style.link_url));
                 }
             }
             i += token.raw.chars().count();

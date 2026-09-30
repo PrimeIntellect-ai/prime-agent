@@ -499,7 +499,19 @@ fn render_block(
             let text = block.lines.first().cloned().unwrap_or_default();
             let mut spans = render_inline(&text, style);
             for s in &mut spans {
+                // The heading color is the baseline for every span, but
+                // the link affordance survives the taper: an underlined
+                // label stays underlined and the URL bracket keeps its
+                // dim `link_url` slot (the observability ruling rides on
+                // every link render, headings included).
+                if s.style == style.link_url {
+                    continue;
+                }
+                let underlined = s.style.add_modifier.contains(Modifier::UNDERLINED);
                 s.style = style.heading;
+                if underlined {
+                    s.style = s.style.add_modifier(Modifier::UNDERLINED);
+                }
             }
             out.push(spans);
             if blank_after(false) {
