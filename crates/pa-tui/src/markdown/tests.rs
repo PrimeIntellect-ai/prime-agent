@@ -670,6 +670,48 @@ fn balanced_parens_in_a_link_destination_stay_intact() {
 }
 
 #[test]
+fn escaped_parens_never_open_or_close_the_link_destination() {
+    // A backslash-escaped paren rides through the destination verbatim
+    // without counting toward the paren balance (CommonMark): `\(` does
+    // not swallow the real closer, and `\)` alone never closes —
+    // `[a](b\)` is plain text, exactly like the reference parser.
+    crate::hyperlinks::set_hyperlinks_override(Some(false));
+    let style = MarkdownStyle::default();
+    let spans = render_inline("[a](b\\(c)", &style);
+    assert_eq!(
+        spans,
+        vec![
+            Span::styled("a", style.body.add_modifier(Modifier::UNDERLINED)),
+            Span::styled(" [b\\(c]", style.link_url),
+        ]
+    );
+    let plain = render_inline("[a](b\\)", &style);
+    assert_eq!(plain.len(), 1);
+    assert_eq!(plain[0].content, "[a](b\\)");
+    crate::hyperlinks::set_hyperlinks_override(None);
+}
+
+#[test]
+fn the_url_bracket_scrubs_terminal_control_bytes() {
+    // The bracket renders the destination as visible text; a raw escape
+    // byte smuggled into an attacker-chosen url must never re-enter the
+    // terminal as a live OSC/CSI sequence. The bracket percent-encodes
+    // control bytes, the same hardening the OSC 8 target gets through
+    // `resolve_link_href`.
+    crate::hyperlinks::set_hyperlinks_override(Some(true));
+    let style = MarkdownStyle::default();
+    let url = "https://x.dev/\u{1b}]52;c;base64";
+    let spans = render_inline(&format!("[a]({url})"), &style);
+    let bracket = spans.last().expect("bracket span");
+    assert_eq!(bracket.content, " [https://x.dev/%1B]52;c;base64]");
+    assert!(
+        !bracket.content.contains('\u{1b}'),
+        "no raw escape byte in the visible bracket"
+    );
+    crate::hyperlinks::set_hyperlinks_override(None);
+}
+
+#[test]
 fn link_url_bracket_wraps_and_counts_like_text() {
     crate::hyperlinks::set_hyperlinks_override(Some(true));
     let style = MarkdownStyle::default();

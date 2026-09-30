@@ -100,11 +100,22 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line,
                 // CommonMark link destination: parentheses ride only as
                 // a balanced pair (TS marked's lexer), so the destination
                 // ends at the `)` that closes it — not at the first `)`
-                // inside, which a Wikipedia-style url carries.
+                // inside, which a Wikipedia-style url carries. A
+                // backslash-escaped char rides through verbatim and
+                // never counts toward the balance either (so `\(` does
+                // not swallow the real closer); unescaping stays out of
+                // this port's inline subset.
                 let mut paren_depth = 0usize;
                 while k < bytes.len() {
                     if bytes[k] == ')' && paren_depth == 0 {
                         break;
+                    }
+                    if bytes[k] == '\\' && k + 1 < bytes.len() {
+                        url.push(bytes[k]);
+                        k += 1;
+                        url.push(bytes[k]);
+                        k += 1;
+                        continue;
                     }
                     if bytes[k] == '(' {
                         paren_depth += 1;
@@ -154,8 +165,15 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line,
                     // for the comparison, like autolinked emails).
                     let comparison = url.strip_prefix("mailto:").unwrap_or(url.as_str());
                     if label != url && label != comparison {
+                        // The bracket renders the destination as visible
+                        // text, so it gets the same control-byte hardening
+                        // the OSC 8 target gets (`resolve_link_href`): an
+                        // escape byte smuggled into an attacker-chosen url
+                        // can never re-enter the terminal as a live
+                        // OSC/CSI sequence.
+                        let shown = crate::hyperlinks::sanitize_control_bytes(url.clone());
                         url_slots.push(spans.len());
-                        spans.push(Span::styled(format!(" [{url}]"), style.link_url));
+                        spans.push(Span::styled(format!(" [{shown}]"), style.link_url));
                     }
                     i = k + 1;
                     continue;
