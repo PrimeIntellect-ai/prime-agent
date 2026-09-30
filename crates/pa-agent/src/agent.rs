@@ -894,6 +894,16 @@ impl Agent {
         self.inner.shared.lock().await.state.thinking_level = level;
     }
 
+    /// Set the model and the requested reasoning level in ONE state-lock
+    /// acquisition: a model switch re-syncs the request's carried level
+    /// (the loop snapshots both fields together), so a turn admitted
+    /// mid-switch can never observe the new model with the old level.
+    pub async fn set_model_and_thinking_level(&self, model: Model, thinking_level: ThinkingLevel) {
+        let mut shared = self.inner.shared.lock().await;
+        shared.state.model = model;
+        shared.state.thinking_level = thinking_level;
+    }
+
     /// Per-run model override (TS `Agent.modelOverride`): `Some` serves
     /// every LLM request of the runs started while it is set on the
     /// override model (with its own thinking level), `None` returns to the
@@ -1564,5 +1574,77 @@ mod tests {
             .expect("the failure assistant row");
         assert_eq!(failure.model, "image-model");
         assert_eq!(failure.stop_reason, crate::types::StopReason::Error);
+    }
+
+    // A model switch re-syncs the request's carried level in ONE
+    // agent-lock acquisition: the loop snapshots model and thinking
+    // level together (the same lock), so a concurrently admitted turn
+    // must never observe the new model with the old level — the mixed
+    // state only exists between two separate acquisitions.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_model_switch_updates_the_model_and_level_atomically() {
+        fn model(id: &str) -> Model {
+            Model {
+                id: id.to_string(),
+                name: id.to_string(),
+                api: "anthropic-messages".to_string(),
+                provider: "anthropic".to_string(),
+                base_url: String::new(),
+                reasoning: true,
+                cost: crate::types::UsageCost::default(),
+                context_window: 200_000,
+                max_tokens: 8_192,
+            }
+        }
+
+        // The initial pair matches the writer's first target pair, so a
+        // reader that samples before the writer's first update observes
+        // a consistent state, not the boot default.
+        let agent = Arc::new(Agent::new(AgentOptions {
+            initial_state: AgentInitialState {
+                model: Some(model("model-a")),
+                thinking_level: Some(crate::types::ThinkingLevel::High),
+                ..Default::default()
+            },
+            ..Default::default()
+        }));
+        let writer = Arc::clone(&agent);
+        let switcher = tokio::spawn(async move {
+            for _ in 0..2_000 {
+                writer
+                    .set_model_and_thinking_level(
+                        model("model-a"),
+                        crate::types::ThinkingLevel::High,
+                    )
+                    .await;
+                writer
+                    .set_model_and_thinking_level(
+                        model("model-b"),
+                        crate::types::ThinkingLevel::Off,
+                    )
+                    .await;
+            }
+        });
+        let reader = Arc::clone(&agent);
+        let observed = tokio::spawn(async move {
+            let mut mixed = 0u64;
+            let mut samples = 0u64;
+            while samples < 20_000 {
+                let state = reader.state().await;
+                let mixed_state = (state.model.id == "model-a"
+                    && state.thinking_level != crate::types::ThinkingLevel::High)
+                    || (state.model.id == "model-b"
+                        && state.thinking_level != crate::types::ThinkingLevel::Off);
+                mixed += u64::from(mixed_state);
+                samples += 1;
+            }
+            mixed
+        });
+        switcher.await.unwrap();
+        let mixed = observed.await.unwrap();
+        assert_eq!(
+            mixed, 0,
+            "every snapshot carries a consistent (model, level) pair"
+        );
     }
 }
