@@ -636,9 +636,9 @@ jobs:
             # cut is already coming; this one keeps its versioned
             # artifacts (immutable, still served to pinned installs) but
             # leaves the channel pointers alone.
-            branch_head="$(gh api "repos/${GITHUB_REPOSITORY}/commits/rust" --jq '.sha')"
+            branch_head="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')"
             if [ "$built_parent" != "$branch_head" ]; then
-              echo "superseded: this beta built ${built_parent} but rust is at ${branch_head}; a newer cut is coming — the versioned artifacts publish, the beta channel pointers do not"
+              echo "superseded: this beta built ${built_parent} but main is at ${branch_head}; a newer cut is coming — the versioned artifacts publish, the beta channel pointers do not"
             else
               current_beta="$(aws s3 cp "s3://${R2_BUCKET}/beta.json" - --endpoint-url "$R2_ENDPOINT_URL" 2>/dev/null | jq -r '.version // empty' || true)"
               if [ -n "$current_beta" ] && version_gt "$current_beta" "$RELEASE_VERSION"; then
