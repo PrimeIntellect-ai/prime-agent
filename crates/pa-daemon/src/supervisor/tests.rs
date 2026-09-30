@@ -106,6 +106,69 @@ async fn a_failed_relaunch_accumulates_to_the_give_up_cap() {
     );
 }
 
+/// A stop that lands while the watch loop is on the give-up cap leaves
+/// the terminal state to the stop: the give-up arm returns without
+/// persisting `Failed` (the stop's tombstone already owns the next boot's
+/// verdict) and without removing the resident (the stop path owns the
+/// removal), so a cleanly stopped worker is not adopted as `GaveUp`.
+#[tokio::test(start_paused = true)]
+async fn a_stop_during_the_storm_leaves_the_terminal_state_to_the_stop() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(agent_dir.join("logs"), "not a directory").unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: agent_dir.clone(),
+        })
+        .expect("supervisor"),
+    );
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
+        "version": 2,
+        "workerId": "w-storm-stop",
+        "pid": 0,
+        "socketPath": "/tmp/none.sock",
+        "recoveryJournalPath": dir.path().join("journal.jsonl").to_string_lossy(),
+        "supervisorSocketPath": "/tmp/none.sock",
+        "authenticationToken": "token",
+        "rootActiveSessionId": "w-storm-stop",
+        "createdAt": "t",
+        "updatedAt": "t",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    let resident = Arc::new(ResidentWorker::new(
+        "w-storm-stop".to_string(),
+        descriptor,
+        dir.path().join("w-storm-stop.descriptor.json"),
+    ));
+    // The storm is at the cap and the stop already landed (the stop
+    // path sets the flag before it finalizes the worker).
+    resident
+        .consecutive_failures
+        .store(MAX_CONSECUTIVE_FAILURES, Ordering::SeqCst);
+    resident.intentional_stop.store(true, Ordering::SeqCst);
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        Arc::clone(&supervisor).watch_worker(Arc::clone(&resident), None, 0),
+    )
+    .await
+    .expect("the give-up arm returns instead of spinning");
+    assert_eq!(
+        resident.descriptor.lock().await.lifecycle,
+        DaemonWorkerLifecycle::Ready,
+        "the give-up must not persist Failed over a concurrent stop"
+    );
+    assert!(
+        supervisor.registry.get("w-storm-stop").await.is_some(),
+        "the stop path owns the worker's removal"
+    );
+}
+
 /// The saved-session surfaces (the `list --all` summary row and the
 /// `list_saved_sessions` catalog row) carry the persisted thinking
 /// level: the agents-view Model column renders "model:level" for
