@@ -405,10 +405,11 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_prompt() {
     // wakes a fresh worker over the saved file (the route's wake arm
     // resolves the saved session and launches). The faux engine's script
     // is spawn-time config (not session-file state), so the replayed
-    // worker's turn runs the default provider — the WAKE oracle here is
-    // the respawn + the prompt's delivery into the child's session file;
-    // the model-answer revival is the VM census's leg (the real binary
-    // against the offline mock).
+    // worker's turn runs the default provider: the response's outcome
+    // depends on the host's credentials and is not asserted — the WAKE
+    // oracle is the revival prompt's row in the child's session file
+    // (only a woken worker writes it); the model-answer revival is the
+    // VM census's leg (the real binary against the offline mock).
     let child_file_rows_before = std::fs::read_to_string({
         let roster = children
             .list_subagents()
@@ -424,23 +425,16 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_prompt() {
         ))
     })
     .map_or(0, |content| content.lines().count());
+    let revive_prompt = "revive: answer again";
     client.send_command(
         "revive",
         &json!({
             "type": "prompt_and_wait",
             "activeSessionId": child_session_id,
-            "message": "revive: answer again",
+            "message": revive_prompt,
         }),
     );
     let revived = client.read_response("revive");
-    assert!(
-        revived["success"] == true
-            || revived
-                .get("error")
-                .and_then(Value::as_str)
-                .is_some_and(|error| error.contains("Insufficient balance")),
-        "the wake must relaunch the child (the faux replay's model turn may fail auth; the wake itself must not): {revived}"
-    );
     // The revival respawned a worker for the child's session (a fresh
     // pid serves the replayed file) and the prompt's row landed in the
     // child's session file (the delivery half of the revival).
@@ -470,8 +464,13 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_prompt() {
         }
         assert!(
             Instant::now() < deadline,
-            "the revival never delivered the prompt into the child's session file ({child_file:?}, rows {rows_after} <= {child_file_rows_before})"
+            "the revival never delivered the prompt into the child's session file ({child_file:?}, rows {rows_after} <= {child_file_rows_before}, response: {revived})"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    let grown = std::fs::read_to_string(&child_file).expect("the child session file");
+    assert!(
+        grown.contains(revive_prompt),
+        "the revival prompt never landed in the child's session file ({child_file:?}, response: {revived})"
+    );
 }
