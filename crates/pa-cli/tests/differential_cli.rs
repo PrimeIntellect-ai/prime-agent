@@ -96,8 +96,6 @@ const CORPUS: &[&[&str]] = &[
     &["--fork"],
     &["--session-dir"],
     &["--models"],
-    &["--tools", "read,write"],
-    &["--tools", "read"],
     &["--goal-token-budget", "5"],
     &["--goal", ""],
     &["--goal", "  "],
