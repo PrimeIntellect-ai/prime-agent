@@ -168,6 +168,11 @@ pub(crate) struct ResidentWorker {
     /// replacement-aware route clones a receiver and sleeps until the
     /// worker is route-ready or retired).
     route_state_tx: tokio::sync::watch::Sender<WorkerRouteState>,
+    /// The root-identity transition's persist is unresolved (the
+    /// descriptor moved but the durable record write failed): the next
+    /// roster write re-runs the transition's persist from the live state
+    /// before a restart can replay the superseded session.
+    identity_persist_pending: AtomicBool,
     /// Monotonic connection epoch: only the pumps of the current
     /// connection may flip `connected` false, so a superseded socket's
     /// late EOF cannot retire a live replacement.
@@ -226,6 +231,7 @@ impl ResidentWorker {
             cron_snapshot: Mutex::new(None),
             heartbeat_snapshot_generation: AtomicU64::new(0),
             route_state_tx,
+            identity_persist_pending: AtomicBool::new(false),
             connection_epoch: AtomicU64::new(0),
             compaction: crate::compaction_supervision::CompactionSupervision::default(),
         })
@@ -333,6 +339,27 @@ impl ResidentWorker {
     /// stop): waiting routes fail fast instead of parking.
     pub(crate) fn note_retired(&self) {
         self.publish_route_state(|state| state.retired = true);
+    }
+
+    /// Whether the root-identity transition's durable record write is
+    /// still unresolved (the live descriptor moved; the persist failed).
+    pub(crate) fn identity_persist_pending(&self) -> bool {
+        self.identity_persist_pending
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Mark the root-identity persist unresolved: the next roster write
+    /// repairs it from the live state.
+    pub(crate) fn mark_identity_persist_pending(&self) {
+        self.identity_persist_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Clear the unresolved marker (the durable record matches the live
+    /// identity again).
+    pub(crate) fn clear_identity_persist_pending(&self) {
+        self.identity_persist_pending
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Selector labels: root active session id, session-file stem, name.
