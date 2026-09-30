@@ -169,6 +169,114 @@ async fn a_stop_during_the_storm_leaves_the_terminal_state_to_the_stop() {
     );
 }
 
+/// An adopted worker's watch parks on the kernel's exit notification and
+/// hands the exit to whoever owns the resident now - a stop that landed,
+/// or a relaunch elsewhere that took the resident's pid. Both cases return
+/// at the exit without entering the crash arm, and with no timer in the
+/// runtime the paused clock cannot advance.
+#[cfg(any(target_os = "linux", target_os = "macos"))] // the kernel-watch arms
+#[tokio::test(start_paused = true)]
+async fn an_adopted_watch_hands_off_at_exit_without_a_timer() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    // A hand-off the watch misses (the unfixed tree) reaches the crash
+    // arm: its relaunch must fail deterministically (the logs dir cannot
+    // be created - a file stands where it would go) instead of spawning
+    // the test binary as a worker.
+    std::fs::write(agent_dir.join("logs"), "not a directory").unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: agent_dir.clone(),
+        })
+        .expect("supervisor"),
+    );
+    {
+        // A stop that landed owns the exit's terminal state.
+        let mut worker = std::process::Command::new("sleep")
+            .arg("600")
+            .spawn()
+            .expect("spawn sleep");
+        let resident = adopted_watch_resident(dir.path(), worker.id());
+        let started = tokio::time::Instant::now();
+        let mut watch = std::pin::pin!(Arc::clone(&supervisor).watch_worker(
+            Arc::clone(&resident),
+            None,
+            u64::from(worker.id())
+        ));
+        assert!(
+            futures::poll!(watch.as_mut()).is_pending(),
+            "a live adopted worker keeps the watch parked"
+        );
+        resident.intentional_stop.store(true, Ordering::SeqCst);
+        worker.kill().expect("kill sleep");
+        worker.wait().expect("reap sleep");
+        watch.await;
+        assert_eq!(
+            tokio::time::Instant::now(),
+            started,
+            "the kernel exit notification woke the watch; no poll timer fired"
+        );
+    }
+    {
+        // A relaunch elsewhere took the resident: the pid no longer names
+        // the watched process, so the watch hands off instead of running
+        // the crash arm over the replacement.
+        let mut worker = std::process::Command::new("sleep")
+            .arg("600")
+            .spawn()
+            .expect("spawn sleep");
+        let resident = adopted_watch_resident(dir.path(), worker.id());
+        let started = tokio::time::Instant::now();
+        let mut watch = std::pin::pin!(Arc::clone(&supervisor).watch_worker(
+            Arc::clone(&resident),
+            None,
+            u64::from(worker.id())
+        ));
+        assert!(
+            futures::poll!(watch.as_mut()).is_pending(),
+            "a live adopted worker keeps the watch parked"
+        );
+        resident.descriptor.lock().await.pid = u64::from(std::process::id());
+        worker.kill().expect("kill sleep");
+        worker.wait().expect("reap sleep");
+        watch.await;
+        assert_eq!(
+            tokio::time::Instant::now(),
+            started,
+            "the kernel exit notification woke the watch; no poll timer fired"
+        );
+    }
+}
+
+/// The watched adopted worker's resident, with the descriptor carrying the
+/// watched pid (the post-exit ownership check compares against it).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn adopted_watch_resident(dir: &std::path::Path, pid: u32) -> Arc<ResidentWorker> {
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
+        "version": 2,
+        "workerId": "w-adopted-watch",
+        "pid": pid,
+        "socketPath": "/tmp/none.sock",
+        "recoveryJournalPath": dir.join("journal.jsonl").to_string_lossy(),
+        "supervisorSocketPath": "/tmp/none.sock",
+        "authenticationToken": "token",
+        "rootActiveSessionId": "w-adopted-watch",
+        "createdAt": "t",
+        "updatedAt": "t",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    ResidentWorker::new(
+        "w-adopted-watch".to_string(),
+        descriptor,
+        dir.join("w-adopted-watch.descriptor.json"),
+    )
+}
+
 /// The saved-session surfaces (the `list --all` summary row and the
 /// `list_saved_sessions` catalog row) carry the persisted thinking
 /// level: the agents-view Model column renders "model:level" for
