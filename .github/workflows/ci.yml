@@ -264,6 +264,24 @@ jobs:
       - name: Build the workspace bins (sibling-binary parity for the e2e suites)
         if: steps.selection.outputs.units != '0'
         run: cargo build --locked --workspace --bins
+      # The kernel e2e suites resolve the AMBIENT kernel venv
+      # ($HOME/.prime/agent/kernel-venv), and every depth-0 session a shard
+      # hosts prewarms its kernel in the background: on the fresh runner a
+      # shard job starts on, the first session-creating unit starts the
+      # venv bootstrap mid-shard (uv venv + the runtime install, tens of
+      # seconds), and the next kernel unit runs against the half-built venv
+      # — its PRIME_AGENT_KERNEL_PYTHON is validated, never bootstrapped,
+      # so it fails fast on the first receipt read (run 36764911023 failed
+      # mcp_product_path_e2e this way right after import_compaction_e2e's
+      # session prewarm started the bootstrap; runs 36763666386 and
+      # 36760316186 failed peer_messaging_e2e the same way). Bootstrapping
+      # once here — the installer's own `--prime-agent-bootstrap` handoff —
+      # makes the venv ready before any unit runs, so no unit ever starts a
+      # bootstrap mid-shard and the kernel-gated suites stop silently
+      # skipping on fresh runners.
+      - name: Bootstrap the kernel venv (ready before the kernel e2e units)
+        if: steps.selection.outputs.units != '0'
+        run: ./target/debug/prime-agent --prime-agent-bootstrap
       - name: Run this shard's test subset
         run: |
           python3 scripts/ci_test_shard.py --shard ${{ matrix.shard }} --total ${{ env.SHARD_COUNT }}             --crates "${{ needs.changes.outputs.crates }}"             --manifest "$RUNNER_TEMP/shard-manifest-${{ matrix.shard }}.json"
