@@ -3,7 +3,7 @@ use crate::protocol::{response_failure, response_success};
 use pa_types::platform::transport::bind_transport;
 use pa_types::session::AgentMessage;
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
@@ -28,6 +28,9 @@ enum FakeChild {
     /// The worker leaves right after the settle answer is captured:
     /// every later child read fails.
     LeavesAfterSettle,
+    /// Unreachable; the watcher's give-up poll parks until the test
+    /// lands a reader's verdict.
+    UnreachableUntilVerdict,
 }
 
 /// A scripted JSONL supervisor for the watcher tests: creates one child
@@ -63,6 +66,9 @@ async fn spawn_fake_supervisor(
         // Shared across link connections: a left worker fails every child
         // read on whichever connection carries it.
         let gone = Arc::new(AtomicBool::new(false));
+        // Shared across link connections: the give-up gate counts the
+        // child's state reads on whichever connection carries them.
+        let state_reads = Arc::new(AtomicU32::new(0));
         loop {
             let Ok(stream) = listener.accept().await else {
                 return;
@@ -71,6 +77,7 @@ async fn spawn_fake_supervisor(
             let kill_tx = kill_tx.clone();
             let kill_behavior = std::sync::Arc::clone(&kill_behavior);
             let gone = Arc::clone(&gone);
+            let state_reads = Arc::clone(&state_reads);
             let child_session_file = std::sync::Arc::clone(&child_session_file);
             tokio::spawn(async move {
                 let (reader, mut writer) = stream.split();
@@ -94,9 +101,24 @@ async fn spawn_fake_supervisor(
                         _ if matches!(
                             (child, command_type),
                             (FakeChild::PromptFails, "prompt")
-                                | (FakeChild::Unreachable, "get_state")
+                                | (
+                                    FakeChild::Unreachable | FakeChild::UnreachableUntilVerdict,
+                                    "get_state",
+                                )
                         ) =>
                         {
+                            // Two get_state reads per watcher pass for the
+                            // parked variant (the refresh read, then the
+                            // liveness poll): the last one is the give-up
+                            // poll. Only that variant counts, so a plain
+                            // unreachable child keeps its instant refusal.
+                            if matches!(child, FakeChild::UnreachableUntilVerdict)
+                                && state_reads.fetch_add(1, Ordering::SeqCst) + 1
+                                    == 2 * WATCH_MAX_UNREACHABLE_POLLS
+                            {
+                                GIVE_UP_POLL.notify_one();
+                                VERDICT_LANDED.notified().await;
+                            }
                             response_failure(
                                 Some(&id),
                                 command_type,
@@ -404,6 +426,58 @@ async fn an_unreachable_child_delivers_the_failure_notice_instead_of_no_reply() 
     // Exactly one failure row lands: the give-up claims once.
     let extra = tokio::time::timeout(Duration::from_millis(300), follow_up_rx.recv()).await;
     assert!(extra.is_err(), "no second notice may arrive");
+}
+
+/// Hand-off into the unreachable give-up's poll: the fake parks the
+/// give-up poll, the test lands the reader's verdict, the fake releases
+/// the poll. Only the lost-claim test uses these.
+static GIVE_UP_POLL: tokio::sync::Notify = tokio::sync::Notify::const_new();
+static VERDICT_LANDED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// A reader's refresh can settle the child between the watcher's settle
+/// read and its unreachable give-up claim: the claim keeps that verdict,
+/// and the watcher still runs its settle tail.
+#[tokio::test(start_paused = true)]
+async fn a_verdict_landing_inside_the_unreachable_give_up_still_runs_the_settle_tail() {
+    tokio::spawn(async {
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            tick.tick().await;
+        }
+    });
+    let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) = sessions_with_fake_supervisor(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        FakeChild::UnreachableUntilVerdict,
+    )
+    .await;
+    let settled = sessions.settle_notified();
+    spawn_child(&sessions).await;
+    sessions.notify_turn_done();
+
+    GIVE_UP_POLL.notified().await;
+    {
+        // What a `collect`'s `refresh_record` writes when the worker
+        // answers idle.
+        let record = Arc::clone(&sessions.inner.children.lock().await[0]);
+        let mut record = record.lock().await;
+        record.settled_status = Some("done");
+    }
+    VERDICT_LANDED.notify_one();
+
+    tokio::time::timeout(Duration::from_secs(3_600), settled)
+        .await
+        .expect("the settle funnel fires for the reader's verdict");
+    assert!(!sessions.any_running().await, "the run must mark settled");
+    let notice = follow_up_rx
+        .try_recv()
+        .expect("the verdict's no-reply notice is still owed");
+    assert_eq!(
+        notice["customMessage"]["customType"],
+        "rlm_child_terminal_notice"
+    );
 }
 
 /// The review's C1 interleaving: a `collect` that lands inside the
