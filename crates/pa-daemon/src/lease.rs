@@ -558,8 +558,8 @@ mod tests {
 
     #[test]
     fn process_start_id_reflects_the_platform_ladder() {
-        // Linux answers from /proc (`proc:`); macOS/BSD from `ps lstart=`
-        // (`ps:`) - the same ladder TS `getProcessStartId` walks.
+        // Linux answers from /proc (`proc:`); macOS/BSD answer
+        // `ps:<lstart>` - the same ladder TS `getProcessStartId` walks.
         let start = get_process_start_id(std::process::id());
         assert!(start.is_some());
         let id = start.unwrap();
