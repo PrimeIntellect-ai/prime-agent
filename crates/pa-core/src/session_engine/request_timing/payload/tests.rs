@@ -317,22 +317,28 @@ fn an_over_budget_body_drops_without_cloning() {
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().join("request-payloads");
     let capture = RequestPayloadCapture::at(&dir_path, 8);
-    // Two bodies that each estimate near half the budget: the second
-    // would cross it and drops at the budget gate.
-    let big_x = json!({ "marker": "budget-x", "body": "x".repeat(33 * 1024 * 1024) });
-    let big_y = json!({ "marker": "budget-y", "body": "y".repeat(33 * 1024 * 1024) });
-    capture.record(&big_x, &agent_model(), Some("sess-timing"), 1);
-    capture.record(&big_y, &agent_model(), Some("sess-timing"), 2);
-    // The drain lands the first body only.
-    wait_for_payload_files(&dir_path, 1);
+    // Three bodies that each estimate at a third of the budget: the
+    // third would cross it and drops at the budget gate.
+    let body_x = json!({ "marker": "budget-x", "body": "x".repeat(8 * 1024 * 1024) });
+    let body_y = json!({ "marker": "budget-y", "body": "y".repeat(8 * 1024 * 1024) });
+    let body_z = json!({ "marker": "budget-z", "body": "z".repeat(8 * 1024 * 1024) });
+    // Two bodies fit the budget; the third crosses it (the estimate
+    // already carries the transient-copies multiplier).
+    assert!(payload_bytes(&body_x) * 2 < REQUEST_PAYLOAD_BUDGET_BYTES);
+    assert!(payload_bytes(&body_x) * 3 > REQUEST_PAYLOAD_BUDGET_BYTES);
+    capture.record(&body_x, &agent_model(), Some("sess-timing"), 1);
+    capture.record(&body_y, &agent_model(), Some("sess-timing"), 2);
+    capture.record(&body_z, &agent_model(), Some("sess-timing"), 3);
+    // The drain lands the first two bodies only.
+    wait_for_payload_files(&dir_path, 2);
     wait_for_drained_queue();
     capture.record(
         &json!({ "marker": "recovered" }),
         &agent_model(),
         Some("sess-timing"),
-        3,
+        4,
     );
-    wait_for_payload_files(&dir_path, 2);
+    wait_for_payload_files(&dir_path, 3);
     let files = payload_files(&dir_path);
     let landed = files
         .iter()
@@ -345,13 +351,13 @@ fn an_over_budget_body_drops_without_cloning() {
         .collect::<Vec<_>>();
     assert_eq!(
         landed,
-        ["budget-x", "recovered"],
+        ["budget-x", "budget-y", "recovered"],
         "the over-budget body never landed; the recovered handoff did"
     );
     assert!(
         !files.iter().any(|name| {
             std::fs::read_to_string(dir_path.join(name))
-                .is_ok_and(|content| content.contains("budget-y"))
+                .is_ok_and(|content| content.contains("budget-z"))
         }),
         "the dropped body exists nowhere in the ring"
     );
@@ -497,7 +503,7 @@ fn a_record_hands_off_without_waiting_for_the_write() {
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().join("request-payloads");
     let capture = RequestPayloadCapture::at(&dir_path, 64);
-    let big = "x".repeat(32 * 1024 * 1024);
+    let big = "x".repeat(8 * 1024 * 1024);
     let payload = json!({"messages": [{"role": "user", "content": big}]});
     let started = std::time::Instant::now();
     capture.record(&payload, &agent_model(), Some("sess-timing"), 1);
@@ -539,7 +545,7 @@ fn a_saturated_queue_drops_without_cloning() {
     // longer than the whole test window, so no slot frees mid-probe.
     let stall = json!({
         "marker": "stall",
-        "messages": (0..200_000_u32).map(|seq| json!({ "seq": seq })).collect::<Vec<_>>()
+        "messages": (0..100_000_u32).map(|seq| json!({ "seq": seq })).collect::<Vec<_>>()
     });
     capture.record(&stall, &agent_model(), Some("sess-timing"), 1);
     // The fill: the queue is saturated against the reserve counter.
@@ -613,7 +619,7 @@ fn concurrent_producers_drop_at_the_reserve_when_the_queue_is_full() {
     // storm.
     let stall = json!({
         "marker": "stall",
-        "messages": (0..200_000_u32).map(|seq| json!({ "seq": seq })).collect::<Vec<_>>()
+        "messages": (0..100_000_u32).map(|seq| json!({ "seq": seq })).collect::<Vec<_>>()
     });
     capture.record(&stall, &agent_model(), Some("sess-timing"), 1);
     let fills = fill_until_saturated(&capture, "fill");

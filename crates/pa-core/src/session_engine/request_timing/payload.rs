@@ -304,24 +304,33 @@ fn drain_writer(queued: &Arc<AtomicUsize>, retained: &Arc<AtomicU64>, jobs: &Rec
     }
 }
 
-/// The payload's byte estimate: the size the retained-bytes budget prices
-/// a body at — the value's own bytes (strings, numbers, keys) without
-/// serialization overhead, walked once without allocating. An estimate
-/// below the serialized size keeps the budget conservative.
-fn payload_bytes(value: &Value) -> u64 {
-    match value {
-        Value::Null => 4,
-        Value::Bool(_) => 5,
-        Value::Number(_) => 20,
-        Value::String(text) => text.len() as u64 + 3,
-        Value::Array(items) => items.iter().map(payload_bytes).sum::<u64>() + 2,
-        Value::Object(map) => {
-            map.iter()
-                .map(|(key, value)| key.len() as u64 + payload_bytes(value))
-                .sum::<u64>()
-                + 2
+/// The payload's byte estimate: an UPPER BOUND on what one accepted
+/// capture allocates — the queue's clone, the envelope's re-clone, and
+/// the serialized bytes — walked once without allocating. Every node
+/// pays its own enum footprint (plus the collection slots), and the
+/// total carries the transient-copies multiplier: the budget is an OOM
+/// guard, so overcounting is the point.
+pub(crate) fn payload_bytes(value: &Value) -> u64 {
+    /// One `Value` node's own footprint (the enum's size).
+    const NODE: u64 = 32;
+    /// The transient full-body copies one accepted capture allocates:
+    /// the queued clone, the envelope's clone, and the serialization
+    /// buffer.
+    const TRANSIENT_COPIES: u64 = 3;
+    fn tree(value: &Value) -> u64 {
+        match value {
+            Value::Null | Value::Bool(_) | Value::Number(_) => NODE,
+            Value::String(text) => NODE + text.len() as u64,
+            Value::Array(items) => NODE + items.iter().map(|item| tree(item) + NODE).sum::<u64>(),
+            Value::Object(map) => {
+                NODE + map
+                    .iter()
+                    .map(|(key, item)| key.len() as u64 + tree(item) + NODE + 64)
+                    .sum::<u64>()
+            }
         }
     }
+    tree(value).saturating_mul(TRANSIENT_COPIES)
 }
 
 /// The capture file's correlation envelope: the same identity fields the
