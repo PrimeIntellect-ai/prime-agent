@@ -319,9 +319,11 @@ fn build_manifest(
         if gitlink {
             // A submodule reference's content is never captured; only its
             // absence from the worktree is recorded (as a deletion). The
-            // probe refuses symlinked ancestors like every other read.
-            let cap = usize::try_from(limits.max_file_bytes).unwrap_or(usize::MAX);
-            match open_leaf(worktree_root, path, cap) {
+            // probe refuses symlinked ancestors like every other read and
+            // classifies the leaf kind WITHOUT reading content: the
+            // bytes a replaced gitlink's stand-in file would cost are
+            // discarded anyway, so they never touch the read budget.
+            match open_leaf(worktree_root, path, 0, true) {
                 Ok(OpenLeaf::Missing) => captured.push(CapturedEntry::Deleted {
                     path: path.to_string(),
                     status: entry_status(entry),
@@ -505,7 +507,12 @@ impl Drop for FdGuard {
 /// after the walk started still cannot redirect the read, because every
 /// component is pinned by its opened fd, not its path.
 #[cfg(unix)]
-fn open_leaf(root: &Path, path: &str, max_bytes: usize) -> std::io::Result<OpenLeaf> {
+fn open_leaf(
+    root: &Path,
+    path: &str,
+    max_bytes: usize,
+    classify_only: bool,
+) -> std::io::Result<OpenLeaf> {
     use nix::fcntl::{openat, OFlag};
     use nix::sys::stat::{fstat, Mode};
     let dir_flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
@@ -544,6 +551,15 @@ fn open_leaf(root: &Path, path: &str, max_bytes: usize) -> std::io::Result<OpenL
                 let metadata = fstat(fd.0).map_err(io_from_errno)?;
                 let mode = nix::sys::stat::SFlag::from_bits_truncate(metadata.st_mode);
                 if mode.contains(nix::sys::stat::SFlag::S_IFREG) {
+                    if classify_only {
+                        // A kind-only probe (the replaced-gitlink path):
+                        // the leaf is classified from the fstat alone, so
+                        // discarded bytes never reach the read budget.
+                        return Ok(OpenLeaf::File {
+                            content: Vec::new(),
+                            executable: metadata.st_mode & 0o111 != 0,
+                        });
+                    }
                     let mut content = Vec::new();
                     let mut buffer = vec![0u8; 128 * 1024];
                     loop {
@@ -612,7 +628,12 @@ enum OpenLeaf {
 }
 
 #[cfg(not(unix))]
-fn open_leaf(root: &Path, path: &str, max_bytes: usize) -> std::io::Result<OpenLeaf> {
+fn open_leaf(
+    root: &Path,
+    path: &str,
+    max_bytes: usize,
+    classify_only: bool,
+) -> std::io::Result<OpenLeaf> {
     let components: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
     let mut prefix = PathBuf::new();
     for component in &components[..components.len().saturating_sub(1)] {
@@ -640,6 +661,15 @@ fn open_leaf(root: &Path, path: &str, max_bytes: usize) -> std::io::Result<OpenL
         });
     }
     if metadata.is_file() {
+        if classify_only {
+            // A kind-only probe (the replaced-gitlink path): the leaf
+            // is classified from the metadata alone, so discarded bytes
+            // never reach the read budget.
+            return Ok(OpenLeaf::File {
+                content: Vec::new(),
+                executable: false,
+            });
+        }
         let mut file = std::fs::File::open(&absolute)?;
         let mut content = Vec::new();
         let mut buffer = vec![0u8; 128 * 1024];
@@ -685,7 +715,7 @@ fn capture_leaf(
     }
     let cap = usize::try_from(limits.max_file_bytes).unwrap_or(usize::MAX);
     let absolute = worktree_root.join(path);
-    match open_leaf(worktree_root, path, cap) {
+    match open_leaf(worktree_root, path, cap, false) {
         Ok(OpenLeaf::AncestorSymlink) => {
             Ok(LeafOutcome::Excluded(ExcludeReason::SymlinkedAncestor))
         }

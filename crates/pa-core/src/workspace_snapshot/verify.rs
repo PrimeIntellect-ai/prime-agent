@@ -62,7 +62,14 @@ fn read_manifest(path: &Path) -> Result<SnapshotManifest, SnapshotError> {
         detail,
     };
     let metadata =
-        std::fs::metadata(path).map_err(|error| reject(format!("unreadable: {error}")))?;
+        std::fs::symlink_metadata(path).map_err(|error| reject(format!("unreadable: {error}")))?;
+    // A named pipe (or a device) named as the manifest would otherwise
+    // pass the length check — a FIFO reports length zero — and block
+    // the open until a writer appears; anything but a regular file is
+    // a malformed staging area.
+    if !metadata.is_file() {
+        return Err(reject("manifest is not a regular file".to_string()));
+    }
     if metadata.len() > MAX_MANIFEST_BYTES {
         return Err(reject(format!(
             "manifest is {} bytes, cap is {MAX_MANIFEST_BYTES}",
@@ -291,7 +298,7 @@ fn verify_blobs(staging_dir: &Path, manifest: &SnapshotManifest) -> Result<(), S
         else {
             continue;
         };
-        referenced.insert(sha256.as_str());
+        let first_reference = referenced.insert(sha256.as_str());
         let blob = blobs_dir.join(sha256);
         let metadata = std::fs::symlink_metadata(&blob).map_err(|error| {
             reject(format!(
@@ -301,11 +308,18 @@ fn verify_blobs(staging_dir: &Path, manifest: &SnapshotManifest) -> Result<(), S
         if !metadata.is_file() {
             return Err(reject(format!("blob {sha256} is not a regular file")));
         }
+        // Every entry's size claim is checked against the blob; the
+        // expensive content hash runs once per digest — a manifest that
+        // shares one blob across many paths cannot amplify it into a
+        // re-hash per path.
         if metadata.len() != *bytes {
             return Err(reject(format!(
                 "blob {sha256} for {list} {path:?} is {} bytes, manifest says {bytes}",
                 metadata.len()
             )));
+        }
+        if !first_reference {
+            continue;
         }
         let mut blob = std::fs::File::open(&blob)
             .map_err(|error| reject(format!("unreadable blob {sha256}: {error}")))?;

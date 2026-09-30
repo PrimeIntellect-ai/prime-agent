@@ -970,11 +970,11 @@ async fn untracked_special_paths_never_block_the_leaf_open() {
     nix::unistd::mkfifo(&root.join("pipe"), nix::sys::stat::Mode::S_IRWXU).unwrap();
     let listener = std::os::unix::net::UnixListener::bind(root.join("sock")).unwrap();
     assert!(matches!(
-        open_leaf(root, "pipe", 1024),
+        open_leaf(root, "pipe", 1024, false),
         Ok(OpenLeaf::NotRegularFile)
     ));
     assert!(matches!(
-        open_leaf(root, "sock", 1024),
+        open_leaf(root, "sock", 1024, false),
         Ok(OpenLeaf::NotRegularFile)
     ));
     drop(listener);
@@ -1230,6 +1230,55 @@ fn secret_name_rules() {
         "README.md",
     ] {
         assert!(!is_secret_path(path), "{path} should be captured");
+    }
+}
+
+#[test]
+fn verification_hashes_a_shared_blob_once_and_accepts_it() {
+    // Two paths sharing one digest: every entry's size claim is checked,
+    // the content hash runs once, and the snapshot verifies.
+    let shared = digest(b"same\n");
+    let manifest = bare_manifest(
+        vec![
+            CapturedEntry::File {
+                path: "one.txt".to_string(),
+                status: "??".to_string(),
+                sha256: shared.clone(),
+                bytes: 5,
+                executable: false,
+            },
+            CapturedEntry::File {
+                path: "two.txt".to_string(),
+                status: "??".to_string(),
+                sha256: shared,
+                bytes: 5,
+                executable: false,
+            },
+        ],
+        vec![],
+    );
+    let staging = stage(&manifest, &[(&digest(b"same\n"), b"same\n")]);
+    assert_eq!(verify_workspace_snapshot(staging.path()).unwrap(), manifest);
+}
+
+#[test]
+fn verification_rejects_a_non_regular_file_manifest() {
+    // A FIFO named manifest.json reports length zero but blocks the
+    // open until a writer appears; it is a malformed staging area.
+    #[cfg(unix)]
+    {
+        let staging = tempfile::tempdir().unwrap();
+        let fifo = staging.path().join("manifest.json");
+        let mkfifo = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .output()
+            .unwrap();
+        assert!(mkfifo.status.success(), "mkfifo works on unix");
+        let error = verify_workspace_snapshot(staging.path())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("not a regular file"), "{error}");
     }
 }
 
