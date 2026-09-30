@@ -540,8 +540,8 @@ fn open_leaf(
     max_bytes: usize,
     classify_only: bool,
 ) -> std::io::Result<OpenLeaf> {
-    use nix::fcntl::{openat, OFlag};
-    use nix::sys::stat::{fstat, Mode};
+    use nix::fcntl::{openat, AtFlags, OFlag};
+    use nix::sys::stat::{fstat, fstatat, Mode, SFlag};
     let dir_flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
     let root = openat(None, root, dir_flags, Mode::empty()).map_err(io_from_errno)?;
     let mut dir = FdGuard(root);
@@ -550,10 +550,21 @@ fn open_leaf(
         let component = *component;
         let fd = match openat(Some(dir.0), component, dir_flags, Mode::empty()) {
             Ok(fd) => FdGuard(fd),
-            // A symlinked ancestor: linux reports ELOOP, darwin ENOTDIR
-            // for the O_DIRECTORY|O_NOFOLLOW open of a symlink.
-            Err(nix::errno::Errno::ELOOP | nix::errno::Errno::ENOTDIR) => {
-                return Ok(OpenLeaf::AncestorSymlink)
+            // The O_DIRECTORY|O_NOFOLLOW open of a symlink fails ELOOP
+            // on older linux and ENOTDIR on current linux and darwin;
+            // ENOTDIR also means a non-directory stands there, under
+            // which the path does not exist.
+            Err(nix::errno::Errno::ELOOP) => return Ok(OpenLeaf::AncestorSymlink),
+            Err(nix::errno::Errno::ENOTDIR) => {
+                let stat = fstatat(Some(dir.0), component, AtFlags::AT_SYMLINK_NOFOLLOW)
+                    .map_err(io_from_errno)?;
+                return Ok(
+                    if stat.st_mode & SFlag::S_IFMT.bits() == SFlag::S_IFLNK.bits() {
+                        OpenLeaf::AncestorSymlink
+                    } else {
+                        OpenLeaf::Missing
+                    },
+                );
             }
             Err(nix::errno::Errno::ENOENT) => return Ok(OpenLeaf::Missing),
             Err(errno) => return Err(io_from_errno(errno)),

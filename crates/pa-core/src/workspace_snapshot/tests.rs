@@ -477,6 +477,67 @@ async fn snapshot_never_reads_behind_symlinked_ancestors() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn a_directory_replaced_by_a_file_deletes_its_tracked_paths() {
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    init_repo(root);
+    write(root, "dir/x", "x\n");
+    write(root, "keep.txt", "k\n");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    std::fs::remove_dir_all(root.join("dir")).unwrap();
+    write(root, "dir", "file now\n");
+    let staging = tempfile::tempdir().unwrap();
+    let snapshot =
+        create_workspace_snapshot(root, staging.path(), BaselineMode::HeadTree, &limits())
+            .await
+            .unwrap();
+    assert_eq!(
+        snapshot.manifest,
+        repo_manifest(
+            root,
+            head_tree(vec![file_entry("keep.txt", "100644", "k\n")]),
+            vec![
+                file_entry("dir", "??", "file now\n"),
+                CapturedEntry::Deleted {
+                    path: "dir/x".to_string(),
+                    status: ".D".to_string(),
+                },
+            ],
+            vec![]
+        )
+    );
+    assert!(verify_workspace_snapshot(staging.path()).is_ok());
+    // The replaced directory read as a baseline path after the status
+    // run: HEAD still records dir/x, but the standing file is not a
+    // path to it, so the baseline can no longer be the stated commit.
+    let staging = tempfile::tempdir().unwrap();
+    let error = build_manifest(
+        root,
+        staging.path(),
+        &GitStatus {
+            head_commit: Some(head_commit(root)),
+            entries: vec![],
+        },
+        BaselineMode::HeadTree,
+        &[HeadTreeEntry {
+            path: "dir/x".to_string(),
+            mode: "100644".to_string(),
+            gitlink: false,
+            skip_worktree: false,
+            oid: git_blob_oid(b"x\n", false),
+        }],
+        &limits(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, SnapshotError::ConcurrentMutation { .. }),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn snapshot_excludes_nested_repositories() {
     let repo = tempfile::tempdir().unwrap();
     let root = repo.path();
