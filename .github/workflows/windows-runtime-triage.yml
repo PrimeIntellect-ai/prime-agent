@@ -31,7 +31,11 @@ jobs:
   windows-battery:
     name: windows battery (on-demand)
     runs-on: windows-latest
-    timeout-minutes: 120
+    # The pa-cli battery (the full e2e set) alone compiles + runs past two
+    # hours on a cold-ish cache; the whole battery (five crates + the
+    # install e2e) needs the headroom the first dispatch measured (run 1
+    # hit the 120-minute cap mid-pa-cli with the cold cache).
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
