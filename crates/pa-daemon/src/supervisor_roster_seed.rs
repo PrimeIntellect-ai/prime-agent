@@ -156,10 +156,11 @@ impl Supervisor {
         // takes (and is awaited before its snapshot) or it spawns after
         // the take (and its pushes land after the response - either way
         // the push cannot overtake the snapshot answer). The hydration
-        // stays DETACHED inside the task: the tracked work is the
-        // lightweight seed (the ledger walk and the edge-only row
-        // writes), never the serial transcript reads - a subscribe must
-        // not block on hydration (that would reintroduce the
+        // and the deleted-descendant fold stay DETACHED inside the
+        // task: the tracked work is the lightweight seed (the ledger
+        // walk and the edge-only row writes), never the serial
+        // transcript reads or the ledger-wide bucket fold - a subscribe
+        // must not block on either (that would reintroduce the
         // large-session open latency this PR removes).
         if let Ok(mut pending) = self.pending_registration_seeds.lock() {
             // Self-pruning: a daemon without subscribers must not
@@ -181,12 +182,15 @@ impl Supervisor {
                     drop(supervisor.spawn_seeded_hydration(seeded));
                 }
                 // The newly resident root's family bills its deleted
-                // descendants: the registration is the event that makes
-                // the bucket observable, and the subscribe barrier that
-                // drains this task lands the refreshed rows before the
-                // roster snapshot answers.
-                let refreshed = supervisor.refresh_deleted_descendant_usage().await;
-                supervisor.push_roster_update(refreshed, Vec::new());
+                // descendants, detached like the hydration: the fold
+                // reads the whole ledger and may cold-scan legacy
+                // transcripts, so it never rides the subscribe
+                // barrier. Its push applies on top of the snapshot, and
+                // the fold ticket orders it against concurrent folds.
+                drop(tokio::spawn(async move {
+                    let refreshed = supervisor.refresh_deleted_descendant_usage().await;
+                    supervisor.push_roster_update(refreshed, Vec::new());
+                }));
             });
             pending.push(handle);
         }
