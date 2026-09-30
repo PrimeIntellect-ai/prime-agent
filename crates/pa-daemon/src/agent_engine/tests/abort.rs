@@ -542,6 +542,15 @@ fn live_kernel_python() -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 fn live_release_dir() -> Option<std::path::PathBuf> {
+    if let Some(explicit) = std::env::var_os("PI_PACKAGE_DIR") {
+        let explicit = std::path::PathBuf::from(explicit);
+        assert!(
+            explicit.join("prime-agent-runtime").exists(),
+            "PI_PACKAGE_DIR {} has no prime-agent-runtime",
+            explicit.display()
+        );
+        return Some(explicit);
+    }
     let releases = std::path::PathBuf::from(std::env::var("HOME").map_or_else(
         |_| "/home/ubuntu/.local/share/prime-agent/releases".to_string(),
         |home| format!("{home}/.local/share/prime-agent/releases"),

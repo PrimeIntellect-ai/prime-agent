@@ -34,6 +34,15 @@ fn kernel_python() -> Option<PathBuf> {
 }
 
 fn release_dir() -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os("PI_PACKAGE_DIR") {
+        let explicit = PathBuf::from(explicit);
+        assert!(
+            explicit.join("prime-agent-runtime").exists(),
+            "PI_PACKAGE_DIR {} has no prime-agent-runtime",
+            explicit.display()
+        );
+        return Some(explicit);
+    }
     let releases = PathBuf::from(std::env::var("HOME").map_or_else(
         |_| "/home/ubuntu/.local/share/prime-agent/releases".to_string(),
         |home| format!("{home}/.local/share/prime-agent/releases"),
