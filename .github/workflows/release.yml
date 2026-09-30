@@ -263,7 +263,12 @@ jobs:
     needs: [build-gnu, build-darwin]
     name: promotion gate -> release attach
     runs-on: ubuntu-latest
-    environment: release
+    # The channel gates differ: the stable channel publishes from the protected
+    # `release` environment (the required-reviewer approval is the ship gate);
+    # the nightly/beta channel publishes from `release-beta` (no required
+    # reviewers - every green merge rolls the beta automatically, the rolling
+    # channel by design; the stable cut stays the human-approved act).
+    environment: ${{ contains(github.ref_name, '-beta') && 'release-beta' || 'release' }}
     permissions:
       contents: write
       id-token: write
