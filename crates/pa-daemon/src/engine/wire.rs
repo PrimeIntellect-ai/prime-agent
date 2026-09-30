@@ -340,12 +340,10 @@ pub fn empty_resource_snapshot() -> Value {
         "contextFiles": [],
         "skills": [],
         "prompts": [],
-        "extensions": [],
         "themes": [],
         "diagnostics": {
             "skills": [],
             "prompts": [],
-            "extensions": [],
             "themes": [],
         },
     })

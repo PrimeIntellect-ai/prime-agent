@@ -304,10 +304,6 @@ async fn serve_stdin(state: Arc<commands::RpcState>) -> i32 {
         }
         match protocol::parse_line(&line) {
             ParsedLine::ParseError(response) => state.writer.write(response),
-            // No in-process extension-UI seam exists: the bridge would
-            // answer; unknown request ids are silently ignored (TS
-            // `respondToExtensionUiRequest(...).catch(() => undefined)`).
-            ParsedLine::ExtensionUiResponse => {}
             ParsedLine::Command(command) => {
                 let state = Arc::clone(&state);
                 let is_prompt = command.command == "prompt";

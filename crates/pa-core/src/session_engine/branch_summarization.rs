@@ -154,7 +154,7 @@ fn get_message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
 #[must_use]
 pub fn prepare_branch_entries(entries: &[FileEntry], token_budget: u64) -> BranchPreparation {
     let mut file_ops = FileOperations::default();
-    // Cumulative tracking from prior branch summaries (never extension ones).
+    // Cumulative tracking from prior branch summaries (never hooked ones).
     for entry in entries {
         if let FileEntry::BranchSummary { payload, .. } = entry {
             if payload.from_hook != Some(true) {

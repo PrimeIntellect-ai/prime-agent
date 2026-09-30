@@ -13,8 +13,8 @@ use super::{
 /// inputs, or the failure message (TS `handleReloadCommand`'s outcome).
 pub(crate) type ReloadNote = Result<(), String>;
 
-/// The question a pending confirm answers (TS `showExtensionConfirm`
-/// callers await inline; the TUI loop parks the continuation instead).
+/// The question a pending confirm answers (callers await inline in TS;
+/// the TUI loop parks the continuation instead).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum PendingConfirm {
     /// `/import <path>`: replace the current session with the JSONL file.
@@ -47,9 +47,8 @@ impl SessionUi {
     // Session import (/import)
     // ------------------------------------------------------------------
 
-    /// The import confirm (TS `handleImportCommand`'s
-    /// `showExtensionConfirm`): parse the path, park the confirm, and let
-    /// the panel answer it.
+    /// The import confirm (TS `handleImportCommand`'s confirm): parse
+    /// the path, park the confirm, and let the panel answer it.
     pub(super) fn open_import_confirm(&mut self, command_text: &str, view: &mut AgentView) {
         let Some(input_path) = crate::export_share::path_command_argument(command_text, "/import")
         else {
@@ -811,8 +810,7 @@ impl SessionUi {
     /// editor (TS swaps the editor container) while the daemon reload
     /// runs; the run loop folds the outcome in when it lands.
     pub(super) fn handle_reload_command(&mut self, view: &mut AgentView) -> Result<()> {
-        view.reload_box =
-            Some("Reloading keybindings, extensions, skills, prompts, themes...".to_string());
+        view.reload_box = Some("Reloading keybindings, skills, prompts, themes...".to_string());
         self.dirty = true;
         let client = self.client.clone();
         let active_session_id = self.active_session_id.clone();
@@ -869,10 +867,7 @@ impl SessionUi {
                 // TS `showStatus`: tracked, so a back-to-back status
                 // (e.g. the `/thinking` unavailable row) rewrites it in
                 // place.
-                self.note(
-                    "Reloaded keybindings, extensions, skills, prompts, themes",
-                    view,
-                );
+                self.note("Reloaded keybindings, skills, prompts, themes", view);
             }
             Err(error) => {
                 self.error_row(&format!("Reload failed: {error}"), view);

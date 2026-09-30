@@ -252,6 +252,75 @@ pub fn persist_worker(path: &Path, descriptor: &WorkerDescriptor) -> Result<()> 
     write_file_atomic(path, &content)
 }
 
+/// The identity-pending side record (the descriptor store's own
+/// durability marker for the root-identity follow): written beside the
+/// descriptor when a moved identity's persist failed on both attempts,
+/// carrying the moved-to identity AND the moment of the move so a
+/// restart never serves the superseded session from the stale record —
+/// and never rolls a NEWER persisted identity back onto an older move
+/// (the boot applies the pending only while it is fresher than the
+/// record's `updated_at`). Removed by the repair — the first persist
+/// that lands the repaired record.
+pub(crate) fn identity_pending_path(descriptor_path: &Path) -> PathBuf {
+    descriptor_path.with_extension("identity-pending")
+}
+
+/// Record the moved-to identity durably (the follow's fallback when the
+/// descriptor write failed: the boot reads this and applies the moved
+/// identity to the resident before any routing or relaunch).
+///
+/// # Errors
+///
+/// Returns an error when the atomic write of the side record fails.
+pub(crate) fn write_identity_pending(
+    descriptor_path: &Path,
+    session_id: &str,
+    session_file: &str,
+    moved_at: &str,
+) -> Result<()> {
+    let record = serde_json::json!({
+        "sessionId": session_id,
+        "sessionFile": session_file,
+        "movedAt": moved_at,
+    });
+    write_file_atomic(
+        &identity_pending_path(descriptor_path),
+        &serde_json::to_string(&record)?,
+    )
+}
+
+/// The moved-to identity a failed follow left beside the descriptor,
+/// with the move's timestamp (`None` when no follow is pending).
+#[must_use]
+pub(crate) fn read_identity_pending(descriptor_path: &Path) -> Option<(String, String, String)> {
+    let content = std::fs::read_to_string(identity_pending_path(descriptor_path)).ok()?;
+    let record: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let session_id = record.get("sessionId").and_then(Value::as_str)?;
+    let session_file = record.get("sessionFile").and_then(Value::as_str)?;
+    let moved_at = record.get("movedAt").and_then(Value::as_str)?;
+    Some((
+        session_id.to_string(),
+        session_file.to_string(),
+        moved_at.to_string(),
+    ))
+}
+
+/// Remove the side record (the repair landed: the descriptor itself now
+/// carries the moved-to identity).
+///
+/// # Errors
+///
+/// Returns an error when the removal fails — a stale side record left
+/// behind could roll a later boot back onto this move, so the callers
+/// surface the failure and the next repair retries the removal.
+pub(crate) fn clear_identity_pending(descriptor_path: &Path) -> Result<()> {
+    match std::fs::remove_file(identity_pending_path(descriptor_path)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(anyhow!("remove the identity-pending record: {error}")),
+    }
+}
+
 #[must_use]
 pub fn load_descriptors(
     dir: &Path,

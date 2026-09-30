@@ -171,7 +171,6 @@ async fn try_daemon_attached_acp(options: &RunOptions) -> Option<i32> {
         for (key, paths) in [
             ("skills", &config.skills),
             ("promptTemplates", &config.prompt_templates),
-            ("extensions", &config.extensions),
         ] {
             if !paths.is_empty() {
                 create_config[key] = paths
@@ -180,9 +179,6 @@ async fn try_daemon_attached_acp(options: &RunOptions) -> Option<i32> {
                     .collect::<Vec<_>>()
                     .into();
             }
-        }
-        if let Some(tools) = &config.tools {
-            create_config["tools"] = serde_json::json!(tools);
         }
         if let Some(autonomous) = &config.autonomous {
             create_config["autonomous"] = serde_json::json!(autonomous_runtime_config(autonomous));
@@ -620,12 +616,6 @@ async fn build_headless_engine_with(
             rlm_subagent_host: None,
             rlm_depth: None,
             model_info: Some(model.clone()),
-            cli_extension_sources: config
-                .extensions
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect(),
-            extension_tool_allow_list: config.tools.clone(),
             // TS print/headless sessions build through the same
             // `createDefaultRuntimeFactory` runtime (prewarmIpythonKernel:
             // true), so the kernel boots in the background at creation;
@@ -1606,7 +1596,7 @@ async fn build_faux_engine_with(
         .get("reasoning")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    // The script pins the context window (the TS faux-extension contract):
+    // The script pins the context window (the harness contract):
     // threshold/overflow verifiers size it to the probe they run.
     let context_window = script
         .get("contextWindow")
@@ -1673,12 +1663,6 @@ async fn build_faux_engine_with(
             rlm_subagent_host: None,
             rlm_depth: None,
             model_info: Some(model.clone()),
-            cli_extension_sources: config
-                .extensions
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect(),
-            extension_tool_allow_list: config.tools.clone(),
             // The faux engine is a Rust-only verification harness, not a
             // product surface: no background kernel boot in tests.
             prewarm_ipython_kernel: None,

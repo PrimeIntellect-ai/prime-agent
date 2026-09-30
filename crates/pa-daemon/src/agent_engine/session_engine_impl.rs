@@ -506,9 +506,20 @@ impl SessionEngine for AgentSessionEngine {
         if let Some(core) = session.as_deref() {
             let provider = model.provider.clone();
             let model_id = model.id.clone();
-            let _ = self
-                .runtime
-                .block_on(core.session.set_model(&model, &provider, &model_id));
+            // TS `setModel` re-applies the thinking level after the
+            // model swap: the agent slot (the level the request carries)
+            // must equal the level `configure_model` re-clamped above.
+            // ONE agent-lock acquisition updates model and level
+            // together — the loop snapshots both fields under the same
+            // lock, so a turn admitted mid-switch never observes the
+            // new model with the old level. No durable
+            // `thinking_level_change` row: TS `setModel` records only
+            // the model row; `/thinking` owns the intent row.
+            let level = map_thinking_level(self.effective_thinking());
+            let _ = self.runtime.block_on(
+                core.session
+                    .set_model_and_thinking_level(&model, &provider, &model_id, level),
+            );
         }
         // The children registry's inherited parent model follows the
         // switch (the build-time stamp alone would go stale): an inherited
@@ -1132,26 +1143,9 @@ impl SessionEngine for AgentSessionEngine {
             let Some(engine) = guard.as_deref() else {
                 return Vec::new();
             };
-            // TS `createAgentConnectionCommands` order: extension
-            // commands, then prompt templates, then skills. The Rust
-            // extension registry does not track per-command source info,
-            // so extension entries carry the TS fields minus
-            // `sourceInfo`.
+            // TS `createAgentConnectionCommands` order: prompt
+            // templates, then skills.
             let mut commands = Vec::new();
-            if let Some(runner) = &engine.extension_runner {
-                let registry = runner.registry().await;
-                for command in registry.commands() {
-                    let mut entry = json!({
-                        "name": command.invocation_name,
-                        "registeredName": command.name,
-                        "source": "extension",
-                    });
-                    if let Some(description) = &command.description {
-                        entry["description"] = json!(description);
-                    }
-                    commands.push(entry);
-                }
-            }
             for template in &engine.prompt_templates {
                 let mut entry = json!({
                     "name": template.name,
@@ -1260,16 +1254,10 @@ impl SessionEngine for AgentSessionEngine {
                 "contextFiles": context_files,
                 "skills": skills,
                 "prompts": prompts,
-                "extensions": [],
                 "themes": [],
                 "diagnostics": {
                     "skills": engine.skill_diagnostics,
                     "prompts": [],
-                    "extensions": engine
-                        .extension_diagnostics
-                        .iter()
-                        .map(|error| json!({ "type": "error", "message": error }))
-                        .collect::<Vec<_>>(),
                     "themes": [],
                 },
             })

@@ -260,9 +260,8 @@ pub(crate) fn escape_xml(value: &str) -> String {
 /// message block. Port of `AgentSession._expandSkillCommand`: a non-skill
 /// input passes through unchanged; an unknown skill name passes through
 /// (the surfaces show their own unknown-command notice); a skill file that
-/// fails to read passes through (TS emits an extension error event here,
-/// a seam the Rust extension runner does not have yet). Returns the skill
-/// the expansion used so the caller can report the invocation.
+/// fails to read passes through. Returns the skill the expansion used so
+/// the caller can report the invocation.
 #[must_use]
 pub fn expand_skill_command<'a>(text: &str, skills: &'a [Skill]) -> (String, Option<&'a Skill>) {
     let Some((name, args)) = parse_slash_command(text) else {

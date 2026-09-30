@@ -1,6 +1,6 @@
 //! The custom-message & session-command surface (protocol breadth wave
 //! b4): the worker arms for `append_custom_message`, `restore_next_turn`,
-//! `restore_actions`, `refine`, `reload`, and `extension_ui_response`
+//! `restore_actions`, `refine`, and `reload`
 //! (TS daemon-mode cases). Wire contracts are TS-verbatim; the durable rows
 //! and broadcasts go through the same paths the turn runner uses.
 
@@ -239,10 +239,9 @@ impl Worker {
                     // TS restores the action's execution policy
                     // (`executionPolicy`): the batch-gathering class maps
                     // from its shape — `nextTurnContextTiming` "commit"
-                    // is the client-queued policy, "preparation" with a
-                    // preserved empty prompt is injected, "preparation"
-                    // without it is the direct-prompt hand-off. An absent
-                    // policy restores as the dominant queued class.
+                    // is the client-queued policy, "preparation" is the
+                    // direct-prompt hand-off. An absent policy restores
+                    // as the dominant queued class.
                     policy: crate::worker::restored_turn_policy(payload),
                     forced_batch: false,
                 };
@@ -344,31 +343,6 @@ impl Worker {
             return response;
         }
         response_success(None, "reload", None)
-    }
-
-    /// `extension_ui_response { requestId, response }` (TS
-    /// `extensionUiRequests`): resolve one pending extension UI request.
-    /// This port's worker hosts no extension UI requests (the extension
-    /// runner surfaces tool registrations, not UI flows), so every request
-    /// id answers the TS unknown-request error.
-    pub(crate) fn handle_extension_ui_response(&self, payload: &Value) -> DaemonResponse {
-        if let Err(response) = self.require_created("extension_ui_response") {
-            return response;
-        }
-        let Some(request_id) = payload.get("requestId").and_then(Value::as_str) else {
-            return response_failure(
-                None,
-                "extension_ui_response",
-                "extension_ui_response requires a requestId",
-                None,
-            );
-        };
-        response_failure(
-            None,
-            "extension_ui_response",
-            &format!("Unknown extension UI request: {request_id}"),
-            None,
-        )
     }
 }
 
@@ -971,31 +945,5 @@ mod tests {
             .await;
         assert!(response.success, "failed: {response:?}");
         assert!(response.data.is_none());
-    }
-
-    /// `extension_ui_response` answers the TS unknown-request error for
-    /// every id (this worker hosts no extension UI requests) and requires
-    /// the id.
-    #[tokio::test]
-    async fn extension_ui_response_matches_the_unknown_request_error() {
-        let worker = created_worker().await;
-        let response = worker
-            .dispatch(
-                "extension_ui_response",
-                &json!({ "activeSessionId": "custom-session", "requestId": "ui-1", "response": { "confirmed": true } }),
-            )
-            .await;
-        assert!(!response.success);
-        assert_eq!(
-            response.error.as_deref(),
-            Some("Unknown extension UI request: ui-1")
-        );
-        let response = worker
-            .dispatch(
-                "extension_ui_response",
-                &json!({ "activeSessionId": "custom-session" }),
-            )
-            .await;
-        assert!(!response.success);
     }
 }

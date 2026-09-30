@@ -1,7 +1,7 @@
 //! Resource configuration (TS `config-selector.ts` data layer): the grouped
-//! view of every resolved extension/skill/prompt/theme and the settings
-//! mutation that flips one resource's enablement. The UI lives in pa-tui /
-//! pa-cli; this module owns the grouping rules and the settings writes.
+//! view of every resolved skill/prompt/theme and the settings mutation that
+//! flips one resource's enablement. The UI lives in pa-tui / pa-cli; this
+//! module owns the grouping rules and the settings writes.
 
 use std::path::{Path, PathBuf};
 
@@ -48,7 +48,6 @@ pub struct ResourceGroup {
 #[must_use]
 pub fn resource_type_label(resource_type: ResourceType) -> &'static str {
     match resource_type {
-        ResourceType::Extensions => "Extensions",
         ResourceType::Skills => "Skills",
         ResourceType::Prompts => "Prompts",
         ResourceType::Themes => "Themes",
@@ -90,9 +89,8 @@ fn scope_word(scope: SourceScope) -> &'static str {
     }
 }
 
-/// The display name of one resource path (TS naming rules): extensions keep
-/// their parent folder when it is not the conventional one, skills named by
-/// their SKILL.md use the folder, everything else shows the file name.
+/// The display name of one resource path (TS naming rules): skills named
+/// by their SKILL.md use the folder, everything else shows the file name.
 fn display_name(path: &Path, resource_type: ResourceType) -> String {
     let file_name = path
         .file_name()
@@ -103,9 +101,6 @@ fn display_name(path: &Path, resource_type: ResourceType) -> String {
         .and_then(|parent| parent.file_name())
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_default();
-    if resource_type == ResourceType::Extensions && parent_folder != "extensions" {
-        return format!("{parent_folder}/{file_name}");
-    }
     if resource_type == ResourceType::Skills && file_name == "SKILL.md" {
         return parent_folder;
     }
@@ -114,7 +109,7 @@ fn display_name(path: &Path, resource_type: ResourceType) -> String {
 
 /// The grouped view of a full resolution (TS `buildGroups`): items grouped by
 /// origin/scope/source, subgroups per resource kind in
-/// extensions/skills/prompts/themes order, items sorted by display name.
+/// skills/prompts/themes order, items sorted by display name.
 #[must_use]
 pub fn build_groups(resolved: &ResolvedPaths) -> Vec<ResourceGroup> {
     let mut groups: Vec<ResourceGroup> = Vec::new();
@@ -163,9 +158,6 @@ pub fn build_groups(resolved: &ResolvedPaths) -> Vec<ResourceGroup> {
             subgroup_key,
         });
     };
-    for resource in &resolved.extensions {
-        add(resource, ResourceType::Extensions);
-    }
     for resource in &resolved.skills {
         add(resource, ResourceType::Skills);
     }
@@ -325,7 +317,7 @@ fn toggle_package_resource(
     updated.push(serde_json::Value::String(written.clone()));
     if let Some(object) = entry.as_object_mut() {
         object.insert(array_key.to_string(), serde_json::Value::Array(updated));
-        let has_filters = ["extensions", "skills", "prompts", "themes"]
+        let has_filters = ["skills", "prompts", "themes"]
             .iter()
             .any(|key| object.contains_key(*key));
         if !has_filters {
@@ -348,7 +340,6 @@ fn resource_array(
     resource_type: ResourceType,
 ) -> Option<&[String]> {
     match resource_type {
-        ResourceType::Extensions => scope.extensions.as_deref(),
         ResourceType::Skills => scope.skills.as_deref(),
         ResourceType::Prompts => scope.prompts.as_deref(),
         ResourceType::Themes => scope.themes.as_deref(),
@@ -357,7 +348,6 @@ fn resource_array(
 
 fn resource_array_key(resource_type: ResourceType) -> &'static str {
     match resource_type {
-        ResourceType::Extensions => "extensions",
         ResourceType::Skills => "skills",
         ResourceType::Prompts => "prompts",
         ResourceType::Themes => "themes",
@@ -446,14 +436,12 @@ mod tests {
             match RESOURCE_TYPES
                 .iter()
                 .find(|kind| {
-                    let is_skill = **kind == ResourceType::Skills;
-                    is_skill == item.path.to_string_lossy().contains("skill")
-                        || (!is_skill && item.path.extension().is_some_and(|e| e == "ts"))
+                    (**kind == ResourceType::Skills)
+                        == item.path.to_string_lossy().contains("skill")
                 })
                 .copied()
                 .unwrap_or(ResourceType::Skills)
             {
-                ResourceType::Extensions => paths.extensions.push(item),
                 ResourceType::Skills => paths.skills.push(item),
                 ResourceType::Prompts => paths.prompts.push(item),
                 ResourceType::Themes => paths.themes.push(item),
@@ -484,16 +472,6 @@ mod tests {
                     None,
                 ),
                 true,
-            ),
-            resource(
-                "/work/.prime/agent/extensions/ext.ts",
-                metadata(
-                    MetadataSource::Local,
-                    SourceScope::Project,
-                    ResourceOrigin::TopLevel,
-                    None,
-                ),
-                false,
             ),
             resource(
                 "/work/.prime/agent/skills/project-skill/SKILL.md",
@@ -543,14 +521,17 @@ mod tests {
             .iter()
             .map(|subgroup| subgroup.label)
             .collect();
-        assert_eq!(kinds, vec!["Extensions", "Skills"]);
-        assert_eq!(project_group.subgroups[0].items[0].display_name, "ext.ts");
+        assert_eq!(kinds, vec!["Skills"]);
+        assert_eq!(
+            project_group.subgroups[0].items[0].display_name,
+            "project-skill"
+        );
     }
 
     #[test]
-    fn extension_display_names_keep_their_parent_folder() {
+    fn prompt_display_names_show_the_file_name() {
         let item = resource(
-            "/work/.prime/agent/extensions/my-ext/index.ts",
+            "/work/.prime/agent/prompts/fix.md",
             metadata(
                 MetadataSource::Local,
                 SourceScope::Project,
@@ -559,10 +540,7 @@ mod tests {
             ),
             true,
         );
-        assert_eq!(
-            display_name(&item.path, ResourceType::Extensions),
-            "my-ext/index.ts"
-        );
+        assert_eq!(display_name(&item.path, ResourceType::Prompts), "fix.md");
     }
 
     fn settings_fixture() -> (tempfile::TempDir, SettingsManager) {

@@ -1,16 +1,15 @@
 //! Ported TS resolve test cases (package-manager.test.ts): settings entries,
 //! auto-discovery (settings-base dirs, `.agents/skills` ancestors, ignore
-//! files, symlinks), extension sources, pattern filtering (top-level
-//! arrays, pi manifest, package filters, `+`/`-` force forms), package
-//! dedupe, multi-file extension discovery, and the offline/missing-source
-//! policies.
+//! files, symlinks), pattern filtering (top-level arrays, pi manifest,
+//! package filters, `+`/`-` force forms), package dedupe, and the
+//! offline/missing-source policies.
 
 use std::path::{Path, PathBuf};
 
 use super::{MetadataSource, ResolvedResource, ResourceOrigin};
 use crate::packages::manager::BundledSkillsDir;
 use crate::packages::source::SourceScope;
-use crate::packages::{PackageManager, PackageManagerOptions, ResolveExtensionOptions};
+use crate::packages::{PackageManager, PackageManagerOptions};
 use crate::settings::SettingsManager;
 
 /// Environment mutations (HOME, `PI_OFFLINE`) are process-wide: tests that
@@ -135,29 +134,11 @@ fn has_path(resources: &[ResolvedResource], suffix: &str) -> bool {
 fn resolve_without_configured_sources_returns_only_auto_resources() {
     let mut fixture = Fixture::new();
     let result = fixture.manager.resolve().unwrap();
-    assert!(result.extensions.is_empty());
     assert!(result.prompts.is_empty());
     assert!(result.themes.is_empty());
     assert!(result.skills.iter().all(|r| {
         r.metadata.source == MetadataSource::Auto && r.metadata.origin == ResourceOrigin::TopLevel
     }));
-}
-
-#[test]
-fn resolve_local_extension_paths_from_settings() {
-    let mut fixture = Fixture::new();
-    let ext_path = fixture.agent_dir.join("extensions").join("my-extension.ts");
-    write(&ext_path, "export default function() {}");
-    fixture.set_user_array(
-        "extensions",
-        serde_json::json!(["extensions/my-extension.ts"]),
-    );
-
-    let result = fixture.manager.resolve().unwrap();
-    assert!(result
-        .extensions
-        .iter()
-        .any(|r| r.path == ext_path && r.enabled));
 }
 
 #[test]
@@ -197,18 +178,15 @@ fn auto_discovers_root_markdown_skills() {
 fn resolves_project_paths_relative_to_project_config_dir() {
     let mut fixture = Fixture::new();
     let project_dir = fixture.manager.cwd().join(crate::settings::CONFIG_DIR_NAME);
-    let ext_path = project_dir.join("extensions").join("project-ext.ts");
-    write(&ext_path, "export default function() {}");
-    fixture.set_project_array(
-        "extensions",
-        serde_json::json!(["extensions/project-ext.ts"]),
-    );
+    let prompt_path = project_dir.join("prompts").join("project.md");
+    write(&prompt_path, "Project prompt");
+    fixture.set_project_array("prompts", serde_json::json!(["prompts/project.md"]));
 
     let result = fixture.manager.resolve().unwrap();
     assert!(result
-        .extensions
+        .prompts
         .iter()
-        .any(|r| r.path == ext_path && r.enabled));
+        .any(|r| r.path == prompt_path && r.enabled));
 }
 
 #[test]
@@ -256,31 +234,19 @@ fn resolves_symlinked_user_and_project_resources_once() {
     skill_md(&shared_skills, "shared-skill", "Shared skill");
     write(&shared.join("prompts").join("shared.md"), "Shared prompt");
     write(&shared.join("themes").join("shared.json"), "{}");
-    write(
-        &shared.join("extensions").join("shared.ts"),
-        "export default function() {}",
-    );
     let project_dir = fixture.manager.cwd().join(crate::settings::CONFIG_DIR_NAME);
     std::fs::create_dir_all(&project_dir).unwrap();
-    symlink(
-        shared.join("extensions"),
-        fixture.agent_dir.join("extensions"),
-    )
-    .unwrap();
     symlink(&shared_skills, fixture.agent_dir.join("skills")).unwrap();
     symlink(shared.join("prompts"), fixture.agent_dir.join("prompts")).unwrap();
     symlink(shared.join("themes"), fixture.agent_dir.join("themes")).unwrap();
-    symlink(shared.join("extensions"), project_dir.join("extensions")).unwrap();
     symlink(shared_skills, project_dir.join("skills")).unwrap();
     symlink(shared.join("prompts"), project_dir.join("prompts")).unwrap();
     symlink(shared.join("themes"), project_dir.join("themes")).unwrap();
 
     let result = fixture.manager.resolve().unwrap();
-    assert_eq!(result.extensions.len(), 1);
     assert_eq!(result.skills.len(), 1);
     assert_eq!(result.prompts.len(), 1);
     assert_eq!(result.themes.len(), 1);
-    assert_eq!(result.extensions[0].metadata.scope, SourceScope::Project);
     assert_eq!(result.skills[0].metadata.scope, SourceScope::Project);
     assert_eq!(result.prompts[0].metadata.scope, SourceScope::Project);
     assert_eq!(result.themes[0].metadata.scope, SourceScope::Project);
@@ -289,38 +255,6 @@ fn resolves_symlinked_user_and_project_resources_once() {
         Some(home) => std::env::set_var("HOME", home),
         None => std::env::remove_var("HOME"),
     }
-}
-
-#[test]
-fn resolves_directory_with_pi_extensions_manifest() {
-    let mut fixture = Fixture::new();
-    let pkg_dir = fixture.temp_dir.join("my-extensions-pkg");
-    write(
-        &pkg_dir.join("package.json"),
-        r#"{"name":"my-extensions-pkg","pi":{"extensions":["./extensions/clip.ts","./extensions/cost.ts"]}}"#,
-    );
-    write(
-        &pkg_dir.join("extensions").join("clip.ts"),
-        "export default function() {}",
-    );
-    write(
-        &pkg_dir.join("extensions").join("cost.ts"),
-        "export default function() {}",
-    );
-    write(
-        &pkg_dir.join("extensions").join("helper.ts"),
-        "export const x = 1;",
-    );
-
-    fixture.set_user_array(
-        "extensions",
-        serde_json::json!([pkg_dir.display().to_string()]),
-    );
-
-    let result = fixture.manager.resolve().unwrap();
-    assert!(is_enabled(&result.extensions, "clip.ts"));
-    assert!(is_enabled(&result.extensions, "cost.ts"));
-    assert!(!has_path(&result.extensions, "helper.ts"));
 }
 
 // -- .agents/skills ancestor scan -----------------------------------------------
@@ -504,128 +438,7 @@ fn parent_gitignore_does_not_apply_to_auto_discovery() {
         .any(|r| r.path == skill_path && r.enabled));
 }
 
-// -- resolveExtensionSources ----------------------------------------------------
-
-#[test]
-fn extension_sources_resolve_local_paths() {
-    let mut fixture = Fixture::new();
-    let ext_path = fixture.temp_dir.join("ext.ts");
-    write(&ext_path, "export default function() {}");
-
-    let result = fixture
-        .manager
-        .resolve_extension_sources(
-            &[ext_path.display().to_string()],
-            ResolveExtensionOptions::default(),
-        )
-        .unwrap();
-    assert!(result
-        .extensions
-        .iter()
-        .any(|r| r.path == ext_path && r.enabled));
-}
-
-#[test]
-fn extension_sources_handle_directories_with_pi_manifest() {
-    let mut fixture = Fixture::new();
-    let pkg_dir = fixture.temp_dir.join("my-package");
-    write(
-        &pkg_dir.join("package.json"),
-        r#"{"name":"my-package","pi":{"extensions":["./src/index.ts"],"skills":["./skills"]}}"#,
-    );
-    write(
-        &pkg_dir.join("src").join("index.ts"),
-        "export default function() {}",
-    );
-    let skill_path = skill_md(&pkg_dir.join("skills"), "my-skill", "Test");
-
-    let result = fixture
-        .manager
-        .resolve_extension_sources(
-            &[pkg_dir.display().to_string()],
-            ResolveExtensionOptions::default(),
-        )
-        .unwrap();
-    assert!(result
-        .extensions
-        .iter()
-        .any(|r| r.path == pkg_dir.join("src").join("index.ts") && r.enabled));
-    assert!(result
-        .skills
-        .iter()
-        .any(|r| r.path == skill_path && r.enabled));
-}
-
-#[test]
-fn extension_sources_handle_auto_discovery_layout() {
-    let mut fixture = Fixture::new();
-    let pkg_dir = fixture.temp_dir.join("auto-pkg");
-    write(
-        &pkg_dir.join("extensions").join("main.ts"),
-        "export default function() {}",
-    );
-    write(&pkg_dir.join("themes").join("dark.json"), "{}");
-
-    let result = fixture
-        .manager
-        .resolve_extension_sources(
-            &[pkg_dir.display().to_string()],
-            ResolveExtensionOptions::default(),
-        )
-        .unwrap();
-    assert!(is_enabled(&result.extensions, "main.ts"));
-    assert!(is_enabled(&result.themes, "dark.json"));
-}
-
-#[test]
-fn extension_sources_stop_recursion_at_skill_md() {
-    let mut fixture = Fixture::new();
-    let pkg_dir = fixture.temp_dir.join("skill-root-pkg");
-    let root_skill = pkg_dir.join("skills").join("root-skill").join("SKILL.md");
-    write(
-        &root_skill,
-        "---\nname: root-skill\ndescription: Root\n---\n",
-    );
-    let nested = skill_md(
-        &pkg_dir
-            .join("skills")
-            .join("root-skill")
-            .join("nested-skill"),
-        "nested-skill",
-        "Nested",
-    );
-
-    let result = fixture
-        .manager
-        .resolve_extension_sources(
-            &[pkg_dir.display().to_string()],
-            ResolveExtensionOptions::default(),
-        )
-        .unwrap();
-    assert!(result
-        .skills
-        .iter()
-        .any(|r| r.path == root_skill && r.enabled));
-    assert!(!result.skills.iter().any(|r| r.path == nested));
-}
-
 // -- pattern filtering: top-level arrays ----------------------------------------
-
-#[test]
-fn top_level_excludes_extensions_with_pattern() {
-    let mut fixture = Fixture::new();
-    let ext_dir = fixture.agent_dir.join("extensions");
-    write(&ext_dir.join("keep.ts"), "export default function() {}");
-    write(&ext_dir.join("remove.ts"), "export default function() {}");
-    fixture.set_user_array(
-        "extensions",
-        serde_json::json!(["extensions", "!**/remove.ts"]),
-    );
-
-    let result = fixture.manager.resolve().unwrap();
-    assert!(is_enabled(&result.extensions, "keep.ts"));
-    assert!(is_disabled(&result.extensions, "remove.ts"));
-}
 
 #[test]
 fn top_level_filters_themes_with_glob_patterns() {
@@ -677,47 +490,6 @@ fn top_level_filters_skills_with_exclusion_pattern() {
 // -- pattern filtering: pi manifest ----------------------------------------------
 
 #[test]
-fn manifest_supports_glob_patterns_for_extensions() {
-    let mut fixture = Fixture::new();
-    let pkg_dir = fixture.temp_dir.join("manifest-pkg");
-    write(
-        &pkg_dir.join("package.json"),
-        r#"{"name":"manifest-pkg","pi":{"extensions":["extensions","node_modules/dep/extensions","!**/skip.ts"]}}"#,
-    );
-    write(
-        &pkg_dir.join("extensions").join("local.ts"),
-        "export default function() {}",
-    );
-    write(
-        &pkg_dir
-            .join("node_modules")
-            .join("dep")
-            .join("extensions")
-            .join("remote.ts"),
-        "export default function() {}",
-    );
-    write(
-        &pkg_dir
-            .join("node_modules")
-            .join("dep")
-            .join("extensions")
-            .join("skip.ts"),
-        "export default function() {}",
-    );
-
-    let result = fixture
-        .manager
-        .resolve_extension_sources(
-            &[pkg_dir.display().to_string()],
-            ResolveExtensionOptions::default(),
-        )
-        .unwrap();
-    assert!(is_enabled(&result.extensions, "local.ts"));
-    assert!(is_enabled(&result.extensions, "remote.ts"));
-    assert!(!has_path(&result.extensions, "skip.ts"));
-}
-
-#[test]
 fn manifest_supports_glob_patterns_for_skills() {
     let mut fixture = Fixture::new();
     let pkg_dir = fixture.temp_dir.join("skill-manifest-pkg");
@@ -728,13 +500,8 @@ fn manifest_supports_glob_patterns_for_skills() {
     skill_md(&pkg_dir.join("skills"), "good-skill", "Good");
     skill_md(&pkg_dir.join("skills"), "bad-skill", "Bad");
 
-    let result = fixture
-        .manager
-        .resolve_extension_sources(
-            &[pkg_dir.display().to_string()],
-            ResolveExtensionOptions::default(),
-        )
-        .unwrap();
+    fixture.set_user_packages(serde_json::json!([pkg_dir.display().to_string()]));
+    let result = fixture.manager.resolve().unwrap();
     assert!(result
         .skills
         .iter()
@@ -767,13 +534,8 @@ fn manifest_expands_positive_glob_entries_before_collecting_skills() {
         "DWS",
     );
 
-    let result = fixture
-        .manager
-        .resolve_extension_sources(
-            &[pkg_dir.display().to_string()],
-            ResolveExtensionOptions::default(),
-        )
-        .unwrap();
+    fixture.set_user_packages(serde_json::json!([pkg_dir.display().to_string()]));
+    let result = fixture.manager.resolve().unwrap();
     assert!(result
         .skills
         .iter()
@@ -793,50 +555,22 @@ fn user_filters_layer_on_top_of_manifest_filters() {
     let pkg_dir = fixture.temp_dir.join("layered-pkg");
     write(
         &pkg_dir.join("package.json"),
-        r#"{"name":"layered-pkg","pi":{"extensions":["extensions","!**/baz.ts"]}}"#,
+        r#"{"name":"layered-pkg","pi":{"prompts":["prompts","!**/baz.md"]}}"#,
     );
-    for name in ["foo.ts", "bar.ts", "baz.ts"] {
-        write(
-            &pkg_dir.join("extensions").join(name),
-            "export default function() {}",
-        );
+    for name in ["foo.md", "bar.md", "baz.md"] {
+        write(&pkg_dir.join("prompts").join(name), "A prompt");
     }
     fixture.set_user_packages(serde_json::json!([{
         "source": pkg_dir.display().to_string(),
-        "extensions": ["!**/bar.ts"],
         "skills": [],
-        "prompts": [],
+        "prompts": ["!**/bar.md"],
         "themes": [],
     }]));
 
     let result = fixture.manager.resolve().unwrap();
-    assert!(is_enabled(&result.extensions, "foo.ts"));
-    assert!(is_disabled(&result.extensions, "bar.ts"));
-    assert!(!has_path(&result.extensions, "baz.ts"));
-}
-
-#[test]
-fn package_filters_exclude_extensions_with_pattern() {
-    let mut fixture = Fixture::new();
-    let pkg_dir = fixture.temp_dir.join("pattern-pkg");
-    for name in ["foo.ts", "bar.ts", "baz.ts"] {
-        write(
-            &pkg_dir.join("extensions").join(name),
-            "export default function() {}",
-        );
-    }
-    fixture.set_user_packages(serde_json::json!([{
-        "source": pkg_dir.display().to_string(),
-        "extensions": ["!**/baz.ts"],
-        "skills": [],
-        "prompts": [],
-        "themes": [],
-    }]));
-
-    let result = fixture.manager.resolve().unwrap();
-    assert!(is_enabled(&result.extensions, "foo.ts"));
-    assert!(is_enabled(&result.extensions, "bar.ts"));
-    assert!(is_disabled(&result.extensions, "baz.ts"));
+    assert!(is_enabled(&result.prompts, "foo.md"));
+    assert!(is_disabled(&result.prompts, "bar.md"));
+    assert!(!has_path(&result.prompts, "baz.md"));
 }
 
 #[test]
@@ -847,7 +581,6 @@ fn package_filters_filter_themes() {
     write(&pkg_dir.join("themes").join("ugly.json"), "{}");
     fixture.set_user_packages(serde_json::json!([{
         "source": pkg_dir.display().to_string(),
-        "extensions": [],
         "skills": [],
         "prompts": [],
         "themes": ["!ugly.json"],
@@ -862,97 +595,60 @@ fn package_filters_filter_themes() {
 fn package_filters_combine_include_and_exclude_patterns() {
     let mut fixture = Fixture::new();
     let pkg_dir = fixture.temp_dir.join("combo-pkg");
-    for name in ["alpha.ts", "beta.ts", "gamma.ts"] {
-        write(
-            &pkg_dir.join("extensions").join(name),
-            "export default function() {}",
-        );
+    for name in ["alpha.md", "beta.md", "gamma.md"] {
+        write(&pkg_dir.join("prompts").join(name), "A prompt");
     }
     fixture.set_user_packages(serde_json::json!([{
         "source": pkg_dir.display().to_string(),
-        "extensions": ["**/alpha.ts", "**/beta.ts", "!**/beta.ts"],
         "skills": [],
-        "prompts": [],
+        "prompts": ["**/alpha.md", "**/beta.md", "!**/beta.md"],
         "themes": [],
     }]));
 
     let result = fixture.manager.resolve().unwrap();
-    assert!(is_enabled(&result.extensions, "alpha.ts"));
-    assert!(is_disabled(&result.extensions, "beta.ts"));
-    assert!(is_disabled(&result.extensions, "gamma.ts"));
+    assert!(is_enabled(&result.prompts, "alpha.md"));
+    assert!(is_disabled(&result.prompts, "beta.md"));
+    assert!(is_disabled(&result.prompts, "gamma.md"));
 }
 
 #[test]
 fn package_filters_work_with_direct_paths() {
     let mut fixture = Fixture::new();
     let pkg_dir = fixture.temp_dir.join("direct-pkg");
-    write(
-        &pkg_dir.join("extensions").join("one.ts"),
-        "export default function() {}",
-    );
-    write(
-        &pkg_dir.join("extensions").join("two.ts"),
-        "export default function() {}",
-    );
+    write(&pkg_dir.join("prompts").join("one.md"), "One");
+    write(&pkg_dir.join("prompts").join("two.md"), "Two");
     fixture.set_user_packages(serde_json::json!([{
         "source": pkg_dir.display().to_string(),
-        "extensions": ["extensions/one.ts"],
         "skills": [],
-        "prompts": [],
+        "prompts": ["prompts/one.md"],
         "themes": [],
     }]));
 
     let result = fixture.manager.resolve().unwrap();
-    assert!(is_enabled(&result.extensions, "one.ts"));
-    assert!(is_disabled(&result.extensions, "two.ts"));
+    assert!(is_enabled(&result.prompts, "one.md"));
+    assert!(is_disabled(&result.prompts, "two.md"));
 }
 
 // -- force-include / force-exclude ---------------------------------------------
 
 #[test]
-fn force_include_extensions_after_exclusion() {
-    let mut fixture = Fixture::new();
-    let ext_dir = fixture.agent_dir.join("extensions");
-    for name in ["keep.ts", "excluded.ts", "force-back.ts"] {
-        write(&ext_dir.join(name), "export default function() {}");
-    }
-    fixture.set_user_array(
-        "extensions",
-        serde_json::json!([
-            "extensions",
-            "!extensions/*.ts",
-            "+extensions/force-back.ts"
-        ]),
-    );
-
-    let result = fixture.manager.resolve().unwrap();
-    assert!(is_disabled(&result.extensions, "keep.ts"));
-    assert!(is_disabled(&result.extensions, "excluded.ts"));
-    assert!(is_enabled(&result.extensions, "force-back.ts"));
-}
-
-#[test]
 fn force_include_overrides_exclude_in_package_filters() {
     let mut fixture = Fixture::new();
     let pkg_dir = fixture.temp_dir.join("force-pkg");
-    for name in ["alpha.ts", "beta.ts", "gamma.ts"] {
-        write(
-            &pkg_dir.join("extensions").join(name),
-            "export default function() {}",
-        );
+    for name in ["alpha.md", "beta.md", "gamma.md"] {
+        write(&pkg_dir.join("prompts").join(name), "A prompt");
     }
     fixture.set_user_packages(serde_json::json!([{
         "source": pkg_dir.display().to_string(),
-        "extensions": ["!**/*.ts", "+extensions/beta.ts"],
         "skills": [],
-        "prompts": [],
+        "prompts": ["!**/*.md", "+prompts/beta.md"],
         "themes": [],
     }]));
 
     let result = fixture.manager.resolve().unwrap();
-    assert!(is_disabled(&result.extensions, "alpha.ts"));
-    assert!(is_enabled(&result.extensions, "beta.ts"));
-    assert!(is_disabled(&result.extensions, "gamma.ts"));
+    assert!(is_disabled(&result.prompts, "alpha.md"));
+    assert!(is_enabled(&result.prompts, "beta.md"));
+    assert!(is_disabled(&result.prompts, "gamma.md"));
 }
 
 #[test]
@@ -964,7 +660,6 @@ fn force_include_multiple_resources() {
     }
     fixture.set_user_packages(serde_json::json!([{
         "source": pkg_dir.display().to_string(),
-        "extensions": [],
         "skills": ["!**/*", "+skills/skill-a", "+skills/skill-c"],
         "prompts": [],
         "themes": [],
@@ -988,17 +683,17 @@ fn force_include_multiple_resources() {
 #[test]
 fn force_include_after_specific_exclusion() {
     let mut fixture = Fixture::new();
-    let ext_dir = fixture.agent_dir.join("extensions");
-    write(&ext_dir.join("a.ts"), "export default function() {}");
-    write(&ext_dir.join("b.ts"), "export default function() {}");
+    let prompts_dir = fixture.agent_dir.join("prompts");
+    write(&prompts_dir.join("a.md"), "A prompt");
+    write(&prompts_dir.join("b.md"), "B prompt");
     fixture.set_user_array(
-        "extensions",
-        serde_json::json!(["extensions", "!extensions/b.ts", "+extensions/b.ts"]),
+        "prompts",
+        serde_json::json!(["prompts", "!prompts/b.md", "+prompts/b.md"]),
     );
 
     let result = fixture.manager.resolve().unwrap();
-    assert!(is_enabled(&result.extensions, "a.ts"));
-    assert!(is_enabled(&result.extensions, "b.ts"));
+    assert!(is_enabled(&result.prompts, "a.md"));
+    assert!(is_enabled(&result.prompts, "b.md"));
 }
 
 #[test]
@@ -1007,25 +702,17 @@ fn force_include_in_manifest_patterns() {
     let pkg_dir = fixture.temp_dir.join("manifest-force-pkg");
     write(
         &pkg_dir.join("package.json"),
-        r#"{"name":"manifest-force-pkg","pi":{"extensions":["extensions","!**/two.ts","+extensions/two.ts"]}}"#,
+        r#"{"name":"manifest-force-pkg","pi":{"prompts":["prompts","!**/two.md","+prompts/two.md"]}}"#,
     );
-    for name in ["one.ts", "two.ts", "three.ts"] {
-        write(
-            &pkg_dir.join("extensions").join(name),
-            "export default function() {}",
-        );
+    for name in ["one.md", "two.md", "three.md"] {
+        write(&pkg_dir.join("prompts").join(name), "A prompt");
     }
 
-    let result = fixture
-        .manager
-        .resolve_extension_sources(
-            &[pkg_dir.display().to_string()],
-            ResolveExtensionOptions::default(),
-        )
-        .unwrap();
-    assert!(is_enabled(&result.extensions, "one.ts"));
-    assert!(is_enabled(&result.extensions, "two.ts"));
-    assert!(is_enabled(&result.extensions, "three.ts"));
+    fixture.set_user_packages(serde_json::json!([pkg_dir.display().to_string()]));
+    let result = fixture.manager.resolve().unwrap();
+    assert!(is_enabled(&result.prompts, "one.md"));
+    assert!(is_enabled(&result.prompts, "two.md"));
+    assert!(is_enabled(&result.prompts, "three.md"));
 }
 
 #[test]
@@ -1067,42 +754,35 @@ fn force_include_prompts() {
 #[test]
 fn force_exclude_top_level_resources() {
     let mut fixture = Fixture::new();
-    let ext_dir = fixture.agent_dir.join("extensions");
-    write(&ext_dir.join("alpha.ts"), "export default function() {}");
-    write(&ext_dir.join("beta.ts"), "export default function() {}");
+    let themes_dir = fixture.agent_dir.join("themes");
+    write(&themes_dir.join("alpha.json"), "{}");
+    write(&themes_dir.join("beta.json"), "{}");
     fixture.set_user_array(
-        "extensions",
-        serde_json::json!(["extensions", "+extensions/alpha.ts", "-extensions/alpha.ts"]),
+        "themes",
+        serde_json::json!(["themes", "+themes/alpha.json", "-themes/alpha.json"]),
     );
 
     let result = fixture.manager.resolve().unwrap();
-    assert!(is_disabled(&result.extensions, "alpha.ts"));
-    assert!(is_enabled(&result.extensions, "beta.ts"));
+    assert!(is_disabled(&result.themes, "alpha.json"));
+    assert!(is_enabled(&result.themes, "beta.json"));
 }
 
 #[test]
 fn force_exclude_in_package_filters() {
     let mut fixture = Fixture::new();
     let pkg_dir = fixture.temp_dir.join("force-exclude-pkg");
-    write(
-        &pkg_dir.join("extensions").join("alpha.ts"),
-        "export default function() {}",
-    );
-    write(
-        &pkg_dir.join("extensions").join("beta.ts"),
-        "export default function() {}",
-    );
+    write(&pkg_dir.join("prompts").join("alpha.md"), "A prompt");
+    write(&pkg_dir.join("prompts").join("beta.md"), "B prompt");
     fixture.set_user_packages(serde_json::json!([{
         "source": pkg_dir.display().to_string(),
-        "extensions": ["extensions/*.ts", "+extensions/alpha.ts", "-extensions/alpha.ts"],
         "skills": [],
-        "prompts": [],
+        "prompts": ["prompts/*.md", "+prompts/alpha.md", "-prompts/alpha.md"],
         "themes": [],
     }]));
 
     let result = fixture.manager.resolve().unwrap();
-    assert!(is_disabled(&result.extensions, "alpha.ts"));
-    assert!(is_enabled(&result.extensions, "beta.ts"));
+    assert!(is_disabled(&result.prompts, "alpha.md"));
+    assert!(is_enabled(&result.prompts, "beta.md"));
 }
 
 // -- package deduplication -------------------------------------------------------
@@ -1111,10 +791,7 @@ fn force_exclude_in_package_filters() {
 fn same_local_package_in_both_scopes_resolves_once_with_project_scope() {
     let mut fixture = Fixture::new();
     let pkg_dir = fixture.temp_dir.join("shared-pkg");
-    write(
-        &pkg_dir.join("extensions").join("shared.ts"),
-        "export default function() {}",
-    );
+    skill_md(&pkg_dir.join("skills"), "shared-skill", "Shared skill");
 
     fixture.set_user_packages(serde_json::json!([pkg_dir.display().to_string()]));
     let project_dir = fixture.manager.cwd().join(crate::settings::CONFIG_DIR_NAME);
@@ -1128,7 +805,7 @@ fn same_local_package_in_both_scopes_resolves_once_with_project_scope() {
 
     let result = fixture.manager.resolve().unwrap();
     let shared: Vec<_> = result
-        .extensions
+        .skills
         .iter()
         .filter(|r| r.path.to_string_lossy().contains("shared-pkg"))
         .collect();
@@ -1141,14 +818,8 @@ fn different_packages_in_both_scopes_both_resolve() {
     let mut fixture = Fixture::new();
     let pkg1 = fixture.temp_dir.join("pkg1");
     let pkg2 = fixture.temp_dir.join("pkg2");
-    write(
-        &pkg1.join("extensions").join("from-pkg1.ts"),
-        "export default function() {}",
-    );
-    write(
-        &pkg2.join("extensions").join("from-pkg2.ts"),
-        "export default function() {}",
-    );
+    write(&pkg1.join("prompts").join("from-pkg1.md"), "Pkg1 prompt");
+    write(&pkg2.join("prompts").join("from-pkg2.md"), "Pkg2 prompt");
 
     fixture.set_user_packages(serde_json::json!([pkg1.display().to_string()]));
     let project_dir = fixture.manager.cwd().join(crate::settings::CONFIG_DIR_NAME);
@@ -1162,141 +833,13 @@ fn different_packages_in_both_scopes_both_resolve() {
 
     let result = fixture.manager.resolve().unwrap();
     assert!(result
-        .extensions
+        .prompts
         .iter()
         .any(|r| r.path.to_string_lossy().contains("pkg1")));
     assert!(result
-        .extensions
+        .prompts
         .iter()
         .any(|r| r.path.to_string_lossy().contains("pkg2")));
-}
-
-// -- multi-file extension discovery ---------------------------------------------
-
-#[test]
-fn only_index_ts_loads_from_subdirectories() {
-    let mut fixture = Fixture::new();
-    let pkg_dir = fixture.temp_dir.join("multifile-pkg");
-    write(
-        &pkg_dir.join("extensions").join("subagent").join("index.ts"),
-        "export default function(api) {}",
-    );
-    write(
-        &pkg_dir
-            .join("extensions")
-            .join("subagent")
-            .join("agents.ts"),
-        "export function helper() {}",
-    );
-    write(
-        &pkg_dir.join("extensions").join("standalone.ts"),
-        "export default function(api) {}",
-    );
-
-    let result = fixture
-        .manager
-        .resolve_extension_sources(
-            &[pkg_dir.display().to_string()],
-            ResolveExtensionOptions::default(),
-        )
-        .unwrap();
-    assert!(is_enabled(&result.extensions, "subagent/index.ts"));
-    assert!(is_enabled(&result.extensions, "standalone.ts"));
-    assert!(!has_path(&result.extensions, "agents.ts"));
-}
-
-#[test]
-fn manifest_in_subdirectories_is_respected() {
-    let mut fixture = Fixture::new();
-    let pkg_dir = fixture.temp_dir.join("manifest-subdir-pkg");
-    write(
-        &pkg_dir
-            .join("extensions")
-            .join("custom")
-            .join("package.json"),
-        r#"{"pi":{"extensions":["./main.ts"]}}"#,
-    );
-    write(
-        &pkg_dir.join("extensions").join("custom").join("main.ts"),
-        "export default function(api) {}",
-    );
-    write(
-        &pkg_dir.join("extensions").join("custom").join("utils.ts"),
-        "export const util = 1;",
-    );
-
-    let result = fixture
-        .manager
-        .resolve_extension_sources(
-            &[pkg_dir.display().to_string()],
-            ResolveExtensionOptions::default(),
-        )
-        .unwrap();
-    assert!(is_enabled(&result.extensions, "custom/main.ts"));
-    assert!(!has_path(&result.extensions, "utils.ts"));
-}
-
-#[test]
-fn mixed_top_level_files_and_subdirectories() {
-    let mut fixture = Fixture::new();
-    let pkg_dir = fixture.temp_dir.join("mixed-pkg");
-    write(
-        &pkg_dir.join("extensions").join("simple.ts"),
-        "export default function(api) {}",
-    );
-    write(
-        &pkg_dir.join("extensions").join("complex").join("index.ts"),
-        "export default function(api) {}",
-    );
-    write(
-        &pkg_dir.join("extensions").join("complex").join("a.ts"),
-        "export const a = 1;",
-    );
-    write(
-        &pkg_dir.join("extensions").join("complex").join("b.ts"),
-        "export const b = 2;",
-    );
-
-    let result = fixture
-        .manager
-        .resolve_extension_sources(
-            &[pkg_dir.display().to_string()],
-            ResolveExtensionOptions::default(),
-        )
-        .unwrap();
-    assert!(is_enabled(&result.extensions, "simple.ts"));
-    assert!(is_enabled(&result.extensions, "complex/index.ts"));
-    assert!(!has_path(&result.extensions, "complex/a.ts"));
-    assert!(!has_path(&result.extensions, "complex/b.ts"));
-    assert_eq!(result.extensions.iter().filter(|r| r.enabled).count(), 2);
-}
-
-#[test]
-fn subdirectories_without_entry_point_are_skipped() {
-    let mut fixture = Fixture::new();
-    let pkg_dir = fixture.temp_dir.join("no-entry-pkg");
-    write(
-        &pkg_dir.join("extensions").join("broken").join("helper.ts"),
-        "export const x = 1;",
-    );
-    write(
-        &pkg_dir.join("extensions").join("broken").join("another.ts"),
-        "export const y = 2;",
-    );
-    write(
-        &pkg_dir.join("extensions").join("valid.ts"),
-        "export default function(api) {}",
-    );
-
-    let result = fixture
-        .manager
-        .resolve_extension_sources(
-            &[pkg_dir.display().to_string()],
-            ResolveExtensionOptions::default(),
-        )
-        .unwrap();
-    assert!(is_enabled(&result.extensions, "valid.ts"));
-    assert_eq!(result.extensions.iter().filter(|r| r.enabled).count(), 1);
 }
 
 // -- offline / missing-source policies -------------------------------------------
@@ -1319,55 +862,11 @@ fn offline_mode_skips_installing_missing_sources() {
 
     let result = fixture.manager.resolve().unwrap();
     assert!(!result
-        .extensions
+        .skills
         .iter()
-        .chain(&result.skills)
         .chain(&result.prompts)
         .chain(&result.themes)
         .any(|r| r.metadata.origin == ResourceOrigin::Package));
-
-    match previous {
-        Some(value) => std::env::set_var("PI_OFFLINE", value),
-        None => std::env::remove_var("PI_OFFLINE"),
-    }
-}
-
-#[test]
-fn offline_mode_skips_refreshing_temporary_git_sources() {
-    let _guard = ENV_MUTEX.lock().unwrap();
-    let previous = std::env::var("PI_OFFLINE").ok();
-    std::env::set_var("PI_OFFLINE", "1");
-    let mut fixture = Fixture::new();
-
-    // A pre-existing temporary checkout for the source is collected without
-    // any refresh attempt.
-    let git_source = "git:github.com/example/repo";
-    let parsed = super::super::source::parse_source(git_source);
-    let installed = match &parsed {
-        crate::packages::ParsedSource::Git(git) => super::super::git::git_install_path(
-            git,
-            SourceScope::Temporary,
-            fixture.manager.cwd(),
-            &fixture.agent_dir,
-        ),
-        _ => panic!("expected git source"),
-    };
-    write(
-        &installed.join("extensions").join("index.ts"),
-        "export default function() {};",
-    );
-
-    let result = fixture
-        .manager
-        .resolve_extension_sources(
-            &[git_source.to_string()],
-            ResolveExtensionOptions {
-                temporary: true,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    assert!(is_enabled(&result.extensions, "extensions/index.ts"));
 
     match previous {
         Some(value) => std::env::set_var("PI_OFFLINE", value),
@@ -1402,8 +901,10 @@ fn on_missing_skip_leaves_the_source_out() {
         .resolve_with_on_missing(Some(&mut |_| crate::packages::MissingSourceAction::Skip))
         .unwrap();
     assert!(result
-        .extensions
+        .skills
         .iter()
+        .chain(&result.prompts)
+        .chain(&result.themes)
         .all(|r| r.metadata.origin != ResourceOrigin::Package));
 }
 

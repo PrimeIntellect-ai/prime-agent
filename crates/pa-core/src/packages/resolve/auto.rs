@@ -6,9 +6,8 @@ use std::path::{Path, PathBuf};
 
 use super::super::PackageManager;
 use super::discovery::{
-    collect_ancestor_agents_skill_dirs, collect_auto_extension_entries,
-    collect_auto_prompt_entries, collect_auto_theme_entries, collect_skill_entries,
-    SkillDiscoveryMode,
+    collect_ancestor_agents_skill_dirs, collect_auto_prompt_entries, collect_auto_theme_entries,
+    collect_skill_entries, SkillDiscoveryMode,
 };
 use super::patterns::is_enabled_by_overrides;
 use super::{
@@ -75,17 +74,9 @@ impl PackageManager {
 
         add_resources(
             accumulator,
-            ResourceType::Extensions,
-            collect_auto_extension_entries(&project_dirs[0]),
-            &project_metadata,
-            &project_overrides[0],
-            project_base_dir,
-        );
-        add_resources(
-            accumulator,
             ResourceType::Skills,
             [
-                collect_skill_entries(&project_dirs[1], SkillDiscoveryMode::Pi),
+                collect_skill_entries(&project_dirs[0], SkillDiscoveryMode::Pi),
                 project_agents_skill_dirs
                     .iter()
                     .flat_map(|dir| collect_skill_entries(dir, SkillDiscoveryMode::Agents))
@@ -93,44 +84,36 @@ impl PackageManager {
             ]
             .concat(),
             &project_metadata,
-            &project_overrides[1],
+            &project_overrides[0],
             project_base_dir,
         );
         add_resources(
             accumulator,
             ResourceType::Prompts,
-            collect_auto_prompt_entries(&project_dirs[2]),
+            collect_auto_prompt_entries(&project_dirs[1]),
             &project_metadata,
-            &project_overrides[2],
+            &project_overrides[1],
             project_base_dir,
         );
         add_resources(
             accumulator,
             ResourceType::Themes,
-            collect_auto_theme_entries(&project_dirs[3]),
+            collect_auto_theme_entries(&project_dirs[2]),
             &project_metadata,
-            &project_overrides[3],
+            &project_overrides[2],
             project_base_dir,
         );
 
         add_resources(
             accumulator,
-            ResourceType::Extensions,
-            collect_auto_extension_entries(&user_dirs[0]),
-            &user_metadata,
-            &user_overrides[0],
-            global_base_dir,
-        );
-        add_resources(
-            accumulator,
             ResourceType::Skills,
             [
-                collect_skill_entries(&user_dirs[1], SkillDiscoveryMode::Pi),
+                collect_skill_entries(&user_dirs[0], SkillDiscoveryMode::Pi),
                 collect_skill_entries(&user_agents_skills_dir, SkillDiscoveryMode::Agents),
             ]
             .concat(),
             &user_metadata,
-            &user_overrides[1],
+            &user_overrides[0],
             global_base_dir,
         );
 
@@ -157,7 +140,7 @@ impl PackageManager {
                         path: Some(bundled_dir.display().to_string()),
                     });
                 }
-                let mut builtin_skill_overrides = user_overrides[1].clone();
+                let mut builtin_skill_overrides = user_overrides[0].clone();
                 if !self.bundled_websearch_enabled() {
                     // Web search stays disabled until explicitly enabled.
                     builtin_skill_overrides.push("-websearch/SKILL.md".to_string());
@@ -178,17 +161,17 @@ impl PackageManager {
         add_resources(
             accumulator,
             ResourceType::Prompts,
-            collect_auto_prompt_entries(&user_dirs[2]),
+            collect_auto_prompt_entries(&user_dirs[1]),
             &user_metadata,
-            &user_overrides[2],
+            &user_overrides[1],
             global_base_dir,
         );
         add_resources(
             accumulator,
             ResourceType::Themes,
-            collect_auto_theme_entries(&user_dirs[3]),
+            collect_auto_theme_entries(&user_dirs[2]),
             &user_metadata,
-            &user_overrides[3],
+            &user_overrides[2],
             global_base_dir,
         );
     }

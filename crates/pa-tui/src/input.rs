@@ -333,8 +333,8 @@ fn forward(
 /// The TS enhanced-key dispatch filters, applied to one terminal write:
 ///
 /// - Key releases are dropped before any surface sees them (TS tui.ts:
-///   `isKeyRelease(data) && !focusedComponent.wantsKeyRelease` — the only
-///   TS opt-ins are example extensions, which this port does not ship).
+///   `isKeyRelease(data) && !focusedComponent.wantsKeyRelease` — no TS
+///   surface opts in, and this port ships none either).
 /// - The kitty-printable dedup (TS `StdinBuffer`
 ///   `pendingKittyPrintableCodepoint`, stdin-buffer.ts:307): a
 ///   duplicate-reporting kitty terminal sends BOTH the plain CSI-u form
@@ -731,8 +731,7 @@ mod tests {
     }
 
     /// Key releases never reach a surface (TS tui.ts: the focused
-    /// component must opt in with wantsKeyRelease; no TS surface except
-    /// example extensions does).
+    /// component must opt in with wantsKeyRelease; no surface does).
     #[test]
     fn key_releases_are_dropped_in_both_kitty_modes() {
         let release = key_with_kind(
