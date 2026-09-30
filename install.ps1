@@ -43,14 +43,22 @@ $ErrorActionPreference = 'Stop'
 $DownloadBaseUrlDefault = 'https://app.primeintellect.ai/prime-agent'
 $ReleaseChannelDefault = 'stable'
 
+# The installer-owned scratch bookkeeping, initialized BEFORE any Fail can
+# run (under `irm | iex` the script scope is the caller's session: ambient
+# variables must never be read as this installer's state, so the names are
+# unique to this script and both start cleared - the bots' finding).
+$script:primeAgentInstallScratch = $null
+$script:primeAgentInstallStage = $null
+
 function Fail($message) {
-    # The download scratch (the tarball + the sums) rides every exit path:
-    # Fail sweeps it before exiting - but ONLY the scratch THIS script
-    # created (the created-flag guards it: under `irm | iex` the script
-    # scope is the caller's session, and an ambient `$download` variable
-    # must never be deleted - the bots' finding).
-    if ($script:downloadCreated) {
-        Remove-Item -Recurse -Force $script:download -ErrorAction SilentlyContinue
+    # The installer's own scratch (the download dir + the stage tree) rides
+    # every exit path: Fail sweeps exactly what THIS script created - the
+    # ambient caller's variables never enter the cleanup.
+    if ($script:primeAgentInstallScratch) {
+        Remove-Item -Recurse -Force $script:primeAgentInstallScratch -ErrorAction SilentlyContinue
+    }
+    if ($script:primeAgentInstallStage) {
+        Remove-Item -Recurse -Force $script:primeAgentInstallStage -ErrorAction SilentlyContinue
     }
     Write-Error "install.ps1: $message"
     exit 1
@@ -128,12 +136,16 @@ $manifest = $null
 $manifestVersion = $null
 $row = $null
 if ($versionPin) {
-    $version = $versionPin.TrimStart('v')
+    $version = $versionPin.Trim().TrimStart('v')
     Write-Host "installing prime-agent $version (pinned) from the $channel channel ($platform)"
 } else {
     $attempt = 0
     while ($true) {
-        $version = (Invoke-RestMethod -Uri "$baseUrl/$pointerName").ToString().Trim()
+        # The pointer is published bare ("1.2.3") but a `v`-prefixed
+        # spelling is a valid historical form - normalize it (the manifest's
+        # version is bare; the release prefix and the artifact names carry
+        # no extra `v` - the bots' finding).
+        $version = (Invoke-RestMethod -Uri "$baseUrl/$pointerName").ToString().Trim().TrimStart('v')
         if (-not $version) { Fail "could not resolve the latest $channel version from $baseUrl/$pointerName" }
         $manifest = Invoke-RestMethod -Uri "$baseUrl/$manifestName"
         $manifestVersion = ($manifest.version).ToString().TrimStart('v')
@@ -170,15 +182,18 @@ if (-not $versionPin) {
 $releasePrefix = "releases/v$version"
 $download = Join-Path ([IO.Path]::GetTempPath()) ("prime-agent-download-{0}" -f [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $download | Out-Null
-$script:downloadCreated = $true
+$script:primeAgentInstallScratch = $download
 # THE DOWNLOAD SWEEP: the scratch (the tarball + the sums) is removed when
 # this script exits - success, a Fail, or a terminating error (install-
 # rust.sh's `rm -rf "$dl"` discipline; the bots' finding: accumulated
 # release tarballs in the temp folder). A script-scoped trap carries the
 # cleanup through the non-local Fail exits.
 trap {
-    if ($script:downloadCreated) {
-        Remove-Item -Recurse -Force $script:download -ErrorAction SilentlyContinue
+    if ($script:primeAgentInstallScratch) {
+        Remove-Item -Recurse -Force $script:primeAgentInstallScratch -ErrorAction SilentlyContinue
+    }
+    if ($script:primeAgentInstallStage) {
+        Remove-Item -Recurse -Force $script:primeAgentInstallStage -ErrorAction SilentlyContinue
     }
     break
 }
@@ -209,6 +224,10 @@ New-Item -ItemType Directory -Path (Join-Path $prefix 'share') -Force | Out-Null
 New-Item -ItemType Directory -Path $bin -Force | Out-Null
 $stage = Join-Path (Join-Path $prefix 'share') ("prime-agent.stage-{0}" -f [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $stage | Out-Null
+# The stage rides every exit path once created (Fail + the trap sweep it:
+# a failed extraction/validation must not leave the extracted payload
+# behind - the bots' finding).
+$script:primeAgentInstallStage = $stage
 & tar -xzf $tarball -C $stage
 if ($LASTEXITCODE -ne 0) { Fail "could not extract $expectedFile (tar exited $LASTEXITCODE)" }
 $payloadExe = Join-Path $stage 'prime-agent.exe'
@@ -250,6 +269,24 @@ try {
 $published = $false
 $rollback = $null
 $script:daemonStopped = $false
+
+# THE PREFLIGHT: every ownership refusal that can happen runs BEFORE the
+# daemon stop (a refused install must never have stopped a daemon - the
+# bots' finding: the stop-then-refuse order was the avoidable downtime).
+$rollback = Join-Path (Join-Path $prefix 'share') 'prime-agent.old'
+if (Test-Path $share -PathType Container) {
+    $markerPath = Join-Path $share '.prime-agent-install'
+    if (-not (Test-Path $markerPath -PathType Leaf)) {
+        Fail "refusing to take ownership of ${share}: it is not a marked prime-agent payload tree (.prime-agent-install); move it aside and re-run"
+    }
+    if (Test-Path $rollback) {
+        $rollbackMarker = Join-Path $rollback '.prime-agent-install'
+        if (-not (Test-Path $rollbackMarker -PathType Leaf)) {
+            Fail "refusing to delete the unmarked rollback directory: $rollback (move it aside and re-run)"
+        }
+    }
+}
+
 try {
     # THE DAEMON STOP, inside the lock's try (a terminating error in the
     # stop must still release the lock - the bots' finding: the stale lock
@@ -279,27 +316,18 @@ try {
         }
     }
 
-    # The one-generation rollback: the previous payload (marker-checked —
-    # an unowned directory is never claimed, and an unowned ROLLBACK name is
-    # never deleted) moves aside, the fresh stage swaps in, and the next
-    # install sweeps the rollback.
-    $rollback = Join-Path (Join-Path $prefix 'share') 'prime-agent.old'
+    # The one-generation rollback (the ownership checks already ran in the
+    # preflight): the previous payload moves aside, the fresh stage swaps
+    # in, and the next install sweeps the rollback.
     if (Test-Path $share -PathType Container) {
-        $markerPath = Join-Path $share '.prime-agent-install'
-        if (-not (Test-Path $markerPath -PathType Leaf)) {
-            Fail "refusing to take ownership of ${share}: it is not a marked prime-agent payload tree (.prime-agent-install); move it aside and re-run"
-        }
         if (Test-Path $rollback) {
-            $rollbackMarker = Join-Path $rollback '.prime-agent-install'
-            if (-not (Test-Path $rollbackMarker -PathType Leaf)) {
-                Fail "refusing to delete the unmarked rollback directory: $rollback (move it aside and re-run)"
-            }
             Remove-Item -Recurse -Force $rollback
         }
         [IO.Directory]::Move($share, $rollback)
         Write-Host "rollback: $rollback (the previous payload, one generation)"
     }
     [IO.Directory]::Move($stage, $share)
+    $script:primeAgentInstallStage = $null
     $published = $true
 } finally {
     # A failed publish never leaves the machine without its previous payload:
@@ -309,12 +337,20 @@ try {
     # own check into the leaked-lock failure (the bots' finding).
     if (-not $published) {
         if ($rollback -and (Test-Path $rollback -PathType Container) -and -not (Test-Path $share)) {
-            [IO.Directory]::Move($rollback, $share)
-            Write-Warning "the publish failed; the previous payload was restored to $share"
+            # The restore's own failure must not swallow the lock release
+            # (an error thrown here would skip the Remove-Item below - the
+            # stale-lock manual recovery class): the restore reports the
+            # manual recovery instead of throwing.
+            try {
+                [IO.Directory]::Move($rollback, $share)
+                Write-Warning "the publish failed; the previous payload was restored to $share"
+            } catch {
+                Write-Warning "the publish failed AND the previous payload could not be restored: it waits at $rollback - recover with: Move-Item '$rollback' '$share'"
+            }
         }
         # A failed install sweeps its stage tree (the bots' finding: the
         # accumulated prime-agent.stage-* directories).
-        if (Test-Path $stage -PathType Container) {
+        if ($stage -and (Test-Path $stage -PathType Container)) {
             Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
         }
         # A daemon stopped for a FAILED install stays down (its sessions'
@@ -447,4 +483,5 @@ Write-Host "source:    the $channel channel at $baseUrl (prime-agent $version)"
 Write-Host 'next steps: the README''s Install section ships inside the payload:'
 Write-Host "  $share\README.md"
 
-if ($script:downloadCreated) { Remove-Item -Recurse -Force $script:download -ErrorAction SilentlyContinue }
+$script:primeAgentInstallScratch = $null
+if ($download) { Remove-Item -Recurse -Force $download -ErrorAction SilentlyContinue }
