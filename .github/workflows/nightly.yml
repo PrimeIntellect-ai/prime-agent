@@ -7,14 +7,14 @@
 #
 # CADENCE (the operator's ruling: the beta channel follows EVERY green
 # tip - 'nightly' meant the beta release, and the beta updates on every
-# commit, not once a night): every push to `rust` fires a cut for that
+# commit, not once a night): every push to `main` fires a cut for that
 # commit. The cut WAITS for the pushed commit's `continuous` run to
 # conclude green (the proven-built evidence: the tip CI must have greened
 # on that commit) before tagging. The SUPERSEDE cost-guard keeps busy days
 # cheap: this job's concurrency group cancels the in-flight WAIT when a
 # newer push lands (nothing has been tagged during the wait), and
 # release.yml's beta publish refuses to move the channel pointers when a
-# newer commit exists on rust - so only the LATEST green commit ever
+# newer commit exists on main - so only the LATEST green commit ever
 # advances the channel, and 20 merges cost at most a handful of actual
 # beta cuts, each the freshest green.
 #
@@ -57,12 +57,12 @@
 #
 # Not built (deliberate, per the proposal): a prune job for accumulated
 # -beta* releases (deferred until asset count matters), and any content
-# change to the branch (the tag-only commit never lands on rust).
+# change to the branch (the tag-only commit never lands on main).
 
 name: nightly
 
 on:
-  # The rolling beta (the operator's ruling): every push to `rust` fires a
+  # The rolling beta (the operator's ruling): every push to `main` fires a
   # cut for that commit; the cut waits out the pushed commit's continuous
   # CI before tagging (the proven-built evidence).
   push:
@@ -177,7 +177,7 @@ jobs:
             fi
             echo "rolling beta parent: ${target_sha} (continuous run ${run_id}: all ${total} build jobs green)"
           else
-            # The dispatch walk: the newest continuous run on rust whose
+            # The dispatch walk: the newest continuous run on main whose
             # BUILD actually ran green, walking the successful runs newest
             # first and accepting the first whose build-* jobs all
             # completed green.
@@ -363,7 +363,7 @@ jobs:
           (out / "commit.json").write_text(json.dumps({
               "message": f"nightly: {tag} (tag-only: the branch is never touched)\n\n"
                          f"The parent {target_sha} is the newest successful continuous build "
-                         f"on rust; this tree differs from it only by the workspace version "
+                         f"on main; this tree differs from it only by the workspace version "
                          f"rows (Cargo.toml + Cargo.lock). Cut by the nightly workflow; no "
                          f"branch head references this commit.",
               "tree": "",
@@ -373,7 +373,7 @@ jobs:
               "tag": tag,
               "message": f"Nightly build {tag}\n\n"
                          f"Built from the continuous train at parent {target_sha} "
-                         f"(the newest successful continuous build on rust) via the nightly "
+                         f"(the newest successful continuous build on main) via the nightly "
                          f"workflow's tag-only commit. The -beta* tag publishes the nightly "
                          f"channel (beta.json) through the release.yml promote gate.",
               "object": "",

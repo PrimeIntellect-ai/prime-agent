@@ -6,7 +6,7 @@
 # --all-targets -- -D warnings, cargo test --workspace) on the pinned
 # toolchain (1.98.1) and runner image the continuous/release builds use:
 #
-#   push to main/rust — every merge is a push. continuous.yml proves the
+#   push to main — every merge is a push. continuous.yml proves the
 #   release binaries link; THIS workflow proves the tip's test/bench/example
 #   targets compile (`cargo check --workspace --all-targets`) and the test
 #   suites pass (the test suite sharded below; the count is the SHARD_COUNT
@@ -17,7 +17,7 @@
 #   #2627's fork_from test-target errors land as latent compile breaks, and
 #   #2635's login-recovery test land red — none noticed by CI.
 #
-#   pull_request against main/rust — the same gates on the merge candidate,
+#   pull_request against main — the same gates on the merge candidate,
 #   so the merge bar stops relying solely on review bots.
 #
 # The test phase is sharded: `cargo test --workspace` ran every test binary

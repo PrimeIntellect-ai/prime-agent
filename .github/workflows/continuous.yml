@@ -1,6 +1,6 @@
 # Continuous build pipeline for Prime Agent (Rust).
 #
-# Builds the 4-target release matrix on every push to `main` or `rust` and
+# Builds the 4-target release matrix on every push to `main` and
 # uploads the tarballs as workflow artifacts (downloadable from the run page).
 # Does NOT create tags or releases — the org repo's release history stays
 # owned by the merged product's release workflow (release.yml).
@@ -12,7 +12,6 @@ name: continuous
 on:
   push:
     branches:
-      - main
       - main
 
 permissions: {}
@@ -27,7 +26,7 @@ env:
 
 jobs:
   # Superseded-push gate (TS #2567): with `cancel-in-progress: false`, every
-  # push to main/rust queues a full 4-target build, so a burst of merges
+  # push to main queues a full 4-target build, so a burst of merges
   # leaves older runs building artifacts for a commit that is no longer the
   # tip. The gate checks the live branch tip first: when the workflow commit
   # is superseded, the expensive build jobs skip (neutral exit) and the

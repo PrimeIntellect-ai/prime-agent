@@ -35,12 +35,9 @@
 # prepare act fails with a config pointer - and the tag act is unreachable
 # by construction (no release PR can be opened without the App).
 #
-# Ref-agnostic by construction: workflow_dispatch registers only from the
-# default branch (verified on this repo: the rust-only
-# windows-runtime-triage.yml dispatch 404s), so the operator mirrors this
-# file to `main` as one config act; both acts resolve the rust line
-# explicitly (the prepare job checks out the `rust` branch, the tag job reads
-# the merge commit) and never read the ref the workflow ran on.
+# Ref-agnostic by construction: both acts resolve `main` explicitly (the
+# prepare job checks out `main`, the tag job reads the merge commit) and
+# never read the ref the workflow ran on.
 
 name: release-prepare
 
@@ -94,13 +91,13 @@ jobs:
           # Setting any permission input narrows the token to exactly these.
           permission-contents: write
           permission-pull-requests: write
-      - name: "Check out the rust line (full history: the fold sorts fragments by add-date)"
+      - name: "Check out main (full history: the fold sorts fragments by add-date)"
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: main
-          # The rust branch clones at ~94MB (measured 2026-09-29); a release
-          # is rare, and the fold's add-date ordering reads fragment
-          # add-commits anywhere in that history.
+          # A full-history clone is large (the pre-merge rust branch measured
+          # ~94MB on 2026-09-29); a release is rare, and the fold's add-date
+          # ordering reads fragment add-commits anywhere in that history.
           fetch-depth: 0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
@@ -158,7 +155,7 @@ jobs:
             | sort > "$RUNNER_TEMP/release-fragments.txt" || true
           python3 scripts/release/fold_changelog.py --version "${INPUT_VERSION}"
           git add -A CHANGELOG.md Cargo.toml Cargo.lock
-      - name: Commit the release branch (release/vX.Y.Z off the rust tip)
+      - name: Commit the release branch (release/vX.Y.Z off the main tip)
         env:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
@@ -167,7 +164,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           base_sha="$(git rev-parse HEAD)"
           git checkout -q -b "release/v${INPUT_VERSION}"
-          git commit -q -m "release: v${INPUT_VERSION}" -m "Version bump + the .changes/ fragment fold, cut by the release-prepare workflow off the rust tip ${base_sha}. Merging this PR ships v${INPUT_VERSION}: the tag act creates the annotated tag at this PR's squash-merge commit, and the tag-triggered release.yml runs the promote gate (the protected release environment)."
+          git commit -q -m "release: v${INPUT_VERSION}" -m "Version bump + the .changes/ fragment fold, cut by the release-prepare workflow off the main tip ${base_sha}. Merging this PR ships v${INPUT_VERSION}: the tag act creates the annotated tag at this PR's squash-merge commit, and the tag-triggered release.yml runs the promote gate (the protected release environment)."
           echo "release/v${INPUT_VERSION} at $(git rev-parse HEAD) (base ${base_sha})"
       - name: Push the release branch (the App token, one-shot credential helper)
         env:
@@ -251,9 +248,6 @@ jobs:
                 and named humans may create/move tags; manual/local tags are refused.
           - [ ] The `release` environment approvers (Settings - Environments -
                 release): the promotion authority for the promote gate.
-          - [ ] The `main` mirror for `release-prepare.yml` + `nightly.yml` (the
-                default branch registers schedule/dispatch triggers; both workflows
-                resolve the rust line explicitly, so the same bytes are safe there).
 
           _No tag is cut by opening or reviewing this PR; the tag act runs only after
           the merge, and the publish itself is gated behind the environment approval.
