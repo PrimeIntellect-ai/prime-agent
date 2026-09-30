@@ -317,20 +317,28 @@ fn an_over_budget_body_drops_without_cloning() {
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().join("request-payloads");
     let capture = RequestPayloadCapture::at(&dir_path, 8);
-    // Three bodies that each estimate at a third of the budget: the
-    // third would cross it and drops at the budget gate.
+    // The stall: a many-node body the writer serializes for far longer
+    // than the three records below take, so the earlier bodies'
+    // reservations hold while the third is priced — the drop is the
+    // budget's, not the drain's timing.
+    let stall = json!({
+        "marker": "stall",
+        "messages": (0..20_000_u32).map(|seq| json!({ "seq": seq })).collect::<Vec<_>>()
+    });
+    // Three bodies that each estimate near a third of the budget: the
+    // third would cross it and drops at the budget gate (the estimate
+    // already carries the transient-copies multiplier).
     let body_x = json!({ "marker": "budget-x", "body": "x".repeat(8 * 1024 * 1024) });
     let body_y = json!({ "marker": "budget-y", "body": "y".repeat(8 * 1024 * 1024) });
     let body_z = json!({ "marker": "budget-z", "body": "z".repeat(8 * 1024 * 1024) });
-    // Two bodies fit the budget; the third crosses it (the estimate
-    // already carries the transient-copies multiplier).
     assert!(payload_bytes(&body_x) * 2 < REQUEST_PAYLOAD_BUDGET_BYTES);
     assert!(payload_bytes(&body_x) * 3 > REQUEST_PAYLOAD_BUDGET_BYTES);
+    capture.record(&stall, &agent_model(), Some("sess-timing"), 0);
     capture.record(&body_x, &agent_model(), Some("sess-timing"), 1);
     capture.record(&body_y, &agent_model(), Some("sess-timing"), 2);
     capture.record(&body_z, &agent_model(), Some("sess-timing"), 3);
-    // The drain lands the first two bodies only.
-    wait_for_payload_files(&dir_path, 2);
+    // The drain lands the stall and the first two bodies only.
+    wait_for_payload_files(&dir_path, 3);
     wait_for_drained_queue();
     capture.record(
         &json!({ "marker": "recovered" }),
@@ -338,7 +346,7 @@ fn an_over_budget_body_drops_without_cloning() {
         Some("sess-timing"),
         4,
     );
-    wait_for_payload_files(&dir_path, 3);
+    wait_for_payload_files(&dir_path, 4);
     let files = payload_files(&dir_path);
     let landed = files
         .iter()
@@ -351,7 +359,7 @@ fn an_over_budget_body_drops_without_cloning() {
         .collect::<Vec<_>>();
     assert_eq!(
         landed,
-        ["budget-x", "budget-y", "recovered"],
+        ["stall", "budget-x", "budget-y", "recovered"],
         "the over-budget body never landed; the recovered handoff did"
     );
     assert!(
