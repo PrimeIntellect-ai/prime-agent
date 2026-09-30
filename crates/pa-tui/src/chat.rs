@@ -245,7 +245,7 @@ pub fn format_working_elapsed(total_secs: u64) -> String {
 impl WorkingState {
     #[must_use]
     pub fn label(&self) -> String {
-        // Extensions and tool bootstrap own the message: plain
+        // A tool-provided working message owns the loader line: plain
         // "<message> <elapsed>" (TS `getWorkingLoaderMessage`).
         if let Some(message) = &self.message {
             return format!("{message} {}", format_working_elapsed(self.elapsed_secs));

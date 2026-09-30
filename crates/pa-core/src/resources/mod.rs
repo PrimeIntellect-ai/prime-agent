@@ -2,9 +2,7 @@
 //! loader. Port of core/resource-loader.ts, scoped to the session engine's
 //! needs: skills, prompt templates, agents files, and system-prompt sources,
 //! resolved from configured packages, settings, auto-discovery, and bundled
-//! skills through the package manager. The extension *runner* (loading and
-//! executing extension modules) is a downstream seam; theme loading lives
-//! in pa-tui.
+//! skills through the package manager. Theme loading lives in pa-tui.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -71,8 +69,8 @@ pub fn load_project_context_files(cwd: &Path, agent_dir: &Path) -> Vec<ContextFi
     context_files
 }
 
-// Session resource resolution (package-manager `resolve()` + CLI extension
-// sources) feeds the loader below.
+// Session resource resolution (package-manager `resolve()`) feeds the
+// loader below.
 pub(crate) mod resolution;
 
 use anyhow::Result;
@@ -89,13 +87,10 @@ pub struct LoadedResources {
     pub agents_files: Vec<ContextFile>,
     pub system_prompt: Option<String>,
     pub append_system_prompt: Vec<String>,
-    /// Enabled extension entry points, in precedence order (the extension
-    /// runner consumes these; it is not part of this lane's surface).
-    pub extension_paths: Vec<String>,
 }
 
 /// Resource loading options (the TS `DefaultResourceLoaderOptions` surface,
-/// minus the extension-runner/theme machinery).
+/// minus the theme machinery).
 #[derive(Default)]
 pub struct ResourceLoaderOptions {
     pub cwd: PathBuf,
@@ -104,8 +99,6 @@ pub struct ResourceLoaderOptions {
     pub settings: Option<SettingsManager>,
     /// Built-in skills directory (default: the packaged layout).
     pub bundled_skills_dir: BundledSkillsDir,
-    /// CLI extension sources resolved in the temporary scope.
-    pub additional_extension_sources: Vec<String>,
     /// Extra force-exclude patterns for built-in skills.
     pub extra_builtin_skill_overrides: Vec<String>,
     pub additional_skill_paths: Vec<String>,
@@ -130,8 +123,7 @@ impl ResourceLoaderOptions {
 
 /// Load all session resources: package-manager resolution (configured
 /// packages, settings arrays, auto-discovery, bundled skills) feeds the
-/// enabled skill and prompt paths; CLI extension sources resolve in the
-/// temporary scope.
+/// enabled skill and prompt paths.
 ///
 /// # Errors
 ///
@@ -144,10 +136,7 @@ pub fn load_resources(mut options: ResourceLoaderOptions) -> Result<LoadedResour
         .unwrap_or_else(|| SettingsManager::create(&options.cwd, &options.agent_dir));
     let resolution = resolution::resolve_session_resources(&options, settings)?;
 
-    let mut resources = LoadedResources {
-        extension_paths: resolution.extension_paths.clone(),
-        ..Default::default()
-    };
+    let mut resources = LoadedResources::default();
 
     // Skills: CLI paths + additional paths first, then resolved paths in
     // precedence order; name collisions resolve first-wins in load order.

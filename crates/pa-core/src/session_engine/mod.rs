@@ -353,6 +353,36 @@ impl AgentSession {
         Ok(())
     }
 
+    /// The atomic model-and-level switch: one agent-lock acquisition
+    /// updates both fields (the loop snapshots them together), so a
+    /// concurrently admitted turn never observes the new model with the
+    /// old level mid-switch. The durable `model_change` row is the same
+    /// bookkeeping as [`AgentSession::set_model`]; the thinking level's
+    /// intent row belongs to the explicit `/thinking` path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the model cannot be converted to the loop
+    /// wire shape, or when the model-change row cannot be persisted.
+    pub async fn set_model_and_thinking_level(
+        &self,
+        model: &pa_types::ai::Model,
+        provider: &str,
+        model_id: &str,
+        thinking_level: ThinkingLevel,
+    ) -> anyhow::Result<()> {
+        let wire: pa_agent::types::Model = serde_json::from_value(
+            serde_json::to_value(model).map_err(|error| anyhow::anyhow!(error.to_string()))?,
+        )
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        self.agent
+            .set_model_and_thinking_level(wire, thinking_level)
+            .await;
+        let mut session = self.session.lock().await;
+        session.append_model_change(provider, model_id)?;
+        Ok(())
+    }
+
     /// Thinking level bookkeeping (mirrors appendThinkingLevelChange).
     ///
     /// # Errors
@@ -402,8 +432,8 @@ async fn persist_event(
                 eprintln!("pa-core: message row not persisted: {error}");
             }
         }
-        // Git state is captured at both run boundaries, exactly like the TS
-        // extension-event path: a commit or branch switch made during the run
+        // Git state is captured at both run boundaries, exactly like the
+        // TS run-boundary event path: a commit or branch switch made during the run
         // (e.g. via the bash tool) lands in the session file at `agent_end`.
         // The persist check lives inside `record_git_state_if_changed`.
         AgentEvent::AgentStart | AgentEvent::AgentEnd { .. } => {

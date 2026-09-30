@@ -48,23 +48,23 @@ fn open_waits_out_the_entry_anchor() {
     assert!(mode.anchor_selection_pending);
     mode.handle_key("enter");
     assert!(mode.opened.is_none(), "the default row did not open");
-    assert!(mode.status.is_some(), "the wait explains itself");
+    assert!(mode.status_text().is_some(), "the wait explains itself");
     mode.roster
         .push(roster_entry("s2", "idle", &parent_summary("s2")));
     mode.rebuild_rows();
     assert!(!mode.anchor_selection_pending);
     assert!(
-        mode.status.is_none(),
+        mode.status_text().is_none(),
         "the anchor landing drops the loading hint"
     );
     // The user's first move ends the wait the same way: the hint it
     // left behind clears too.
     mode.anchor_selection_pending = true;
-    mode.status = Some(ANCHOR_LOADING_HINT.to_string());
+    mode.set_status(ANCHOR_LOADING_HINT);
     mode.handle_key("down");
     assert!(!mode.anchor_selection_pending);
     assert!(
-        mode.status.is_none(),
+        mode.status_text().is_none(),
         "the canceling move drops the loading hint as well"
     );
     mode.handle_key("enter");
@@ -134,14 +134,14 @@ fn a_click_cancels_the_anchor_wait_and_opens_the_clicked_row() {
         !mode.anchor_selection_pending,
         "the click ends the entry anchor's wait"
     );
+    assert!(
+        mode.status_text().is_none(),
+        "the click drops the loading hint with the wait"
+    );
     let opened = mode.opened.expect("the click opened the row");
     assert_eq!(
         opened.selection,
         SessionSelection::Attach("s3-live".to_string())
-    );
-    assert!(
-        mode.status.is_none(),
-        "the click drops the loading hint with the wait"
     );
     crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
 }
@@ -157,14 +157,14 @@ fn a_saved_catalog_failure_settles_the_anchor_wait() {
         Some("s2"),
         vec![roster_entry("s1", "idle", &parent_summary("s1"))],
     );
-    mode.status = Some(ANCHOR_LOADING_HINT.to_string());
+    mode.set_status(ANCHOR_LOADING_HINT);
     mode.settle_anchor_wait_on_saved_failure();
     assert!(
         !mode.anchor_selection_pending,
         "the wait ends with the failed catalog"
     );
     assert_ne!(
-        mode.status.as_deref(),
+        mode.status_text(),
         Some(ANCHOR_LOADING_HINT),
         "the loading hint drops with the wait"
     );
@@ -177,7 +177,7 @@ fn a_saved_catalog_failure_settles_the_anchor_wait() {
         "the settled view opens the default row instead of re-arming the hint"
     );
     assert_ne!(
-        mode.status.as_deref(),
+        mode.status_text(),
         Some(ANCHOR_LOADING_HINT),
         "no re-armed loading hint behind the failure"
     );
@@ -247,31 +247,29 @@ fn a_noop_edit_on_an_empty_query_never_rearms() {
 #[test]
 fn a_successful_load_retires_the_failure_status() {
     let mut mode = mode_with_anchor(None, Vec::new());
-    mode.status = Some("Saved sessions unavailable: scan failed".to_string());
+    mode.set_status("Saved sessions unavailable: scan failed");
     mode.saved_fetch_failed = true;
     mode.saved = Vec::new();
     // The load arm's own logic (the loop's SavedLoaded handler): the
     // failure flag clears and the fetch's own status retires.
     mode.saved_fetch_failed = false;
     if mode
-        .status
-        .as_deref()
+        .status_text()
         .is_some_and(|status| status.starts_with("Saved sessions unavailable"))
     {
         mode.status = None;
     }
-    assert_eq!(mode.status, None, "the stale failure status retired");
+    assert_eq!(mode.status_text(), None, "the stale failure status retired");
     // An unrelated status (the flow's own notice) survives a load.
-    mode.status = Some("Session s1 is no longer running".to_string());
+    mode.set_status("Session s1 is no longer running");
     if mode
-        .status
-        .as_deref()
+        .status_text()
         .is_some_and(|status| status.starts_with("Saved sessions unavailable"))
     {
         mode.status = None;
     }
     assert_eq!(
-        mode.status.as_deref(),
+        mode.status_text(),
         Some("Session s1 is no longer running"),
         "an unrelated status is never clobbered by the load"
     );
@@ -337,6 +335,7 @@ fn carried_selection_wins_over_the_entry_anchor() {
         keybindings: crate::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
         incident_notice_state: None,
+        create_config: serde_json::json!({}),
     });
     mode.roster = vec![
         roster_entry("s1", "idle", &parent_summary("s1")),

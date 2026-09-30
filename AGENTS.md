@@ -1,15 +1,15 @@
 # AGENTS.md
 
-Development rules for Prime Agent (Rust) on PrimeIntellect-ai/prime-agent, branch `rust`.
+Development rules for Prime Agent (Rust) on PrimeIntellect-ai/prime-agent, branch `main`.
 Every contributor (human or agent) must read this before working on this repo.
 
 ## Repository
 
-- The repo is PrimeIntellect-ai/prime-agent; the Rust implementation lives on the `rust` branch.
-- PRs go to the org repo with base `rust`:
-  `gh pr create --repo PrimeIntellect-ai/prime-agent --base rust`.
-- CI runs on the org's billing: `.github/workflows/continuous.yml` + `release.yml` on the
-  `rust` branch.
+- The repo is PrimeIntellect-ai/prime-agent; the Rust implementation lives on the `main` branch.
+- PRs go to the org repo with base `main`:
+  `gh pr create --repo PrimeIntellect-ai/prime-agent --base main`.
+- CI runs on the org's billing: `.github/workflows/continuous.yml` on `main` pushes and
+  `release.yml` on version tags.
 - Parity ground truth is unchanged: the TS checkout at ~/prime-agent (read-only).
 
 ## Style and structure
@@ -76,9 +76,9 @@ Every contributor (human or agent) must read this before working on this repo.
 
 - `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
   `cargo test --workspace` must pass before every merge. Run `make check` — the local mirror of
-  the same gates; CI runs on the org's billing (`.github/workflows/continuous.yml` + `release.yml`
-  on the `rust` branch). The PR-only codebase-health check reports growth past 500 lines
-  as review guidance; it never blocks a merge.
+  the same gates; CI runs on the org's billing (`.github/workflows/continuous.yml` on `main`
+  pushes; `release.yml` on version tags). The PR-only codebase-health check reports growth
+  past 500 lines as review guidance; it never blocks a merge.
 - **Parity-diff evidence is a merge gate** (the port's definition, not optional polish): every PR
   that touches a user-visible surface must include a "parity-diff evidence" section in its
   description showing the TS-binary comparison for what it changed: (1) rendered output —

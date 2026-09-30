@@ -522,13 +522,12 @@ impl SettingsManager {
         self.merged = deep_merge(&self.global, &self.project);
     }
 
-    /// Replace one resource-path array (`extensions`/`skills`/`prompts`/
-    /// `themes`) in the global settings file (TS `setSkillPaths` & friends).
+    /// Replace one resource-path array (`skills`/`prompts`/`themes`) in the
+    /// global settings file (TS `setSkillPaths` & friends).
     pub fn set_global_resource_array(&mut self, field: &str, values: Vec<String>) {
         let array: Vec<serde_json::Value> =
             values.into_iter().map(serde_json::Value::String).collect();
         match field {
-            "extensions" => self.global.extensions = Some(strings(&array)),
             "skills" => self.global.skills = Some(strings(&array)),
             "prompts" => self.global.prompts = Some(strings(&array)),
             "themes" => self.global.themes = Some(strings(&array)),
@@ -548,7 +547,6 @@ impl SettingsManager {
         let array: Vec<serde_json::Value> =
             values.into_iter().map(serde_json::Value::String).collect();
         match field {
-            "extensions" => self.project.extensions = Some(strings(&array)),
             "skills" => self.project.skills = Some(strings(&array)),
             "prompts" => self.project.prompts = Some(strings(&array)),
             "themes" => self.project.themes = Some(strings(&array)),
