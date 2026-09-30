@@ -169,4 +169,19 @@ catalog-assets-gates:
 fold-gates:
 	python3 scripts/release/test_fold_changelog.py
 
-.PHONY: check deny windows-cross actionlint perf-wave glibc-gate release-dry-run continuous-dry-run audit-build package catalog-assets catalog-assets-fixture catalog-assets-gates fold-gates
+# The consume route's restamp battery (release.yml's beta channel): the
+# continuous artifacts restamped to the beta version keep the built bytes
+# and carry the release shape - the provenance case is first (a foreign
+# commit's artifacts are refused).
+restamp-gates:
+	python3 scripts/release/test_restamp.py
+
+# The CI shard tooling's contract battery (ci.yml's PR smoke): the stable
+# crc32 assignment under the narrowed selection, the scope-aware summary
+# audit, the selection resolver the conditional bins build reads, and the
+# fail-safe PR-files mapping the changes job feeds it.
+shard-gates:
+	python3 scripts/test_ci_test_shard.py
+	python3 scripts/test_ci_pr_crates.py
+
+.PHONY: check deny windows-cross actionlint perf-wave glibc-gate release-dry-run continuous-dry-run audit-build package catalog-assets catalog-assets-fixture catalog-assets-gates fold-gates restamp-gates shard-gates

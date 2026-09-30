@@ -161,6 +161,36 @@ fn row_runs(row: &Line) -> Vec<(String, Style)> {
 }
 
 #[test]
+fn user_block_keeps_the_link_affordance() {
+    // A markdown link in the user block: the label underlines over the
+    // user-message color, the URL bracket keeps the dim link slot, and
+    // the OSC 8 wrap rides the label — all on the block background.
+    crate::hyperlinks::set_hyperlinks_override(Some(true));
+    let (bg, body, _, _, _) = user_block_styles();
+    let link_url = bg.patch(theme().fg_style(ThemeColor::MdLinkUrl));
+    let rows = render_user_block("see [docs](https://x.dev/a)", &theme(), "  ", 60);
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        row_runs(&rows[1]),
+        vec![
+            ("  ".to_string(), bg),
+            ("see ".to_string(), body),
+            (
+                format!(
+                    "{}docs{}",
+                    crate::hyperlinks::osc8_open("https://x.dev/a"),
+                    crate::hyperlinks::OSC8_CLOSE
+                ),
+                body.add_modifier(ratatui::style::Modifier::UNDERLINED)
+            ),
+            (" [https://x.dev/a]".to_string(), link_url),
+            (" ".repeat(60 - 28), bg),
+        ]
+    );
+    crate::hyperlinks::set_hyperlinks_override(None);
+}
+
+#[test]
 fn user_block_highlights_argument_tokens() {
     // TS `PromptTokenMask`: the argument tokens render in their own
     // colors inside the `userMessageText` body.

@@ -1,7 +1,7 @@
 //! Geometry uses the same wrapping traversal as painted Markdown rows.
 use super::{
-    block_cache_key, parse_blocks, render_inline, wrapped_span_count, Block, BlockKind,
-    MarkdownBlockCache, MarkdownStyle,
+    block_cache_key, heading_spans, parse_blocks, render_inline, wrapped_span_count, Block,
+    BlockKind, MarkdownBlockCache, MarkdownStyle,
 };
 use crate::{Line, Span};
 use ratatui::style::Style;
@@ -99,7 +99,11 @@ pub(crate) fn markdown_row_count_tagged(
             continue;
         }
         let count = match &block.kind {
-            BlockKind::Heading => 1 + usize::from(blank_after(next, false)),
+            BlockKind::Heading => {
+                let text = block.lines.first().cloned().unwrap_or_default();
+                wrapped_span_count(&heading_spans(&text, style), width)
+                    + usize::from(blank_after(next, false))
+            }
             BlockKind::Hr => 1,
             BlockKind::Code { .. } => {
                 block.lines.len().max(1) + usize::from(blank_after(next, false))
