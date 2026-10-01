@@ -1321,22 +1321,26 @@ if [ -e "$legacy_lock" ] || [ -L "$legacy_lock" ]; then
 fi
 # THE WINDOWS LOCK: MSYS `ln -s` deep-copies by default (a real symlink
 # needs Developer Mode + winsymlinks), so the symlink claim is not atomic
-# on Windows - a lock DIRECTORY is: `mkdir` is the single-winner claim,
-# the holder's pid rides a file inside it, and a dead holder is detected
-# by `kill -0` (MSYS pids) exactly like the unix link. The EXIT trap
-# sweeps the directory; a stale lock (a crashed install) is never
-# auto-stolen - the same manual-recovery contract as the link.
+# on Windows - a lock DIRECTORY is: `mkdir` is the single-winner claim and
+# the holder's pid rides a file inside it. install.ps1 claims the SAME
+# directory, so the pid is always the WINDOWS pid (the MSYS/Cygwin $$ is a
+# different namespace: /proc/$$/winpid maps it) and liveness is asked of
+# Windows (tasklist), never `kill -0`. The EXIT trap sweeps the directory;
+# a lock is never auto-stolen, and when the holder does not show as live
+# the message stays conditional (the manual-recovery contract of the link).
 if [ "$WINDOWS" = "yes" ]; then
   lock_dir="${PREFIX}/share/.prime-agent-install.lock.d"
   until mkdir "$lock_dir" 2>/dev/null; do
     held_by="$(cat "$lock_dir/pid" 2>/dev/null || true)"
-    if [ -n "$held_by" ] && kill -0 "$held_by" 2>/dev/null; then
-      die "another install-rust.sh (pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"
+    if [ -n "$held_by" ] \
+       && MSYS2_ARG_CONV_EXCL='*' tasklist.exe /FI "PID eq ${held_by}" /NH 2>/dev/null \
+          | grep -qw "$held_by"; then
+      die "another prime-agent installer (Windows pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"
     fi
-    die "a previous install-rust.sh (pid ${held_by:-unknown}) left a stale publication lock (a crashed install; its cleanup trap cannot have run). Remove it and retry:
+    die "a publication lock (Windows pid ${held_by:-unknown}) is held at ${lock_dir}. If no prime-agent installer (install-rust.sh or install.ps1) is running, it is stale (a crashed install); remove it and retry:
   rm -rf ${lock_dir}"
   done
-  printf '%s\n' $$ > "$lock_dir/pid"
+  printf '%s\n' "$(cat "/proc/$$/winpid" 2>/dev/null || echo $$)" > "$lock_dir/pid"
 else
   until ln -s $$ "$lock_link" 2>/dev/null; do
     held_by="$(readlink "$lock_link" 2>/dev/null || true)"
