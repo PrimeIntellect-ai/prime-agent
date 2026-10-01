@@ -1,7 +1,10 @@
 //! The `/factory` view: one panel per live factory run — the machine
 //! diagram with live highlighting, the run's state, the instances running
 //! and queued, the budget consumed, and the milestone tail, with the
-//! orchestration keys (stop/resume) and the copy-mermaid action.
+//! orchestration keys (stop/resume) and the copy-mermaid action. The
+//! panels read NEWEST-FIRST like a live activity feed (a run created
+//! after an existing one renders above it), and the page opens with the
+//! newest run selected.
 //!
 //! The view is pure presentation and selection: the session UI owns the
 //! refresh cadence (the run's collect cycle: a bounded watch on the
@@ -110,12 +113,26 @@ impl FactoryRunSnapshot {
 /// Parse the daemon `factory_activity` graph reply: `{"runs": [...]}` in
 /// the kernel's compact snapshot shape. Malformed rows drop (a truncated
 /// panel never renders), and an unknown shape answers an empty view.
+///
+/// The reply carries the registry's start order, oldest run first (the
+/// kernel's documented polling order — `FactoryExecutor.graph` in
+/// `rlm/factory.py`); the view reads NEWEST-FIRST, like a live activity
+/// feed, so this seam reverses the list exactly once and every view path
+/// (the mount and the refresh fold) receives the same reading order. The
+/// wire contract stays stable: the kernel reply and the agent
+/// conversation API keep their oldest-first order — the reading order is
+/// presentation. Reversal, never an `elapsedMs` sort: the elapsed clock
+/// grows live, truncates to whole milliseconds, and each row snapshots
+/// at its own tick, so two close-start runs could flip between
+/// refreshes; the reply's start order is total and stable.
 #[must_use]
 pub fn parse_factory_runs(data: &Value) -> Vec<FactoryRunSnapshot> {
     let Some(runs) = data.get("runs").and_then(Value::as_array) else {
         return Vec::new();
     };
-    runs.iter().filter_map(parse_run).collect()
+    let mut parsed: Vec<FactoryRunSnapshot> = runs.iter().filter_map(parse_run).collect();
+    parsed.reverse();
+    parsed
 }
 
 /// Whether a reply is the graph list shape at all: a reply without the
@@ -248,7 +265,10 @@ pub struct FactoryView {
 }
 
 impl FactoryView {
-    /// Build the view from the first snapshot batch.
+    /// Build the view from the first snapshot batch. The batch arrives
+    /// newest-first ([`parse_factory_runs`]'s reading order), so the
+    /// default selection — index 0 — is the newest run: the page opens on
+    /// the feed's live head.
     #[must_use]
     pub fn new(runs: Vec<FactoryRunSnapshot>, viewport_rows: usize) -> Self {
         let recent_change = vec![false; runs.len()];
@@ -280,16 +300,24 @@ impl FactoryView {
                 changed = true;
             }
         }
-        // Keep the selection on the same run id.
+        // Keep the selection on the same run id, never the same index:
+        // the list reads newest-first, so a newer run folding in moves
+        // the selected run down without stealing the selection. A run
+        // that left the batch (the wire cap's oldest-end trim, a
+        // cleared registry) returns the selection to the feed's head —
+        // the newest run — because the same slot names a different run
+        // in the reversed order.
         let selected_id = self.runs.get(self.selected).map(|run| run.run_id.clone());
         self.runs = runs;
         self.recent_change = recent_change;
-        if let Some(selected_id) = selected_id {
-            if let Some(index) = self.runs.iter().position(|run| run.run_id == selected_id) {
-                self.selected = index;
-            }
-        }
-        self.selected = self.selected.min(self.runs.len().saturating_sub(1));
+        self.selected = match selected_id {
+            Some(selected_id) => self
+                .runs
+                .iter()
+                .position(|run| run.run_id == selected_id)
+                .unwrap_or(0),
+            None => 0,
+        };
         changed
     }
 
@@ -391,17 +419,20 @@ impl FactoryView {
         }
         // The dock's frame budget owns the final trim; the view never
         // renders more rows than the viewport asked for. A tall view
-        // windows over the panel area: the trailing window keeps the
-        // newest panels, and when the selected run's panel falls outside
-        // it the window slides to the selection (a stop/resume target
-        // never hides behind the budget); the chrome stays pinned at the
-        // end either way.
+        // windows over the panel area: the leading window keeps the top
+        // of the feed (the newest panels — the oldest panels drop
+        // first), and when the selected run's panel falls below it the
+        // window slides to the selection (a stop/resume target never
+        // hides behind the budget); the chrome stays pinned at the end
+        // either way.
         let budget = self.viewport_rows.max(1);
         let panel_budget = budget.saturating_sub(chrome_rows);
         if panels.len() > panel_budget {
-            let mut start = panels.len().saturating_sub(panel_budget);
+            let mut start = 0;
             if let Some((selected_start, _)) = panel_ranges.get(self.selected) {
-                start = start.min(*selected_start);
+                if *selected_start >= panel_budget {
+                    start = *selected_start;
+                }
             }
             if start > 0 {
                 panels.drain(..start);

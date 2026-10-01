@@ -126,14 +126,44 @@ fn runs_response(snapshot: &serde_json::Value) -> serde_json::Value {
     json!({ "runs": [snapshot] })
 }
 
-/// Two live runs for the window battery: the second panel's name differs
-/// so the header rows tell the runs apart.
+/// Two live runs for the battery, in the reply's start order (oldest
+/// first — the kernel's documented polling order): review-loop started
+/// first, second-run after it, so second-run is the NEWEST run and
+/// renders on top. The name differs so the header rows tell the runs
+/// apart, and the elapsed clocks match on purpose — a same-clock pair
+/// is exactly where an elapsed sort would be ambiguous and the reply's
+/// start order is not.
 fn two_run_response() -> serde_json::Value {
     let mut response = runs_response(&scripted_snapshot());
     let second = scripted_snapshot();
     response["runs"].as_array_mut().unwrap().push(second);
     response["runs"][1]["runId"] = json!("run-def67890");
     response["runs"][1]["name"] = json!("second-run");
+    response
+}
+
+/// Three live runs, again in the reply's start order (oldest first):
+/// the third row is a run created after both — the fold battery's
+/// "a newer run appears on top" case.
+fn three_run_response() -> serde_json::Value {
+    let mut response = two_run_response();
+    let third = scripted_snapshot();
+    response["runs"].as_array_mut().unwrap().push(third);
+    response["runs"][2]["runId"] = json!("run-ghi13579");
+    response["runs"][2]["name"] = json!("third-run");
+    response
+}
+
+/// The two newer runs remain after the oldest leaves the reply (the wire
+/// cap's oldest-end trim), still in the reply's start order.
+fn later_pair_response() -> serde_json::Value {
+    let mut response = runs_response(&scripted_snapshot());
+    response["runs"][0]["runId"] = json!("run-def67890");
+    response["runs"][0]["name"] = json!("second-run");
+    let third = scripted_snapshot();
+    response["runs"].as_array_mut().unwrap().push(third);
+    response["runs"][1]["runId"] = json!("run-ghi13579");
+    response["runs"][1]["name"] = json!("third-run");
     response
 }
 
@@ -547,23 +577,103 @@ fn apply_runs_lights_the_marker_only_on_notice_worthy_changes() {
     );
 }
 
-/// Two runs: the selection moves and the panels keep their identities.
+/// The reading order (the UX pin): the reply carries the registry's
+/// start order, oldest run first, and the view reads it NEWEST-FIRST
+/// like a live activity feed — a run created after an existing one
+/// renders ABOVE it, and the page opens with the newest run selected
+/// (the mutation check: rendering the reply's insertion order instead
+/// fails every assertion here).
+#[test]
+fn the_runs_list_reads_newest_first_and_opens_on_the_newest_run() {
+    // The reply's order is start order: review-loop started first,
+    // second-run after it.
+    let runs = parse_factory_runs(&two_run_response());
+    assert_eq!(
+        runs.iter()
+            .map(|run| run.run_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["run-def67890", "run-abc12345"],
+        "the parsed list reads newest-first"
+    );
+    // The page opens with the newest run selected.
+    let mut view = FactoryView::new(runs, 40);
+    assert_eq!(
+        view.selected_run().map(|run| run.run_id.clone()),
+        Some("run-def67890".to_string()),
+        "the newest run is the default selection"
+    );
+    // The rendered frame: the newest run's panel is the first panel and
+    // the older run renders below it.
+    let rows = frame_text(&mut view);
+    let joined = rows.join("\n");
+    let first_header = rows
+        .iter()
+        .find(|row| row.contains("factory: "))
+        .expect("the panels render");
+    assert!(
+        first_header.contains("second-run"),
+        "the newest run's panel renders first: {joined}"
+    );
+    let newest = rows
+        .iter()
+        .position(|row| row.contains("factory: second-run"))
+        .expect("the newest run's header renders");
+    let older = rows
+        .iter()
+        .position(|row| row.contains("factory: review-loop"))
+        .expect("the older run's header renders");
+    assert!(
+        newest < older,
+        "a run created after an existing one appears above it: {joined}"
+    );
+}
+
+/// Two runs: the selection moves down the feed, and a refresh keeps
+/// the selection on the SAME RUN, never the same index — a newer run
+/// folding in on top moves the selected run down the list without
+/// stealing the selection, and a run that left the batch returns the
+/// selection to the feed's head (the mutation check: index-tracking
+/// jumps to the new newest run and fails the fold assertions).
 #[test]
 fn multiple_runs_keep_the_selection_on_the_same_run() {
     let runs = parse_factory_runs(&two_run_response());
     let mut view = FactoryView::new(runs, 40);
-    assert_eq!(view.selected, 0);
-    let _ = view.handle_key("j", &kb());
-    assert_eq!(view.selected, 1);
+    // The page opens on the newest run.
     assert_eq!(
         view.selected_run().map(|run| run.run_id.clone()),
         Some("run-def67890".to_string())
     );
-    // The refresh keeps the selection on the same run id.
+    // j moves the selection down the feed, to the older run.
+    let _ = view.handle_key("j", &kb());
+    assert_eq!(view.selected, 1);
+    assert_eq!(
+        view.selected_run().map(|run| run.run_id.clone()),
+        Some("run-abc12345".to_string())
+    );
+    // An unchanged refresh keeps the selection on the same run id.
     view.apply_runs(parse_factory_runs(&two_run_response()));
     assert_eq!(
         view.selected_run().map(|run| run.run_id.clone()),
-        Some("run-def67890".to_string())
+        Some("run-abc12345".to_string())
+    );
+    // A run created after both folds in on top: the selected run moves
+    // down the list (index 1 becomes index 2) and the selection stays
+    // on the same run — the same index would be the new newest run.
+    view.apply_runs(parse_factory_runs(&three_run_response()));
+    assert_eq!(view.selected, 2);
+    assert_eq!(
+        view.selected_run().map(|run| run.run_id.clone()),
+        Some("run-abc12345".to_string()),
+        "the selection stays on the same run, not the same index"
+    );
+    // The selected run leaves the batch (the wire cap's oldest-end trim
+    // dropped it): the selection returns to the feed's head, the newest
+    // run.
+    view.apply_runs(parse_factory_runs(&later_pair_response()));
+    assert_eq!(
+        view.selected_run().map(|run| run.run_id.clone()),
+        Some("run-ghi13579".to_string()),
+        "a run that left the batch returns the selection to the head"
     );
 }
 
@@ -595,10 +705,12 @@ fn the_degenerate_budget_still_honors_the_viewport() {
 /// The render budget window (a tall view at a small viewport): the view
 /// never renders more rows than the viewport asked for, the trailing key
 /// hint always stays painted, and the selected run's panel header stays
-/// visible even when the selection sits outside the trailing window —
-/// a stop/resume target never hides behind the budget (the mutation
-/// checks: leading-row truncation drops the hint, tail-only retention
-/// drops the selected header).
+/// visible even when the selection sits below the top window — a
+/// stop/resume target never hides behind the budget. The window keeps
+/// the TOP of the newest-first feed (the newest panels render first,
+/// the oldest panels drop first) and slides to the selection when it
+/// falls below (the mutation check: a window without the slide hides
+/// the selected run's header).
 #[test]
 fn the_budget_window_keeps_the_hint_and_the_selected_panel() {
     let mut view = FactoryView::new(parse_factory_runs(&two_run_response()), 8);
@@ -614,17 +726,23 @@ fn the_budget_window_keeps_the_hint_and_the_selected_panel() {
         joined.contains("copy mermaid"),
         "the key hint stays painted: {joined}"
     );
-    // The selected (first) run's header stays visible with its marker.
+    // The default selection is the newest run: its header stays visible
+    // with its marker, and the older panel drops first.
     assert!(
-        joined.contains("▸ factory: review-loop — running"),
-        "the selected run's header stays visible: {joined}"
+        joined.contains("▸ factory: second-run — running"),
+        "the newest (selected) run's header stays visible: {joined}"
+    );
+    assert!(
+        !joined.contains("factory: review-loop"),
+        "the older panel drops instead of the chrome: {joined}"
     );
 
-    // The selection on the newest run: the window follows the selection,
-    // keeps the hint, and drops the older panel instead.
-    let mut selected_newest = FactoryView::new(parse_factory_runs(&two_run_response()), 8);
-    let _ = selected_newest.handle_key("j", &kb());
-    let rows = frame_text(&mut selected_newest);
+    // The selection moved down the feed (the older run): the window
+    // follows the selection, keeps the hint, and drops the newest
+    // panel instead.
+    let mut selected_older = FactoryView::new(parse_factory_runs(&two_run_response()), 8);
+    let _ = selected_older.handle_key("j", &kb());
+    let rows = frame_text(&mut selected_older);
     let joined = rows.join("\n");
     assert!(
         rows.len() <= 8,
@@ -635,11 +753,11 @@ fn the_budget_window_keeps_the_hint_and_the_selected_panel() {
         "the key hint stays painted: {joined}"
     );
     assert!(
-        joined.contains("▸ factory: second-run — running"),
-        "the newest selection's header stays visible: {joined}"
+        joined.contains("▸ factory: review-loop — running"),
+        "the selected run's header stays visible: {joined}"
     );
     assert!(
-        !joined.contains("factory: review-loop"),
-        "the older panel drops instead of the chrome: {joined}"
+        !joined.contains("factory: second-run"),
+        "the unselected newest panel drops instead of the chrome: {joined}"
     );
 }
