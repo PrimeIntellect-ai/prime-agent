@@ -154,6 +154,30 @@ impl SessionFile {
         self.persist_entry_at(entry_type, fields, &crate::util::now_iso())
     }
 
+    /// Durably mark that this session has drawn the Anthropic subscription
+    /// ban-risk warning (the once-per-session-lifecycle gate, operator
+    /// directive 2026-09-29): append the
+    /// [`pa_core::session::ANTHROPIC_WARNING_SHOWN_CUSTOM_TYPE`] custom row
+    /// and arm the in-memory flag, so a reattach, a resume, or a worker
+    /// replacement rebuild reads the row and the gate holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the durable append fails; the
+    /// in-memory flag stays unset then, so the next open re-warns (a lost
+    /// marker costs one repeated warning, never a suppressed one).
+    pub fn mark_anthropic_warning_shown(&mut self) -> Result<()> {
+        self.persist_entry(
+            "custom",
+            json!({
+                "customType": pa_core::session::ANTHROPIC_WARNING_SHOWN_CUSTOM_TYPE,
+                "data": { "shown": true },
+            }),
+        )?;
+        self.anthropic_warning_shown = true;
+        Ok(())
+    }
+
     /// Append one entry stamped with the given time. The interrupted-
     /// compaction replay re-stamps the supervisor's declaration, so the
     /// entry's timestamp is the row's stable identity: a replacement that

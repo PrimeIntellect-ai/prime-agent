@@ -271,6 +271,10 @@ impl WindowedSessionStore {
         let mut compaction_count = 0;
         let mut non_bootstrap = false;
         let mut goal = None;
+        // The Anthropic subscription warning's once-per-session-lifecycle
+        // gate: set when the walk meets the marked-shown custom row (any
+        // position on the active branch hydrates it, exactly like `goal`).
+        let mut anthropic_warning_shown = false;
         let mut window_done = false;
         let mut seen = HashSet::new();
         let mut thinking = None;
@@ -437,7 +441,10 @@ impl WindowedSessionStore {
                         "model_change" | "thinking_level_change" | "service_tier_change"
                     ) || (goal.is_none()
                         && meta.custom_type.as_deref()
-                            == Some(crate::goals::GOAL_STATE_CUSTOM_TYPE))))
+                            == Some(crate::goals::GOAL_STATE_CUSTOM_TYPE))
+                        || (!anthropic_warning_shown
+                            && meta.custom_type.as_deref()
+                                == Some(crate::session::ANTHROPIC_WARNING_SHOWN_CUSTOM_TYPE))))
             {
                 match serde_json::from_slice::<FileEntry>(&line) {
                     Ok(entry) => Some(entry),
@@ -449,6 +456,9 @@ impl WindowedSessionStore {
             if on_path {
                 if goal.is_none() {
                     goal = entry.as_ref().and_then(valid_goal);
+                }
+                if !anthropic_warning_shown {
+                    anthropic_warning_shown = entry.as_ref().is_some_and(valid_warning_shown);
                 }
                 match entry.as_ref() {
                     Some(FileEntry::ThinkingLevelChange { payload, .. }) if thinking.is_none() => {
@@ -582,6 +592,7 @@ impl WindowedSessionStore {
             stats: older_path_stats.clone(),
             first_user: first_user_message.clone(),
             goal,
+            anthropic_warning_shown,
             non_bootstrap,
             retained_whole_file: !window_done,
         };
@@ -764,6 +775,13 @@ impl WindowedSessionStore {
     pub fn goal_state(&self) -> Option<&crate::goals::GoalState> {
         self.snapshot.goal.as_ref()
     }
+    /// Whether the active branch already carries the Anthropic subscription
+    /// warning's shown marker (the once-per-session-lifecycle gate's
+    /// hydrated read; [`crate::session::ANTHROPIC_WARNING_SHOWN_CUSTOM_TYPE`]).
+    #[must_use]
+    pub fn anthropic_warning_shown(&self) -> bool {
+        self.snapshot.anthropic_warning_shown
+    }
     #[must_use]
     pub fn has_thinking_level(&self) -> bool {
         self.snapshot.thinking_present
@@ -926,6 +944,23 @@ impl WindowedSessionStore {
     }
 }
 
+/// Whether `entry` is the session's Anthropic subscription warning shown
+/// marker (the once-per-lifecycle gate's persisted row,
+/// [`crate::session::ANTHROPIC_WARNING_SHOWN_CUSTOM_TYPE`] with
+/// `data.shown == true`).
+fn valid_warning_shown(entry: &FileEntry) -> bool {
+    let FileEntry::Custom { payload, .. } = entry else {
+        return false;
+    };
+    payload.custom_type == crate::session::ANTHROPIC_WARNING_SHOWN_CUSTOM_TYPE
+        && payload
+            .data
+            .as_ref()
+            .and_then(|data| data.get("shown"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+}
+
 fn valid_goal(entry: &FileEntry) -> Option<crate::goals::GoalState> {
     let FileEntry::Custom { payload, .. } = entry else {
         return None;
@@ -969,6 +1004,12 @@ pub(super) fn update_snapshot(snapshot: &mut Snapshot, entry: &FileEntry) {
     }
     if let Some(goal) = valid_goal(entry) {
         snapshot.goal = Some(goal);
+    }
+    // A live append of the warning marker folds into the retained window's
+    // snapshot the same way, so the sidecar the next reload serves stays
+    // current without a re-walk.
+    if valid_warning_shown(entry) {
+        snapshot.anthropic_warning_shown = true;
     }
     match entry {
         FileEntry::ThinkingLevelChange { payload, .. } => {

@@ -21,6 +21,7 @@ mod remote_source;
 mod service_catalog;
 mod url_checks;
 
+pub use catalog_plugin_views::{McpCredentialView, API_KEY_CREDENTIALS};
 pub use catalog_views::{
     mcp_credential_field_prompt_label, mcp_paste_credential, McpPasteCredential,
 };
@@ -359,6 +360,17 @@ impl McpManager {
     /// Re-read settings and re-resolve integrations; call after a reload.
     pub fn refresh(&mut self) {
         self.resolve_integrations();
+    }
+
+    /// Reload the shared auth store (blocking lock, never on the async
+    /// runtime): a credential another process wrote — the interactive
+    /// client's `/mcp` key flow stores through its own storage instance —
+    /// becomes visible to the next view read, like the settings re-read
+    /// above.
+    pub fn reload_auth_storage(&mut self) {
+        let storage = self.auth_storage.clone();
+        let mut handle = storage.blocking_lock();
+        handle.reload();
     }
 
     /// The resolved integrations (login resolution and status displays).
