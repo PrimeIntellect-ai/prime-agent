@@ -234,8 +234,17 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             runs-on: macos-14
+          # The x86_64 leg cross-compiles on the Apple-silicon pool: rustc
+          # and the Xcode linker build either darwin arch from an M-series
+          # host, and the M-pool links this binary ~2.2x faster than the
+          # macos-15-intel pool with far tighter variance (484 s vs 1046 s
+          # same-commit link tail, 2026-09-30). The livecheck below runs
+          # the assembled x64 artifact under Rosetta 2 — the macos-15
+          # arm64 image installs it, and install-rust.sh ships the x64
+          # build to an Apple-Silicon Mac's Rosetta shell, so the gate
+          # still boots the binary on its delivery runtime.
           - target: x86_64-apple-darwin
-            runs-on: macos-15-intel  # macos-13 is retired; this is the Intel runner now
+            runs-on: macos-15
     env:
       # AppleDouble resource forks must not leak into the archive; the
       # assembler additionally enforces plain-file payloads.
@@ -272,7 +281,13 @@ jobs:
             --catalog-assets "target/${{ matrix.target }}/catalog-assets" \
             --out-dir "target/${{ matrix.target }}/dist"
           cat "target/${{ matrix.target }}/dist/manifest.json"
-      - name: Livecheck the assembled continuous artifact on its native runner
+      # The livecheck extracts the tarball and runs the payload binary's
+      # `--version` from a scratch cwd (verify_release.py). The aarch64 leg
+      # executes it natively; the x86_64 leg, cross-compiled on the
+      # Apple-silicon pool, executes it under Rosetta 2 — the runtime the
+      # x64 payload runs on for an Apple-Silicon Mac customer, so the gate
+      # still boots the artifact on its delivery runtime.
+      - name: Livecheck the assembled continuous artifact on its build runner
         run: |
           set -euo pipefail
           version="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
