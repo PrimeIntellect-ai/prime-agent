@@ -223,8 +223,8 @@ mod tests {
 
     #[test]
     fn process_start_id_reads_the_platform_ladder() {
-        // Linux answers from /proc (`proc:`); macOS/BSD from `ps lstart=`
-        // (`ps:`) - the same ladder TS `getProcessStartId` walks.
+        // Linux answers from /proc (`proc:`); macOS/BSD answer
+        // `ps:<lstart>` - the same ladder TS `getProcessStartId` walks.
         let id = get_process_start_id(std::process::id() as i32);
         let id = id.expect("own pid must be readable");
         assert!(id.starts_with("proc:") || id.starts_with("ps:"));

@@ -10,12 +10,13 @@
 //! exactly like TS records with `processStartId: undefined`.
 
 /// The pid-reuse identity: `/proc/<pid>/stat` field 22 (starttime) as
-/// `proc:<starttime>`, else the portable `ps -o lstart=` reading as
-/// `ps:<lstart>` (macOS/BSD - TS `getPsProcessStartId`). A recycled pid has
-/// a different start time, so a recorded identity that still matches proves
-/// the pid still names the same process. `None` only when the platform
-/// exposes neither - owners then trust liveness checks alone, exactly like
-/// TS records with `processStartId: undefined`.
+/// `proc:<starttime>`, else the portable `ps:<lstart>` identity (TS
+/// `getPsProcessStartId`) - rendered in-process from the kernel process
+/// record on macOS, by running `ps -o lstart=` on other unixes. A recycled
+/// pid has a different start time, so a recorded identity that still
+/// matches proves the pid still names the same process. `None` only when
+/// the platform exposes neither - owners then trust liveness checks
+/// alone, exactly like TS records with `processStartId: undefined`.
 #[cfg(unix)]
 #[must_use]
 pub fn process_start_id(pid: u32) -> Option<String> {
@@ -36,7 +37,7 @@ pub fn process_start_id(pid: u32) -> Option<String> {
 /// renders in the subprocess timezone and locale, so both are pinned for a
 /// durable identity. Formatted `ps:<lstart>` - the exact value the TS
 /// product records on macOS and BSD.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_vendor = "apple")))]
 fn ps_process_start_id(pid: u32) -> Option<String> {
     let output = std::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "lstart="])
@@ -48,6 +49,38 @@ fn ps_process_start_id(pid: u32) -> Option<String> {
         .ok()?;
     let start_time = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!start_time.is_empty()).then(|| format!("ps:{start_time}"))
+}
+
+/// macOS: the `ps:<lstart>` identity (TS `getPsProcessStartId`) rendered
+/// in-process, byte-identical to `ps -p <pid> -o lstart=` under the pinned
+/// `LC_ALL=C TZ=UTC` env: the same kernel record and field `ps` reads
+/// (`kp_proc.p_starttime.tv_sec`), formatted with ps's own `strftime("%c")`
+/// (with `gmtime_r` for `localtime` under `TZ=UTC`, and the null locale as
+/// the C locale per xlocale(3)). The value is persisted by earlier builds
+/// and the TS product, so any drift would read as a recycled pid.
+#[cfg(target_vendor = "apple")]
+fn ps_process_start_id(pid: u32) -> Option<String> {
+    let start = darwin::kinfo_proc(pid).ok().flatten()?.p_starttime.tv_sec;
+    // SAFETY: all-zero is a valid `tm` (integers and a null zone pointer).
+    let mut civil: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: writes only `civil`; null means `start` is out of range.
+    if unsafe { libc::gmtime_r(&raw const start, &raw mut civil) }.is_null() {
+        return None;
+    }
+    let mut buffer = [0u8; 64];
+    // SAFETY: writes at most `buffer.len()` bytes (NUL-terminated) and
+    // returns the length without the NUL, 0 when it does not fit.
+    let written = unsafe {
+        libc::strftime_l(
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            c"%c".as_ptr(),
+            &raw const civil,
+            std::ptr::null_mut(),
+        )
+    };
+    let lstart = String::from_utf8_lossy(&buffer[..written]);
+    (written > 0).then(|| format!("ps:{lstart}"))
 }
 
 /// Windows: the process creation time in 100ns ticks since 1601-01-01 UTC
@@ -93,6 +126,7 @@ pub fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
 /// answers 0 and stays `None` - the same best-effort contract as the Linux
 /// `/proc` read.
 #[cfg(all(unix, target_vendor = "apple"))]
+#[must_use]
 pub fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
     if pid == 0 {
         return None;
@@ -102,19 +136,20 @@ pub fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
     // and every XNU version accepts it, so the probe stays inside the
     // documented shape instead of the implementation's bare minimum.
     let mut buffer = [0u8; 4 * libc::PATH_MAX as usize];
+    // A `PATH_MAX`-scaled constant length always fits proc_pidpath's u32
+    // size parameter.
+    #[allow(clippy::cast_possible_truncation)]
+    let buffer_len = buffer.len() as u32;
     // SAFETY: writes the pid's executable path into `buffer` (at most its
     // size, NUL-terminated) and returns the byte count; 0 means the path
     // was not resolvable.
-    let written = unsafe {
-        libc::proc_pidpath(
-            pid as libc::pid_t,
-            buffer.as_mut_ptr().cast(),
-            buffer.len() as u32,
-        )
-    };
+    let written =
+        unsafe { libc::proc_pidpath(pid as libc::pid_t, buffer.as_mut_ptr().cast(), buffer_len) };
     if written <= 0 {
         return None;
     }
+    // Positive by the check above, so widening to usize loses no sign.
+    #[allow(clippy::cast_sign_loss)]
     let written = (written as usize).min(buffer.len());
     let end = buffer[..written]
         .iter()
@@ -299,13 +334,13 @@ pub fn restore_default_sigint() -> anyhow::Result<()> {
 /// it (macOS/BSD) previously read every live process as dead here, so lease
 /// staleness judged a live owner reclaimable. The fallback restores the TS
 /// semantics: the `kill(pid, 0)` existence probe (EPERM counts as alive -
-/// the pid exists but is not ours to signal) plus the portable `ps`
-/// zombie demotion.
+/// the pid exists but is not ours to signal) plus the zombie demotion
+/// (macOS: the kernel process record; other unixes: `ps`).
 ///
 /// # Errors
 ///
 /// Returns an error when the `kill(pid, 0)` probe fails with an error
-/// other than `ESRCH` (dead) or `EPERM` (alive), or when the `ps` zombie
+/// other than `ESRCH` (dead) or `EPERM` (alive), or when the zombie
 /// demotion cannot run.
 #[cfg(unix)]
 pub fn is_process_alive(pid: u32) -> anyhow::Result<bool> {
@@ -336,14 +371,20 @@ pub fn is_process_alive(pid: u32) -> anyhow::Result<bool> {
             code => anyhow::bail!("kill(0) liveness probe failed: {code:?}"),
         };
     }
-    // The pid resolves: demote zombies with `ps` (TS `isZombieProcess`'s
-    // portable listing) - there is no /proc state line to read here.
-    let output = std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "stat="])
-        .output()?;
-    Ok(!String::from_utf8_lossy(&output.stdout)
-        .trim_start()
-        .starts_with('Z'))
+    // The pid resolves: demote zombies (TS `isZombieProcess`) - there is
+    // no /proc state line to read here.
+    #[cfg(target_vendor = "apple")]
+    let zombie = darwin::kinfo_proc(pid)?.is_some_and(|info| u32::from(info.p_stat) == libc::SZOMB);
+    #[cfg(not(target_vendor = "apple"))]
+    let zombie = {
+        let output = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "stat="])
+            .output()?;
+        String::from_utf8_lossy(&output.stdout)
+            .trim_start()
+            .starts_with('Z')
+    };
+    Ok(!zombie)
 }
 
 /// Windows: a handle-existence probe with the `STILL_ACTIVE` exit-code check
@@ -369,6 +410,64 @@ pub fn is_process_alive(pid: u32) -> anyhow::Result<bool> {
 #[cfg(not(any(unix, windows)))]
 pub fn is_process_alive(_pid: u32) -> anyhow::Result<bool> {
     anyhow::bail!("process liveness is not implemented on this platform")
+}
+
+/// XNU's process record (`struct kinfo_proc`, <sys/sysctl.h>), which the
+/// libc crate does not bind: the leading `kp_proc` (`struct extern_proc`,
+/// <sys/proc.h>) fields the probes read, padded to the full record. 648
+/// bytes with `p_stat` at offset 36 on both 64-bit Darwin ABIs (`arm64`,
+/// `x86_64`) - pinned at compile time below.
+#[cfg(target_vendor = "apple")]
+mod darwin {
+    #[repr(C)]
+    pub(super) struct KinfoProc {
+        /// `kp_proc.p_starttime` (the `p_un` union's timeval arm): the
+        /// start time `ps -o lstart` renders.
+        pub(super) p_starttime: libc::timeval,
+        _p_vmspace: *mut libc::c_void,
+        _p_sigacts: *mut libc::c_void,
+        _p_flag: libc::c_int,
+        /// `kp_proc.p_stat`: `SZOMB` for an unreaped zombie.
+        pub(super) p_stat: u8,
+        _rest: [u8; 611],
+    }
+
+    const _: () = assert!(
+        std::mem::size_of::<KinfoProc>() == 648 && std::mem::offset_of!(KinfoProc, p_stat) == 36
+    );
+
+    /// `sysctl(CTL_KERN, KERN_PROC, KERN_PROC_PID, pid)`: the record
+    /// `ps -p <pid>` itself reads. Needs no privilege and answers zombies
+    /// too; `Ok(None)` when no process has the pid.
+    ///
+    /// Not `proc_pidinfo(PROC_PIDTBSDINFO)`: it fails `EPERM` for
+    /// other-uid (root-owned) pids, where `ps`/sysctl answer - turning
+    /// `Some` identities into lease staleness's owner-alive `None`.
+    pub(super) fn kinfo_proc(pid: u32) -> std::io::Result<Option<KinfoProc>> {
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return Ok(None);
+        };
+        let mut name = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid];
+        // SAFETY: all-zero is valid for integers, bytes, and null pointers.
+        let mut info: KinfoProc = unsafe { std::mem::zeroed() };
+        let mut length = std::mem::size_of::<KinfoProc>();
+        // SAFETY: the kernel writes at most `length` bytes into `info` and
+        // stores the written size back; no new value is set.
+        let status = unsafe {
+            libc::sysctl(
+                name.as_mut_ptr(),
+                4,
+                (&raw mut info).cast(),
+                &raw mut length,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if status != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok((length != 0).then_some(info))
+    }
 }
 
 /// The kernel32 surface the Windows identity/liveness queries need, as a
@@ -514,7 +613,8 @@ mod liveness_tests {
     use super::*;
 
     /// This very process reads alive wherever the probe lands: /proc's
-    /// state line on Linux, kill(0) + `ps` where /proc is not mounted.
+    /// state line on Linux, kill(0) + the process record where /proc is
+    /// not mounted.
     #[test]
     fn a_live_process_reads_alive() {
         assert!(is_process_alive(std::process::id()).expect("liveness probe"));
@@ -533,6 +633,94 @@ mod liveness_tests {
     #[test]
     fn a_nonexistent_pid_reads_dead_through_the_fallback() {
         assert!(!is_process_alive(100_000_000).expect("liveness probe"));
+    }
+}
+
+/// The Apple process record vs the `ps` ground truth it replaces: the
+/// identity and zombie state must match byte-for-byte, with `ps`
+/// unresolvable on `PATH` (the test re-execs itself without one).
+#[cfg(all(test, target_vendor = "apple"))]
+mod darwin_process_record_tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+
+    /// The identity earlier builds and the TS product recorded: `ps -o
+    /// lstart=` under the pinned env - the removed production path, kept
+    /// as test-side ground truth. `/bin/ps` by absolute path, so it still
+    /// runs when the test hides `ps` from `PATH`.
+    fn ps_lstart_identity(pid: u32) -> Option<String> {
+        let output = Command::new("/bin/ps")
+            .args(["-p", &pid.to_string(), "-o", "lstart="])
+            .env("LC_ALL", "C")
+            .env("LC_TIME", "C")
+            .env("LANG", "C")
+            .env("TZ", "UTC")
+            .output()
+            .ok()?;
+        let lstart = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (!lstart.is_empty()).then(|| format!("ps:{lstart}"))
+    }
+
+    #[test]
+    fn identity_and_zombie_state_match_ps_with_no_ps_on_path() {
+        const CHILD: &str = "PA_TYPES_PROCESS_RECORD_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Re-run this very test where `ps` does not resolve: a probe
+            // that spawns `ps` answers None/Err there.
+            let output = Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "platform::process::darwin_process_record_tests::identity_and_zombie_state_match_ps_with_no_ps_on_path",
+                ])
+                .env(CHILD, "1")
+                .env("PATH", "/var/empty")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        // Detached stdio: a sleep leaked by an assert failure cannot hold
+        // the parent's output pipes open.
+        let mut child = Command::new("/bin/sleep")
+            .arg("600")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        // pid 1 is root-owned launchd: readable without privilege, like ps.
+        let live = [pid, 1];
+        assert_eq!(live.map(process_start_id), live.map(ps_lstart_identity));
+        assert!(is_process_alive(pid).unwrap());
+        child.kill().unwrap();
+        // Block until the child has exited, but leave it unreaped (a zombie).
+        // SAFETY: all-zero is valid for `siginfo_t` (integers and pointers).
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: writes only `info`; blocks until the child exits without
+        // reaping it (WNOWAIT).
+        assert_eq!(
+            unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid,
+                    &raw mut info,
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            },
+            0
+        );
+        assert_eq!(process_start_id(pid), ps_lstart_identity(pid));
+        assert!(!is_process_alive(pid).unwrap());
+        child.wait().unwrap();
+        assert_eq!(
+            (process_start_id(pid), ps_lstart_identity(pid)),
+            (None, None)
+        );
     }
 }
 
