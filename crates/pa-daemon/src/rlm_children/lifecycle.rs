@@ -252,10 +252,10 @@ impl SupervisorChildSessionsInner {
                     for record in children.iter() {
                         let record = record.lock().await;
                         if record.active_session_id == active_session_id {
-                            durable = record
-                                .session_id
-                                .clone()
-                                .or_else(|| Some(record.rlm_child_id.clone()));
+                            durable = Some(crate::rlm_children::durable_child_selector(
+                                record.session_id.as_deref(),
+                                &record.rlm_child_id,
+                            ));
                             break;
                         }
                     }

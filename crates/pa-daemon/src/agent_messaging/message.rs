@@ -198,11 +198,22 @@ impl AgentMessageController for LinkAgentMessageController {
                     .collect(),
             });
         }
-        // Children the roster does not list (a passivating or
-        // mid-registration child worker) stay addressable: the delivery
-        // transports resolve or wake them from their persisted identity.
+        // Children the roster does not list (a passivated or
+        // mid-registration child worker) are addressed by their DURABLE
+        // id, like TS family entries (`id: agent.sessionId`): the
+        // supervisor's send_message wake resolves it through the spawn
+        // ledger and relaunches a passivated child. The spawn-time live id
+        // stays an alias selector.
         for child in children {
-            child_members.push(child_member(&child, None));
+            let mut member = child_member(&child, None);
+            let durable = crate::rlm_children::durable_child_selector(
+                child.session_id.as_deref(),
+                &child.rlm_child_id,
+            );
+            member
+                .aliases
+                .push(std::mem::replace(&mut member.id, durable));
+            child_members.push(member);
         }
         // TS `selectAgentFamily` order: parent, siblings by name, then
         // children by name.
@@ -290,7 +301,6 @@ impl LinkAgentMessageController {
         };
         match crate::peer_client::deliver_message_over_peer_transport(
             &ticket,
-            &input.target,
             &input.message,
             &self.sender_block(),
             None,

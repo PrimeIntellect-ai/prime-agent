@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 
 use crate::agents_view_forest::{
     ancestor_session_ids, build_rows, compute_rollups, has_session_children, resolve_selection,
-    scope_ancestors, scope_depth, scope_to_subtree, AgentsViewRow, RowKind, SelectionKey,
+    scope_ancestors, scope_root, scope_to_subtree, AgentsViewRow, RowKind, ScopeRoot, SelectionKey,
 };
 use crate::agents_view_state::truncate_text;
 use crate::agents_view_state::{
@@ -122,8 +122,10 @@ pub struct AgentsViewOptions {
 
 /// The open action the run ended with (TS `AgentsViewRunResult`'s
 /// `open`/`scope_back` arms, unified): the session the flow opens plus
-/// the row metadata it carries across the view/session loop.
-#[derive(Debug, Clone)]
+/// the row metadata it carries across the view/session loop — the new
+/// sessions open the same way (TS `createNewSession`'s
+/// `finish({ type: "open" })`).
+#[derive(Debug, Clone, PartialEq)]
 pub struct OpenedRow {
     pub selection: SessionSelection,
     pub expanded_ancestors: Vec<String>,
@@ -434,10 +436,11 @@ struct AgentsViewMode {
     /// the catalog apply filters these paths out (a deleted row never
     /// reappears behind a slow fetch).
     deleted_saved_paths: std::collections::HashSet<String>,
-    /// The scope root's `depth` metadata (`rlmDepth + 1`); `None` when the
-    /// scope root is not on the roster (the view falls back to the global
-    /// list with a status message, TS scope-resolution fallback).
-    scope_depth: Option<u32>,
+    /// The scope root's facts the scoped view renders and creates with
+    /// ([`ScopeRoot`]); `None` when the scope root is not on the roster
+    /// (the view falls back to the global list with a status message, TS
+    /// scope-resolution fallback).
+    scope_root: Option<ScopeRoot>,
     /// The scope root resolved on the last rebuild.
     scope_active: bool,
     /// Whether the scope root left the roster mid-run (TS
@@ -487,8 +490,6 @@ struct AgentsViewMode {
     scope_back: bool,
     /// The open action the run ended with (`None` while the view runs).
     opened: Option<OpenedRow>,
-    /// ctrl+n requested a fresh session (TS `app.agents.new`).
-    new_session: bool,
     /// The effective keybindings (TS `AgentsViewMode.keybindings`): every
     /// action and hint dispatches through this manager.
     keybindings: crate::keybindings::KeybindingsManager,
@@ -625,7 +626,7 @@ impl AgentsViewMode {
             pending_headline: None,
             pending_delete_action: None,
             deleted_saved_paths: std::collections::HashSet::default(),
-            scope_depth: None,
+            scope_root: None,
             scope_active: false,
             scope_dropped: false,
             expanded_parents: std::collections::HashSet::default(),
@@ -641,7 +642,6 @@ impl AgentsViewMode {
             scope_popped: false,
             scope_back: false,
             opened: None,
-            new_session: false,
             saved_fetch_failed: false,
             saved_query_rearm: false,
             saved_stream: Vec::new(),
@@ -1326,11 +1326,11 @@ async fn run_agents_view_surface(
     // after the stop-or-delete drain settles: a confirmed request
     // completes before any deadline can cut it down. `renderer.finish`
     // consumes the renderer, so the terminal check is read first.
-    let handing_off = mode.opened.is_some() || mode.new_session;
+    let handing_off = mode.opened.is_some();
     let terminal_exit = matches!(renderer, Renderer::Terminal { .. }) && !handing_off;
     // A selection hands the pane to the chat it opened (TS `result.type !== "exit"`);
     // exiting releases the alternate screen.
-    let frames = renderer.finish(mode.opened.is_some() || mode.new_session);
+    let frames = renderer.finish(mode.opened.is_some());
     // TS `AgentsViewRosterStore.dispose` fires the roster unsubscribe
     // fire-and-forget ("nobody needs the ack"; the supervisor also drops
     // the subscription with the socket), so no handoff ever waits on it.
@@ -1414,7 +1414,7 @@ async fn run_agents_view_surface(
     }
     // A handoff returns the roster connection for the flow's next view run
     // (TS `persistentState.rosterClient`); a selection-less exit closes it.
-    let link = if opened.is_some() || mode.new_session {
+    let link = if opened.is_some() {
         // The handoff link carries the catalog the run loaded (TS
         // `persistentState.savedSessions`/`savedCatalogLoaded`): the flow's
         // next view run paints the Inactive rows it already holds on its
@@ -1432,10 +1432,7 @@ async fn run_agents_view_surface(
     Ok(AgentsViewRun {
         link,
         outcome: AgentsViewOutcome {
-            selection: opened
-                .as_ref()
-                .map(|row| row.selection.clone())
-                .or(mode.new_session.then_some(SessionSelection::New)),
+            selection: opened.as_ref().map(|row| row.selection.clone()),
             frames,
             query: (!mode.query.is_empty()).then(|| mode.query.clone()),
             scope_popped: mode.scope_popped,

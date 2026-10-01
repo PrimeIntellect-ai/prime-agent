@@ -35,5 +35,6 @@ pub use storage::{
 };
 pub use types::{
     AuthCredential, AuthSource, AuthSourceToken, AuthStatus, AuthStorageData, PrimeTeamAssignment,
-    PrimeTeamCredential, StoredPrimeTeam, PRIME_INFERENCE_PROVIDER_ID,
+    PrimeTeamCredential, StoredPrimeTeam, PRIME_INFERENCE_PROVIDER_ID, SERPER_CREDENTIAL_ID,
+    SERPER_CREDENTIAL_NAME,
 };
