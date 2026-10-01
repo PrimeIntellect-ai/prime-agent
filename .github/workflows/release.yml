@@ -441,7 +441,12 @@ jobs:
     needs: [build-gnu, build-darwin, reuse-continuous]
     name: promotion gate -> release attach
     runs-on: ubuntu-latest
-    environment: release
+    # The channel gates differ: the stable channel publishes from the protected
+    # `release` environment (the required-reviewer approval is the ship gate);
+    # the nightly/beta channel publishes from `release-beta` (no required
+    # reviewers - every green merge rolls the beta automatically, the rolling
+    # channel by design; the stable cut stays the human-approved act).
+    environment: ${{ contains(github.ref_name, '-beta') && 'release-beta' || 'release' }}
     permissions:
       contents: write
       id-token: write
@@ -681,11 +686,14 @@ jobs:
       #
       # THE SECURITY MODEL, in one block for every future reader:
       #   - SEPARATION: the build jobs (build-gnu/build-darwin) produce and
-      #     attest the artifacts and hold NO R2 credentials; this promote job
-      #     — the protected 'release' environment, gated by the operator's
-      #     approval click — is the ONLY job that ever holds the R2 secrets.
-      #     The build is not the release: the approval gate IS the release
-      #     decision, and every s3 cp below runs only after it.
+      #     attest the artifacts and never reference the R2 secrets; this
+      #     promote job is the only job that does. The R2 secrets are
+      #     repo-level (neither environment holds any), so the environment
+      #     is not a credential boundary. Stable tags run in the 'release'
+      #     environment, whose required-reviewer approval is a process gate:
+      #     a stable s3 cp runs only after a human approves. Beta tags run in
+      #     'release-beta' (no reviewers) and publish automatically once the
+      #     builds pass.
       #   - CHECKSUM FIRST: sha256sum --check SHA256SUMS passes before any
       #     upload — a corrupt or mismatched artifact never reaches the
       #     bucket.
@@ -695,8 +703,8 @@ jobs:
       #     install.sh, install-beta.sh) are no-cache — the user path is
       #     always fresh.
       #   - NO PATS, NO LEAKS: the GitHub side uses the workflow's own
-      #     identity (github.token); the R2 keys are environment secrets
-      #     scoped to this job; nothing is echoed.
+      #     identity (github.token); the R2 keys are repo-level secrets
+      #     read only by this job; nothing is echoed.
       #   - BETA SUPERSEDE: only the LATEST green commit gets a beta cut;
       #     a newer main push landing while this beta built means a newer
       #     cut is coming — this publish keeps its versioned artifacts but
