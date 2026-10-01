@@ -648,29 +648,16 @@ impl Worker {
         }
     }
 
-    pub(crate) async fn handle_wait_for_idle(&self) -> DaemonResponse {
-        self.wait_until_idle().await;
-        response_success(None, "wait_for_idle", None)
-    }
-
-    /// `wait_for_headless_completion` (TS daemon command): settle the
-    /// headless run first (same idle wait as `wait_for_idle`), then answer
-    /// the autonomous-run accounting snapshot (`DaemonAutonomousStatus`).
-    /// `waitForRlmQuiescence` (TS `waitForHeadlessCompletion`'s strong arm
-    /// over `agent-session.ts` `waitForRlmQuiescence`): the barrier also
-    /// owns descendant work - it holds past the parent's idle until every
-    /// tracked child run's settle funnel fires (after the terminal notice
-    /// is delivered), and the settle loop re-runs the idle wait, so a
-    /// settled child's terminal notice (a queued parent turn) drains
-    /// inside the barrier exactly like TS's "work may start at the
-    /// child-settlement boundary" re-check.
-    pub(crate) async fn handle_wait_for_headless_completion(
-        &self,
-        payload: &Value,
-    ) -> DaemonResponse {
-        if let Err(response) = self.require_created("wait_for_headless_completion") {
-            return response;
-        }
+    /// The idle wait, plus `waitForRlmQuiescence` (TS
+    /// `waitForHeadlessCompletion`'s strong arm over `agent-session.ts`
+    /// `waitForRlmQuiescence`): the barrier also owns descendant work - it
+    /// holds past the session's idle until every tracked child run's
+    /// settle funnel fires (after the terminal notice is delivered), and
+    /// the settle loop re-runs the idle wait, so a settled child's
+    /// terminal notice (a queued turn) drains inside the barrier exactly
+    /// like TS's "work may start at the child-settlement boundary"
+    /// re-check.
+    async fn wait_until_quiescent(&self, payload: &Value) {
         let children = if payload.get("waitForRlmQuiescence").and_then(Value::as_bool) == Some(true)
         {
             self.agent_engine
@@ -682,7 +669,7 @@ impl Worker {
         loop {
             self.wait_until_idle().await;
             let Some(children) = children.as_ref() else {
-                break;
+                return;
             };
             // Register the permit before the unsettled-work read: a run
             // that settles between the read and the await still wakes
@@ -699,12 +686,34 @@ impl Worker {
                 // runs before answering, so the barrier holds for the
                 // new work too instead of completing at the boundary.
                 if !children.any_running().await {
-                    break;
+                    return;
                 }
                 continue;
             }
             settled.await;
         }
+    }
+
+    /// `wait_for_idle`: park until the session is idle;
+    /// `waitForRlmQuiescence` also holds until its RLM children settled
+    /// (the parent-side settle watcher and `collect` wait out a child's
+    /// whole subtree this way).
+    pub(crate) async fn handle_wait_for_idle(&self, payload: &Value) -> DaemonResponse {
+        self.wait_until_quiescent(payload).await;
+        response_success(None, "wait_for_idle", None)
+    }
+
+    /// `wait_for_headless_completion` (TS daemon command): settle the
+    /// headless run first (same idle wait as `wait_for_idle`), then answer
+    /// the autonomous-run accounting snapshot (`DaemonAutonomousStatus`).
+    pub(crate) async fn handle_wait_for_headless_completion(
+        &self,
+        payload: &Value,
+    ) -> DaemonResponse {
+        if let Err(response) = self.require_created("wait_for_headless_completion") {
+            return response;
+        }
+        self.wait_until_quiescent(payload).await;
         // The idle wait finished, so no turn holds the accounting state;
         // the snapshot read cannot interleave with a running turn.
         let status = self

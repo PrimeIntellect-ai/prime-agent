@@ -435,6 +435,36 @@ fn headless_completion_waits_for_rlm_quiescence() {
     );
 }
 
+/// `wait_for_idle` with `waitForRlmQuiescence: true` is the same barrier:
+/// the parent's settle watcher waits on a child this way, so a child with
+/// running subagents is not idle until its whole subtree settled.
+#[test]
+fn wait_for_idle_waits_for_rlm_quiescence() {
+    let Some(kernel_python) = kernel_python() else {
+        return;
+    };
+    let mut lane = spawn_held_child_lane(&kernel_python);
+    lane.client.send_command(
+        "w1",
+        &json!({
+            "type": "wait_for_idle",
+            "activeSessionId": lane.parent_id,
+            "waitForRlmQuiescence": true,
+        }),
+    );
+    let idle = lane.client.read_response("w1");
+    assert_eq!(idle["success"], true, "wait_for_idle failed: {idle}");
+    let rows = rlm_children_rows(&mut lane.client, "g1", &lane.parent_id);
+    let child_row = rows
+        .iter()
+        .find(|row| row["id"] == json!(lane.child_id))
+        .expect("the spawned child's roster row");
+    assert_eq!(
+        child_row["status"], "done",
+        "wait_for_idle answered while the child was still running"
+    );
+}
+
 /// The barrier reads the run's settlement, not the roster status: the
 /// roster flips terminal inside the watcher's settle grace, and the
 /// record only settles at the settle funnel - after the grace re-check,

@@ -332,7 +332,8 @@ impl SupervisorChildSessionsInner {
             .map(compact_rlm_text))
     }
 
-    /// Best-effort bounded wait for one child to go idle. The wait is a
+    /// Best-effort bounded wait for one child and its descendants to go
+    /// idle. The wait is a
     /// snapshot helper, not a gate: its timeout is not an error, and the
     /// caller re-reads the child's state afterwards (TS collect: "a
     /// timeout returns current snapshots, never an error").
@@ -340,9 +341,12 @@ impl SupervisorChildSessionsInner {
         if budget.is_zero() {
             return;
         }
+        // The child's own descendants keep it busy (`child_busy`), so the
+        // wait holds until they settle too.
         let command = DaemonCommand::WaitForIdle {
             id: None,
             active_session_id: active_session_id.to_string(),
+            wait_for_rlm_quiescence: Some(true),
             rest: Map::default(),
         };
         let _ = self

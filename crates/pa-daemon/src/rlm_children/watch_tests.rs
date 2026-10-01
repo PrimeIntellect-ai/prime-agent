@@ -88,23 +88,27 @@ async fn spawn_fake_supervisor(
                         "wait_for_idle" => {
                             tokio::time::sleep(std::time::Duration::from_millis(idle_delay_ms))
                                 .await;
+                            // The quiescence arm also waits out the
+                            // child's own running subagents.
+                            if command["waitForRlmQuiescence"] == true {
+                                child_subagents
+                                    .quiescent_waits
+                                    .fetch_add(1, Ordering::SeqCst);
+                                while child_subagents.running.load(Ordering::SeqCst) {
+                                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                                }
+                            }
                             response_success(Some(&id), command_type, None)
                         }
-                        "get_state" => {
-                            let running = child_subagents.running.load(Ordering::SeqCst);
-                            if running {
-                                child_subagents.busy_reads.fetch_add(1, Ordering::SeqCst);
-                            }
-                            response_success(
-                                Some(&id),
-                                command_type,
-                                Some(json!({
-                                    "isStreaming": false,
-                                    "hasRunningSubagents": running,
-                                    "sessionActions": { "queuedCount": 0 },
-                                })),
-                            )
-                        }
+                        "get_state" => response_success(
+                            Some(&id),
+                            command_type,
+                            Some(json!({
+                                "isStreaming": false,
+                                "hasRunningSubagents": child_subagents.running.load(Ordering::SeqCst),
+                                "sessionActions": { "queuedCount": 0 },
+                            })),
+                        ),
                         "get_last_assistant_text" => {
                             // The settle capture: with the knob set, the
                             // worker leaves right after its final answer.
@@ -175,12 +179,12 @@ async fn sessions_with_fake_supervisor(
 }
 
 /// The fake child's own subagents: whether one still runs (the child
-/// reports `hasRunningSubagents`), and how many child state reads
-/// answered busy because of it.
+/// reports `hasRunningSubagents`, and a `waitForRlmQuiescence` idle wait
+/// holds until it finishes), and how many such waits started.
 #[derive(Default)]
 struct FakeChildSubagents {
     running: AtomicBool,
-    busy_reads: std::sync::atomic::AtomicUsize,
+    quiescent_waits: std::sync::atomic::AtomicUsize,
 }
 
 /// [`sessions_with_fake_supervisor`] whose child reports its own running
@@ -352,16 +356,8 @@ async fn a_child_with_a_running_grandchild_keeps_the_parent_running() {
     sessions.notify_turn_done();
 
     // The child is idle on its own, but its grandchild still runs: the
-    // watcher reads the child busy (twice: the settle check and its
-    // follow-up liveness check) and keeps it running.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while grandchild.busy_reads.load(Ordering::SeqCst) < 2 {
-        assert!(
-            Instant::now() < deadline,
-            "the watcher never read the child"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    // watcher's idle wait holds for the child's whole subtree.
+    wait_for_quiescent_wait(&grandchild).await;
     let roster = sessions.list_subagents().await.expect("child roster");
     assert_eq!(roster[0].status, "running");
     assert!(sessions.has_running_children());
@@ -374,6 +370,52 @@ async fn a_child_with_a_running_grandchild_keeps_the_parent_running() {
     assert_eq!(roster[0].status, "completed");
     assert!(!sessions.has_running_children());
     assert!(running.has_changed().unwrap());
+}
+
+/// A `collect` with a timeout waits out a child whose own turn ended but
+/// whose grandchild still runs, instead of answering `running` at once.
+#[tokio::test]
+async fn collect_with_a_timeout_waits_for_a_running_grandchild() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let grandchild = Arc::new(FakeChildSubagents {
+        running: AtomicBool::new(true),
+        ..FakeChildSubagents::default()
+    });
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        false,
+        Arc::clone(&grandchild),
+    )
+    .await;
+    let handle = spawn_child(&sessions).await;
+    sessions.notify_turn_done();
+    wait_for_quiescent_wait(&grandchild).await;
+
+    let finish = Arc::clone(&grandchild);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        finish.running.store(false, Ordering::SeqCst);
+    });
+    let results = sessions
+        .collect(vec![handle.rlm_child_id.clone()], 10_000)
+        .await
+        .expect("collect the child");
+    assert_eq!(results[0].status, "done");
+    assert!(!grandchild.running.load(Ordering::SeqCst));
+}
+
+/// Wait until the settle watcher parks in the child's subtree idle wait.
+async fn wait_for_quiescent_wait(child_subagents: &FakeChildSubagents) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child_subagents.quiescent_waits.load(Ordering::SeqCst) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the watcher never waited for the child's subtree"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// One child row exists and is running before the close tests run.

@@ -89,7 +89,7 @@ impl Worker {
                 response_success(None, "abort_compaction", None)
             }
             "set_auto_compaction" => self.handle_set_auto_compaction(payload),
-            "wait_for_idle" => self.handle_wait_for_idle().await,
+            "wait_for_idle" => self.handle_wait_for_idle(payload).await,
             "wait_for_headless_completion" => {
                 self.handle_wait_for_headless_completion(payload).await
             }
