@@ -6,7 +6,6 @@
 //! boundary, so the quiet select parked — the loader froze and the
 //! counter skipped whole seconds.
 #![cfg(unix)]
-#![allow(clippy::cast_possible_truncation)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -145,8 +144,8 @@ fn write_json(writer: &mut UnixStream, value: &Value) {
 fn attach_data(id: &str) -> Value {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_millis() as u64)
-        .unwrap_or_default();
+        .expect("clock after the epoch")
+        .as_millis();
     json!({
         "type": "response",
         "id": id,
