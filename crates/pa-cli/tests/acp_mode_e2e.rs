@@ -729,7 +729,7 @@ fn acp_daemon_attached_serves_a_client_owned_session() {
     // the sandboxed socket, hosts a client-owned scripted session, and
     // serves the same ACP surface (chunk + settle envelope + end_turn).
     let script = json!({ "engine": "faux", "responses": ["The Thames flows through London."] });
-    let (mut client, _socket) =
+    let (mut client, socket) =
         AcpChild::spawn_daemon_attached(&["--mode", "acp", "--no-session"], &script);
     let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
@@ -743,6 +743,23 @@ fn acp_daemon_attached_serves_a_client_owned_session() {
         .as_str()
         .unwrap()
         .to_string();
+    // Read before session/close: its Kill removes the descriptor.
+    let home = socket.parent().expect("the sandbox home");
+    let descriptor = std::fs::read_dir(home.join(".prime/agent/daemon-workers"))
+        .expect("descriptor instances")
+        .flatten()
+        .flat_map(|instance| {
+            std::fs::read_dir(instance.path())
+                .expect("instance dir")
+                .flatten()
+        })
+        .filter_map(|file| {
+            serde_json::from_str::<Value>(&std::fs::read_to_string(file.path()).ok()?).ok()
+        })
+        .find(|descriptor| descriptor.get("authenticationToken").is_some())
+        .expect("the worker descriptor");
+    let acp_pid = client.child.id();
+    assert_eq!(descriptor["ownerClientId"], json!(format!("acp:{acp_pid}")));
     let prompt = client.request(
         "session/prompt",
         &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "Name a river." }] }),
@@ -940,6 +957,60 @@ fn acp_daemon_attached_supervisor_loss_fails_the_prompt() {
             "data": { "details": "the daemon connection closed mid-request" }
         }),
         "the in-flight prompt fails fast on supervisor loss: {prompt_response}"
+    );
+}
+
+#[test]
+fn acp_daemon_attached_image_only_prompt_reaches_the_session() {
+    let (mut client, socket) = AcpChild::spawn_daemon_attached(
+        &["--mode", "acp", "--no-session"],
+        &json!({ "engine": "faux", "responses": ["SAW-IMAGE"] }),
+    );
+    let init = client.request("initialize", &initialize_params());
+    let _ = client.wait_response(init, TIMEOUT);
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
+    let (new_response, _) = client.wait_response(new, TIMEOUT);
+    let session_id = new_response["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // 1x1 PNG
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    let prompt = client.request(
+        "session/prompt",
+        &json!({
+            "sessionId": session_id,
+            "prompt": [
+                { "type": "image", "data": png, "mimeType": "image/png" },
+            ],
+        }),
+    );
+    let (prompt_response, _) = client.wait_response(prompt, TIMEOUT);
+    assert_eq!(
+        prompt_response["result"]["stopReason"], "end_turn",
+        "an image-only prompt runs a turn: {prompt_response}"
+    );
+    // The stored user row carries the image: an empty text block first,
+    // then the images (TS `_buildPromptContent`).
+    let list = daemon_request(&socket, "img-list", &json!({ "type": "list" }));
+    let active_session_id = &list["data"]["sessions"][0]["activeSessionId"];
+    let messages = daemon_request(
+        &socket,
+        "img-msgs",
+        &json!({ "type": "get_messages", "activeSessionId": active_session_id }),
+    );
+    let user = messages["data"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "user")
+        .unwrap();
+    assert_eq!(
+        user["content"],
+        json!([
+            { "type": "text", "text": "" },
+            { "type": "image", "data": png, "mimeType": "image/png" },
+        ])
     );
 }
 

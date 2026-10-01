@@ -294,7 +294,8 @@ async fn family_resolves_the_parent_by_session_id() {
 }
 
 /// Registry children the roster does not list stay addressable as Child
-/// members keyed by their registry identity.
+/// members keyed by their durable session id (the wake-resolvable
+/// selector), the spawn-time live id kept as an alias.
 #[tokio::test]
 async fn family_keeps_off_roster_children_addressable() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -321,9 +322,9 @@ async fn family_keeps_off_roster_children_addressable() {
     let family = controller.family().await.unwrap();
     assert_eq!(family.len(), 1, "{family:?}");
     assert_eq!(family[0].relationship, AgentFamilyRelationship::Child);
-    assert_eq!(family[0].id, "eee555");
+    assert_eq!(family[0].id, "sess-e");
     assert_eq!(family[0].name.as_deref(), Some("worker-b"));
-    assert_eq!(family[0].aliases, vec!["sub-kid2", "sess-e"]);
+    assert_eq!(family[0].aliases, vec!["sub-kid2", "sess-e", "eee555"]);
 }
 
 /// A refused ticket falls back to the supervisor-routed `send_message`.
@@ -367,10 +368,10 @@ async fn self_target_is_refused() {
     );
 }
 
-/// A minted ticket delivers straight to the target worker's socket:
-/// `peer_auth` with the worker purpose, then `worker_deliver_message`
-/// carrying the TS sender identity block, and the receipt maps onto
-/// the kernel shape.
+/// A minted ticket delivers straight to the target worker's socket,
+/// addressed to the ticket's resolved session: `peer_auth` with the
+/// worker purpose, then `worker_deliver_message` carrying the TS
+/// sender identity block, and the receipt maps onto the kernel shape.
 #[tokio::test]
 async fn direct_ticket_delivers_to_the_target_worker_socket() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -470,7 +471,14 @@ async fn direct_ticket_delivers_to_the_target_worker_socket() {
     let socket = dir.path().join("sup.sock");
     spawn_fake_supervisor(socket.clone(), json!({ "sessions": [] }), Some(ticket)).await;
     let controller = controller(socket, own_summary());
-    let receipt = controller.send_agent_message(input()).await.unwrap();
+    // The supervisor resolved the durable selector "sess-b" into the ticket.
+    let receipt = controller
+        .send_agent_message(AgentMessageSendInput {
+            target: "sess-b".to_string(),
+            ..input()
+        })
+        .await
+        .unwrap();
     assert_eq!(receipt.id, "agentmsg_peer");
     assert_eq!(receipt.delivery_status, AgentMessageDeliveryStatus::Queued);
     assert_eq!(receipt.target, "bbb222");

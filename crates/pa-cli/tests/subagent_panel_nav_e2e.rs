@@ -170,6 +170,20 @@ fn write_fixture(
     path
 }
 
+/// One billed assistant turn appended to a fixture transcript: the
+/// usage-bearing row the own-usage fold reads.
+fn append_billed_turn(path: &Path, id: &str, input: u64, output: u64, cost: f64) {
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .expect("open the fixture for its billed turn");
+    let _ = writeln!(
+        file,
+        "{{\"type\":\"message\",\"id\":\"{id}\",\"timestamp\":\"2026-09-29T00:00:02.100Z\",\"message\":{{\"role\":\"assistant\",\"provider\":\"prime-inference\",\"model\":\"internal/glm-5.3-fast\",\"content\":[{{\"type\":\"text\",\"text\":\"work complete\"}}],\"stopReason\":\"stop\",\"timestamp\":2100,\"usage\":{{\"input\":{input},\"output\":{output},\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":{},\"cost\":{{\"input\":0.0,\"output\":{cost},\"cacheRead\":0.0,\"cacheWrite\":0.0,\"total\":{cost}}}}}}}}}",
+        input + output,
+    );
+}
+
 /// The first frame showing `marker` (the state before the later keystrokes
 /// mutate it).
 fn first_frame_of(frames: &[String], marker: &str) -> String {
@@ -474,15 +488,7 @@ async fn the_title_bills_a_passive_subagents_spend() {
         (&parent_path, "pm1a", 100, 10, 1.0),
         (&child_path, "cm1a", 50, 5, 0.3),
     ] {
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(path)
-            .expect("open the fixture for its billed turn");
-        let _ = writeln!(
-            file,
-            "{{\"type\":\"message\",\"id\":\"{id}\",\"timestamp\":\"2026-09-29T00:00:02.100Z\",\"message\":{{\"role\":\"assistant\",\"provider\":\"prime-inference\",\"model\":\"internal/glm-5.3-fast\",\"content\":[{{\"type\":\"text\",\"text\":\"work complete\"}}],\"stopReason\":\"stop\",\"timestamp\":2100,\"usage\":{{\"input\":{input},\"output\":{output},\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":{},\"cost\":{{\"input\":0.0,\"output\":{cost},\"cacheRead\":0.0,\"cacheWrite\":0.0,\"total\":{cost}}}}}}}}}",
-            input + output,
-        );
+        append_billed_turn(path, id, input, output, cost);
     }
 
     // The durable spawn edge: the roster surfaces the child as the
@@ -530,6 +536,109 @@ async fn the_title_bills_a_passive_subagents_spend() {
         .to_string();
     assert!(
         top_bar.contains("title bill parent") && top_bar.contains("$1.30"),
+        "the top bar bills the family rollup beside the chat name:\n{top_bar}"
+    );
+}
+
+/// The attached parent's top bar bills a deleted subagent's spend: the
+/// RLM-deleted child keeps its transcript under session-artifacts (no
+/// catalog row exists for it), so its captured spend rides the parent's
+/// roster row through the deleted-descendant bucket. This test asserts
+/// the top bar; the agents-view row reads the same row through the same
+/// `compute_rollups`, so it bills the same number.
+#[tokio::test]
+async fn the_title_bills_a_deleted_subagents_spend() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+
+    // The parent ($1.00 own) and its child, whose transcript lives under
+    // the parent's session-artifacts tree (the real RLM child location:
+    // the flat catalog never lists it, so the child has no row anywhere).
+    let parent_path = write_fixture(
+        &session_dir,
+        "title-del-parent",
+        "title del parent",
+        None,
+        0,
+        &[],
+    );
+    let child_dir = agent_dir
+        .join("session-artifacts")
+        .join("title-del-parent")
+        .join("title-del-child");
+    std::fs::create_dir_all(&child_dir).expect("child artifacts dir");
+    let child_path = write_fixture(
+        &child_dir,
+        "title-del-worker",
+        "title del worker",
+        Some(&parent_path),
+        1,
+        &[],
+    );
+    // The billed turns: the parent $1.00, the deleted child $0.30.
+    append_billed_turn(&parent_path, "dm1a", 100, 10, 1.0);
+    append_billed_turn(&child_path, "dm1c", 50, 5, 0.3);
+
+    // The durable spawn edge plus the RLM delete's tombstone carrying
+    // the captured usage (the amendment the stop finalize appends after
+    // the flush barrier): the child's spend survives the deletion.
+    let ledger = pa_daemon::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &session_dir, |_m| {});
+    ledger
+        .append_spawn(&pa_daemon::rlm_ledger::RlmSpawnInput {
+            child_id: "title-del-child".to_string(),
+            parent: parent_path.to_string_lossy().to_string(),
+            child: child_path.to_string_lossy().to_string(),
+            depth: 1,
+            name: "title del worker".to_string(),
+        })
+        .expect("append spawn edge");
+    ledger
+        .append_delete_with_usage(
+            "title-del-child",
+            &child_path.to_string_lossy(),
+            pa_daemon::rlm_ledger::RlmLedgerDeleteReason::User,
+            &pa_daemon::session_usage::SessionUsageSummary {
+                input_tokens: 50,
+                output_tokens: 5,
+                cost: 0.3,
+            },
+        )
+        .expect("append delete tombstone");
+
+    let options = session_options(
+        &supervisor.socket,
+        &session_dir,
+        SessionSelection::Resume(parent_path.clone()),
+        None,
+        true,
+    );
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 15_000 },
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "$1.30".to_string(),
+                timeout_ms: 15_000,
+            },
+        ],
+        width: 120,
+        height: 36,
+    };
+    let run = pa_tui::interactive::run_interactive(options, UiMode::Headless(plan))
+        .await
+        .expect("parent session run");
+    // The top bar row (render_top_bar): the parent's own $1.00 plus the
+    // deleted child's $0.30, the family rollup - the child's spend
+    // bills through the bucket even though no row exists for it.
+    let top_bar = frame_of(&run.frames, "$1.30")
+        .lines()
+        .next()
+        .expect("the top bar row")
+        .to_string();
+    assert!(
+        top_bar.contains("title del parent") && top_bar.contains("$1.30"),
         "the top bar bills the family rollup beside the chat name:\n{top_bar}"
     );
 }
