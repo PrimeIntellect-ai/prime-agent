@@ -551,6 +551,22 @@ impl SessionUi {
                     title: format!("Connect {label}"),
                 });
             }
+            Some(crate::mcp_view::McpViewAction::Key { id, label }) => {
+                view.mcp_view = None;
+                self.dirty = true;
+                if self.picker_restored_draft {
+                    self.picker_restored_draft = false;
+                } else {
+                    view.editor.set_text("");
+                }
+                // The api-key credential's client surface: prompt for the
+                // key (masked), store it in the credential's auth slot —
+                // the exact contract the runtime reads.
+                self.pending_mcp_auth = Some(McpAuthIntent {
+                    args: format!("key {id}"),
+                    title: format!("Connect {label}"),
+                });
+            }
         }
         Ok(())
     }

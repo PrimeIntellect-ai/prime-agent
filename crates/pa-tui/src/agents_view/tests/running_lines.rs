@@ -8,32 +8,13 @@ use super::*;
 /// default stands there.
 #[test]
 fn scoped_view_keeps_the_first_row_default() {
-    let mut mode = AgentsViewMode::new(AgentsViewOptions {
-        socket_path: PathBuf::from("/tmp/agents-view-test.sock"),
-        cwd: PathBuf::from("/tmp"),
-        session_dir: None,
-        theme: "prime".to_string(),
-        version: "0.0.0".to_string(),
-        anchor_session_id: Some("p".to_string()),
-        scope: Some(AgentsViewScope {
-            session_id: Some("p".to_string()),
-            active_session_id: Some("p-live".to_string()),
-            session_name: Some("p name".to_string()),
-        }),
-        query: None,
-        expanded_ancestors: Vec::new(),
-        selected_row_identity: None,
-        selected_key: None,
-        status_message: None,
-        keybindings: crate::keybindings::KeybindingsManager::new(),
-        show_hardware_cursor: false,
-        incident_notice_state: None,
-    });
-    mode.roster = vec![
-        roster_entry("p", "idle", &parent_summary("p")),
-        roster_entry("c", "running", &child_summary("c", "p", "worker one")),
-    ];
-    mode.rebuild_rows();
+    let mut mode = scoped_mode(
+        Some("p"),
+        vec![
+            roster_entry("p", "idle", &parent_summary("p")),
+            roster_entry("c", "running", &child_summary("c", "p", "worker one")),
+        ],
+    );
     assert_eq!(mode.rows.len(), 1, "the scope root is excluded");
     assert_eq!(mode.selected, 0);
     assert_eq!(mode.rows[0].summary["sessionId"], "c");
@@ -53,30 +34,10 @@ fn scoped_view_keeps_the_first_row_default() {
 /// A scoped view whose scope root has no children (the all-zero dock's
 /// Subagents destination): the roster carries the root alone.
 fn childless_scope() -> AgentsViewMode {
-    let mut mode = AgentsViewMode::new(AgentsViewOptions {
-        socket_path: PathBuf::from("/tmp/agents-view-test.sock"),
-        cwd: PathBuf::from("/tmp"),
-        session_dir: None,
-        theme: "prime".to_string(),
-        version: "0.0.0".to_string(),
-        anchor_session_id: Some("p".to_string()),
-        scope: Some(AgentsViewScope {
-            session_id: Some("p".to_string()),
-            active_session_id: Some("p-live".to_string()),
-            session_name: Some("p name".to_string()),
-        }),
-        query: None,
-        expanded_ancestors: Vec::new(),
-        selected_row_identity: None,
-        selected_key: None,
-        status_message: None,
-        keybindings: crate::keybindings::KeybindingsManager::new(),
-        show_hardware_cursor: false,
-        incident_notice_state: None,
-    });
-    mode.roster = vec![roster_entry("p", "idle", &parent_summary("p"))];
-    mode.rebuild_rows();
-    mode
+    scoped_mode(
+        Some("p"),
+        vec![roster_entry("p", "idle", &parent_summary("p"))],
+    )
 }
 
 /// A childless scope is an empty view that keeps its keys: the
@@ -120,11 +81,13 @@ fn a_childless_scope_is_an_empty_view_that_keeps_its_keys() {
     // ctrl+d quits the empty view without opening anything.
     let mut mode = childless_scope();
     mode.handle_key("ctrl+d");
-    assert!(!mode.running && mode.opened.is_none() && !mode.new_session);
-    // ctrl+n dispatches the new-session action.
+    assert!(!mode.running && mode.opened.is_none());
+    // ctrl+n dispatches the new-session action from the empty view too
+    // (the binding's whole-object shape is pinned in the key_bindings
+    // family's scoped test).
     let mut mode = childless_scope();
     mode.handle_key("ctrl+n");
-    assert!(mode.new_session && !mode.running);
+    assert!(!mode.running && mode.opened.is_some());
 }
 
 /// TS `countRowsBySection` (the splash header counts) counts agent-kind
@@ -187,6 +150,7 @@ fn mode_with_mixed_children() -> AgentsViewMode {
         keybindings: crate::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
         incident_notice_state: None,
+        create_config: serde_json::json!({}),
     });
     mode.roster = vec![
         roster_entry("p", "idle", &parent_summary("p")),

@@ -101,8 +101,7 @@ pub fn command_plane(command_type: &str) -> DaemonCommandPlane {
         | "get_last_assistant_text"
         | "get_system_prompt"
         | "get_tool_definition"
-        | "set_session_entry_label"
-        | "extension_ui_response" => Session,
+        | "set_session_entry_label" => Session,
         _ => Control,
     }
 }
@@ -172,8 +171,7 @@ pub fn is_daemon_mutating_command(command_type: &str) -> bool {
 pub fn is_update_drain_command(command_type: &str) -> bool {
     matches!(
         command_type,
-        "extension_ui_response"
-            | "abort"
+        "abort"
             | "abort_bash"
             | "kill_kernel_bash"
             | "abort_branch_summary"
@@ -258,7 +256,6 @@ mod tests {
     #[test]
     fn update_drain_commands_match_ts() {
         for drain in [
-            "extension_ui_response",
             "abort",
             "abort_bash",
             "abort_branch_summary",

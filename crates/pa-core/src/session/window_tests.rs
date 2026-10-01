@@ -297,6 +297,70 @@ fn valid_goal_and_physical_metadata_survive_invalid_newer_branch_goal() {
     }
 }
 
+/// The Anthropic subscription warning's once-per-session-lifecycle marker
+/// hydrates from the discarded prefix exactly like the goal row (operator
+/// directive 2026-09-29): the walk parses on-path custom rows beyond the
+/// retained window, so a resume of a long session reads the marker without
+/// paying a full-file parse — and the cached sidecar serves it warm. The
+/// matcher is honest about the payload: a row with `data.shown` false is
+/// not a marker.
+#[test]
+fn anthropic_warning_marker_hydrates_from_before_the_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("warning.jsonl");
+    let mut rows: Vec<serde_json::Value> = fixture()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    // Put the marker deep in the discarded prefix, on the active chain
+    // (the same rewiring the goal fixture uses: u0 parents to the marker,
+    // the marker parents to the settings row).
+    rows[2]["parentId"] = json!("marked");
+    rows.insert(
+        2,
+        json!({"type":"custom","id":"marked","parentId":"settings","customType":crate::session::ANTHROPIC_WARNING_SHOWN_CUSTOM_TYPE,"data":{"shown":true}}),
+    );
+    let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
+    std::fs::write(&path, body).unwrap();
+    // Twice: the cold walk, then the warm sidecar reload — both must
+    // serve the hydrated gate.
+    for _ in 0..2 {
+        let store = WindowedSessionStore::open(&path).unwrap().unwrap();
+        assert!(
+            store.anthropic_warning_shown(),
+            "the marker beyond the retained window hydrates the gate"
+        );
+        assert_eq!(store.compaction_count(), 2);
+    }
+    // The plain fixture never hydrates the gate.
+    let plain = dir.path().join("plain.jsonl");
+    std::fs::write(&plain, fixture()).unwrap();
+    let store = WindowedSessionStore::open(&plain).unwrap().unwrap();
+    assert!(!store.anthropic_warning_shown());
+}
+
+/// A `custom` row with the marker's type but `data.shown` false is not the
+/// marker: the gate's payload check keeps a future un-show payload (or a
+/// foreign row borrowing the type) from suppressing the warning.
+#[test]
+fn an_unshown_marker_row_never_hydrates_the_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("unshown.jsonl");
+    let mut rows: Vec<serde_json::Value> = fixture()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    rows[2]["parentId"] = json!("unshown");
+    rows.insert(
+        2,
+        json!({"type":"custom","id":"unshown","parentId":"settings","customType":crate::session::ANTHROPIC_WARNING_SHOWN_CUSTOM_TYPE,"data":{"shown":false}}),
+    );
+    let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
+    std::fs::write(&path, body).unwrap();
+    let store = WindowedSessionStore::open(&path).unwrap().unwrap();
+    assert!(!store.anthropic_warning_shown());
+}
+
 #[test]
 fn unleased_append_invalidates_without_certification() {
     let dir = tempfile::tempdir().unwrap();

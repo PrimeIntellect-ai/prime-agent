@@ -10,6 +10,7 @@ use crate::engine::{
 // fixtures stay here (burst_runner, turn_session_events, positions_of)
 // - every family drives them, and the children reach them + the worker
 // namespace through `use super::*`.
+mod abort_idle_race;
 mod broadcast;
 mod burst;
 mod feed;
@@ -119,4 +120,180 @@ fn positions_of(events: &[Value], frame_type: &str) -> Vec<usize> {
         .filter(|(_, event)| event.get("type").and_then(Value::as_str) == Some(frame_type))
         .map(|(index, _)| index)
         .collect()
+}
+
+// The abort gate's arm semantics (the fallback closer's silence
+// association), pinned on the wire: a scripted engine replays the
+// sighting frames through the worker's own gated emit with the flag
+// preset (`run_turn` driven directly - the pickup's delivery-scoped
+// clear never ran), so the final-emit race is deterministic.
+struct GateProbeEngine {
+    frames: Vec<EngineEvent>,
+}
+
+impl SessionEngine for GateProbeEngine {
+    fn run_prompt(
+        &self,
+        _prompt_index: usize,
+        _request: PromptRequest,
+        _aborted: &dyn Fn() -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> bool,
+    ) {
+        for frame in &self.frames {
+            if !emit(frame.clone()) {
+                return;
+            }
+        }
+    }
+
+    fn run_side_question(
+        &self,
+        _request: SideQuestionRequest,
+        _signal: &pa_agent::abort::AbortSignal,
+        _sink: &pa_core::session_engine::side_question::SideQuestionSink,
+    ) -> SideQuestionOutcome {
+        SideQuestionOutcome::Failed {
+            answer: String::new(),
+            error: "unsupported".to_string(),
+        }
+    }
+
+    fn run_compaction(
+        &self,
+        _request: CompactionRequest,
+        _signal: &pa_agent::abort::AbortSignal,
+    ) -> CompactionOutcome {
+        CompactionOutcome::Skipped {
+            message: "nothing to compact".to_string(),
+        }
+    }
+
+    fn run_branch_summary(
+        &self,
+        _request: crate::engine::BranchSummaryRequest,
+        _signal: &pa_agent::abort::AbortSignal,
+    ) -> crate::engine::BranchSummaryOutcome {
+        crate::engine::BranchSummaryOutcome::Failed {
+            error: "unsupported".to_string(),
+        }
+    }
+
+    fn rebuild_session_context(
+        &self,
+        _branch_entries: Vec<pa_types::session::FileEntry>,
+        _goal_reload: pa_core::session_engine::goal_driver::GoalBranchReload,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// One gated sighting battery: the scripted frames through the worker's
+/// turn with the abort flag (and the suppressed-row class) preset.
+async fn gate_sighting_events(
+    frames: Vec<EngineEvent>,
+    abort_requested: bool,
+    suppress_aborted_row: bool,
+) -> Vec<Value> {
+    let engine: Arc<dyn SessionEngine> = Arc::new(GateProbeEngine { frames });
+    let runner = burst_runner(Arc::clone(&engine));
+    {
+        let mut core = runner.core.lock().unwrap();
+        core.abort_requested = abort_requested;
+        core.suppress_aborted_row = suppress_aborted_row;
+    }
+    let mut subscription = runner.events.subscribe();
+    runner
+        .run_turn(
+            engine,
+            vec![QueuedItem {
+                priority: QueuePriority::Human,
+                preview: None,
+                message: "gate".to_string(),
+                custom_message: None,
+                agent_message: None,
+                queue_key: None,
+                admission_id: None,
+                images: Vec::new(),
+                done: None,
+                queue_visible: true,
+                policy: TurnPolicy::Queued,
+                forced_batch: false,
+            }],
+        )
+        .await;
+    let mut events = Vec::new();
+    while let Ok(frame) = subscription.try_recv() {
+        if frame.outbound_type == "session_event" {
+            if let Ok(outbound) = serde_json::from_slice::<Value>(&frame.payload) {
+                events.push(outbound["event"].clone());
+            }
+        }
+    }
+    events
+}
+
+/// The finding's final-emit race, made deterministic: an abort flag
+/// sighting on the trailing `Done` of a run that completed on its own
+/// (the session-command / pre-model-failure shape - no aborted outcome,
+/// no suppressed row) must not arm the fallback's silence: the closer
+/// still pairs the run's opening `agent_start` (TS: an abort of a
+/// finished run no-ops).
+#[tokio::test]
+async fn a_late_abort_sighting_on_a_completed_runs_done_keeps_the_fallback_closer() {
+    let events = gate_sighting_events(vec![EngineEvent::Done(Ok(()))], true, false).await;
+    let starts = positions_of(&events, "agent_start");
+    let ends = positions_of(&events, "agent_end");
+    assert_eq!(starts.len(), 1, "the run opens one agent_start: {events:?}");
+    assert_eq!(
+        ends.len(),
+        1,
+        "the fallback closer pairs the opening agent_start: {events:?}"
+    );
+    assert!(
+        ends[0] > starts[0],
+        "the closer lands after the open: {events:?}"
+    );
+}
+
+/// The admission consult's settle: `DoneAborted` with no engine
+/// `agent_end` - the aborted-outcome carrier arms the silence, the
+/// suppressed-run wire shape holds (no synthesized closer for the
+/// aborted turn).
+#[tokio::test]
+async fn done_aborted_arms_the_fallback_silence() {
+    let events = gate_sighting_events(vec![EngineEvent::DoneAborted], true, false).await;
+    assert!(
+        positions_of(&events, "agent_end").is_empty(),
+        "the aborted settle keeps the suppressed-run silence: {events:?}"
+    );
+}
+
+/// The suppressed-row class (the compact path's detached run): a settle
+/// frame that would forward on a plain flag sighting (the closer test's
+/// shape) drops when `suppress_aborted_row` is set - the arm is what the
+/// assertion discriminates on, not the flag: without the suppress term
+/// the same `ToolResultMessage` reaches the wire as its message pair.
+#[tokio::test]
+async fn the_suppressed_row_sighting_drops_and_arms_the_silence() {
+    let events = gate_sighting_events(
+        vec![
+            EngineEvent::ToolResultMessage(json!({
+                "role": "toolResult",
+                "text": "the aborted tool's error result",
+            })),
+            EngineEvent::Done(Ok(())),
+        ],
+        true,
+        true,
+    )
+    .await;
+    assert!(
+        positions_of(&events, "message_start").is_empty()
+            && positions_of(&events, "message_end").is_empty(),
+        "the suppressed settle frame never reaches the wire: {events:?}"
+    );
+    assert!(
+        positions_of(&events, "agent_end").is_empty(),
+        "the suppressed-row sighting arms the silence: {events:?}"
+    );
 }

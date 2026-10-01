@@ -2286,3 +2286,7 @@ fn elided_image_tool_results_render_their_marker_metadata() {
         "Loaded 1 image(s) into context: /tmp/shot.png\n[Image: [image/png]]"
     );
 }
+
+/// The thinking-channel render pins (the two provider envelopes' stored
+/// row shapes) live in their own child module with this file's harness.
+mod thinking_pins;

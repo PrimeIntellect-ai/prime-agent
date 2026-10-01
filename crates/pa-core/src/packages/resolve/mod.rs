@@ -1,5 +1,5 @@
 //! Session resource resolution (`resolve()`): precedence-ranked collection of
-//! extension/skill/prompt/theme paths from configured packages (pi manifest,
+//! skill/prompt/theme paths from configured packages (pi manifest,
 //! convention directories, filter patterns), settings top-level arrays, and
 //! auto-discovery (settings-base directories, `.agents/skills` ancestor
 //! scan, bundled skills).
@@ -22,17 +22,15 @@ use std::path::PathBuf;
 
 use super::SourceScope;
 
-/// The four session resource kinds a package can provide.
+/// The session resource kinds a package can provide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ResourceType {
-    Extensions,
     Skills,
     Prompts,
     Themes,
 }
 
-pub(crate) const RESOURCE_TYPES: [ResourceType; 4] = [
-    ResourceType::Extensions,
+pub(crate) const RESOURCE_TYPES: [ResourceType; 3] = [
     ResourceType::Skills,
     ResourceType::Prompts,
     ResourceType::Themes,
@@ -88,7 +86,6 @@ pub struct ResolvedResource {
 /// The `resolve()` output: ranked resources per kind plus diagnostics.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResolvedPaths {
-    pub extensions: Vec<ResolvedResource>,
     pub skills: Vec<ResolvedResource>,
     pub prompts: Vec<ResolvedResource>,
     pub themes: Vec<ResolvedResource>,
@@ -101,15 +98,6 @@ pub enum MissingSourceAction {
     Install,
     Skip,
     Error,
-}
-
-/// Options for [`crate::packages::PackageManager::resolve_extension_sources`]:
-/// `local` puts sources in project scope; `temporary` uses the ephemeral
-/// resolve-only scope (never persisted).
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ResolveExtensionOptions {
-    pub local: bool,
-    pub temporary: bool,
 }
 
 /// Lower rank = higher precedence: project settings (0), project auto (1),
@@ -129,7 +117,6 @@ pub(crate) fn resource_precedence_rank(metadata: &PathMetadata) -> u8 {
 /// `packages` settings entry). An explicit empty list disables the kind.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PackageFilter {
-    pub extensions: Option<Vec<String>>,
     pub skills: Option<Vec<String>>,
     pub prompts: Option<Vec<String>>,
     pub themes: Option<Vec<String>>,
@@ -138,7 +125,6 @@ pub(crate) struct PackageFilter {
 impl PackageFilter {
     fn get(&self, resource_type: ResourceType) -> Option<&Vec<String>> {
         match resource_type {
-            ResourceType::Extensions => self.extensions.as_ref(),
             ResourceType::Skills => self.skills.as_ref(),
             ResourceType::Prompts => self.prompts.as_ref(),
             ResourceType::Themes => self.themes.as_ref(),
@@ -157,7 +143,6 @@ pub(crate) struct ConfiguredSource {
 /// manifest, per the TS product).
 #[derive(Debug, Default)]
 pub(crate) struct PiManifest {
-    pub extensions: Option<Vec<String>>,
     pub skills: Option<Vec<String>>,
     pub prompts: Option<Vec<String>>,
     pub themes: Option<Vec<String>>,
@@ -166,7 +151,6 @@ pub(crate) struct PiManifest {
 impl PiManifest {
     pub(crate) fn entries(&self, resource_type: ResourceType) -> Option<Vec<String>> {
         match resource_type {
-            ResourceType::Extensions => self.extensions.clone(),
             ResourceType::Skills => self.skills.clone(),
             ResourceType::Prompts => self.prompts.clone(),
             ResourceType::Themes => self.themes.clone(),
@@ -201,7 +185,6 @@ impl ResourceMap {
 /// [`ResolvedPaths`] at the end of resolution.
 #[derive(Default)]
 pub(crate) struct ResourceAccumulator {
-    pub extensions: ResourceMap,
     pub skills: ResourceMap,
     pub prompts: ResourceMap,
     pub themes: ResourceMap,
@@ -211,7 +194,6 @@ pub(crate) struct ResourceAccumulator {
 impl ResourceAccumulator {
     pub(crate) fn map(&mut self, resource_type: ResourceType) -> &mut ResourceMap {
         match resource_type {
-            ResourceType::Extensions => &mut self.extensions,
             ResourceType::Skills => &mut self.skills,
             ResourceType::Prompts => &mut self.prompts,
             ResourceType::Themes => &mut self.themes,
@@ -242,7 +224,6 @@ pub(crate) fn to_resolved_paths(accumulator: ResourceAccumulator) -> ResolvedPat
     };
 
     ResolvedPaths {
-        extensions: map_to_resolved(accumulator.extensions),
         skills: map_to_resolved(accumulator.skills),
         prompts: map_to_resolved(accumulator.prompts),
         themes: map_to_resolved(accumulator.themes),
@@ -257,7 +238,6 @@ pub(crate) fn settings_array(
     resource_type: ResourceType,
 ) -> Vec<String> {
     match resource_type {
-        ResourceType::Extensions => settings.extensions.clone().unwrap_or_default(),
         ResourceType::Skills => settings.skills.clone().unwrap_or_default(),
         ResourceType::Prompts => settings.prompts.clone().unwrap_or_default(),
         ResourceType::Themes => settings.themes.clone().unwrap_or_default(),
@@ -266,7 +246,6 @@ pub(crate) fn settings_array(
 
 pub(crate) fn resource_type_dir_name(resource_type: ResourceType) -> &'static str {
     match resource_type {
-        ResourceType::Extensions => "extensions",
         ResourceType::Skills => "skills",
         ResourceType::Prompts => "prompts",
         ResourceType::Themes => "themes",

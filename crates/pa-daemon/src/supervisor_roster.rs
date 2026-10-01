@@ -108,6 +108,13 @@ impl Supervisor {
                 None,
             );
         };
+        // One per-worker critical section spans the roster write AND the
+        // identity follow (the resident's descriptor lock — the same lock
+        // every identity reader takes): a routing reader can never observe
+        // a half-applied swap, and an older follow can never persist after
+        // a newer one (each accepted row carries its own follow inside the
+        // same guard, so the persists apply in accept order).
+        //
         // The stale-delta gate and the write share ONE roster lock
         // acquisition: two accepted deltas must never write in reverse
         // order (each supervisor connection runs its own task), so the
@@ -123,21 +130,50 @@ impl Supervisor {
         let mut changed = Vec::new();
         let mut removed_ids = Vec::new();
         {
-            let mut roster = self.roster.lock().unwrap();
-            if !roster.accept_delta_sequence(
-                &resident.worker_id,
-                worker_instance_id.as_deref().unwrap_or(""),
-                sequence.unwrap_or(0),
-            ) {
-                return response_success(Some(command_id), type_name, None);
-            }
-            let entry = roster.write_summary(summary, Some(&resident.worker_id), None);
-            changed.push(entry);
-            for agent_id in removed {
-                if roster.get(&agent_id).is_some() {
-                    roster.delete(&agent_id);
-                    removed_ids.push(agent_id);
+            let mut descriptor = resident.descriptor.lock().await;
+            {
+                let mut roster = self.roster.lock().unwrap();
+                if !roster.accept_delta_sequence(
+                    &resident.worker_id,
+                    worker_instance_id.as_deref().unwrap_or(""),
+                    sequence.unwrap_or(0),
+                ) {
+                    return response_success(Some(command_id), type_name, None);
                 }
+                let entry = roster.write_summary(summary.clone(), Some(&resident.worker_id), None);
+                // The worker's root slot can swap to a new durable session
+                // (a `new_session`/`switch_session`/`import_jsonl`/`fork`
+                // replacement serves a new file under the same address):
+                // the row it previously owned for that address described
+                // the superseded session, and the roster must not keep
+                // presenting it as the worker's live root (TS
+                // `flushRoster`'s swapped-in-place removal).
+                for swapped in roster.swapped_out_root_rows(&resident.worker_id, &entry) {
+                    roster.delete(&swapped);
+                    removed_ids.push(swapped);
+                }
+                changed.push(entry);
+                for agent_id in removed {
+                    if roster.get(&agent_id).is_some() {
+                        roster.delete(&agent_id);
+                        removed_ids.push(agent_id);
+                    }
+                }
+            }
+            // The roster write is the worker's live word on what it
+            // serves: the supervisor-side identity follows it inside the
+            // same critical section (the fork-isolation seam — the
+            // descriptor, the persisted record, the durable create
+            // command, and the binding table all move onto the worker's
+            // current session). The boot reconciliation quarantine lifts
+            // ONLY on a root-identity-bearing write: the sync answers
+            // whether the worker's own root row carried the live word —
+            // a subagent/child summary (keying under its own address)
+            // never lifts the root's fence.
+            let root_identity_bearing =
+                self.sync_root_identity_from_roster(&resident, &mut descriptor);
+            if root_identity_bearing {
+                resident.clear_identity_quarantine();
             }
         }
         self.push_roster_update(changed, removed_ids);
@@ -194,20 +230,56 @@ impl Supervisor {
         let counter = summary
             .get("rosterDeltaSequence")
             .and_then(serde_json::Value::as_u64);
-        let entry = {
-            let mut roster = self.roster.lock().unwrap();
-            if !roster.accept_roster_pull(&resident.worker_id, &instance, counter) {
-                return None;
+        let (entry, swapped) = {
+            // The pull shares the delta path's per-worker critical
+            // section (the resident's descriptor lock across the roster
+            // write and the identity follow): the registration and
+            // refresh pulls land their descriptor/persist/binding moves
+            // as one transition, in accept order, never observable
+            // half-applied.
+            let mut descriptor = resident.descriptor.lock().await;
+            let (entry, swapped) = {
+                let mut roster = self.roster.lock().unwrap();
+                if !roster.accept_roster_pull(&resident.worker_id, &instance, counter) {
+                    return None;
+                }
+                let entry = roster.write_summary(summary.clone(), Some(&resident.worker_id), None);
+                // The pull sees the same root-slot swap the deltas do (a
+                // registration or refresh landing after a
+                // `new_session`/`switch_session`/`import_jsonl`/`fork`
+                // replacement): the superseded row retires with the write,
+                // and the identity follow below re-binds the
+                // supervisor-side identity onto the moved-to session.
+                let swapped = roster.swapped_out_root_rows(&resident.worker_id, &entry);
+                for agent_id in &swapped {
+                    roster.delete(agent_id);
+                }
+                (entry, swapped)
+            };
+            // The pull is the worker's own root state by construction, so
+            // its accepted write lifts the boot reconciliation quarantine
+            // with the identity it just reconciled.
+            let root_identity_bearing =
+                self.sync_root_identity_from_roster(resident, &mut descriptor);
+            if root_identity_bearing {
+                resident.clear_identity_quarantine();
             }
-            roster.write_summary(summary.clone(), Some(&resident.worker_id), None)
+            (entry, swapped)
         };
-        self.push_roster_update(vec![entry.clone()], Vec::new());
+        self.push_roster_update(vec![entry.clone()], swapped);
         Some(entry)
     }
 
     /// Refresh one resident worker's entry from its live `get_state`
-    /// (registration, adoption, and create flows).
-    pub(crate) async fn refresh_roster_entry(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
+    /// (registration, adoption, and create flows). Returns whether the
+    /// live state landed: the write carries the root-identity follow, so
+    /// a `false` answer means the reconciliation did not run — the caller
+    /// logs it and the persisted identity keeps serving until the next
+    /// roster write.
+    pub(crate) async fn refresh_roster_entry(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+    ) -> bool {
         let response = self
             .route_command_typed(
                 resident,
@@ -217,14 +289,18 @@ impl Supervisor {
                 RouteAdmission::SupervisorInternal,
             )
             .await;
-        if let Ok(response) = response {
-            if response.success {
-                if let Some(data) = response.data {
-                    self.write_roster_summary_for_resident(resident, &data)
-                        .await;
-                }
-            }
+        let Ok(response) = response else {
+            return false;
+        };
+        if !response.success {
+            return false;
         }
+        let Some(data) = response.data else {
+            return false;
+        };
+        self.write_roster_summary_for_resident(resident, &data)
+            .await
+            .is_some()
     }
 
     /// TS `flipWorkerRosterEntriesInactive` (the Rust form: one pass in
@@ -297,6 +373,12 @@ impl Supervisor {
         ) = (Vec::new(), HashMap::new());
         let (_, parent_by_child) = ledger_view.as_ref().unwrap_or(&empty_view);
         let roots = self.roster_seed_roots().await;
+        // The stop's own ledger event: an RLM delete tombstoned its child
+        // before the stop began, and the shutdown route was the
+        // transcript's flush barrier, so the fold beside the ledger view
+        // reads the final bucket - the later capture amendment yields the
+        // same value, so no second push follows it.
+        let bucket_fold = self.deleted_descendant_usage_bucket().await;
         // The ledger/roots awaits opened a late-write window. Only
         // rows that carry the STOPPED generation settle here: the
         // stopped worker's own in-flight delta can have written a row
@@ -321,6 +403,14 @@ impl Supervisor {
         let mut removed = Vec::new();
         {
             let mut roster = self.roster.lock().unwrap();
+            // The refreshed bucket applies FIRST: the settle loop's
+            // passivated rewrites then attach the new value at store
+            // time, and the rewritten rows ship in this same push - the
+            // child's removal and its parent's new bucket together, with
+            // no frame in between where the spend dips.
+            if let Some((ticket, bucket)) = bucket_fold {
+                changed.extend(roster.set_deleted_descendant_usage(ticket, bucket));
+            }
             let mut settle: Vec<AgentRosterEntry> = owned;
             for late in roster.entries_for_worker(worker_id).into_iter().cloned() {
                 if !settle
@@ -821,6 +911,262 @@ mod tests {
             "the durable pair, not the live descriptor: {row:?}"
         );
         assert_eq!(row.summary["thinkingLevel"], json!("low"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The RLM delete's stop: the passivation's single push carries both
+    /// the tombstoned child's removal and its parent's refreshed
+    /// deleted-descendant bucket. The child's transcript survives under
+    /// session-artifacts (the real RLM-delete shape: no catalog row
+    /// exists for it), so its captured spend bills through the bucket
+    /// on the parent's row - not through a row anywhere.
+    #[tokio::test]
+    async fn stop_carries_the_deleted_childs_spend_to_its_parent() {
+        let (dir, supervisor, root_file, child_file) = roster_fixture().await;
+        let agent_dir = dir.join("agent");
+        let sessions_dir = agent_dir.join("sessions");
+        register_root_worker(&supervisor, "w-root", &root_file).await;
+        // The parent's top-level row: the bucket's target.
+        let mut parent_summary = live_child_summary(&root_file, &child_file);
+        parent_summary["runtimeKind"] = json!("top-level");
+        parent_summary["sessionId"] = json!("root-persisted");
+        parent_summary["id"] = json!("root-persisted");
+        parent_summary["sessionFile"] = json!(root_file.to_string_lossy());
+        parent_summary.as_object_mut().unwrap().remove("rlmChildId");
+        parent_summary
+            .as_object_mut()
+            .unwrap()
+            .remove("parentSessionPath");
+        supervisor.write_roster_summary(&parent_summary, Some("w-root"));
+        // The deleted child's real transcript location: under the agent
+        // dir's session-artifacts tree (the file exists - the shape the
+        // RLM delete leaves behind).
+        let child_artifact = agent_dir
+            .join("session-artifacts")
+            .join("root-1")
+            .join("sub-9")
+            .join("sub-9.jsonl");
+        std::fs::create_dir_all(child_artifact.parent().expect("artifact dir")).unwrap();
+        write_display_file(&child_artifact, "/the/deleted/cwd");
+        // The flushed transcript carries the child's final own spend
+        // ($0.30): the kill route was the flush barrier, so the
+        // passivation fold reads this row.
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&child_artifact)
+                .expect("open the child transcript for its billed turn");
+            writeln!(
+                file,
+                "{}",
+                json!({
+                    "type": "message",
+                    "id": "dm1a",
+                    "parentId": null,
+                    "timestamp": "2026-09-29T00:00:02.100Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "work complete"}],
+                        "timestamp": 2100,
+                        "usage": {
+                            "input": 60,
+                            "output": 6,
+                            "cacheRead": 0,
+                            "cacheWrite": 0,
+                            "totalTokens": 66,
+                            "cost": {"input": 0.0, "output": 0.3, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.3}
+                        }
+                    }
+                })
+            )
+            .expect("append the billed turn");
+        }
+        append_family_edge(
+            &agent_dir,
+            &sessions_dir,
+            "sub-9",
+            &root_file,
+            &child_artifact,
+        );
+        // The RLM delete's tombstone carries no usage yet (the capture
+        // amendment lands after the stop); the passivation fold bills
+        // the flushed transcript.
+        let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
+        ledger
+            .append_delete(
+                "sub-9",
+                &child_artifact.to_string_lossy(),
+                crate::rlm_ledger::RlmLedgerDeleteReason::User,
+            )
+            .expect("append delete");
+        // The child's live roster row, owned by the stopping worker.
+        let mut events = supervisor.events.subscribe();
+        supervisor.write_roster_summary(
+            &live_child_summary(&root_file, &child_artifact),
+            Some("w-child"),
+        );
+        let child_agent_id = drain_roster_pushes(&mut events)[0]["changed"][0]["agentId"]
+            .as_str()
+            .expect("the child agent id")
+            .to_string();
+
+        supervisor.passivate_roster_worker("w-child", false).await;
+        let pushes = drain_roster_pushes(&mut events);
+        assert_eq!(pushes.len(), 1, "one settle push: {pushes:?}");
+        // The parent's refreshed row is the push's whole `changed`.
+        let parent_after = supervisor
+            .roster
+            .lock()
+            .unwrap()
+            .entries()
+            .into_iter()
+            .find(|entry| {
+                entry.summary.get("sessionId").and_then(Value::as_str) == Some("root-persisted")
+            })
+            .expect("the parent row");
+        assert_eq!(
+            pushes[0]["changed"],
+            serde_json::to_value(vec![parent_after]).expect("serialized parent"),
+            "the push carries the parent's refreshed row: {pushes:?}"
+        );
+        assert_eq!(
+            pushes[0]["changed"][0]["summary"]["deletedDescendantUsage"],
+            json!({ "inputTokens": 60, "outputTokens": 6, "cost": 0.3 }),
+            "the deleted child's captured spend bills through the parent"
+        );
+        assert_eq!(
+            pushes[0]["removed"],
+            json!([child_agent_id]),
+            "the tombstoned child's row dies in the same push: {pushes:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A saved delete of a subagent whose only row was the saved listing
+    /// (no roster row - its parent is stopped, so no seed ever wrote
+    /// one) still refreshes the bucket: the ledger tombstone is the
+    /// event, and the parent's roster row bills the deleted child's
+    /// captured spend in the delete's own push.
+    #[tokio::test]
+    async fn a_saved_delete_without_a_roster_row_bills_the_parent() {
+        let (dir, supervisor, root_file, child_file) = roster_fixture().await;
+        let agent_dir = dir.join("agent");
+        let sessions_dir = agent_dir.join("sessions");
+        register_root_worker(&supervisor, "w-root", &root_file).await;
+        // The parent's top-level row: the ONLY roster row (the child has
+        // none).
+        let mut parent_summary = live_child_summary(&root_file, &child_file);
+        parent_summary["runtimeKind"] = json!("top-level");
+        parent_summary["sessionId"] = json!("root-persisted");
+        parent_summary["id"] = json!("root-persisted");
+        parent_summary["sessionFile"] = json!(root_file.to_string_lossy());
+        parent_summary.as_object_mut().unwrap().remove("rlmChildId");
+        parent_summary
+            .as_object_mut()
+            .unwrap()
+            .remove("parentSessionPath");
+        supervisor.write_roster_summary(&parent_summary, Some("w-root"));
+        // The child: a transcript under the session-artifacts tree whose
+        // header links it to the parent (the capture's child shape), with
+        // one billed assistant row ($0.30), plus its spawn edge.
+        let child_artifact = agent_dir
+            .join("session-artifacts")
+            .join("root-1")
+            .join("sub-9")
+            .join("sub-9.jsonl");
+        std::fs::create_dir_all(child_artifact.parent().expect("artifact dir")).unwrap();
+        std::fs::write(
+            &child_artifact,
+            format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"sub-9\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"/the/deleted/cwd\",\"parentSession\":\"{}\",\"rlmDepth\":1}}\n",
+                root_file.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&child_artifact)
+                .expect("open the child transcript for its billed turn");
+            writeln!(
+                file,
+                "{}",
+                json!({
+                    "type": "message",
+                    "id": "dm1a",
+                    "parentId": null,
+                    "timestamp": "2026-09-29T00:00:02.100Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "work complete"}],
+                        "timestamp": 2100,
+                        "usage": {
+                            "input": 60,
+                            "output": 6,
+                            "cacheRead": 0,
+                            "cacheWrite": 0,
+                            "totalTokens": 66,
+                            "cost": {"input": 0.0, "output": 0.3, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.3}
+                        }
+                    }
+                })
+            )
+            .expect("append the billed turn");
+        }
+        append_family_edge(
+            &agent_dir,
+            &sessions_dir,
+            "sub-9",
+            &root_file,
+            &child_artifact,
+        );
+        // The selector-less saved delete of the child: the supervisor arm.
+        let mut events = supervisor.events.subscribe();
+        let command = pa_types::daemon::DaemonCommand::DeleteSavedSession {
+            id: None,
+            active_session_id: None,
+            session_path: child_artifact.to_string_lossy().to_string(),
+            rest: Map::default(),
+        };
+        let (responses, _) = supervisor
+            .handle_delete_saved_session(&command, "client-1", "c1", "delete_saved_session")
+            .await;
+        assert_eq!(
+            responses[0]["success"],
+            json!(true),
+            "the delete succeeded: {responses:?}"
+        );
+        assert!(!child_artifact.is_file(), "the child transcript is gone");
+        // The delete's own push carries the parent's refreshed row - the
+        // whole `changed`, with no removal (the child had no row).
+        let pushes = drain_roster_pushes(&mut events);
+        assert_eq!(pushes.len(), 1, "one refresh push: {pushes:?}");
+        let parent_after = supervisor
+            .roster
+            .lock()
+            .unwrap()
+            .entries()
+            .into_iter()
+            .find(|entry| {
+                entry.summary.get("sessionId").and_then(Value::as_str) == Some("root-persisted")
+            })
+            .expect("the parent row");
+        assert_eq!(
+            pushes[0]["changed"],
+            serde_json::to_value(vec![parent_after]).expect("serialized parent"),
+            "the push carries the parent's refreshed row: {pushes:?}"
+        );
+        assert_eq!(
+            pushes[0]["changed"][0]["summary"]["deletedDescendantUsage"],
+            json!({ "inputTokens": 60, "outputTokens": 6, "cost": 0.3 }),
+            "the deleted child's captured spend bills through the parent"
+        );
+        assert!(
+            pushes[0].get("removed").is_none() || pushes[0]["removed"].is_null(),
+            "no removal rides the push: {pushes:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

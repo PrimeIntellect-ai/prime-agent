@@ -97,7 +97,7 @@ impl SupervisorChildSessionsInner {
                 .with_context(|| format!("abort RLM child session {active_session_id}"));
             // The settled/cancelled child releases an owed goal
             // continuation.
-            self.fire_settle_hook();
+            self.fire_settle_hook(record).await;
             return true;
         }
         false
@@ -168,7 +168,7 @@ impl SupervisorChildSessionsInner {
                 .retain(|candidate| !Arc::ptr_eq(candidate, record));
             // The deleted child is a TS resume site for the owed goal
             // continuation (`_finishRlmRunDeletion`).
-            self.fire_settle_hook();
+            self.fire_settle_hook(record).await;
             return Ok("deleted");
         }
         Ok("not_found")
@@ -227,6 +227,9 @@ impl SupervisorChildSessionsInner {
                 .await
                 .retain(|candidate| !Arc::ptr_eq(candidate, record));
         }
+        // The walk changed the registry: wake a parked barrier (a closed
+        // child is settled work, settled here by its removal).
+        self.settle_notify.notify_waiters();
         match close_error {
             Some(error) => Err(error),
             None => Ok(()),

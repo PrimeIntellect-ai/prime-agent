@@ -85,6 +85,14 @@ pub(super) struct Snapshot {
     pub stats: WindowStats,
     pub first_user: Option<serde_json::Value>,
     pub goal: Option<crate::goals::GoalState>,
+    /// Whether the active branch already carries an
+    /// [`crate::session::ANTHROPIC_WARNING_SHOWN_CUSTOM_TYPE`] row: the
+    /// subscription warning's once-per-session-lifecycle gate, hydrated
+    /// from the walk like `goal`. Older sidecars deserialize this as
+    /// `false` (the conservative default: the warning shows again rather
+    /// than being suppressed by a cache that predates the flag).
+    #[serde(default)]
+    pub anthropic_warning_shown: bool,
     pub non_bootstrap: bool,
     /// The open's walk retained every file row (no compaction boundary
     /// was found): the retained window covers the whole session file, so

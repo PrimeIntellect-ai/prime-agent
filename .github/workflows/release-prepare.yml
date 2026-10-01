@@ -67,7 +67,7 @@ concurrency:
 jobs:
   prepare:
     if: github.event_name == 'workflow_dispatch'
-    name: "bump + fold, then open the release PR (base main)"
+    name: open the release PR
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

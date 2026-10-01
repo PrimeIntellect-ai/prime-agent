@@ -2069,8 +2069,7 @@ async fn tui_compact_on_a_short_session_warns_nothing_to_compact() {
 /// summary row renders (TS `CompactionSummaryMessageComponent`) at the head
 /// of the rebuilt transcript (TS `rebuildChatFromMessages`). The loader row
 /// is a soft evidence capture (its in-flight window is delayMs-paced and a
-/// loaded box can batch the whole window past the paint loop; the strict
-/// loader assertion is the f14 battery flow, `scripts/compact_parity.py`);
+/// loaded box can batch the whole window past the paint loop);
 /// the settled outcome — the summary row, the rebuilt transcript, and the
 /// retained tail — carries the hard asserts.
 #[tokio::test]
@@ -2089,7 +2088,7 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
     .expect("write settings");
     let supervisor = spawn_supervisor(dir.path());
 
-    // The compact_parity.py session shape (TS-binary-verified): a large
+    // The session shape (TS-binary-verified): a large
     // first turn gives the compactor history to summarize, the small
     // second turn crosses the 10-token keep-recent budget AT its user
     // message — a non-split cut that keeps the whole second turn — and
@@ -2201,9 +2200,8 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
     // compaction-finished events then apply in one batched iteration (the
     // loop drains the queued events before it paints), so no captured frame
     // ever shows the loader row. Any finite pacing window leaves that race,
-    // so the strict frame-level loader assertion lives in
-    // scripts/compact_parity.py (the f14 battery flow, run on an idle box
-    // or a sandbox). Here the observed loader row is evidence only; the hard
+    // so frame-level loader assertions belong in a sandboxed run on an
+    // idle box. Here the observed loader row is evidence only; the hard
     // asserts below pin the settled outcome — the parity-critical claims.
     let loader = "Compacting context (focus: focus on the goal)... (Ctrl+C to cancel)";
     let loader_frames = outcome
@@ -2212,7 +2210,7 @@ async fn tui_compact_shows_the_loader_then_the_summary_and_rebuilds() {
         .filter(|frame| frame.contains(loader))
         .count();
     println!(
-        "compaction loader evidence: {loader_frames} frames captured the loader row (soft check; the strict assertion is scripts/compact_parity.py)"
+        "compaction loader evidence: {loader_frames} frames captured the loader row (soft check)"
     );
     // The summary row: the TS header plus the collapsed summary.
     assert!(
@@ -5034,6 +5032,210 @@ async fn tui_attach_to_idle_session_renders_without_input() {
         outcome.active_session_id, session,
         "the run attached to the idle session by id"
     );
+    drop(supervisor);
+}
+
+/// The Anthropic subscription ban-risk warning's detection text: the fake
+/// auth resolves it for the e2e (the product text the login-completed arm
+/// draws is the `ANTHROPIC_SUBSCRIPTION_AUTH_WARNING` constant; the two
+/// stay distinguishable).
+const E2E_SUBSCRIPTION_WARNING: &str = "E2E anthropic subscription ban-risk warning";
+
+/// The e2e's fake auth surface: the credential-detection arm resolves a
+/// subscription warning (the product's `getAnthropicSubscriptionAuthWarning`
+/// seam — a stored OAuth credential answers the warning text).
+struct E2ESubscriptionAuth;
+
+impl pa_tui::provider_auth::ProviderAuthCommands for E2ESubscriptionAuth {
+    fn login_options(&self) -> pa_tui::provider_auth::ProviderRowsFuture {
+        Box::pin(async move { Vec::new() })
+    }
+
+    fn logout_options(&self) -> pa_tui::provider_auth::ProviderRowsFuture {
+        Box::pin(async move { Vec::new() })
+    }
+
+    fn login(
+        &self,
+        _provider: &pa_tui::provider_auth::ProviderRow,
+        _api_key: Option<&str>,
+    ) -> pa_tui::provider_auth::ProviderAuthFuture {
+        Box::pin(async move { pa_tui::provider_auth::ProviderAuthOutcome::Cancelled })
+    }
+
+    fn login_on_panel(
+        &self,
+        _provider: &pa_tui::provider_auth::ProviderRow,
+        _panel: pa_tui::auth_panel::AuthPanelHandle,
+    ) -> pa_tui::provider_auth::ProviderAuthFuture {
+        Box::pin(async move { pa_tui::provider_auth::ProviderAuthOutcome::Cancelled })
+    }
+
+    fn logout(
+        &self,
+        _provider: &pa_tui::provider_auth::ProviderRow,
+    ) -> pa_tui::provider_auth::ProviderAuthFuture {
+        Box::pin(async move { pa_tui::provider_auth::ProviderAuthOutcome::Cancelled })
+    }
+
+    fn anthropic_subscription_warning(&self) -> pa_tui::provider_auth::ProviderWarningFuture {
+        Box::pin(async move { Some(E2E_SUBSCRIPTION_WARNING) })
+    }
+}
+
+/// The interactive options for a session on an Anthropic model with the
+/// fake subscription credential surface (the detection arm's two inputs).
+fn subscription_options(
+    supervisor: &Supervisor,
+    dir: &Path,
+    session_dir: &Path,
+    session: pa_tui::interactive::SessionSelection,
+) -> pa_tui::interactive::InteractiveOptions {
+    let mut options = base_options(supervisor, dir, session_dir);
+    options.model_selection = pa_tui::interactive::ModelSelection {
+        provider: Some("anthropic".to_string()),
+        model: Some("claude-test".to_string()),
+        api_key: None,
+        thinking: None,
+    };
+    options.provider_auth = Some(pa_tui::provider_auth::ProviderAuthCommandsHandle(
+        std::sync::Arc::new(E2ESubscriptionAuth),
+    ));
+    options.session = session;
+    options
+}
+
+/// The Anthropic subscription warning fires once per session LIFECYCLE,
+/// not on every open (operator directive 2026-09-29): a new session on an
+/// Anthropic subscription credential draws the ban-risk warning once and
+/// marks the session's persisted gate with the daemon — the marker row is
+/// durable in the session file and `get_state` serves it — and a FRESH
+/// TUI process attaching to that session draws NO warning: the reattach
+/// reads the gate. This is the end-to-end composition of the client gate
+/// and the daemon's marker (the supervisor routes the new
+/// `mark_anthropic_warning_shown` frame to the worker).
+#[tokio::test]
+async fn tui_anthropic_warning_warns_once_then_a_fresh_process_reattaches_silently() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+
+    // The scripted model fixture (the harness's opt-in `model` knob): the
+    // session reports an Anthropic model, so the startup detection arm's
+    // provider gate passes and the fake credential resolves the warning.
+    let script = serde_json::json!({
+        "responses": [],
+        "model": { "id": "claude-test", "provider": "anthropic", "reasoning": false },
+    });
+    std::fs::write(
+        dir.path().join("script.json"),
+        serde_json::to_string(&script).expect("script json"),
+    )
+    .expect("script.json");
+
+    // Run one: the fresh session warns once and marks the gate.
+    let options = subscription_options(
+        &supervisor,
+        dir.path(),
+        &session_dir,
+        pa_tui::interactive::SessionSelection::New,
+    );
+    let plan = pa_tui::interactive::HeadlessPlan {
+        // The exit gate holds the run until the fire-and-forget mark's
+        // write resolves (the worker persists the marker row before its
+        // ack), so the durable-row assertions below read completed state —
+        // no timing window guards them.
+        steps: vec![pa_tui::interactive::HeadlessStep::WaitRender {
+            needle: E2E_SUBSCRIPTION_WARNING.to_string(),
+            timeout_ms: 15_000,
+        }],
+        width: 100,
+        height: 30,
+    };
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run one");
+    let rendered = outcome.frames.join("\n");
+    assert!(
+        rendered.contains(E2E_SUBSCRIPTION_WARNING),
+        "the new session drew the ban-risk warning:\n{rendered}"
+    );
+    let session = outcome.active_session_id.clone();
+
+    // The gate is durable: the marker row landed in the session file, and
+    // the daemon's `get_state` serves it open.
+    let file = session_dir.join(format!("{}.jsonl", outcome.session_id));
+    let persisted = std::fs::read_to_string(&file).unwrap_or_else(|_| {
+        let listing = std::fs::read_dir(&session_dir).map_or_else(
+            |error| format!("unreadable: {error}"),
+            |entries| {
+                entries
+                    .filter_map(std::result::Result::ok)
+                    .map(|entry| entry.file_name().to_string_lossy().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
+        );
+        panic!("the session file {} ({listing})", file.display())
+    });
+    assert!(
+        persisted.contains("anthropic_subscription_warning_shown"),
+        "the marker row reached the session file:\n{persisted}"
+    );
+    let (client, _events) = pa_tui::daemon_client::DaemonClient::connect(&supervisor.socket)
+        .await
+        .expect("connect supervisor");
+    let state = client
+        .request_ok(DaemonCommand::GetState {
+            id: None,
+            active_session_id: session.clone(),
+            rest: serde_json::Map::default(),
+        })
+        .await
+        .expect("get_state");
+    client.close();
+    assert_eq!(
+        state.get("anthropicWarningShown"),
+        Some(&serde_json::json!(true)),
+        "the daemon serves the open gate: {state}"
+    );
+
+    // Run two: a FRESH TUI process attaches to the same session — the
+    // gate holds, no warning renders anywhere in the run.
+    let options = subscription_options(
+        &supervisor,
+        dir.path(),
+        &session_dir,
+        pa_tui::interactive::SessionSelection::Attach(session.clone()),
+    );
+    let plan = pa_tui::interactive::HeadlessPlan {
+        // The detection arm is awaited at open, so the first dock frame
+        // proves its decision baked in — the reattach's negative reads
+        // completed state, not a timing window (a late warning cannot
+        // miss the window: the open either warned or skipped before the
+        // frame painted).
+        steps: vec![pa_tui::interactive::HeadlessStep::WaitRender {
+            needle: "subagents".to_string(),
+            timeout_ms: 15_000,
+        }],
+        width: 100,
+        height: 30,
+    };
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run two");
+    let rendered = outcome.frames.join("\n");
+    assert!(
+        !rendered.contains(E2E_SUBSCRIPTION_WARNING),
+        "the reattaching process did not re-render the warning:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("Anthropic subscription auth is active"),
+        "neither arm re-warned on the reattach:\n{rendered}"
+    );
+    assert_eq!(outcome.active_session_id, session, "run two attached by id");
     drop(supervisor);
 }
 

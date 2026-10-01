@@ -31,6 +31,19 @@ impl SessionUi {
     ) -> Result<SessionUi> {
         let active_session_id = match &options.session {
             SessionSelection::New => create_session(&client, options, None).await?,
+            SessionSelection::NewChild { rlm_depth, .. } => {
+                let id = create_session(&client, options, None).await?;
+                // `tui agents new scoped`, fire-and-forget (the
+                // `subagents_view_opened` pattern): the open never waits on
+                // the telemetry flush.
+                if let Some(telemetry) = options.telemetry.clone() {
+                    let depth = *rlm_depth;
+                    tokio::spawn(async move {
+                        telemetry.scoped_agent_created(depth).await;
+                    });
+                }
+                id
+            }
             SessionSelection::Attach(id) => id.clone(),
             SessionSelection::Resume(_) => {
                 create_session(&client, options, Some(&options.session)).await?
@@ -78,6 +91,7 @@ impl SessionUi {
             speed_stats: None,
             client_settings: options.client_settings.clone(),
             anthropic_subscription_warning_shown: false,
+            anthropic_warning_mark_pending: std::sync::Arc::default(),
             active_side_question_id: None,
             side_question_counter: 0,
             share: None,
@@ -344,7 +358,6 @@ impl SessionUi {
         let attach_command = |session_id: &str| DaemonCommand::Attach {
             id: None,
             active_session_id: session_id.to_string(),
-            supports_extension_ui: None,
             client_id: None,
             // `elide_snapshot_images`: the transcript arrives without the
             // base64 image payloads (their fallback-only metadata rows

@@ -71,9 +71,6 @@ pub struct RpcCommand {
 #[derive(Debug, Clone)]
 pub enum ParsedLine {
     Command(RpcCommand),
-    /// An `extension_ui_response` line: the TS mode routes it to the
-    /// extension-UI bridge first and silently ignores unknown ids.
-    ExtensionUiResponse,
     /// The frame failed the JSON or shape parse: the protocol error
     /// response to answer with.
     ParseError(Value),
@@ -111,9 +108,6 @@ pub fn parse_line(line: &str) -> ParsedLine {
             ));
         }
     };
-    if command == "extension_ui_response" {
-        return ParsedLine::ExtensionUiResponse;
-    }
     ParsedLine::Command(RpcCommand {
         id: object.get("id").cloned().filter(|id| !id.is_null()),
         command,
@@ -194,7 +188,7 @@ mod tests {
                     "the TS error prefix is the contract"
                 );
             }
-            other => panic!("expected a parse error, got {other:?}"),
+            other @ ParsedLine::Command(_) => panic!("expected a parse error, got {other:?}"),
         }
         match parse_line("[1, 2]") {
             ParsedLine::ParseError(response) => {
@@ -203,7 +197,7 @@ mod tests {
                     "Invalid command: expected an object with a string type"
                 );
             }
-            other => panic!("expected a parse error, got {other:?}"),
+            other @ ParsedLine::Command(_) => panic!("expected a parse error, got {other:?}"),
         }
     }
 
@@ -220,13 +214,5 @@ mod tests {
             command_streaming_behavior(&command.payload),
             Some(pa_core::session_engine::StreamingBehavior::Steer)
         );
-    }
-
-    #[test]
-    fn extension_ui_response_is_a_silent_route() {
-        assert!(matches!(
-            parse_line(r#"{"type": "extension_ui_response", "id": "ui-1", "value": "x"}"#),
-            ParsedLine::ExtensionUiResponse
-        ));
     }
 }

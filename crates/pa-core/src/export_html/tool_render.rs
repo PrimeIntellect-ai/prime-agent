@@ -166,7 +166,7 @@ pub fn pre_render_custom_tools(
                 .unwrap_or_default();
             // TS: `existing || !TEMPLATE_RENDERED_TOOLS.has(toolName)` — a
             // template-rendered tool only renders when its call already did
-            // (e.g. an extension overriding the name).
+            // (e.g. another tool overriding the name).
             let existing = rendered_tools.get(tool_call_id).cloned();
             if existing.is_none() && TEMPLATE_RENDERED_TOOLS.contains(&tool_name) {
                 continue;

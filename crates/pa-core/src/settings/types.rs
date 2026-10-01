@@ -346,7 +346,6 @@ pub struct Settings {
     /// source wins per id, and no bundled id can be shadowed.
     pub mcp_catalog_sources: Option<Vec<String>>,
     pub packages: Option<Vec<serde_json::Value>>,
-    pub extensions: Option<Vec<String>>,
     pub skills: Option<Vec<String>>,
     pub prompts: Option<Vec<String>>,
     pub themes: Option<Vec<String>>,

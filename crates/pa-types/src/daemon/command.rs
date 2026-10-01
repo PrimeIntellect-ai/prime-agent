@@ -257,8 +257,6 @@ pub enum DaemonCommand {
         id: Option<String>,
         active_session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        supports_extension_ui: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         client_id: Option<DaemonClientId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         capabilities: Option<Vec<DaemonClientCapability>>,
@@ -280,8 +278,6 @@ pub enum DaemonCommand {
         id: Option<String>,
         active_session_id: String,
         target_active_session_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        supports_extension_ui: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_id: Option<DaemonClientId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1144,12 +1140,18 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
-    ExtensionUiResponse {
+    /// Rust-native client command (operator directive 2026-09-29): the
+    /// interactive client's report that it just drew the Anthropic
+    /// subscription ban-risk warning — the worker persists the session's
+    /// once-per-lifecycle marker row so a reattach, a resume, or a worker
+    /// replacement of the same session skips the warning (the TS gate is
+    /// per interactive-mode instance, so the TS protocol has no
+    /// counterpart; an older daemon rejects the frame and the client
+    /// degrades to its per-instance gate).
+    MarkAnthropicWarningShown {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         active_session_id: String,
-        request_id: String,
-        response: DaemonExtensionUiResponse,
         #[serde(flatten)]
         rest: JsonMap,
     },
@@ -1249,15 +1251,6 @@ pub enum ForkPosition {
     At,
 }
 
-/// Response payload of an `extension_ui_request` dialog.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum DaemonExtensionUiResponse {
-    Value { value: String },
-    Confirmed { confirmed: bool },
-    Cancelled { cancelled: bool },
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1280,9 +1273,7 @@ mod tests {
     }
 
     #[test]
-    fn extension_ui_response_variants() {
-        rt::<DaemonExtensionUiResponse>(r#"{"value":"pick"}"#);
-        rt::<DaemonExtensionUiResponse>(r#"{"confirmed":true}"#);
-        rt::<DaemonExtensionUiResponse>(r#"{"cancelled":true}"#);
+    fn mark_anthropic_warning_shown_roundtrip() {
+        rt::<DaemonCommand>(r#"{"type":"mark_anthropic_warning_shown","activeSessionId":"s1"}"#);
     }
 }
