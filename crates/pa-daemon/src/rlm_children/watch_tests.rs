@@ -30,7 +30,7 @@ async fn spawn_fake_supervisor(
     kill_tx: mpsc::UnboundedSender<Value>,
     kill_behavior: FakeKill,
     worker_leaves_after_settle: bool,
-    child_has_running_subagents: Arc<AtomicBool>,
+    child_subagents: Arc<FakeChildSubagents>,
 ) {
     let kill_behavior = std::sync::Arc::new(kill_behavior);
     let listener = bind_transport(&socket).await.unwrap();
@@ -46,7 +46,7 @@ async fn spawn_fake_supervisor(
             let kill_tx = kill_tx.clone();
             let kill_behavior = std::sync::Arc::clone(&kill_behavior);
             let gone = Arc::clone(&gone);
-            let child_has_running_subagents = Arc::clone(&child_has_running_subagents);
+            let child_subagents = Arc::clone(&child_subagents);
             tokio::spawn(async move {
                 let (reader, mut writer) = stream.split();
                 let mut reader = BufReader::new(reader);
@@ -90,15 +90,21 @@ async fn spawn_fake_supervisor(
                                 .await;
                             response_success(Some(&id), command_type, None)
                         }
-                        "get_state" => response_success(
-                            Some(&id),
-                            command_type,
-                            Some(json!({
-                                "isStreaming": false,
-                                "hasRunningSubagents": child_has_running_subagents.load(Ordering::SeqCst),
-                                "sessionActions": { "queuedCount": 0 },
-                            })),
-                        ),
+                        "get_state" => {
+                            let running = child_subagents.running.load(Ordering::SeqCst);
+                            if running {
+                                child_subagents.busy_reads.fetch_add(1, Ordering::SeqCst);
+                            }
+                            response_success(
+                                Some(&id),
+                                command_type,
+                                Some(json!({
+                                    "isStreaming": false,
+                                    "hasRunningSubagents": running,
+                                    "sessionActions": { "queuedCount": 0 },
+                                })),
+                            )
+                        }
                         "get_last_assistant_text" => {
                             // The settle capture: with the knob set, the
                             // worker leaves right after its final answer.
@@ -163,19 +169,28 @@ async fn sessions_with_fake_supervisor(
         idle_delay_ms,
         kill_behavior,
         worker_leaves_after_settle,
-        Arc::new(AtomicBool::new(false)),
+        Arc::new(FakeChildSubagents::default()),
     )
     .await
 }
 
-/// [`sessions_with_fake_supervisor`] whose child reports
-/// `hasRunningSubagents` from the shared flag (a grandchild still running).
+/// The fake child's own subagents: whether one still runs (the child
+/// reports `hasRunningSubagents`), and how many child state reads
+/// answered busy because of it.
+#[derive(Default)]
+struct FakeChildSubagents {
+    running: AtomicBool,
+    busy_reads: std::sync::atomic::AtomicUsize,
+}
+
+/// [`sessions_with_fake_supervisor`] whose child reports its own running
+/// subagents from `child_subagents` (a grandchild still running).
 async fn sessions_with_fake_child_subagents(
     follow_up_tx: mpsc::UnboundedSender<Value>,
     idle_delay_ms: u64,
     kill_behavior: FakeKill,
     worker_leaves_after_settle: bool,
-    child_has_running_subagents: Arc<AtomicBool>,
+    child_subagents: Arc<FakeChildSubagents>,
 ) -> (SupervisorChildSessions, mpsc::UnboundedReceiver<Value>) {
     let socket = std::env::temp_dir().join(format!(
         "pa-rlm-watch-{}.sock",
@@ -189,7 +204,7 @@ async fn sessions_with_fake_child_subagents(
         kill_tx,
         kill_behavior,
         worker_leaves_after_settle,
-        child_has_running_subagents,
+        child_subagents,
     )
     .await;
     let link = Arc::new(crate::supervisor_link::SupervisorLink::new(socket));
@@ -316,13 +331,16 @@ async fn a_worker_leaving_inside_the_settle_grace_keeps_the_verdict() {
 #[tokio::test]
 async fn a_child_with_a_running_grandchild_keeps_the_parent_running() {
     let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
-    let grandchild_running = Arc::new(AtomicBool::new(true));
+    let grandchild = Arc::new(FakeChildSubagents {
+        running: AtomicBool::new(true),
+        ..FakeChildSubagents::default()
+    });
     let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
         follow_up_tx,
         0,
         FakeKill::Success,
         false,
-        Arc::clone(&grandchild_running),
+        Arc::clone(&grandchild),
     )
     .await;
     assert!(!sessions.has_running_children());
@@ -333,13 +351,22 @@ async fn a_child_with_a_running_grandchild_keeps_the_parent_running() {
     assert!(*running.borrow_and_update());
     sessions.notify_turn_done();
 
-    // The child is idle on its own, but its grandchild still runs.
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    // The child is idle on its own, but its grandchild still runs: the
+    // watcher reads the child busy (twice: the settle check and its
+    // follow-up liveness check) and keeps it running.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while grandchild.busy_reads.load(Ordering::SeqCst) < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "the watcher never read the child"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let roster = sessions.list_subagents().await.expect("child roster");
     assert_eq!(roster[0].status, "running");
     assert!(sessions.has_running_children());
 
-    grandchild_running.store(false, Ordering::SeqCst);
+    grandchild.running.store(false, Ordering::SeqCst);
     tokio::time::timeout(Duration::from_secs(10), settled)
         .await
         .expect("the child settles once its grandchild finished");

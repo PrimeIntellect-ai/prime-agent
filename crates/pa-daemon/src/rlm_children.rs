@@ -236,6 +236,16 @@ impl ChildRecord {
     }
 }
 
+/// Whether any record's settle funnel has not fired yet.
+async fn any_unsettled(children: &[Arc<Mutex<ChildRecord>>]) -> bool {
+    for record in children {
+        if !record.lock().await.settled {
+            return true;
+        }
+    }
+    false
+}
+
 /// A deleted child's retained identity (TS `_deletedRlmChildRuns`
 /// tombstone, #2388): the delete receipt promised a collectable cancelled
 /// envelope, and only the fields that envelope reads survive the registry
@@ -825,18 +835,17 @@ impl SupervisorChildSessionsInner {
     /// Whether any tracked child run's settle funnel has not fired yet.
     pub(crate) async fn any_running(&self) -> bool {
         let children = self.children.lock().await;
-        for record in children.iter() {
-            if !record.lock().await.settled {
-                return true;
-            }
-        }
-        false
+        any_unsettled(&children).await
     }
 
     /// Re-read [`Self::any_running`] into the `running` feed after a
-    /// registry change (a registration, a settle, a close walk).
+    /// registry change (a registration, a settle, a close walk). The read
+    /// and the publish share one hold of the children lock, so racing
+    /// refreshes publish in order and the last one always reflects the
+    /// registry after every change that preceded it.
     pub(crate) async fn refresh_running(&self) {
-        let running = self.any_running().await;
+        let children = self.children.lock().await;
+        let running = any_unsettled(&children).await;
         self.running.send_if_modified(|current| {
             let changed = *current != running;
             *current = running;
