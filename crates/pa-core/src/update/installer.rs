@@ -1,14 +1,15 @@
 //! The installer-takeover update funnel: `prime-agent update` and the TUI's
-//! `/update` download the installer from the OFFICIAL DOMAIN endpoint and
-//! run it — never a GitHub raw or workflow URL. The script is the single
-//! source of truth for the whole move — it resolves and downloads the
-//! latest build, uninstalls the TypeScript version, publishes the payload,
-//! and never touches `~/.prime/agent` (the sessions and configuration the
-//! products share). The command's contract is "fetch from the official
-//! source, run it". This module only fetches and execs the script, then
-//! reports what landed; every install/uninstall decision stays in the
-//! script the installer-takeover lane owns, so the two surfaces can never
-//! drift from it.
+//! `/update` download the update channel's installer and run it — the
+//! official domain endpoint for stable, the download base's
+//! `install-beta.sh` for nightly; never a GitHub raw or workflow URL. The
+//! script is the single source of truth for the whole move — it resolves
+//! and downloads the latest build, uninstalls the TypeScript version,
+//! publishes the payload, and never touches `~/.prime/agent` (the sessions
+//! and configuration the products share). The command's contract is "fetch
+//! from the official source, run it". This module only fetches and execs
+//! the script, then reports what landed; every install/uninstall decision
+//! stays in the script the installer-takeover lane owns, so the two
+//! surfaces can never drift from it.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -33,10 +34,13 @@ pub const ENV_DOWNLOAD_BASE_URL: &str = "PRIME_AGENT_DOWNLOAD_BASE_URL";
 /// manifests (`latest.json`, `beta.json`) are published.
 pub const DEFAULT_DOWNLOAD_BASE_URL: &str = "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev";
 
-/// The official domain's install endpoint — the one source the funnel
-/// fetches the installer from; never a GitHub raw or workflow URL (the
-/// override env var stays for tests and pinned installs).
+/// The official domain's install endpoint — the stable channel's installer
+/// source; never a GitHub raw or workflow URL (the override env var stays
+/// for tests and pinned installs).
 pub const OFFICIAL_INSTALLER_URL: &str = "https://app.primeintellect.ai/prime-agent/install.sh";
+/// The nightly installer's file under the download base (the domain only
+/// forwards `install.sh`, so nightly updates fetch it from the base).
+pub const BETA_INSTALLER_FILE: &str = "install-beta.sh";
 
 /// The small-file budget for the script download (the script is a few KB;
 /// a hung fetch must not hang the update).
@@ -45,17 +49,25 @@ const SCRIPT_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// probe uses; a hung launcher must not hang the report).
 const LAUNCHER_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The installer script URL: the official domain's install endpoint by
-/// default (`PRIME_AGENT_RUST_INSTALLER_URL` overrides it — tests serve
-/// their own script, a pinned install can point elsewhere).
+/// The installer script URL for an installer channel (`stable` | `beta`):
+/// `<download base>/install-beta.sh` for beta, the official domain's
+/// install endpoint otherwise. `PRIME_AGENT_RUST_INSTALLER_URL` overrides
+/// both — tests serve their own script, a pinned install can point
+/// elsewhere.
 #[must_use]
-pub fn installer_script_url() -> String {
+pub fn installer_script_url(channel: Option<&str>) -> String {
     if let Ok(url) = std::env::var(ENV_INSTALLER_URL) {
         if !url.trim().is_empty() {
             return url;
         }
     }
-    OFFICIAL_INSTALLER_URL.to_string()
+    match channel {
+        Some("beta") => format!(
+            "{}/{BETA_INSTALLER_FILE}",
+            download_base_url().trim_end_matches('/')
+        ),
+        _ => OFFICIAL_INSTALLER_URL.to_string(),
+    }
 }
 
 /// The download base `--check` reads the channel manifest from: the
@@ -161,10 +173,10 @@ pub struct UpdateFailure {
     pub message: String,
 }
 
-/// Run the takeover update with the environment's knobs (the script URL
-/// and the install prefix): the composition root's entry. `channel` is the
-/// requested release channel (`stable` | `beta`); `None` keeps the
-/// installed one.
+/// Run the takeover update with the environment's knobs (the install
+/// prefix and the channel's script URL): the composition root's entry.
+/// `channel` is the requested release channel (`stable` | `beta`); `None`
+/// keeps the installed one.
 ///
 /// # Errors
 /// Returns the failure message for every non-installing outcome (see
@@ -173,7 +185,9 @@ pub async fn run_installer(
     channel: Option<&'static str>,
     output: InstallerOutput,
 ) -> std::result::Result<Installed, UpdateFailure> {
-    run_installer_from(&installer_script_url(), &install_prefix(), channel, output).await
+    let prefix = install_prefix();
+    let channel = channel.or_else(|| installed_channel(&prefix));
+    run_installer_from(&installer_script_url(channel), &prefix, channel, output).await
 }
 
 /// Run the takeover update from one explicit script URL and install
@@ -630,29 +644,51 @@ echo "installed: 9.9.8-continuous.fedcba9876543210"
         (root, preserve, prefix)
     }
 
-    /// The default funnel URL is the official domain's install endpoint —
-    /// never a GitHub raw or workflow URL (the operator ships the Rust
-    /// installer through the domain itself; the override stays for tests
-    /// and pinned installs).
+    /// The funnel URL follows the channel: stable fetches the official
+    /// domain's install endpoint, nightly (beta) fetches `install-beta.sh`
+    /// from the download base (the domain forwards only `install.sh`), and
+    /// the override pins both.
     #[test]
-    fn the_default_installer_url_is_the_official_domain_endpoint() {
-        // The override is SAVED and RESTORED around the probe: the test
-        // asserts the default resolution, but a pinned value in the
-        // surrounding environment (a test or a pinned install) must
-        // survive it (the env is process-global — leave it as found).
+    fn the_installer_url_follows_the_channel() {
+        // The knobs are SAVED and RESTORED around the probe: the env is
+        // process-global, so a pinned value in the surrounding
+        // environment must survive it.
         let prior_override = std::env::var(ENV_INSTALLER_URL).ok();
+        let prior_base = std::env::var(ENV_DOWNLOAD_BASE_URL).ok();
         std::env::remove_var(ENV_INSTALLER_URL);
-        assert_eq!(installer_script_url(), OFFICIAL_INSTALLER_URL);
+        std::env::remove_var(ENV_DOWNLOAD_BASE_URL);
         assert_eq!(
-            OFFICIAL_INSTALLER_URL,
+            installer_script_url(Some("stable")),
             "https://app.primeintellect.ai/prime-agent/install.sh"
         );
-        assert!(
-            !OFFICIAL_INSTALLER_URL.contains("github"),
-            "the official endpoint never points at GitHub"
+        assert_eq!(installer_script_url(None), OFFICIAL_INSTALLER_URL);
+        assert_eq!(
+            installer_script_url(Some("beta")),
+            "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/install-beta.sh"
         );
-        if let Some(value) = prior_override {
-            std::env::set_var(ENV_INSTALLER_URL, value);
+        std::env::set_var(ENV_DOWNLOAD_BASE_URL, "https://mirror.example/");
+        assert_eq!(
+            installer_script_url(Some("beta")),
+            "https://mirror.example/install-beta.sh"
+        );
+        assert_eq!(installer_script_url(Some("stable")), OFFICIAL_INSTALLER_URL);
+        std::env::set_var(ENV_INSTALLER_URL, "http://127.0.0.1:9/pinned.sh");
+        assert_eq!(
+            installer_script_url(Some("beta")),
+            "http://127.0.0.1:9/pinned.sh"
+        );
+        assert_eq!(
+            installer_script_url(Some("stable")),
+            "http://127.0.0.1:9/pinned.sh"
+        );
+        for (name, prior) in [
+            (ENV_INSTALLER_URL, prior_override),
+            (ENV_DOWNLOAD_BASE_URL, prior_base),
+        ] {
+            match prior {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
         }
     }
 

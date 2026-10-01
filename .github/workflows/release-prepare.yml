@@ -103,9 +103,10 @@ jobs:
           # add-commits anywhere in that history.
           fetch-depth: 0
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
-        with:
-          toolchain: "1.98.1"
+      # The pinned SHA is the toolchain pin: this action version has no
+      # `toolchain` input, and its parse step hard-codes 1.98.1. Change the
+      # compiler by changing the SHA; a `toolchain:` input is ignored.
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e
       - name: Guard the lineage (refuse an existing tag or a below-tip version)
         env:
           INPUT_VERSION: ${{ inputs.version }}
