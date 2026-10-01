@@ -31,10 +31,11 @@ jobs:
   windows-battery:
     name: windows battery (on-demand)
     runs-on: windows-latest
-    # The pa-cli battery (the full e2e set) alone compiles + runs past
-    # three hours on this runner (measured on three dispatches: 120 -> 240
-    # both cancelled mid-pa-cli); the whole battery needs the headroom.
-    timeout-minutes: 480
+    # GitHub-hosted jobs stop at six hours whatever this says, so 360 is
+    # the real maximum. The full pa-cli e2e set alone runs past it on this
+    # runner (measured on four dispatches), which is why the install e2e
+    # runs before the pa-cli battery.
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:

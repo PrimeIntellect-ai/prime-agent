@@ -1856,8 +1856,13 @@ case ":$PATH:" in
     echo "note: ${bin_dir} is not on your PATH; add it to your shell profile:"
     printf "  export PATH=\"%s:\$PATH\"\n" "$bin_dir"
     if [ "$WINDOWS" = "yes" ]; then
+      # The User PATH takes the Windows spelling (C:\...), not the MSYS one.
+      win_bin_dir="$bin_dir"
+      if command -v cygpath >/dev/null 2>&1; then
+        win_bin_dir="$(cygpath -w "$bin_dir" 2>/dev/null)" || win_bin_dir="$bin_dir"
+      fi
       echo "  (PowerShell/cmd: add the same directory to the user PATH, e.g. via"
-      echo "   [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';${bin_dir}', 'User'))"
+      echo "   [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';${win_bin_dir}', 'User'))"
     fi
     ;;
 esac
