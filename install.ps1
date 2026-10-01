@@ -38,9 +38,10 @@ $ErrorActionPreference = 'Stop'
 
 # The publish-rendered defaults: the release pipeline copies this file to
 # <base>/install.ps1 with $DownloadBaseUrlDefault set to the R2 public base
-# and $ReleaseChannelDefault set to the channel; the repo-file default IS
-# the official domain, so the raw repo copy installs out of the box too.
-$DownloadBaseUrlDefault = 'https://app.primeintellect.ai/prime-agent'
+# and $ReleaseChannelDefault set to the channel; the repo-file default is
+# the same bucket-root base install-rust.sh carries, so the raw repo copy
+# installs out of the box too.
+$DownloadBaseUrlDefault = 'https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev'
 $ReleaseChannelDefault = 'stable'
 
 # The installer-owned bookkeeping, initialized BEFORE any Fail can run
