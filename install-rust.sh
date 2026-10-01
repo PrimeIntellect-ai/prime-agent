@@ -520,7 +520,7 @@ case "$BASE_URL" in
   https://*) ;;
   *) die "the download base URL must be an https URL: ${BASE_URL}" ;;
 esac
-BASE_URL="${BASE_URL%/}"
+while [ "${BASE_URL%/}" != "$BASE_URL" ]; do BASE_URL="${BASE_URL%/}"; done
 
 VERSION_PINNED="no"
 if [ -n "${PRIME_AGENT_VERSION:-}" ]; then
