@@ -1497,8 +1497,12 @@ if [ -d "$share_dir" ] && ts_managed "$share_dir"; then
   displaced_ts_root="$preserved_to"
   echo "the TypeScript native install at ${share_dir} was preserved at:"
   echo "  ${preserved_to}"
-  echo "  rollback: mv '${preserved_to}' '${share_dir}' &&"
-  echo "            ln -snf '${share_dir}/bin/prime-agent' '${launcher}'"
+  # The rollback runs AFTER this install, when ${share_dir} holds the
+  # Rust payload: it moves that payload aside first (a plain mv onto an
+  # existing directory would nest the TS tree inside it), and it stays one
+  # copy-pasteable line.
+  rust_aside="$(fresh_slot "${share_dir}.rust-rollback")"
+  echo "  rollback: mv '${share_dir}' '${rust_aside}' && mv '${preserved_to}' '${share_dir}' && ln -snf '${share_dir}/bin/prime-agent' '${launcher}'"
 fi
 
 # Refuse to take ownership of a share dir that is neither this installer's
