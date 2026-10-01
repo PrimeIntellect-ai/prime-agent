@@ -536,12 +536,13 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
         "the parent-death close keeps the child's resume entry (no archive): {child_session}"
     );
 
-    // The respawned parent reseeds the spawn edge the death close kept and
-    // lists the child as a settled row (wire status `done`) once the async reseed lands.
+    // The respawned parent reseeds the spawn edge the death close kept.
+    // Its display still says running, so TS exposes the interrupted task
+    // as error rather than presenting it as a completed child.
     wait_until(&mut client, Duration::from_mins(1), |client| {
         rlm_children_rows(client, "g3", &parent_id)
             .into_iter()
-            .find(|row| row["id"] == json!(child_id) && row["status"] == "done")
+            .find(|row| row["id"] == json!(child_id) && row["status"] == "error")
     });
 
     // The passive row per TS: the spawn edge survived the close (a stop,
