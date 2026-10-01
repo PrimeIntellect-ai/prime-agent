@@ -312,7 +312,6 @@ fn prompt_down_enters_the_all_zero_dock_and_enter_opens_subagents() {
             timeout_ms: 5_000,
         },
         HeadlessStep::Key(down()),
-        HeadlessStep::WaitMs(100),
         HeadlessStep::Key(enter()),
         HeadlessStep::WaitMs(300),
     ];
@@ -335,9 +334,7 @@ fn prompt_down_reaches_every_empty_group() {
             timeout_ms: 5_000,
         },
         HeadlessStep::Key(down()),
-        HeadlessStep::WaitMs(100),
         HeadlessStep::Key(right()),
-        HeadlessStep::WaitMs(100),
         HeadlessStep::Key(enter()),
         HeadlessStep::WaitRender {
             needle: "No running or paused heartbeats".to_string(),
@@ -345,9 +342,7 @@ fn prompt_down_reaches_every_empty_group() {
         },
         // The panel's exit lands back on its own dock item.
         HeadlessStep::Key(escape()),
-        HeadlessStep::WaitMs(100),
         HeadlessStep::Key(right()),
-        HeadlessStep::WaitMs(100),
         HeadlessStep::Key(enter()),
         HeadlessStep::WaitRender {
             needle: "No background commands".to_string(),
@@ -378,11 +373,8 @@ fn prompt_down_reaches_the_shells_group_with_zero_subagents() {
             timeout_ms: 5_000,
         },
         HeadlessStep::Key(down()),
-        HeadlessStep::WaitMs(100),
         HeadlessStep::Key(right()),
-        HeadlessStep::WaitMs(100),
         HeadlessStep::Key(right()),
-        HeadlessStep::WaitMs(100),
         HeadlessStep::Key(enter()),
         HeadlessStep::WaitRender {
             needle: "render the frames".to_string(),
@@ -399,9 +391,9 @@ fn prompt_down_reaches_the_shells_group_with_zero_subagents() {
 }
 
 /// Up and Esc from the focused dock return to the prompt: the Enter that
-/// follows reaches the empty prompt, not the dock's subagents group (the
-/// Down-then-Enter test above pins that Enter on the focused dock opens
-/// the agents view).
+/// follows reaches the empty prompt, never the dock's heartbeats group
+/// (whose view would render its empty state), and the typed text after it
+/// lands in the prompt — the barrier proves the Enter was handled.
 #[test]
 fn up_and_esc_return_from_the_dock_to_the_prompt() {
     for back in [up(), escape()] {
@@ -411,16 +403,20 @@ fn up_and_esc_return_from_the_dock_to_the_prompt() {
                 timeout_ms: 5_000,
             },
             HeadlessStep::Key(down()),
-            HeadlessStep::WaitMs(100),
+            HeadlessStep::Key(right()),
             HeadlessStep::Key(back),
-            HeadlessStep::WaitMs(100),
             HeadlessStep::Key(enter()),
-            HeadlessStep::WaitMs(300),
+            HeadlessStep::Type("back at the prompt".to_string()),
+            HeadlessStep::WaitRender {
+                needle: "back at the prompt".to_string(),
+                timeout_ms: 5_000,
+            },
         ];
         let outcome = run_plan(steps, false);
+        let all = outcome.frames.join("\n");
         assert!(
-            !outcome.return_to_agents_view,
-            "{back:?} returned the focus to the prompt before the Enter"
+            all.contains("back at the prompt") && !all.contains("No running or paused heartbeats"),
+            "{back:?} returned the focus to the prompt before the Enter:\n{all}"
         );
     }
 }

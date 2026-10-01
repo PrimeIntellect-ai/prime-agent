@@ -408,11 +408,9 @@ fn the_drafts_down_enters_the_dock_and_up_returns_before_the_recall() {
     steps.push(HeadlessStep::Key(down()));
     steps.push(wait_gone("second prompt"));
     steps.push(HeadlessStep::Key(down()));
-    steps.push(HeadlessStep::WaitMs(100));
     // The first Up only leaves the dock, so the second Up recalls the
     // NEWEST prompt (two recalls would have walked on to the older one).
     steps.push(HeadlessStep::Key(up()));
-    steps.push(HeadlessStep::WaitMs(100));
     steps.push(HeadlessStep::Key(up()));
     steps.push(wait_render("second prompt"));
     steps.push(HeadlessStep::WaitMs(100));
