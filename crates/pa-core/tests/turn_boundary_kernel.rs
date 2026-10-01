@@ -64,46 +64,6 @@ fn kernel_python() -> Option<PathBuf> {
     None
 }
 
-/// The installed release directory (ships `prime-agent-runtime/` and the
-/// bundled skill packages): `PI_PACKAGE_DIR` wins, else the newest release
-/// under ~/.local/share/prime-agent/releases. Skipped when absent.
-fn release_dir() -> Option<PathBuf> {
-    if let Some(explicit) = std::env::var_os("PI_PACKAGE_DIR") {
-        let explicit = PathBuf::from(explicit);
-        assert!(
-            explicit.join("prime-agent-runtime").exists(),
-            "PI_PACKAGE_DIR {} has no prime-agent-runtime",
-            explicit.display()
-        );
-        return Some(explicit);
-    }
-    let releases = PathBuf::from(std::env::var("HOME").map_or_else(
-        |_| "/home/ubuntu/.local/share/prime-agent/releases".to_string(),
-        |home| format!("{home}/.local/share/prime-agent/releases"),
-    ));
-    let Ok(entries) = std::fs::read_dir(&releases) else {
-        eprintln!(
-            "no releases dir at {}; skipping live kernel test",
-            releases.display()
-        );
-        return None;
-    };
-    let mut candidates: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.join("prime-agent-runtime").is_dir() && path.join("skills").is_dir())
-        .collect();
-    candidates.sort();
-    let Some(latest) = candidates.pop() else {
-        eprintln!(
-            "no release with prime-agent-runtime under {}; skipping live kernel test",
-            releases.display()
-        );
-        return None;
-    };
-    Some(latest)
-}
-
 /// Scoped process-env overrides: applied on construction, restored on drop.
 /// This binary carries exactly one live-kernel test, so nothing races.
 struct EnvOverride {
@@ -176,9 +136,6 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
     let Some(kernel_python) = kernel_python() else {
         return;
     };
-    let Some(release) = release_dir() else {
-        return;
-    };
     let dir = tempfile::tempdir().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let sessions_dir = agent_dir.join("sessions");
@@ -187,14 +144,13 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
     std::fs::create_dir_all(&cwd).expect("project dir");
     let receipt_path = dir.path().join("harness-receipt.json");
 
-    // Hermeticity: the kernel runs on the installed runtime (PI_PACKAGE_DIR +
-    // the ambient kernel venv), and no ambient agent state leaks in.
+    // Hermeticity: the kernel runs on the bootstrapped kernel venv, and no
+    // ambient agent state leaks in.
     let _env = EnvOverride::apply(&[
         (
             "PRIME_AGENT_KERNEL_PYTHON",
             Some(kernel_python.display().to_string()),
         ),
-        ("PI_PACKAGE_DIR", Some(release.display().to_string())),
         ("PRIME_AGENT_CODING_AGENT_DIR", None),
         ("PRIME_API_KEY", None),
     ]);

@@ -128,7 +128,7 @@ pub fn scan_session_headers(session_dir: &Path) -> Vec<SessionHeaderInfo> {
             continue;
         }
         if let Some(header) = read_session_header(&path) {
-            if header.id.is_empty() || header.cwd.is_empty() {
+            if header.cwd.is_empty() {
                 continue;
             }
             headers.push(SessionHeaderInfo {

@@ -892,4 +892,59 @@ mod tests {
             other => panic!("the seeded team answered, got {other:?}"),
         }
     }
+
+    /// The installer's banner (install-rust.sh's awk port of this splash)
+    /// draws the same canvas as `mark_rows` — every character and tone —
+    /// for the same frame and width, so the two cannot drift.
+    #[test]
+    #[cfg(unix)]
+    fn the_installer_banner_matches_the_splash() {
+        let script = include_str!("../../../install-rust.sh");
+        let program = script
+            .split("# BANNER_AWK_BEGIN\n")
+            .nth(1)
+            .and_then(|rest| rest.split("# BANNER_AWK_END").next())
+            .expect("the installer carries the banner program");
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let tone = |color: Option<Color>| match color {
+            Some(Color::Rgb(113, 113, 122)) => 'D',
+            Some(Color::Rgb(82, 82, 91)) => 'B',
+            Some(Color::Rgb(124, 111, 175)) => 'A',
+            Some(Color::Rgb(56, 189, 248)) => 'L',
+            Some(Color::Rgb(245, 158, 11)) => 'W',
+            Some(Color::Reset) | None => 'T',
+            other => panic!("unexpected splash tone {other:?}"),
+        };
+        for (frame, width) in [(0_u64, 80_usize), (1, 80), (7, 40), (113, 61), (250, 119)] {
+            let mut screen = OnboardingScreen::new();
+            screen.frame = frame;
+            let expected: Vec<String> = screen
+                .mark_rows(&theme, width)
+                .iter()
+                .map(|row| {
+                    let chars: String = row.iter().map(|span| span.content.as_str()).collect();
+                    let tones: String = row
+                        .iter()
+                        .flat_map(|span| {
+                            std::iter::repeat_n(tone(span.style.fg), span.content.chars().count())
+                        })
+                        .collect();
+                    format!("{chars}\t{tones}")
+                })
+                .collect();
+            let output = std::process::Command::new("awk")
+                .args(["-v", "parity=1"])
+                .args(["-v", &format!("frame={frame}")])
+                .args(["-v", &format!("width={width}")])
+                .arg(program)
+                .output()
+                .expect("run awk");
+            assert!(output.status.success(), "awk failed: {output:?}");
+            let actual: Vec<String> = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::to_string)
+                .collect();
+            assert_eq!(actual, expected, "frame {frame} at width {width}");
+        }
+    }
 }

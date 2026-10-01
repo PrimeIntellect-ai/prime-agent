@@ -698,7 +698,7 @@ jobs:
       #     identity (github.token); the R2 keys are environment secrets
       #     scoped to this job; nothing is echoed.
       #   - BETA SUPERSEDE: only the LATEST green commit gets a beta cut;
-      #     a newer rust push landing while this beta built means a newer
+      #     a newer main push landing while this beta built means a newer
       #     cut is coming — this publish keeps its versioned artifacts but
       #     skips the beta channel pointers (beta.json/beta/install-beta.sh),
       #     so the channel only ever advances forward.
@@ -848,7 +848,7 @@ jobs:
           if [[ "$RELEASE_VERSION" == *-beta* ]]; then
             # THE BETA CHANNEL: the rolling per-push cut. The supersede
             # rule — only the newest proven commit advances the channel: a
-            # newer rust push landing while this beta built means a newer
+            # newer main push landing while this beta built means a newer
             # cut is already coming; this one keeps its versioned
             # artifacts (immutable, still served to pinned installs) but
             # leaves the channel pointers alone.

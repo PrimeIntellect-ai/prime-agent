@@ -513,10 +513,8 @@ fn decode_legacy_meta_sequence(body: &[char]) -> Option<KeyEvent> {
 /// never finds a key either. Kept to the finals the product binds.
 fn decode_csi_with_modifier(rest: &str) -> Option<(KeyCode, KeyModifiers)> {
     let (params, last) = rest.split_once(';')?;
-    if last.is_empty() {
-        return None;
-    }
-    let (modifier, final_char) = last.split_at(last.chars().count() - 1);
+    let (final_index, _) = last.char_indices().next_back()?;
+    let (modifier, final_char) = last.split_at(final_index);
     let modifiers = match modifier.parse::<u8>().ok()? {
         1 => KeyModifiers::NONE,
         2 => KeyModifiers::SHIFT,
@@ -1007,6 +1005,24 @@ mod tests {
         let incomplete = merge_legacy_meta_escapes(vec![esc, press('[')]);
         assert_eq!(incomplete.len(), 2);
         assert!(matches!(incomplete[0], Event::Key(ref k) if k.code == KeyCode::Esc));
+    }
+
+    /// A malformed wrapped tail with a multi-byte character before its last
+    /// char is rejected, not a panic: the chunk passes through untouched.
+    #[test]
+    fn malformed_non_ascii_wrapped_tail_stays_untouched() {
+        let _guard = crate::enhanced_keys::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::enhanced_keys::set_kitty_active_for_tests(false);
+        let chunk = vec![
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            press('['),
+            press(';'),
+            press('я'),
+            press(';'),
+        ];
+        assert_eq!(merge_legacy_meta_escapes(chunk.clone()), chunk);
     }
 
     /// Inactive under the kitty protocol: those terminals report
