@@ -36,6 +36,8 @@ from bundle_catalog import validate_bundled_catalog_dir
 from assemble_artifacts import TARGET_ALIASES, RUNTIME_EXCLUDED_NAMES, RUNTIME_EXCLUDED_SUFFIXES
 
 # Must mirror STAGED_ENTRIES in assemble_artifacts.py and §5 of the design doc.
+# Never add a root-level install.sh: it is what lets a TypeScript 0.9.8
+# updater install the archive (release.yml's promote job refuses it).
 # Continuous builds additionally stage the package.json version manifest.
 EXPECTED_TOP_LEVEL = {
     "prime-agent",
