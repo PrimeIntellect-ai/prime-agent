@@ -454,16 +454,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("d.sock");
         let path = dir.path().join("supervisor.config.json");
-        let config = PersistedSupervisorConfig {
-            version: 1,
-            socket_path: socket.to_string_lossy().to_string(),
-            default_session_dir: Some(dir.path().join("sessions").to_string_lossy().to_string()),
-        };
-        persist_supervisor_config(&path, &config).unwrap();
+        let default_session_dir = dir.path().join("sessions");
+        persist_supervisor_config(
+            &path,
+            &PersistedSupervisorConfig {
+                version: 1,
+                socket_path: socket.to_string_lossy().to_string(),
+                default_session_dir: Some(default_session_dir.to_string_lossy().to_string()),
+            },
+        )
+        .unwrap();
+        let loaded =
+            load_supervisor_config(&path, &socket).expect("the unsynced persist stays parseable");
         assert_eq!(
-            load_supervisor_config(&path, &socket),
-            Some(config),
-            "the unsynced persist stays parseable and belongs to its socket"
+            (loaded.version, loaded.socket_path, loaded.default_session_dir),
+            (
+                1,
+                socket.to_string_lossy().to_string(),
+                Some(default_session_dir.to_string_lossy().to_string())
+            ),
+            "the loaded config matches the unsynced write and belongs to its socket"
         );
     }
 
