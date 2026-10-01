@@ -208,33 +208,39 @@ async fn revival_waits_for_in_flight_stop_before_booting() {
     })
     .await
     .expect("stop claimed the prior manager");
-    // Records, at the revival's first progress stage, whether the held host
-    // request had been released yet.
+    // Records, at the revival's first boot stage, whether the held host
+    // request had been released yet; `waiting` fires once the revival is
+    // parked on the predecessor-stop gate.
     let boot_saw_release = Arc::new(Mutex::new(None::<bool>));
     let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+    let waiting_tx = Arc::new(Mutex::new(Some(waiting_tx)));
     let progress: pa_core::kernel::bootstrap::KernelBootstrapProgressHandler = Arc::new({
         let boot_saw_release = Arc::clone(&boot_saw_release);
         let released = Arc::clone(&released);
-        move |message| {
-            if message == "Starting Python kernel..." {
+        move |message| match message {
+            "Waiting for the previous kernel to stop..." => {
+                if let Some(tx) = waiting_tx.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+            }
+            "Starting Python kernel..." => {
                 boot_saw_release
                     .lock()
                     .unwrap()
                     .get_or_insert(released.load(std::sync::atomic::Ordering::SeqCst));
             }
+            _ => {}
         }
     });
     let revival = tokio::spawn({
         let provisioner = provisioner.clone();
         async move { provisioner.ensure(Some(progress), None).await }
     });
-    // On this single-threaded runtime each yield runs every queued task, so a
-    // few yields drive the revival through ensure(), its startup task, and the
-    // boot up to its first await. Without the gate that boot emits its first
-    // progress stage synchronously before any await.
-    for _ in 0..32 {
-        tokio::task::yield_now().await;
-    }
+    tokio::time::timeout(Duration::from_secs(10), waiting_rx)
+        .await
+        .expect("revival boot must park on the predecessor-stop gate")
+        .expect("waiting signal");
     assert!(
         boot_saw_release.lock().unwrap().is_none(),
         "revival boot crossed the predecessor-stop gate"
