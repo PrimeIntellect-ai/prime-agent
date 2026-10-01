@@ -953,10 +953,13 @@ impl Worker {
         // and leak the hold).
         if final_release {
             let mut released = self.released_attach_tokens.lock().unwrap();
-            released.insert(token.to_string());
-            if released.len() > 8192 {
+            // Clear before the insert: the token released right now is
+            // the one most likely to race a late registration, so the
+            // overflow must never forget it.
+            if released.len() >= 8192 {
                 released.clear();
             }
+            released.insert(token.to_string());
         }
         let mut core = self.core.lock().unwrap();
         let ids = {

@@ -353,12 +353,11 @@ impl TurnRunner {
         // graceful SHUTDOWN starting during it must all cancel the stop
         // (the shutdown would cancel the compaction and disconnect the
         // new client; a stop ask under a running shutdown races the
-        // worker's own exit - TS's fresh-snapshot fence checks
-        // `shuttingDown` at the same point, daemon-mode.ts
-        // `passivateSession`); the bash that started in the window keeps
-        // the worker resident exactly like the pre-gate check. The
-        // shutdown arm is the round-9 uniform-predicate-set claim made
-        // true at this site (the interleave harness's residual finding).
+        // worker's own exit). The shutdown arm is stricter than TS:
+        // daemon-mode.ts `passivateSession` checks `shuttingDown` only
+        // BEFORE its fresh-snapshot await, not after it. The bash that
+        // started in the window keeps the worker resident exactly like
+        // the pre-gate check.
         {
             let core = self.core.lock().unwrap();
             if core.compacting

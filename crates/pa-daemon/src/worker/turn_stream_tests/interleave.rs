@@ -54,14 +54,10 @@
 //!   work intact. The shutdown arm is the harness's residual finding: the
 //!   round-9 "uniform predicate set" claim did not hold at the post-await
 //!   site (the arm ships with the harness).
-//! - THE DEPARTURE RELEASE (round 5): an attached client holds the window
-//!   closed (the runner's own window arm), the connection's close releases
-//!   the hold, the re-armed window opens, and the fire from the departed
-//!   state reaches the supervisor — the chain minus the wall-clock timer.
-//! - THE SHUTDOWN'S BASH ADMISSION (round 8): the admission gate closes
-//!   BEFORE the bash abort — a bash dispatched inside the stop is refused
-//!   ("Session is shutting down"), a bash admitted before the gate is
-//!   aborted by the stop (the settled run reports cancelled).
+//! - THE SHUTDOWN'S BASH ADMISSION (rounds 7/8): a bash dispatched while
+//!   the stop is closing is refused ("Session is shutting down"), and a
+//!   bash admitted before the stop is aborted by it (the settled run
+//!   reports cancelled).
 //! - THE ATTACH/CLOSE TOKEN LIFECYCLE (rounds 8/9): both orders pinned —
 //!   the close beating the detached handler's registration leaves no
 //!   unowned hold (the harness's residual finding: the round-8 belt
@@ -78,7 +74,12 @@
 //! family's predicate-set test. The timer leg (the park loop's sleep to
 //! the threshold) is wall-clock-bound by design and stays pinned at rest
 //! by the park family's window battery plus the product's real-time
-//! coverage. The base's `UserBash` open corners (the single-slot overlap,
+//! coverage. The departure release (a closed connection's release
+//! re-arming the window) is the park family's window battery too. The
+//! gate-before-abort ORDER inside `handle_shutdown` (one critical section
+//! sets `shutdown_requested` before `user_bash.abort()` runs) has no seam
+//! a test can hold between the two steps, so no test here pins it - the
+//! tests pin each step's effect. The base's `UserBash` open corners (the single-slot overlap,
 //! the forked-grandchild survival) are TS-anchored follow-ups on the
 //! base's bash surface — out of this lane's scope (the round-9 rebuttal
 //! carries them).
@@ -184,7 +185,7 @@ impl StopAskProbe {
     }
 }
 
-/// The engine-gate seam: `can_passivate_settled_session` signals entry and
+/// The engine-gate seam: `can_passivate_worker` signals entry and
 /// parks on its release Notify, so the harness holds the fire at the EXACT
 /// await the post-await revalidation covers — probe-true-at-the-seam. The
 /// engine counts gate entries (the cancel arms must reach it exactly once).
@@ -255,7 +256,7 @@ impl SessionEngine for GateHoldEngine {
         Ok(())
     }
 
-    fn can_passivate_settled_session(
+    fn can_passivate_worker(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
         let entered = Arc::clone(&self.entered);
@@ -270,8 +271,9 @@ impl SessionEngine for GateHoldEngine {
     }
 }
 
-/// The raced-fire runner fixture: a parent-owned child (`rlm_depth` 1) under
-/// the one-minute eviction threshold, its idle clock already two minutes
+/// The raced-fire runner fixture: an unattached session (roots and children
+/// alike reach the fire since the depth fence left) under the one-minute
+/// eviction threshold, its idle clock already two minutes
 /// past the stamp (the park loop's own re-stamp shape — `now_ms() - 120s`,
 /// wall-clock elapsed, so the fire's fresh-clock gate passes
 /// deterministically; no test waits a real threshold), the probe link in
@@ -287,7 +289,6 @@ fn interleave_runner(
     let mut runner = burst_runner(Arc::clone(engine) as Arc<dyn SessionEngine>);
     {
         let mut core = runner.core.lock().unwrap();
-        core.rlm_depth = 1;
         core.cwd = dir.path().to_string_lossy().to_string();
         // The idle clock crossed the 1-minute threshold two minutes ago:
         // the fresh-snapshot fence and the fresh-clock gate both pass, and
@@ -298,7 +299,7 @@ fn interleave_runner(
     runner.passivation.link = Arc::new(crate::supervisor_link::SupervisorLink::new(
         probe.socket.clone(),
     ));
-    runner.passivation.worker_token = "interleave-child-token".to_string();
+    runner.passivation.worker_token = "interleave-worker-token".to_string();
     (runner, dir)
 }
 
@@ -356,7 +357,7 @@ struct FiredSeam {
 /// TAKES the fire handle (the caller's last use of the seam's settle
 /// arm; the survivors stay readable through the seam's own handles).
 async fn release_the_gate_and_settle(gate: &GateHoldEngine, fired: tokio::task::JoinHandle<()>) {
-    gate.release.notify_waiters();
+    gate.release.notify_one();
     fired.await.expect("the fire settles at its own completion");
 }
 
@@ -390,7 +391,7 @@ async fn the_unraced_fire_passes_the_gate_and_asks_the_supervisor_to_stop() {
     );
     assert_eq!(
         asks[0].get("workerToken").and_then(Value::as_str),
-        Some("interleave-child-token")
+        Some("interleave-worker-token")
     );
     assert_eq!(asks[0].get("idleMinutes").and_then(Value::as_u64), Some(1));
 }
@@ -542,8 +543,9 @@ async fn a_user_bash_admitted_at_the_gate_cancels_the_stop() {
 /// A shutdown starting while the fire holds at the engine gate: the stop
 /// cancels (the round-9 "uniform predicate set" claim, made true at the
 /// post-await site — the harness's residual finding: the ask would have
-/// raced the worker's own exit; TS's fresh-snapshot fence checks
-/// `shuttingDown` at the same point, daemon-mode.ts `passivateSession`).
+/// raced the worker's own exit). Stricter than TS: daemon-mode.ts
+/// `passivateSession` checks `shuttingDown` only before its fresh-snapshot
+/// await.
 #[tokio::test]
 async fn a_shutdown_starting_at_the_gate_cancels_the_stop() {
     let probe = StopAskProbe::spawn();
@@ -559,49 +561,8 @@ async fn a_shutdown_starting_at_the_gate_cancels_the_stop() {
     );
 }
 
-/// THE DEPARTURE RELEASE (the round-5 chain, minus the wall-clock timer):
-/// an attached client holds the window closed (the runner's own window
-/// arm), the connection's close releases the hold, the re-armed window
-/// opens, and the fire from the departed state reaches the supervisor —
-/// the full release -> re-arm -> fire -> ask chain over the same fixture
-/// the cancel arms share.
-#[tokio::test]
-async fn the_departure_release_re_arms_the_window_and_the_stop_leaves() {
-    let probe = StopAskProbe::spawn();
-    let gate = Arc::new(GateHoldEngine::new());
-    let (runner, dir) = interleave_runner(&gate, &probe);
-    // THE HOLD: the attach retains the core hold and the window stays
-    // closed (the runner's own view — the release path's landing zone).
-    runner
-        .core
-        .lock()
-        .unwrap()
-        .attached_client_ids
-        .push("client-1".to_string());
-    assert!(
-        runner.idle_passivation_window().is_none(),
-        "the attached hold must keep the window closed"
-    );
-    // THE DEPARTURE: the connection's close (the release's exact core
-    // effect on the runner's view) — the id leaves and the window re-arms.
-    runner.core.lock().unwrap().attached_client_ids.clear();
-    assert!(
-        runner.idle_passivation_window().is_some(),
-        "the released hold must re-arm the window"
-    );
-    // THE FIRE from the departed state: the gate, the fence, and the ask.
-    let seam = drive_the_fire_to_the_gate(runner, dir, &gate).await;
-    release_the_gate_and_settle(&gate, seam.fired).await;
-    let asks = probe.asks();
-    assert_eq!(
-        asks.len(),
-        1,
-        "the re-armed fire must reach the supervisor: {asks:?}"
-    );
-}
-
 // ---------------------------------------------------------------------------
-// THE SHUTDOWN'S BASH ADMISSION (round 8): the gate closes BEFORE the abort.
+// THE SHUTDOWN'S BASH ADMISSION (rounds 7/8): the gate refuses, the abort kills.
 // ---------------------------------------------------------------------------
 
 /// A created worker over the plain scripted engine: the register/release
@@ -668,11 +629,11 @@ async fn wait_for_event(
     }
 }
 
-/// The round-8 ordering pin: the graceful stop closes the admission gate
-/// BEFORE it aborts the bash, so a bash dispatched while the stop holds at
-/// its work-settled park (a compaction in flight keeps it parked there) is
-/// REFUSED — the pre-fix shape (the abort clearing the racing handler's
-/// fresh claim, the exit orphaning its child) cannot recur.
+/// The round-8 admission pin: a bash dispatched while the graceful stop
+/// holds at its work-settled park (a compaction in flight keeps it parked
+/// there) is REFUSED by the shutdown admission gate and spawns no child.
+/// This pins the gate, not its order against the bash abort (see the
+/// module docs).
 #[tokio::test]
 async fn the_shutdown_gate_refuses_a_bash_admitted_inside_the_stop() {
     let (worker, _dir) = interleave_worker().await;
@@ -952,7 +913,9 @@ async fn a_shared_client_id_survives_one_connection_close_while_the_other_holds(
 }
 
 /// The round-9 overflow belt: the released-token set caps at 8192 with the
-/// clear-on-overflow arm — a long-lived worker cannot grow it unbounded.
+/// clear-on-overflow arm — a long-lived worker cannot grow it unbounded —
+/// and the clear runs BEFORE the insert, so the overflowing release still
+/// rejects its own late registration.
 #[tokio::test]
 async fn the_released_token_set_caps_at_8192() {
     let (worker, _dir) = interleave_worker().await;
@@ -965,11 +928,15 @@ async fn the_released_token_set_caps_at_8192() {
         "the released-token set must cap on overflow (len {len})"
     );
     assert!(
-        !worker
+        worker
             .released_attach_tokens
             .lock()
             .unwrap()
             .contains("cap-8192"),
-        "the overflow's last release is inside the cleared set"
+        "the overflowing release must survive the clear"
+    );
+    assert!(
+        !worker.register_session_attach("cap-8192", "late-client"),
+        "a late registration on the overflowing token is rejected"
     );
 }
