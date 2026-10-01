@@ -673,6 +673,13 @@ impl TurnRunner {
                 match &event {
                     EngineEvent::AgentStart => {
                         herdr.lock().unwrap().run_started();
+                        // A later run in the same turn (the retry, the
+                        // continuation) re-opens its own end: the settle
+                        // fallback keys on the flag, so a run start must
+                        // clear it or an end-swallowed abort of the
+                        // LATER run would skip the settle and strand the
+                        // pane working.
+                        herdr_run_end_seen.store(false, std::sync::atomic::Ordering::SeqCst);
                     }
                     EngineEvent::AgentEnd { messages } => {
                         let more_queued = !core.steering.is_empty() || !core.follow_up.is_empty();
@@ -684,6 +691,11 @@ impl TurnRunner {
                     }
                     EngineEvent::AutoRetryStart { .. } => {
                         herdr.lock().unwrap().retry_started();
+                        // The retry re-runs the turn body: its end (when
+                        // the abort gate lets it through) re-sets the
+                        // flag; clearing here lets a swallowed retry end
+                        // still settle at the turn's close.
+                        herdr_run_end_seen.store(false, std::sync::atomic::Ordering::SeqCst);
                     }
                     _ => {}
                 }

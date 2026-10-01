@@ -626,15 +626,6 @@ impl Worker {
             core.child_script.clone_from(&child_script);
             (self.summary_locked(&core), rlm_depth)
         };
-        // The built-in Herdr connector binds here, per session: the pane
-        // identity comes from the create payload's client env (the client
-        // that owns the pane sent it), never from this process's ambient
-        // environment — so sessions created in other panes report their
-        // own panes regardless of where the supervisor booted (the TS
-        // boot-context bug class, not reproduced). RLM subagents never
-        // report: they share the parent's pane, and a child's turn or
-        // quit must not flip or release it.
-        self.rebind_herdr_reporter(payload);
         // TS `sdk.ts` seeds the Agent's queue modes from the settings
         // manager at session create (`steeringMode`/`followUpMode`): the
         // engine's agent-level queues drain per the same modes the worker
@@ -655,6 +646,19 @@ impl Worker {
         }) {
             return response_failure(None, "create", &error.to_string(), None);
         }
+        // The built-in Herdr connector binds here, per session: the pane
+        // identity comes from the create payload's client env (the client
+        // that owns the pane sent it), never from this process's ambient
+        // environment — so sessions created in other panes report their
+        // own panes regardless of where the supervisor booted (the TS
+        // boot-context bug class, not reproduced). A live RLM child never
+        // reports: it shares the parent's pane, and a child's turn or quit
+        // must not flip or release it. The bind sits PAST the create's
+        // last fallible step, so a create that fails never publishes an
+        // idle claim for a session the supervisor then tears down (the
+        // failed create would otherwise leave the pane ghost-claimed —
+        // the force-kill path releases nothing).
+        self.rebind_herdr_reporter(payload);
         // The engine renders this summary into the sender identity block
         // of worker-to-worker agent messages.
         if let Ok(summary_value) = serde_json::to_value(&summary) {
@@ -749,12 +753,21 @@ impl Worker {
             .and_then(|env| serde_json::from_value(env).ok())
             .map(|env| crate::herdr::filter_client_env(&env))
             .unwrap_or_default();
-        let (active, session_ref, rlm_depth) = {
+        // TS keys the child skip on the SPAWN OVERRIDE ONLY
+        // (`sessionOptionsOverride?.rlmDepth`), never the persisted file
+        // depth: a resumed subagent file opened as a top-level session
+        // still reports for its own pane (the file's depth serves the
+        // roster and usage attribution, not the reporter decision).
+        let spawned_as_child = payload
+            .get("rlmDepth")
+            .and_then(Value::as_u64)
+            .is_some_and(|depth| depth > 0);
+        let (active, session_ref) = {
             let core = self.core.lock().unwrap();
-            (core.busy, Worker::herdr_session_ref(&core), core.rlm_depth)
+            (core.busy, Worker::herdr_session_ref(&core))
         };
         let reporter = match crate::herdr::HerdrConfig::from_env(&client_env) {
-            Some(config) if rlm_depth == 0 => {
+            Some(config) if !spawned_as_child => {
                 // The fresh epoch: bumping the shared counter makes the
                 // replaced reporter's task drop its queued boundary
                 // events instead of flushing them over this session's
@@ -770,7 +783,7 @@ impl Worker {
                     std::sync::Arc::clone(&self.herdr_generation),
                 )
             }
-            None if rlm_depth == 0 && self.herdr.lock().unwrap().enabled() => {
+            None if !spawned_as_child && self.herdr.lock().unwrap().enabled() => {
                 // An idempotent re-create that carries no pane identity
                 // (e.g. a replay from a client outside a Herdr pane)
                 // must not strip the binding an earlier create or an
@@ -778,8 +791,8 @@ impl Worker {
                 // pane (adopt-if-absent, never rebind to nothing).
                 return;
             }
-            // Not inside a Herdr pane (the no-op reporter), or an RLM
-            // subagent: subagents share the parent's pane, so their runs
+            // Not inside a Herdr pane (the no-op reporter), or a live
+            // RLM child: subagents share the parent's pane, so their runs
             // must not flip it and their quits must not release it.
             _ => crate::herdr::HerdrReporter::default(),
         };
