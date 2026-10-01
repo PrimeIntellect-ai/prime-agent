@@ -368,12 +368,32 @@ fn ledger_child_records(
                 .parent()
                 .map(|dir| dir.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            label: display
-                .as_ref()
-                .and_then(|display| display.prompt.as_deref())
-                .map_or_else(String::new, rlm_child_label),
-            started_at_ms: display.map_or(0, |display| display.created_at),
-            settled_status: Some("done"),
+            label: rlm_child_label(
+                display
+                    .as_ref()
+                    .and_then(|display| display.prompt.as_deref())
+                    .unwrap_or_default(),
+            ),
+            started_at_ms: display.as_ref().map_or_else(
+                || {
+                    std::fs::metadata(&child)
+                        .ok()
+                        .and_then(|metadata| metadata.created().ok())
+                        .and_then(|created| created.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map_or(0, |duration| duration.as_millis() as u64)
+                },
+                |display| display.created_at,
+            ),
+            settled_status: Some(
+                if display
+                    .as_ref()
+                    .is_some_and(|display| display.status == "running")
+                {
+                    "error"
+                } else {
+                    "done"
+                },
+            ),
             settled: true,
             answer_preview: None,
             answer_captured: false,

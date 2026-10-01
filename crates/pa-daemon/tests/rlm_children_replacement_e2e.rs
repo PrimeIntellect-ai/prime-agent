@@ -641,6 +641,15 @@ fn new_session_keeps_a_created_root_session_running() {
 /// reattached parent lists its child again and messaging it wakes the child.
 #[test]
 fn a_daemon_restart_relists_and_wakes_the_parents_child() {
+    restart_relists_child(0, "completed");
+}
+
+#[test]
+fn a_daemon_restart_marks_a_still_running_child_as_failed() {
+    restart_relists_child(30_000, "running");
+}
+
+fn restart_relists_child(delay_ms: u64, display_status: &str) {
     let Some(kernel_python) = kernel_python() else {
         return;
     };
@@ -659,7 +668,7 @@ fn a_daemon_restart_relists_and_wakes_the_parents_child() {
     let child_script = dir.path().join("child.json");
     std::fs::write(
         &child_script,
-        json!({ "responses": [ { "text": "kid done" } ] }).to_string(),
+        json!({ "responses": [ { "text": "kid done", "delayMs": delay_ms } ] }).to_string(),
     )
     .expect("write child script");
     let parent_script = write_parent_script(
@@ -716,6 +725,29 @@ fn a_daemon_restart_relists_and_wakes_the_parents_child() {
         .join(parent_session_id)
         .join(&child_id)
         .join(format!("{child_session_id}.jsonl"));
+    let display_file = child_file.parent().unwrap().join("rlm-subagent.json");
+    if delay_ms > 0 {
+        wait_until(&mut client, Duration::from_secs(30), |client| {
+            let rows = rlm_children_rows(client, "g-running", &parent_id);
+            rows.iter()
+                .any(|row| row["id"] == child_id && row["status"] == "running")
+                .then_some(())
+        });
+    }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let display: Value =
+            serde_json::from_slice(&std::fs::read(&display_file).expect("child display file"))
+                .expect("child display json");
+        if display["status"] == display_status {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "child display never completed: {display}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 
     client.send_command("bye", &json!({ "type": "shutdown" }));
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -768,8 +800,16 @@ fn a_daemon_restart_relists_and_wakes_the_parents_child() {
         serde_json::from_str(&await_receipt(&list_receipt)).expect("list receipt json");
     assert_eq!(
         rows,
-        json!([[child_id, "completed", child_session_id]]),
-        "the restarted parent must relist its ledger child as a settled row"
+        json!([[
+            child_id,
+            if display_status == "completed" {
+                "completed"
+            } else {
+                "error"
+            },
+            child_session_id
+        ]]),
+        "the restarted parent must relist its ledger child with its persisted status"
     );
     // (b) send receipt
     let _send: Value =

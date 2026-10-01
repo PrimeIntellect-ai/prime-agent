@@ -167,8 +167,34 @@ async fn reseed_lists_live_ledger_children_settled_and_bills_only_after_a_delive
     let parent_two = file_at(daemon_sessions.join("Q.jsonl"));
     let child_one = file_at(agent.join("session-artifacts/P/sub-a/sess-a.jsonl"));
     let child_two = file_at(agent.join("session-artifacts/P/sub-b/sess-b.jsonl"));
+    let child_legacy = file_at(agent.join("session-artifacts/P/sub-legacy/sess-legacy.jsonl"));
     let child_three = file_at(agent.join("session-artifacts/P/sub-c/sess-c.jsonl"));
     let child_four = file_at(agent.join("session-artifacts/Q/sub-d/sess-d.jsonl"));
+    for (child_id, session_file, status, prompt) in [
+        ("sub-a", &child_one, "completed", Some("finished task")),
+        ("sub-b", &child_two, "running", None),
+    ] {
+        crate::rlm_ledger::write_rlm_subagent_display(
+            &crate::rlm_ledger::RlmSubagentDisplayEntry {
+                type_tag: "rlm_subagent".to_string(),
+                child_id: child_id.to_string(),
+                session_name: child_id.to_string(),
+                session_dir: Path::new(session_file)
+                    .parent()
+                    .unwrap()
+                    .display()
+                    .to_string(),
+                session_file: session_file.clone(),
+                rlm_parent_node_id: None,
+                prompt: prompt.map(str::to_string),
+                spawn_code: None,
+                model: None,
+                status: status.to_string(),
+                created_at: 1234,
+            },
+        )
+        .unwrap();
+    }
     let spawn = |child_id: &str, parent: &str, child: &str| {
         format!(
             r#"{{"v":1,"op":"spawn","at":"2026-09-30T00:00:00Z","childId":"{child_id}","parent":"{parent}","child":"{child}","depth":1,"name":"{child_id}"}}"#
@@ -183,6 +209,7 @@ async fn reseed_lists_live_ledger_children_settled_and_bills_only_after_a_delive
             spawn("sub-a", &parent_one, &child_one).as_str(),
             r#"{"v":1,"op":"spawn","at":"#,
             spawn("sub-b", &parent_one, &child_two).as_str(),
+            spawn("sub-legacy", &parent_one, &child_legacy).as_str(),
             spawn("sub-c", &parent_one, &child_three).as_str(),
             format!(
                 r#"{{"v":1,"op":"delete","at":"2026-09-30T00:00:01Z","childId":"sub-c","child":"{child_three}","reason":"user"}}"#
@@ -220,17 +247,31 @@ async fn reseed_lists_live_ledger_children_settled_and_bills_only_after_a_delive
                 row.rlm_child_id.as_str(),
                 row.status,
                 row.active_session_id.as_deref(),
+                row.label.as_deref(),
             )
         })
         .collect();
     assert_eq!(
         rows,
         [
-            ("sub-a", "completed", Some("sess-a")),
-            ("sub-b", "completed", Some("sess-b")),
+            ("sub-a", "completed", Some("sess-a"), Some("finished task")),
+            ("sub-b", "error", Some("sess-b"), Some("child agent")),
+            (
+                "sub-legacy",
+                "completed",
+                Some("sess-legacy"),
+                Some("child agent")
+            ),
         ],
-        "only the parent's live edges reseed, as settled rows"
+        "completed and interrupted children keep their display verdicts"
     );
+
+    let legacy = sessions
+        .inner
+        .find_record("sub-legacy")
+        .await
+        .expect("ledger-only row");
+    assert!(legacy.lock().await.started_at_ms > 0);
 
     let record = sessions
         .inner
