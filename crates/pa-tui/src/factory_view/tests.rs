@@ -405,6 +405,65 @@ fn a_reply_without_the_runs_list_is_malformed_not_empty() {
     );
 }
 
+/// The terminal-safety pin (the daemon-text scrub): every string the
+/// view paints comes from the daemon's reply, and a reply carrying an
+/// OSC 52 payload — or any ANSI/OSC sequence — must never drive the
+/// terminal (e.g. overwrite the operator's clipboard). The parse seam
+/// scrubs control bytes to spaces (`scrub_controls`, the bash activity
+/// lane's rule); the run id alone stays raw — it never paints and must
+/// round-trip the kernel's registry as the stop/resume/watch identity
+/// (the mutation checks: an unscrubbed name, state id, or error line
+/// fails the assertions here).
+#[test]
+fn daemon_text_never_carries_terminal_control_sequences() {
+    let mut snapshot = scripted_snapshot();
+    // The OSC 52 clipboard-overwrite payload and an ANSI SGR sequence,
+    // in every display string the view paints.
+    snapshot["name"] = json!("run\x1b]52;c;dGVzdA==\x07name");
+    snapshot["specId"] = json!("spec\x1b[31mid");
+    snapshot["machine"]["states"][0]["id"] = json!("col\x1b]52;c;evil\x07lect");
+    snapshot["nodes"][0]["id"] = json!("col\x1b]52;c;evil\x07lect");
+    snapshot["machine"]["states"][0]["subagent"] = json!("sub\x1b[31magent");
+    snapshot["machine"]["transitions"][0]["when"] = json!({
+        "output": "ver\x1b]52;c;evil\x07dict", "op": "eq", "value": false
+    });
+    snapshot["nodes"][0]["error"] = json!("err\x1b]52;c;evil\x07or");
+    snapshot["events"][0]["milestone"] = json!("mile\x1b[31mstone");
+    let has_control = |text: &str| text.chars().any(|c| c.is_control() && c != '\n');
+    let runs = parse_factory_runs(&runs_response(&snapshot));
+    assert!(
+        runs.iter().all(|run| !has_control(&run.display_name())
+            && !has_control(&run.states[0].id)
+            && run.milestones.iter().all(|m| !has_control(m))),
+        "the parsed display strings carry no control byte"
+    );
+    // The run id stays raw: it never paints, and the kernel's registry
+    // answers it verbatim.
+    assert_eq!(runs[0].run_id, "run-abc12345");
+    // The painted frame and the copied Mermaid source carry no control
+    // byte either — scrubbed text is the only thing that reaches a
+    // span or the clipboard.
+    let mut view = FactoryView::new(runs, 40);
+    view.set_error(Some("boom\x1b]52;c;evil\x07".to_string()));
+    let rows = frame_text(&mut view);
+    for row in &rows {
+        assert!(
+            !has_control(row),
+            "a rendered row carries no control byte: {row:?}"
+        );
+    }
+    assert!(
+        rows.iter().any(|row| row.contains("Error: boom")),
+        "the scrubbed error text still paints: {rows:?}"
+    );
+    let run = view.selected_run().expect("a run is live");
+    let source = diagram::mermaid_source(run);
+    assert!(
+        !has_control(&source),
+        "the Mermaid copy carries no control byte: {source}"
+    );
+}
+
 /// The fired-edge identity includes the guard: two transitions may share
 /// one from+to pair with different guards, so the fired marking must
 /// light only the one that fired (the mutation check: matching on

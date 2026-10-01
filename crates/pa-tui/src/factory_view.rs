@@ -152,6 +152,19 @@ fn opt_string(value: Option<&Value>) -> Option<String> {
         .filter(|text| !text.is_empty())
 }
 
+/// One daemon-provided DISPLAY string, scrubbed: control bytes never
+/// reach a styled span (`scrub_controls`, the bash activity lane's
+/// rule — a run name or milestone carrying an OSC sequence can never
+/// drive the terminal, e.g. overwrite the operator's clipboard via
+/// OSC 52). The scrub lands at this parse seam, so every paint path
+/// (the panel header, the diagram rows, the milestone tail, the
+/// Mermaid copy) sees terminal-safe text; the run id stays raw — it
+/// never reaches a span and must round-trip the kernel's registry as
+/// the stop/resume/watch identity.
+fn scrubbed_string(value: Option<&Value>) -> Option<String> {
+    opt_string(value).map(|text| crate::menu_panel::scrub_controls(&text))
+}
+
 /// One field read that tolerates both spellings: the kernel's
 /// conversation shape (`snake_case`) and the activity lane's wire shape
 /// (`camelCase` — `_wire_payload` re-keys the reply before it travels).
@@ -167,10 +180,13 @@ fn get_either<'a>(value: &'a Value, snake: &str, camel: &str) -> Option<&'a Valu
 /// `events` the fused structure and live overlay. Every key read
 /// tolerates both spellings: the activity wire carries the `camelCase`
 /// form (`_wire_payload` converts the reply before it travels) and the
-/// kernel's conversation shape stays `snake_case`.
+/// kernel's conversation shape stays `snake_case`. Every DISPLAY string
+/// scrubs its control bytes ([`scrubbed_string`]) — daemon-provided
+/// text never drives the terminal — and the run id stays raw (the
+/// stop/resume/watch identity must round-trip the kernel's registry).
 fn parse_run(run: &Value) -> Option<FactoryRunSnapshot> {
     let run_id = opt_string(get_either(run, "run_id", "runId")).unwrap_or_default();
-    let spec_id = opt_string(get_either(run, "spec_id", "specId")).unwrap_or_default();
+    let spec_id = scrubbed_string(get_either(run, "spec_id", "specId")).unwrap_or_default();
     if run_id.is_empty() && spec_id.is_empty() {
         return None;
     }
@@ -196,8 +212,10 @@ fn parse_run(run: &Value) -> Option<FactoryRunSnapshot> {
         .into_iter()
         .flatten()
     {
-        if let (Some(id), Some(node)) = (opt_string(node.get("id")), FactoryNodeState::parse(node))
-        {
+        if let (Some(id), Some(node)) = (
+            scrubbed_string(node.get("id")),
+            FactoryNodeState::parse(node),
+        ) {
             nodes.insert(id, node);
         }
     }
@@ -207,13 +225,13 @@ fn parse_run(run: &Value) -> Option<FactoryRunSnapshot> {
         .into_iter()
         .flatten()
         .filter(|event| event.get("kind").and_then(Value::as_str) == Some("milestone"))
-        .filter_map(|event| opt_string(event.get("milestone")))
+        .filter_map(|event| scrubbed_string(event.get("milestone")))
         .collect();
     Some(FactoryRunSnapshot {
         run_id,
         spec_id,
-        name: opt_string(run.get("name")),
-        state: opt_string(run.get("state")),
+        name: scrubbed_string(run.get("name")),
+        state: scrubbed_string(run.get("state")),
         elapsed_ms: get_either(run, "elapsed_ms", "elapsedMs")
             .and_then(Value::as_u64)
             .unwrap_or_default(),
@@ -327,9 +345,12 @@ impl FactoryView {
         self.runs.get(self.selected)
     }
 
-    /// Record one fetch/error line from the session UI's refresh.
+    /// Record one fetch/error line from the session UI's refresh. The
+    /// message is daemon-provided text painted on the chrome line, so it
+    /// scrubs — an OSC sequence in a reply's error reason can never
+    /// drive the terminal.
     pub fn set_error(&mut self, error: Option<String>) {
-        self.error = error;
+        self.error = error.map(|text| crate::menu_panel::scrub_controls(&text));
     }
 
     /// One key press: j/k (or the arrow keys) move the selection, s stops

@@ -3,11 +3,26 @@
 //! compact guard rendering, and the Mermaid emitter. One graph model feeds
 //! both the ASCII diagram and the Mermaid source, so the in-terminal
 //! highlighting and the pasteable highlighting are the same statement.
+//! Every daemon-provided string the model keeps scrubs its control
+//! bytes at the parse seam (`scrubbed`): wire text can never drive the
+//! terminal.
 
 use serde_json::Value;
 
 use super::get_either;
 use crate::theme::ThemeColor;
+
+/// One daemon-provided string scrubbed for the terminal
+/// (`crate::menu_panel::scrub_controls`, the bash activity lane's rule):
+/// the diagram's rows paint wire-provided ids, subagent names, guard
+/// labels, statuses, and errors — none of them may carry a control byte
+/// into a styled span (an OSC sequence in that text could otherwise
+/// drive the terminal, e.g. overwrite the operator's clipboard via
+/// OSC 52). The scrub lands at this parse seam, so the ASCII diagram
+/// and the Mermaid emitter share terminal-safe text.
+fn scrubbed(text: &str) -> String {
+    crate::menu_panel::scrub_controls(text)
+}
 
 /// One machine state's declared shape.
 #[derive(Debug, Clone, PartialEq)]
@@ -22,20 +37,19 @@ pub struct FactoryState {
 impl FactoryState {
     pub fn parse(value: &Value) -> Option<Self> {
         Some(Self {
-            id: value.get("id")?.as_str()?.to_string(),
+            id: scrubbed(value.get("id")?.as_str()?),
             entry: value.get("entry").and_then(Value::as_bool).unwrap_or(false),
             lifecycle: value
                 .get("lifecycle")
                 .and_then(Value::as_str)
-                .unwrap_or("task")
-                .to_string(),
+                .map_or_else(|| "task".to_string(), scrubbed),
             max_entries: get_either(value, "max_entries", "maxEntries")
                 .and_then(Value::as_u64)
                 .unwrap_or(1),
             subagent: value
                 .get("subagent")
                 .and_then(Value::as_str)
-                .map(str::to_string)
+                .map(scrubbed)
                 .filter(|text| !text.is_empty()),
         })
     }
@@ -55,9 +69,9 @@ impl FactoryTransition {
             Some(Value::Array(sources)) => sources
                 .iter()
                 .filter_map(|source| source.as_str())
-                .map(str::to_string)
+                .map(scrubbed)
                 .collect::<Vec<_>>(),
-            Some(Value::String(source)) => vec![source.clone()],
+            Some(Value::String(source)) => vec![scrubbed(source)],
             _ => return None,
         };
         if from.is_empty() {
@@ -65,10 +79,11 @@ impl FactoryTransition {
         }
         Some(Self {
             from,
-            to: value.get("to")?.as_str()?.to_string(),
+            to: scrubbed(value.get("to")?.as_str()?),
             when: value
                 .get("when")
                 .and_then(format_guard)
+                .map(|guard| scrubbed(&guard))
                 .filter(|guard| !guard.is_empty()),
         })
     }
@@ -96,9 +111,9 @@ impl FactoryEdge {
             Some(Value::Array(sources)) => sources
                 .iter()
                 .filter_map(|source| source.as_str())
-                .map(str::to_string)
+                .map(scrubbed)
                 .collect::<Vec<_>>(),
-            Some(Value::String(source)) => vec![source.clone()],
+            Some(Value::String(source)) => vec![scrubbed(source)],
             _ => return None,
         };
         if from.is_empty() {
@@ -106,10 +121,11 @@ impl FactoryEdge {
         }
         Some(Self {
             from,
-            to: value.get("to")?.as_str()?.to_string(),
+            to: scrubbed(value.get("to")?.as_str()?),
             when: value
                 .get("when")
                 .and_then(format_guard)
+                .map(|guard| scrubbed(&guard))
                 .filter(|guard| !guard.is_empty()),
         })
     }
@@ -154,12 +170,12 @@ impl FactoryNodeState {
             .map(|rows| {
                 rows.iter()
                     .filter_map(|entry| entry.get("status").and_then(Value::as_str))
-                    .map(str::to_string)
+                    .map(scrubbed)
                     .collect()
             })
             .unwrap_or_default();
         Some(Self {
-            status: value.get("status")?.as_str()?.to_string(),
+            status: scrubbed(value.get("status")?.as_str()?),
             entries,
             entries_used: get_either(value, "entries_used", "entriesUsed")
                 .and_then(Value::as_u64)
@@ -174,14 +190,11 @@ impl FactoryNodeState {
                     instances
                         .iter()
                         .filter_map(|instance| instance.get("status").and_then(Value::as_str))
-                        .map(str::to_string)
+                        .map(scrubbed)
                         .collect()
                 })
                 .unwrap_or_default(),
-            error: value
-                .get("error")
-                .and_then(Value::as_str)
-                .map(str::to_string),
+            error: value.get("error").and_then(Value::as_str).map(scrubbed),
         })
     }
 

@@ -147,7 +147,14 @@ impl super::SessionUi {
             .await
         {
             Ok(data) => {
-                let state = data.get("state").and_then(Value::as_str).unwrap_or(action);
+                // The reply's state is daemon-provided text painted by
+                // the toast, so it scrubs (`scrub_controls`, the factory
+                // view's parse-seam rule): a control byte can never ride
+                // the toast to the terminal.
+                let state = data
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .map_or_else(|| action.to_string(), crate::menu_panel::scrub_controls);
                 self.toast(&format!("Factory run {run_id} is now {state}"), view);
             }
             Err(error) => {
