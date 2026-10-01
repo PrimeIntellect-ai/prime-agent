@@ -306,7 +306,8 @@ async fn execute_script(
                     message: "could not run the installer: no Git Bash found at \
                               the trusted install roots \
                               (C:\\Program Files\\Git\\bin\\bash.exe); install \
-                              Git for Windows (https://git-scm.com/download/win)                               to update from this machine"
+                              Git for Windows (https://git-scm.com/download/win) \
+                              to update from this machine"
                         .to_string(),
                 });
             }
