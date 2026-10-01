@@ -465,7 +465,14 @@ async fn run_reporter(
                 &state.session_ref,
                 next_report_seq(),
             );
-            send_request(&target, request).await;
+            if send_request(&target, request).await {
+                // The state reached the wire (best-effort): the
+                // publish-dedup keys on it. A failed send (Herdr down)
+                // leaves it unpublished, so it re-queues at the next
+                // boundary instead of being deduped away.
+                state.last_state = Some(report.state);
+                state.last_message = report.message;
+            }
             if is_stale() {
                 return;
             }
@@ -590,10 +597,13 @@ fn desired_state(state: &ReporterState) -> (PaneState, Option<String>) {
 /// Queue the desired state when it differs from the last published one.
 fn publish(state: &mut ReporterState) {
     let (next_state, next_message) = desired_state(state);
-    if next_state == state.last_state.unwrap_or(PaneState::Idle)
-        && next_message == state.last_message
-    {
-        return;
+    // Dedup only against a state that actually reached the wire — a
+    // never-sent state (Herdr down) must re-queue, not silently dedup
+    // against the pre-wire default.
+    if let Some(last_state) = state.last_state {
+        if next_state == last_state && next_message == state.last_message {
+            return;
+        }
     }
     queue_state(state, next_state, next_message);
 }
@@ -606,8 +616,10 @@ fn publish_force(state: &mut ReporterState) {
 }
 
 fn queue_state(state: &mut ReporterState, next_state: PaneState, next_message: Option<String>) {
-    state.last_state = Some(next_state);
-    state.last_message.clone_from(&next_message);
+    // The slot only QUEUES here: `last_state` marks what is on the
+    // wire, recorded after a successful send — a state whose send
+    // failed (Herdr down) stays UNpublished, so the same state is
+    // re-sent at the next boundary instead of being deduped away.
     state.pending = Some(PendingReport {
         state: next_state,
         message: next_message,
@@ -722,7 +734,24 @@ fn probe_effective_uid(dir: &std::path::Path) -> Option<u32> {
 }
 
 #[cfg(unix)]
-fn pane_socket_acceptable(socket_target: &str) -> bool {
+async fn pane_socket_acceptable(socket_target: &str) -> bool {
+    // The lstat is a blocking syscall on a CLIENT-SUPPLIED path — it
+    // moves off the async runtime (spawn_blocking) under the same
+    // 500 ms bound as every other phase, so a pathological target (a
+    // hung mount) cannot stall the reporter task.
+    let target = socket_target.to_string();
+    let checked = tokio::time::timeout(
+        Duration::from_millis(SEND_TIMEOUT_MS),
+        tokio::task::spawn_blocking(move || pane_socket_acceptable_blocking(&target)),
+    )
+    .await;
+    matches!(checked, Ok(Ok(true)))
+}
+
+/// The fence's blocking decision (runs on the blocking pool): lstat the
+/// target, and accept only a socket this process's own uid owns.
+#[cfg(unix)]
+fn pane_socket_acceptable_blocking(socket_target: &str) -> bool {
     let Ok(metadata) = std::fs::symlink_metadata(socket_target) else {
         // A target that does not exist (yet) is not a refusal: Herdr
         // may simply be down; the connect below fails silently as
@@ -747,7 +776,7 @@ fn pane_socket_acceptable(socket_target: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn pane_socket_acceptable(_socket_target: &str) -> bool {
+async fn pane_socket_acceptable(_socket_target: &str) -> bool {
     // Named pipes carry their own ACL model at connect time.
     true
 }
@@ -756,14 +785,14 @@ fn pane_socket_acceptable(_socket_target: &str) -> bool {
 /// response byte, an error, a close, or the 500 ms window (the TS
 /// `sendRequest`). Failures are silent — the pane state API is
 /// best-effort, and a down daemon must never wedge a session.
-async fn send_request(socket_target: &str, request: Value) {
+async fn send_request(socket_target: &str, request: Value) -> bool {
     // The pane-socket fence comes FIRST (the client-supplied target is
     // untrusted): a target that is not this process's own Unix socket
     // never reports. Missing targets pass through here — the connect
     // below already fails silently on them, so a Herdr daemon that is
     // merely down does not log.
-    if !pane_socket_acceptable(socket_target) {
-        return;
+    if !pane_socket_acceptable(socket_target).await {
+        return false;
     }
     // Every phase of the one-shot request is time-bounded — connect,
     // write, and the response's first byte — so a wedged peer (a socket
@@ -775,7 +804,7 @@ async fn send_request(socket_target: &str, request: Value) {
     )
     .await;
     let Ok(Ok(stream)) = connected else {
-        return;
+        return false;
     };
     let (mut reader, mut writer) = stream.split();
     let line = format!("{request}\n");
@@ -785,7 +814,7 @@ async fn send_request(socket_target: &str, request: Value) {
     )
     .await;
     if !matches!(written, Ok(Ok(()))) {
-        return;
+        return false;
     }
     let _ = writer.shutdown().await;
     let mut byte = [0u8; 1];
@@ -794,6 +823,9 @@ async fn send_request(socket_target: &str, request: Value) {
         reader.read_exact(&mut byte),
     )
     .await;
+    // The request left the process (best-effort: whether the peer read
+    // it is unknowable, but the write succeeded).
+    true
 }
 
 /// The resume argv a report carries (the one gap herdr's contract names
@@ -1353,11 +1385,11 @@ mod tests {
         // successor speaks).
         predecessor.run_started();
         tokio::time::sleep(Duration::from_millis(80)).await;
+        let frames = requests.lock().unwrap().clone();
         assert_eq!(
-            requests.lock().unwrap().len(),
+            frames.len(),
             1,
-            "a stale-generation reporter wrote: {:?}",
-            requests.lock().unwrap()
+            "a stale-generation reporter wrote: {frames:?}"
         );
 
         // The successor reports for its own session.
@@ -1410,11 +1442,11 @@ mod tests {
             awaited < Duration::from_secs(1),
             "a dropped release must ack promptly, took {awaited:?}"
         );
+        let frames = requests.lock().unwrap().clone();
         assert_eq!(
-            requests.lock().unwrap().len(),
+            frames.len(),
             1,
-            "a stale reporter released the successor's pane: {:?}",
-            requests.lock().unwrap()
+            "a stale reporter released the successor's pane: {frames:?}"
         );
         server.abort();
     }
@@ -1451,12 +1483,12 @@ mod tests {
         // The fence end of it: the real socket passes, the file and the
         // symlink do not, and a missing target passes through (the
         // connect below still fails silently on it).
-        assert!(pane_socket_acceptable(socket_path.to_str().unwrap()));
-        assert!(!pane_socket_acceptable(file_path.to_str().unwrap()));
-        assert!(!pane_socket_acceptable(link_path.to_str().unwrap()));
-        assert!(pane_socket_acceptable(
-            socket_path.with_extension("absent").to_str().unwrap()
-        ));
+        assert!(pane_socket_acceptable(socket_path.to_str().unwrap()).await);
+        assert!(!pane_socket_acceptable(file_path.to_str().unwrap()).await);
+        assert!(!pane_socket_acceptable(link_path.to_str().unwrap()).await);
+        assert!(
+            pane_socket_acceptable(socket_path.with_extension("absent").to_str().unwrap()).await
+        );
         drop(listener);
     }
 
@@ -1465,28 +1497,35 @@ mod tests {
     /// socket.
     #[tokio::test]
     async fn a_reporter_into_a_non_socket_target_stays_silent() {
+        // A LIVE listener exists at the real path: the impostor the
+        // reporter receives is a symlink pointing AT it. If the fence
+        // ever followed the link (or accepted the impostor), the
+        // server below would record the report — the assertion watches
+        // a real, reachable sink, never a vacuous vector.
         let dir = temp_socket("not-a-socket");
-        let socket_path = dir.with_extension("impostor");
-        std::fs::write(&socket_path, b"not a socket").unwrap();
-        let requests: std::sync::Arc<std::sync::Mutex<Vec<Value>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        // No fake server: a legitimate socket never exists at any path,
-        // so any arriving report would have to come from the impostor.
-        let config = HerdrConfig::from_env(&pane_env(&socket_path, "w1:p9")).unwrap();
+        let real_socket = dir.with_extension("real.sock");
+        let (requests, server) = fake_herdr(&real_socket);
+        let impostor = dir.with_extension("impostor");
+        std::os::unix::fs::symlink(&real_socket, &impostor).unwrap();
+
+        let config = HerdrConfig::from_env(&pane_env(&impostor, "w1:p9")).unwrap();
         let (reporter, _generation) =
             start_reporter(config, HerdrSessionRef::new(None, Some("s12".to_string())));
         reporter.session_started(false, HerdrSessionRef::new(None, Some("s12".to_string())));
         tokio::time::sleep(Duration::from_millis(120)).await;
+        let frames = requests.lock().unwrap().clone();
         assert!(
-            requests.lock().unwrap().is_empty(),
-            "a non-socket target produced reports"
+            frames.is_empty(),
+            "a non-socket target produced reports: {frames:?}"
         );
         reporter.release().await;
         tokio::time::sleep(Duration::from_millis(50)).await;
+        let frames = requests.lock().unwrap().clone();
         assert!(
-            requests.lock().unwrap().is_empty(),
-            "a non-socket target produced a release"
+            frames.is_empty(),
+            "a non-socket target produced a release: {frames:?}"
         );
+        server.abort();
     }
 
     /// A uid probe that cannot create its file yields `None`, and the
