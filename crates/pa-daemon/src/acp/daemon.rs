@@ -491,17 +491,14 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
             FrameOrder::Refused { id, message } => {
                 let _ = tx.send(super::internal_error(&id, &message));
             }
-            // A cancel arms the stop task; the request form answers `{}`
-            // immediately (the notification form has no response).
-            FrameOrder::Cancel { request_id, stop } => {
+            // A cancel arms the stop task (the notification form has no
+            // response).
+            FrameOrder::Cancel(stop) => {
                 if let Some(stop) = stop {
                     let link = Arc::clone(&link);
                     tokio::spawn(async move {
                         run_cancel_stop(stop, &link).await;
                     });
-                }
-                if let Some(id) = request_id {
-                    let _ = tx.send(jsonrpc::response(&id, &json!({})));
                 }
             }
         }
@@ -583,12 +580,7 @@ enum FrameOrder {
         id: Value,
         message: String,
     },
-    /// `request_id` is set for the request form, which answers `{}` (TS
-    /// only registers the notification form).
-    Cancel {
-        request_id: Option<Value>,
-        stop: Option<CancelStop>,
-    },
+    Cancel(Option<CancelStop>),
 }
 
 struct CancelStop {
@@ -613,19 +605,8 @@ async fn frame_order_prefix(incoming: &Incoming, state: &Arc<Mutex<DaemonAcpStat
                 },
             }
         }
-        Incoming::Request { id, method, params } if method == "session/cancel" => {
-            let stop = arm_cancel(params, state).await;
-            FrameOrder::Cancel {
-                request_id: Some(id.clone()),
-                stop,
-            }
-        }
         Incoming::Notification { method, params } if method == "session/cancel" => {
-            let stop = arm_cancel(params, state).await;
-            FrameOrder::Cancel {
-                request_id: None,
-                stop,
-            }
+            FrameOrder::Cancel(arm_cancel(params, state).await)
         }
         _ => FrameOrder::Spawn,
     }
@@ -744,8 +725,7 @@ async fn cancel_owned_admission(
         .await;
 }
 
-/// One incoming ACP frame. Requests answer; `session/cancel` is handled in
-/// the reader loop.
+/// One incoming ACP frame. Requests answer.
 async fn handle_incoming(
     incoming: Incoming,
     link: &Arc<DaemonLink>,
