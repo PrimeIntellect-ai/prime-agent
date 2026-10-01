@@ -208,28 +208,38 @@ async fn revival_waits_for_in_flight_stop_before_booting() {
     })
     .await
     .expect("stop claimed the prior manager");
-    let (progress_tx, progress_rx) = tokio::sync::oneshot::channel();
-    let progress_tx = Arc::new(Mutex::new(Some(progress_tx)));
-    let progress: pa_core::kernel::bootstrap::KernelBootstrapProgressHandler =
-        Arc::new(move |message| {
+    // Records, at the revival's first progress stage, whether the held host
+    // request had been released yet.
+    let boot_saw_release = Arc::new(Mutex::new(None::<bool>));
+    let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let progress: pa_core::kernel::bootstrap::KernelBootstrapProgressHandler = Arc::new({
+        let boot_saw_release = Arc::clone(&boot_saw_release);
+        let released = Arc::clone(&released);
+        move |message| {
             if message == "Starting Python kernel..." {
-                if let Some(tx) = progress_tx.lock().unwrap().take() {
-                    let _ = tx.send(());
-                }
+                boot_saw_release
+                    .lock()
+                    .unwrap()
+                    .get_or_insert(released.load(std::sync::atomic::Ordering::SeqCst));
             }
-        });
+        }
+    });
     let revival = tokio::spawn({
         let provisioner = provisioner.clone();
         async move { provisioner.ensure(Some(progress), None).await }
     });
-    // Boot cannot emit its first progress stage while the old stop waits for
-    // the held host request: that stage follows the pending-stop gate.
+    // On this single-threaded runtime each yield runs every queued task, so a
+    // few yields drive the revival through ensure(), its startup task, and the
+    // boot up to its first await. Without the gate that boot emits its first
+    // progress stage synchronously before any await.
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
     assert!(
-        tokio::time::timeout(Duration::from_millis(200), progress_rx)
-            .await
-            .is_err(),
+        boot_saw_release.lock().unwrap().is_none(),
         "revival boot crossed the predecessor-stop gate"
     );
+    released.store(true, std::sync::atomic::Ordering::SeqCst);
     let _ = release_tx.send(true);
     tokio::time::timeout(Duration::from_secs(15), stop)
         .await
@@ -240,6 +250,11 @@ async fn revival_waits_for_in_flight_stop_before_booting() {
         .expect("revival settled after stop")
         .unwrap()
         .unwrap();
+    assert_eq!(
+        *boot_saw_release.lock().unwrap(),
+        Some(true),
+        "revival boot started only after the stop's held host request was released"
+    );
     let result = revived
         .execute("1 + 1", ExecuteOptions::default())
         .await
