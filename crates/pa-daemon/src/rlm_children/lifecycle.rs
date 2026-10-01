@@ -295,8 +295,10 @@ impl SupervisorChildSessionsInner {
         Ok(())
     }
 
-    /// Whether the child worker still has work in flight (streaming or
-    /// queued). `Err` means the child cannot be reached right now.
+    /// Whether the child worker still has work in flight (streaming,
+    /// queued, or its own children still running - so a child stays
+    /// running while any descendant does). `Err` means the child cannot be
+    /// reached right now.
     pub(super) async fn child_busy(&self, active_session_id: &str) -> Result<bool> {
         let command = DaemonCommand::GetState {
             id: None,
@@ -304,10 +306,9 @@ impl SupervisorChildSessionsInner {
             rest: Map::default(),
         };
         let state = self.command(&command, STATE_TIMEOUT_MS).await?;
-        Ok(state
-            .get("isStreaming")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
+        let flag = |name: &str| state.get(name).and_then(Value::as_bool).unwrap_or(false);
+        Ok(flag("isStreaming")
+            || flag("hasRunningSubagents")
             || state
                 .get("sessionActions")
                 .and_then(|actions| actions.get("queuedCount"))

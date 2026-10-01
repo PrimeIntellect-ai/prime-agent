@@ -27,6 +27,7 @@ impl Worker {
             self.engine.model_fallback_message(),
             self.user_bash.is_running(),
             self.engine.is_quota_parked(),
+            self.engine.has_running_subagents(),
         );
         // The worker's roster-delta counter at snapshot time, and the
         // process instance that read it — the pair is one snapshot:
@@ -319,6 +320,7 @@ pub(crate) fn push_roster_delta(context: &RosterPushContext) {
             context.engine.model_fallback_message(),
             context.user_bash.is_running(),
             context.engine.is_quota_parked(),
+            context.engine.has_running_subagents(),
         )
     };
     // The embedded counter is the pre-stamp value read under the order
@@ -360,6 +362,7 @@ pub(crate) fn session_summary(
     model_fallback_message: Option<String>,
     bash_running: bool,
     quota_parked: bool,
+    subagents_running: bool,
 ) -> SessionSummary {
     let store = core.store.as_ref();
     let streaming = core.busy;
@@ -404,7 +407,9 @@ pub(crate) fn session_summary(
         id: core.active_session_id.clone(),
         lifecycle: active_lifecycle(&core.runtime_kind, scalars.message_count == 0, streaming)
             .to_string(),
-        activity: if streaming || compacting {
+        // Running children keep the session working after its own turn
+        // ended: every status surface classifies this activity.
+        activity: if streaming || compacting || subagents_running {
             "working"
         } else {
             "idle"
@@ -427,6 +432,7 @@ pub(crate) fn session_summary(
         is_quota_parked: Some(quota_parked),
         is_bash_running: Some(bash_running),
         is_running_tools: streaming && !core.running_tool_calls.is_empty(),
+        has_running_subagents: subagents_running,
         attached_clients: core.attached_client_ids.len() as u32,
         message_count: store.map_or(0, crate::session_store::SessionFile::message_count) as u32,
         session_actions: session_snapshot(core),

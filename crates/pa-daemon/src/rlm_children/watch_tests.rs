@@ -30,6 +30,7 @@ async fn spawn_fake_supervisor(
     kill_tx: mpsc::UnboundedSender<Value>,
     kill_behavior: FakeKill,
     worker_leaves_after_settle: bool,
+    child_has_running_subagents: Arc<AtomicBool>,
 ) {
     let kill_behavior = std::sync::Arc::new(kill_behavior);
     let listener = bind_transport(&socket).await.unwrap();
@@ -45,6 +46,7 @@ async fn spawn_fake_supervisor(
             let kill_tx = kill_tx.clone();
             let kill_behavior = std::sync::Arc::clone(&kill_behavior);
             let gone = Arc::clone(&gone);
+            let child_has_running_subagents = Arc::clone(&child_has_running_subagents);
             tokio::spawn(async move {
                 let (reader, mut writer) = stream.split();
                 let mut reader = BufReader::new(reader);
@@ -93,6 +95,7 @@ async fn spawn_fake_supervisor(
                             command_type,
                             Some(json!({
                                 "isStreaming": false,
+                                "hasRunningSubagents": child_has_running_subagents.load(Ordering::SeqCst),
                                 "sessionActions": { "queuedCount": 0 },
                             })),
                         ),
@@ -155,6 +158,25 @@ async fn sessions_with_fake_supervisor(
     kill_behavior: FakeKill,
     worker_leaves_after_settle: bool,
 ) -> (SupervisorChildSessions, mpsc::UnboundedReceiver<Value>) {
+    sessions_with_fake_child_subagents(
+        follow_up_tx,
+        idle_delay_ms,
+        kill_behavior,
+        worker_leaves_after_settle,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+}
+
+/// [`sessions_with_fake_supervisor`] whose child reports
+/// `hasRunningSubagents` from the shared flag (a grandchild still running).
+async fn sessions_with_fake_child_subagents(
+    follow_up_tx: mpsc::UnboundedSender<Value>,
+    idle_delay_ms: u64,
+    kill_behavior: FakeKill,
+    worker_leaves_after_settle: bool,
+    child_has_running_subagents: Arc<AtomicBool>,
+) -> (SupervisorChildSessions, mpsc::UnboundedReceiver<Value>) {
     let socket = std::env::temp_dir().join(format!(
         "pa-rlm-watch-{}.sock",
         uuid::Uuid::new_v4().simple()
@@ -167,6 +189,7 @@ async fn sessions_with_fake_supervisor(
         kill_tx,
         kill_behavior,
         worker_leaves_after_settle,
+        child_has_running_subagents,
     )
     .await;
     let link = Arc::new(crate::supervisor_link::SupervisorLink::new(socket));
@@ -283,6 +306,47 @@ async fn a_worker_leaving_inside_the_settle_grace_keeps_the_verdict() {
     assert!(notice["customMessage"]["content"]
         .as_str()
         .is_some_and(|content| content.contains("the child final answer")));
+}
+
+/// A parent counts as running while any descendant runs: the child's own
+/// turn is done, but while it reports a running grandchild the parent's
+/// row stays `running` and the registry keeps the parent's summary busy;
+/// once the grandchild finishes, the child settles and the parent is
+/// quiet again.
+#[tokio::test]
+async fn a_child_with_a_running_grandchild_keeps_the_parent_running() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let grandchild_running = Arc::new(AtomicBool::new(true));
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        false,
+        Arc::clone(&grandchild_running),
+    )
+    .await;
+    assert!(!sessions.has_running_children());
+    let mut running = sessions.subscribe_running();
+    let settled = sessions.settle_notified();
+    spawn_child(&sessions).await;
+    assert!(running.has_changed().unwrap());
+    assert!(*running.borrow_and_update());
+    sessions.notify_turn_done();
+
+    // The child is idle on its own, but its grandchild still runs.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let roster = sessions.list_subagents().await.expect("child roster");
+    assert_eq!(roster[0].status, "running");
+    assert!(sessions.has_running_children());
+
+    grandchild_running.store(false, Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(10), settled)
+        .await
+        .expect("the child settles once its grandchild finished");
+    let roster = sessions.list_subagents().await.expect("child roster");
+    assert_eq!(roster[0].status, "completed");
+    assert!(!sessions.has_running_children());
+    assert!(running.has_changed().unwrap());
 }
 
 /// One child row exists and is running before the close tests run.

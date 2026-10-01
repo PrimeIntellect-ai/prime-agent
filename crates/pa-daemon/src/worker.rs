@@ -698,6 +698,15 @@ impl Worker {
                     roster_push_order: std::sync::Arc::clone(&roster_push_order),
                 });
             crate::roster_activity::spawn_roster_activity_watch(&events, roster_pushes.clone());
+            if let Some(children) = agent_engine
+                .as_ref()
+                .and_then(|engine| engine.children.as_ref())
+            {
+                crate::roster_activity::spawn_running_children_watch(
+                    children,
+                    roster_pushes.clone(),
+                );
+            }
             let runner = TurnRunner {
                 recovery: Arc::clone(&recovery),
                 core: Arc::clone(&core),

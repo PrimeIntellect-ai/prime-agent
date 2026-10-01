@@ -85,6 +85,11 @@ pub struct SessionSummary {
     /// activity label's `running tools` state.
     #[serde(default)]
     pub is_running_tools: bool,
+    /// An RLM child of this session (or one of its descendants) is still
+    /// running; the session counts as working even after its own turn
+    /// ended.
+    #[serde(default)]
+    pub has_running_subagents: bool,
     pub attached_clients: u32,
     pub message_count: u32,
     pub session_actions: SessionActionSnapshot,
