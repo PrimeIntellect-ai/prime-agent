@@ -121,6 +121,7 @@ impl Worker {
             "shutdown" => self.handle_shutdown().await,
             "rename" => self.handle_rename("rename", payload),
             "set_session_name" => self.handle_rename("set_session_name", payload),
+            "mark_anthropic_warning_shown" => self.handle_mark_anthropic_warning_shown(),
             "rename_saved_session" => self.handle_rename_saved_session(payload),
             "delete_saved_session" => self.handle_delete_saved_session(payload).await,
             "replace_acp_mcp_servers" => self.handle_replace_acp_mcp_servers(payload),
@@ -745,6 +746,31 @@ impl Worker {
             .and_then(|store| store.lease.take());
         drop(lease);
         response_success(None, "kill", None)
+    }
+
+    /// `mark_anthropic_warning_shown` (Rust-native, operator directive
+    /// 2026-09-29): the interactive client reports that it just drew the
+    /// Anthropic subscription ban-risk warning; the worker persists the
+    /// once-per-session-lifecycle marker row (the gate a reattach, a resume,
+    /// or a worker replacement reads). Idempotent — a session already marked
+    /// (or an in-memory session with no file) answers success without a
+    /// second row.
+    fn handle_mark_anthropic_warning_shown(&self) -> DaemonResponse {
+        const NAME: &str = "mark_anthropic_warning_shown";
+        if let Err(response) = self.require_created(NAME) {
+            return response;
+        }
+        let mut core = self.core.lock().unwrap();
+        let Some(store) = core.store.as_mut() else {
+            return response_failure(None, NAME, "Session is still initializing", None);
+        };
+        if store.anthropic_warning_shown() {
+            return response_success(None, NAME, None);
+        }
+        match store.mark_anthropic_warning_shown() {
+            Ok(()) => response_success(None, NAME, None),
+            Err(error) => response_failure(None, NAME, &error.to_string(), None),
+        }
     }
 
     pub(crate) fn handle_rename(&self, command: &str, payload: &Value) -> DaemonResponse {

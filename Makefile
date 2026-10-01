@@ -64,14 +64,6 @@ glibc-gate:
 		fi \
 		;; esac
 
-# Perf wave + regression gate (benchmark.yml job, the local mirror): runs the
-# TS binary and a fresh release build side by side in a fresh Prime sandbox
-# (both sides on one quiet machine, the methodology BENCHMARKS.md requires)
-# and gates the rust medians against scripts/battery/perf-baseline.json.
-# PA_BENCH_NO_SANDBOX=1 runs it on the bare runner instead.
-perf-wave:
-	scripts/battery/ci_perf_wave.sh
-
 # Local mirror of the release build-job gates:
 # release build against the committed lockfile, deterministic tarball assembly,
 # then end-to-end verification of the host-target artifact. The vendored
@@ -193,4 +185,4 @@ shard-gates:
 	python3 scripts/test_ci_test_shard.py
 	python3 scripts/test_ci_pr_crates.py
 
-.PHONY: check deny windows-cross actionlint perf-wave glibc-gate release-dry-run continuous-dry-run audit-build package catalog-assets catalog-assets-fixture catalog-assets-gates fold-gates restamp-gates shard-gates
+.PHONY: check deny windows-cross actionlint glibc-gate release-dry-run continuous-dry-run audit-build package catalog-assets catalog-assets-fixture catalog-assets-gates fold-gates restamp-gates shard-gates

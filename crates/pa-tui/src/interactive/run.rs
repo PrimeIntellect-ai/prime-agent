@@ -275,7 +275,12 @@ async fn run_interactive_surface(
     // clear rides the first draw's single flush, which carries the
     // complete frame — no splash flash, no panel appearing late over a
     // half-open view.
-    if !headless && matches!(&options.session, SessionSelection::New) {
+    if !headless
+        && matches!(
+            &options.session,
+            SessionSelection::New | SessionSelection::NewChild { .. }
+        )
+    {
         if let Some(renderer) = renderer.is_terminal_mut() {
             crate::app::draw(renderer, &mut view)?;
         }

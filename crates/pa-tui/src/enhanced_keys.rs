@@ -8,7 +8,10 @@
 //! alternate keys) when the terminal answers, and falls back to xterm
 //! modifyOtherKeys mode 2 (`\x1b[>4;2m`) when no kitty answer arrives in
 //! the fallback window. Teardown pops the kitty flags, resets
-//! modifyOtherKeys, and disables bracketed paste in the same byte order.
+//! modifyOtherKeys, and disables bracketed paste in the same byte
+//! order; the exit tail (`exit_restore`) then drains the stack's stale
+//! levels — bare pops after the alt-screen leave, clamped no-ops at
+//! spec depth zero (see `STALE_LEVEL_DRAIN`).
 //!
 //! The kitty query runs on a probe thread that holds no UI state: it
 //! blocks inside crossterm's terminal support check until the terminal
@@ -93,22 +96,32 @@ const DISABLE_BRACKETED_PASTE: &[u8] = b"\x1b[?2004l";
 /// Kitty keyboard protocol, flags `1|2|4` (TS `ProcessTerminal` writes the
 /// same set after the query answer).
 const ENABLE_KITTY_FLAGS: &[u8] = b"\x1b[>7u";
-/// Pop the kitty flags stack at teardown (TS writes the bare pop).
+/// Pop one level of the kitty flags stack (the bare form TS writes at
+/// teardown).
 const POP_KITTY_FLAGS: &[u8] = b"\x1b[<u";
-/// The stale-level drain before this process's own push (the
-/// crashed-run hardening): a killed session never runs its teardown, so
-/// its pushed level stays on the terminal's stack; every later session
-/// in that terminal pushes once more and pops once — the stale level
-/// survives every exit and the shell keeps receiving CSI-u escapes for
-/// plain keys (the reported leak). The pre-pop drain (a bounded run of
-/// pops before the push) clears EVERY stale level below this process's
-/// own: the teardown pop then lands at depth zero regardless of the
-/// entry depth. Pops against an empty stack are ignored (kitty spec),
-/// so the drain is free on a clean terminal. The count covers a
-/// killed-session pile-up (one wedge plus a couple of kill retries);
-/// deeper stacks still self-heal one level per session run.
-const PRE_POP_DRAIN: usize = 3;
-const PRE_POP_KITTY_FLAGS: &[u8] = b"\x1b[<u";
+/// The stale-level drain (the crashed-run and relay-accounting
+/// hardening): a bounded run of bare pops. At the mount it runs BEFORE
+/// the push: a killed session never runs its teardown, so its pushed
+/// level stays on the terminal's stack; every later session in that
+/// terminal pushes once more and pops once — the stale level survives
+/// every exit and the shell keeps receiving CSI-u escapes for plain
+/// keys (the reported leak). At the teardown it runs in the exit tail,
+/// AFTER the alternate screen is left ([`pop_stale_levels`]): a
+/// mode-counting relay — herdr's pane emulator re-encodes every
+/// keystroke from its own count of the push/pop pairs in the pane
+/// output, never resets the count on foreground-program exit, and
+/// discards the pair's writes that land while the pane's alternate
+/// screen is up — leaves the pane's stack one level deep after a plain
+/// exit, and the leftover level turns every later Ctrl+C/Ctrl+D in the
+/// pane's shell into a kitty CSI-u keypress no shell understands (the
+/// live report, herdr 0.9.3: every exit left the pane one pop short;
+/// pops written after the alt-screen leave survive, and one manual pop
+/// repaired the pane). Pops against an empty stack are ignored (kitty
+/// spec), so the drain is free on a clean terminal. The count covers a
+/// killed-session pile-up (one wedge plus a couple of kill retries)
+/// and the relay's miscount with margin; deeper stacks still self-heal
+/// one level per session run.
+const STALE_LEVEL_DRAIN: usize = 3;
 /// Reset xterm modifyOtherKeys (TS writes the reset at teardown; this port
 /// also writes it at every start — see the module docs for why the mode-2
 /// fallback is never armed here).
@@ -319,11 +332,12 @@ pub(crate) fn enable(out: &mut Stdout) -> Result<()> {
                     KITTY_PROBED.store(true, Ordering::SeqCst);
                     record_kitty_supported();
                     if !KITTY_ACTIVE.swap(true, Ordering::SeqCst) {
-                        // The crashed-run hardening: clear a stale level
-                        // left by a killed session before this process's
-                        // own push (see PRE_POP_KITTY_FLAGS).
-                        for _ in 0..PRE_POP_DRAIN {
-                            write_all(out, PRE_POP_KITTY_FLAGS)?;
+                        // The stale-level drain: clear the levels a
+                        // killed session (or a miscounting relay) left
+                        // before this process's own push (see
+                        // STALE_LEVEL_DRAIN).
+                        for _ in 0..STALE_LEVEL_DRAIN {
+                            write_all(out, POP_KITTY_FLAGS)?;
                         }
                         write_all(out, ENABLE_KITTY_FLAGS)?;
                     }
@@ -341,11 +355,11 @@ pub(crate) fn enable(out: &mut Stdout) -> Result<()> {
         }
         KittyAction::PushFlags => {
             if !KITTY_ACTIVE.swap(true, Ordering::SeqCst) {
-                // The crashed-run hardening (see PRE_POP_KITTY_FLAGS):
-                // a suspend's pop and resume's re-push stay balanced; a
+                // The stale-level drain (see STALE_LEVEL_DRAIN): a
+                // suspend's pop and resume's re-push stay balanced; a
                 // stale level from a killed session levels out here.
-                for _ in 0..PRE_POP_DRAIN {
-                    write_all(out, PRE_POP_KITTY_FLAGS)?;
+                for _ in 0..STALE_LEVEL_DRAIN {
+                    write_all(out, POP_KITTY_FLAGS)?;
                 }
                 write_all(out, ENABLE_KITTY_FLAGS)?;
             }
@@ -540,12 +554,32 @@ fn enable_kitty(out: &mut Stdout) {
         return;
     }
     if !KITTY_ACTIVE.swap(true, Ordering::SeqCst) {
-        // The crashed-run hardening (see PRE_POP_KITTY_FLAGS): the probe
+        // The stale-level drain (see STALE_LEVEL_DRAIN): the probe
         // answer's push drains the stale levels too.
-        for _ in 0..PRE_POP_DRAIN {
-            let _ = write_all(out, PRE_POP_KITTY_FLAGS);
+        for _ in 0..STALE_LEVEL_DRAIN {
+            let _ = write_all(out, POP_KITTY_FLAGS);
         }
         let _ = write_all(out, ENABLE_KITTY_FLAGS);
+    }
+}
+
+/// The exit tail's stale-level drain: [`STALE_LEVEL_DRAIN`] bare pops,
+/// written after the alternate screen is left. A mode-counting relay
+/// that tracks the keyboard protocol from the pane output discards the
+/// pair's writes made while the pane's alt screen is up (herdr), so
+/// the teardown's own pop — written inside the alt screen, where TS
+/// writes it — never lands on the relay's stack, and the pane's shell
+/// inherits the leftover level as dead Ctrl+C/Ctrl+D keys. The tail's
+/// position is after the alt-screen leave on every exit route, where
+/// the relay's accounting keeps the writes; the bare pops are clamped
+/// no-ops at spec depth zero, so a clean terminal sees nothing change.
+pub(crate) fn pop_stale_levels(out: &mut Stdout) {
+    if !out.is_terminal() {
+        return;
+    }
+    let _modes = lock_modes();
+    for _ in 0..STALE_LEVEL_DRAIN {
+        let _ = write_all(out, POP_KITTY_FLAGS);
     }
 }
 

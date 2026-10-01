@@ -41,6 +41,8 @@ from assemble_artifacts import (
 )
 
 # Must mirror STAGED_ENTRIES in assemble_artifacts.py and §5 of the design doc.
+# Never add a root-level install.sh: it is what lets a TypeScript 0.9.8
+# updater install the archive (release.yml's promote job refuses it).
 # Continuous builds additionally stage the package.json version manifest.
 # The binary entry is the target's name (`prime-agent.exe` on the MSVC
 # Windows target), resolved in `main` via `binary_name_for_target`.

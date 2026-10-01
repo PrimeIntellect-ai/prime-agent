@@ -51,6 +51,9 @@ use sha2::{Digest, Sha256};
 /// The fixture version the assembled artifacts carry.
 const VERSION: &str = "0.9.9";
 
+/// The promote step that refuses archives a TS 0.9.8 updater would install.
+const TS_GUARD_STEP: &str = "Refuse archives the TypeScript updater would install";
+
 /// The current build matrix (release.yml's `build-gnu` + `build-darwin` +
 /// `build-windows` jobs): the five standalone targets. The single-artifact
 /// case stands in for a trimmed matrix; the five-target case is today's
@@ -210,22 +213,25 @@ fn sha256_file(path: &Path) -> String {
 
 /// One real (extractable) tar.gz archive: the staged payload binary
 /// (`prime-agent` — or `prime-agent.exe` on the MSVC target) with
-/// deterministic member metadata, the `assemble_artifacts.py` shape.
-fn write_fixture_tarball(out_path: &Path, payload_name: &str) {
+/// deterministic member metadata, the `assemble_artifacts.py` shape, plus
+/// any `extra_members`.
+fn write_fixture_tarball(out_path: &Path, payload_name: &str, extra_members: &[&str]) {
     let file = fs::File::create(out_path).expect("create the fixture archive");
     let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     let mut archive = tar::Builder::new(encoder);
     let payload = VERSION.as_bytes().to_vec();
-    let mut header = tar::Header::new_gnu();
-    header.set_size(payload.len() as u64);
-    header.set_mode(0o755);
-    header.set_uid(0);
-    header.set_gid(0);
-    header.set_mtime(0);
-    header.set_cksum();
-    archive
-        .append_data(&mut header, payload_name, payload.as_slice())
-        .expect("stage the fixture payload");
+    for name in std::iter::once(payload_name).chain(extra_members.iter().copied()) {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(payload.len() as u64);
+        header.set_mode(0o755);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, name, payload.as_slice())
+            .expect("stage the fixture payload");
+    }
     archive
         .into_inner()
         .expect("finish the tar stream")
@@ -237,11 +243,15 @@ fn write_fixture_tarball(out_path: &Path, payload_name: &str) {
 /// per-target manifest (`assemble_artifacts.py`'s schema). Returns the manifest
 /// row the merged manifest must carry back.
 fn write_artifact(dir: &Path, target: &str) -> serde_json::Value {
+    write_artifact_with(dir, target, &[])
+}
+
+fn write_artifact_with(dir: &Path, target: &str, extra_members: &[&str]) -> serde_json::Value {
     fs::create_dir_all(dir).expect("create the artifact directory");
     // The archive name the channel contract requires: the PLATFORM ALIAS,
     // never the target triple (the update reader drops a triple-named row).
     let archive_name = format!("prime-agent-{VERSION}-{}.tar.gz", platform_alias(target));
-    write_fixture_tarball(&dir.join(&archive_name), binary_name(target));
+    write_fixture_tarball(&dir.join(&archive_name), binary_name(target), extra_members);
     let sha256 = sha256_file(&dir.join(&archive_name));
     fs::write(
         dir.join("SHA256SUMS"),
@@ -303,6 +313,7 @@ fn run_promote_gates(cwd: &Path, steps: &[Step]) -> (String, serde_json::Value) 
         steps,
         "Verify hash continuity (artifacts match build-job manifests)",
     )];
+    let ts_guard = &steps[step_position(steps, TS_GUARD_STEP)];
     let merge = &steps[step_position(steps, "Merge per-target manifests + SHA256SUMS")];
 
     let normalize_stdout = assert_success(&run_step(cwd, normalize), "normalize download layout");
@@ -311,6 +322,7 @@ fn run_promote_gates(cwd: &Path, steps: &[Step]) -> (String, serde_json::Value) 
         verify_stdout.contains("hash continuity verified for all archives"),
         "hash continuity must report verifying the archives"
     );
+    assert_success(&run_step(cwd, ts_guard), TS_GUARD_STEP);
     assert_success(&run_step(cwd, merge), "merge per-target manifests");
 
     let merged: serde_json::Value = serde_json::from_str(
@@ -463,6 +475,56 @@ fn promote_download_layout_contract() {
     assert!(
         download < normalize && normalize < verify && verify < merge,
         "the layout must be normalized between the download and the per-artifact gates"
+    );
+    let ts_guard = step_position(&steps, TS_GUARD_STEP);
+    assert!(
+        normalize < ts_guard && ts_guard < merge,
+        "the TS-updater gate must check every archive before anything is merged or published"
+    );
+}
+
+/// A TS 0.9.8 updater installs any archive that carries install.sh (plus
+/// three other files the Rust archive lacks) into the TS layout. The promote
+/// gate must refuse an archive with a root-level install.sh, and only that
+/// root-level file: the same name deeper in the tree is not what TS reads.
+#[test]
+fn an_archive_with_a_root_install_sh_fails_the_ts_updater_gate() {
+    let Some(_python3) = python3_binary((3, 0)) else {
+        return;
+    };
+    let steps = promote_steps();
+    let ts_guard = &steps[step_position(&steps, TS_GUARD_STEP)];
+
+    let cwd = tempfile::tempdir().expect("scratch dir");
+    let incoming = cwd.path().join("incoming");
+    write_artifact(
+        &incoming.join(format!("artifacts-{}", TARGETS[0])),
+        TARGETS[0],
+    );
+    write_artifact_with(
+        &incoming.join(format!("artifacts-{}", TARGETS[1])),
+        TARGETS[1],
+        &["skills/install.sh"],
+    );
+    let output = assert_success(&run_step(cwd.path(), ts_guard), TS_GUARD_STEP);
+    assert!(output.contains("no archive carries the TypeScript installer layout"));
+
+    write_artifact_with(
+        &incoming.join(format!("artifacts-{}", TARGETS[2])),
+        TARGETS[2],
+        &["install.sh"],
+    );
+    let output = assert_failure(&run_step(cwd.path(), ts_guard), TS_GUARD_STEP);
+    assert!(
+        output.contains(&format!(
+            "prime-agent-{VERSION}-{}.tar.gz: contains a root-level install.sh",
+            platform_alias(TARGETS[2])
+        )),
+        "the gate must name the offending archive\n{output}"
+    );
+    assert!(
+        !output.contains(platform_alias(TARGETS[1])),
+        "a nested install.sh must not trip the gate\n{output}"
     );
 }
 
