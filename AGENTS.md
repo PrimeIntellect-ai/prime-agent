@@ -8,13 +8,13 @@ Every contributor (human or agent) must read this before working on this repo.
 - **Never set git identity for commits to this repo's history.** Agents must not set
   `user.name`/`user.email` (config or `-c`) or `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/
   `GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL` for commits that land in this repository.
-  Those commits carry the identity of the ambient auth. If such a commit fails for a
+  Those commits carry the identity of the ambient git config. If such a commit fails for a
   missing identity, report it instead of adding config. Allowed: the `*_DATE` variables
   (the golden corpus pins them for reproducibility), throwaway temp repos created by
   tests, and the release automation's bot identity.
 - **Never add `Co-authored-by` trailers** — not in commit messages, not in squash
   suggestions, not as attribution for work merged from branches. A PR's commits carry
-  one identity: the ambient auth's. Fabricated or hand-written trailers (including
+  one identity: the ambient git config's. Fabricated or hand-written trailers (including
   noreply forms) misattribute commits to unrelated GitHub accounts.
 - The repo is PrimeIntellect-ai/prime-agent; the Rust implementation lives on the `main` branch.
 - PRs go to the org repo with base `main`:
