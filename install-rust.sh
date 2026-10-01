@@ -113,8 +113,8 @@
 #   PRIME_AGENT_DOWNLOAD_BASE_URL  the R2-backed download base (default:
 #                                  the official domain, the same base the
 #                                  release pipeline renders into the
-#                                  published copy of this script); when
-#                                  set, EVERY download comes from it, the
+#                                  published copy of this script); any
+#                                  other base serves EVERY download, the
 #                                  release archives included (mirrors, tests)
 #   PRIME_AGENT_RELEASE_CHANNEL   stable | beta (default: stable)
 #   PRIME_AGENT_VERSION           pin an exact version instead of reading
@@ -131,9 +131,11 @@
 # before extraction. The bucket keeps only the small channel files on
 # this path: its r2.dev address throttles large downloads from datacenter
 # IPs, so servers and sandboxes stalled mid-archive. No gh and no
-# GITHUB_TOKEN: the release assets are plain public URLs. With
-# PRIME_AGENT_DOWNLOAD_BASE_URL set, the archive and SHA256SUMS come from
-# <base>/releases/v<version>/ instead (the bucket layout).
+# GITHUB_TOKEN: the release assets are plain public URLs. When
+# PRIME_AGENT_DOWNLOAD_BASE_URL names any other base, the archive and
+# SHA256SUMS come from <base>/releases/v<version>/ instead (the bucket
+# layout); naming the official base explicitly changes nothing.
+# pa-core's update::release::archive_url applies the same rule.
 #
 # Usage: install-rust.sh [--update] — both entry points install the
 # channel's current version; the script is idempotent (a re-run replaces
@@ -194,8 +196,8 @@ Output:
 
 Environment:
   PRIME_AGENT_DOWNLOAD_BASE_URL  the R2-backed download base (the official
-                                 domain by default); when set, the release
-                                 archive also downloads from it instead of
+                                 domain by default); any other base also
+                                 serves the release archive instead of
                                  the GitHub release
   PRIME_AGENT_RELEASE_CHANNEL    stable | beta (stable by default)
   PRIME_AGENT_VERSION            pin an exact version (skips the channel
@@ -616,10 +618,10 @@ done
 fi
 
 # --- the tarball + SHA256SUMS from the release of tag v<version> ------------
-if [ -n "${PRIME_AGENT_DOWNLOAD_BASE_URL:-}" ]; then
-  RELEASE_URL="${BASE_URL}/releases/v${VERSION#v}"
-else
+if [ "$BASE_URL" = "${DOWNLOAD_BASE_URL_DEFAULT%/}" ]; then
   RELEASE_URL="https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v${VERSION#v}"
+else
+  RELEASE_URL="${BASE_URL}/releases/v${VERSION#v}"
 fi
 say "downloading ${asset_name} from ${RELEASE_URL}/"
 curl -fsSL "${RELEASE_URL}/${asset_name}" -o "$dl/${asset_name}" \

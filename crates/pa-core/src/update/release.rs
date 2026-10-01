@@ -179,18 +179,17 @@ pub const GITHUB_RELEASE_DOWNLOAD_URL: &str =
 /// ([`super::installer::DEFAULT_DOWNLOAD_BASE_URL`]) serves only the small
 /// channel files here: its r2.dev address throttles large downloads from
 /// datacenter IPs, so its archives come from the GitHub release of tag
-/// `v<version>`. Any other base serves the archive itself, next to its
-/// channel manifest.
+/// `v<version>`. Any other base (a mirror) serves the archive under
+/// `releases/v<version>/`, the bucket layout. `install-rust.sh` applies the
+/// same rule.
 #[must_use]
 pub fn archive_url(base_url: &str, version: &str, file: &str) -> String {
     let base_url = base_url.trim_end_matches('/');
+    let version = version.trim_start_matches('v');
     if base_url == super::installer::DEFAULT_DOWNLOAD_BASE_URL {
-        format!(
-            "{GITHUB_RELEASE_DOWNLOAD_URL}/v{}/{file}",
-            version.trim_start_matches('v')
-        )
+        format!("{GITHUB_RELEASE_DOWNLOAD_URL}/v{version}/{file}")
     } else {
-        format!("{base_url}/{file}")
+        format!("{base_url}/releases/v{version}/{file}")
     }
 }
 
@@ -233,18 +232,14 @@ mod tests {
 
     #[test]
     fn archive_url_sends_the_official_bucket_to_the_github_release() {
+        let official = super::super::installer::DEFAULT_DOWNLOAD_BASE_URL;
         let file = "prime-agent-1.2.3-linux-x64.tar.gz";
-        assert_eq!(
-            archive_url(
-                &format!("{}/", super::super::installer::DEFAULT_DOWNLOAD_BASE_URL),
-                "1.2.3",
-                file
-            ),
-            format!("{GITHUB_RELEASE_DOWNLOAD_URL}/v1.2.3/{file}")
-        );
+        let github = format!("{GITHUB_RELEASE_DOWNLOAD_URL}/v1.2.3/{file}");
+        assert_eq!(archive_url(official, "1.2.3", file), github);
+        assert_eq!(archive_url(&format!("{official}/"), "v1.2.3", file), github);
         assert_eq!(
             archive_url("https://mirror.example.com/", "1.2.3", file),
-            format!("https://mirror.example.com/{file}")
+            format!("https://mirror.example.com/releases/v1.2.3/{file}")
         );
     }
 
