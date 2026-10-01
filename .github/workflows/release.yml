@@ -813,7 +813,7 @@ jobs:
               else
                 render_installer beta
                 publish_pointer_pair beta.json beta release-out/beta.json beta
-                aws s3 cp /tmp/install-beta.sh "s3://${R2_BUCKET}/prime-agent/install-beta.sh" \
+                aws s3 cp /tmp/install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
                   --endpoint-url "$R2_ENDPOINT_URL" \
                   --content-type text/x-shellscript \
                   --cache-control no-cache
@@ -834,12 +834,12 @@ jobs:
             else
               render_installer stable
               publish_pointer_pair latest.json stable release-out/latest.json stable
-              aws s3 cp /tmp/install-stable.sh "s3://${R2_BUCKET}/prime-agent/install.sh" \
+              aws s3 cp /tmp/install-stable.sh "s3://${R2_BUCKET}/install.sh" \
                 --endpoint-url "$R2_ENDPOINT_URL" \
                 --content-type text/x-shellscript \
                 --cache-control no-cache
               render_installer beta
-              aws s3 cp /tmp/install-beta.sh "s3://${R2_BUCKET}/prime-agent/install-beta.sh" \
+              aws s3 cp /tmp/install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
                 --endpoint-url "$R2_ENDPOINT_URL" \
                 --content-type text/x-shellscript \
                 --cache-control no-cache

@@ -353,12 +353,9 @@ impl SessionUi {
                 self.handle_traces_command(resolved, view).await?;
             }
             // `/nightly [on|off|status]` (TS `interactive-mode.ts`
-            // 5455-5484): status resolves the effective channel and
-            // off/stable pins the settings channel — the settings surface
-            // the TS product still shares. `on` (or bare) explains the
-            // move instead of switching: the update installs the latest
-            // continuous Rust build, so there is no nightly channel left
-            // to switch to.
+            // 5455-5484): status resolves the effective channel; on (or
+            // bare) and off/stable save the `updateChannel` setting that
+            // `/update` and `prime-agent update` follow.
             "nightly" => {
                 self.track_command_used("nightly");
                 let arg = resolved.args.trim().to_lowercase();
@@ -410,13 +407,16 @@ impl SessionUi {
                     self.error_row("Usage: /nightly [on|off|status]", view);
                     return Ok(());
                 }
-                // The nightly channel moved: the update installs the
-                // latest continuous Rust build (the TS release channels
-                // this arm switched between belong to the TypeScript
-                // product the migration uninstalls), so the arm explains
-                // the move instead of parking an update plan.
+                let Some(settings) = &self.client_settings else {
+                    self.note("/nightly is not available in this client yet", view);
+                    return Ok(());
+                };
+                if let Err(error) = settings.set_update_channel("nightly") {
+                    self.error_row(&format!("{error:#}"), view);
+                    return Ok(());
+                }
                 self.note(
-                    "Nightly builds are now the continuous Rust build — run /update to install the latest.",
+                    "Updates now follow the nightly channel. Run /update to install the latest nightly build.",
                     view,
                 );
             }
