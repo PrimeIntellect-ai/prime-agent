@@ -519,6 +519,13 @@ impl TurnRunner {
         // run).
         let engine_agent_end = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let engine_agent_end_seen = Arc::clone(&engine_agent_end);
+        // The pane reporter's settle hold: a run that FAILED without the
+        // engine's `agent_end` (a provider error before any terminal
+        // assistant row) still parks its error here, so the settle's
+        // fallback report can block the pane with the message instead
+        // of a false idle.
+        let herdr_settle_error = Arc::new(std::sync::Mutex::new(None::<String>));
+        let herdr_settle_error_seen = Arc::clone(&herdr_settle_error);
         // Whether the abort gate ever observed the delivery's cancel flag
         // DURING this turn (the per-event read below): the fallback
         // `agent_end` keys its silence on THIS association — an abort
@@ -1006,6 +1013,10 @@ impl TurnRunner {
                         vec![json!({ "type": "turn_end" })]
                     }
                     EngineEvent::Done(Err(error)) if !engine_turn_ended => {
+                        herdr_settle_error_seen
+                            .lock()
+                            .unwrap()
+                            .replace(error.clone());
                         vec![json!({ "type": "turn_end", "error": error })]
                     }
                     EngineEvent::DoneAborted if !engine_turn_ended => vec![json!({
@@ -1224,23 +1235,30 @@ impl TurnRunner {
         }
         {
             // The settle's boundary state: the run's own `agent_end`
-            // already reported (inside the emit closure); a run that ended
-            // without one (session commands, pre-model failures) reports
-            // here — the TS fallback arm — and an aborted settle keeps
-            // the same silence as its emit (the suppressed run never
-            // flips the pane). `core.busy` flipped to false above; queued
-            // lanes still holding items keep the settle debounced so the
-            // next pickup cancels the idle flip.
-            let (report, more_queued) = {
+            // already reported (inside the emit closure); a run that
+            // ended without one reports here — the TS fallback arm.
+            // This includes the aborted settle: the run's `agent_start`
+            // already flipped the pane working, so suppressing the end
+            // would strand the pane working forever (the wire emit's
+            // abort-gate suppression is about the TUI's frames, not the
+            // pane). A failed run (Done(Err) with no `agent_end`) parks
+            // its error in the settle cell and blocks like the TS
+            // error-hold arm instead of reporting a false idle.
+            // `core.busy` flipped to false above; queued lanes still
+            // holding items keep the settle debounced so the next pickup
+            // cancels the idle flip.
+            let (error_hold, more_queued) = {
                 let core = self.core.lock().unwrap();
                 (
-                    !engine_reported_run_end
-                        && !abort_gate_armed.load(std::sync::atomic::Ordering::SeqCst),
+                    herdr_settle_error.lock().unwrap().take(),
                     !core.steering.is_empty() || !core.follow_up.is_empty(),
                 )
             };
-            if report {
-                self.herdr.lock().unwrap().run_ended(None, more_queued);
+            if !engine_reported_run_end {
+                self.herdr
+                    .lock()
+                    .unwrap()
+                    .run_ended(error_hold, more_queued);
             }
         }
         let snapshot = {

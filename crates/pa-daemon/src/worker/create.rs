@@ -755,7 +755,28 @@ impl Worker {
         };
         let reporter = match crate::herdr::HerdrConfig::from_env(&client_env) {
             Some(config) if rlm_depth == 0 => {
-                crate::herdr::HerdrReporter::start(config, session_ref.clone())
+                // The fresh epoch: bumping the shared counter makes the
+                // replaced reporter's task drop its queued boundary
+                // events instead of flushing them over this session's
+                // pane state.
+                let generation = self
+                    .herdr_generation
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
+                crate::herdr::HerdrReporter::start(
+                    config,
+                    session_ref.clone(),
+                    generation,
+                    std::sync::Arc::clone(&self.herdr_generation),
+                )
+            }
+            None if rlm_depth == 0 && self.herdr.lock().unwrap().enabled() => {
+                // An idempotent re-create that carries no pane identity
+                // (e.g. a replay from a client outside a Herdr pane)
+                // must not strip the binding an earlier create or an
+                // attach installed — the session keeps reporting for its
+                // pane (adopt-if-absent, never rebind to nothing).
+                return;
             }
             // Not inside a Herdr pane (the no-op reporter), or an RLM
             // subagent: subagents share the parent's pane, so their runs

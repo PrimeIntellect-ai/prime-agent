@@ -170,18 +170,20 @@ fn next_report_seq() -> u64 {
     let floor = now_ms_x1000();
     let mut current = REPORT_SEQ.load(Ordering::Relaxed);
     if current == 0 {
-        // First use this process: seed at the floor, then continue.
+        // First use this process: seed at the floor. The CAS loser must
+        // ADVANCE through the same loop as everyone else — returning
+        // `seeded + 1` without storing it let the next caller mint the
+        // same value (a duplicate seq herdr may drop).
         match REPORT_SEQ.compare_exchange(0, floor, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(_) => floor,
-            Err(seeded) => seeded + 1,
+            Ok(_) => return floor,
+            Err(seeded) => current = seeded,
         }
-    } else {
-        loop {
-            let next = (current + 1).max(floor);
-            match REPORT_SEQ.compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed) {
-                Ok(_) => return next,
-                Err(seen) => current = seen,
-            }
+    }
+    loop {
+        let next = (current + 1).max(floor);
+        match REPORT_SEQ.compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return next,
+            Err(seen) => current = seen,
         }
     }
 }
@@ -252,10 +254,26 @@ pub(crate) struct HerdrReporter {
 }
 
 impl HerdrReporter {
-    /// Start the reporter for a session resolved to a Herdr pane.
-    pub(crate) fn start(config: HerdrConfig, session_ref: HerdrSessionRef) -> Self {
+    /// Start the reporter for a session resolved to a Herdr pane. The
+    /// `generation` is the worker's reporter epoch (bumped on every
+    /// (re)bind): the task drops signals once the shared counter has
+    /// moved past its own epoch, so a replaced reporter's queued or
+    /// racing boundary events cannot overwrite the successor's pane
+    /// state — only the current reporter's writes reach the wire.
+    pub(crate) fn start(
+        config: HerdrConfig,
+        session_ref: HerdrSessionRef,
+        generation: u64,
+        current_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        tokio::spawn(run_reporter(config, session_ref, rx));
+        tokio::spawn(run_reporter(
+            config,
+            session_ref,
+            generation,
+            current_generation,
+            rx,
+        ));
         Self {
             tx: Some(std::sync::Arc::new(tx)),
         }
@@ -311,11 +329,38 @@ impl HerdrReporter {
 
 /// The reporter task: owns the state machine and the single-slot send
 /// queue; one write in flight at a time, the latest state wins.
+/// The quit release: the last write, the pending drop, then the ack.
+/// The write itself is time-bounded, so the awaiting caller's timeout is
+/// the exception path, not the norm.
+async fn release_pane(
+    state: &mut ReporterState,
+    config: &HerdrConfig,
+    done: tokio::sync::oneshot::Sender<()>,
+) {
+    state.released = true;
+    state.pending = None;
+    state.idle_deadline = None;
+    state.retry_deadline = None;
+    // This task serializes every write and the drain below completed
+    // before the release was admitted, so the release is the last
+    // write on the wire — exactly the TS ordering contract.
+    let target = herdr_socket_target(&config.socket_path, cfg!(windows));
+    send_request(&target, release_request(&config.pane_id, next_report_seq())).await;
+    let _ = done.send(());
+}
+
 async fn run_reporter(
     config: HerdrConfig,
     session_ref: HerdrSessionRef,
+    generation: u64,
+    current_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Signal>,
 ) {
+    // A stale reporter never writes: the worker bumped the generation
+    // when it installed a successor, so this task's queued or racing
+    // boundary events (and its pending slot) die here — only the
+    // current reporter's writes reach the wire.
+    let is_stale = || current_generation.load(std::sync::atomic::Ordering::Relaxed) != generation;
     let mut state = ReporterState {
         agent_active: false,
         retry_hold_active: false,
@@ -331,6 +376,9 @@ async fn run_reporter(
         released: false,
     };
     loop {
+        if is_stale() {
+            return;
+        }
         // The next timer deadline, if any: the two debounce/grace timers.
         let deadline = [state.idle_deadline, state.retry_deadline]
             .into_iter()
@@ -340,24 +388,16 @@ async fn run_reporter(
             signal = rx.recv() => {
                 match signal {
                     Some(Signal::Release { done }) => {
-                        state.released = true;
-                        state.pending = None;
-                        state.idle_deadline = None;
-                        state.retry_deadline = None;
-                        // This task serializes every write and the
-                        // drain below completed before the release was
-                        // admitted, so the release is the last write on
-                        // the wire — exactly the TS ordering contract.
-                        let target = herdr_socket_target(&config.socket_path, cfg!(windows));
-                        send_request(
-                            &target,
-                            release_request(&config.pane_id, next_report_seq()),
-                        )
-                        .await;
-                        let _ = done.send(());
+                        if is_stale() {
+                            return;
+                        }
+                        release_pane(&mut state, &config, done).await;
                         return;
                     }
                     Some(signal) => {
+                        if is_stale() {
+                            return;
+                        }
                         handle_signal(&mut state, signal, &config);
                     }
                     None => {
@@ -392,9 +432,13 @@ async fn run_reporter(
                 }
             }
         }
-        // Drain the single-slot queue: one write at a time; a state that
-        // changed while the write was in flight replaces the slot.
-        while !state.released && !state.silenced {
+        // Drain the single-slot queue — the TS latest-wins slot: the
+        // queued state writes first, and the signals that arrived while
+        // that write was in flight are absorbed after it, so only the
+        // NEWEST state of a flapping run writes next (the absorbed
+        // intermediates never hit the wire). Absorbing before the first
+        // write would instead swallow the run's opening `working`.
+        while !state.released && !state.silenced && !is_stale() {
             let Some(report) = state.pending.take() else {
                 break;
             };
@@ -407,6 +451,21 @@ async fn run_reporter(
                 next_report_seq(),
             );
             send_request(&target, request).await;
+            if is_stale() {
+                return;
+            }
+            while let Ok(signal) = rx.try_recv() {
+                match signal {
+                    Signal::Release { done } => {
+                        release_pane(&mut state, &config, done).await;
+                        return;
+                    }
+                    signal => handle_signal(&mut state, signal, &config),
+                }
+                if is_stale() {
+                    return;
+                }
+            }
         }
     }
 }
@@ -419,8 +478,18 @@ fn handle_signal(state: &mut ReporterState, signal: Signal, config: &HerdrConfig
             active,
             session_ref,
         } => {
+            // The successor starts CLEAN: the predecessor's failure
+            // block, its hold message, and both timers describe the
+            // replaced session, so `desired_state` must not carry them
+            // over (a fork after a provider error must not re-publish
+            // the old error as the new session's state).
             state.session_ref = session_ref;
             state.agent_active = active;
+            state.retry_hold_active = false;
+            state.failure_blocked = false;
+            state.failure_message = None;
+            state.idle_deadline = None;
+            state.retry_deadline = None;
             publish_force(state);
         }
         // A run start and a retry both (re)claim the pane working and
@@ -589,14 +658,26 @@ fn rand_suffix() -> String {
 /// `sendRequest`). Failures are silent — the pane state API is
 /// best-effort, and a down daemon must never wedge a session.
 async fn send_request(socket_target: &str, request: Value) {
-    let Ok(stream) =
-        pa_types::platform::transport::connect_transport(std::path::Path::new(socket_target)).await
-    else {
+    // Every phase of the one-shot request is time-bounded — connect,
+    // write, and the response's first byte — so a wedged peer (a socket
+    // that accepts but never reads) can never stall the reporter task
+    // and starve later states or the release.
+    let connected = tokio::time::timeout(
+        Duration::from_millis(SEND_TIMEOUT_MS),
+        pa_types::platform::transport::connect_transport(std::path::Path::new(socket_target)),
+    )
+    .await;
+    let Ok(Ok(stream)) = connected else {
         return;
     };
     let (mut reader, mut writer) = stream.split();
     let line = format!("{request}\n");
-    if writer.write_all(line.as_bytes()).await.is_err() {
+    let written = tokio::time::timeout(
+        Duration::from_millis(SEND_TIMEOUT_MS),
+        writer.write_all(line.as_bytes()),
+    )
+    .await;
+    if !matches!(written, Ok(Ok(()))) {
         return;
     }
     let _ = writer.shutdown().await;
@@ -898,6 +979,18 @@ mod tests {
             .collect()
     }
 
+    /// A fresh generation counter with the reporter started at epoch 1:
+    /// tests that exercise the stale-generation gate bump the counter.
+    fn start_reporter(
+        config: HerdrConfig,
+        session_ref: HerdrSessionRef,
+    ) -> (HerdrReporter, std::sync::Arc<std::sync::atomic::AtomicU64>) {
+        let current = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let reporter =
+            HerdrReporter::start(config, session_ref, 1, std::sync::Arc::clone(&current));
+        (reporter, current)
+    }
+
     fn temp_socket(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("pa-herdr-{tag}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -923,7 +1016,7 @@ mod tests {
             Some("/home/me/.prime/agent/sessions/s1.jsonl".to_string()),
             Some("s1".to_string()),
         );
-        let reporter = HerdrReporter::start(config, session_ref.clone());
+        let (reporter, _generation) = start_reporter(config, session_ref.clone());
 
         // session_start always reports (idle), refreshed with the same
         // file-backed session reference the worker resolves.
@@ -974,8 +1067,8 @@ mod tests {
         let socket_path = temp_socket("hold");
         let (requests, server) = fake_herdr(&socket_path);
         let config = HerdrConfig::from_env(&pane_env(&socket_path, "w1:p2")).unwrap();
-        let reporter =
-            HerdrReporter::start(config, HerdrSessionRef::new(None, Some("s2".to_string())));
+        let (reporter, _generation) =
+            start_reporter(config, HerdrSessionRef::new(None, Some("s2".to_string())));
         reporter.session_started(false, HerdrSessionRef::new(None, Some("s2".to_string())));
         wait_for_requests(&requests, 1).await;
 
@@ -1006,8 +1099,8 @@ mod tests {
         let socket_path = temp_socket("retry");
         let (requests, server) = fake_herdr(&socket_path);
         let config = HerdrConfig::from_env(&pane_env(&socket_path, "w1:p3")).unwrap();
-        let reporter =
-            HerdrReporter::start(config, HerdrSessionRef::new(None, Some("s3".to_string())));
+        let (reporter, _generation) =
+            start_reporter(config, HerdrSessionRef::new(None, Some("s3".to_string())));
         reporter.session_started(false, HerdrSessionRef::new(None, Some("s3".to_string())));
         wait_for_requests(&requests, 1).await;
 
@@ -1044,8 +1137,8 @@ mod tests {
         let socket_path = temp_socket("release");
         let (requests, server) = fake_herdr(&socket_path);
         let config = HerdrConfig::from_env(&pane_env(&socket_path, "w1:p4")).unwrap();
-        let reporter =
-            HerdrReporter::start(config, HerdrSessionRef::new(None, Some("s4".to_string())));
+        let (reporter, _generation) =
+            start_reporter(config, HerdrSessionRef::new(None, Some("s4".to_string())));
         reporter.session_started(false, HerdrSessionRef::new(None, Some("s4".to_string())));
         wait_for_requests(&requests, 1).await;
 
@@ -1069,12 +1162,132 @@ mod tests {
         server.abort();
     }
 
+    /// A session replacement must not inherit the predecessor's
+    /// failure state: the successor's `session_start` publishes clean
+    /// (idle), never the old blocked/error shape.
+    #[tokio::test]
+    async fn a_replacement_resets_the_predecessor_failure_state() {
+        let socket_path = temp_socket("reset");
+        let (requests, server) = fake_herdr(&socket_path);
+        let config = HerdrConfig::from_env(&pane_env(&socket_path, "w1:p6")).unwrap();
+        let (reporter, _generation) =
+            start_reporter(config, HerdrSessionRef::new(None, Some("s7".to_string())));
+        reporter.session_started(false, HerdrSessionRef::new(None, Some("s7".to_string())));
+        wait_for_requests(&requests, 1).await;
+
+        // The predecessor's run fails and settles blocked with the error.
+        reporter.run_started();
+        reporter.run_ended(Some("overloaded".to_string()), false);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let states = states_of(&requests);
+            if states.last() == Some(&"blocked".to_string()) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the failure never settled blocked: {states:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // The successor session starts on the SAME pane: clean idle, the
+        // predecessor's block and message do not carry over.
+        reporter.session_started(false, HerdrSessionRef::new(None, Some("s8".to_string())));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let frames = requests.lock().unwrap().clone();
+            if let Some(last) = frames.last() {
+                if last["params"]["state"] == "idle" {
+                    assert!(
+                        last["params"].get("message").is_none(),
+                        "the successor inherited the error message: {last}"
+                    );
+                    assert_eq!(last["params"]["agent_session_id"], "s8");
+                    assert!(frames.len() >= 3, "the frames: {frames:?}");
+                    server.abort();
+                    return;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the successor never reported idle: {frames:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// The stale-generation gate: a replaced reporter's racing boundary
+    /// events never reach the wire — only the successor's do.
+    #[tokio::test]
+    async fn a_stale_generation_reporter_never_writes() {
+        let socket_path = temp_socket("stale");
+        let (requests, server) = fake_herdr(&socket_path);
+        let config = HerdrConfig::from_env(&pane_env(&socket_path, "w1:p7")).unwrap();
+        let (predecessor, generation) = start_reporter(
+            config.clone(),
+            HerdrSessionRef::new(None, Some("s9".to_string())),
+        );
+        predecessor.session_started(false, HerdrSessionRef::new(None, Some("s9".to_string())));
+        wait_for_requests(&requests, 1).await;
+
+        // The worker installs a successor: the generation moves past the
+        // predecessor's epoch.
+        generation.store(2, std::sync::atomic::Ordering::Relaxed);
+        let successor = HerdrReporter::start(
+            config,
+            HerdrSessionRef::new(None, Some("s10".to_string())),
+            2,
+            std::sync::Arc::clone(&generation),
+        );
+        // The predecessor's late boundary event must be dropped by the
+        // gate, never sent (the wire stays at one frame until the
+        // successor speaks).
+        predecessor.run_started();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            1,
+            "a stale-generation reporter wrote: {:?}",
+            requests.lock().unwrap()
+        );
+
+        // The successor reports for its own session.
+        successor.session_started(false, HerdrSessionRef::new(None, Some("s10".to_string())));
+        wait_for_requests(&requests, 2).await;
+        let frames = requests.lock().unwrap().clone();
+        assert_eq!(frames[1]["params"]["agent_session_id"], "s10");
+        server.abort();
+    }
+
+    /// Concurrent seq minting never duplicates: the first-seed race's
+    /// loser must advance the shared counter like every other caller.
+    #[test]
+    fn concurrent_seq_mints_never_duplicate() {
+        let all = std::sync::Mutex::new(Vec::new());
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let all = &all;
+                scope.spawn(move || {
+                    let mut mine = Vec::new();
+                    for _ in 0..50 {
+                        mine.push(next_report_seq());
+                    }
+                    all.lock().unwrap().extend(mine);
+                });
+            }
+        });
+        let all = all.into_inner().unwrap();
+        let distinct = all.iter().collect::<std::collections::HashSet<_>>().len();
+        assert_eq!(distinct, all.len(), "duplicate seq minted: {all:?}");
+    }
+
     #[tokio::test]
     async fn a_dropped_reporter_stays_silent_without_releasing() {
         let socket_path = temp_socket("silent");
         let (requests, server) = fake_herdr(&socket_path);
         let config = HerdrConfig::from_env(&pane_env(&socket_path, "w1:p5")).unwrap();
-        let reporter = HerdrReporter::start(
+        let (reporter, generation) = start_reporter(
             config.clone(),
             HerdrSessionRef::new(None, Some("s5".to_string())),
         );
@@ -1095,8 +1308,12 @@ mod tests {
 
         // A successor reporter in the same pane re-reports immediately
         // (its session_start) and its seq stays above the predecessor's.
-        let successor =
-            HerdrReporter::start(config, HerdrSessionRef::new(None, Some("s6".to_string())));
+        let successor = HerdrReporter::start(
+            config,
+            HerdrSessionRef::new(None, Some("s6".to_string())),
+            generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1,
+            std::sync::Arc::clone(&generation),
+        );
         successor.session_started(false, HerdrSessionRef::new(None, Some("s6".to_string())));
         wait_for_requests(&requests, 2).await;
         let (predecessor_seq, successor_seq) = {

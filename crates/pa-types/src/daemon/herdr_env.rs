@@ -8,17 +8,29 @@
 //! environment the daemon itself booted in — and the daemon re-filters on
 //! receipt (the socket peer is untrusted). Both sides share this one list
 //! because it is the wire contract.
+//!
+//! The trust model: the pane identity names the socket a session reports
+//! to, and a client picks it — but any client that can reach the
+//! user-scoped daemon socket can already read the full session through the
+//! daemon's own API, so the report surface (the session reference and the
+//! pane state) crosses no privilege boundary. The re-filter bounds what
+//! rides the wire: a forwarded map never carries more than these keys.
 
 use std::collections::BTreeMap;
 
 /// The allowlist of client env vars the Herdr connector consumes (TS
-/// `DAEMON_CLIENT_ENV_KEYS`).
-pub const HERDR_CLIENT_ENV_KEYS: [&str; 5] = [
+/// `DAEMON_CLIENT_ENV_KEYS`, plus the connector's own tuning keys). The
+/// tuning keys ride the same allowlist so a pane can tune the debounce
+/// and the retry grace per session — the TS read them from the shared
+/// daemon process env, which the session-scoped port deliberately cannot.
+pub const HERDR_CLIENT_ENV_KEYS: [&str; 7] = [
     "HERDR_ENV",
     "HERDR_PANE_ID",
     "HERDR_SOCKET_PATH",
     "HERDR_TAB_ID",
     "HERDR_WORKSPACE_ID",
+    "HERDR_PI_IDLE_DEBOUNCE_MS",
+    "HERDR_PI_RETRY_GRACE_MS",
 ];
 
 /// Collect the allowlisted vars from a process-env-like source (the
@@ -59,6 +71,9 @@ mod tests {
             "HERDR_PANE_ID" => Some("w1:payload".to_string()),
             "HERDR_TAB_ID" => Some("t1".to_string()),
             "HERDR_WORKSPACE_ID" => Some("ws1".to_string()),
+            "HERDR_PI_IDLE_DEBOUNCE_MS" => Some("10".to_string()),
+            "HERDR_PI_RETRY_GRACE_MS" => Some("30".to_string()),
+            "SOMETHING_ELSE" => Some("never travels".to_string()),
             _ => None,
         });
         assert_eq!(
@@ -72,6 +87,8 @@ mod tests {
                 ("HERDR_PANE_ID".to_string(), "w1:payload".to_string()),
                 ("HERDR_TAB_ID".to_string(), "t1".to_string()),
                 ("HERDR_WORKSPACE_ID".to_string(), "ws1".to_string()),
+                ("HERDR_PI_IDLE_DEBOUNCE_MS".to_string(), "10".to_string()),
+                ("HERDR_PI_RETRY_GRACE_MS".to_string(), "30".to_string()),
             ])
         );
     }
@@ -92,17 +109,24 @@ mod tests {
     }
 
     /// The daemon side re-filters a received map (the socket peer is
-    /// untrusted): an off-list key and an empty value never survive.
+    /// untrusted): an off-list key and an empty value never survive —
+    /// and the tuning keys ride through.
     #[test]
     fn the_daemon_re_filters_to_the_allowlist() {
         let received = BTreeMap::from([
             ("HERDR_PANE_ID".to_string(), "w1:payload".to_string()),
             ("PRIME_API_KEY".to_string(), "leak".to_string()),
             ("HERDR_ENV".to_string(), String::new()),
+            ("HERDR_PI_IDLE_DEBOUNCE_MS".to_string(), "10".to_string()),
+            ("HERDR_PI_RETRY_GRACE_MS".to_string(), "30".to_string()),
         ]);
         assert_eq!(
             filter_client_env(&received),
-            BTreeMap::from([("HERDR_PANE_ID".to_string(), "w1:payload".to_string())])
+            BTreeMap::from([
+                ("HERDR_PANE_ID".to_string(), "w1:payload".to_string()),
+                ("HERDR_PI_IDLE_DEBOUNCE_MS".to_string(), "10".to_string()),
+                ("HERDR_PI_RETRY_GRACE_MS".to_string(), "30".to_string()),
+            ])
         );
     }
 }
