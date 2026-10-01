@@ -5,9 +5,10 @@
 //! (moved with their concern).
 use super::{
     build_rows, compute_rollups, filter_empty_sessions, filter_unified_sessions,
-    parse_search_query, reconcile_unified_sessions, resolve_selection, scope_ancestors,
-    scope_depth, scope_to_subtree, AgentsViewMode, AgentsViewScope, Composer, PressedMouseClick,
-    RowKind, SelectionEdge, Value, ANCHOR_LOADING_HINT,
+    parse_search_query, reconcile_unified_sessions, resolve_selection, scope_ancestors, scope_root,
+    scope_to_subtree, AgentsViewMode, AgentsViewScope, Composer, OpenedRow, PathBuf,
+    PressedMouseClick, RowKind, ScopeRoot, SelectionEdge, SelectionKey, SessionSelection, Value,
+    ANCHOR_LOADING_HINT,
 };
 
 impl AgentsViewMode {
@@ -34,10 +35,10 @@ impl AgentsViewMode {
             Some(scope) if !self.scope_dropped => {
                 if let Some(scoped) = scope_to_subtree(&records, scope) {
                     scope_active = true;
-                    self.scope_depth = scope_depth(&records, scope);
+                    self.scope_root = scope_root(&records, scope);
                     Some(scoped)
                 } else {
-                    self.scope_depth = None;
+                    self.scope_root = None;
                     self.scope_dropped = true;
                     self.set_status("Scope is no longer available; returned to the global view");
                     None
@@ -520,11 +521,43 @@ impl AgentsViewMode {
             return;
         }
         // TS `app.agents.new` (default ctrl+n): start a session; a plain
-        // "n" is search text like any other character.
+        // "n" is search text like any other character. Scoped (the
+        // operator's 2026-09-28 directive, a deliberate TS divergence -
+        // TS always starts a root session): the session starts under the
+        // scope root, one level below it and in its directory, so it
+        // lists in this view and the agents-back return lands here. A
+        // root with no session file (a `--no-session` root) has nothing
+        // to bind and starts a root session.
         if self.keybindings.matches(key, "app.agents.new") {
-            self.opened = None;
+            let (selection, rlm_depth, cwd) = match self.scope_root.clone() {
+                Some(ScopeRoot {
+                    child_depth,
+                    session_file: Some(file),
+                    cwd,
+                }) => (
+                    SessionSelection::NewChild {
+                        parent_session_file: PathBuf::from(file),
+                        rlm_depth: child_depth,
+                    },
+                    Some(child_depth),
+                    cwd,
+                ),
+                Some(ScopeRoot {
+                    session_file: None, ..
+                })
+                | None => (SessionSelection::New, None, None),
+            };
+            self.opened = Some(OpenedRow {
+                selection,
+                expanded_ancestors: Vec::new(),
+                selected_row_identity: String::new(),
+                selected_key: SelectionKey::default(),
+                rlm_depth,
+                has_children: false,
+                status_message: None,
+                cwd,
+            });
             self.running = false;
-            self.new_session = true;
             return;
         }
         // TS `app.agents.program` (default ctrl+o, empty editor only,

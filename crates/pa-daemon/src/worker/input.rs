@@ -20,7 +20,9 @@ impl Worker {
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if message.is_empty() {
+        // TS has no empty check; this port still rejects a prompt with neither text nor images.
+        let images = parse_prompt_images(payload);
+        if message.is_empty() && images.is_empty() {
             return response_failure(None, "prompt", "Prompt cannot be empty", None);
         }
         let streaming_behavior = payload.get("streamingBehavior").and_then(Value::as_str);
@@ -42,7 +44,6 @@ impl Worker {
                 );
             }
         }
-        let images = parse_prompt_images(payload);
         // TS daemon prompts map `resumeIfIdle` to
         // `command.streamingBehavior !== undefined`: while the queued-input
         // suspension is set (post `abort`/manual `compact`), a plain prompt

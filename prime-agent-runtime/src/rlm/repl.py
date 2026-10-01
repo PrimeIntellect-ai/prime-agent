@@ -12,12 +12,14 @@ import asyncio
 import codecs
 import contextvars
 import ctypes
+import functools
 import inspect
 import io
 import json
 import linecache
 import os
 import platform
+import select
 import signal
 import sys
 import tempfile
@@ -1495,6 +1497,40 @@ def _owner_alive_posix(owner: int, initial_ppid: int) -> bool:
     return True
 
 
+def _wait_owner_posix(owner: int, initial_ppid: int) -> None:
+    # Blocks until the owner exits: the OS exit notification (kqueue NOTE_EXIT
+    # on macOS/BSD, a pidfd on Linux) wakes this thread once, with no polling.
+    # Registration binds whichever process holds the pid right now, so the
+    # liveness check after it catches a parent owner that died (and whose pid
+    # may be reused) before the watch existed.
+    try:
+        if hasattr(select, "kqueue"):
+            kq = select.kqueue()
+            # max_events=0 makes a registration error raise (ESRCH for a gone
+            # owner) instead of arriving as an EV_ERROR event.
+            kq.control(
+                [select.kevent(owner, select.KQ_FILTER_PROC, select.KQ_EV_ADD, select.KQ_NOTE_EXIT)],
+                0,
+                0,
+            )
+            wait_for_exit = functools.partial(kq.control, None, 1)
+        else:
+            poller = select.poll()
+            poller.register(os.pidfd_open(owner), select.POLLIN)
+            wait_for_exit = poller.poll
+    except ProcessLookupError:
+        return  # already gone
+    except (AttributeError, OSError):
+        # Slow fallback, only where exit notification is unavailable: Linux
+        # before 5.3, a seccomp filter denying pidfd_open, a CPython built
+        # without os.pidfd_open.
+        while _owner_alive_posix(owner, initial_ppid):
+            time.sleep(30.0)
+        return
+    if _owner_alive_posix(owner, initial_ppid):
+        wait_for_exit()
+
+
 def _wait_owner_windows(owner: int) -> None:
     # Blocks until the owner exits. os.kill(pid, 0) on Windows TERMINATES the
     # target, so a SYNCHRONIZE handle wait is the only sound probe.
@@ -1522,8 +1558,7 @@ def _owner_watchdog(owner: int, initial_ppid: int) -> None:
     if os.name == "nt":
         _wait_owner_windows(owner)
     else:
-        while _owner_alive_posix(owner, initial_ppid):
-            time.sleep(1.0)
+        _wait_owner_posix(owner, initial_ppid)
     # Event-loop-independent by design: a synchronous cell monopolizes the
     # loop, so the queued EOF shutdown can never run; hard-exit from here.
     try:
