@@ -237,7 +237,6 @@ impl AgentsViewMode {
     /// which must never override it.
     pub(super) fn move_selection(&mut self, delta: isize) {
         self.anchor_selection_pending = false;
-        self.search_return = None;
         self.clear_anchor_loading_hint();
         let selectable: Vec<usize> = self
             .rows
@@ -270,7 +269,6 @@ impl AgentsViewMode {
     /// roster rebuild resolves the selection back onto the landed row.
     pub(super) fn move_selection_to(&mut self, edge: SelectionEdge) {
         self.anchor_selection_pending = false;
-        self.search_return = None;
         self.clear_anchor_loading_hint();
         let selectable: Vec<usize> = self
             .rows
@@ -360,13 +358,12 @@ impl AgentsViewMode {
         self.end_anchor_wait();
     }
 
-    /// One search edit (TS `queryChanged`). The rebuilt list selects its
-    /// first row, the top-ranked hit, instead of following the previous
-    /// row (a lower-ranked hit, or an index clamped onto the last hit when
-    /// that row was filtered out). The first keystroke remembers the
-    /// selected session, and the edit that clears the query returns to it
-    /// while it is still listed, else to the top. Searching is an explicit
-    /// choice, so it ends the entry anchor's wait (TS `syncSelectedRowState`).
+    /// One search edit (TS `queryChanged`). Every edit, the clear included,
+    /// selects the rebuilt list's first row - the top-ranked hit - instead
+    /// of following the previous row (a lower-ranked hit, or an index
+    /// clamped onto the last hit when that row was filtered out).
+    /// Searching is an explicit choice, so it ends the entry anchor's wait
+    /// (TS `syncSelectedRowState`).
     ///
     /// TS `rearmSavedSearchFetch`: a terminal saved-catalog failure re-arms
     /// on the next query change. The loop owns the client, so the mode only
@@ -375,25 +372,15 @@ impl AgentsViewMode {
     /// concurrent `list_saved_sessions` scans (whose completions can
     /// arrive out of order) never race a stale failure over a newer
     /// success.
-    pub(super) fn query_changed(&mut self, was_empty: bool) {
+    pub(super) fn query_changed(&mut self) {
         self.saved_query_rearm = self.saved_fetch_failed;
         self.end_anchor_wait();
-        if was_empty {
-            self.search_return = self
-                .selected_identity
-                .clone()
-                .zip(self.selected_key.clone());
-        }
         self.rebuild_rows();
-        if !self.query.is_empty() {
-            self.selected = self
-                .rows
-                .iter()
-                .position(AgentsViewRow::selectable)
-                .unwrap_or(0);
-        } else if let Some((identity, key)) = self.search_return.take() {
-            self.selected = resolve_selection(&self.rows, 0, Some(&identity), Some(&key));
-        }
+        self.selected = self
+            .rows
+            .iter()
+            .position(AgentsViewRow::selectable)
+            .unwrap_or(0);
         self.sync_selected_row_state();
     }
 
@@ -664,7 +651,7 @@ impl AgentsViewMode {
         if self.keybindings.matches(key, "app.input.clear") {
             if !self.query.is_empty() {
                 self.query.clear();
-                self.query_changed(false);
+                self.query_changed();
             } else if self.scope_active {
                 self.open_scope_root(false);
             } else {
@@ -688,7 +675,7 @@ impl AgentsViewMode {
             // A no-op edit on an empty query changes nothing: the
             // re-arm's expensive retry must not fire behind it.
             if self.query.pop().is_some() {
-                self.query_changed(false);
+                self.query_changed();
             }
             return;
         }
@@ -698,7 +685,7 @@ impl AgentsViewMode {
         {
             if !self.query.is_empty() {
                 self.query.clear();
-                self.query_changed(false);
+                self.query_changed();
             }
             return;
         }
@@ -707,9 +694,8 @@ impl AgentsViewMode {
         // raw space there), and the shift+letter ids decode to their
         // characters.
         if let Some(text) = crate::editor::decode_printable(key) {
-            let was_empty = self.query.is_empty();
             self.query.push_str(&text);
-            self.query_changed(was_empty);
+            self.query_changed();
         }
     }
 
@@ -835,7 +821,6 @@ impl AgentsViewMode {
         self.exit_armed = false;
         self.pending_delete = None;
         self.selected = *index;
-        self.search_return = None;
         // A click is an explicit user choice like a direction key: it
         // ends the entry anchor's wait, so the open below targets the
         // clicked row, never the loading hint.
