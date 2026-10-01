@@ -10,8 +10,7 @@
 //! session socket directly.
 //!
 //! TS refuses tickets for client-owned workers (`ownerClientId`); the Rust
-//! supervisor has no client-owned worker lifecycle (every worker it spawns or
-//! adopts is a resident session), so there is no such class to refuse.
+//! supervisor has not ported that refusal yet (a disclosed divergence).
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
