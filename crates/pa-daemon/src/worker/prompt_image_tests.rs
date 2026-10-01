@@ -86,4 +86,9 @@ async fn prompt_with_images_queues_the_images_with_the_message() {
         }],
         "the attachment rides the queue item"
     );
+    // A prompt with neither text nor images stays rejected (this port's
+    // guard; the TS worker has no empty check).
+    let rejected = worker.dispatch("prompt", &json!({ "message": "" })).await;
+    assert!(!rejected.success);
+    assert_eq!(rejected.error.as_deref(), Some("Prompt cannot be empty"));
 }

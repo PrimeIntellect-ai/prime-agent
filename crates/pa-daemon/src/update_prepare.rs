@@ -27,6 +27,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use pa_types::daemon::{
@@ -37,7 +38,7 @@ use pa_types::daemon::{
 use tokio::sync::watch;
 use tokio::time::Instant;
 
-use crate::util::iso_from_unix_ms;
+use crate::util::{iso_from_unix_ms, now_ms};
 
 /// Wire names of the supervisor-side prepare states (TS `draining`/`prepared`
 /// phases, extended with the spec's `fenced`/`snapshotted`/`stopping`).
@@ -141,16 +142,19 @@ impl PrepareTransaction {
         }
     }
 
-    /// The watchdog check for the current state (spec §5 exit events).
-    /// `Stopping` has no watchdog here: its budget is the per-worker stop
-    /// budget, owned by the graceful-stop protocol.
-    fn check_expiry(&self, now_ms: u64) -> Option<AbortReason> {
+    /// The watchdog budget of the current state (spec §5 exit events): the
+    /// epoch-ms instant it expires and the abort it causes. `Stopping` has
+    /// no watchdog here: its budget is the per-worker stop budget, owned by
+    /// the graceful-stop protocol.
+    fn watchdog(&self) -> Option<(u64, AbortReason)> {
         match self.state {
-            PrepareState::Draining | PrepareState::Fenced | PrepareState::Snapshotted => {
-                (now_ms >= self.prepare_deadline_ms).then_some(AbortReason::PrepareDeadlineExceeded)
-            }
-            PrepareState::Prepared => (now_ms >= self.marker_expires_at_ms.unwrap_or(u64::MAX))
-                .then_some(AbortReason::PreparedExpired),
+            PrepareState::Draining | PrepareState::Fenced | PrepareState::Snapshotted => Some((
+                self.prepare_deadline_ms,
+                AbortReason::PrepareDeadlineExceeded,
+            )),
+            PrepareState::Prepared => self
+                .marker_expires_at_ms
+                .map(|expires_at_ms| (expires_at_ms, AbortReason::PreparedExpired)),
             PrepareState::Stopping => None,
         }
     }
@@ -231,6 +235,8 @@ pub(crate) fn marker_expires_at_iso(now_ms: u64, budget: &UpdateTimeoutBudget) -
 #[derive(Debug, Default)]
 pub(crate) struct PrepareCoordinator {
     inner: Mutex<Option<PrepareTransaction>>,
+    /// Woken whenever a transition moves the watchdog budget.
+    watchdog_moved: tokio::sync::Notify,
 }
 
 /// Result of [`PrepareCoordinator::begin`].
@@ -266,6 +272,18 @@ impl PrepareCoordinator {
         Self::default()
     }
 
+    /// Run one operation on the transaction slot, waking the expiry wait
+    /// when the operation moved the watchdog budget.
+    fn modify<R>(&self, operation: impl FnOnce(&mut Option<PrepareTransaction>) -> R) -> R {
+        let mut inner = self.inner.lock().unwrap();
+        let before = inner.as_ref().and_then(PrepareTransaction::watchdog);
+        let output = operation(&mut inner);
+        if inner.as_ref().and_then(PrepareTransaction::watchdog) != before {
+            self.watchdog_moved.notify_one();
+        }
+        output
+    }
+
     /// Accept a prepare request (idempotent on `update_id`, refusing any
     /// other id while active).
     pub(crate) fn begin(
@@ -274,8 +292,7 @@ impl PrepareCoordinator {
         now_ms: u64,
         budget: &UpdateTimeoutBudget,
     ) -> BeginOutcome {
-        let mut inner = self.inner.lock().unwrap();
-        match inner.as_ref() {
+        self.modify(|inner| match inner.as_ref() {
             Some(active) if *active.update_id() == update_id => BeginOutcome::AlreadyActive {
                 state: active.state(),
                 accepted_at_ms: active.accepted_at_ms(),
@@ -292,32 +309,35 @@ impl PrepareCoordinator {
                 *inner = Some(transaction);
                 outcome
             }
-        }
+        })
     }
 
     /// Watchdog poll: abort an active transaction whose budget expired.
-    /// Called on a timer and on any later command (spec §5).
+    /// Called when the expiry wait fires and on any later command (spec §5).
     pub(crate) fn abort_if_expired(&self, now_ms: u64) -> Option<AbortOutcome> {
-        let mut inner = self.inner.lock().unwrap();
-        let reason = inner.as_ref()?.check_expiry(now_ms)?;
-        take_locked(&mut inner, reason)
+        self.modify(|inner| {
+            let (deadline_ms, reason) = inner.as_ref()?.watchdog()?;
+            if now_ms < deadline_ms {
+                return None;
+            }
+            take_locked(inner, reason)
+        })
     }
 
     /// Driver abort (failure default - rollback over retry). Idempotent:
     /// a second abort for the same id finds nothing and returns `None`.
     pub(crate) fn abort(&self, update_id: &UpdateId) -> Option<AbortOutcome> {
-        let mut inner = self.inner.lock().unwrap();
-        match inner.as_ref() {
+        self.modify(|inner| match inner.as_ref() {
             Some(active) if *active.update_id() == *update_id => {
                 // The stop protocol owns `Stopping` from here on; the driver
                 // aborts only its own prepare phases.
                 if active.state() == PrepareState::Stopping {
                     return None;
                 }
-                take_locked(&mut inner, AbortReason::PrepareDeadlineExceeded)
+                take_locked(inner, AbortReason::PrepareDeadlineExceeded)
             }
             _ => None,
-        }
+        })
     }
 
     /// `Draining -> Fenced` for the named transaction.
@@ -346,20 +366,21 @@ impl PrepareCoordinator {
     /// `Prepared -> Stopping` for the named transaction; idempotent while
     /// already `Stopping` (the coordinator may poll the commit).
     pub(crate) fn commit(&self, update_id: &UpdateId) -> PrepareOp {
-        let mut inner = self.inner.lock().unwrap();
-        let Some(transaction) = inner.as_mut() else {
-            return PrepareOp::NotActive;
-        };
-        if *transaction.update_id() != *update_id {
-            return PrepareOp::NotActive;
-        }
-        if transaction.state() == PrepareState::Stopping {
-            return PrepareOp::Applied(PrepareState::Stopping);
-        }
-        match transaction.commit() {
-            Ok(state) => PrepareOp::Applied(state),
-            Err(_) => PrepareOp::NotActive,
-        }
+        self.modify(|inner| {
+            let Some(transaction) = inner.as_mut() else {
+                return PrepareOp::NotActive;
+            };
+            if *transaction.update_id() != *update_id {
+                return PrepareOp::NotActive;
+            }
+            if transaction.state() == PrepareState::Stopping {
+                return PrepareOp::Applied(PrepareState::Stopping);
+            }
+            match transaction.commit() {
+                Ok(state) => PrepareOp::Applied(state),
+                Err(_) => PrepareOp::NotActive,
+            }
+        })
     }
 
     /// `Stopping -> Aborted` (spec §5's `worker budget exceeded -> Aborted`):
@@ -367,16 +388,15 @@ impl PrepareCoordinator {
     /// prepared artifacts are garbage (the update was abandoned, not
     /// activated) and must be deleted.
     pub(crate) fn abandon_stopping(&self, update_id: &UpdateId) -> Option<AbortOutcome> {
-        let mut inner = self.inner.lock().unwrap();
-        match inner.as_ref() {
+        self.modify(|inner| match inner.as_ref() {
             Some(transaction)
                 if *transaction.update_id() == *update_id
                     && transaction.state() == PrepareState::Stopping =>
             {
-                take_locked(&mut inner, AbortReason::UpdateAbandoned)
+                take_locked(inner, AbortReason::UpdateAbandoned)
             }
             _ => None,
-        }
+        })
     }
 
     fn apply(
@@ -384,16 +404,48 @@ impl PrepareCoordinator {
         update_id: &UpdateId,
         operation: impl FnOnce(&mut PrepareTransaction) -> Result<PrepareState>,
     ) -> PrepareOp {
-        let mut inner = self.inner.lock().unwrap();
-        let Some(transaction) = inner.as_mut() else {
-            return PrepareOp::NotActive;
-        };
-        if *transaction.update_id() != *update_id {
-            return PrepareOp::NotActive;
-        }
-        match operation(transaction) {
-            Ok(state) => PrepareOp::Applied(state),
-            Err(_) => PrepareOp::NotActive,
+        self.modify(|inner| {
+            let Some(transaction) = inner.as_mut() else {
+                return PrepareOp::NotActive;
+            };
+            if *transaction.update_id() != *update_id {
+                return PrepareOp::NotActive;
+            }
+            match operation(transaction) {
+                Ok(state) => PrepareOp::Applied(state),
+                Err(_) => PrepareOp::NotActive,
+            }
+        })
+    }
+
+    /// Wait until the active transaction's watchdog budget expires, abort
+    /// it, and return the abort (spec §5 invariant I1: every state has a
+    /// watchdog exit). One waiter only (the supervisor's watchdog task):
+    /// a transition that lands while no one is parked leaves a
+    /// `notify_one` permit, which the next wait consumes.
+    pub(crate) async fn wait_for_expiry(&self) -> AbortOutcome {
+        loop {
+            let moved = self.watchdog_moved.notified();
+            let watchdog = self
+                .inner
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(PrepareTransaction::watchdog);
+            let Some((deadline_ms, _)) = watchdog else {
+                moved.await;
+                continue;
+            };
+            // The budget is wall-clock epoch ms (durable in marker.json).
+            let remaining = Duration::from_millis(deadline_ms.saturating_sub(now_ms()));
+            tokio::select! {
+                () = moved => {}
+                () = tokio::time::sleep(remaining) => {
+                    if let Some(abort) = self.abort_if_expired(now_ms()) {
+                        return abort;
+                    }
+                }
+            }
         }
     }
 
@@ -554,7 +606,11 @@ impl MutationDrainLatch {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::future::Future;
+    use std::pin::pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Wake, Waker};
 
     use super::*;
     use pa_types::daemon::{update_marker_path, update_roster_path, UpdateSupervisorIdentity};
@@ -769,6 +825,57 @@ mod tests {
         assert_eq!(abort.reason, AbortReason::PreparedExpired);
         assert!(abort.delete_prepared);
         assert_eq!(coordinator.active_state(), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expiry_wait_parks_without_timers_and_rearms_when_the_budget_moves() {
+        struct WakeCount(AtomicUsize);
+        impl Wake for WakeCount {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let tally = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let woken = || tally.0.load(Ordering::SeqCst);
+        let waker = Waker::from(Arc::clone(&tally));
+        let mut cx = Context::from_waker(&waker);
+        let coordinator = PrepareCoordinator::new();
+        let mut wait = pin!(coordinator.wait_for_expiry());
+        // The 1 h prepare deadline stays in the future; the marker expiry (1_100) is past.
+        let budget = UpdateTimeoutBudget {
+            prepare_ms: 3_600_000,
+            prepared_expiry_ms: 100,
+            ..UpdateTimeoutBudget::default()
+        };
+
+        // Idle parks with zero wakes: a day of paused time is silent.
+        assert!(wait.as_mut().poll(&mut cx).is_pending());
+        tokio::time::advance(Duration::from_hours(24)).await;
+        assert_eq!(woken(), 0);
+
+        // Armed on the prepare deadline: silent for 600 s (an in-flight 1 Hz loop would wake here).
+        coordinator.begin(id("u1"), now_ms(), &budget);
+        assert_eq!(woken(), 1);
+        assert!(wait.as_mut().poll(&mut cx).is_pending());
+        tokio::time::advance(Duration::from_secs(600)).await;
+        assert_eq!(woken(), 1);
+
+        // Only a budget move wakes: the ack swaps the deadline for the marker expiry.
+        coordinator.drain_complete(&id("u1"));
+        coordinator.snapshot_written(&id("u1"), 1_000, &budget);
+        coordinator.prepare_acked(&id("u1"));
+        assert_eq!(woken(), 2);
+        let armed = Instant::now();
+        assert_eq!(
+            wait.as_mut().await,
+            AbortOutcome {
+                update_id: id("u1"),
+                delete_prepared: true,
+                reason: AbortReason::PreparedExpired,
+            }
+        );
+        // Not after the dropped 1 h deadline (the wheel may tick 1 ms for a zero sleep).
+        assert!(armed.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

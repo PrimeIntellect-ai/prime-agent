@@ -18,7 +18,45 @@ const CONTENT_ENTRY_TYPES: &[&str] = &[
     "branch_summary",
 ];
 
+/// Whether `entry` is the session's Anthropic subscription warning shown
+/// marker: a `custom` row carrying
+/// [`pa_core::session::ANTHROPIC_WARNING_SHOWN_CUSTOM_TYPE`] with
+/// `data.shown == true` (the once-per-session-lifecycle gate's persisted
+/// state, written by [`SessionFile::mark_anthropic_warning_shown`]).
+pub(crate) fn is_warning_shown_row(entry: &SessionEntry) -> bool {
+    entry.type_ == "custom"
+        && entry.fields.get("customType").and_then(Value::as_str)
+            == Some(pa_core::session::ANTHROPIC_WARNING_SHOWN_CUSTOM_TYPE)
+        && entry
+            .fields
+            .get("data")
+            .and_then(|data| data.get("shown"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
 impl SessionFile {
+    /// Whether this session has already drawn the Anthropic subscription
+    /// ban-risk warning (the once-per-session-lifecycle gate): hydrated from
+    /// the persisted marker row at open, flipped by
+    /// [`SessionFile::mark_anthropic_warning_shown`]; `get_state` serves it
+    /// as `SessionSummary::anthropic_warning_shown`.
+    #[must_use]
+    pub fn anthropic_warning_shown(&self) -> bool {
+        self.anthropic_warning_shown
+    }
+
+    /// Re-hydrate the warning gate from the in-memory entries: the fork
+    /// arms build their stores by ADOPTING copied rows (no file reopen),
+    /// so the gate must agree with the rows the new store itself carries —
+    /// a fork of a warned session answers its own file (the marker row
+    /// rides the copied branch), not the source's live flag.
+    pub(crate) fn hydrate_anthropic_warning_flag(&mut self) {
+        // The active branch, exactly like the reopen paths: a marker on a
+        // sibling row never flips the gate.
+        self.anthropic_warning_shown = self.branch().iter().copied().any(is_warning_shown_row);
+    }
+
     #[must_use]
     pub fn entries(&self) -> &[SessionEntry] {
         &self.entries

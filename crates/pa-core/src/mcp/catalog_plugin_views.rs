@@ -493,6 +493,29 @@ pub struct McpConnectionView {
     pub setup_hint: Option<String>,
 }
 
+/// The `/mcp` view's api-key credential catalog: the non-provider keys the
+/// product stores in the shared auth store and offers alongside the MCP
+/// connections (the web-search key the websearch skill's runtime reads).
+pub const API_KEY_CREDENTIALS: &[(&str, &str)] = &[(
+    crate::auth::SERPER_CREDENTIAL_ID,
+    crate::auth::SERPER_CREDENTIAL_NAME,
+)];
+
+/// One row of the `/mcp` view's api-key credential section (the daemon's
+/// `get_mcp_connections` response): a stored key the surface manages. Enter
+/// opens the paste-the-key prompt; the submitted key lands in the row's auth
+/// slot (the `AuthCredential::ApiKey` form).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpCredentialView {
+    /// The auth-store slot the credential writes and the runtime reads
+    /// (e.g. `serper`).
+    pub id: String,
+    pub label: String,
+    /// True when the shared auth store holds an API key at the slot.
+    pub configured: bool,
+}
+
 /// The conflict hint of a reserved-ownership ruling (canonical and disabled
 /// carry none).
 fn ownership_setup_hint(ownership: &ReservedOwnership) -> Option<String> {

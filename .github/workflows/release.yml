@@ -57,9 +57,10 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
-        with:
-          toolchain: "1.98.1"
+      # The pinned SHA is the toolchain pin: this action version has no
+      # `toolchain` input, and its parse step hard-codes 1.98.1. Change the
+      # compiler by changing the SHA; a `toolchain:` input is ignored.
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e
       - name: Validate tag matches workspace version
         run: |
           set -euo pipefail
@@ -132,9 +133,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
+      # The pinned SHA is the toolchain pin: this action version has no
+      # `toolchain` input, and its parse step hard-codes 1.98.1. Change the
+      # compiler by changing the SHA; a `toolchain:` input is ignored.
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e
         with:
-          toolchain: "1.98.1"
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -145,8 +148,11 @@ jobs:
           # the new key builds cold; the marker moves only with reviewed
           # baseline changes (same protocol as the image digest below).
           key: ${{ matrix.target }}-glibc235
+      # Only the shipped binary links here: the job packages `prime-agent`
+      # alone, so pa-daemon's [[bin]] would be a second thin-LTO link with
+      # no consumer (~26% of the build step, measured).
       - name: Build (release, locked)
-        run: cargo build --release --locked --target ${{ matrix.target }} -j 4
+        run: cargo build --release --locked --target ${{ matrix.target }} -j 4 -p pa-cli --bin prime-agent
       - name: Split the shipped binary + split-debug decoder (Option C posture)
         # Linux only: the build emits line tables and does not strip at
         # link; this step produces the SHIPPED binary (objcopy
@@ -234,8 +240,17 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             runs-on: macos-14
+          # The x86_64 leg cross-compiles on the Apple-silicon pool: rustc
+          # and the Xcode linker build either darwin arch from an M-series
+          # host, and the M-pool links this binary ~2.2x faster than the
+          # macos-15-intel pool with far tighter variance (484 s vs 1046 s
+          # same-commit link tail, 2026-09-30). The livecheck below runs
+          # the assembled x64 artifact under Rosetta 2 — the macos-15
+          # arm64 image installs it, and install-rust.sh ships the x64
+          # build to an Apple-Silicon Mac's Rosetta shell, so the gate
+          # still boots the binary on its delivery runtime.
           - target: x86_64-apple-darwin
-            runs-on: macos-15-intel  # macos-13 is retired; this is the Intel runner now
+            runs-on: macos-15
     env:
       # AppleDouble resource forks must not leak into the archive; the
       # assembler additionally enforces plain-file payloads.
@@ -244,15 +259,24 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
+      # The pinned SHA is the toolchain pin: this action version has no
+      # `toolchain` input, and its parse step hard-codes 1.98.1. Change the
+      # compiler by changing the SHA; a `toolchain:` input is ignored.
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e
         with:
-          toolchain: "1.98.1"
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.target }}
+      # Only the shipped binary links here: the job packages `prime-agent`
+      # alone, so pa-daemon's [[bin]] would be a second thin-LTO link with
+      # no consumer (~26% of the build step, measured).
       - name: Build (release, locked)
-        run: cargo build --release --locked --target ${{ matrix.target }} -j 4
+        run: cargo build --release --locked --target ${{ matrix.target }} -j 4 -p pa-cli --bin prime-agent
+      # The aarch64 leg livechecks natively; the x86_64 leg,
+      # cross-compiled on the Apple-silicon pool, livechecks under
+      # Rosetta 2 — the runtime install-rust.sh gives the x64 payload on
+      # an Apple-Silicon Mac.
       - name: "Livecheck gate: --version prints the tag version"
         run: |
           set -euo pipefail
@@ -813,7 +837,7 @@ jobs:
               else
                 render_installer beta
                 publish_pointer_pair beta.json beta release-out/beta.json beta
-                aws s3 cp /tmp/install-beta.sh "s3://${R2_BUCKET}/prime-agent/install-beta.sh" \
+                aws s3 cp /tmp/install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
                   --endpoint-url "$R2_ENDPOINT_URL" \
                   --content-type text/x-shellscript \
                   --cache-control no-cache
@@ -834,12 +858,12 @@ jobs:
             else
               render_installer stable
               publish_pointer_pair latest.json stable release-out/latest.json stable
-              aws s3 cp /tmp/install-stable.sh "s3://${R2_BUCKET}/prime-agent/install.sh" \
+              aws s3 cp /tmp/install-stable.sh "s3://${R2_BUCKET}/install.sh" \
                 --endpoint-url "$R2_ENDPOINT_URL" \
                 --content-type text/x-shellscript \
                 --cache-control no-cache
               render_installer beta
-              aws s3 cp /tmp/install-beta.sh "s3://${R2_BUCKET}/prime-agent/install-beta.sh" \
+              aws s3 cp /tmp/install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
                 --endpoint-url "$R2_ENDPOINT_URL" \
                 --content-type text/x-shellscript \
                 --cache-control no-cache
@@ -904,7 +928,21 @@ jobs:
   # refuses to clobber a newer rolling beta.json (re-runs of older tags).
   nightly-refresh:
     needs: promote
-    if: contains(github.ref_name, '-')
+    # THE GATE IS EXPLICIT (the promote precedent: an `if` without a status
+    # function is auto-prefixed with success(), and GitHub's default needs
+    # gate skips every job downstream of a skipped job in the dependency
+    # chain). On a -beta* tag the two stable-route build jobs skip themselves
+    # by their own gates; they are promote's needs and therefore this job's
+    # TRANSITIVE needs, so the bare `if: contains(github.ref_name, '-')` that
+    # lived here skipped the refresh on every
+    # green beta promote since the flow went live - the rolling `nightly`
+    # release never materialized (releases/tags/nightly 404s) while the
+    # per-tag prereleases and the R2 beta.json published and the payload
+    # uploaded inside the same green promote. The explicit form admits
+    # exactly the one healthy state: a green promote - the only producer of
+    # the nightly-refresh-payload artifact - on a -beta* tag. A failed,
+    # skipped, or cancelled promote leaves the refresh skipped.
+    if: ${{ !cancelled() && needs.promote.result == 'success' && contains(github.ref_name, '-') }}
     name: rolling nightly release refresh (the nightly channel's discoverable base)
     concurrency:
       group: rolling-nightly-refresh
@@ -921,6 +959,13 @@ jobs:
       - name: Refresh the rolling nightly release
         env:
           GH_TOKEN: ${{ github.token }}
+          # gh resolves the repo from the git remote - absent: this job never
+          # checks out - or GH_REPO, and never from GITHUB_REPOSITORY, so
+          # without this row every `gh release ...` call below dies with
+          # "failed to run git: not a git repository" (probe-pinned: the gate
+          # fix alone let the job run and its first gh call failed exactly
+          # so).
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           # The rolling update channel distributes tarballs only. Per-tag

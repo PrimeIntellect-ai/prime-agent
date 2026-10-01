@@ -76,6 +76,8 @@ struct Step {
     run: Option<String>,
     #[serde(default)]
     with: Option<With>,
+    #[serde(default)]
+    env: Option<BTreeMap<String, String>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -301,8 +303,17 @@ fn the_rolling_nightly_refresh_is_a_serialized_job() {
         .expect("the nightly-refresh job exists");
     assert_eq!(
         refresh.r#if.as_deref(),
-        Some("contains(github.ref_name, '-')"),
-        "only -beta* tags refresh the rolling nightly release"
+        Some(
+            "${{ !cancelled() && needs.promote.result == 'success' \
+&& contains(github.ref_name, '-') }}",
+        ),
+        "the refresh gate is the explicit result form (the promote precedent): \
+         an `if` without a status function is auto-prefixed with success(), and \
+         the default needs gate skips every job downstream of a skipped job in \
+         the dependency chain - on a -beta* tag the two stable-route build jobs \
+         are skipped, and as promote's needs they are the refresh's transitive \
+         needs, so the bare form skipped the refresh on every green beta \
+         promote while the payload uploaded inside the same promote"
     );
     // The refresh is the workflow's only shared mutable state, so it alone
     // serializes (a queued refresh superseded by a newer tag is harmless:
@@ -317,7 +328,27 @@ fn the_rolling_nightly_refresh_is_a_serialized_job() {
         "the refresh serializes in its own group"
     );
     assert!(refresh.needs.is_some(), "the refresh needs the promote job");
-    let run = step(refresh, "Refresh the rolling nightly release")
+    // The refresh step's gh calls are repo-relative (gh release view /
+    // download / upload / create) and this job never checks out: gh resolves
+    // the repo from the git remote or GH_REPO - never from GITHUB_REPOSITORY
+    // - so the GH_REPO row is load-bearing. Probe-pinned: with the gate
+    // fixed but GH_REPO absent, the job's first gh call fails with
+    // "failed to run git: not a git repository".
+    let refresh_step = step(refresh, "Refresh the rolling nightly release");
+    let refresh_env = refresh_step
+        .env
+        .as_ref()
+        .expect("the refresh step declares env");
+    assert_eq!(
+        refresh_env.get("GH_REPO").map(String::as_str),
+        Some("${{ github.repository }}"),
+        "the refresh step pins the repo for gh (no checkout, no git remote)"
+    );
+    assert!(
+        refresh_env.contains_key("GH_TOKEN"),
+        "the refresh step carries the workflow token"
+    );
+    let run = refresh_step
         .run
         .as_deref()
         .expect("the refresh step runs a script");

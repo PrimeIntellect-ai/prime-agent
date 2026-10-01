@@ -169,6 +169,114 @@ async fn a_stop_during_the_storm_leaves_the_terminal_state_to_the_stop() {
     );
 }
 
+/// An adopted worker's watch parks on the kernel's exit notification and
+/// hands the exit to whoever owns the resident now - a stop that landed,
+/// or a relaunch elsewhere that took the resident's pid. Both cases return
+/// at the exit without entering the crash arm, and with no timer in the
+/// runtime the paused clock cannot advance.
+#[cfg(any(target_os = "linux", target_os = "macos"))] // the kernel-watch arms
+#[tokio::test(start_paused = true)]
+async fn an_adopted_watch_hands_off_at_exit_without_a_timer() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    // A hand-off the watch misses (the unfixed tree) reaches the crash
+    // arm: its relaunch must fail deterministically (the logs dir cannot
+    // be created - a file stands where it would go) instead of spawning
+    // the test binary as a worker.
+    std::fs::write(agent_dir.join("logs"), "not a directory").unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: agent_dir.clone(),
+        })
+        .expect("supervisor"),
+    );
+    {
+        // A stop that landed owns the exit's terminal state.
+        let mut worker = std::process::Command::new("sleep")
+            .arg("600")
+            .spawn()
+            .expect("spawn sleep");
+        let resident = adopted_watch_resident(dir.path(), worker.id());
+        let started = tokio::time::Instant::now();
+        let mut watch = std::pin::pin!(Arc::clone(&supervisor).watch_worker(
+            Arc::clone(&resident),
+            None,
+            u64::from(worker.id())
+        ));
+        assert!(
+            futures::poll!(watch.as_mut()).is_pending(),
+            "a live adopted worker keeps the watch parked"
+        );
+        resident.intentional_stop.store(true, Ordering::SeqCst);
+        worker.kill().expect("kill sleep");
+        worker.wait().expect("reap sleep");
+        watch.await;
+        assert_eq!(
+            tokio::time::Instant::now(),
+            started,
+            "the kernel exit notification woke the watch; no poll timer fired"
+        );
+    }
+    {
+        // A relaunch elsewhere took the resident: the pid no longer names
+        // the watched process, so the watch hands off instead of running
+        // the crash arm over the replacement.
+        let mut worker = std::process::Command::new("sleep")
+            .arg("600")
+            .spawn()
+            .expect("spawn sleep");
+        let resident = adopted_watch_resident(dir.path(), worker.id());
+        let started = tokio::time::Instant::now();
+        let mut watch = std::pin::pin!(Arc::clone(&supervisor).watch_worker(
+            Arc::clone(&resident),
+            None,
+            u64::from(worker.id())
+        ));
+        assert!(
+            futures::poll!(watch.as_mut()).is_pending(),
+            "a live adopted worker keeps the watch parked"
+        );
+        resident.descriptor.lock().await.pid = u64::from(std::process::id());
+        worker.kill().expect("kill sleep");
+        worker.wait().expect("reap sleep");
+        watch.await;
+        assert_eq!(
+            tokio::time::Instant::now(),
+            started,
+            "the kernel exit notification woke the watch; no poll timer fired"
+        );
+    }
+}
+
+/// The watched adopted worker's resident, with the descriptor carrying the
+/// watched pid (the post-exit ownership check compares against it).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn adopted_watch_resident(dir: &std::path::Path, pid: u32) -> Arc<ResidentWorker> {
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
+        "version": 2,
+        "workerId": "w-adopted-watch",
+        "pid": pid,
+        "socketPath": "/tmp/none.sock",
+        "recoveryJournalPath": dir.join("journal.jsonl").to_string_lossy(),
+        "supervisorSocketPath": "/tmp/none.sock",
+        "authenticationToken": "token",
+        "rootActiveSessionId": "w-adopted-watch",
+        "createdAt": "t",
+        "updatedAt": "t",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    ResidentWorker::new(
+        "w-adopted-watch".to_string(),
+        descriptor,
+        dir.join("w-adopted-watch.descriptor.json"),
+    )
+}
+
 /// The saved-session surfaces (the `list --all` summary row and the
 /// `list_saved_sessions` catalog row) carry the persisted thinking
 /// level: the agents-view Model column renders "model:level" for
@@ -962,12 +1070,12 @@ async fn idle_passivation_requires_the_worker_token() {
 }
 
 #[tokio::test]
-async fn idle_passivation_refuses_client_owned_and_in_memory_workers() {
-    // The refusal gate (TS `canEvictWorker`'s `hasOwnerClient` arm,
-    // widened): a client-owned worker never passivates itself, and an
-    // in-memory (noSession) root has no file to wake from. An unowned
-    // sessioned root passes this gate (the e2e drives the pass side
-    // end to end).
+async fn idle_passivation_refuses_a_client_owned_worker() {
+    // The owner refusal (TS `canEvictWorker`'s `hasOwnerClient` arm):
+    // ownership alone carries it (TS `clientOwned: noSession`). An
+    // unowned root passes this gate; with a route in flight, its ask
+    // defers instead of stopping the worker underneath it (the e2e
+    // drives the pass side end to end).
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
@@ -1010,13 +1118,11 @@ async fn idle_passivation_refuses_client_owned_and_in_memory_workers() {
         last_error: None,
         rest: Map::default(),
     };
-    let in_memory = {
-        let mut descriptor = descriptor.clone();
-        descriptor.worker_id = "w-mem".to_string();
-        descriptor.authentication_token = "mem-token".to_string();
-        descriptor.owner_client_id = None;
-        descriptor.create_command.no_session = Some(true);
-        descriptor
+    let idle = pa_types::daemon::DaemonWorkerDescriptor {
+        worker_id: "w-idle".to_string(),
+        authentication_token: "idle-token".to_string(),
+        owner_client_id: None,
+        ..descriptor.clone()
     };
     let resident = ResidentWorker::new("w-owned".to_string(), descriptor, dir.path().join("w.d"));
     supervisor.registry.insert(resident).await;
@@ -1029,22 +1135,34 @@ async fn idle_passivation_refuses_client_owned_and_in_memory_workers() {
             .error
             .as_deref()
             .unwrap_or("")
-            .contains("client-owned or in-memory (noSession) worker"),
+            .contains("client-owned worker"),
         "the client-owned worker's ask is refused: {response:?}"
     );
-    let resident = ResidentWorker::new("w-mem".to_string(), in_memory, dir.path().join("w-mem.d"));
-    supervisor.registry.insert(resident).await;
-    let response = supervisor
-        .handle_worker_idle_passivation("c2", "worker_idle_passivation", "mem-token", Some(1))
+    // The eviction fence (TS `withEvictionFence`): a request in flight
+    // when the ask arrives defers the passivation — no stop, no
+    // tombstone — and the same ask stops the worker once the route
+    // drains.
+    let resident = ResidentWorker::new("w-idle".to_string(), idle, dir.path().join("w-idle.d"));
+    supervisor.registry.insert(resident.clone()).await;
+    let in_flight = Arc::clone(&resident.inflight).try_acquire_owned().unwrap();
+    supervisor
+        .handle_worker_idle_passivation("c3", "worker_idle_passivation", "idle-token", None)
         .await;
-    assert!(!response.success);
     assert!(
-        response
-            .error
-            .as_deref()
-            .unwrap_or("")
-            .contains("client-owned or in-memory (noSession) worker"),
-        "the in-memory worker's ask is refused: {response:?}"
+        supervisor.registry.get("w-idle").await.is_some(),
+        "the deferred ask never stopped the worker"
+    );
+    assert!(
+        resident.descriptor.lock().await.stop_requested_at.is_none(),
+        "the deferred ask left no stop tombstone on the live worker"
+    );
+    drop(in_flight);
+    supervisor
+        .handle_worker_idle_passivation("c4", "worker_idle_passivation", "idle-token", None)
+        .await;
+    assert!(
+        supervisor.registry.get("w-idle").await.is_none(),
+        "the drained worker's ask stops it"
     );
 }
 
@@ -1300,6 +1418,187 @@ async fn a_ledger_delete_of_a_stopped_child_tombstones_without_a_worker() {
             .expect("the child file survives (archived, not unlinked)")
             .contains("archived"),
         "the stopped child's delete must archive the session file"
+    );
+}
+
+/// The stopped-child delete settles the roster the way the resident
+/// delete does (the D1b composition with the idle passivation): a
+/// `rlmLedgerDelete` aimed at an idle-passivated child finds no stop to
+/// settle the row, so the passivation's unowned row would linger while
+/// the bucket bills the captured spend on the parent - the same child
+/// billed twice until some later stop's unowned sweep catches the row.
+/// The delete's own push carries both halves together: the parent's
+/// refreshed bucket AND the child's row removal, one `roster_update`.
+#[tokio::test]
+async fn the_stopped_childs_delete_removes_its_row_and_bills_the_parent() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let sessions_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: agent_dir.clone(),
+        })
+        .expect("supervisor"),
+    );
+    // The parent's roster row: the bucket's target.
+    let parent_file = sessions_dir.join("parent.jsonl");
+    std::fs::write(&parent_file, "{\"type\":\"session\",\"id\":\"p\"}\n").unwrap();
+    let parent_row = json!({
+        "sessionId": "p",
+        "activeSessionId": "p-live",
+        "runtimeKind": "top-level",
+        "sessionFile": parent_file.to_string_lossy(),
+        "sessionName": "parent",
+        "status": "idle",
+    });
+    supervisor.write_roster_summary(&parent_row, None);
+    // The idle-passivated child: its transcript lives under
+    // session-artifacts (the real RLM-delete shape - the flat catalog
+    // never lists it, so the bucket is its only billing surface), one
+    // billed assistant turn ($0.30) the delete captures into the
+    // tombstone, and the passivation's lingering unowned roster row.
+    let child_transcript = agent_dir
+        .join("session-artifacts")
+        .join("root-1")
+        .join("sub-gone")
+        .join("sub-gone.jsonl");
+    std::fs::create_dir_all(child_transcript.parent().expect("artifact dir")).unwrap();
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&child_transcript)
+            .expect("open the child transcript");
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "type": "session", "version": 3, "id": "sub-gone",
+                "timestamp": "2026-09-29T00:00:00.000Z", "cwd": "/the/stopped/cwd",
+                "parentSession": parent_file.to_string_lossy(), "rlmDepth": 1
+            })
+        )
+        .expect("the child header");
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "type": "message", "id": "dm1a", "parentId": null,
+                "timestamp": "2026-09-29T00:00:02.100Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "parked work"}],
+                    "timestamp": 2100,
+                    "usage": {
+                        "input": 60, "output": 6, "cacheRead": 0, "cacheWrite": 0,
+                        "totalTokens": 66,
+                        "cost": {"input": 0.0, "output": 0.3, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.3}
+                    }
+                }
+            })
+        )
+        .expect("the billed turn");
+    }
+    let child_row = json!({
+        "sessionId": "sub-gone-persisted",
+        "activeSessionId": "sub-gone-live",
+        "runtimeKind": "subagent",
+        "rlmChildId": "sub-gone",
+        "rlmDepth": 1,
+        "sessionFile": child_transcript.to_string_lossy(),
+        "sessionName": "parked-worker",
+        "cwd": "/the/stopped/cwd",
+        "parentSessionPath": parent_file.to_string_lossy(),
+        "status": "done",
+        "usage": { "inputTokens": 60, "outputTokens": 6, "cost": 0.3 },
+    });
+    let child_agent_id = supervisor
+        .write_roster_summary(&child_row, None)
+        .expect("the child row")
+        .agent_id;
+    // A live ledger edge for the stopped child (the whole-worker idle
+    // stop left the edge behind).
+    let ledger = supervisor
+        .rlm_spawn_ledger_for(None)
+        .await
+        .expect("the spawn ledger resolves");
+    ledger
+        .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
+            child_id: "sub-gone".to_string(),
+            parent: parent_file.to_string_lossy().into_owned(),
+            child: child_transcript.to_string_lossy().into_owned(),
+            depth: 1,
+            name: "parked-worker".to_string(),
+        })
+        .expect("the spawn edge appends");
+    let mut events = supervisor.events.subscribe();
+    // The parent's delete of its stopped child.
+    supervisor
+        .tombstone_saved_rlm_child(
+            "sub-gone",
+            Some("sub-gone"),
+            crate::rlm_ledger::RlmLedgerDeleteReason::User,
+        )
+        .await
+        .expect("the stopped child's delete tombstones");
+    // ONE push carries both halves of the settle: the parent's
+    // refreshed bucket and the child's row removal.
+    let mut pushes = Vec::new();
+    loop {
+        match events.try_recv() {
+            Ok((ClientRouting::RosterSubscribers, payload)) => pushes.push((*payload).clone()),
+            Ok(_) => {}
+            Err(
+                tokio::sync::broadcast::error::TryRecvError::Empty
+                | tokio::sync::broadcast::error::TryRecvError::Closed,
+            ) => break,
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(missed)) => {
+                panic!("roster push subscriber lagged by {missed}");
+            }
+        }
+    }
+    assert_eq!(
+        pushes.len(),
+        1,
+        "the stopped child's delete settles in one push: {pushes:?}"
+    );
+    let parent_after = supervisor
+        .roster
+        .lock()
+        .unwrap()
+        .entries()
+        .into_iter()
+        .find(|entry| entry.summary.get("sessionId").and_then(Value::as_str) == Some("p"))
+        .expect("the parent row");
+    assert_eq!(
+        pushes[0]["changed"],
+        serde_json::to_value(vec![parent_after]).expect("serialized parent"),
+        "the push carries the parent's refreshed row: {pushes:?}"
+    );
+    assert_eq!(
+        pushes[0]["changed"][0]["summary"]["deletedDescendantUsage"],
+        json!({ "inputTokens": 60, "outputTokens": 6, "cost": 0.3 }),
+        "the deleted child's captured spend bills through the parent"
+    );
+    assert_eq!(
+        pushes[0]["removed"],
+        json!([child_agent_id]),
+        "the lingering row is removed in the same push: {pushes:?}"
+    );
+    assert!(
+        supervisor
+            .roster
+            .lock()
+            .unwrap()
+            .entries()
+            .into_iter()
+            .all(|entry| {
+                entry.summary.get("rlmChildId").and_then(Value::as_str) != Some("sub-gone")
+            }),
+        "the deleted child's row is gone from the roster"
     );
 }
 
