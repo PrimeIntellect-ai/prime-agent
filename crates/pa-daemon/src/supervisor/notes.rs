@@ -23,6 +23,15 @@ impl Default for DaemonEventCounts {
     }
 }
 
+fn send_daemon_event_summary(client: &pa_telemetry::TelemetryClient, counts: DaemonEventCounts) {
+    pa_core::session_engine::telemetry::track_daemon_event_summary(
+        client,
+        counts.window_started.elapsed().as_millis() as u64,
+        &counts.counts,
+        counts.saved_sessions_usage_rows_max,
+    );
+}
+
 impl Supervisor {
     /// Emit the `daemon event` adoption signal for a session-archive sweep
     /// (best-effort, non-blocking; no-op when the daemon is opted out).
@@ -100,16 +109,28 @@ impl Supervisor {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         update(&mut counts);
-        let window = counts.window_started.elapsed();
-        if window >= DAEMON_EVENT_SUMMARY_WINDOW {
-            let summary = std::mem::take(&mut *counts);
-            pa_core::session_engine::telemetry::track_daemon_event_summary(
-                &client,
-                window.as_millis() as u64,
-                &summary.counts,
-                summary.saved_sessions_usage_rows_max,
-            );
+        if counts.window_started.elapsed() >= DAEMON_EVENT_SUMMARY_WINDOW {
+            send_daemon_event_summary(&client, std::mem::take(&mut *counts));
         }
+    }
+
+    /// The daemon's exit: send the current window's partial summary and
+    /// drain the telemetry client, so the last window's counts and any
+    /// queued event are not lost when the process ends.
+    pub(super) async fn flush_telemetry_on_exit(&self) {
+        let Some(client) = self.telemetry.lock().unwrap().take() else {
+            return;
+        };
+        let counts = std::mem::take(
+            &mut *self
+                .daemon_event_counts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        if !counts.counts.is_empty() {
+            send_daemon_event_summary(&client, counts);
+        }
+        let _ = client.shutdown().await;
     }
 
     /// Publish one session event to the session's attached connections

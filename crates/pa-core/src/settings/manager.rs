@@ -85,7 +85,7 @@ impl SettingsManager {
     #[must_use]
     pub fn reopen(&self) -> Self {
         let mut fresh = Self::from_storage(Arc::clone(&self.storage));
-        fresh.runtime_overrides = self.runtime_overrides.clone();
+        fresh.apply_overrides(&self.runtime_overrides);
         fresh
     }
 
@@ -1090,6 +1090,19 @@ mod tests {
         );
         manager.reload().unwrap();
         assert_eq!(manager.get_default_model(), Some("z-ai/glm-5.3"));
+    }
+
+    #[test]
+    fn reopen_keeps_the_runtime_overrides_in_the_merged_settings() {
+        let mut manager = SettingsManager::in_memory(&Settings::default());
+        manager.apply_overrides(&Settings {
+            markdown: Some(MarkdownSettings {
+                code_block_indent: Some("    ".to_string()),
+                mermaid: None,
+            }),
+            ..Settings::default()
+        });
+        assert_eq!(manager.reopen().get_code_block_indent(), "    ");
     }
 
     #[test]

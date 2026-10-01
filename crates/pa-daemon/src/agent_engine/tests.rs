@@ -60,7 +60,8 @@ fn write_compaction_settings(dir: &std::path::Path, reserve_tokens: u64) {
 /// Turns the repo's `cargo test` telemetry opt-out (`DO_NOT_TRACK=1` in
 /// `.cargo/config.toml`) back off for one test that asserts telemetry
 /// wiring, restoring it on drop. Debug builds have no network sink, so the
-/// opted-in test still sends nothing; serialized so concurrent opt-ins
+/// opted-in test still sends nothing (its callers are ignored in release
+/// builds, which have one); serialized so concurrent opt-ins
 /// never interleave their restores.
 pub(crate) fn telemetry_opt_in() -> TelemetryOptIn {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

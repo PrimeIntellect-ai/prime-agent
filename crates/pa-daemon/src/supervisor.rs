@@ -496,6 +496,7 @@ impl Supervisor {
             &self.options.socket_path,
             socket::socket_identity(&self.options.socket_path),
         );
+        self.flush_telemetry_on_exit().await;
         Ok(())
     }
 }

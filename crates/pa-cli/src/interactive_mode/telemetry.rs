@@ -35,9 +35,13 @@ impl CliInteractionTelemetry {
         }
     }
 
+    fn settings(&self) -> pa_core::settings::SettingsManager {
+        pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir)
+    }
+
     /// A one-shot client, or `None` when telemetry is opted out.
     fn client(&self) -> Option<pa_telemetry::TelemetryClient> {
-        let settings = pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir);
+        let settings = self.settings();
         if crate::mode::telemetry_disabled(&settings) {
             return None;
         }
@@ -47,7 +51,12 @@ impl CliInteractionTelemetry {
         ))
     }
 
+    /// Count only while telemetry is on, so turning it on later never
+    /// sends what happened while it was off.
     fn with(&self, update: impl FnOnce(&mut TuiCounters)) {
+        if crate::mode::telemetry_disabled(&self.settings()) {
+            return;
+        }
         update(
             &mut self
                 .counters
@@ -284,5 +293,32 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
             client.track("agent command used", properties);
             let _ = client.shutdown().await;
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pa_tui::interactive::InteractionTelemetry as _;
+
+    use super::CliInteractionTelemetry;
+
+    /// Interactions while telemetry is off never count, so a later
+    /// `/telemetry on` cannot send them with `tui exit`.
+    #[tokio::test]
+    async fn interactions_while_off_never_count() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        pa_core::settings::SettingsManager::create(dir.path(), &agent_dir)
+            .set_telemetry_enabled(false)
+            .unwrap();
+        let telemetry = CliInteractionTelemetry::new(dir.path().to_path_buf(), agent_dir);
+        telemetry.scroll_used("page", false).await;
+        telemetry
+            .input_stage(String::new(), "received", "ok", 5)
+            .await;
+        telemetry.hyperlinks_active(true).await;
+        let counters = telemetry.counters.lock().unwrap();
+        assert!(counters.counts.is_empty());
+        assert!(counters.flags.is_empty());
     }
 }

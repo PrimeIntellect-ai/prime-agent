@@ -330,6 +330,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "release builds send to the real endpoint"
+    )]
     async fn refusal_telemetry_honors_both_opt_outs() {
         let _telemetry = crate::agent_engine::tests::telemetry_opt_in();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -362,6 +366,10 @@ mod tests {
     /// getter re-resolving the same refused model stays silent after the
     /// first event.
     #[tokio::test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "release builds send to the real endpoint"
+    )]
     async fn refusal_telemetry_dedupes_repeated_resolves() {
         let _telemetry = crate::agent_engine::tests::telemetry_opt_in();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -382,6 +390,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "release builds send to the real endpoint"
+    )]
     async fn refusal_telemetry_rebinds_when_the_cwd_moves() {
         let _telemetry = crate::agent_engine::tests::telemetry_opt_in();
         let dir = tempfile::tempdir().expect("tempdir");

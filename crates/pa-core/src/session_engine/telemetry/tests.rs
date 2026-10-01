@@ -688,7 +688,9 @@ async fn retries_fold_into_one_run_that_succeeds() {
     retry_start(&telemetry, 1, 500, false);
     attempt(&fixture, failed);
     retry_start(&telemetry, 2, 1_000, true);
-    attempt(&fixture, assistant_message());
+    let mut recovered = assistant_message();
+    recovered.usage.cost.total = 0.012;
+    attempt(&fixture, recovered);
     telemetry.note_auto_retry_event(&AutoRetryEvent::End {
         success: true,
         attempt: 2,
@@ -709,6 +711,9 @@ async fn retries_fold_into_one_run_that_succeeds() {
     assert_eq!(run["turn_count"], serde_json::json!(3));
     assert_eq!(run["model_error_count"], serde_json::json!(2));
     assert_eq!(run["error_rate_limit_count"], serde_json::json!(2));
+    // A recovered failure keeps the turn's cost.
+    assert_eq!(run["usage_complete"], serde_json::json!(true));
+    assert_eq!(run["estimated_cost_usd"], serde_json::json!(0.012));
     let ended = event_properties(&fixture.mock, "agent session ended").await;
     assert_eq!(ended[0]["run_count"], serde_json::json!(1));
     assert_eq!(ended[0]["successful_run_count"], serde_json::json!(1));
@@ -761,6 +766,47 @@ async fn exhausted_retries_are_one_failed_run() {
     let ended = event_properties(&fixture.mock, "agent session ended").await;
     assert_eq!(ended[0]["failed_run_count"], serde_json::json!(1));
     assert_eq!(ended[0]["run_count"], serde_json::json!(1));
+}
+
+/// A retry whose wait is cancelled closes its run: the next user turn is
+/// a run of its own, not a continuation of the abandoned retry.
+#[tokio::test]
+async fn a_cancelled_retry_never_absorbs_the_next_turn() {
+    let fixture = fixture();
+    let telemetry = SessionTelemetry::detached(
+        fixture.client.clone(),
+        fixture.state.clone(),
+        "interactive".to_string(),
+    );
+    emit(
+        &fixture,
+        AgentEvent::MessageStart {
+            message: user_message(),
+        },
+    );
+    attempt(&fixture, assistant_with_error("network connection reset"));
+    retry_start(&telemetry, 1, 500, false);
+    telemetry.note_auto_retry_event(&AutoRetryEvent::End {
+        success: false,
+        attempt: 1,
+        final_error: Some("Retry cancelled".to_string()),
+        restored_model: None,
+    });
+    emit(
+        &fixture,
+        AgentEvent::MessageStart {
+            message: user_message(),
+        },
+    );
+    attempt(&fixture, assistant_message());
+    telemetry.end().await.unwrap();
+
+    let runs = event_properties(&fixture.mock, "agent run completed").await;
+    assert_eq!(runs.len(), 2, "the next turn is its own run");
+    assert_eq!(runs[0]["outcome"], serde_json::json!("error"));
+    assert_eq!(runs[0]["retry_count"], serde_json::json!(1));
+    assert_eq!(runs[1]["outcome"], serde_json::json!("success"));
+    assert_eq!(runs[1]["retry_count"], serde_json::json!(0));
 }
 
 /// The enriched `agent run completed` (v2): the run pair id, the
@@ -898,12 +944,15 @@ async fn legacy_events_reach_the_analytics_endpoint_in_the_ts_shape() {
                             serde_json::from_slice(&request[end + 4..end + 4 + length]).unwrap();
                         let accepted = body["events"].as_array().map_or(0, Vec::len);
                         let reply = format!("{{\"accepted\":{accepted}}}");
+                        // Hand the body over before answering: the flush
+                        // returns once the reply is read, and the test
+                        // collects right after it.
+                        let _ = tx.send(body);
                         let _ = write!(
                             stream,
                             "HTTP/1.1 202 Accepted\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
                             reply.len()
                         );
-                        let _ = tx.send(body);
                         break;
                     }
                 }

@@ -1778,3 +1778,35 @@ async fn a_ledger_child_wake_joins_an_already_hosting_resident() {
         "the ledger wake's reuse arm must not launch a second worker"
     );
 }
+
+/// The daemon's exit sends the partial `daemon event` summary of the
+/// current window (the window is under an hour, so no count sent it yet).
+#[tokio::test]
+async fn the_exit_flush_sends_the_partial_daemon_event_summary() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let supervisor = Supervisor::new(SupervisorOptions {
+        socket_path: dir.path().join("daemon.sock"),
+        agent_dir: dir.path().join("agent"),
+    })
+    .expect("supervisor");
+    let mock = Arc::new(pa_telemetry::MockSink::new());
+    let mut config = pa_telemetry::TelemetryClientConfig::new("install-1");
+    config.sinks = vec![mock.clone() as Arc<dyn pa_telemetry::TelemetrySink>];
+    *supervisor.telemetry.lock().unwrap() =
+        Some(pa_telemetry::TelemetryClient::spawn(config).unwrap());
+    supervisor.note_daemon_event("attach", None);
+    supervisor.note_daemon_event("attach", None);
+    assert!(mock.events().is_empty(), "the window is still open");
+    supervisor.flush_telemetry_on_exit().await;
+    let events = mock.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].name, "daemon event");
+    assert_eq!(
+        events[0].properties.get("kind"),
+        Some(&Value::from("summary"))
+    );
+    assert_eq!(
+        events[0].properties.get("attach_count"),
+        Some(&Value::from(2))
+    );
+}

@@ -452,7 +452,9 @@ impl SessionTelemetry {
     /// `Start` counts the retry (and a backup-provider switch as a
     /// failover) into the active run, sums the retry wait, and keeps the
     /// run open, so the retried attempt continues the same run (one
-    /// `agent run completed` per turn, like TS). `End` adds nothing: the
+    /// `agent run completed` per turn, like TS). `End` closes the retry:
+    /// a retry that never ran (a cancelled wait) leaves the run to
+    /// finalize at the next start instead of absorbing the next turn. The
     /// final attempt's message decides the outcome.
     ///
     /// # Panics
@@ -460,11 +462,13 @@ impl SessionTelemetry {
     /// Panics if the telemetry state mutex is poisoned.
     pub fn note_auto_retry_event(&self, event: &AutoRetryEvent) {
         let mut state = self.state.lock().expect("telemetry state poisoned");
-        if let AutoRetryEvent::Start {
-            delay_ms, reason, ..
-        } = event
-        {
-            if let Some(run) = state.active_run.as_mut() {
+        let Some(run) = state.active_run.as_mut() else {
+            return;
+        };
+        match event {
+            AutoRetryEvent::Start {
+                delay_ms, reason, ..
+            } => {
                 run.retry_count += 1;
                 run.retry_wait_ms += *delay_ms;
                 run.retry_pending = true;
@@ -472,6 +476,7 @@ impl SessionTelemetry {
                     run.failover_count += 1;
                 }
             }
+            AutoRetryEvent::End { .. } => run.retry_pending = false,
         }
     }
 
@@ -627,6 +632,10 @@ fn handle_event(
                 run.retry_pending = false;
                 run.ended = false;
                 run.ended_at = None;
+                // The failed call is behind a retry now: the run's cost
+                // stays reported (with the failed attempts' usage
+                // included) unless the final attempt fails too.
+                run.usage_complete = true;
                 return;
             }
             // The previous run finalizes here (not at AgentEnd): a post-run

@@ -98,9 +98,10 @@ pub struct TelemetryClientConfig {
     pub retry: RetryPolicy,
     /// Fan-out sinks: every sink receives every event.
     pub sinks: Vec<Arc<dyn TelemetrySink>>,
-    /// The live on/off switch, asked before every delivery pass: while it
-    /// answers false, queued events are dropped unsent (a mid-session
-    /// opt-out applies without a restart). `None` is always on.
+    /// The live on/off switch, asked for every tracked event and before
+    /// every delivery pass: while it answers false, new and queued events
+    /// are dropped unsent (a mid-session opt-out applies without a
+    /// restart). `None` is always on.
     pub enabled: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
@@ -293,6 +294,13 @@ impl Worker {
                     };
                     match cmd {
                         Cmd::Track(event) => {
+                            // An event recorded while the switch is off is
+                            // dropped now, so turning telemetry back on
+                            // never sends what happened while it was off.
+                            if self.drop_while_disabled() {
+                                self.queue_dropped.fetch_add(1, Ordering::Relaxed);
+                                continue;
+                            }
                             self.enqueue(&event);
                             if self.channels.iter().any(|channel| {
                                 channel.queue.len() >= self.config.batch_size

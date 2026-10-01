@@ -213,13 +213,18 @@ mod tests {
         config.enabled = Some(Arc::new(move || switch.load(Ordering::SeqCst)));
         let client = TelemetryClient::spawn(config).unwrap();
         client.track("while off", Properties::new());
-        client.flush().await.unwrap();
-        assert!(mock.batches().is_empty(), "nothing sends while off");
-        assert_eq!(client.dropped_count(), 1, "the queued event is dropped");
+        // The worker takes the event while off; telemetry is turned back
+        // on before any delivery pass, and that event still never sends.
+        tokio::time::sleep(Duration::from_millis(50)).await;
         on.store(true, Ordering::SeqCst);
         client.track("back on", Properties::new());
         client.flush().await.unwrap();
         assert_eq!(mock.event_names(), vec!["back on"]);
+        assert_eq!(
+            client.dropped_count(),
+            1,
+            "the event tracked while off is dropped"
+        );
         client.shutdown().await.unwrap();
     }
 
