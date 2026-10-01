@@ -198,11 +198,6 @@ pub async fn execute_session_command(
         execution.error = Some(error);
         return execution;
     }
-    // Telemetry adoption seam: builtin session commands carry their usage
-    // event from the single dispatch point (canonical name only).
-    if let Some(telemetry) = &engine.telemetry {
-        telemetry.note_command_used(command.name);
-    }
     let result = match command.name {
         "compact" => execute_compact(engine, params, command, &mut execution).await,
         "refine" => execute_refine(engine, params, command, &mut execution).await,

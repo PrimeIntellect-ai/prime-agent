@@ -78,6 +78,13 @@ pub fn install_id(agent_dir: &Path) -> Result<String> {
     }
 }
 
+/// The stored installation id, read-only: `None` when `telemetry.json` is
+/// absent, unreadable, or invalid (status surfaces must not create one).
+#[must_use]
+pub fn existing_install_id(agent_dir: &Path) -> Option<String> {
+    read_install_id(&agent_dir.join(STATE_FILE)).ok().flatten()
+}
+
 /// Valid stored id, or `None` when the file is absent or holds invalid state.
 fn read_install_id(path: &Path) -> Result<Option<String>> {
     let bytes = match std::fs::read(path) {

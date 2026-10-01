@@ -207,10 +207,7 @@ impl Runtime for UnavailableRuntime {
 /// `PRIME_AGENT_TELEMETRY`), then the settings AND. Returns true when
 /// telemetry is disabled for this invocation.
 pub fn telemetry_disabled(settings: &pa_core::settings::SettingsManager) -> bool {
-    match pa_telemetry::env_telemetry_override() {
-        Some(enabled) => !enabled,
-        None => !settings.get_telemetry_enabled(),
-    }
+    !pa_core::session_engine::telemetry::telemetry_switch(settings).enabled()
 }
 
 /// Build the runtime config from parsed args, mirroring `runtimeConfigFromArgs`.

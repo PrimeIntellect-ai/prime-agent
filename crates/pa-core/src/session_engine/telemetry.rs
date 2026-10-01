@@ -1,7 +1,7 @@
 //! Session telemetry: the agent-event state machine behind the session
 //! lifecycle events (`agent started` / `agent run started` /
-//! `agent run completed` / `agent session ended` / `agent command used` /
-//! `tool executed`) and the #2117 v2 vocabulary (`agent error`,
+//! `agent run completed` / `agent session ended` / `tool executed`; the
+//! TUI client reports `agent command used`) and the #2117 v2 vocabulary (`agent error`,
 //! `agent timing`, `agent tool summary`). Behavioral port of the TS
 //! `installAgentTelemetry` subscriber (`packages/coding-agent/src/core/
 //! telemetry.ts`) plus the never-merged #2117 tracking intent, implemented
@@ -58,7 +58,13 @@ pub use track::{
 // private (classify-internal callers).
 mod classify;
 pub use classify::provider_category;
+
+mod status;
 use classify::{error_category, model_category, opt_value, run_outcome};
+pub use status::{
+    set_telemetry_enabled_text, telemetry_endpoint, telemetry_status_text, telemetry_switch,
+    TelemetrySwitch,
+};
 
 // The inline unit battery moved to the child module at the same tree
 // position (session_engine::telemetry::tests); its use-super glob keeps
@@ -559,15 +565,6 @@ impl SessionTelemetry {
         self.client.track("rlm child usage attributed", properties);
     }
 
-    /// `agent command used`: builtin session commands only, canonical name.
-    /// Feed from `session_commands::execute_session_command` (TS
-    /// `captureAgentCommandUsed`).
-    pub fn note_command_used(&self, command_name: &str) {
-        let mut properties = self.session_properties();
-        properties.set("command_name", Value::from(command_name));
-        self.client.track("agent command used", properties);
-    }
-
     /// Base properties + `session_id` for per-event properties.
     fn session_properties(&self) -> Properties {
         let mut properties = base_properties(&self.execution_mode);
@@ -816,7 +813,6 @@ fn handle_event(
                 }
                 tool_stats.duration_ms += duration_ms;
             }
-            state.totals.tool_call_count += 1;
             // `tool executed` (v1): tool name + duration + outcome.
             let mut properties = base_properties(execution_mode);
             properties.set("session_id", Value::from(state.session_id.as_str()));
@@ -1063,12 +1059,11 @@ fn stop_reason(last_assistant: Option<&AssistantMessage>) -> &'static str {
     }
 }
 
-/// Build the product telemetry client from settings (opt-in already
-/// resolved by the caller): the Prime Intellect analytics sink (the TS
-/// endpoint and wire format) plus the local JSONL transparency mirror
-/// (default on, `telemetry.localMirror` disables it). Debug builds (every
-/// `cargo test`, every dev run) install no analytics sink, so tests and
-/// local development never reach production analytics. Never fails: a
+/// Build the product telemetry client from settings: the Prime Intellect
+/// analytics sink (the TS endpoint and wire format; none in debug builds,
+/// see [`telemetry_endpoint`]) plus the local JSONL transparency mirror
+/// (default on, `telemetry.localMirror` disables it), behind the live
+/// [`telemetry_switch`] re-read before every delivery pass. Never fails: a
 /// broken install id falls back to a no-op client (TS parity: capture
 /// disables itself when the installation identity cannot be created).
 pub fn build_client(
@@ -1081,10 +1076,8 @@ pub fn build_client(
         Ok(id) => {
             config.install_id = id;
             let mut sinks: Vec<Arc<dyn pa_telemetry::TelemetrySink>> = Vec::new();
-            if !cfg!(debug_assertions) {
-                sinks.push(Arc::new(pa_telemetry::AnalyticsSink::new(
-                    pa_telemetry::ANALYTICS_ENDPOINT,
-                )));
+            if let Some(endpoint) = telemetry_endpoint() {
+                sinks.push(Arc::new(pa_telemetry::AnalyticsSink::new(endpoint)));
             }
             let local_mirror = settings
                 .settings()
@@ -1096,6 +1089,12 @@ pub fn build_client(
                 sinks.push(Arc::new(pa_telemetry::FileSink::new(agent_dir)));
             }
             config.sinks = sinks;
+            // `/telemetry off` (or a settings edit) applies to running
+            // clients at their next delivery pass, no restart needed.
+            let settings = settings.reopen();
+            config.enabled = Some(Arc::new(move || {
+                telemetry_switch(&settings.reopen()).enabled()
+            }));
         }
         Err(error) => {
             tracing::warn!(error = %error, "telemetry install id unavailable; telemetry disabled");

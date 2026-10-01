@@ -72,14 +72,14 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
     // (a session diagnostic in the TUI; the Rust build prints it to stderr
     // before the TUI starts, which keeps the same text visible without a
     // daemon-side diagnostics round-trip).
-    if !tui_options.telemetry_disabled.unwrap_or(false) {
+    if !options.config.telemetry_disabled {
         let mut settings = pa_core::settings::SettingsManager::create(
             &options.config.cwd,
             &options.config.agent_dir,
         );
         if settings.get_onboarding_shown() && !settings.get_telemetry_notice_shown() {
             eprintln!(
-                "Prime Agent sends pseudonymous usage and performance metrics without prompts, responses, tool content, file paths, or repository data. Disable this with telemetry.enabled=false, PRIME_AGENT_TELEMETRY=0, DO_NOT_TRACK=1, or offline mode."
+                "Prime Agent sends pseudonymous usage and performance metrics without prompts, responses, tool content, file paths, or repository data. Disable this with /telemetry off, telemetry.enabled=false, PRIME_AGENT_TELEMETRY=0, DO_NOT_TRACK=1, or offline mode."
             );
             if let Err(error) = settings.set_telemetry_notice_shown(true) {
                 eprintln!("Warning: could not persist the telemetry notice: {error}");
@@ -563,8 +563,17 @@ fn build_tui_options(
         // gates the completion marker, and the auth handle serves the
         // not-ready branch's sign-in steps.
         onboarding,
-        // Only Some(true) rides the wire (TS `telemetryDisabled`).
-        telemetry_disabled: config.telemetry_disabled.then_some(true),
+        // Only Some(true) rides the wire (TS `telemetryDisabled`), and only
+        // for an environment opt-out: a settings opt-out stays the live
+        // switch the session's client re-reads, so `/telemetry on`
+        // resumes the running session instead of waiting for a new one.
+        telemetry_disabled: matches!(
+            pa_core::session_engine::telemetry::telemetry_switch(
+                &pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir)
+            ),
+            pa_core::session_engine::telemetry::TelemetrySwitch::Env { enabled: false, .. }
+        )
+        .then_some(true),
         // `/mcp login` / `/mcp logout`: the client-side auth flows run in
         // this process (the TS interactive client's placement) and persist
         // through the shared auth store the daemon's sessions read.

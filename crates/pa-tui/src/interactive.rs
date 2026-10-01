@@ -158,9 +158,9 @@ pub trait InteractionTelemetry: Send + Sync {
     /// `surface` is `transcript` (a card expand click) / `editor` (a
     /// prompt-bar caret placement) / `picker` (a menu row select).
     fn click_used(&self, surface: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
-    /// A builtin client command was submitted (`agent command used`):
-    /// `command` is the canonical name (`model`, `effort`, ...). Session
-    /// commands report through the session telemetry instead.
+    /// A builtin command was submitted (`agent command used`): `command`
+    /// is the canonical name (`model`, `compact`, ...), client and session
+    /// commands alike (TS `captureAgentCommandUsed`).
     fn command_used(&self, command: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// A user-visible feature attempt's observed outcome (#2117
     /// `agent feature outcome`): `feature` is the fixed feature name
@@ -455,7 +455,13 @@ impl InteractiveOptions {
     /// `AgentsViewModeOptions.config`).
     #[must_use]
     pub fn create_config(&self) -> Value {
-        let mut config = json!({ "cwd": self.cwd.display().to_string() });
+        // `executionMode` is the telemetry execution mode the daemon
+        // worker stamps on the session's events (TS main.ts
+        // `executionMode: appMode`).
+        let mut config = json!({
+            "cwd": self.cwd.display().to_string(),
+            "executionMode": "interactive",
+        });
         if let Some(session_dir) = &self.session_dir {
             config["sessionDir"] = json!(session_dir.display().to_string());
         }

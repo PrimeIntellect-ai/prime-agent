@@ -1080,7 +1080,7 @@ impl AgentSessionEngine {
                     &settings,
                     &self.config.agent_dir,
                 ),
-                execution_mode: Some("daemon".to_string()),
+                execution_mode: create_resources.execution_mode.clone(),
                 now: None,
             }
         });

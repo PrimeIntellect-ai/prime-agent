@@ -51,14 +51,14 @@ pub use catalog::{
     TIMING_ORIGINS, TIMING_STAGES, TOOL_CATEGORIES, WORKLOAD_ORIGINS,
 };
 pub use client::{TelemetryClient, TelemetryClientConfig};
-pub use env::{env_telemetry_override, parse_bool_override};
+pub use env::parse_bool_override;
 pub use event::TelemetryEvent;
 pub use events::{
     AgentError, AgentFeatureOutcome, AgentInputStage, AgentInstallationStage, AgentRunStarted,
     AgentStartupStage, AgentTiming, AgentToolSummary, ErrorEventKind, OnboardingStage, RunTrigger,
     TimingStage, ToolCategory,
 };
-pub use install_id::install_id;
+pub use install_id::{existing_install_id, install_id};
 pub use platform::{base_properties, SCHEMA_VERSION};
 pub use properties::Properties;
 pub use rename::rename_onto;
@@ -202,6 +202,28 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(a.event_names(), vec!["fanned"]);
         assert_eq!(b.event_names(), vec!["fanned"]);
+        client.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_live_switch_drops_while_off_and_resumes_when_on() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mock = Arc::new(MockSink::new());
+        let on = Arc::new(AtomicBool::new(false));
+        let mut config = TelemetryClientConfig::new("install-1");
+        config.flush_interval = Duration::from_mins(1);
+        config.sinks = vec![mock.clone() as Arc<dyn TelemetrySink>];
+        let switch = Arc::clone(&on);
+        config.enabled = Some(Arc::new(move || switch.load(Ordering::SeqCst)));
+        let client = TelemetryClient::spawn(config).unwrap();
+        client.track("while off", Properties::new());
+        client.flush().await.unwrap();
+        assert!(mock.batches().is_empty(), "nothing sends while off");
+        assert_eq!(client.dropped_count(), 1, "the queued event is dropped");
+        on.store(true, Ordering::SeqCst);
+        client.track("back on", Properties::new());
+        client.flush().await.unwrap();
+        assert_eq!(mock.event_names(), vec!["back on"]);
         client.shutdown().await.unwrap();
     }
 

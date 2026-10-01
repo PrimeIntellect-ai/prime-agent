@@ -145,6 +145,30 @@ pub(super) struct SettingsOnboardingSink {
     /// The startup-model probe (the completion telemetry's category
     /// columns: the resolved startup model and its auth source).
     pub(super) probe: StartupModelProbe,
+    /// The success outcome was reported (the completion marker ran).
+    pub(super) completion_reported: std::sync::atomic::AtomicBool,
+}
+
+impl SettingsOnboardingSink {
+    /// The `onboarding completed` properties (TS
+    /// `captureOnboardingCompleted`): the auth and provider categories read
+    /// the resolved startup model (`getCurrentModel` + its auth status).
+    fn completed_properties(&self, outcome: &str, duration_ms: u64) -> pa_telemetry::Properties {
+        let mut properties = pa_telemetry::base_properties("interactive");
+        properties.set("duration_ms", serde_json::Value::from(duration_ms));
+        properties.set("outcome", serde_json::Value::from(outcome));
+        let (auth_category, provider_category) = self.probe.telemetry_categories();
+        properties.set("auth_category", serde_json::Value::from(auth_category));
+        properties.set(
+            "provider_category",
+            serde_json::Value::from(provider_category),
+        );
+        properties.set(
+            "onboarding_id",
+            serde_json::Value::from(self.onboarding_id.as_str()),
+        );
+        properties
+    }
 }
 
 impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
@@ -166,29 +190,19 @@ impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
     fn mark_onboarding_complete(&self) -> Result<()> {
         let mut settings = pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir);
         settings.set_onboarding_shown(true)?;
-        // `onboarding completed` (schema v1): the marker writes only on a
-        // completed flow, so the outcome is always success; the auth and
-        // provider categories read the resolved startup model (TS
-        // `captureOnboardingCompleted`'s `getCurrentModel` + auth status
-        // columns). Best-effort like all telemetry.
+        // `onboarding completed` (schema v1) with the success outcome: the
+        // marker writes only on a completed flow. Best-effort like all
+        // telemetry.
+        self.completion_reported
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         if !crate::mode::telemetry_disabled(&settings) {
             let client =
                 pa_core::session_engine::telemetry::build_client(&settings, &self.agent_dir);
             let duration_ms = self.created_at.elapsed().as_millis() as u64;
-            let mut properties = pa_telemetry::base_properties("interactive");
-            properties.set("duration_ms", serde_json::Value::from(duration_ms));
-            properties.set("outcome", serde_json::Value::from("success"));
-            let (auth_category, provider_category) = self.probe.telemetry_categories();
-            properties.set("auth_category", serde_json::Value::from(auth_category));
-            properties.set(
-                "provider_category",
-                serde_json::Value::from(provider_category),
+            client.track(
+                "onboarding completed",
+                self.completed_properties("success", duration_ms),
             );
-            properties.set(
-                "onboarding_id",
-                serde_json::Value::from(self.onboarding_id.as_str()),
-            );
-            client.track("onboarding completed", properties);
             // The `exit` stage (#2117 `onboarding stage`): the completion
             // marker's own stage event, paired by `onboarding_id`. The
             // final flush rides the client's drop (the worker drains once
@@ -225,6 +239,27 @@ impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
             .track(&client);
         }
         Ok(())
+    }
+
+    fn onboarding_incomplete(&self, outcome: &'static str) {
+        // A completed flow whose marker failed to persist already reported
+        // its success.
+        if self
+            .completion_reported
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
+        let settings = pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir);
+        if crate::mode::telemetry_disabled(&settings) {
+            return;
+        }
+        let client = pa_core::session_engine::telemetry::build_client(&settings, &self.agent_dir);
+        let duration_ms = self.created_at.elapsed().as_millis() as u64;
+        client.track(
+            "onboarding completed",
+            self.completed_properties(outcome, duration_ms),
+        );
     }
 }
 
@@ -307,6 +342,7 @@ pub(super) fn onboarding_task(
             created_at: std::time::Instant::now(),
             onboarding_id,
             ready_emitted: std::sync::atomic::AtomicBool::new(mount_ready),
+            completion_reported: std::sync::atomic::AtomicBool::new(false),
             probe,
         }),
         model_ready: std::sync::Arc::new(move || readiness_probe.resolve().1),

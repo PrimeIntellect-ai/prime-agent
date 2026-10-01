@@ -244,7 +244,7 @@ impl SessionUi {
         }
     }
 
-    /// Report a builtin client-command submission (`agent command used`),
+    /// Report a builtin command submission (`agent command used`),
     /// fire-and-forget like the scroll event: the command's handling never
     /// waits on the telemetry flush.
     pub(super) fn track_command_used(&mut self, command: &'static str) {

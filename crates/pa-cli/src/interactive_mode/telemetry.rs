@@ -273,9 +273,9 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
     }
 
     fn command_used(&self, command: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        // `agent command used` (TS `captureAgentCommandUsed`): builtin
-        // client commands report from the client; session commands report
-        // through the session telemetry, so the two seams never double-emit.
+        // `agent command used` (TS `captureAgentCommandUsed`): every
+        // submitted builtin reports from the client, session commands
+        // included (the session engine reports none).
         Box::pin(async move {
             let Some(client) = self.client() else {
                 return;

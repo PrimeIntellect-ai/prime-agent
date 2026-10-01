@@ -136,11 +136,7 @@ impl ModelRefusalTelemetry {
         let settings = pa_core::settings::SettingsManager::create(cwd, &self.agent_dir);
         // The same gating as the supervisor's `daemon event`: the env
         // override wins, else the merged settings' telemetry switch.
-        let enabled = match pa_telemetry::env_telemetry_override() {
-            Some(enabled) => enabled,
-            None => settings.get_telemetry_enabled(),
-        };
-        if !enabled {
+        if !pa_core::session_engine::telemetry::telemetry_switch(&settings).enabled() {
             return;
         }
         // Once per distinct (surface, selector): repeated resolutions of the

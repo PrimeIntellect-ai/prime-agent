@@ -108,7 +108,7 @@ async fn acp_mode_main(options: &RunOptions) -> Result<i32, String> {
         return Ok(exit_code);
     }
     let config = &options.config;
-    let engine = build_headless_engine_parts(options, "print").await?;
+    let engine = build_headless_engine_parts(options, "acp").await?;
     let exit_code = pa_daemon::acp::run_acp_mode(pa_daemon::acp::AcpOptions {
         engine: std::sync::Arc::new(engine.engine),
         actual_cwd: config.cwd.clone(),
@@ -388,7 +388,9 @@ fn run_print_mode(options: &RunOptions) -> Result<i32, String> {
 }
 
 async fn print_mode_main(options: &RunOptions) -> Result<i32, String> {
-    let headless = build_headless_engine(options, "print").await?;
+    // `print` or `json`: the telemetry execution mode is the app mode (TS
+    // main.ts `executionMode: appMode`).
+    let headless = build_headless_engine(options, options.app_mode.as_str()).await?;
     let engine = std::sync::Arc::new(headless.engine);
     // The CLI `--goal` seed (TS constructor seeding): a fresh root branch
     // starts the goal and queues its continuation context as the first

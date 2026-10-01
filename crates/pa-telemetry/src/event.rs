@@ -46,9 +46,8 @@ impl TelemetryEvent {
     }
 
     /// The sink-facing object form: `{"id", "name", "timestamp" (ISO-8601),
-    /// "properties"}` - the analytics endpoint's event shape. Other sinks
-    /// lift fields from it (`PostHog` `event`/`timestamp`, JSONL mirror adds
-    /// `distinct_id`).
+    /// "properties"}` - the analytics endpoint's event shape; the JSONL
+    /// mirror adds `distinct_id`.
     pub(crate) fn to_value(&self) -> Value {
         json!({
             "id": self.id,

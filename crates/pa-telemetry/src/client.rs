@@ -98,6 +98,10 @@ pub struct TelemetryClientConfig {
     pub retry: RetryPolicy,
     /// Fan-out sinks: every sink receives every event.
     pub sinks: Vec<Arc<dyn TelemetrySink>>,
+    /// The live on/off switch, asked before every delivery pass: while it
+    /// answers false, queued events are dropped unsent (a mid-session
+    /// opt-out applies without a restart). `None` is always on.
+    pub enabled: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl TelemetryClientConfig {
@@ -111,6 +115,7 @@ impl TelemetryClientConfig {
             max_batch_bytes: DEFAULT_MAX_BATCH_BYTES,
             retry: RetryPolicy::default(),
             sinks: Vec::new(),
+            enabled: None,
         }
     }
 }
@@ -341,6 +346,21 @@ impl Worker {
         now + delay
     }
 
+    /// Ask the live switch; when it is off, drop every queued event
+    /// (counted) and report true so the pass sends nothing.
+    fn drop_while_disabled(&mut self) -> bool {
+        if self.config.enabled.as_ref().is_none_or(|enabled| enabled()) {
+            return false;
+        }
+        for channel in &mut self.channels {
+            self.queue_dropped
+                .fetch_add(channel.queue.len() as u64, Ordering::Relaxed);
+            channel.queue.clear();
+            channel.next_retry_at = None;
+        }
+        true
+    }
+
     fn enqueue(&mut self, event: &TelemetryEvent) {
         for channel in &mut self.channels {
             if channel.queue.len() >= self.config.queue_capacity {
@@ -356,6 +376,9 @@ impl Worker {
 
     /// One delivery pass over every channel: expire, batch, send, retry.
     async fn flush_pass(&mut self) {
+        if self.drop_while_disabled() {
+            return;
+        }
         let now = std::time::SystemTime::now();
         let now_epoch_ms = now
             .duration_since(std::time::UNIX_EPOCH)
@@ -432,6 +455,9 @@ impl Worker {
     /// (bounded shutdown; a hard exit may lose reports, like the TS
     /// contract).
     async fn flush_final(&mut self) {
+        if self.drop_while_disabled() {
+            return;
+        }
         for channel in &mut self.channels {
             while !channel.queue.is_empty() {
                 // The final drain honors the same batch byte cap as the

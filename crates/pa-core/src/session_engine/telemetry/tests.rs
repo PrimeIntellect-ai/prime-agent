@@ -439,22 +439,6 @@ async fn tool_executed_events_carry_name_duration_outcome() {
     assert!(!all.contains("private tool output"));
 }
 
-/// `agent command used` events: canonical command name only.
-#[tokio::test]
-async fn command_used_event_shape() {
-    let fixture = fixture();
-    let telemetry = SessionTelemetry::detached(
-        fixture.client.clone(),
-        fixture.state.clone(),
-        "interactive".to_string(),
-    );
-    telemetry.note_command_used("compact");
-    fixture.client.flush().await.unwrap();
-    let commands = event_properties(&fixture.mock, "agent command used").await;
-    assert_eq!(commands.len(), 1);
-    assert_eq!(commands[0]["command_name"], serde_json::json!("compact"));
-}
-
 /// `skill used` events: name, kind, and arrival source; never prompt
 /// content.
 #[tokio::test]
@@ -1002,4 +986,221 @@ async fn bot_edges_the_give_up_never_double_counts_the_chain() {
         serde_json::json!(1),
         "the give-up never inflated the chain to 2"
     );
+}
+
+/// End to end through the real client and the real analytics sink to a
+/// local stub endpoint: a scripted interactive session (start, one run
+/// with a tool call, end) posts TS-shaped bodies, and every legacy event
+/// carries the full TS property set in the TS vocabulary.
+#[tokio::test]
+async fn legacy_events_reach_the_analytics_endpoint_in_the_ts_shape() {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://{}/api/v1/agent-analytics/events",
+        listener.local_addr().unwrap()
+    );
+    let (tx, rx) = std::sync::mpsc::channel::<serde_json::Value>();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 8192];
+            loop {
+                let n = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..n]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let length = text[..end]
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        let body: serde_json::Value =
+                            serde_json::from_slice(&request[end + 4..end + 4 + length]).unwrap();
+                        let accepted = body["events"].as_array().map_or(0, Vec::len);
+                        let reply = format!("{{\"accepted\":{accepted}}}");
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 202 Accepted\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                            reply.len()
+                        );
+                        let _ = tx.send(body);
+                        break;
+                    }
+                }
+                if n == 0 {
+                    break;
+                }
+            }
+        }
+    });
+
+    let install_id = "6f1c2b3a-4d5e-4f60-8a7b-9c0d1e2f3a4b";
+    let mut config = TelemetryClientConfig::new(install_id);
+    config.flush_interval = Duration::from_mins(10);
+    config.sinks = vec![
+        Arc::new(pa_telemetry::AnalyticsSink::new(url)) as Arc<dyn pa_telemetry::TelemetrySink>
+    ];
+    let client = TelemetryClient::spawn(config).unwrap();
+    let mut fixture = fixture();
+    fixture.client = client.clone();
+
+    let mut started = base_properties("interactive");
+    started.set(
+        "session_id",
+        Value::from("0197d0a0-8f5c-7f2a-b0e3-2d7e0d2b3b1a"),
+    );
+    client.track("agent started", started);
+    let assistant = assistant_message();
+    emit(&fixture, AgentEvent::AgentStart);
+    emit(
+        &fixture,
+        AgentEvent::MessageStart {
+            message: user_message(),
+        },
+    );
+    emit(&fixture, AgentEvent::TurnStart);
+    emit(&fixture, text_delta_event(&assistant));
+    let (tool_start, tool_end) = tool_execution_event("bash", false);
+    emit(&fixture, tool_start);
+    emit(&fixture, tool_end);
+    emit(&fixture, message_end_event(assistant));
+    emit(
+        &fixture,
+        AgentEvent::AgentEnd {
+            messages: Vec::new(),
+        },
+    );
+    let telemetry =
+        SessionTelemetry::detached(client, fixture.state.clone(), "interactive".to_string());
+    telemetry.end().await.unwrap();
+
+    let bodies: Vec<serde_json::Value> = rx.try_iter().collect();
+    assert!(!bodies.is_empty(), "the stub received the batches");
+    for body in &bodies {
+        println!("{}", serde_json::to_string_pretty(body).unwrap());
+        let mut keys: Vec<&String> = body.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["events", "installation_id"],
+            "the TS envelope, nothing else"
+        );
+        assert_eq!(body["installation_id"], install_id);
+        for event in body["events"].as_array().unwrap() {
+            let mut keys: Vec<&String> = event.as_object().unwrap().keys().collect();
+            keys.sort();
+            assert_eq!(keys, ["id", "name", "properties", "timestamp"]);
+        }
+    }
+    let events: Vec<&serde_json::Value> = bodies
+        .iter()
+        .flat_map(|body| body["events"].as_array().unwrap())
+        .collect();
+    let base = [
+        "version",
+        "os_family",
+        "architecture",
+        "install_method",
+        "execution_mode",
+        "libc",
+        "libc_version",
+        "cpu_baseline",
+        "os_release",
+        "os_product_version",
+    ];
+    let ts_keys: [(&str, &[&str]); 3] = [
+        ("agent started", &["session_id"]),
+        (
+            "agent run completed",
+            &[
+                "session_id",
+                "outcome",
+                "duration_ms",
+                "visible_ttft_ms",
+                "first_model_event_ms",
+                "model_latency_ms",
+                "max_model_latency_ms",
+                "model_call_count",
+                "turn_count",
+                "tool_call_count",
+                "tool_error_count",
+                "input_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+                "total_tokens",
+                "compaction_count",
+                "retry_count",
+                "provider_category",
+                "model_category",
+                "error_category",
+            ],
+        ),
+        (
+            "agent session ended",
+            &[
+                "session_id",
+                "duration_ms",
+                "prompt_count",
+                "run_count",
+                "successful_run_count",
+                "failed_run_count",
+                "aborted_run_count",
+                "tool_call_count",
+                "compaction_count",
+                "model_call_count",
+                "input_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+                "total_tokens",
+            ],
+        ),
+    ];
+    for (name, keys) in ts_keys {
+        let event = events
+            .iter()
+            .find(|event| event["name"] == name)
+            .unwrap_or_else(|| panic!("{name} was sent"));
+        let properties = event["properties"].as_object().unwrap();
+        for key in base.iter().chain(keys.iter()) {
+            assert!(
+                properties.contains_key(*key),
+                "{name} carries the TS key {key}"
+            );
+        }
+        assert_eq!(properties["execution_mode"], "interactive");
+        assert!(["linux", "darwin", "win32", "freebsd", "android"]
+            .contains(&properties["os_family"].as_str().unwrap()));
+        assert!(
+            ["x64", "arm64", "ia32", "arm", "s390x", "ppc64", "riscv64", "loong64"]
+                .contains(&properties["architecture"].as_str().unwrap())
+        );
+    }
+    let run = events
+        .iter()
+        .find(|event| event["name"] == "agent run completed")
+        .unwrap();
+    assert_eq!(run["properties"]["outcome"], "success");
+    assert_eq!(run["properties"]["provider_category"], "openai");
+    assert_eq!(run["properties"]["model_category"], "gpt");
+    assert_eq!(run["properties"]["error_category"], serde_json::Value::Null);
+    // TS sums the session's tool calls from its runs (one call, counted once).
+    let ended = events
+        .iter()
+        .find(|event| event["name"] == "agent session ended")
+        .unwrap();
+    assert_eq!(ended["properties"]["tool_call_count"], 1);
+    std::fs::write(
+        std::env::temp_dir().join("pa-telemetry-e2e-bodies.json"),
+        serde_json::to_string_pretty(&bodies).unwrap(),
+    )
+    .unwrap();
 }

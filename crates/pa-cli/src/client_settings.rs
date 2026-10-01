@@ -227,6 +227,18 @@ impl ClientSettings for CliClientSettings {
             .wire_name()
             .to_string()
     }
+
+    fn telemetry_status(&self) -> String {
+        pa_core::session_engine::telemetry::telemetry_status_text(&self.manager(), &self.agent_dir)
+    }
+
+    fn set_telemetry_enabled(&self, enabled: bool) -> Result<String> {
+        pa_core::session_engine::telemetry::set_telemetry_enabled_text(
+            &mut self.manager(),
+            &self.agent_dir,
+            enabled,
+        )
+    }
 }
 
 #[cfg(test)]

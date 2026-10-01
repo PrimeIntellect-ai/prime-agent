@@ -22,6 +22,7 @@ pub const SCHEMA_REVISION: u64 = 2;
 /// The `cpu_baseline` values.
 const CPU_AVX2: &str = "avx2";
 const CPU_NO_AVX2: &str = "no_avx2";
+const CPU_AVX2_ASSUMED: &str = "avx2_assumed";
 const CPU_NOT_APPLICABLE: &str = "not_applicable";
 
 /// The platform-fidelity set (memoised: probes run at most once per process).
@@ -50,8 +51,8 @@ pub fn base_properties(execution_mode: &str) -> Properties {
         Value::from(workload_origin(execution_mode)),
     );
     properties.set("schema_revision", Value::from(SCHEMA_REVISION));
-    properties.set("os_family", Value::from(std::env::consts::OS));
-    properties.set("architecture", Value::from(std::env::consts::ARCH));
+    properties.set("os_family", Value::from(os_family()));
+    properties.set("architecture", Value::from(architecture()));
     properties.set("install_method", Value::String("binary".to_string()));
     properties.set("execution_mode", Value::from(execution_mode));
     properties.set("libc", Value::from(fidelity.libc));
@@ -63,6 +64,28 @@ pub fn base_properties(execution_mode: &str) -> Properties {
         Value::from(fidelity.os_product_version.as_str()),
     );
     properties
+}
+
+/// The OS in the TS product's vocabulary (Node `os.platform()`), so the
+/// Rust and TS populations land in the same `os_family` buckets.
+fn os_family() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other,
+    }
+}
+
+/// The CPU architecture in the TS product's vocabulary (Node `os.arch()`).
+fn architecture() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        "x86" => "ia32",
+        "powerpc64" => "ppc64",
+        "loongarch64" => "loong64",
+        other => other,
+    }
 }
 
 /// The build channel: debug builds are `development`, versions carrying a
@@ -127,12 +150,42 @@ fn detect_libc() -> &'static str {
     }
 }
 
-/// The linked glibc version when `getconf GNU_LIBC_VERSION` output is embedded
-/// at build time; the Rust standard library exposes no portable runtime probe,
-/// so this stays `unknown` unless ldd-style inspection succeeded. Cheapest true
-/// answer: `ldd --version` needs a subprocess, which is out of budget here.
+/// The running glibc version (TS `glibcVersionRuntime`, e.g. `2.39`) on
+/// glibc Linux builds: the loaded `libc.so.6` (found in `/proc/self/maps`)
+/// carries its banner `... stable release version 2.39.`; `unknown`
+/// elsewhere or when the probe fails.
 fn detect_libc_version() -> String {
-    UNKNOWN.to_string()
+    if cfg!(all(target_os = "linux", target_env = "gnu")) {
+        loaded_glibc_version().unwrap_or_else(|| UNKNOWN.to_string())
+    } else {
+        UNKNOWN.to_string()
+    }
+}
+
+fn loaded_glibc_version() -> Option<String> {
+    let maps = read_text_prefix("/proc/self/maps", 1 << 20)?;
+    let path = maps
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(5))
+        .find(|path| path.ends_with("/libc.so.6"))?;
+    let library = std::fs::read(path).ok()?;
+    glibc_banner_version(&library)
+}
+
+fn glibc_banner_version(library: &[u8]) -> Option<String> {
+    let marker = b"release version ";
+    let start = library
+        .windows(marker.len())
+        .position(|window| window == marker)?
+        + marker.len();
+    let version: String = library[start..]
+        .iter()
+        .take(16)
+        .take_while(|byte| byte.is_ascii_digit() || **byte == b'.')
+        .map(|&byte| char::from(byte))
+        .collect();
+    let version = version.trim_end_matches('.');
+    (!version.is_empty()).then(|| version.to_string())
 }
 
 /// AVX2 availability on `x86_64` via /proc/cpuinfo (Linux); not applicable off
@@ -153,6 +206,10 @@ fn detect_cpu_baseline() -> &'static str {
                 Some(_) => CPU_NO_AVX2,
                 None => UNKNOWN,
             }
+        } else if cfg!(target_os = "macos") {
+            // TS parity: every Intel Mac that runs a supported macOS has
+            // AVX2; the distinct value keeps the inference visible.
+            CPU_AVX2_ASSUMED
         } else {
             UNKNOWN
         }
@@ -161,11 +218,18 @@ fn detect_cpu_baseline() -> &'static str {
     }
 }
 
-/// Kernel release via /proc (Linux); `unknown` elsewhere.
+/// The kernel release (TS `os.release()`: `uname -r` on Linux and macOS);
+/// `unknown` on Windows, where this build has no probe.
 fn detect_os_release() -> String {
-    if cfg!(target_os = "linux") {
-        read_text_prefix("/proc/sys/kernel/osrelease", 256).unwrap_or_else(|| UNKNOWN.into())
-    } else {
+    #[cfg(unix)]
+    {
+        rustix::system::uname()
+            .release()
+            .to_string_lossy()
+            .into_owned()
+    }
+    #[cfg(not(unix))]
+    {
         UNKNOWN.into()
     }
 }
@@ -192,13 +256,14 @@ fn detect_os_product_version() -> String {
     }
 }
 
+/// Up to `max_bytes` of a text file. Reads until EOF or the cap: procfs
+/// files answer one page per `read`, so a single read would truncate them.
 fn read_text_prefix(path: &str, max_bytes: usize) -> Option<String> {
     use std::io::Read;
-    let mut file = std::fs::File::open(path).ok()?;
-    let mut buffer = vec![0u8; max_bytes];
-    let read = file.read(&mut buffer).ok()?;
-    buffer.truncate(read);
-    String::from_utf8(buffer).ok()
+    let file = std::fs::File::open(path).ok()?;
+    let mut buffer = Vec::new();
+    file.take(max_bytes as u64).read_to_end(&mut buffer).ok()?;
+    String::from_utf8_lossy(&buffer).into_owned().into()
 }
 
 fn sanitize_version(value: &str) -> String {
@@ -250,13 +315,10 @@ mod tests {
             properties.get("install_method"),
             Some(&Value::from("binary"))
         );
-        assert_eq!(
-            properties.get("os_family"),
-            Some(&Value::from(std::env::consts::OS))
-        );
+        assert_eq!(properties.get("os_family"), Some(&Value::from(os_family())));
         assert_eq!(
             properties.get("architecture"),
-            Some(&Value::from(std::env::consts::ARCH))
+            Some(&Value::from(architecture()))
         );
         // Fidelity fields are always present and never empty.
         for key in [
@@ -278,6 +340,36 @@ mod tests {
                 ),
                 "{key} must be a primitive"
             );
+        }
+    }
+
+    /// The TS (Node) vocabulary the existing dashboards group by.
+    #[test]
+    fn platform_names_use_the_ts_vocabulary() {
+        let os = os_family();
+        assert!(["linux", "darwin", "win32", "freebsd", "android"].contains(&os) || !os.is_empty());
+        assert_ne!(os, "macos");
+        assert_ne!(os, "windows");
+        let arch = architecture();
+        assert_ne!(arch, "x86_64");
+        assert_ne!(arch, "aarch64");
+        if cfg!(target_arch = "x86_64") {
+            assert_eq!(arch, "x64");
+        }
+        if cfg!(target_os = "linux") {
+            assert_eq!(os, "linux");
+        }
+    }
+
+    #[test]
+    fn the_glibc_banner_parses() {
+        let banner =
+            b"\0GNU C Library (Ubuntu GLIBC 2.39-0ubuntu8.4) stable release version 2.39.\n\0";
+        assert_eq!(glibc_banner_version(banner).as_deref(), Some("2.39"));
+        assert_eq!(glibc_banner_version(b"no banner here"), None);
+        if cfg!(all(target_os = "linux", target_env = "gnu")) {
+            let version = detect_libc_version();
+            assert!(version.starts_with("2."), "the running glibc: {version}");
         }
     }
 

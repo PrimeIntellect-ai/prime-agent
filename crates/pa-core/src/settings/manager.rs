@@ -79,6 +79,16 @@ impl SettingsManager {
         Self::from_storage(storage)
     }
 
+    /// A new manager over the same settings store (a fresh read; the
+    /// runtime overrides carry over), for long-lived readers such as the
+    /// telemetry switch.
+    #[must_use]
+    pub fn reopen(&self) -> Self {
+        let mut fresh = Self::from_storage(Arc::clone(&self.storage));
+        fresh.runtime_overrides = self.runtime_overrides.clone();
+        fresh
+    }
+
     /// In-memory manager (tests, embedded hosts).
     #[must_use]
     pub fn in_memory(initial: &Settings) -> Self {
@@ -911,6 +921,20 @@ impl SettingsManager {
     #[must_use]
     pub fn get_transport(&self) -> TransportSetting {
         self.merged.transport.unwrap_or(TransportSetting::Auto)
+    }
+
+    /// `telemetry.enabled` when any scope sets it (`None`: nothing set, the
+    /// default-on posture), resolved like [`Self::get_telemetry_enabled`].
+    #[must_use]
+    pub fn telemetry_enabled_setting(&self) -> Option<bool> {
+        let set = [
+            self.global.telemetry.as_ref(),
+            self.project.telemetry.as_ref(),
+            self.runtime_overrides.telemetry.as_ref(),
+        ]
+        .iter()
+        .any(|scope| scope.and_then(|t| t.enabled).is_some());
+        set.then(|| self.get_telemetry_enabled())
     }
 
     /// Telemetry is enabled only when every scope says so (default true).

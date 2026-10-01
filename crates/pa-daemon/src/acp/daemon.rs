@@ -536,6 +536,8 @@ async fn handle_session_new(
 
     // The client-owned daemon session: `--no-session` semantics.
     let mut config = options.create_config.clone();
+    // The telemetry execution mode (TS main.ts `executionMode: appMode`).
+    config["executionMode"] = Value::String("acp".to_string());
     // Verification seam: a scripted daemon session (the same `{"engine":
     // "faux", ...}` form the in-process e2e rides). The product never sets
     // it; the supervisor turns the path into the worker's script env.

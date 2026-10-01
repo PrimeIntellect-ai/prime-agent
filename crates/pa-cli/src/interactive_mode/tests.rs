@@ -351,6 +351,7 @@ fn settings_sink_completes_a_provisioned_home_without_touching_the_choice() {
         created_at: std::time::Instant::now(),
         onboarding_id: uuid::Uuid::new_v4().to_string(),
         ready_emitted: std::sync::atomic::AtomicBool::new(false),
+        completion_reported: std::sync::atomic::AtomicBool::new(false),
         probe: StartupModelProbe {
             cwd: dir.path().to_path_buf(),
             agent_dir: agent_dir.clone(),
@@ -381,6 +382,68 @@ fn settings_sink_completes_a_provisioned_home_without_touching_the_choice() {
     );
 }
 
+/// A flow that ran but did not complete reports `onboarding completed`
+/// with the `aborted` outcome (TS `runStartupOnboarding`'s `finally`), and
+/// a completed flow never reports a second, aborted outcome.
+#[tokio::test]
+async fn settings_sink_reports_an_aborted_flow_once() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let sink = SettingsOnboardingSink {
+        cwd: dir.path().to_path_buf(),
+        agent_dir: agent_dir.clone(),
+        created_at: std::time::Instant::now(),
+        onboarding_id: uuid::Uuid::new_v4().to_string(),
+        ready_emitted: std::sync::atomic::AtomicBool::new(false),
+        completion_reported: std::sync::atomic::AtomicBool::new(false),
+        probe: StartupModelProbe {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: agent_dir.clone(),
+            cli_provider: None,
+            cli_model: None,
+            models: None,
+            is_continuing: false,
+            api_key: None,
+        },
+    };
+    if crate::mode::telemetry_disabled(&pa_core::settings::SettingsManager::create(
+        dir.path(),
+        &agent_dir,
+    )) {
+        // An ambient opt-out (DO_NOT_TRACK in the test env) sends nothing.
+        return;
+    }
+    sink.onboarding_incomplete("aborted");
+    let mirror = agent_dir.join("telemetry.jsonl");
+    let mut line = None;
+    for _ in 0..100 {
+        if let Some(first) = std::fs::read_to_string(&mirror)
+            .ok()
+            .and_then(|text| text.lines().next().map(str::to_string))
+        {
+            line = Some(first);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let event: serde_json::Value =
+        serde_json::from_str(&line.expect("the mirror recorded the event")).unwrap();
+    assert_eq!(event["name"], "onboarding completed");
+    assert_eq!(event["properties"]["outcome"], "aborted");
+    assert_eq!(event["properties"]["execution_mode"], "interactive");
+
+    sink.completion_reported
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    sink.onboarding_incomplete("aborted");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let lines = std::fs::read_to_string(&mirror).unwrap().lines().count();
+    assert_eq!(
+        lines, 1,
+        "a reported completion never adds an aborted outcome"
+    );
+}
+
 /// A fresh home (no choice written) is the one home the question still
 /// mounts for — the opt-in moment: the flow's `Share` answer persists
 /// beside the completion flag, and both read back through the next
@@ -401,6 +464,7 @@ fn settings_sink_persists_the_fresh_home_answer_with_the_flag() {
         created_at: std::time::Instant::now(),
         onboarding_id: uuid::Uuid::new_v4().to_string(),
         ready_emitted: std::sync::atomic::AtomicBool::new(false),
+        completion_reported: std::sync::atomic::AtomicBool::new(false),
         probe: StartupModelProbe {
             cwd: dir.path().to_path_buf(),
             agent_dir: agent_dir.clone(),
