@@ -22,9 +22,10 @@
 #
 # THE TYPESCRIPT TAKEOVER (this script is also the uninstall path for the
 # TS product — one installer owns the keyword's lifecycle):
-#   1. BOTH DAEMONS ARE STOPPED CLEANLY, NEVER KILLED, but only AFTER the
-#      new payload and launcher are published — the retirement steps
-#      (daemon stops, npm uninstall) never leave the machine without a
+#   1. BOTH DAEMONS ARE STOPPED CLEANLY, NEVER KILLED (--force alone may
+#      signal one that will not stop), but only AFTER the new payload and
+#      launcher are published — the retirement steps (daemon stops, npm
+#      uninstall) never leave the machine without a
 #      working prime-agent if the install aborts mid-way. The probed
 #      candidates: the TS daemon's default socket
 #      (${TMPDIR:-/tmp}/prime-agent-$(id -u)/daemon.sock),
@@ -165,11 +166,10 @@ install-rust.sh — install the Rust build of Prime Agent under the prime-agent 
 
 The launcher lands at $PRIME_AGENT_RUST_PREFIX/bin/prime-agent and the payload at
 $PRIME_AGENT_RUST_PREFIX/share/prime-agent/ (default prefix ~/.local). The installed
-TypeScript product is taken over: its daemon is stopped cleanly when idle, its native
-install is preserved under share/prime-agent-legacy, and its npm package is uninstalled
-(the restore command is printed). ~/.prime/agent (the shared session store) is never
-touched. Both the default and --update install the newest successful `continuous`
-workflow run on the `rust` branch.
+TypeScript product is taken over: its daemon is stopped with its own shutdown request,
+its native install is preserved under share/prime-agent-legacy, and its npm package is
+uninstalled (the restore command is printed). ~/.prime/agent (the shared session store)
+is never touched. Both the default and --update install the channel's current version.
 
 Needs curl + sh (+ the network): the installer bootstraps its own Python via
 uv — no system python3 required. It also pre-warms the Python kernel (uv +
@@ -179,13 +179,18 @@ network once.
 
 Options:
   --update    the documented alias the update entry points exec (identical run)
+  --force     stop every running Prime Agent daemon (TypeScript and Rust, busy
+              ones and the one this install runs under): the shutdown request
+              first, then SIGTERM/SIGKILL after a bounded wait
+              (from a pipe: curl -fsSL <url>/install.sh | sh -s -- --force)
   --verbose   the progress detail also goes to stdout, not just fd 3
 Output:
   stdout      the essentials (the success block, the actionable takeover
               facts, the PATH warning when it applies, the next-step line)
-  fd 3        the progress detail — a wrapper captures it by opening fd 3;
-              a bare run leaves it closed and stays quiet
-  stderr      warnings and diagnostics (a curl | sh run keeps them)
+  stderr      one progress line per step (plus a download bar when stderr is
+              a terminal), warnings and diagnostics
+  fd 3        the extra progress detail — a wrapper captures it by opening
+              fd 3; a bare run leaves it closed
 
 Environment:
   PRIME_AGENT_DOWNLOAD_BASE_URL  the R2-backed download base (the official
@@ -205,12 +210,14 @@ USAGE
 # run because the flow is idempotent by construction. --verbose folds the fd-3
 # progress detail onto stdout (PRIME_AGENT_RUST_VERBOSE=1 does the same).
 VERBOSE="${PRIME_AGENT_RUST_VERBOSE:-0}"
+FORCE=0
 # Every argument is scanned (no positionals exist): the flags compose, so
 # `--update --verbose` sets both effects instead of silently dropping one.
 for arg in "$@"; do
   case "$arg" in
     --update) ;;
     --verbose|-v) VERBOSE=1 ;;
+    --force) FORCE=1 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; die "unknown argument: ${arg}" ;;
   esac
@@ -236,6 +243,41 @@ else
 fi
 say() { printf '%s\n' "$*" >&3; }
 note() { printf '%s\n' "$*" >&2; }
+# The visible progress: one plain line per step on stderr, printed BEFORE
+# the step runs, so a slow step never looks like a hang. A terminal also
+# gets curl's download bar; captured output (the TUI's /update, CI, pipes)
+# stays plain lines with no carriage returns.
+step() { printf '%s\n' "$*" >&2; }
+STDERR_TTY=0
+if [ -t 2 ]; then STDERR_TTY=1; fi
+
+# Every network read goes through fetch: a connect timeout, a whole-call
+# cap, a stall cutoff (under 1 KB/s for 30s), and 3 attempts — a stalled
+# connection fails with the URL named instead of hanging forever. The loop
+# replaces curl's --retry-all-errors, which older curls (macOS) lack; a
+# retry resumes the partial file (-C -) instead of starting over.
+# Usage: fetch <url> <output file> <max seconds> [bar]
+fetch() {
+  fetch_attempt=1
+  rm -f "$2"
+  while :; do
+    if [ "${4:-}" = bar ] && [ "$STDERR_TTY" = 1 ]; then
+      curl -fL -C - --progress-bar --connect-timeout 10 --max-time "$3" \
+        --speed-limit 1024 --speed-time 30 "$1" -o "$2" && return 0
+    else
+      curl -fsSL -C - --connect-timeout 10 --max-time "$3" \
+        --speed-limit 1024 --speed-time 30 "$1" -o "$2" 2>/dev/null && return 0
+    fi
+    [ "$fetch_attempt" -lt 3 ] || return 1
+    fetch_attempt=$((fetch_attempt + 1))
+    if [ "${4:-}" = bar ]; then
+      step "  download failed; retrying (attempt ${fetch_attempt} of 3)..."
+    fi
+    sleep 1
+  done
+}
+
+step "Installing Prime Agent (${CHANNEL} channel)..."
 
 # --- the Python bootstrap: the installer must not depend on system python3 ----
 # Every scripting step below (the store guard's realpath, the artifact's
@@ -335,12 +377,18 @@ else
   # alias — which also overrides any inherited value pointing into the
   # shared session store (it would place uv there BEFORE the store guard
   # runs).
-  if [ -n "$uv_bin_dir" ] \
-     && uv_install_out="$(curl -fsSLsS https://astral.sh/uv/install.sh)" \
-     && printf '%s\n' "$uv_install_out" \
-        | env -u UV_UNMANAGED_INSTALL UV_INSTALL_DIR="$uv_bin_dir" sh >/dev/null 2>&1 \
-     && [ -x "${uv_bin_dir}/uv" ]; then
-    uv_bin="${uv_bin_dir}/uv"
+  if [ -n "$uv_bin_dir" ]; then
+    step "Setting up uv for the installer (one-time)..."
+    if uv_install_out="$(curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 \
+          https://astral.sh/uv/install.sh)" \
+       && printf '%s\n' "$uv_install_out" \
+          | env -u UV_UNMANAGED_INSTALL UV_INSTALL_DIR="$uv_bin_dir" sh >/dev/null 2>&1 \
+       && [ -x "${uv_bin_dir}/uv" ]; then
+      uv_bin="${uv_bin_dir}/uv"
+      step "  done"
+    else
+      step "  failed (falling back to a system python3)"
+    fi
   fi
 fi
 
@@ -368,9 +416,11 @@ if [ -n "$uv_bin" ]; then
   # just-installed interpreter would never be found.
   UVPY="$(env -u UV_PYTHON_INSTALL_DIR "$uv_bin" python find --system 3.11 2>/dev/null || true)"
   if [ -z "$UVPY" ]; then
+    step "Setting up Python for the installer (one-time, can take a minute)..."
     if env -u UV_PYTHON_INSTALL_DIR "$uv_bin" python install 3.11 >/dev/null 2>&1; then
       UVPY="$(env -u UV_PYTHON_INSTALL_DIR "$uv_bin" python find --system 3.11 2>/dev/null || true)"
     fi
+    if [ -n "$UVPY" ]; then step "  done"; else step "  failed"; fi
   fi
 fi
 if [ -z "$UVPY" ] && command -v python3 >/dev/null 2>&1; then
@@ -495,6 +545,7 @@ compiled against glibc 2.35 (Ubuntu 22.04) and will not start here"
   fi
   say "glibc ${glibc} >= 2.35: supported"
 fi
+step "Detected platform: ${CHANNEL_PLATFORM}"
 
 # --- the R2 channel (the user path never touches GitHub) --------------------
 # THE CHANNEL RESOLUTION (the TS install.sh parity): the channel pointer
@@ -513,6 +564,13 @@ case "$BASE_URL" in
 esac
 BASE_URL="${BASE_URL%/}"
 
+dl="$(mktemp -d "${TMPDIR:-/tmp}/prime-agent-download.XXXXXX")"
+# The channel pointer's one-line body (empty when the read fails).
+read_channel_version() {
+  if fetch "${BASE_URL}/${CHANNEL}" "$dl/channel-pointer" 30; then
+    tr -d '[:space:]' < "$dl/channel-pointer"
+  fi
+}
 VERSION_PINNED="no"
 if [ -n "${PRIME_AGENT_VERSION:-}" ]; then
   VERSION="${PRIME_AGENT_VERSION#v}"
@@ -523,9 +581,10 @@ else
   # a read landing between them sees the old pointer with the new
   # manifest — a transient mismatch, not a broken channel. One re-read of
   # the PAIR resolves it; a second refusal is a real error.
+  step "Checking the latest ${CHANNEL} version..."
   version_attempt=1
   while :; do
-    VERSION="$(curl -fsSL "${BASE_URL}/${CHANNEL}" 2>/dev/null || true)"
+    VERSION="$(read_channel_version)"
     [ -n "$VERSION" ] && break
     version_attempt=$((version_attempt + 1))
     [ "$version_attempt" -le 2 ] || break
@@ -556,15 +615,14 @@ say "installing prime-agent ${VERSION} from the ${CHANNEL} channel (${CHANNEL_PL
 # The row reader rides a FILE, not a heredoc inside a command substitution
 # (the probe-py pattern: macOS ships bash 3.2 as /bin/sh, and its
 # POSIX-mode parser cannot close a $( ) that spans a heredoc body).
-dl="$(mktemp -d "${TMPDIR:-/tmp}/prime-agent-download.XXXXXX")"
 if [ "$VERSION_PINNED" = "yes" ]; then
   asset_name="prime-agent-${VERSION}-${CHANNEL_PLATFORM}.tar.gz"
   manifest_sha=""
 else
 manifest_attempt=1
 while :; do
-  curl -fsSL "${BASE_URL}/${CHANNEL_MANIFEST}" -o "$dl/${CHANNEL_MANIFEST}" \
-    || die "could not read the ${CHANNEL} channel manifest: ${BASE_URL}/${CHANNEL_MANIFEST}"
+  fetch "${BASE_URL}/${CHANNEL_MANIFEST}" "$dl/${CHANNEL_MANIFEST}" 30 \
+    || die "could not read the ${CHANNEL} channel manifest: ${BASE_URL}/${CHANNEL_MANIFEST} (3 attempts)"
   row_py="$dl/channel_row.py"
   cat > "$row_py" <<'ROW_PY'
 import json, sys
@@ -593,7 +651,7 @@ ROW_PY
            # pointer (the publish writes the manifest first) — re-read the
            # PAIR once before refusing.
            sleep 1
-           VERSION="$(curl -fsSL "${BASE_URL}/${CHANNEL}" 2>/dev/null || true)"
+           VERSION="$(read_channel_version)"
            [ -n "$VERSION" ] || die "could not resolve the latest ${CHANNEL} version from ${BASE_URL}/${CHANNEL}"
            say "installing prime-agent ${VERSION} from the ${CHANNEL} channel (${CHANNEL_PLATFORM})"
            continue
@@ -610,10 +668,11 @@ fi
 
 # --- the tarball + SHA256SUMS from the versioned release prefix -------------
 RELEASE_PREFIX="releases/v${VERSION#v}"
-curl -fsSL "${BASE_URL}/${RELEASE_PREFIX}/${asset_name}" -o "$dl/${asset_name}" \
-  || die "could not download ${asset_name} from ${BASE_URL}/${RELEASE_PREFIX}/"
-curl -fsSL "${BASE_URL}/${RELEASE_PREFIX}/SHA256SUMS" -o "$dl/SHA256SUMS" \
-  || die "could not download SHA256SUMS from ${BASE_URL}/${RELEASE_PREFIX}/"
+step "Downloading prime-agent ${VERSION}..."
+fetch "${BASE_URL}/${RELEASE_PREFIX}/${asset_name}" "$dl/${asset_name}" 1800 bar \
+  || die "could not download ${BASE_URL}/${RELEASE_PREFIX}/${asset_name} (3 attempts; check the network and re-run)"
+fetch "${BASE_URL}/${RELEASE_PREFIX}/SHA256SUMS" "$dl/SHA256SUMS" 30 \
+  || die "could not download ${BASE_URL}/${RELEASE_PREFIX}/SHA256SUMS (3 attempts; check the network and re-run)"
 asset="$dl/${asset_name}"
 
 # --- verify the checksum -------------------------------------------------------
@@ -625,6 +684,7 @@ asset="$dl/${asset_name}"
 # a corrupt tarball. (The checksum rides the same channel as the tarball —
 # the known same-channel limitation; the signed-asset design is the
 # graduation path in RELEASE_SECURITY.md.)
+step "Verifying the checksum..."
 line="$(grep "  ${asset_name}\$" "$dl/SHA256SUMS" || true)"
 [ -n "$line" ] || die "SHA256SUMS in ${RELEASE_PREFIX} has no line for ${asset_name}"
 sums_sha="${line%% *}"
@@ -744,16 +804,30 @@ fi
 # holds a plain call.
 probe_py="${dl}/daemon-stop.py"
 cat > "$probe_py" <<'PROBE_PY'
-import json, select, socket, sys, time
+import json, os, select, signal, socket, sys, time
 
 path = sys.argv[-1]
 kind = "ts"
 listening_only = False
+force = False
 for flag in sys.argv[1:-1]:
     if flag == "--listening":
         listening_only = True
     if flag.startswith("--kind="):
         kind = flag[len("--kind="):]
+    if flag == "--force=1":
+        force = True
+
+# The visible progress lines go to fd 4 (the installer points it at its
+# stderr); stdout stays the one-word verdict the shell parses.
+try:
+    progress_out = os.fdopen(4, "w", buffering=1)
+except OSError:
+    progress_out = None
+
+def progress(line):
+    if progress_out is not None:
+        progress_out.write(line + "\n")
 
 # The classification ladder, identity before schema: a hello whose
 # runtime build id is this product's ("pa-daemon-rs-<version>", carried by
@@ -783,6 +857,11 @@ STOP_DRAIN_MINIMUM_S = 5.0
 STOP_DRAIN_PER_SESSION_S = 2.0
 STOP_DRAIN_UNKNOWN_S = 30.0
 STOP_DRAIN_CAP_S = 120.0
+# --force: the forced request's drain wait is capped short, then the
+# supervisor pid gets SIGTERM and, if it is still up, SIGKILL.
+FORCE_DRAIN_CAP_S = 15.0
+FORCE_TERM_WAIT_S = 5.0
+FORCE_KILL_WAIT_S = 3.0
 
 def read_line(sock, deadline, buf):
     # One persistent buffer per connection: a daemon that answers
@@ -995,8 +1074,17 @@ if request_replaced:
 #      instead of reporting a stop.
 def drain_confirm_timeout_s():
     if count is None:
-        return STOP_DRAIN_UNKNOWN_S
-    return min(STOP_DRAIN_MINIMUM_S + STOP_DRAIN_PER_SESSION_S * count, STOP_DRAIN_CAP_S)
+        drain = STOP_DRAIN_UNKNOWN_S
+    else:
+        drain = min(STOP_DRAIN_MINIMUM_S + STOP_DRAIN_PER_SESSION_S * count, STOP_DRAIN_CAP_S)
+    return min(drain, FORCE_DRAIN_CAP_S) if force else drain
+
+owner_label = "Rust" if owner == "rust" else "TypeScript"
+sessions_label = "unknown sessions" if count is None else "%d session%s" % (count, "" if count == 1 else "s")
+bound_s = STOP_CONFIRM_TIMEOUT_S + drain_confirm_timeout_s()
+if force:
+    bound_s += FORCE_TERM_WAIT_S + FORCE_KILL_WAIT_S
+progress("Stopping the running %s daemon (%s, up to %ds)..." % (owner_label, sessions_label, bound_s))
 
 request({"type": "shutdown", "force": False})
 if request_replaced:
@@ -1005,12 +1093,45 @@ if request_replaced:
 if stopped_within(STOP_CONFIRM_TIMEOUT_S):
     print("%s:stopped:%s" % (owner, count_label))
     sys.exit(0)
+progress("  still running; sending a forced shutdown (waiting up to %ds)..." % drain_confirm_timeout_s())
 request({"type": "shutdown", "force": True})
 if request_replaced:
     print("%s:replaced:%s" % (owner, count_label))
     sys.exit(0)
 if stopped_within(drain_confirm_timeout_s()):
     print("%s:stopped-forced:%s" % (owner, count_label))
+    sys.exit(0)
+
+# --force only: signal the supervisor pid the daemon's own hello named.
+# The pid is re-read from a fresh hello on the same socket, so the signal
+# goes to the process that is still listening there, never a stale pid.
+def kill_supervisor():
+    try:
+        sock = connect()
+    except OSError:
+        return True
+    current = wait_hello(sock)
+    sock.close()
+    if current is None or (kind == "ts" and classify_hello(current) != owner):
+        return False
+    pid = current.get("supervisorPid")
+    if not isinstance(pid, int) or pid <= 1 or pid == os.getpid():
+        return False
+    for sig, wait_s, name in ((signal.SIGTERM, FORCE_TERM_WAIT_S, "SIGTERM"),
+                              (signal.SIGKILL, FORCE_KILL_WAIT_S, "SIGKILL")):
+        progress("  still running; sending %s to pid %d..." % (name, pid))
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        if stopped_within(wait_s):
+            return True
+    return False
+
+if force and kill_supervisor():
+    print("%s:stopped-killed:%s" % (owner, count_label))
     sys.exit(0)
 print("%s:stop-failed:%s" % (owner, count_label))
 
@@ -1042,23 +1163,27 @@ stop_daemon_candidate() {
   if [ -n "$live_daemon_socket" ] \
      && { [ "$socket_path" = "$live_daemon_socket" ] \
           || [ "$socket_path" -ef "$live_daemon_socket" ]; } \
-     && [ "${PRIME_AGENT_STOP_LIVE_DAEMON:-}" != "1" ]; then
+     && [ "${PRIME_AGENT_STOP_LIVE_DAEMON:-}" != "1" ] \
+     && [ "$FORCE" != 1 ]; then
     note "note: ${socket_path} is the daemon this install runs under — it is"
     note "  never probed (stopping it would cut the branch this installer"
-    note "  sits on). Set PRIME_AGENT_STOP_LIVE_DAEMON=1 to stop it for a"
-    note "  deliberate in-daemon update."
-    ts_stop_summary="${ts_stop_summary}daemon: skipped the live daemon socket ${socket_path} (this install runs under it; PRIME_AGENT_STOP_LIVE_DAEMON=1 stops it)
+    note "  sits on). Re-run with --force (or PRIME_AGENT_STOP_LIVE_DAEMON=1)"
+    note "  to stop it for a deliberate in-daemon update."
+    ts_stop_summary="${ts_stop_summary}daemon: skipped the live daemon socket ${socket_path} (this install runs under it; re-run with --force to stop it)
 "
     ts_stop_refused="yes"
     return 0
   fi
   if [ -e "$socket_path" ]; then
-    verdict="$("$UVPY" "$probe_py" "--kind=${candidate_kind}" "$socket_path" 2>/dev/null)" || verdict="probe-error"
+    # The probe prints its own progress lines ("Stopping ... up to Ns")
+    # on fd 4 before each wait, so a long drain is never silent.
+    verdict="$("$UVPY" "$probe_py" "--kind=${candidate_kind}" "--force=${FORCE}" "$socket_path" 4>&2 2>/dev/null)" || verdict="probe-error"
   else
     verdict="absent"
   fi
   case "$verdict" in
     ts:stopped:0)
+      step "  stopped"
       ts_stop_found_any="yes"
       last_stop_recorded="yes"
       say "the TypeScript daemon on ${socket_path} stopped cleanly (idle; no signal sent)"
@@ -1066,6 +1191,7 @@ stop_daemon_candidate() {
 "
       ;;
     ts:stopped:*)
+      step "  stopped"
       sessions="${verdict##*:}"
       ts_stop_found_any="yes"
       last_stop_recorded="yes"
@@ -1075,6 +1201,7 @@ stop_daemon_candidate() {
 "
       ;;
     ts:stopped-forced:*)
+      step "  stopped (forced shutdown)"
       sessions="${verdict##*:}"
       ts_stop_found_any="yes"
       last_stop_recorded="yes"
@@ -1084,6 +1211,7 @@ stop_daemon_candidate() {
 "
       ;;
     rust:stopped:0)
+      step "  stopped"
       ts_stop_found_any="yes"
       last_stop_recorded="yes"
       last_stop_was_rust="yes"
@@ -1093,6 +1221,7 @@ stop_daemon_candidate() {
 "
       ;;
     rust:stopped:*)
+      step "  stopped"
       sessions="${verdict##*:}"
       ts_stop_found_any="yes"
       last_stop_recorded="yes"
@@ -1104,6 +1233,7 @@ stop_daemon_candidate() {
 "
       ;;
     rust:stopped-forced:*)
+      step "  stopped (forced shutdown)"
       sessions="${verdict##*:}"
       ts_stop_found_any="yes"
       last_stop_recorded="yes"
@@ -1112,6 +1242,22 @@ stop_daemon_candidate() {
       say "the Rust daemon on ${socket_path} stopped for the update (${sessions} session(s)"
       say "  were live; forced after the graceful request; no signal sent)"
       ts_stop_summary="${ts_stop_summary}rust daemon: stopped for the update on ${socket_path} (serving ${sessions} session(s); forced after the graceful request; verified down)
+"
+      ;;
+    ts:stopped-killed:*|rust:stopped-killed:*)
+      sessions="${verdict##*:}"
+      owner="ts"
+      ts_stop_found_any="yes"
+      last_stop_recorded="yes"
+      step "  stopped (killed)"
+      case "$verdict" in
+        rust:*)
+          owner="rust"
+          last_stop_was_rust="yes"
+          ts_stop_rust_stopped="yes"
+          ;;
+      esac
+      ts_stop_summary="${ts_stop_summary}${owner} daemon: killed on ${socket_path} (--force; serving ${sessions} session(s); the shutdown requests did not bring it down; verified down)
 "
       ;;
     ts:replaced:*|rust:replaced:*)
@@ -1132,11 +1278,18 @@ stop_daemon_candidate() {
       owner="the TypeScript daemon"
       case "$verdict" in rust:*) owner="the Rust daemon" ;; esac
       ts_stop_found_any="yes"
+      step "  failed: still running"
       note "WARNING: ${owner} on ${socket_path} is STILL RUNNING after this install"
       note "  (it was serving ${sessions} session(s); the graceful and the forced shutdown"
-      note "  requests both failed to bring it down, and no signal was ever sent)."
-      note "  Stop it by hand: prime-agent shutdown --force"
-      ts_stop_summary="${ts_stop_summary}daemon: WARNING still running on ${socket_path} (${owner}, ${sessions} session(s); the graceful and forced requests did not bring it down; stop it by hand: prime-agent shutdown --force)
+      if [ "$FORCE" = 1 ]; then
+        note "  requests both failed to bring it down, and the kill did not either)."
+        note "  Stop it by hand: prime-agent shutdown --force"
+      else
+        note "  requests both failed to bring it down, and no signal was ever sent)."
+        note "  Re-run the installer with --force to kill it, or stop it by hand:"
+        note "  prime-agent shutdown --force"
+      fi
+      ts_stop_summary="${ts_stop_summary}daemon: WARNING still running on ${socket_path} (${owner}, ${sessions} session(s); the graceful and forced requests did not bring it down; re-run with --force, or stop it by hand: prime-agent shutdown --force)
 "
       ;;
     unrecognized:*)
@@ -1217,6 +1370,7 @@ fi
 # new stage is in place, so the live tree is never rm'd while the launcher
 # still points into it. The renamed-aside tree is KEPT as a one-generation
 # rollback (prime-agent.old.<pid>); the next successful install sweeps it.
+step "Installing to ${share_dir}..."
 stage="$(mktemp -d "${PREFIX}/share/prime-agent.stage.XXXXXX")"
 guard_preserved "$stage"
 tar -xzf "$asset" -C "$stage"
@@ -1567,6 +1721,7 @@ try:
 except Exception:
     print("")' "${npm_root}/prime-agent/package.json")"
     if [ -n "$ts_version" ]; then
+      step "Removing the TypeScript npm package prime-agent@${ts_version}..."
       if npm uninstall -g prime-agent >/dev/null 2>&1; then
         echo "the TypeScript npm package prime-agent@${ts_version} was uninstalled"
         echo "  restore with: npm install -g prime-agent@${ts_version}"
@@ -1601,6 +1756,7 @@ if command -v uv >/dev/null 2>&1 \
   say "uv found (the kernel venv's package manager)"
 else
   if [ -n "$uv_bin_dir" ]; then
+    step "Installing uv (the Python kernel's package manager)..."
     say "installing uv (the kernel venv's package manager — the command the"
     say "product's own error message names):"
   else
@@ -1615,9 +1771,10 @@ else
   # alias — the store-alias fallback above), which also overrides any
   # inherited value pointing into the shared session store.
   if [ -n "$uv_bin_dir" ] \
-     && curl_out="$(curl -LsSf https://astral.sh/uv/install.sh)" \
+     && curl_out="$(curl -LsSf --connect-timeout 10 --max-time 60 --retry 2 \
+          https://astral.sh/uv/install.sh)" \
      && printf '%s\n' "$curl_out" \
-        | env -u UV_UNMANAGED_INSTALL UV_INSTALL_DIR="$uv_bin_dir" sh; then
+        | env -u UV_UNMANAGED_INSTALL UV_INSTALL_DIR="$uv_bin_dir" sh >&3 2>&1; then
     [ -x "${uv_bin_dir}/uv" ] \
       || note "warning: the uv installer reported success but ${uv_bin_dir}/uv is missing; the first session may need to install uv itself"
   else
@@ -1628,7 +1785,9 @@ else
 fi
 if command -v uv >/dev/null 2>&1 \
    || { [ -n "$uv_bin_dir" ] && [ -x "${uv_bin_dir}/uv" ]; }; then
+  step "Preparing the Python kernel (can take a minute on a first install)..."
   if bootstrap_out="$("$launcher" --prime-agent-bootstrap 2>&1)"; then
+    step "  done"
     say "kernel pre-warmed: the first session's Python kernel is ready"
     say "$bootstrap_out"
   else
@@ -1640,6 +1799,9 @@ else
   note "note: kernel pre-warm skipped (no uv); the first session bootstraps"
   note "  the kernel itself and needs the network once"
 fi
+
+step "Done."
+step ""
 
 # --- PATH check (warn, not fail) ---------------------------------------------------
 case ":$PATH:" in
