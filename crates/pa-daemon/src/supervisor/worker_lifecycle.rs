@@ -622,10 +622,8 @@ impl Supervisor {
     /// idle state and crossed the threshold asks for its own graceful
     /// stop over the supervisor link — TS `canEvictWorker` reaches roots
     /// and children alike. The supervisor verifies the worker token,
-    /// refuses a client-owned or noSession descriptor (TS
-    /// `hasOwnerClient`: the owner's disconnect cleanup owns that stop;
-    /// an in-memory session has no file to wake from), and re-reads the
-    /// setting — the supervisor's own fresh-snapshot fence: a setting
+    /// refuses a client-owned descriptor (TS `hasOwnerClient`), and re-reads
+    /// the setting — the supervisor's own fresh-snapshot fence: a setting
     /// flipped to `"off"` (or past the threshold) between the worker's
     /// ask and the stop cancels the passivation. The stop runs under the
     /// eviction fence (TS `withEvictionFence`) and is the existing
@@ -649,21 +647,15 @@ impl Supervisor {
                 None,
             );
         };
-        // Rust clients create noSession roots unowned (`lifecycle: None`);
-        // TS makes them client-owned, so its `hasOwnerClient` refuses them.
-        // An in-memory session has no file to wake from.
-        {
-            let descriptor = resident.descriptor.lock().await;
-            if descriptor.owner_client_id.is_some()
-                || descriptor.create_command.no_session == Some(true)
-            {
-                return response_failure(
-                    Some(command_id),
-                    type_name,
-                    "Idle passivation is refused for a client-owned or in-memory (noSession) worker",
-                    None,
-                );
-            }
+        // The owner gate (TS `canEvictWorker`'s `hasOwnerClient` arm): a
+        // client-owned worker never passivates itself.
+        if resident.descriptor.lock().await.owner_client_id.is_some() {
+            return response_failure(
+                Some(command_id),
+                type_name,
+                "Idle passivation is refused for a client-owned worker",
+                None,
+            );
         }
         // The supervisor-side settings re-read (the fence): the same
         // `idleEvictionMinutes` surface the worker read.

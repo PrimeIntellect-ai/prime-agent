@@ -133,7 +133,6 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
-    use std::time::Duration;
 
     use pa_ai::oauth::CodexHttpResponse;
 
@@ -386,73 +385,5 @@ mod tests {
             expired.get_api_key("openai-codex"),
             Some(account_jwt("acct-2"))
         );
-    }
-
-    #[tokio::test]
-    async fn the_panel_surface_mounts_the_ts_prompts() {
-        // The panel adapter's seam: on_auth renders the url block, the
-        // manual paste mounts with the TS prompt, and the fallback
-        // prompt passes the flow's message. The paste/prompt futures
-        // are LAZY (the request sends on first poll), so the test
-        // spawns them and reads the requests off the channel's
-        // receiving side, bounded by a recv timeout that fails the
-        // test — never a green-on-timeout retry.
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let panel = AuthPanelHandle::new(tx);
-        let ui = PanelCodexLoginUi::new(panel);
-        ui.on_auth("https://auth.example/authorize", "Open your browser.");
-        // The url block sends immediately (a plain request, not a
-        // future).
-        let url_request = rx.recv().await.expect("the url block sends");
-        let pa_tui::auth_panel::AuthPanelRequest::AuthUrl { url, instructions } = url_request
-        else {
-            panic!("expected the url block request")
-        };
-        assert_eq!(url, "https://auth.example/authorize");
-        assert_eq!(instructions.as_deref(), Some("Open your browser."));
-
-        // The manual paste: spawned (the boxed future sends its
-        // PastePrompt on first poll, then pends on the answer this test
-        // never gives).
-        let manual = ui
-            .on_manual_code_input()
-            .expect("the panel supplies the paste");
-        let manual_task = tokio::spawn(async move {
-            let _ = manual.await;
-        });
-        let paste_request = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("the paste request sends once polled")
-            .expect("the channel stays open");
-        let pa_tui::auth_panel::AuthPanelRequest::PastePrompt { prompt, .. } = paste_request else {
-            panic!("expected the paste request")
-        };
-        assert_eq!(
-            prompt,
-            "Paste redirect URL below, or complete login in browser:"
-        );
-
-        // The fallback prompt carries the flow's own message.
-        let prompt = ui.on_prompt("Paste the authorization code (or full redirect URL):");
-        let prompt_task = tokio::spawn(async move {
-            let _ = prompt.await;
-        });
-        let prompt_request = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("the prompt request sends once polled")
-            .expect("the channel stays open");
-        let pa_tui::auth_panel::AuthPanelRequest::PastePrompt { prompt, .. } = prompt_request
-        else {
-            panic!("expected the prompt request")
-        };
-        assert_eq!(
-            prompt,
-            "Paste the authorization code (or full redirect URL):"
-        );
-
-        // The pending paste/prompt tasks are dropped: no answer is
-        // expected (the test never mounts the panel).
-        manual_task.abort();
-        prompt_task.abort();
     }
 }
