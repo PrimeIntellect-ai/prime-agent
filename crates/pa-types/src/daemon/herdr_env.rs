@@ -15,6 +15,9 @@
 //! daemon's own API, so the report surface (the session reference and the
 //! pane state) crosses no privilege boundary. The re-filter bounds what
 //! rides the wire: a forwarded map never carries more than these keys.
+//! The daemon-side reporter additionally FENCES the target itself: it
+//! connects only to a Unix socket the daemon's own uid owns (lstat, no
+//! symlink follow), so a redirected target cannot exfiltrate anywhere.
 
 use std::collections::BTreeMap;
 

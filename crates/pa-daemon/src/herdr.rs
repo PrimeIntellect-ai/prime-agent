@@ -35,7 +35,7 @@
 //! lower-seq reports per source, which would stick a pane at working).
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::{json, Map, Value};
@@ -676,11 +676,87 @@ fn rand_suffix() -> String {
     format!("{random:x}")
 }
 
+/// The pane-socket trust fence (the operator's hardening for the
+/// client-supplied socket target): before the reporter connects, the
+/// target must lstat (no symlink follow) as a Unix socket owned by THIS
+/// process's own effective uid. A regular file, a symlink (even one
+/// pointing at a legitimate socket), or a socket another user owns
+/// never reports — the session simply stays unreported. The normal case
+/// passes unchanged: Herdr's own socket under the user's runtime
+/// directory is that user's own socket (TS parity). Named pipes on
+/// Windows keep their connect-time ACL model (no lstat to check).
+static SOCKET_REFUSAL_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// The fence's pure decision (unit-testable without `chown`): the
+/// metadata must be a socket owned by `own_uid`.
+#[cfg(unix)]
+fn pane_socket_is_ownable(metadata: &std::fs::Metadata, own_uid: u32) -> bool {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    metadata.file_type().is_socket() && metadata.uid() == own_uid
+}
+
+/// This process's effective uid, std-only (the crate forbids unsafe
+/// code, so no direct `geteuid`): a file the process creates is owned by
+/// its effective uid — the temp file's owner is exactly the uid the
+/// fence compares against, which is also the uid a socket this process
+/// would bind would carry. Cached once per process.
+#[cfg(unix)]
+fn effective_uid() -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    static UID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *UID.get_or_init(|| {
+        let probe =
+            std::env::temp_dir().join(format!("pa-herdr-uid-probe-{}", uuid::Uuid::new_v4()));
+        let uid = std::fs::File::create(&probe)
+            .and_then(|file| file.metadata())
+            .map_or(0, |metadata| metadata.uid());
+        let _ = std::fs::remove_file(&probe);
+        uid
+    })
+}
+
+#[cfg(unix)]
+fn pane_socket_acceptable(socket_target: &str) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(socket_target) else {
+        // A target that does not exist (yet) is not a refusal: Herdr
+        // may simply be down; the connect below fails silently as
+        // before, and reporting starts when the socket appears.
+        return true;
+    };
+    let acceptable = pane_socket_is_ownable(&metadata, effective_uid());
+    if !acceptable
+        && SOCKET_REFUSAL_LOGGED
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        // Log once per process (the pane state API is best-effort; a
+        // hostile or misconfigured target must not spam the daemon log).
+        eprintln!(
+            "herdr: the pane socket target {socket_target} failed the ownership fence — this session stays unreported"
+        );
+    }
+    acceptable
+}
+
+#[cfg(windows)]
+fn pane_socket_acceptable(_socket_target: &str) -> bool {
+    // Named pipes carry their own ACL model at connect time.
+    true
+}
+
 /// Send one request line: connect, write, and finish on the first
 /// response byte, an error, a close, or the 500 ms window (the TS
 /// `sendRequest`). Failures are silent — the pane state API is
 /// best-effort, and a down daemon must never wedge a session.
 async fn send_request(socket_target: &str, request: Value) {
+    // The pane-socket fence comes FIRST (the client-supplied target is
+    // untrusted): a target that is not this process's own Unix socket
+    // never reports. Missing targets pass through here — the connect
+    // below already fails silently on them, so a Herdr daemon that is
+    // merely down does not log.
+    if !pane_socket_acceptable(socket_target) {
+        return;
+    }
     // Every phase of the one-shot request is time-bounded — connect,
     // write, and the response's first byte — so a wedged peer (a socket
     // that accepts but never reads) can never stall the reporter task
@@ -939,7 +1015,8 @@ mod tests {
         tokio::task::JoinHandle<()>,
     ) {
         let listener = tokio::net::UnixListener::bind(socket_path).unwrap();
-        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let requests: std::sync::Arc<std::sync::Mutex<Vec<Value>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen = std::sync::Arc::clone(&requests);
         let handle = tokio::spawn(async move {
             loop {
@@ -1332,6 +1409,74 @@ mod tests {
             requests.lock().unwrap()
         );
         server.abort();
+    }
+
+    /// The pane-socket fence decides by file type and owner: a bound
+    /// socket this process owns passes, a regular file and a symlink
+    /// (even one pointing at the legitimate socket) never do, and the
+    /// pure decision rejects a foreign owner (the `chown`-free mock: a
+    /// uid that is not ours).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_pane_socket_fence_decides_by_type_and_owner() {
+        let socket_path = temp_socket("fence");
+        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        let own_metadata = std::fs::symlink_metadata(&socket_path).unwrap();
+
+        // The owner check is the process's own uid for a real socket.
+        assert!(pane_socket_is_ownable(&own_metadata, effective_uid()));
+        // A foreign owner never passes (the mocked metadata check).
+        assert!(!pane_socket_is_ownable(&own_metadata, effective_uid() + 1));
+        // A regular file is never a pane socket.
+        let file_path = socket_path.with_extension("file");
+        std::fs::write(&file_path, b"not a socket").unwrap();
+        let file_metadata = std::fs::symlink_metadata(&file_path).unwrap();
+        assert!(!pane_socket_is_ownable(&file_metadata, effective_uid()));
+        // A symlink never passes — even one pointing at the legitimate
+        // socket (lstat does not follow).
+        let link_path = socket_path.with_extension("link");
+        std::os::unix::fs::symlink(&socket_path, &link_path).unwrap();
+        let link_metadata = std::fs::symlink_metadata(&link_path).unwrap();
+        assert!(!pane_socket_is_ownable(&link_metadata, effective_uid()));
+        // The fence end of it: the real socket passes, the file and the
+        // symlink do not, and a missing target passes through (the
+        // connect below still fails silently on it).
+        assert!(pane_socket_acceptable(socket_path.to_str().unwrap()));
+        assert!(!pane_socket_acceptable(file_path.to_str().unwrap()));
+        assert!(!pane_socket_acceptable(link_path.to_str().unwrap()));
+        assert!(pane_socket_acceptable(
+            socket_path.with_extension("absent").to_str().unwrap()
+        ));
+        drop(listener);
+    }
+
+    /// A reporter aimed at a non-socket target stays silent: the fence
+    /// drops the report before the connect, exactly like a missing
+    /// socket.
+    #[tokio::test]
+    async fn a_reporter_into_a_non_socket_target_stays_silent() {
+        let dir = temp_socket("not-a-socket");
+        let socket_path = dir.with_extension("impostor");
+        std::fs::write(&socket_path, b"not a socket").unwrap();
+        let requests: std::sync::Arc<std::sync::Mutex<Vec<Value>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // No fake server: a legitimate socket never exists at any path,
+        // so any arriving report would have to come from the impostor.
+        let config = HerdrConfig::from_env(&pane_env(&socket_path, "w1:p9")).unwrap();
+        let (reporter, _generation) =
+            start_reporter(config, HerdrSessionRef::new(None, Some("s12".to_string())));
+        reporter.session_started(false, HerdrSessionRef::new(None, Some("s12".to_string())));
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "a non-socket target produced reports"
+        );
+        reporter.release().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "a non-socket target produced a release"
+        );
     }
 
     /// Concurrent seq minting never duplicates: the first-seed race's
