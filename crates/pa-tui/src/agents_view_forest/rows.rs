@@ -4,13 +4,13 @@ use serde_json::Value;
 
 use super::lineage::{depth_consistent_parent, is_subagent_descendant};
 use super::{
-    is_subagent_summary, session_model, session_title, AgentsViewRow, AgentsViewScope, Rollup,
-    RowKind, SUMMARY_ROW_PREFIX,
+    session_model, session_title, AgentsViewRow, AgentsViewScope, Rollup, RowKind,
+    SUMMARY_ROW_PREFIX,
 };
 use crate::agents_view_state::{
     now_ms, relative_age, section_rank, summary_for_record, Section, UnifiedRecord,
 };
-use crate::subagents::{summary_identity_keys, summary_parent_keys};
+use crate::subagents::{is_subagent_summary, summary_identity_keys, summary_parent_keys};
 
 struct BaseRow {
     kind: RowKind,
