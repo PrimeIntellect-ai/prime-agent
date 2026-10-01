@@ -1502,6 +1502,38 @@ class ValidateFactoryMachineTest(unittest.TestCase):
         self.assertEqual(validate_factory_machine(machine), [])
         self.assertEqual(validate_factory_spec(machine), [])
 
+    def test_guard_values_must_be_finite(self) -> None:
+        # Regression (bot review): a non-finite float in a guard comparison
+        # value serializes as the non-JSON NaN/Infinity tokens and breaks
+        # every strict consumer of the activity reply frames (the host
+        # bridge's parser included) — validation rejects them at the
+        # machine's source, deeply (a contains needle list carries the
+        # same rule).
+        def machine_with(when: Any) -> dict[str, Any]:
+            return {
+                "states": [
+                    state("a", entry=True, outputs=[{"name": "verdict", "type": "json"}]),
+                    state("b"),
+                ],
+                "transitions": [{"from": "a", "to": "b", "when": when}],
+            }
+
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            self.assertEqual(
+                validate_factory_machine(
+                    machine_with({"output": "verdict", "op": "eq", "value": bad})
+                ),
+                ["transitions[0] when.value must be finite (JSON carries no NaN or Infinity)"],
+                repr(bad),
+            )
+        nested = machine_with(
+            {"output": "verdict", "op": "contains", "value": ["ok", {"x": float("nan")}]}
+        )
+        self.assertEqual(
+            validate_factory_machine(nested),
+            ["transitions[0] when.value must be finite (JSON carries no NaN or Infinity)"],
+        )
+
     def test_guard_rules(self) -> None:
         def machine_with(when: Any) -> dict[str, Any]:
             return {
@@ -5015,6 +5047,28 @@ class FactoryGraphWatchTest(unittest.TestCase):
 class FactoryFrameCapTest(unittest.TestCase):
     """The reply frame's wire cap: the events tail trims first, the all-runs
     reply drops its oldest runs, and a frame that cannot fit fails loudly."""
+
+    def test_a_non_finite_frame_fails_loudly(self) -> None:
+        # The belt: validation blocks non-finite guard values at the
+        # machine's source; a frame that ever carries one anyway fails
+        # loudly instead of emitting the non-JSON NaN/Infinity tokens
+        # (every strict consumer of the reply would choke on them).
+        frame = {
+            "event": "done",
+            "id": "r",
+            "status": "ok",
+            "result": {
+                "machine": {
+                    "transitions": [{"when": {"op": "eq", "value": float("nan")}}]
+                }
+            },
+        }
+        factory_module._cap_factory_frame(frame)
+        self.assertEqual(frame["status"], "error")
+        self.assertIn("non-finite", frame["reason"])
+        clean = {"event": "done", "id": "r", "status": "ok", "result": {"runs": []}}
+        factory_module._cap_factory_frame(clean)
+        self.assertEqual(clean["status"], "ok")
 
     def test_an_oversized_error_frame_fails_loudly(self) -> None:
         # The error lane rides the same wire cap: a multi-megabyte reason

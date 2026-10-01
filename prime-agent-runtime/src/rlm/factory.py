@@ -82,6 +82,22 @@ def _is_positive_int(value: Any) -> bool:
     return _is_int(value) and value > 0
 
 
+def _value_is_finite(value: Any) -> bool:
+    """True when every float inside a guard comparison value is finite.
+    JSON carries no NaN/Infinity tokens, so a non-finite float would
+    serialize as the non-JSON ``NaN``/``Infinity`` tokens and break every
+    strict consumer of the reply frames (the host bridge's parser
+    included) — a machine declaring one is invalid at the source.
+    """
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_value_is_finite(item) for item in value)
+    if isinstance(value, dict):
+        return all(_value_is_finite(item) for item in value.values())
+    return True
+
+
 def _is_nonempty_str(value: Any) -> bool:
     return isinstance(value, str) and value != ""
 
@@ -376,6 +392,11 @@ def _validate_guard(
             errors.append(f"transitions[{index}] when.op 'contains' requires a non-empty list value")
     elif op in ("eq", "ne") and not _is_scalar(value):
         errors.append(f"transitions[{index}] when.op {op!r} requires a scalar value")
+    if not _value_is_finite(value):
+        errors.append(
+            f"transitions[{index}] when.value must be finite "
+            "(JSON carries no NaN or Infinity)"
+        )
 
 
 def validate_factory_machine(machine: Any) -> list[str]:
@@ -3066,3 +3087,14 @@ def _cap_factory_frame(frame: dict[str, Any]) -> None:
         frame["status"] = "error"
         frame["reason"] = "factory activity reply exceeds the wire cap"
         return
+    # A non-finite float anywhere in the frame would serialize as the
+    # non-JSON tokens NaN/Infinity and break every strict consumer of
+    # the reply (the host bridge's parser included) — validation blocks
+    # them at the machine's source; this belt fails loudly if one ever
+    # slips through, instead of emitting the token.
+    try:
+        json.dumps(frame, allow_nan=False)
+    except ValueError:
+        frame.pop("result", None)
+        frame["status"] = "error"
+        frame["reason"] = "factory activity reply contains non-finite values"
