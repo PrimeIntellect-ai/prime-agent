@@ -537,3 +537,78 @@ async fn abort_and_clear_queue_suspends_plain_prompts() {
     let idle = worker.dispatch("wait_for_idle", &json!({})).await;
     assert!(idle.success, "never went idle: {idle:?}");
 }
+
+/// `cancel_prompt_admission` with `cancelOwned` on a running prompt (TS
+/// `admission.controller?.abort()`): the worker answers `owned`, aborts
+/// the turn, and the settle clears the admission.
+#[tokio::test]
+async fn cancel_owned_admission_aborts_the_running_prompt() {
+    let dir = std::env::temp_dir().join(format!("pa-worker-cancel-owned-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = WorkerConfig {
+        socket_path: dir.join("worker.sock"),
+        supervisor_socket_path: PathBuf::new(),
+        token: "token".to_string(),
+        worker_instance_id: String::new(),
+        active_session_id: "cancel-owned-session".to_string(),
+        agent_dir: dir.join("agent"),
+        recovery_journal_path: dir.join("recovery.jsonl"),
+        telemetry_disabled: None,
+        script: Some(json!({ "responses": [{ "text": "held reply", "delayMs": 60000 }] })),
+    };
+    let worker = Arc::new(Worker::new(config, None));
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({ "noSession": true, "cwd": "/tmp", "name": "cancel-owned" }),
+        )
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+    let mut subscription = worker.events.subscribe();
+    let wait = tokio::spawn({
+        let worker = Arc::clone(&worker);
+        async move {
+            worker
+                .dispatch(
+                    "prompt_and_wait",
+                    &json!({
+                        "activeSessionId": "cancel-owned-session",
+                        "message": "go",
+                        "admissionId": "adm-1",
+                    }),
+                )
+                .await
+        }
+    });
+    // The turn commits its admission before it emits `agent_start`.
+    loop {
+        let frame = subscription.recv().await.unwrap();
+        if frame.outbound_type == "session_event"
+            && serde_json::from_slice::<Value>(&frame.payload).unwrap()["event"]["type"]
+                == "agent_start"
+        {
+            break;
+        }
+    }
+    let cancel = json!({
+        "activeSessionId": "cancel-owned-session",
+        "admissionId": "adm-1",
+        "cancelOwned": true,
+    });
+    let owned = worker.dispatch("cancel_prompt_admission", &cancel).await;
+    assert_eq!(owned.data, Some(json!({ "status": "owned" })), "{owned:?}");
+    wait.await.unwrap();
+    let messages = worker.dispatch("get_messages", &json!({})).await;
+    let messages = serde_json::to_string(&messages.data).unwrap();
+    assert!(
+        !messages.contains("held reply"),
+        "the turn ran to the end: {messages}"
+    );
+    let cleared = worker.dispatch("cancel_prompt_admission", &cancel).await;
+    assert_eq!(
+        cleared.data,
+        Some(json!({ "status": "unknown" })),
+        "{cleared:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

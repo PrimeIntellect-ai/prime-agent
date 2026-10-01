@@ -702,7 +702,7 @@ impl Worker {
                 recovery: Arc::clone(&recovery),
                 core: Arc::clone(&core),
                 input_pauses: input_pauses.clone(),
-                prompt_admissions,
+                prompt_admissions: prompt_admissions.clone(),
                 work_notify: Arc::clone(&work_notify),
                 idle_notify: Arc::clone(&idle_notify),
                 events: events.clone(),
@@ -756,7 +756,6 @@ impl Worker {
             remote_source: None,
             probe_override: None,
         });
-        let prompt_admissions = crate::prompt_admission::WorkerAdmissions::new();
         let navigation = crate::session_navigation::SessionNavigation::new(
             std::sync::Arc::clone(&engine),
             Arc::clone(&core),
