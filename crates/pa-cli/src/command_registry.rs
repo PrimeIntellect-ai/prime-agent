@@ -324,14 +324,8 @@ const TOP_LEVEL_OPTION_GROUPS: &[OptionGroup] = &[
         ],
     },
     OptionGroup {
-        heading: "Tool and resource options",
+        heading: "Resource options",
         options: &[
-            ("-t, --tools <list>", "Allowlist comma-separated tool names"),
-            ("-nt, --no-tools", "Disable all tools by default"),
-            (
-                "-nbt, --no-builtin-tools",
-                "Disable built-in tools by default",
-            ),
             ("--skill <path>", "Load a skill (repeatable)"),
             ("-ns, --no-skills", "Disable skill discovery"),
             (

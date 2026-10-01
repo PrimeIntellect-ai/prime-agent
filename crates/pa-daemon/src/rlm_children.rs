@@ -150,6 +150,14 @@ pub struct RlmChildIdentity {
     pub session_name: String,
 }
 
+/// The selector that reaches a child whether or not its worker is
+/// resident: the persisted session id (the session-file stem the
+/// supervisor's ledger wake resolves), else the RLM child id. The
+/// spawn-time live id stops resolving once the worker passivates.
+pub(crate) fn durable_child_selector(session_id: Option<&str>, rlm_child_id: &str) -> String {
+    session_id.unwrap_or(rlm_child_id).to_string()
+}
+
 /// One tracked child session.
 #[derive(Debug)]
 struct ChildRecord {

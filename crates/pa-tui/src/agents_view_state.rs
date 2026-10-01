@@ -417,7 +417,7 @@ pub fn filter_empty_sessions(records: &[UnifiedRecord], preserved: &[&str]) -> V
                 .and_then(Value::as_f64)
                 .unwrap_or(0.0)
                 > 0.0
-            || crate::agents_view_forest::is_subagent_summary(&summary)
+            || crate::subagents::is_subagent_summary(&summary)
             || get_str(&summary, "sessionId").is_some_and(|id| preserved.contains(&id));
         if keep_row {
             keep(index, &mut retained);

@@ -20,6 +20,9 @@ pub(super) const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 pub(super) const STABLE_LIFETIME_MS: u64 = 30_000;
 const BASE_BACKOFF_MS: u64 = 250;
 const MAX_BACKOFF_MS: u64 = 30_000;
+/// The adopted-worker liveness poll used only where the kernel exit watch
+/// cannot register (no pidfd, descriptor exhaustion, Windows).
+const ADOPTED_EXIT_FALLBACK_POLL: Duration = Duration::from_secs(30);
 
 impl Supervisor {
     /// Watch a worker process: on unexpected exit, restart with backoff.
@@ -71,24 +74,30 @@ impl Supervisor {
                     return;
                 }
             } else if adopted_pid != 0 {
-                // Adopted worker: poll liveness (cannot wait on a foreign
-                // pid). A previous relaunch that produced no worker leaves
-                // pid 0 here - there is nothing to watch, and polling pid 0
-                // would report a phantom exit; fall straight to the
-                // failure/backoff/relaunch arm instead.
-                loop {
-                    if self.shutting_down.load(Ordering::SeqCst)
-                        || resident.intentional_stop.load(Ordering::SeqCst)
-                    {
-                        return;
+                // Adopted worker (no Child handle): park on the kernel's
+                // exit notification for the pid. A previous relaunch that
+                // produced no worker leaves pid 0 here - there is nothing
+                // to watch, and a watch on pid 0 would report a phantom
+                // exit; fall straight to the failure/backoff/relaunch arm
+                // instead.
+                if let Err(error) =
+                    pa_core::platform::process::wait_for_exit(adopted_pid as u32).await
+                {
+                    // The slow fallback, only where the kernel exit watch
+                    // cannot register.
+                    self.log_line(&format!(
+                        "session worker {}: kernel exit watch unavailable ({error}); polling liveness every {}s",
+                        resident.worker_id,
+                        ADOPTED_EXIT_FALLBACK_POLL.as_secs()
+                    ));
+                    while matches!(is_process_alive(adopted_pid as u32), Ok(true)) {
+                        tokio::time::sleep(ADOPTED_EXIT_FALLBACK_POLL).await;
                     }
-                    if !matches!(is_process_alive(adopted_pid as u32), Ok(true)) {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
-                if resident.intentional_stop.load(Ordering::SeqCst)
-                    || self.shutting_down.load(Ordering::SeqCst)
+                // A relaunch elsewhere (update abandon, retry) took over the
+                // resident with a new process.
+                if self.is_stopping(&resident)
+                    || resident.descriptor.lock().await.pid != adopted_pid
                 {
                     return;
                 }
