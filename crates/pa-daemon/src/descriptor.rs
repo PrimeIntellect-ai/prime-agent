@@ -211,7 +211,23 @@ pub fn descriptor_dir(agent_dir: &Path, socket_path: &Path) -> PathBuf {
         .join(crate::paths::hash_key(&socket_path.to_string_lossy(), 12))
 }
 
-/// Write a file atomically with 0600 permissions (port of writeFileAtomicSync).
+/// The temp file's durability posture before the rename: the port of TS
+/// `writeFileAtomicSync`'s per-call-site `fsync` option (the same
+/// per-site variance the worker journal's `Finalize` enum models for its
+/// own writes).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum TempSync {
+    /// `fsync: true` — sync the temp file before the rename (the durable
+    /// surfaces: worker descriptors, the identity-pending record).
+    Synced,
+    /// The TS default at the call sites that pass no `fsync` option: the
+    /// temp data rides the rename unsynced. A crash may lose the write;
+    /// the atomic rename keeps every state a reader can see parseable.
+    Unsynced,
+}
+
+/// Write a file atomically with 0600 permissions (port of
+/// `writeFileAtomicSync` at its `fsync: true` call sites).
 ///
 /// # Errors
 ///
@@ -220,6 +236,23 @@ pub fn descriptor_dir(agent_dir: &Path, socket_path: &Path) -> PathBuf {
 /// the final rename onto `path` fails; the 0600 restriction is best
 /// effort and never fails the call.
 pub fn write_file_atomic(path: &Path, content: &str) -> Result<()> {
+    write_file_atomic_at(path, content, TempSync::Synced)
+}
+
+/// [`write_file_atomic`] without the temp-file sync — the TS
+/// `writeFileAtomicSync` call sites that pass no `fsync` option.
+///
+/// # Errors
+///
+/// Returns an error when the parent directory cannot be created, or when
+/// creating, writing, or flushing the temp file fails, or when the final
+/// rename onto `path` fails; the 0600 restriction is best effort and
+/// never fails the call.
+pub(crate) fn write_file_atomic_unsynced(path: &Path, content: &str) -> Result<()> {
+    write_file_atomic_at(path, content, TempSync::Unsynced)
+}
+
+fn write_file_atomic_at(path: &Path, content: &str, sync: TempSync) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -230,7 +263,9 @@ pub fn write_file_atomic(path: &Path, content: &str) -> Result<()> {
         let mut writer = std::io::BufWriter::new(file);
         writer.write_all(content.as_bytes())?;
         writer.flush()?;
-        writer.get_ref().sync_all()?;
+        if matches!(sync, TempSync::Synced) {
+            writer.get_ref().sync_all()?;
+        }
     }
     let _ = pa_core::platform::perms::restrict_file(&temp);
     pa_core::platform::rename_onto(&temp, path)
@@ -368,14 +403,17 @@ pub fn load_supervisor_config(
     Some(config)
 }
 
-/// Persist the supervisor config atomically.
+/// Persist the supervisor config atomically (TS `persistSupervisorConfig`
+/// — `writeFileAtomicSync` passes no `fsync` option at this call site,
+/// so the unsynced rename is the daemon's own posture for this write: a
+/// crash losing it only costs the mirror this boot rewrote anyway).
 ///
 /// # Errors
 ///
 /// Returns an error when the config cannot be serialized or the atomic
 /// write to `path` fails.
 pub fn persist_supervisor_config(path: &Path, config: &PersistedSupervisorConfig) -> Result<()> {
-    write_file_atomic(path, &serde_json::to_string_pretty(config)?)
+    write_file_atomic_unsynced(path, &serde_json::to_string_pretty(config)?)
 }
 
 use std::io::Write as _;
@@ -395,6 +433,37 @@ mod tests {
         assert!(
             std::fs::read_dir(dir.path()).unwrap().count() == 1,
             "the temp file must not survive the rename"
+        );
+    }
+
+    #[test]
+    fn unsynced_atomic_write_replaces_an_existing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("supervisor.config.json");
+        std::fs::write(&path, "stale").unwrap();
+        write_file_atomic_unsynced(&path, "next").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "next");
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().count() == 1,
+            "the temp file must not survive the unsynced rename"
+        );
+    }
+
+    #[test]
+    fn persisted_supervisor_config_round_trips_through_the_unsynced_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("d.sock");
+        let path = dir.path().join("supervisor.config.json");
+        let config = PersistedSupervisorConfig {
+            version: 1,
+            socket_path: socket.to_string_lossy().to_string(),
+            default_session_dir: Some(dir.path().join("sessions").to_string_lossy().to_string()),
+        };
+        persist_supervisor_config(&path, &config).unwrap();
+        assert_eq!(
+            load_supervisor_config(&path, &socket),
+            Some(config),
+            "the unsynced persist stays parseable and belongs to its socket"
         );
     }
 
