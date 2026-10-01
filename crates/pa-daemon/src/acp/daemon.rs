@@ -266,19 +266,6 @@ pub(crate) struct HostedSession {
     turn: Option<ActiveTurn>,
     /// The newest assistant stop reason observed on the event stream.
     assistant_stop_reason: Option<String>,
-    /// Resolved when the worker emits the turn's last `agent_end` event:
-    /// the worker sends its `prompt_and_wait` response BEFORE that marker,
-    /// so the marker is the deterministic "every turn frame is on the
-    /// wire" signal the settlement waits for (the supervisor's event relay
-    /// may otherwise trail the response). One `agent_end` per agent run —
-    /// retried and continued runs restart with their own pair — so the
-    /// marker resolves only when every started run ended (a fallback
-    /// `agent_end` for a run without a model turn settles immediately).
-    turn_emitted: Option<oneshot::Sender<()>>,
-    /// `agent_start` frames seen since the marker armed.
-    agent_runs_started: u64,
-    /// `agent_end` frames seen since the marker armed.
-    agent_runs_ended: u64,
 }
 
 struct ActiveTurn {
@@ -363,25 +350,6 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
                             };
                             if let Some(stop) = wire_events::assistant_stop(&event) {
                                 current.assistant_stop_reason = stop.stop_reason;
-                            }
-                            // The worker's post-turn marker: the settlement
-                            // waiting on it may resume once every agent run of
-                            // the turn ended (a retried or continued run
-                            // restarts with its own `agent_start`, so the LAST
-                            // `agent_end` is the marker — an early one leaves
-                            // the trailing retry frames behind the settlement).
-                            match event.get("type").and_then(Value::as_str) {
-                                Some("agent_start") => current.agent_runs_started += 1,
-                                Some("agent_end") => {
-                                    current.agent_runs_ended += 1;
-                                    if current.agent_runs_ended >= current.agent_runs_started.max(1)
-                                    {
-                                        if let Some(emitted) = current.turn_emitted.take() {
-                                            let _ = emitted.send(());
-                                        }
-                                    }
-                                }
-                                _ => {}
                             }
                             let turn_id = current.producer.active_prompt_turn().await;
                             for update in wire_events::wire_updates(&event, &mut mapping) {
@@ -941,9 +909,6 @@ async fn handle_session_new(
         mcp_server_names: Vec::new(),
         turn: None,
         assistant_stop_reason: None,
-        turn_emitted: None,
-        agent_runs_started: 0,
-        agent_runs_ended: 0,
     };
     // The ACP MCP servers ride the wire command, not a local manager.
     if let Err(error) = replace_session_servers(link, &hosted, &resolved).await {
@@ -1117,22 +1082,8 @@ async fn prompt_turn(
         }
     };
     let turn_id = producer.begin_prompt().await;
-    // The turn-end marker: the consumer loop resolves it on the worker's
-    // post-turn `agent_end` event (after the `prompt_and_wait` response).
-    let (emitted_tx, emitted_rx) = oneshot::channel::<()>();
     // TS `abort.signal.aborted` before `promptAndWait`.
-    let cancelled = {
-        let mut guard = state.lock().await;
-        let cancelled = turn_cancelled(&guard, admission_id);
-        if !cancelled {
-            if let Some(hosted) = guard.session.as_mut() {
-                hosted.turn_emitted = Some(emitted_tx);
-                hosted.agent_runs_started = 0;
-                hosted.agent_runs_ended = 0;
-            }
-        }
-        cancelled
-    };
+    let cancelled = turn_cancelled(&*state.lock().await, admission_id);
     if cancelled {
         producer.finish_prompt(turn_id).await;
         return cancelled_response(&id);
@@ -1178,29 +1129,11 @@ async fn prompt_turn(
             return super::internal_error(&id, &error.to_string());
         }
     };
-    // The worker answers the response before its post-turn marker; wait
-    // for the marker so every turn frame is published before the settle
-    // (the event relay may otherwise trail the response). A prompt that
-    // failed before any run started (the aborted-before-delivery cancel:
-    // no agent_start/agent_end ever follows) resolves the marker now -
-    // the settle must not pay the full marker window for a turn that
-    // never ran.
-    let marker_resolved = {
-        let guard = state.lock().await;
-        matches!(
-            guard.session.as_ref(),
-            Some(hosted) if hosted.agent_runs_started == 0
-        )
-    };
-    if !response.success && marker_resolved {
-        let mut guard = state.lock().await;
-        if let Some(hosted) = guard.session.as_mut() {
-            if let Some(emitted) = hosted.turn_emitted.take() {
-                let _ = emitted.send(());
-            }
-        }
-    }
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(30), emitted_rx).await;
+    // TS `abort.signal.aborted` after `promptAndWait`: every turn frame
+    // is published by now - the worker flushes its session events before
+    // the response leaves its socket, and the supervisor's per-client
+    // writer writes a queued event ahead of a queued response - so the
+    // settle reads the stream directly, with no marker wait.
     let cancelled = {
         let guard = state.lock().await;
         turn_cancelled(&guard, admission_id)
@@ -1220,8 +1153,9 @@ async fn prompt_turn(
     }
     // The autonomous accounting for the completion envelope: the daemon's
     // headless-completion status (TS `waitForHeadlessCompletion`), fetched
-    // after the turn marker settled the run. A failed fetch degrades to no
-    // autonomous meta (the envelope still settles without a run).
+    // after the turn settled (the response is the run's end). A failed
+    // fetch degrades to no autonomous meta (the envelope still settles
+    // without a run).
     let autonomous_status = fetch_autonomous_status(link, &hosted_daemon_session_id, false)
         .await
         .ok();

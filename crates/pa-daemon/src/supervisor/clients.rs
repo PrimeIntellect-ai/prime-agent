@@ -154,6 +154,7 @@ impl Supervisor {
         loop {
             line.clear();
             tokio::select! {
+                biased;
                 read = reader.read_line(&mut line), if dispatch_slots.available_permits() > 0 => {
                     let Ok(read) = read else { break };
                     if read == 0 {
@@ -218,6 +219,37 @@ impl Supervisor {
                         drop(dispatch_slot);
                     });
                 }
+                targeted = targeted_rx.recv() => {
+                    // A session event routed by the subscriber registry at
+                    // publish time: the delivery decision already ran, the
+                    // frame only writes (the queue preserves per-session
+                    // publish order). The arm polls ahead of the response
+                    // arm, so an event published before a response bundle
+                    // is queued is written first - the worker's own
+                    // event-before-response socket order survives the hop.
+                    if let Some(payload) = targeted {
+                        if let Err(error) = write_line(&mut writer, &payload).await {
+                            // An event-write failure must not strand an
+                            // accepted shutdown: if this connection owns
+                            // the stop, it still starts the pass.
+                            let is_shutdown_owner = self
+                                .shutdown_owner
+                                .lock()
+                                .unwrap()
+                                .as_deref()
+                                == Some(connection_id.as_str());
+                            if is_shutdown_owner
+                                && self.shutting_down.load(Ordering::SeqCst)
+                                && !self.accept_exit.load(Ordering::SeqCst)
+                            {
+                                self.ensure_shutdown_started().await;
+                            }
+                            return Err(error);
+                        }
+                    } else {
+                        break;
+                    }
+                }
                 dispatched = dispatch_rx.recv() => {
                     let Some((lines, stop)) = dispatched else { break };
                     for outbound in lines {
@@ -256,34 +288,6 @@ impl Supervisor {
                         // begin_shutdown sets accept_exit, so worker stops
                         // cannot be cut short by another inbound connection.
                         self.ensure_shutdown_started().await;
-                        break;
-                    }
-                }
-                targeted = targeted_rx.recv() => {
-                    // A session event routed by the subscriber registry at
-                    // publish time: the delivery decision already ran, the
-                    // frame only writes (the queue preserves per-session
-                    // publish order).
-                    if let Some(payload) = targeted {
-                        if let Err(error) = write_line(&mut writer, &payload).await {
-                            // An event-write failure must not strand an
-                            // accepted shutdown: if this connection owns
-                            // the stop, it still starts the pass.
-                            let is_shutdown_owner = self
-                                .shutdown_owner
-                                .lock()
-                                .unwrap()
-                                .as_deref()
-                                == Some(connection_id.as_str());
-                            if is_shutdown_owner
-                                && self.shutting_down.load(Ordering::SeqCst)
-                                && !self.accept_exit.load(Ordering::SeqCst)
-                            {
-                                self.ensure_shutdown_started().await;
-                            }
-                            return Err(error);
-                        }
-                    } else {
                         break;
                     }
                 }
