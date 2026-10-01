@@ -154,6 +154,23 @@ fn create_config_omits_thinking_when_no_flag_was_given() {
 }
 
 #[test]
+fn create_config_binds_a_new_child_to_its_parent() {
+    let mut opts = options(ModelSelection::default());
+    opts.session = SessionSelection::NewChild {
+        parent_session_file: "/x/p.jsonl".into(),
+        rlm_depth: 2,
+    };
+    assert_eq!(
+        opts.create_config(),
+        json!({
+            "cwd": "/tmp",
+            "parentSessionPath": "/x/p.jsonl",
+            "rlmDepth": 2
+        })
+    );
+}
+
+#[test]
 fn resume_hint_names_a_flushed_session() {
     let dir = std::env::temp_dir().join("pa-tui-resume-hint-test");
     std::fs::create_dir_all(&dir).unwrap();

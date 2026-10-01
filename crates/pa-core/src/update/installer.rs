@@ -131,7 +131,8 @@ pub enum InstallerOutput {
     /// terminal.
     Inherit,
     /// The TUI's run: the output is captured (the live frame stays intact)
-    /// and the failure tail becomes the message.
+    /// and the failure tail becomes the message; the run is detached from
+    /// the terminal (it can never prompt).
     Capture,
 }
 
@@ -167,9 +168,9 @@ pub async fn run_installer(
 /// Run the takeover update from one explicit script URL and install
 /// prefix: platform preflight, fetch the branch's installer script, and
 /// exec it with the environment passed through (the installer's own
-/// `PRIME_AGENT_RUST_*` knobs and `GITHUB_TOKEN` ride the process
-/// environment; the script owns download, the TypeScript uninstall, the
-/// publish, and the `~/.prime/agent` preserve). On success the
+/// `PRIME_AGENT_RUST_*` knobs ride the process environment; the script
+/// owns download, the TypeScript uninstall, the publish, and the
+/// `~/.prime/agent` preserve). On success the
 /// launcher's `--version` answers the new version; on failure the
 /// previous install is kept (the script's own rollback covers a
 /// mid-publish crash).
@@ -258,10 +259,10 @@ async fn fetch_script(url: &str) -> Result<PathBuf> {
 /// Exec the downloaded script (`/bin/sh`, the same interpreter the
 /// curl|sh one-liner uses, at the trusted absolute path so a poisoned
 /// `PATH` cannot substitute the interpreter that runs the installer with
-/// the inherited `GITHUB_TOKEN`) and wait for it. The install prefix rides
+/// the inherited environment) and wait for it. The install prefix rides
 /// the child's environment as the installer's own knob, so the script
 /// publishes exactly where the probe looks — every other
-/// `PRIME_AGENT_RUST_*` knob and `GITHUB_TOKEN` pass through untouched.
+/// `PRIME_AGENT_RUST_*` knob passes through untouched.
 /// The script's own die messages already streamed with
 /// [`InstallerOutput::Inherit`]; with [`InstallerOutput::Capture`] the
 /// tail becomes the failure message.
@@ -303,6 +304,11 @@ async fn execute_script(
             })
         }
         InstallerOutput::Capture => {
+            // The TUI owns the terminal: no inherited stdin and no
+            // controlling tty, so the script cannot open /dev/tty to prompt.
+            command.stdin(std::process::Stdio::null());
+            #[cfg(unix)]
+            crate::platform::process::set_new_session(command.as_std_mut());
             let captured = command.output().await.map_err(|error| UpdateFailure {
                 message: format!("could not run the installer: {error}"),
             })?;
@@ -517,6 +523,8 @@ mod tests {
     #[cfg(unix)]
     const MOCK_INSTALLER: &str = r#"#!/bin/sh
 set -eu
+# Fails only under a controlling terminal (a developer run or `script`); headless CI has none.
+if ( : <>/dev/tty ) 2>/dev/null || [ -t 0 ]; then echo "the captured installer reached the terminal" >&2; exit 9; fi
 mkdir -p "${PRIME_AGENT_RUST_PREFIX}/bin"
 printf '#!/bin/sh\necho "9.9.9-continuous.0123456789abcdef"\n' > "${PRIME_AGENT_RUST_PREFIX}/bin/prime-agent"
 chmod 0755 "${PRIME_AGENT_RUST_PREFIX}/bin/prime-agent"
