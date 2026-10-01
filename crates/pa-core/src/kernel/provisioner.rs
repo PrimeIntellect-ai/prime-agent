@@ -97,7 +97,7 @@ pub enum KernelBootstrapOutcome {
     Error,
 }
 
-/// What one `kernel bootstrap` telemetry event reports.
+/// One kernel boot's facts for the `kernel_bootstrap_*` session counters.
 #[derive(Debug, Clone, Copy)]
 pub struct KernelBootstrapStats {
     /// No prior namespace snapshot existed to restore (fresh session vs a
@@ -108,7 +108,7 @@ pub struct KernelBootstrapStats {
     pub duration_ms: u64,
 }
 
-/// Reports kernel bootstrap results (`kernel bootstrap`, schema v1).
+/// Reports kernel bootstrap results (the `kernel_bootstrap_*` session counters).
 pub type KernelBootstrapResultHandler = Arc<dyn Fn(KernelBootstrapStats) + Send + Sync>;
 
 #[derive(Default, Clone)]
@@ -140,7 +140,7 @@ pub struct IpythonKernelProvisionerOptions {
     /// session can tell the model before it wastes turns calling them
     /// (TS `IpythonToolOptions.onUnavailableSkills`).
     pub on_unavailable_skills: Option<UnavailableSkillsCallback>,
-    /// Publishes the per-boot result for `kernel bootstrap` telemetry.
+    /// Publishes the per-boot result for the `kernel_bootstrap_*` counters.
     /// Telemetry only; kernel behavior never depends on it.
     pub on_bootstrap_result: Option<KernelBootstrapResultHandler>,
 }

@@ -185,8 +185,8 @@ pub struct AgentSession {
     /// reads `resourceLoader.getSkills()` at expansion time; the engine
     /// wiring installs the loaded list once the session is assembled).
     skills: Vec<crate::skills::Skill>,
-    /// The telemetry handle for the `skill used` adoption event the
-    /// prompt path owns (`None` in sessions without telemetry).
+    /// The telemetry handle for the `skill_use_count` counter the prompt
+    /// path owns (`None` in sessions without telemetry).
     skill_telemetry: Option<std::sync::Arc<telemetry::SessionTelemetry>>,
     /// The image-model routing host seam (`None` keeps the session model on
     /// image turns: verification harnesses, and the daemon worker whose

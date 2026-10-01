@@ -2,6 +2,27 @@
 //! notes, the rotating log line, and the spawn-ledger assembly.
 use super::{paths, util, Arc, Result, Supervisor, Value};
 
+/// How long the frequent supervision events accumulate before their one
+/// `daemon event` summary.
+const DAEMON_EVENT_SUMMARY_WINDOW: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// The supervision counters of the current summary window.
+pub(crate) struct DaemonEventCounts {
+    window_started: std::time::Instant,
+    counts: std::collections::BTreeMap<String, u64>,
+    saved_sessions_usage_rows_max: u64,
+}
+
+impl Default for DaemonEventCounts {
+    fn default() -> Self {
+        Self {
+            window_started: std::time::Instant::now(),
+            counts: std::collections::BTreeMap::new(),
+            saved_sessions_usage_rows_max: 0,
+        }
+    }
+}
+
 impl Supervisor {
     /// Emit the `daemon event` adoption signal for a session-archive sweep
     /// (best-effort, non-blocking; no-op when the daemon is opted out).
@@ -43,11 +64,51 @@ impl Supervisor {
         }
     }
 
-    /// Emit a `daemon event` (best-effort, non-blocking; no-op when the
-    /// daemon is opted out).
+    /// Count a frequent supervision event (attach/detach, worker exits and
+    /// restarts, overloads, refusals) into the window's `daemon event`
+    /// summary (best-effort; no-op when the daemon is opted out).
     pub(crate) fn note_daemon_event(&self, kind: &str, exit_reason: Option<&str>) {
-        if let Some(client) = &*self.telemetry.lock().unwrap() {
-            pa_core::session_engine::telemetry::track_daemon_event(client, kind, exit_reason);
+        let key = match (kind, exit_reason) {
+            ("worker_exited", Some("normal")) => "worker_exited_normal_count".to_string(),
+            ("worker_exited", _) => "worker_exited_crash_count".to_string(),
+            (kind, _) => format!("{kind}_count"),
+        };
+        self.count_daemon_event(|counts| *counts.counts.entry(key).or_default() += 1);
+    }
+
+    /// Count one served saved-session listing and its usage-bearing rows.
+    pub(crate) fn note_saved_sessions_listed(&self, rows_with_usage: usize) {
+        self.count_daemon_event(|counts| {
+            *counts
+                .counts
+                .entry("saved_sessions_list_count".to_string())
+                .or_default() += 1;
+            counts.saved_sessions_usage_rows_max = counts
+                .saved_sessions_usage_rows_max
+                .max(rows_with_usage as u64);
+        });
+    }
+
+    /// Apply one count; once the window is an hour old, send the summary
+    /// and start a new window.
+    fn count_daemon_event(&self, update: impl FnOnce(&mut DaemonEventCounts)) {
+        let Some(client) = self.telemetry.lock().unwrap().clone() else {
+            return;
+        };
+        let mut counts = self
+            .daemon_event_counts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        update(&mut counts);
+        let window = counts.window_started.elapsed();
+        if window >= DAEMON_EVENT_SUMMARY_WINDOW {
+            let summary = std::mem::take(&mut *counts);
+            pa_core::session_engine::telemetry::track_daemon_event_summary(
+                &client,
+                window.as_millis() as u64,
+                &summary.counts,
+                summary.saved_sessions_usage_rows_max,
+            );
         }
     }
 

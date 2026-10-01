@@ -170,7 +170,7 @@ impl SessionUi {
         self.dirty = true;
     }
 
-    /// Report the first scroll action of the run (`tui scroll used`),
+    /// Report the first scroll action of the run (`tui_scroll_count`),
     /// fire-and-forget so the keypress never waits on the telemetry flush.
     pub(super) fn track_scroll(&mut self, action: &'static str, resumed_following: bool) {
         if self.scroll_adoption_emitted {

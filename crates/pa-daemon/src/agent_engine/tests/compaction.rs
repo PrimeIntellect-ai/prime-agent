@@ -489,6 +489,7 @@ fn mirror_telemetry_properties(
 /// the session total (TS `compaction_end` handling).
 #[test]
 fn threshold_compaction_counts_into_the_run_telemetry() {
+    let _telemetry = super::telemetry_opt_in();
     let _faux = FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -549,6 +550,7 @@ fn threshold_compaction_counts_into_the_run_telemetry() {
 /// kernel's `compact.run` scheduled counts into the open run.
 #[test]
 fn requested_compaction_counts_into_the_run_telemetry() {
+    let _telemetry = super::telemetry_opt_in();
     let _faux = FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -609,6 +611,7 @@ fn requested_compaction_counts_into_the_run_telemetry() {
 /// into the still-open run it interrupts.
 #[test]
 fn manual_wire_compaction_counts_into_the_run_telemetry() {
+    let _telemetry = super::telemetry_opt_in();
     let _faux = FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

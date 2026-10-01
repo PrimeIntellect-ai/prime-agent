@@ -331,6 +331,7 @@ mod tests {
 
     #[tokio::test]
     async fn refusal_telemetry_honors_both_opt_outs() {
+        let _telemetry = crate::agent_engine::tests::telemetry_opt_in();
         let dir = tempfile::tempdir().expect("tempdir");
         // The create-command opt-out: no client ever.
         let disabled = ModelRefusalTelemetry::new(dir.path().to_path_buf(), true);
@@ -362,6 +363,7 @@ mod tests {
     /// first event.
     #[tokio::test]
     async fn refusal_telemetry_dedupes_repeated_resolves() {
+        let _telemetry = crate::agent_engine::tests::telemetry_opt_in();
         let dir = tempfile::tempdir().expect("tempdir");
         let telemetry = ModelRefusalTelemetry::new(dir.path().to_path_buf(), false);
         telemetry.note_refused("session_start", "zai/glm-5.3", dir.path());
@@ -381,6 +383,7 @@ mod tests {
 
     #[tokio::test]
     async fn refusal_telemetry_rebinds_when_the_cwd_moves() {
+        let _telemetry = crate::agent_engine::tests::telemetry_opt_in();
         let dir = tempfile::tempdir().expect("tempdir");
         let telemetry = ModelRefusalTelemetry::new(dir.path().join("agent"), false);
         let first = dir.path().join("project-a");

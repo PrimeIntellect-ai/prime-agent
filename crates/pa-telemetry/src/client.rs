@@ -871,7 +871,7 @@ mod tests {
         );
         properties.set("trigger", serde_json::Value::from("spontaneous"));
         properties.set("secret_path", serde_json::Value::from("/home/user/project"));
-        client.track("agent run started", properties);
+        client.track("agent run completed", properties);
         client.flush().await.unwrap();
         let events = mock.events();
         assert_eq!(events.len(), 1);

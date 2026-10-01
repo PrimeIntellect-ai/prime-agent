@@ -597,10 +597,10 @@ fn build_tui_options(
         // `/login` + `/logout`: the provider auth flows (the API-key store,
         // the MCP device flow, the provider catalog).
         provider_auth: Some(provider_auth),
-        telemetry: Some(std::sync::Arc::new(CliInteractionTelemetry {
-            cwd: config.cwd.clone(),
-            agent_dir: config.agent_dir.clone(),
-        })),
+        telemetry: Some(std::sync::Arc::new(CliInteractionTelemetry::new(
+            config.cwd.clone(),
+            config.agent_dir.clone(),
+        ))),
         keybindings,
         // The process-wide prompt stash store (TS `ClientPromptStashStore`
         // lives in `main.ts`'s invocation scope): one store per process, so

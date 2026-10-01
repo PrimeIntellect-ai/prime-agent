@@ -337,8 +337,8 @@ async fn execute_goal(
     execution: &mut SessionCommandExecution,
 ) -> Result<(), String> {
     let goal = parse_goal_command(&command.args)?;
-    // The goal command's fixed choice for the `agent feature outcome`
-    // event (captured before the driver arm moves the command's fields).
+    // The goal command's fixed choice for the feature-outcome seam
+    // (captured before the driver arm moves the command's fields).
     let goal_choice = match goal {
         GoalCommand::Status => "status",
         GoalCommand::Clear => "clear",
@@ -415,10 +415,8 @@ async fn execute_goal(
     // turn's primary record (an injected custom row), never an early
     // durable row — the loop admission appends it once.
     execution.continuation_message = context_message;
-    // `agent feature outcome` (v2, #2117): the goal command's observed
-    // result at this seam (the driver applied the action). The
-    // configuration_choice carries the action for the fixed-choice
-    // commands.
+    // The goal command's observed result at this seam (the driver applied
+    // the action), counted as `feature_goal_completed_count`.
     if let Some(telemetry) = engine.telemetry.as_ref() {
         telemetry.note_feature_outcome("goal", "completed", Some(goal_choice));
     }

@@ -15,8 +15,6 @@ use crate::resources::{load_resources, ResourceLoaderOptions};
 use crate::session::manager::SessionManager;
 use crate::skills::PromptTemplate;
 
-use pa_telemetry::base_properties;
-
 use super::{AgentSession, PromptOptions, PromptOutcome};
 
 /// Everything needed to assemble a session.
@@ -321,26 +319,23 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     if let Some(extra) = config.extra_host_handlers.clone() {
         handlers.merge(extra);
     }
+    // Per-session counters (MCP connector use, kernel boots, skills, RLM
+    // child usage, feature outcomes) ride `agent session ended`; the seams
+    // below count into them instead of emitting their own events.
+    let session_counters = std::sync::Arc::new(super::telemetry::SessionCounters::default());
     // The `mcp.*` host requests (config/refresh/begin_login) the kernel's
     // generic MCP registry sends while listing or calling generic servers.
-    // Telemetry reports connector usage (server name + action only) when the
+    // Telemetry counts connector use (never the server name) when the
     // session is telemetry-enabled; set before the handlers register so
     // their closures capture the reporter.
-    {
-        let mut manager = mcp_manager.lock().unwrap();
-        if let Some(wiring) = &config.telemetry {
-            let client = wiring.client.clone();
-            let execution_mode = wiring
-                .execution_mode
-                .clone()
-                .unwrap_or_else(|| super::telemetry::EXECUTION_MODE_UNKNOWN.to_string());
-            manager.set_usage_report(Some(std::sync::Arc::new(move |action, server| {
-                let mut properties = base_properties(&execution_mode);
-                properties.set("action", serde_json::Value::from(action));
-                properties.set("server_name", serde_json::Value::from(server));
-                client.track("mcp connector used", properties);
+    if config.telemetry.is_some() {
+        let counters = std::sync::Arc::clone(&session_counters);
+        mcp_manager
+            .lock()
+            .unwrap()
+            .set_usage_report(Some(std::sync::Arc::new(move |_action, _server| {
+                counters.note_mcp_connector_use();
             })));
-        }
     }
     // The `mcp.*` host-request registration takes the shared manager: the
     // inventory handlers (list_plugins/search_plugins/list_connections)
@@ -383,27 +378,20 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     if auto_refine_allowed {
         turn_boundary.register_refine_handlers(&mut handlers);
     }
-    // `kernel bootstrap` telemetry: the provisioner reports every actual
-    // boot (duration, cold/revived, outcome) through the session's client.
-    let on_bootstrap_result = config.telemetry.as_ref().map(|wiring| {
-        let client = wiring.client.clone();
-        let execution_mode = wiring
-            .execution_mode
-            .clone()
-            .unwrap_or_else(|| super::telemetry::EXECUTION_MODE_UNKNOWN.to_string());
+    // Kernel boots (duration, cold/revived, outcome) count into the
+    // session counters.
+    let on_bootstrap_result = config.telemetry.as_ref().map(|_| {
+        let counters = std::sync::Arc::clone(&session_counters);
         std::sync::Arc::new(
             move |stats: crate::kernel::provisioner::KernelBootstrapStats| {
-                let mut properties = base_properties(&execution_mode);
-                properties.set("cold", serde_json::Value::from(stats.cold));
-                properties.set(
-                    "outcome",
-                    serde_json::Value::from(match stats.outcome {
-                        crate::kernel::provisioner::KernelBootstrapOutcome::Ready => "success",
-                        crate::kernel::provisioner::KernelBootstrapOutcome::Error => "error",
-                    }),
+                counters.note_kernel_bootstrap(
+                    stats.cold,
+                    matches!(
+                        stats.outcome,
+                        crate::kernel::provisioner::KernelBootstrapOutcome::Ready
+                    ),
+                    stats.duration_ms,
                 );
-                properties.set("duration_ms", serde_json::Value::from(stats.duration_ms));
-                client.track("kernel bootstrap", properties);
             },
         ) as crate::kernel::provisioner::KernelBootstrapResultHandler
     });
@@ -782,6 +770,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
                 &telemetry_agent,
                 &wiring,
                 Some(skill_counts),
+                std::sync::Arc::clone(&session_counters),
             )
             .await?;
             Some(std::sync::Arc::new(installed))
@@ -789,13 +778,13 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         _ => None,
     };
 
-    // The `skill used` adoption event reports through the session's
+    // The `skill_use_count` session counter counts through the session's
     // telemetry handle (installed once the telemetry composition decided
     // whether this session reports at all).
     if let Some(telemetry) = telemetry.as_ref() {
         session.set_skill_telemetry(telemetry.clone());
-        // Same lifetime for the `rlm child usage attributed` adoption
-        // event: the producer's flush reports through this handle.
+        // Same lifetime for the `rlm_child_*` session counters: the
+        // producer's flush counts through this handle.
         wiring.rlm_usage.set_telemetry(telemetry.clone());
     }
     let goal_driver = wiring.runtime.goal_driver().clone();
@@ -848,8 +837,8 @@ impl SessionEngine {
     /// the accepted-turn row (TS `_expandSkillCommand`; the row the daemon
     /// emits before admission must match the text the model turn
     /// receives). Non-skill inputs pass through unchanged; the admitted
-    /// turn's own expansion is idempotent over the block. The `skill used`
-    /// adoption event reports from the admission, not here.
+    /// turn's own expansion is idempotent over the block. The
+    /// `skill_use_count` counter counts at the admission, not here.
     pub fn expand_skill_submission(&self, text: &str) -> String {
         crate::skills::expand_skill_command(text, &self.skills).0
     }

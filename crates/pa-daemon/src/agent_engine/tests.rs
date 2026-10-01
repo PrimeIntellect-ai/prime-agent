@@ -57,6 +57,38 @@ fn write_compaction_settings(dir: &std::path::Path, reserve_tokens: u64) {
 
 /// One faux-driven engine over its own tempdir (settings written before
 /// the first prompt so the session build resolves them).
+/// Turns the repo's `cargo test` telemetry opt-out (`DO_NOT_TRACK=1` in
+/// `.cargo/config.toml`) back off for one test that asserts telemetry
+/// wiring, restoring it on drop. Debug builds have no network sink, so the
+/// opted-in test still sends nothing; serialized so concurrent opt-ins
+/// never interleave their restores.
+pub(crate) fn telemetry_opt_in() -> TelemetryOptIn {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let previous = std::env::var_os("DO_NOT_TRACK");
+    std::env::set_var("DO_NOT_TRACK", "0");
+    TelemetryOptIn {
+        previous,
+        _guard: guard,
+    }
+}
+
+pub(crate) struct TelemetryOptIn {
+    previous: Option<std::ffi::OsString>,
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for TelemetryOptIn {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => std::env::set_var("DO_NOT_TRACK", value),
+            None => std::env::remove_var("DO_NOT_TRACK"),
+        }
+    }
+}
+
 pub(crate) fn faux_engine_with_settings(
     script: &serde_json::Value,
     reserve_tokens: u64,

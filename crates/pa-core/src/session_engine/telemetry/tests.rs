@@ -61,8 +61,6 @@ fn fixture_with_clock(clock: TestClock) -> Fixture {
         totals: SessionTotals::default(),
         active_run: None,
         tool_starts: HashMap::new(),
-        active_error: None,
-        consecutive_failure_count: 0,
         now,
     }));
     Fixture {
@@ -411,79 +409,96 @@ fn provider_and_model_categories() {
     assert_eq!(model_category("my-finetune"), "custom");
 }
 
-/// `tool executed` events: tool name + duration + outcome, no arguments
-/// or results, per-execution.
+/// Tool calls fold into the run: built-in tools by name, MCP and custom
+/// tools only as aggregates, and no raw tool name rides any event.
 #[tokio::test]
-async fn tool_executed_events_carry_name_duration_outcome() {
+async fn tool_calls_fold_into_run_aggregates() {
     let fixture = fixture();
+    let assistant = assistant_message();
     emit(&fixture, AgentEvent::AgentStart);
-    fixture.clock.set(1_000);
-    let (tool_start, tool_end) = tool_execution_event("bash", false);
-    emit(&fixture, tool_start);
-    fixture.clock.set(1_250);
-    emit(&fixture, tool_end);
-    let (fail_start, fail_end) = tool_execution_event("edit", true);
-    emit(&fixture, fail_start);
-    fixture.clock.set(1_300);
-    emit(&fixture, fail_end);
-
-    let tools = event_properties(&fixture.mock, "tool executed").await;
-    assert_eq!(tools.len(), 2);
-    assert_eq!(tools[0]["tool_name"], serde_json::json!("bash"));
-    assert_eq!(tools[0]["duration_ms"], serde_json::json!(250));
-    assert_eq!(tools[0]["is_error"], serde_json::json!(false));
-    assert_eq!(tools[1]["tool_name"], serde_json::json!("edit"));
-    assert_eq!(tools[1]["is_error"], serde_json::json!(true));
+    emit(
+        &fixture,
+        AgentEvent::MessageStart {
+            message: user_message(),
+        },
+    );
+    for (tool, is_error, start, end) in [
+        ("bash", false, 1_000, 1_040),
+        ("bash", true, 1_100, 1_110),
+        ("edit", false, 1_200, 1_205),
+        ("mcp__github__create_issue", false, 1_300, 1_350),
+        ("private-extension-tool", false, 1_400, 1_401),
+    ] {
+        let (tool_start, tool_end) = tool_execution_event(tool, is_error);
+        fixture.clock.set(start);
+        emit(&fixture, tool_start);
+        fixture.clock.set(end);
+        emit(&fixture, tool_end);
+    }
+    emit(&fixture, message_end_event(assistant));
+    emit(
+        &fixture,
+        AgentEvent::AgentEnd {
+            messages: Vec::new(),
+        },
+    );
+    emit(&fixture, AgentEvent::AgentStart);
+    let runs = event_properties(&fixture.mock, "agent run completed").await;
+    let run = &runs[0];
+    assert_eq!(run["tool_call_count"], serde_json::json!(5));
+    assert_eq!(run["tool_error_count"], serde_json::json!(1));
+    assert_eq!(run["tool_bash_call_count"], serde_json::json!(2));
+    assert_eq!(run["tool_bash_error_count"], serde_json::json!(1));
+    assert_eq!(run["tool_bash_duration_ms"], serde_json::json!(50));
+    assert_eq!(run["tool_bash_max_duration_ms"], serde_json::json!(40));
+    assert_eq!(run["tool_edit_call_count"], serde_json::json!(1));
+    assert_eq!(run["mcp_tool_call_count"], serde_json::json!(1));
+    assert_eq!(run["custom_tool_call_count"], serde_json::json!(1));
+    assert!(
+        run.get("tool_read_call_count").is_none(),
+        "unused tools stay absent"
+    );
+    let names: Vec<String> = fixture.mock.event_names();
+    assert_eq!(names, ["agent run completed"], "no per-call events");
     let all = serde_json::to_string(&fixture.mock.events()).unwrap();
-    assert!(!all.contains("private command"));
-    assert!(!all.contains("private tool output"));
+    assert!(!all.contains("github"));
+    assert!(!all.contains("private-extension-tool"));
 }
 
-/// `skill used` events: name, kind, and arrival source; never prompt
-/// content.
+/// Skills, RLM child usage, MCP connector use, kernel boots, and feature
+/// outcomes count into `agent session ended` instead of their own events.
 #[tokio::test]
-async fn skill_used_event_shape() {
+async fn session_counters_ride_session_ended() {
     let fixture = fixture();
-    let telemetry = SessionTelemetry::detached(
+    let counters = Arc::new(SessionCounters::default());
+    let mut telemetry = SessionTelemetry::detached(
         fixture.client.clone(),
         fixture.state.clone(),
         "interactive".to_string(),
     );
-    telemetry.note_skill_used("web-search", "markdown", "prompt");
-    telemetry.note_skill_used("agent-message", "python", "steer");
-    fixture.client.flush().await.unwrap();
-    let skills = event_properties(&fixture.mock, "skill used").await;
-    assert_eq!(skills.len(), 2);
-    assert_eq!(skills[0]["skill_name"], serde_json::json!("web-search"));
-    assert_eq!(skills[0]["skill_kind"], serde_json::json!("markdown"));
-    assert_eq!(skills[0]["source"], serde_json::json!("prompt"));
-    assert_eq!(skills[1]["skill_name"], serde_json::json!("agent-message"));
-    assert_eq!(skills[1]["skill_kind"], serde_json::json!("python"));
-    assert_eq!(skills[1]["source"], serde_json::json!("steer"));
-    let all = serde_json::to_string(&fixture.mock.events()).unwrap();
-    assert!(!all.contains("skill content"));
-}
-
-/// `rlm child usage attributed`: the origin label and the batch's
-/// primitives; the token counts and cost round-trip, and nothing
-/// else rides.
-#[tokio::test]
-async fn child_usage_attributed_event_shape() {
-    let fixture = fixture();
-    let telemetry = SessionTelemetry::detached(
-        fixture.client.clone(),
-        fixture.state.clone(),
-        "interactive".to_string(),
-    );
-    telemetry.note_child_usage_attributed("spawn_task", 50_208, 2_929, 0, 0, 0.008_995_7);
-    fixture.client.flush().await.unwrap();
-    let events = event_properties(&fixture.mock, "rlm child usage attributed").await;
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0]["origin"], serde_json::json!("spawn_task"));
-    assert_eq!(events[0]["input_tokens"], serde_json::json!(50_208));
-    assert_eq!(events[0]["output_tokens"], serde_json::json!(2_929));
-    assert_eq!(events[0]["cache_read_tokens"], serde_json::json!(0));
-    assert!((events[0]["cost"].as_f64().unwrap() - 0.008_995_7).abs() < 1e-9);
+    telemetry.counters = Arc::clone(&counters);
+    telemetry.note_skill_used();
+    telemetry.note_skill_used();
+    telemetry.note_child_usage_attributed(50_208, 2_929, 0, 0, 0.008_995_7);
+    counters.note_mcp_connector_use();
+    counters.note_kernel_bootstrap(true, true, 1_200);
+    counters.note_kernel_bootstrap(false, false, 300);
+    telemetry.note_feature_outcome("goal", "completed", Some("create"));
+    telemetry.note_feature_outcome("not-a-feature", "completed", None);
+    telemetry.end().await.unwrap();
+    assert_eq!(fixture.mock.event_names(), ["agent session ended"]);
+    let ended = &event_properties(&fixture.mock, "agent session ended").await[0];
+    assert_eq!(ended["skill_use_count"], serde_json::json!(2));
+    assert_eq!(ended["rlm_child_usage_count"], serde_json::json!(1));
+    assert_eq!(ended["rlm_child_input_tokens"], serde_json::json!(50_208));
+    assert_eq!(ended["rlm_child_output_tokens"], serde_json::json!(2_929));
+    assert!((ended["rlm_child_cost"].as_f64().unwrap() - 0.008_995_7).abs() < 1e-9);
+    assert_eq!(ended["mcp_connector_use_count"], serde_json::json!(1));
+    assert_eq!(ended["kernel_bootstrap_count"], serde_json::json!(2));
+    assert_eq!(ended["kernel_bootstrap_cold_count"], serde_json::json!(1));
+    assert_eq!(ended["kernel_bootstrap_failed_count"], serde_json::json!(1));
+    assert_eq!(ended["kernel_bootstrap_max_ms"], serde_json::json!(1_200));
+    assert_eq!(ended["feature_goal_completed_count"], serde_json::json!(1));
 }
 
 /// `build_client` reuses the installation id a TS install wrote to
@@ -505,10 +520,20 @@ async fn build_client_reuses_the_ts_installation_id_and_mirrors() {
     assert_eq!(client.install_id(), ts_id);
     client.track("agent started", base_properties("interactive"));
     client.flush().await.unwrap();
-    let mirror = std::fs::read_to_string(agent_dir.join("telemetry.jsonl")).unwrap();
-    let line: serde_json::Value = serde_json::from_str(mirror.lines().next().unwrap()).unwrap();
-    assert_eq!(line["distinct_id"], ts_id);
-    assert_eq!(line["name"], "agent started");
+    // The live switch gates every sink, the mirror included: the repo's
+    // cargo env (`DO_NOT_TRACK=1`) keeps it off under `cargo test`.
+    let mirror = std::fs::read_to_string(agent_dir.join("telemetry.jsonl")).ok();
+    if telemetry_switch(&settings).enabled() {
+        let mirror = mirror.expect("the mirror recorded the event");
+        let line: serde_json::Value = serde_json::from_str(mirror.lines().next().unwrap()).unwrap();
+        assert_eq!(line["distinct_id"], ts_id);
+        assert_eq!(line["name"], "agent started");
+    } else {
+        assert!(
+            mirror.is_none(),
+            "nothing is recorded while telemetry is off"
+        );
+    }
 }
 
 /// Two runs in one session: totals merge, per-run events separate.
@@ -542,7 +567,7 @@ async fn multiple_runs_merge_into_session_totals() {
 /// moment, with the prompt trigger when a user message drives the run
 /// and a `run_index` that pairs it with the completed event.
 #[tokio::test]
-async fn run_started_fires_with_prompt_trigger_and_run_index() {
+async fn the_prompt_trigger_and_run_index_ride_the_completed_run() {
     let fixture = fixture();
     let assistant = assistant_message();
     emit(
@@ -576,18 +601,16 @@ async fn run_started_fires_with_prompt_trigger_and_run_index() {
             message: user_message(),
         },
     );
-    let starts = event_properties(&fixture.mock, "agent run started").await;
-    assert_eq!(starts.len(), 2, "one per run window");
-    assert_eq!(starts[0]["trigger"], serde_json::json!("prompt"));
-    assert_eq!(starts[0]["run_index"], serde_json::json!(1));
-    assert_eq!(starts[1]["run_index"], serde_json::json!(2));
+    assert!(
+        event_properties(&fixture.mock, "agent run started")
+            .await
+            .is_empty(),
+        "no run-start event: the trigger rides the completed run"
+    );
     let runs = event_properties(&fixture.mock, "agent run completed").await;
     assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["trigger"], serde_json::json!("prompt"));
     assert_eq!(runs[0]["run_index"], serde_json::json!(1));
-    assert_eq!(
-        starts[0]["run_id"], runs[0]["run_id"],
-        "the run started/completed pair shares the run id"
-    );
 }
 
 /// A continuation run (the auto-retry re-entry: no user message inside
@@ -607,185 +630,137 @@ async fn continuation_run_reports_continuation_trigger() {
         },
     );
     emit(&fixture, AgentEvent::AgentStart);
-    let starts = event_properties(&fixture.mock, "agent run started").await;
-    assert_eq!(starts.len(), 1);
-    assert_eq!(starts[0]["trigger"], serde_json::json!("continuation"));
+    let runs = event_properties(&fixture.mock, "agent run completed").await;
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["trigger"], serde_json::json!("continuation"));
 }
 
-/// `agent tool summary` (v2): per-category call/failure/recovered
-/// counts and durations at run finalize; a failure later followed by a
-/// success of the same category counts as recovered.
-#[tokio::test]
-async fn tool_summary_per_category_with_recovery() {
-    let fixture = fixture();
-    emit(&fixture, AgentEvent::AgentStart);
-    fixture.clock.set(1_000);
-    let (bash_start, bash_end) = tool_execution_event("bash", false);
-    emit(&fixture, bash_start);
-    fixture.clock.set(1_100);
-    emit(&fixture, bash_end);
-    let (edit_start, edit_end) = tool_execution_event("edit", true);
-    emit(&fixture, edit_start);
-    fixture.clock.set(1_200);
-    emit(&fixture, edit_end);
-    // The recovered call: the same category fails then succeeds.
-    let (edit_retry_start, edit_retry_end) = tool_execution_event("edit", false);
-    emit(&fixture, edit_retry_start);
-    fixture.clock.set(1_250);
-    emit(&fixture, edit_retry_end);
+fn retry_start(telemetry: &SessionTelemetry, attempt: u32, delay_ms: u64, backup: bool) {
+    telemetry.note_auto_retry_event(&AutoRetryEvent::Start {
+        attempt,
+        max_attempts: 3,
+        delay_ms,
+        error_message: String::new(),
+        reason: if backup {
+            crate::session_engine::auto_retry::RetryStartReason::Backup {
+                backup_model: "backup/m".to_string(),
+            }
+        } else {
+            crate::session_engine::auto_retry::RetryStartReason::Quick
+        },
+    });
+}
+
+/// One model attempt inside the current run: the attempt's start, the
+/// model call, its end.
+fn attempt(fixture: &Fixture, message: AssistantMessage) {
+    emit(fixture, AgentEvent::AgentStart);
+    emit(fixture, AgentEvent::TurnStart);
+    emit(fixture, message_end_event(message));
     emit(
-        &fixture,
+        fixture,
         AgentEvent::AgentEnd {
             messages: Vec::new(),
         },
     );
-    emit(&fixture, AgentEvent::AgentStart);
-    let summaries = event_properties(&fixture.mock, "agent tool summary").await;
-    assert_eq!(summaries.len(), 2);
-    let bash = summaries
-        .iter()
-        .find(|summary| summary["tool_category"] == serde_json::json!("bash"))
-        .expect("bash summary");
-    assert_eq!(bash["call_count"], serde_json::json!(1));
-    assert_eq!(bash["failure_count"], serde_json::json!(0));
-    assert_eq!(bash["duration_ms"], serde_json::json!(100));
-    assert_eq!(bash["recovered_count"], serde_json::json!(0));
-    let edit = summaries
-        .iter()
-        .find(|summary| summary["tool_category"] == serde_json::json!("edit"))
-        .expect("edit summary");
-    assert_eq!(edit["call_count"], serde_json::json!(2));
-    assert_eq!(edit["failure_count"], serde_json::json!(1));
-    assert_eq!(edit["recovered_count"], serde_json::json!(1));
-    assert_eq!(edit["duration_ms"], serde_json::json!(150));
-    // The per-execution `agent timing` tool events fired too.
-    let timings = event_properties(&fixture.mock, "agent timing").await;
-    let tool_timings: Vec<_> = timings
-        .iter()
-        .filter(|timing| timing["stage"] == serde_json::json!("tool"))
-        .collect();
-    assert_eq!(tool_timings.len(), 3, "one timing event per execution");
-    assert_eq!(tool_timings[0]["duration_ms"], serde_json::json!(100));
-    assert_eq!(tool_timings[0]["tool_category"], serde_json::json!("bash"));
-    assert_eq!(tool_timings[1]["outcome"], serde_json::json!("error"));
 }
 
-/// `agent error` (v2): a failed model call emits one occurrence with
-/// the classification (fixed diagnostic only - never the raw provider
-/// text), and the retry's success emits the recovery update with the
-/// same error id.
+/// TS one-run-per-turn: a turn that retried twice and then succeeded is
+/// exactly one `agent run completed`, with `retry_count` 2, the success
+/// outcome of the final attempt, and the failed attempts folded into the
+/// error counters.
 #[tokio::test]
-async fn error_occurrence_and_recovery_pair_by_error_id() {
+async fn retries_fold_into_one_run_that_succeeds() {
     let fixture = fixture();
-    let failed = assistant_with_error("API Error: 429 rate limit exceeded with /home/user/secret");
-    fixture.clock.set(1_000);
-    emit(&fixture, AgentEvent::AgentStart);
-    emit(&fixture, AgentEvent::TurnStart);
-    fixture.clock.set(1_300);
-    emit(&fixture, message_end_event(failed));
-    emit(
-        &fixture,
-        AgentEvent::AgentEnd {
-            messages: Vec::new(),
-        },
-    );
-    // The retry seam: the wait, then the recovery.
     let telemetry = SessionTelemetry::detached(
         fixture.client.clone(),
         fixture.state.clone(),
         "interactive".to_string(),
     );
-    telemetry.note_auto_retry_event(&AutoRetryEvent::Start {
-        attempt: 1,
-        max_attempts: 3,
-        delay_ms: 500,
-        error_message: String::new(),
-        reason: crate::session_engine::auto_retry::RetryStartReason::Quick,
-    });
+    let failed = assistant_with_error("API Error: 429 rate limit exceeded with /home/user/secret");
+    emit(
+        &fixture,
+        AgentEvent::MessageStart {
+            message: user_message(),
+        },
+    );
+    attempt(&fixture, failed.clone());
+    retry_start(&telemetry, 1, 500, false);
+    attempt(&fixture, failed);
+    retry_start(&telemetry, 2, 1_000, true);
+    attempt(&fixture, assistant_message());
     telemetry.note_auto_retry_event(&AutoRetryEvent::End {
         success: true,
-        attempt: 1,
+        attempt: 2,
         final_error: None,
         restored_model: None,
     });
+    telemetry.end().await.unwrap();
 
-    let errors = event_properties(&fixture.mock, "agent error").await;
-    assert_eq!(errors.len(), 2, "one occurrence + one recovery update");
-    let occurrence = &errors[0];
-    assert_eq!(
-        occurrence["error_event_kind"],
-        serde_json::json!("occurrence")
-    );
-    assert_eq!(
-        occurrence["error_subtype"],
-        serde_json::json!("rate_limited")
-    );
-    assert_eq!(
-        occurrence["error_category"],
-        serde_json::json!("rate_limit")
-    );
-    assert_eq!(occurrence["http_status"], serde_json::json!(429));
-    assert_eq!(occurrence["component"], serde_json::json!("provider"));
-    assert_eq!(occurrence["operation"], serde_json::json!("stream"));
-    assert_eq!(occurrence["stage"], serde_json::json!("model_stream"));
-    assert_eq!(
-        occurrence["consecutive_failure_count"],
-        serde_json::json!(1)
-    );
+    let runs = event_properties(&fixture.mock, "agent run completed").await;
+    assert_eq!(runs.len(), 1, "one run per turn");
+    let run = &runs[0];
+    assert_eq!(run["outcome"], serde_json::json!("success"));
+    assert_eq!(run["error_category"], serde_json::Value::Null);
+    assert_eq!(run["retry_count"], serde_json::json!(2));
+    assert_eq!(run["failover_count"], serde_json::json!(1));
+    assert_eq!(run["retry_wait_ms"], serde_json::json!(1_500));
+    assert_eq!(run["model_call_count"], serde_json::json!(3));
+    assert_eq!(run["turn_count"], serde_json::json!(3));
+    assert_eq!(run["model_error_count"], serde_json::json!(2));
+    assert_eq!(run["error_rate_limit_count"], serde_json::json!(2));
+    let ended = event_properties(&fixture.mock, "agent session ended").await;
+    assert_eq!(ended[0]["run_count"], serde_json::json!(1));
+    assert_eq!(ended[0]["successful_run_count"], serde_json::json!(1));
+    assert_eq!(ended[0]["failed_run_count"], serde_json::json!(0));
+    assert_eq!(ended[0]["retry_count"], serde_json::json!(2));
     // The privacy contract: no raw provider text anywhere.
     let all = serde_json::to_string(&fixture.mock.events()).unwrap();
     assert!(!all.contains("API Error"));
     assert!(!all.contains("/home/user/secret"));
-    assert_eq!(
-        occurrence["diagnostic_message"],
-        serde_json::json!("Provider rate limit exceeded.")
+}
+
+/// A turn whose retries are exhausted is one run with the error outcome
+/// of its final attempt.
+#[tokio::test]
+async fn exhausted_retries_are_one_failed_run() {
+    let fixture = fixture();
+    let telemetry = SessionTelemetry::detached(
+        fixture.client.clone(),
+        fixture.state.clone(),
+        "interactive".to_string(),
     );
-    assert_eq!(
-        occurrence["error_message_redacted"],
-        serde_json::json!(true)
+    let failed = assistant_with_error("network connection reset");
+    emit(
+        &fixture,
+        AgentEvent::MessageStart {
+            message: user_message(),
+        },
     );
-    let recovery = &errors[1];
-    assert_eq!(
-        recovery["error_event_kind"],
-        serde_json::json!("recovery_update")
-    );
-    assert_eq!(
-        recovery["recovery_action"],
-        serde_json::json!("automatic_retry")
-    );
-    assert_eq!(recovery["recovery_outcome"], serde_json::json!("success"));
-    assert_eq!(recovery["retry_attempt"], serde_json::json!(1));
-    assert_eq!(
-        occurrence["error_id"], recovery["error_id"],
-        "the recovery update pairs with its occurrence"
-    );
-    // The `time_to_error` and `retry_wait` timing stages.
-    let timings = event_properties(&fixture.mock, "agent timing").await;
-    let time_to_error = timings
-        .iter()
-        .find(|timing| timing["stage"] == serde_json::json!("time_to_error"))
-        .expect("time_to_error timing");
-    assert_eq!(time_to_error["duration_ms"], serde_json::json!(300));
-    let retry_wait = timings
-        .iter()
-        .find(|timing| timing["stage"] == serde_json::json!("retry_wait"))
-        .expect("retry_wait timing");
-    assert_eq!(retry_wait["duration_ms"], serde_json::json!(500));
-    // The failed run window reports the retry counts.
-    emit(&fixture, AgentEvent::AgentStart);
+    attempt(&fixture, failed.clone());
+    retry_start(&telemetry, 1, 500, false);
+    attempt(&fixture, failed.clone());
+    retry_start(&telemetry, 2, 500, false);
+    attempt(&fixture, failed);
+    telemetry.note_auto_retry_event(&AutoRetryEvent::End {
+        success: false,
+        attempt: 2,
+        final_error: Some("network".to_string()),
+        restored_model: None,
+    });
+    telemetry.end().await.unwrap();
+
     let runs = event_properties(&fixture.mock, "agent run completed").await;
-    assert_eq!(runs.len(), 1);
+    assert_eq!(runs.len(), 1, "one run per turn");
     assert_eq!(runs[0]["outcome"], serde_json::json!("error"));
-    assert_eq!(runs[0]["retry_count"], serde_json::json!(1));
-    assert_eq!(runs[0]["retry_wait_ms"], serde_json::json!(500));
-    assert_eq!(runs[0]["error_subtype"], serde_json::json!("rate_limited"));
+    assert_eq!(runs[0]["error_category"], serde_json::json!("network"));
+    assert_eq!(runs[0]["retry_count"], serde_json::json!(2));
+    assert_eq!(runs[0]["model_error_count"], serde_json::json!(3));
+    assert_eq!(runs[0]["error_network_count"], serde_json::json!(3));
     assert_eq!(runs[0]["stop_reason"], serde_json::json!("error"));
-    assert_eq!(runs[0]["terminal_outcome"], serde_json::json!("error"));
-    assert_eq!(runs[0]["usage_complete"], serde_json::json!(false));
-    assert!(
-        runs[0].get("estimated_cost_usd").is_none(),
-        "incomplete usage never reports a cost"
-    );
+    let ended = event_properties(&fixture.mock, "agent session ended").await;
+    assert_eq!(ended[0]["failed_run_count"], serde_json::json!(1));
+    assert_eq!(ended[0]["run_count"], serde_json::json!(1));
 }
 
 /// The enriched `agent run completed` (v2): the run pair id, the
@@ -828,24 +803,6 @@ async fn run_completed_v2_enrichment() {
     assert_eq!(ended[0]["terminal_outcome"], serde_json::json!("success"));
 }
 
-/// A tool failure emits its own error occurrence (component `tools`)
-/// without ever uploading the tool output.
-#[tokio::test]
-async fn tool_failure_emits_tools_error_occurrence() {
-    let fixture = fixture();
-    emit(&fixture, AgentEvent::AgentStart);
-    let (start, end) = tool_execution_event("bash", true);
-    emit(&fixture, start);
-    emit(&fixture, end);
-    let errors = event_properties(&fixture.mock, "agent error").await;
-    assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0]["component"], serde_json::json!("tools"));
-    assert_eq!(errors[0]["operation"], serde_json::json!("execute"));
-    assert_eq!(errors[0]["stage"], serde_json::json!("tool_execution"));
-    let all = serde_json::to_string(&fixture.mock.events()).unwrap();
-    assert!(!all.contains("private tool output"));
-}
-
 /// The stream-gap timing: the largest quiet stretch between model
 /// events reports on the run's timing stage.
 #[tokio::test]
@@ -868,12 +825,6 @@ async fn stream_gap_tracks_the_largest_quiet_stretch() {
         },
     );
     emit(&fixture, AgentEvent::AgentStart);
-    let timings = event_properties(&fixture.mock, "agent timing").await;
-    let gap = timings
-        .iter()
-        .find(|timing| timing["stage"] == serde_json::json!("stream_gap"))
-        .expect("stream_gap timing");
-    assert_eq!(gap["duration_ms"], serde_json::json!(150));
     let runs = event_properties(&fixture.mock, "agent run completed").await;
     assert_eq!(runs[0]["max_stream_gap_ms"], serde_json::json!(150));
     assert_eq!(runs[0]["run_to_first_text_ms"], serde_json::json!(0));
@@ -908,84 +859,6 @@ async fn bot_edges_the_trigger_lands_and_terminal_outcome_maps() {
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0]["trigger"], serde_json::json!("prompt"));
     assert_eq!(runs[0]["terminal_outcome"], serde_json::json!("cancelled"));
-}
-
-#[tokio::test]
-async fn bot_edges_tool_failure_never_touches_the_model_failure_chain() {
-    let fixture = fixture();
-    emit(&fixture, AgentEvent::AgentStart);
-    // The model failure counts chain link 1.
-    emit(
-        &fixture,
-        message_end_event(assistant_with_error("API Error: 429 rate limit exceeded")),
-    );
-    // A tool failure between model failures emits its own occurrence but
-    // neither increments nor wipes the model chain.
-    let (start, end) = tool_execution_event("bash", true);
-    emit(&fixture, start);
-    emit(&fixture, end);
-    // The next model failure still reports chain link 2.
-    emit(
-        &fixture,
-        message_end_event(assistant_with_error("API Error: 429 rate limit exceeded")),
-    );
-    let errors = event_properties(&fixture.mock, "agent error").await;
-    let model_occurrences: Vec<_> = errors
-        .iter()
-        .filter(|error| error["component"] == serde_json::json!("provider"))
-        .collect();
-    assert_eq!(
-        model_occurrences[0]["consecutive_failure_count"],
-        serde_json::json!(1)
-    );
-    assert_eq!(
-        model_occurrences[1]["consecutive_failure_count"],
-        serde_json::json!(2),
-        "the tool failure in between never reset the chain"
-    );
-    let tool_occurrence = errors
-        .iter()
-        .find(|error| error["component"] == serde_json::json!("tools"))
-        .expect("the tool occurrence fired");
-    assert!(
-        tool_occurrence.get("consecutive_failure_count").is_none(),
-        "tool occurrences never carry the model chain counter"
-    );
-}
-
-#[tokio::test]
-async fn bot_edges_the_give_up_never_double_counts_the_chain() {
-    let fixture = fixture();
-    let failed = assistant_with_error("API Error: 429 rate limit exceeded");
-    emit(&fixture, AgentEvent::AgentStart);
-    emit(&fixture, message_end_event(failed));
-    let telemetry = SessionTelemetry::detached(
-        fixture.client.clone(),
-        fixture.state.clone(),
-        "interactive".to_string(),
-    );
-    // The retry gives up: the failed call already counted its link, and
-    // a FAILED retry emits no recovery update at all (the retried
-    // attempt's own failure is its own new occurrence when one happens -
-    // a mispaired update would claim the wrong recovery).
-    telemetry.note_auto_retry_event(&AutoRetryEvent::End {
-        success: false,
-        attempt: 1,
-        final_error: Some("gave up".to_string()),
-        restored_model: None,
-    });
-    let errors = event_properties(&fixture.mock, "agent error").await;
-    assert_eq!(
-        errors.len(),
-        1,
-        "the give-up never created a recovery update"
-    );
-    let occurrence = &errors[0];
-    assert_eq!(
-        occurrence["consecutive_failure_count"],
-        serde_json::json!(1),
-        "the give-up never inflated the chain to 2"
-    );
 }
 
 /// End to end through the real client and the real analytics sink to a

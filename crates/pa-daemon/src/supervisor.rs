@@ -137,6 +137,10 @@ pub struct Supervisor {
     /// Daemon-lifecycle telemetry (`daemon event` schema v1), resolved at
     /// run start (None = opted out); never blocks supervision paths.
     telemetry: std::sync::Mutex<Option<pa_telemetry::TelemetryClient>>,
+    /// The frequent supervision events (attach/detach, worker exits and
+    /// restarts, overloads, saved-session listings), counted and sent as
+    /// one `daemon event` summary per window instead of one event each.
+    daemon_event_counts: std::sync::Mutex<notes::DaemonEventCounts>,
     pub(crate) registry: SessionRegistry,
     /// Worker outbound frames, with their client routing. The payload is
     /// shared (`Arc`): every connected client's event arm receives every
@@ -289,6 +293,7 @@ impl Supervisor {
             session_bindings: crate::session_bindings::SessionBindingTable::new(),
             opening_files: std::sync::Mutex::new(std::collections::HashMap::new()),
             telemetry: std::sync::Mutex::new(None),
+            daemon_event_counts: std::sync::Mutex::default(),
             registry: SessionRegistry::new(),
             events,
             session_subscribers: subscribers::SessionSubscribers::new(),
