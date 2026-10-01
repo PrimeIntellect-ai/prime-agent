@@ -45,23 +45,23 @@ fn record_with_file(child_id: &str, session_file: &Path) -> Arc<Mutex<ChildRecor
         error: None,
         closed_by_parent: false,
         session_file: Some(session_file.display().to_string()),
-        attributed_rows: 0,
+        attributed_rows: Some(0),
         usage_watch_live: false,
         usage_rearm: false,
         emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
     }))
 }
 
-fn registry() -> SupervisorChildSessions {
+fn registry(agent_dir: &Path) -> SupervisorChildSessions {
     let tmp = tempfile::tempdir().unwrap();
     let socket = tmp.path().join("supervisor.sock");
     std::mem::forget(tmp);
     SupervisorChildSessions::new(
         Arc::new(SupervisorLink::new(socket)),
-        std::path::PathBuf::from("/agent"),
+        agent_dir.to_path_buf(),
         "parent-live".to_string(),
         std::sync::Arc::new(crate::model_allowlist::ModelRefusalTelemetry::new(
-            std::path::PathBuf::from("/agent"),
+            agent_dir.to_path_buf(),
             /*telemetry_disabled*/ true,
         )),
     )
@@ -91,7 +91,7 @@ fn child_file(dir: &Path) -> PathBuf {
 async fn emit_reads_once_and_advances_the_cursor() {
     let tmp = tempfile::tempdir().unwrap();
     let file = child_file(tmp.path());
-    let sessions = registry();
+    let sessions = registry(Path::new("/agent"));
     let sink = Arc::new(CapturingSink::default());
     sessions.set_usage_sink(sink.clone());
     let record = record_with_file("sub-emit1", &file);
@@ -108,7 +108,7 @@ async fn emit_reads_once_and_advances_the_cursor() {
     assert_eq!(usage.output, 2_929);
     assert!((usage.cost.total.as_f64() - 0.008_995_7).abs() < 1e-9);
     let consumed = record.lock().await.attributed_rows;
-    assert!(consumed > 0);
+    assert!(consumed.is_some_and(|rows| rows > 0));
 
     // The cursor consumed the rows: nothing re-delivers.
     sessions.inner.emit_child_usage(&record).await;
@@ -123,11 +123,11 @@ async fn emit_reads_once_and_advances_the_cursor() {
 async fn emit_without_a_sink_consumes_nothing() {
     let tmp = tempfile::tempdir().unwrap();
     let file = child_file(tmp.path());
-    let sessions = registry();
+    let sessions = registry(Path::new("/agent"));
     let record = record_with_file("sub-emit2", &file);
 
     sessions.inner.emit_child_usage(&record).await;
-    assert_eq!(record.lock().await.attributed_rows, 0);
+    assert_eq!(record.lock().await.attributed_rows, Some(0));
 }
 
 /// A record without a session file (the test seam's shape) observes
@@ -136,7 +136,7 @@ async fn emit_without_a_sink_consumes_nothing() {
 #[tokio::test]
 async fn emit_tolerates_missing_and_absent_files() {
     let tmp = tempfile::tempdir().unwrap();
-    let sessions = registry();
+    let sessions = registry(Path::new("/agent"));
     let sink = Arc::new(CapturingSink::default());
     sessions.set_usage_sink(sink.clone());
     let missing = record_with_file("sub-emit3", &tmp.path().join("absent.jsonl"));
@@ -147,4 +147,114 @@ async fn emit_tolerates_missing_and_absent_files() {
     no_file.lock().await.session_file = None;
     sessions.inner.emit_child_usage(&no_file).await;
     assert_eq!(sink.0.lock().expect("reports lock").len(), 0);
+}
+
+/// The reseed lists the parent's live ledger children as settled rows
+/// (tombstones/torn/`meta`/foreign parents excluded), the cursor lazy
+/// until a delivery primes it at the tail.
+#[tokio::test]
+async fn reseed_lists_live_ledger_children_settled_and_bills_only_after_a_delivery() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = tmp.path().join("agent");
+    let daemon_sessions = tmp.path().join("daemon-sessions");
+    let proto = child_file(tmp.path());
+    let file_at = |path: PathBuf| {
+        std::fs::create_dir_all(path.parent().expect("parent dir")).unwrap();
+        std::fs::copy(&proto, &path).unwrap();
+        path.display().to_string()
+    };
+    let parent_one = file_at(daemon_sessions.join("P.jsonl"));
+    let parent_two = file_at(daemon_sessions.join("Q.jsonl"));
+    let child_one = file_at(agent.join("session-artifacts/P/sub-a/sess-a.jsonl"));
+    let child_two = file_at(agent.join("session-artifacts/P/sub-b/sess-b.jsonl"));
+    let child_three = file_at(agent.join("session-artifacts/P/sub-c/sess-c.jsonl"));
+    let child_four = file_at(agent.join("session-artifacts/Q/sub-d/sess-d.jsonl"));
+    let spawn = |child_id: &str, parent: &str, child: &str| {
+        format!(
+            r#"{{"v":1,"op":"spawn","at":"2026-09-30T00:00:00Z","childId":"{child_id}","parent":"{parent}","child":"{child}","depth":1,"name":"{child_id}"}}"#
+        )
+    };
+    let ledger_path = crate::rlm_ledger::rlm_ledger_path(&agent, &daemon_sessions);
+    std::fs::create_dir_all(ledger_path.parent().expect("ledger dir")).unwrap();
+    std::fs::write(
+        ledger_path,
+        [
+            r#"{"v":1,"op":"meta","at":"2026-09-30T00:00:00Z"}"#,
+            spawn("sub-a", &parent_one, &child_one).as_str(),
+            r#"{"v":1,"op":"spawn","at":"#,
+            spawn("sub-b", &parent_one, &child_two).as_str(),
+            spawn("sub-c", &parent_one, &child_three).as_str(),
+            format!(
+                r#"{{"v":1,"op":"delete","at":"2026-09-30T00:00:01Z","childId":"sub-c","child":"{child_three}","reason":"user"}}"#
+            )
+            .as_str(),
+            spawn("sub-d", &parent_two, &child_four).as_str(),
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let sessions = registry(&agent);
+    let supervisor_socket = sessions.inner.link.socket_path().clone();
+    crate::descriptor::persist_supervisor_config(
+        &crate::descriptor::descriptor_dir(&agent, &supervisor_socket)
+            .join(crate::descriptor::SUPERVISOR_CONFIG_FILE_NAME),
+        &crate::descriptor::PersistedSupervisorConfig {
+            version: 1,
+            socket_path: supervisor_socket.to_string_lossy().to_string(),
+            default_session_dir: Some(daemon_sessions.display().to_string()),
+        },
+    )
+    .unwrap();
+    sessions.set_identity(ParentIdentity {
+        session_file: Some(parent_one.clone()),
+        ..ParentIdentity::with_default_depth()
+    });
+    let sink = Arc::new(CapturingSink::default());
+    sessions.set_usage_sink(sink.clone());
+    sessions.reseed_from_ledger().await;
+    let roster = sessions.list_subagents().await.expect("the roster read");
+    let rows: Vec<_> = roster
+        .iter()
+        .map(|row| {
+            (
+                row.rlm_child_id.as_str(),
+                row.status,
+                row.active_session_id.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("sub-a", "completed", Some("sess-a")),
+            ("sub-b", "completed", Some("sess-b")),
+        ],
+        "only the parent's live edges reseed, as settled rows"
+    );
+
+    let record = sessions
+        .inner
+        .find_record("sub-a")
+        .await
+        .expect("the reseeded row");
+    // Nothing is owed: the pre-restart history never re-bills.
+    sessions.inner.emit_child_usage(&record).await;
+    assert_eq!(sink.0.lock().expect("reports lock").len(), 0);
+    // A delivery primes the lazy cursor at the tail; the delivered turn
+    // appends its row; the next emit bills only that row.
+    SupervisorChildSessionsInner::arm_usage_watch(&sessions.inner, &record).await;
+    assert_eq!(record.lock().await.attributed_rows, Some(2));
+    let mut content = std::fs::read_to_string(Path::new(&child_one)).expect("child file");
+    content.push_str(
+        r#"{"type":"message","id":"a2","parentId":"a1","timestamp":"2026-09-23T00:00:03.000Z","message":{"role":"assistant","content":[],"stopReason":"toolUse","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15,"cost":{"input":0.1,"output":0.05,"cacheRead":0,"cacheWrite":0,"total":0.15}}}}"#,
+    );
+    content.push('\n');
+    std::fs::write(Path::new(&child_one), content).expect("append the row");
+    sessions.inner.emit_child_usage(&record).await;
+    let reports = sink.0.lock().expect("reports lock").clone();
+    assert_eq!(reports.len(), 1);
+    let [(_, usage)] = reports[0].batches[..] else {
+        panic!("one batch: {:?}", reports[0].batches);
+    };
+    assert_eq!((usage.input, usage.output), (10, 5));
 }

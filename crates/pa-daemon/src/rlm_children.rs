@@ -196,8 +196,10 @@ struct ChildRecord {
     session_file: Option<String>,
     /// Rows of [`ChildRecord::session_file`] already folded into the
     /// parent's attribution rows. The walk resumes here, so repeated
-    /// observation never double-bills a child.
-    attributed_rows: usize,
+    /// observation never double-bills a child. `None` on a reseeded row:
+    /// nothing has been observed since the reseed, and the first delivery
+    /// primes the cursor at the file's tail.
+    attributed_rows: Option<usize>,
     /// A follow-up usage watcher is live for this retained child
     /// (delayed agent messaging after the task run settled).
     usage_watch_live: bool,
@@ -504,6 +506,12 @@ impl SupervisorChildSessions {
         *self.inner.identity.lock().expect("identity lock") = identity;
     }
 
+    /// Rebuild the children registry from the spawn ledger (a restarted
+    /// parent lists its ledger children again).
+    pub async fn reseed_from_ledger(&self) {
+        self.inner.reseed_from_ledger().await;
+    }
+
     /// The inherited RLM depth bound (TS `getRlmMaxDepthStatus().maxDepth`
     /// before any chat override).
     ///
@@ -668,7 +676,7 @@ impl SupervisorChildSessions {
                 error: None,
                 closed_by_parent: false,
                 session_file: None,
-                attributed_rows: 0,
+                attributed_rows: Some(0),
                 usage_watch_live: false,
                 usage_rearm: false,
                 emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),

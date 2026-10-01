@@ -315,6 +315,16 @@ fn roster_cell(receipt: &Path, error_receipt: &Path) -> String {
     )
 }
 
+/// The probe cell: the restarted parent's roster rows, then a send to the child.
+fn probe_cell(list_receipt: &Path, send_receipt: &Path, error_receipt: &Path) -> String {
+    format!(
+        "import inspect, json, traceback\ntry:\n    roster = rlm.list_subagents()\n    if inspect.isawaitable(roster):\n        roster = await roster\n    rows = [[s.rlm_child_id, s.status, s.active_session_id] for s in roster]\n    open({list:?}, \"w\").write(json.dumps(rows))\n    receipt = await agent_message.send(\"boot-ping\", receiver_role=\"child\", receiver_name=\"kid\")\n    open({send:?}, \"w\").write(json.dumps(receipt))\n    print(rows, receipt)\nexcept Exception:\n    open({error:?}, \"w\").write(traceback.format_exc())\n    raise",
+        list = list_receipt.display().to_string(),
+        send = send_receipt.display().to_string(),
+        error = error_receipt.display().to_string(),
+    )
+}
+
 /// The kernel cell that creates one depth-0 resident root session through
 /// the product `rlm.create_session` surface.
 fn create_session_cell(receipt: &Path, error_receipt: &Path) -> String {
@@ -371,23 +381,25 @@ fn create_parent(
     dir: &Path,
     parent_script: &Path,
     child_script: &Path,
+    session_path: Option<&Path>,
     id: &str,
 ) -> Value {
     let sessions_dir = dir.join("sessions");
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
-    client.send_command(
-        id,
-        &json!({
-            "type": "create",
-            "name": "parent",
-            "config": {
-                "cwd": dir.to_string_lossy(),
-                "sessionDir": sessions_dir.to_string_lossy(),
-                "script": parent_script.to_string_lossy(),
-                "childScript": child_script.to_string_lossy(),
-            },
-        }),
-    );
+    let mut create = json!({
+        "type": "create",
+        "name": "parent",
+        "config": {
+            "cwd": dir.to_string_lossy(),
+            "sessionDir": sessions_dir.to_string_lossy(),
+            "script": parent_script.to_string_lossy(),
+            "childScript": child_script.to_string_lossy(),
+        },
+    });
+    if let Some(path) = session_path {
+        create["sessionPath"] = json!(path.to_string_lossy());
+    }
+    client.send_command(id, &create);
     let created = client.read_response(id);
     assert_eq!(created["success"], true, "create parent failed: {created}");
     created["data"].clone()
@@ -427,7 +439,14 @@ fn new_session_closes_the_spawned_child_and_empties_the_roster() {
     wait_socket_ready(&socket);
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
-    let parent = create_parent(&mut client, dir.path(), &parent_script, &child_script, "c1");
+    let parent = create_parent(
+        &mut client,
+        dir.path(),
+        &parent_script,
+        &child_script,
+        None,
+        "c1",
+    );
     let parent_id = parent["activeSessionId"]
         .as_str()
         .or_else(|| parent["id"].as_str())
@@ -559,7 +578,14 @@ fn new_session_keeps_a_created_root_session_running() {
     wait_socket_ready(&socket);
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
-    let parent = create_parent(&mut client, dir.path(), &parent_script, &child_script, "c1");
+    let parent = create_parent(
+        &mut client,
+        dir.path(),
+        &parent_script,
+        &child_script,
+        None,
+        "c1",
+    );
     let parent_id = parent["activeSessionId"]
         .as_str()
         .or_else(|| parent["id"].as_str())
@@ -609,4 +635,166 @@ fn new_session_keeps_a_created_root_session_running() {
         json!(parent_id),
         "the created root session is its own session, not the parent's"
     );
+}
+
+/// A daemon restart must not lose the parent's RLM children: the
+/// reattached parent lists its child again and messaging it wakes the child.
+#[test]
+fn a_daemon_restart_relists_and_wakes_the_parents_child() {
+    let Some(kernel_python) = kernel_python() else {
+        return;
+    };
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let socket = dir.path().join("supervisor.sock");
+    let receipts = dir.path().join("receipts");
+    std::fs::create_dir_all(&receipts).expect("receipts dir");
+    let spawn_receipt = receipts.join("spawn.json");
+    let spawn_error = receipts.join("spawn.error");
+    let list_receipt = receipts.join("list.json");
+    let send_receipt = receipts.join("send.json");
+    let probe_error = receipts.join("probe.error");
+
+    let child_script = dir.path().join("child.json");
+    std::fs::write(
+        &child_script,
+        json!({ "responses": [ { "text": "kid done" } ] }).to_string(),
+    )
+    .expect("write child script");
+    let parent_script = write_parent_script(
+        dir.path(),
+        &spawn_cell(&spawn_receipt, &spawn_error),
+        "pass",
+    );
+    let mut daemon = spawn_supervisor(&socket, &agent_dir, &kernel_python);
+    wait_socket_ready(&socket);
+    let (mut client, hello) = Client::connect(&socket);
+    assert_eq!(hello["type"], "daemon_hello");
+    let parent = create_parent(
+        &mut client,
+        dir.path(),
+        &parent_script,
+        &child_script,
+        None,
+        "c1",
+    );
+    let parent_id = parent["activeSessionId"]
+        .as_str()
+        .or_else(|| parent["id"].as_str())
+        .expect("parent active session id")
+        .to_string();
+    let parent_session_id = parent["sessionId"].as_str().expect("parent session id");
+    let parent_file = parent["sessionFile"]
+        .as_str()
+        .expect("parent session file")
+        .to_string();
+
+    run_turn(&mut client, &parent_id, "spawn the kid", "t1");
+    let spawned: Value =
+        serde_json::from_str(&await_receipt(&spawn_receipt)).expect("spawn receipt json");
+    let child_id = spawned["rlm_child_id"]
+        .as_str()
+        .expect("child id")
+        .to_string();
+    assert!(
+        !spawn_error.exists(),
+        "the spawn cell failed: {}",
+        std::fs::read_to_string(&spawn_error).unwrap_or_default()
+    );
+    let supervisor_row = wait_until(&mut client, Duration::from_secs(30), |client| {
+        roster_summaries(client, "l1").into_iter().find(|summary| {
+            summary["sessionName"] == json!("kid") && summary["runtimeKind"] == "subagent"
+        })
+    });
+    let child_session_id = supervisor_row["sessionId"]
+        .as_str()
+        .expect("child session id")
+        .to_string();
+    let child_file = agent_dir
+        .join("session-artifacts")
+        .join(parent_session_id)
+        .join(&child_id)
+        .join(format!("{child_session_id}.jsonl"));
+
+    client.send_command("bye", &json!({ "type": "shutdown" }));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while daemon
+        .child
+        .try_wait()
+        .expect("wait for the supervisor exit")
+        .is_none()
+    {
+        assert!(Instant::now() < deadline, "the supervisor never exited");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _daemon = spawn_supervisor(&socket, &agent_dir, &kernel_python);
+    wait_socket_ready(&socket);
+    let (mut client, hello) = Client::connect(&socket);
+    assert_eq!(hello["type"], "daemon_hello");
+
+    let probe_script = write_parent_script(
+        dir.path(),
+        &probe_cell(&list_receipt, &send_receipt, &probe_error),
+        "pass",
+    );
+    let parent = create_parent(
+        &mut client,
+        dir.path(),
+        &probe_script,
+        &child_script,
+        Some(Path::new(&parent_file)),
+        "c2",
+    );
+    let new_parent_id = parent["activeSessionId"]
+        .as_str()
+        .or_else(|| parent["id"].as_str())
+        .expect("parent active session id")
+        .to_string();
+
+    run_turn(
+        &mut client,
+        &new_parent_id,
+        "probe the restarted roster",
+        "t2",
+    );
+    assert!(
+        !probe_error.exists(),
+        "the probe cell failed: {}",
+        std::fs::read_to_string(&probe_error).unwrap_or_default()
+    );
+    // (a) relisted
+    let rows: Value =
+        serde_json::from_str(&await_receipt(&list_receipt)).expect("list receipt json");
+    assert_eq!(
+        rows,
+        json!([[child_id, "completed", child_session_id]]),
+        "the restarted parent must relist its ledger child as a settled row"
+    );
+    // (b) send receipt
+    let _send: Value =
+        serde_json::from_str(&await_receipt(&send_receipt)).expect("send receipt json");
+    // (c) wake oracle
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let content = std::fs::read_to_string(&child_file).unwrap_or_default();
+        if content.contains("boot-ping") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the send never woke the child into its session file: {content}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // (d) child runtime
+    client.send_command(
+        "gs",
+        &json!({ "type": "get_state", "activeSessionId": child_session_id }),
+    );
+    let state = client.read_response("gs");
+    assert_eq!(state["success"], true, "get_state failed: {state}");
+    assert_eq!(state["data"]["rlmChildId"], json!(child_id));
+    assert_eq!(state["data"]["rlmDepth"], json!(1));
+    assert_eq!(state["data"]["parentSessionPath"], json!(parent_file));
 }

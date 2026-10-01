@@ -1,0 +1,1 @@
+- After a daemon restart or update, a parent session lists its subagents again, and messaging one wakes it as the parent's subagent, instead of rlm.list_subagents() coming back empty.
