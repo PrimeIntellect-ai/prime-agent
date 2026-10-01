@@ -2,13 +2,9 @@
 //! `packages/tui/src/components/editor.ts`'s `navigateHistory` behind
 //! `tui.editor.cursorUp`/`cursorDown`): Up walks the recalled prompts
 //! backward, Down walks them forward, and one Down past the newest returns
-//! to the draft. The compact dock coexists with the recall: the Down at
-//! the prompt's end keeps TS `SubagentSummaryLine.isSelectable()` — it
-//! grabs focus only when subagents exist — while the dock's other groups
-//! keep their own shortcut (`app.subagents.focus`). The regression this
-//! pins: a dock group outside the subagents box (here, one heartbeat)
-//! must never silently steal that Down, because the dock's focused-Up arm
-//! then consumed the very next Up and the recall read broken.
+//! to the draft. The compact dock coexists with the recall: the draft's
+//! own Down enters the dock in every session shape, and the Up that
+//! follows returns to the prompt before the next Up recalls.
 #![cfg(unix)]
 // Pedantic-gate exceptions (every other pedantic warning in this crate is
 // fixed in place; each exception carries its one-line justification):
@@ -393,36 +389,39 @@ fn up_walks_backward_down_forward_and_the_draft_returns() {
     );
 }
 
-/// The regression (operator report 2026-09-26): with a selectable dock
-/// group outside the subagents box (one heartbeat, no subagents), the
-/// Down at the draft's end must not hand the dock focus — TS
-/// `SubagentSummaryLine.isSelectable()` grants that Down only when
-/// subagents exist. Before the fix this Down grabbed the dock, and the
-/// dock's focused-Up arm consumed the very next Up, so the recall read
-/// broken.
+/// The draft's Down enters the dock in every session shape (the
+/// operator's 2026-10-01 consistency ruling — here one heartbeat and no
+/// subagents), and the recall stays one press away: the Up after that
+/// Down returns the focus to the prompt, and the next Up recalls.
 #[test]
-fn a_heartbeats_only_dock_never_takes_the_prompts_down() {
+fn the_drafts_down_enters_the_dock_and_up_returns_before_the_recall() {
     let mut steps = Vec::new();
-    // The dock's heartbeats group is mounted and selectable before the
-    // walk starts: the frame carries its `◷ 1 heartbeat` row.
+    // The dock's heartbeats group is mounted before the walk starts: the
+    // frame carries its `◷ 1 heartbeat` row.
     steps.push(wait_render("heartbeat"));
     steps.extend(submit("first prompt"));
+    steps.extend(submit("second prompt"));
     steps.push(HeadlessStep::Key(up()));
-    steps.push(wait_render("first prompt"));
+    steps.push(wait_render("second prompt"));
     // The overshoot: Down back to the draft, then the draft's own Down —
-    // the press that used to steal the focus.
+    // the press that enters the dock.
     steps.push(HeadlessStep::Key(down()));
-    steps.push(wait_gone("first prompt"));
+    steps.push(wait_gone("second prompt"));
     steps.push(HeadlessStep::Key(down()));
-    // The very next Up must recall, not unfocus a silently grabbed dock.
+    steps.push(HeadlessStep::WaitMs(100));
+    // The first Up only leaves the dock, so the second Up recalls the
+    // NEWEST prompt (two recalls would have walked on to the older one).
     steps.push(HeadlessStep::Key(up()));
-    steps.push(wait_render("first prompt"));
+    steps.push(HeadlessStep::WaitMs(100));
+    steps.push(HeadlessStep::Key(up()));
+    steps.push(wait_render("second prompt"));
+    steps.push(HeadlessStep::WaitMs(100));
     let frames = run_plan(steps);
     assert_no_barrier_timeouts(&frames);
     let last = frames.last().expect("the plan rendered frames");
     assert!(
-        last.contains("first prompt"),
-        "the Up after the draft's Down recalled the prompt: {last:?}"
+        last.contains("second prompt") && !last.contains("first prompt"),
+        "the first Up left the dock and the second recalled the newest prompt: {last:?}"
     );
 }
 
