@@ -1005,10 +1005,10 @@ const SESSION_ARCHIVED: EventRule = EventRule {
     ],
 };
 
-/// `tui exit` (v1, enriched): one per interactive client process, carrying
-/// the client's adoption counters for the process (the TUI interactions,
-/// the client-side feature outcomes, the input-stage counts and maxima)
-/// instead of one event per interaction.
+/// `tui exit` (v1, enriched): one per interactive session run (each agents
+/// view handoff ends one), carrying that run's adoption counters (the TUI
+/// interactions, the client-side feature outcomes, the input-stage counts
+/// and maxima) instead of one event per interaction.
 const TUI_EXIT: EventRule = EventRule {
     name: "tui exit",
     since: 1,

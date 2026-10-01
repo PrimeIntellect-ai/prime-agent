@@ -416,32 +416,22 @@ async fn report_an_aborted_flow_once() {
             api_key: None,
         },
     };
-    sink.onboarding_incomplete("aborted");
-    let mirror = agent_dir.join("telemetry.jsonl");
-    let mut line = None;
-    for _ in 0..100 {
-        if let Some(first) = std::fs::read_to_string(&mirror)
-            .ok()
-            .and_then(|text| text.lines().next().map(str::to_string))
-        {
-            line = Some(first);
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    let event: serde_json::Value =
-        serde_json::from_str(&line.expect("the mirror recorded the event")).unwrap();
+    let client = sink
+        .track_incomplete("aborted")
+        .expect("telemetry is on: the aborted flow reports");
+    client.shutdown().await.expect("the mirror flushed");
+    let mirror = std::fs::read_to_string(agent_dir.join("telemetry.jsonl")).unwrap();
+    let lines: Vec<&str> = mirror.lines().collect();
+    assert_eq!(lines.len(), 1);
+    let event: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(event["name"], "onboarding completed");
     assert_eq!(event["properties"]["outcome"], "aborted");
     assert_eq!(event["properties"]["execution_mode"], "interactive");
 
     sink.completion_reported
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    sink.onboarding_incomplete("aborted");
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    let lines = std::fs::read_to_string(&mirror).unwrap().lines().count();
-    assert_eq!(
-        lines, 1,
+    assert!(
+        sink.track_incomplete("aborted").is_none(),
         "a reported completion never adds an aborted outcome"
     );
 }

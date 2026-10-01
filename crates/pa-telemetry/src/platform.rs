@@ -40,7 +40,7 @@ struct PlatformFidelity {
 pub fn base_properties(execution_mode: &str) -> Properties {
     let fidelity = fidelity();
     let mut properties = Properties::new();
-    properties.set("version", Value::String(crate::VERSION.to_string()));
+    properties.set("version", Value::from(crate::version()));
     properties.set("schema_version", Value::from(SCHEMA_VERSION));
     // #2117/v2 common properties: the build channel, the workload origin
     // (env override first, then the execution mode), and the catalog's
@@ -94,7 +94,8 @@ fn build_channel() -> &'static str {
     if cfg!(debug_assertions) {
         return "development";
     }
-    if crate::VERSION.contains('-') && crate::VERSION.contains("beta") {
+    let version = crate::version();
+    if version.contains('-') && version.contains("beta") {
         return "prerelease";
     }
     "release"
@@ -305,7 +306,7 @@ mod tests {
         );
         assert_eq!(
             properties.get("version"),
-            Some(&Value::from(crate::VERSION))
+            Some(&Value::from(crate::version()))
         );
         assert_eq!(
             properties.get("execution_mode"),

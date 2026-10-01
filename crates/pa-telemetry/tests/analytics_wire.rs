@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use pa_telemetry::{
     AnalyticsSink, Properties, SinkOutcome, TelemetryClient, TelemetryClientConfig, TelemetryEvent,
-    TelemetrySink, VERSION,
+    TelemetrySink,
 };
 use serde_json::json;
 
@@ -46,6 +46,13 @@ fn ts_body(events: &[TelemetryEvent]) -> serde_json::Value {
 
 #[tokio::test]
 async fn batch_posts_the_exact_ts_request() {
+    // The binary's runtime version (a beta restamps only the packaged
+    // manifest) rides the User-Agent and every event, not the crate's.
+    pa_telemetry::set_version("0.9.9-beta.3");
+    assert_eq!(
+        pa_telemetry::base_properties("print").get("version"),
+        Some(&json!("0.9.9-beta.3"))
+    );
     let (base, rx) = spawn_stub(vec![(202, json!({ "accepted": 2 }))]);
     let sink = AnalyticsSink::new(format!("{base}/api/v1/agent-analytics/events"));
     let events = vec![event("agent started"), event("agent run completed")];
@@ -62,7 +69,7 @@ async fn batch_posts_the_exact_ts_request() {
     );
     assert_eq!(
         header(&request.headers, "user-agent"),
-        Some(format!("prime-agent/{VERSION}").as_str())
+        Some("prime-agent/0.9.9-beta.3")
     );
     assert_eq!(header(&request.headers, "authorization"), None);
     assert_eq!(request.body, ts_body(&events));

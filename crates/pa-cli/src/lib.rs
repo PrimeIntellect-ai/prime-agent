@@ -93,6 +93,10 @@ pub fn main_with_runtime(args: &[String], runtime: &dyn mode::Runtime) -> i32 {
 fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String> {
     use std::io::IsTerminal;
 
+    // Telemetry reports the version `--version` prints: the beta channel
+    // restamps only the packaged manifest, never the compiled-in version.
+    pa_telemetry::set_version(crate::config::version());
+
     let offline_mode = args.iter().any(|arg| arg == "--offline")
         || crate::config::is_truthy_env_flag(
             std::env::var(crate::config::ENV_OFFLINE).ok().as_deref(),

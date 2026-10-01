@@ -36,8 +36,24 @@ mod sink;
 mod sinks;
 mod time;
 
-/// Product version stamped on outgoing requests (`prime-agent/<version>`).
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Set the product version stamped on every event and on outgoing requests
+/// (`prime-agent/<version>`). The binary passes its runtime version: a
+/// release restamps the packaged manifest, not the compiled-in crate
+/// version. The first call wins.
+pub fn set_version(version: &str) {
+    let _ = VERSION.set(version.to_string());
+}
+
+/// The product version: the one given to [`set_version`], else the
+/// compiled-in crate version.
+#[must_use]
+pub fn version() -> &'static str {
+    VERSION
+        .get()
+        .map_or(env!("CARGO_PKG_VERSION"), String::as_str)
+}
 
 pub use catalog::{
     catalog, feature_outcome_key, input_stage_key, lookup, sanitize, EventRule, PropKind,

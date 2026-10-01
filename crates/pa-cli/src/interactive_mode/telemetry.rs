@@ -1,6 +1,6 @@
 //! The interaction-telemetry concern: the pa-tui interactive loop reports
 //! through the `InteractionTelemetry` trait. Interactions only count into
-//! the process's counters, which ride its one `tui exit` event; `agent
+//! the session run's counters, which ride its one `tui exit` event; `agent
 //! command used` stays its own event (TS parity).
 
 use std::collections::BTreeMap;
@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use super::{Future, PathBuf, Pin};
 
-/// The interactive client's telemetry: per-process adoption counters
+/// The interactive client's telemetry: per-session-run adoption counters
 /// flushed with `tui exit`, plus the TS `agent command used` event on a
 /// one-shot client. Telemetry must never fail the session: opt-out or a
 /// broken install id drops the events.
@@ -18,7 +18,7 @@ pub(super) struct CliInteractionTelemetry {
     pub(super) counters: Mutex<TuiCounters>,
 }
 
-/// The process's adoption counters (`tui_*_count`, `feature_*_count`,
+/// The session run's adoption counters (`tui_*_count`, `feature_*_count`,
 /// `input_*`) and its terminal capability flags.
 #[derive(Default)]
 pub(super) struct TuiCounters {
@@ -261,20 +261,27 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
         turn_active: bool,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
+            // Every session run of the process shares these counters (the
+            // agents view hands one telemetry handle to each session it
+            // opens), so each `tui exit` takes what its run counted.
+            let counters = std::mem::take(
+                &mut *self
+                    .counters
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
             let Some(client) = self.client() else {
                 return;
             };
             let mut properties = pa_telemetry::base_properties("interactive");
             properties.set("exit_reason", serde_json::Value::from(reason));
             properties.set("turn_active", serde_json::Value::from(turn_active));
-            self.with(|counters| {
-                for (key, count) in &counters.counts {
-                    properties.set(key, serde_json::Value::from(*count));
-                }
-                for (key, flag) in &counters.flags {
-                    properties.set(key, serde_json::Value::from(*flag));
-                }
-            });
+            for (key, count) in &counters.counts {
+                properties.set(key, serde_json::Value::from(*count));
+            }
+            for (key, flag) in &counters.flags {
+                properties.set(key, serde_json::Value::from(*flag));
+            }
             client.track("tui exit", properties);
             let _ = client.shutdown().await;
         })
@@ -334,5 +341,40 @@ mod tests {
         telemetry.scroll_used("page", false).await;
         let counters = telemetry.counters.lock().unwrap();
         assert_eq!(counters.counts.get("tui_scroll_count"), Some(&1));
+    }
+
+    /// The agents view shares one telemetry handle across the sessions it
+    /// opens: each `tui exit` reports only its own run's interactions.
+    #[test]
+    fn each_tui_exit_reports_only_its_own_run() {
+        crate::mode::tests::with_clean_telemetry_env(|| {
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(report_each_run_once());
+        });
+    }
+
+    async fn report_each_run_once() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let telemetry = CliInteractionTelemetry::new(dir.path().to_path_buf(), agent_dir.clone());
+        telemetry.scroll_used("page", false).await;
+        telemetry.hyperlinks_active(true).await;
+        telemetry.client_exit("session_request", false).await;
+        telemetry.client_exit("ctrl_d", false).await;
+        let mirror = std::fs::read_to_string(agent_dir.join("telemetry.jsonl")).unwrap();
+        let exits: Vec<serde_json::Value> = mirror
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .filter(|event: &serde_json::Value| event["name"] == "tui exit")
+            .collect();
+        assert_eq!(exits.len(), 2);
+        assert_eq!(exits[0]["properties"]["tui_scroll_count"], 1);
+        assert_eq!(exits[0]["properties"]["tui_hyperlinks_enabled"], true);
+        assert!(exits[1]["properties"].get("tui_scroll_count").is_none());
+        assert!(exits[1]["properties"]
+            .get("tui_hyperlinks_enabled")
+            .is_none());
     }
 }

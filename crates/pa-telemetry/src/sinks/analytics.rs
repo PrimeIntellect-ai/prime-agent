@@ -82,7 +82,7 @@ impl TelemetrySink for AnalyticsSink {
                 .http
                 .post(&self.endpoint)
                 .header("content-type", "application/json")
-                .header("user-agent", format!("prime-agent/{}", crate::VERSION))
+                .header("user-agent", format!("prime-agent/{}", crate::version()))
                 .json(&Self::batch_body(install_id, &events))
                 .send()
                 .await;

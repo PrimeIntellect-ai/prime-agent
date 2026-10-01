@@ -169,6 +169,30 @@ impl SettingsOnboardingSink {
         );
         properties
     }
+
+    /// Track `onboarding completed` with an unfinished `outcome` on a fresh
+    /// client and return it, or `None` when nothing is reported.
+    pub(super) fn track_incomplete(&self, outcome: &str) -> Option<pa_telemetry::TelemetryClient> {
+        // A completed flow whose marker failed to persist already reported
+        // its success.
+        if self
+            .completion_reported
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return None;
+        }
+        let settings = pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir);
+        if crate::mode::telemetry_disabled(&settings) {
+            return None;
+        }
+        let client = pa_core::session_engine::telemetry::build_client(&settings, &self.agent_dir);
+        let duration_ms = self.created_at.elapsed().as_millis() as u64;
+        client.track(
+            "onboarding completed",
+            self.completed_properties(outcome, duration_ms),
+        );
+        Some(client)
+    }
 }
 
 impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
@@ -242,24 +266,8 @@ impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
     }
 
     fn onboarding_incomplete(&self, outcome: &'static str) {
-        // A completed flow whose marker failed to persist already reported
-        // its success.
-        if self
-            .completion_reported
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            return;
-        }
-        let settings = pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir);
-        if crate::mode::telemetry_disabled(&settings) {
-            return;
-        }
-        let client = pa_core::session_engine::telemetry::build_client(&settings, &self.agent_dir);
-        let duration_ms = self.created_at.elapsed().as_millis() as u64;
-        client.track(
-            "onboarding completed",
-            self.completed_properties(outcome, duration_ms),
-        );
+        // The final flush rides the client's drop.
+        let _ = self.track_incomplete(outcome);
     }
 }
 
