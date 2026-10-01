@@ -16,9 +16,8 @@ const DAEMON_SHUTDOWN_WAIT_MS: u64 = 5_000;
 /// connects per cold launch (each ~us; bounded by the same 30s startup
 /// budget, so a hung boot adds at most ~1k connects/s of syscall work,
 /// not a spin). Overshoot tables: probe-grid record 20261001-034500 on the
-/// bench repo (the 5ms predecessor tables live in record 20260926-202000).
-/// Timing-only: the probe itself, the 30s startup budget, and the timeout
-/// error are unchanged.
+/// bench repo. Timing-only: the probe itself, the 30s startup budget, and
+/// the timeout error are unchanged.
 const DAEMON_PROBE_INTERVAL_MS: u64 = 1;
 
 /// The daemon probe outcome (TS `DaemonVersionProbe`).
