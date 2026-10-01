@@ -34,6 +34,12 @@
 # the kernel's Python runtime bootstraps through uv on first session — the
 # pre-warm below installs the venv when uv is available).
 
+# The whole body runs in a child scope: under `irm | iex` the script shares
+# the caller's session, so the Stop preference and the installer's own
+# variables must not stay behind in it, and a refusal must return to the
+# prompt (Fail throws) instead of closing the user's PowerShell. The body
+# stays unindented so the publish render's line-anchored sed still matches.
+& {
 $ErrorActionPreference = 'Stop'
 
 # The publish-rendered defaults: the release pipeline copies this file to
@@ -67,8 +73,7 @@ function Fail($message) {
     if ($script:primeAgentInstallLock) {
         Remove-Item -Recurse -Force $script:primeAgentInstallLock -ErrorAction SilentlyContinue
     }
-    Write-Error "install.ps1: $message"
-    exit 1
+    throw "install.ps1: $message"
 }
 
 # --- TLS floor (PowerShell 5.1 defaults can sit below TLS 1.2) ---------------
@@ -499,3 +504,4 @@ Write-Host "  $share\README.md"
 
 $script:primeAgentInstallScratch = $null
 if ($download) { Remove-Item -Recurse -Force $download -ErrorAction SilentlyContinue }
+}
