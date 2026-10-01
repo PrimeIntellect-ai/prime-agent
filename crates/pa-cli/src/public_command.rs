@@ -618,36 +618,22 @@ fn is_self_update_source(source: &str) -> bool {
 }
 
 fn run_update(args: &[String]) -> PublicCommandResult {
-    // The migration path's own surface: the bare command is the
-    // installer takeover (the funnel), and `--check` reports the latest
-    // available build vs the running one without installing. The
-    // TS-parity staged-flow flags below keep their surface exactly as
-    // before (the managed releases/ layout world the battery's wire
-    // suites pin); an installer-based install reports it is not owned by
-    // the installer there, while the bare command works everywhere the
-    // installer does.
-    if args.is_empty() {
-        let options = crate::installer_update::UpdateOptions { check: false };
-        return handled_with_exit(crate::installer_update::run(&options));
-    }
     // `--check` alone (alias `--version`) reports without installing;
-    // mixed with anything else the staged parse below rejects it.
-    if args
-        .iter()
-        .all(|arg| matches!(arg.as_str(), "--check" | "--version"))
+    // mixed with anything else the parse below rejects it.
+    if !args.is_empty()
+        && args
+            .iter()
+            .all(|arg| matches!(arg.as_str(), "--check" | "--version"))
     {
-        let options = crate::installer_update::UpdateOptions { check: true };
+        let options = crate::installer_update::UpdateOptions {
+            check: true,
+            channel: None,
+        };
         return handled_with_exit(crate::installer_update::run(&options));
     }
     let Some(options) = parse_update_options(args) else {
         return handled_failed();
     };
-    // TS package-manager-cli's update case: the persisted `updateChannel`
-    // setting (`/nightly off`) is the default the update follows
-    // (`options.channel ?? persistedChannel`), an explicit nightly switch
-    // warns and confirms, and a completed run persists the explicit
-    // switch (`commitChannel`) — one shared body with the `package update`
-    // self target (`crate::self_update`).
     let persisted_wire = std::env::current_dir()
         .ok()
         .and_then(|cwd| {
@@ -663,6 +649,17 @@ fn run_update(args: &[String]) -> PublicCommandResult {
         std::io::stdin().is_terminal(),
     ) {
         return handled_with_exit(abort_code);
+    }
+    // The installer funnel serves the bare update and the channel flags:
+    // the channel is the flag, else the saved `updateChannel` setting
+    // (`/nightly on|off`), else the installed one. `--rollback` and
+    // `--archive` stay on the managed-install flow.
+    if !options.rollback && options.archive.is_none() {
+        let update = crate::installer_update::UpdateOptions {
+            check: false,
+            channel: options.channel,
+        };
+        return handled_with_exit(crate::installer_update::run(&update));
     }
     handled_with_exit(crate::self_update::run(&options, persisted_wire.as_deref()))
 }

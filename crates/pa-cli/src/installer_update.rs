@@ -2,22 +2,50 @@
 //! the update fetches the installer from the OFFICIAL DOMAIN endpoint
 //! (`https://app.primeintellect.ai/prime-agent/install.sh`, never a
 //! GitHub raw or workflow URL) and runs it; the script uninstalls the
-//! TypeScript version, installs the latest Rust build, and never touches
-//! `~/.prime/agent` (the sessions and configuration). The TUI's `/update`
-//! runs the same core out-of-band (`client_update.rs`), so the two
-//! surfaces cannot diverge. This command exists only in the Rust binary:
-//! the TypeScript version does not have it — the move happens when the
-//! user runs the installer's curl|sh URL (the README's Install section) or
-//! `prime-agent update` (after the Rust install exists).
+//! TypeScript version, installs the latest Rust build of the update
+//! channel, and never touches `~/.prime/agent` (the sessions and
+//! configuration). The TUI's `/update` runs the same core out-of-band
+//! (`client_update.rs`), so the two surfaces cannot diverge.
 
 use pa_core::update::installer::{self, InstallerOutput};
+use pa_core::update::version::UpdateChannel;
 
 /// One parsed `prime-agent update` invocation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UpdateOptions {
-    /// `--check`: print the latest available build vs the running
-    /// binary's version, without installing.
+    /// `--check`: print the latest release of the update channel vs the
+    /// running binary's version, without installing.
     pub check: bool,
+    /// `--nightly` / `--stable`: switch the update channel (persisted once
+    /// the update completes).
+    pub channel: Option<UpdateChannel>,
+}
+
+/// The saved `updateChannel` setting (`/nightly on|off`, `--nightly`,
+/// `--stable`).
+fn saved_channel() -> Option<UpdateChannel> {
+    let cwd = std::env::current_dir().ok()?;
+    let saved = pa_core::settings::SettingsManager::create(&cwd, crate::config::get_agent_dir())
+        .get_update_channel()?;
+    Some(match saved {
+        pa_core::settings::UpdateChannel::Stable => UpdateChannel::Stable,
+        pa_core::settings::UpdateChannel::Nightly => UpdateChannel::Nightly,
+    })
+}
+
+/// The installer's channel name for an update channel.
+fn installer_channel(channel: UpdateChannel) -> &'static str {
+    match channel {
+        UpdateChannel::Stable => "stable",
+        UpdateChannel::Nightly => "beta",
+    }
+}
+
+/// The channel the installer runs with: an explicit flag, else the saved
+/// setting. `None` keeps the channel the install marker records.
+#[must_use]
+pub fn requested_installer_channel(flag: Option<UpdateChannel>) -> Option<&'static str> {
+    flag.or_else(saved_channel).map(installer_channel)
 }
 
 /// Run the update command: the funnel (the installer script owns the
@@ -41,7 +69,8 @@ pub fn run(options: &UpdateOptions) -> i32 {
         "Updating to the latest Rust build — fetching the installer from {}:",
         installer::installer_script_url()
     );
-    match runtime.block_on(installer::run_installer(InstallerOutput::Inherit)) {
+    let channel = requested_installer_channel(options.channel);
+    match runtime.block_on(installer::run_installer(channel, InstallerOutput::Inherit)) {
         Ok(installed) => {
             match installed.version {
                 Some(version) => {
@@ -53,6 +82,9 @@ pub fn run(options: &UpdateOptions) -> i32 {
                     );
                 }
             }
+            if let Some(channel) = options.channel {
+                save_channel(channel);
+            }
             0
         }
         Err(failure) => {
@@ -62,43 +94,65 @@ pub fn run(options: &UpdateOptions) -> i32 {
     }
 }
 
-/// The `--check` report: the platform's build, the running binary's
-/// version, the latest continuous run, and whether they match. Nothing
-/// downloads.
+/// Persist an explicit channel switch (`--nightly` / `--stable`) after a
+/// completed update.
+fn save_channel(channel: UpdateChannel) {
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    let setting = match channel {
+        UpdateChannel::Stable => pa_core::settings::UpdateChannel::Stable,
+        UpdateChannel::Nightly => pa_core::settings::UpdateChannel::Nightly,
+    };
+    let mut settings =
+        pa_core::settings::SettingsManager::create(&cwd, crate::config::get_agent_dir());
+    if settings.set_update_channel(setting).is_ok() {
+        println!("Updates now follow the {} channel.", channel.wire_name());
+    }
+}
+
+/// The `--check` report: the running version vs the update channel's
+/// published release (`latest.json` / `beta.json`). Nothing downloads.
 async fn run_check() -> i32 {
     let running = crate::config::version();
-    let target = match installer::current_target() {
-        Ok(target) => target,
-        Err(error) => {
-            eprintln!("Error: {error:#}");
-            return 1;
-        }
+    let channel = match requested_installer_channel(None)
+        .or_else(|| installer::installed_channel(&installer::install_prefix()))
+    {
+        Some("stable") => UpdateChannel::Stable,
+        Some(_) => UpdateChannel::Nightly,
+        None => pa_core::update::version::resolve_update_channel(running, None),
     };
-    println!("Platform: {target}");
+    let base = installer::download_base_url();
     println!("Running:  {running}");
-    // The resolved source (the official endpoint unless the override
-    // pins one): --check must verify the script the funnel will execute,
-    // so its Source line can never disagree with the actual fetch.
+    println!("Channel:  {}", channel.wire_name());
+    let latest = pa_core::update::release::latest_release(
+        running,
+        Some(channel),
+        &base,
+        std::time::Duration::from_secs(10),
+    )
+    .await;
+    let Ok(Some(latest)) = latest else {
+        eprintln!(
+            "Error: could not read the {} release manifest at {base}/{}",
+            channel.wire_name(),
+            channel.manifest_path()
+        );
+        return 1;
+    };
     println!(
-        "Source:  {} (the endpoint `prime-agent update` fetches the installer from)",
-        installer::installer_script_url()
+        "Latest:   {} ({base}/{})",
+        latest.version,
+        channel.manifest_path()
     );
-    match installer::latest_continuous_run().await {
-        Ok(latest) => {
-            println!(
-                "Latest:   continuous run {} (commit {})",
-                latest.id, latest.commit
-            );
-            let up_to_date =
-                installer::running_commit(running).is_some_and(|commit| commit == latest.commit);
-            println!("{}", check_verdict(up_to_date));
-            0
-        }
-        Err(error) => {
-            eprintln!("Error: could not resolve the latest continuous run: {error:#}");
-            1
-        }
-    }
+    println!(
+        "{}",
+        check_verdict(!pa_core::update::version::is_newer_package_version(
+            &latest.version,
+            running
+        ))
+    );
+    0
 }
 
 /// The `--check` verdict line.
@@ -121,5 +175,11 @@ mod tests {
             check_verdict(false),
             "An update is available — run `prime-agent update` to install it."
         );
+    }
+
+    #[test]
+    fn the_nightly_channel_runs_the_installer_on_beta() {
+        assert_eq!(installer_channel(UpdateChannel::Nightly), "beta");
+        assert_eq!(installer_channel(UpdateChannel::Stable), "stable");
     }
 }
