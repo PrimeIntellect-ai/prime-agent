@@ -11,12 +11,15 @@ narrowed run can never masquerade as a full one:
 
   1. every shard produced a manifest;
   2. all shards enumerated the same unit set (digest match);
-  3. all shards record the SAME selection scope (a mixed-scope wave is a
+  3. all shards recorded the SAME workflow attempt (a re-run of individual
+     shard jobs mixes attempts, and the merged verdict would otherwise
+     cover units the current attempt never re-ran);
+  4. all shards record the SAME selection scope (a mixed-scope wave is a
      broken partition; the summary names it instead of auditing a chimera);
-  4. shard assignments are disjoint and their union is the selected set
+  5. shard assignments are disjoint and their union is the selected set
      (nothing selected is skipped, nothing outside the selection ran);
-  5. every shard completed all of its selected units;
-  6. every executed unit passed.
+  6. every shard completed all of its selected units;
+  7. every executed unit passed.
 
 It then prints ONE merged report: the scope, which binaries failed, in which
 shard, with their failing test names — the single place a lane looks when a
@@ -76,6 +79,15 @@ def _unit_package(unit_id: str) -> str:
     return unit_id.split("#", 1)[0]
 
 
+def run_attempts(manifests: dict) -> list[int]:
+    """The workflow attempts the wave's manifests were produced by.
+
+    Absent on manifests written before this field existed (and outside
+    Actions), which read as attempt 1 — the value a first run records too.
+    """
+    return sorted({m.get("attempt", 1) for m in manifests.values()})
+
+
 def audit(manifests: dict, total: int) -> tuple[list[str], set[str]]:
     """Structural audit failures and the set of failing unit ids."""
     problems = []
@@ -94,6 +106,25 @@ def audit(manifests: dict, total: int) -> tuple[list[str], set[str]]:
                         "ref changed mid-run or a manifest is stale; rerun CI")
         return problems, failed_units
     all_ids = manifests[1]["all_unit_ids"]
+
+    # A `gh run rerun --failed` wave re-runs only the failed jobs, so the
+    # shards that were already green keep their earlier-attempt manifests and
+    # the summary merges them with the re-run ones. That is a wave assembled
+    # from two different points in time, and every check below reads those
+    # manifests as one: a unit green in an earlier attempt counts as green
+    # here even though the re-run never re-ran it. Name the mix instead of
+    # reporting a merged verdict the wave never actually produced.
+    attempts = run_attempts(manifests)
+    if len(attempts) > 1:
+        described = ", ".join(
+            f"shard {shard}: attempt {m.get('attempt', 1)}"
+            for shard, m in sorted(manifests.items()))
+        problems.append(
+            f"shards reported from different workflow attempts ({described}) "
+            "— this is a re-run of individual shard jobs, so the wave is a "
+            "mix of attempts and the merged verdict covers units this attempt "
+            "never re-ran; rerun all shards for one clean wave")
+        return problems, failed_units
 
     kind, crates = run_scope(manifests)
     if kind == "MIXED":
@@ -147,8 +178,11 @@ def merged_report(manifests: dict, total: int, problems: list[str],
              else f"crate selection: {', '.join(crates or [])}")
     selected = selected_ids(manifests.get(1, {"all_unit_ids": []}), crates)
     union_size = len(manifests.get(1, {}).get("all_unit_ids", []))
+    attempts = ", ".join(str(a) for a in run_attempts(manifests))
     lines = [f"### test summary ({total} shards)",
-             f"- scope: {scope} — {len(selected)} of {union_size} units selected"]
+             f"- scope: {scope} — {len(selected)} of {union_size} units selected",
+             f"- attempt: {attempts or 'none recorded'} of the run's "
+             "workflow attempts"]
     for shard in sorted(manifests):
         manifest = manifests[shard]
         units = manifest["units"]
