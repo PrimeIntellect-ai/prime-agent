@@ -85,8 +85,16 @@ pub fn herdr_socket_target(socket_path: &str, windows: bool) -> String {
 fn parse_duration_env(env: &BTreeMap<String, String>, key: &str, fallback_ms: u64) -> Duration {
     env.get(key)
         .and_then(|raw| raw.parse::<u64>().ok())
+        // The JS bound (`setTimeout` saturates at 2^31 - 1 ms): a hostile
+        // or runaway tuning value cannot overflow the deadline additions
+        // (`Instant + Duration` panics on overflow, which would kill the
+        // reporter task before it could report or release the pane).
+        .map(|ms| ms.min(TUNING_MAX_MS))
         .map_or(Duration::from_millis(fallback_ms), Duration::from_millis)
 }
+
+/// The ceiling for the tuning envs (the JS `setTimeout` saturation bound).
+const TUNING_MAX_MS: u64 = 2_147_483_647;
 
 /// The resolved pane identity and tuning for one session's reporter.
 #[derive(Debug, Clone, PartialEq)]
@@ -389,6 +397,13 @@ async fn run_reporter(
                 match signal {
                     Some(Signal::Release { done }) => {
                         if is_stale() {
+                            // A successor owns the pane now (the rebind
+                            // bumped the epoch and its `session_start`
+                            // force-published): this task must neither
+                            // release nor leak the caller — the ack still
+                            // fires so the quit close does not stall on
+                            // the timeout.
+                            let _ = done.send(());
                             return;
                         }
                         release_pane(&mut state, &config, done).await;
@@ -457,6 +472,14 @@ async fn run_reporter(
             while let Ok(signal) = rx.try_recv() {
                 match signal {
                     Signal::Release { done } => {
+                        // The same fence as the select arm: a stale
+                        // reporter never releases the successor's pane,
+                        // and the ack still fires so the quit close does
+                        // not stall on the timeout.
+                        if is_stale() {
+                            let _ = done.send(());
+                            return;
+                        }
                         release_pane(&mut state, &config, done).await;
                         return;
                     }
@@ -1257,6 +1280,57 @@ mod tests {
         wait_for_requests(&requests, 2).await;
         let frames = requests.lock().unwrap().clone();
         assert_eq!(frames[1]["params"]["agent_session_id"], "s10");
+        server.abort();
+    }
+
+    /// A runaway tuning env cannot overflow the deadline arithmetic:
+    /// the value caps at the JS `setTimeout` bound instead of panicking
+    /// the reporter task with `Instant + Duration`.
+    #[test]
+    fn runaway_tuning_values_cap_instead_of_panicking() {
+        let config = HerdrConfig::from_env(&env(&[
+            ("HERDR_ENV", "1"),
+            ("HERDR_SOCKET_PATH", "/tmp/h.sock"),
+            ("HERDR_PANE_ID", "w1:p1"),
+            ("HERDR_PI_IDLE_DEBOUNCE_MS", &u64::MAX.to_string()),
+            ("HERDR_PI_RETRY_GRACE_MS", &u64::MAX.to_string()),
+        ]))
+        .expect("the runaway config still resolves");
+        assert_eq!(config.idle_debounce, Duration::from_millis(2_147_483_647));
+        assert_eq!(config.retry_grace, Duration::from_millis(2_147_483_647));
+        // The capped deadline additions are representable.
+        let _ = tokio::time::Instant::now() + config.idle_debounce;
+        let _ = tokio::time::Instant::now() + config.retry_grace;
+    }
+
+    /// A stale-generation reporter never releases the successor's pane —
+    /// and the dropped release still acks so the quit close does not
+    /// stall on the timeout.
+    #[tokio::test]
+    async fn a_stale_release_neither_writes_nor_stalls() {
+        let socket_path = temp_socket("stale-release");
+        let (requests, server) = fake_herdr(&socket_path);
+        let config = HerdrConfig::from_env(&pane_env(&socket_path, "w1:p8")).unwrap();
+        let (predecessor, generation) =
+            start_reporter(config, HerdrSessionRef::new(None, Some("s11".to_string())));
+        predecessor.session_started(false, HerdrSessionRef::new(None, Some("s11".to_string())));
+        wait_for_requests(&requests, 1).await;
+
+        // The successor installs: the epoch moves past the predecessor.
+        generation.store(2, std::sync::atomic::Ordering::Relaxed);
+        let released_at = tokio::time::Instant::now();
+        predecessor.release().await;
+        let awaited = released_at.elapsed();
+        assert!(
+            awaited < Duration::from_secs(1),
+            "a dropped release must ack promptly, took {awaited:?}"
+        );
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            1,
+            "a stale reporter released the successor's pane: {:?}",
+            requests.lock().unwrap()
+        );
         server.abort();
     }
 

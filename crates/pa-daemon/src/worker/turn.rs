@@ -526,6 +526,13 @@ impl TurnRunner {
         // of a false idle.
         let herdr_settle_error = Arc::new(std::sync::Mutex::new(None::<String>));
         let herdr_settle_error_seen = Arc::clone(&herdr_settle_error);
+        // Whether the PANE REPORTER already received this run's end —
+        // set only where `run_ended` is actually called (the engine
+        // `agent_end` flag above is set on SIGHT, before the abort gate
+        // can drop the event, so a swallowed `agent_end` must not make
+        // the settle's pane fallback skip and strand the pane working).
+        let herdr_run_end = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let herdr_run_end_seen = Arc::clone(&herdr_run_end);
         // Whether the abort gate ever observed the delivery's cancel flag
         // DURING this turn (the per-event read below): the fallback
         // `agent_end` keys its silence on THIS association — an abort
@@ -674,6 +681,7 @@ impl TurnRunner {
                             .lock()
                             .unwrap()
                             .run_ended(crate::herdr::error_hold_message(messages), more_queued);
+                        herdr_run_end_seen.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
                     EngineEvent::AutoRetryStart { .. } => {
                         herdr.lock().unwrap().retry_started();
@@ -1235,7 +1243,9 @@ impl TurnRunner {
         }
         {
             // The settle's boundary state: the run's own `agent_end`
-            // already reported (inside the emit closure); a run that
+            // already reported (inside the emit closure) — the pane
+            // flag, not the engine's sight flag, so an `agent_end` the
+            // abort gate swallowed still settles here too; a run that
             // ended without one reports here — the TS fallback arm.
             // This includes the aborted settle: the run's `agent_start`
             // already flipped the pane working, so suppressing the end
@@ -1254,7 +1264,7 @@ impl TurnRunner {
                     !core.steering.is_empty() || !core.follow_up.is_empty(),
                 )
             };
-            if !engine_reported_run_end {
+            if !herdr_run_end.load(std::sync::atomic::Ordering::SeqCst) {
                 self.herdr
                     .lock()
                     .unwrap()
