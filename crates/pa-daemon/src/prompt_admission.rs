@@ -636,7 +636,9 @@ impl Worker {
                     .retain(|item| item.admission_id.as_deref() != Some(admission_id));
                 self.prompt_admissions.clear(admission_id);
             }
-            let abort_running = cancel_owned && status == Some(AdmissionStatus::Owned) && !queued;
+            let abort_running = cancel_owned
+                && status == Some(AdmissionStatus::Owned)
+                && core.running_admission_ids.contains(admission_id);
             if abort_running {
                 core.abort_requested = true;
             }

@@ -636,6 +636,21 @@ async fn cancel_owned_admission_aborts_the_running_prompt() {
         .dispatch("cancel_prompt_admission", &queued_cancel)
         .await;
     assert_eq!(cleared_queued.data, Some(json!({ "status": "unknown" })));
+    // Simulate the narrow settle gap: an earlier owned admission still
+    // exists in the registry, but this different turn is now running.
+    worker.register_prompt_admission("stale-owned");
+    assert!(worker.prompt_admissions.commit("stale-owned"));
+    let stale = worker
+        .dispatch(
+            "cancel_prompt_admission",
+            &json!({"activeSessionId": "cancel-owned-session", "admissionId": "stale-owned", "cancelOwned": true}),
+        )
+        .await;
+    assert_eq!(stale.data, Some(json!({ "status": "owned" })));
+    assert!(
+        !worker.core.lock().unwrap().abort_requested,
+        "stale admission must not abort the unrelated running turn"
+    );
     let cancel = json!({
         "activeSessionId": "cancel-owned-session",
         "admissionId": "adm-1",

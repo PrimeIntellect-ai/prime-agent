@@ -335,6 +335,7 @@ impl Worker {
             pending_next_turn: Vec::new(),
             active_action: None,
             running_tool_calls: std::collections::HashSet::new(),
+            running_admission_ids: std::collections::HashSet::new(),
         };
         let active_session_id = config.active_session_id.clone();
         let script = config.script.clone();

@@ -87,6 +87,10 @@ impl TurnRunner {
                     None
                 } else if core.steering.front().is_some() {
                     let items = gather_delivery_batch(&mut core, Lane::Steering);
+                    core.running_admission_ids = items
+                        .iter()
+                        .filter_map(|item| item.admission_id.clone())
+                        .collect();
                     core.busy = true;
                     core.abort_requested = false;
                     core.retry_abort_requested = false;
@@ -96,6 +100,10 @@ impl TurnRunner {
                     Some(items)
                 } else if core.follow_up.front().is_some() {
                     let items = gather_delivery_batch(&mut core, Lane::FollowUp);
+                    core.running_admission_ids = items
+                        .iter()
+                        .filter_map(|item| item.admission_id.clone())
+                        .collect();
                     core.busy = true;
                     core.abort_requested = false;
                     core.retry_abort_requested = false;
@@ -1161,6 +1169,7 @@ impl TurnRunner {
             let mut core = self.core.lock().unwrap();
             core.busy = false;
             core.active_action = None;
+            core.running_admission_ids.clear();
         }
         self.push_roster_delta();
         // The fallback `agent_end` for runs that ended without a model
