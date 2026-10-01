@@ -593,17 +593,31 @@ async fn cancel_owned_admission_aborts_the_running_prompt() {
     }
     // The held turn keeps the session busy, so a second prompt queues
     // behind it. Admission is already owned before delivery, as in TS.
-    let queued = worker
-        .dispatch(
-            "prompt",
-            &json!({
-                "activeSessionId": "cancel-owned-session",
-                "message": "queued behind the held turn",
-                "admissionId": "adm-2",
-            }),
-        )
-        .await;
-    assert!(queued.success, "queued prompt failed: {queued:?}");
+    let queued_wait = tokio::spawn({
+        let worker = Arc::clone(&worker);
+        async move {
+            worker
+                .dispatch(
+                    "prompt_and_wait",
+                    &json!({
+                        "activeSessionId": "cancel-owned-session",
+                        "message": "queued behind the held turn",
+                        "admissionId": "adm-2",
+                    }),
+                )
+                .await
+        }
+    });
+    // The queued prompt has been accepted while its response waits on the
+    // held turn; its admission is already owned, not yet settled.
+    loop {
+        if worker.prompt_admissions.cancel("adm-2")
+            == Some(crate::prompt_admission::AdmissionStatus::Owned)
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
     let queued_cancel = json!({
         "activeSessionId": "cancel-owned-session",
         "admissionId": "adm-2",
@@ -636,6 +650,11 @@ async fn cancel_owned_admission_aborts_the_running_prompt() {
         .dispatch("cancel_prompt_admission", &queued_cancel)
         .await;
     assert_eq!(cleared_queued.data, Some(json!({ "status": "unknown" })));
+    let queued_result = queued_wait.await.unwrap();
+    assert!(
+        !queued_result.success,
+        "the withdrawn prompt cannot complete"
+    );
     // Simulate the narrow settle gap: an earlier owned admission still
     // exists in the registry, but this different turn is now running.
     worker.register_prompt_admission("stale-owned");
