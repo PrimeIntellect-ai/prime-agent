@@ -332,7 +332,7 @@ fn the_startup_placeholder_carries_the_dock_a_fresh_session_mounts() {
         rows[rows.len() - 2..],
         [
             "\u{2500}".repeat(100),
-            " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells"
+            " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells  \u{b7}  \u{2699} 0 factory"
                 .to_string(),
         ],
         "the placeholder's last two rows are the dock's rule and zero row"

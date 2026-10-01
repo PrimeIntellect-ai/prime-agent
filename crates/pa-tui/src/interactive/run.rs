@@ -193,8 +193,9 @@ async fn run_interactive_surface(
     let (auth_panel_tx, mut auth_panel_rx) =
         mpsc::unbounded_channel::<crate::auth_panel::AuthPanelRequest>();
     let (bash_tx, mut bash_rx) = mpsc::unbounded_channel::<crate::session_ui::BashActivityUpdate>();
-    // Background factory refreshes (the `/factory` view's watch+graph
-    // cadence) report here; the loop folds them into the open view.
+    // Background factory refreshes (the factory page's watch+graph
+    // cadence and the dock count's poll) report here; the loop folds them
+    // into the session — the open page's panels and the dock's count.
     let (factory_tx, mut factory_rx) =
         mpsc::unbounded_channel::<crate::session_ui::FactoryUpdate>();
     // Background slash-command-catalog refreshes (`get_commands`) report
@@ -1866,13 +1867,13 @@ async fn run_interactive_surface(
                 session.spawn_bash_activity_refresh();
             }
             () = async {
-                // The `/factory` view's refresh tick: the same 2s cadence
-                // as the bash poll, armed only while the view is mounted
-                // on a daemon that advertises the factory lane (the
-                // watch+graph refresh itself returns at the run's own
-                // pace; this tick is the cadence floor and the unselected
-                // runs' keepalive).
-                if !(factory_refresh_wanted && session.factory_view_open()) {
+                // The factory lane's 2s poll: the bash poll's cadence
+                // and gate, armed on daemons that advertise the
+                // factory lane. The poll runs whether or not the page
+                // is open (the dock's factory count stays live); an
+                // open page adds its selected run's watch ahead of the
+                // graph inside the same serialized cycle.
+                if !factory_refresh_wanted {
                     std::future::pending::<()>().await;
                 }
                 tokio::time::sleep_until(

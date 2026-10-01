@@ -34,77 +34,156 @@ fn frame_spans(view: &mut FactoryView) -> Vec<Vec<crate::Span>> {
     view.render(&theme(), 110, &kb())
 }
 
-/// A scripted run: the review-loop machine mid-flight — collect done,
-/// reviewing running (its first entry settled, so the collect edge fired),
-/// fixing pending — plus the usage and milestone tail.
+/// A scripted run in the ACTIVITY LANE's wire shape — derived from a
+/// real `factory_activity` graph reply (the kernel's `_graph_snapshot`
+/// rows converted by `_wire_payload` in `rlm/factory.py`: the reply
+/// keys are camelCase end to end, matching the protocol's request
+/// frame): the review-loop machine mid-flight — collect done, reviewing
+/// running (its first entry settled, so the collect edge fired), fixing
+/// pending — plus the usage and milestone tail.
 fn scripted_snapshot() -> serde_json::Value {
     json!({
         "runId": "run-abc12345",
         "specId": "review-loop",
         "name": "review-loop",
         "state": "running",
+        "pauseReason": null,
         "elapsedMs": 45_000,
-        "budget": { "limitMs": 600_000, "consumedMs": 45_000 },
         "machine": {
             "run": { "maxParallel": 4, "maxTransitions": 40, "failurePolicy": "continue", "budgetMs": 600_000 },
             "states": [
-                { "id": "collect", "entry": true, "lifecycle": "task", "maxEntries": 1, "subagent": "researcher" },
+                { "id": "collect", "entry": true, "lifecycle": "task", "maxEntries": 1, "retries": 0, "subagent": "researcher" },
                 { "id": "reviewing", "entry": false, "lifecycle": "task", "maxEntries": 4, "retries": 1 },
-                { "id": "fixing", "entry": false, "lifecycle": "task", "maxEntries": 3 }
+                { "id": "fixing", "entry": false, "lifecycle": "task", "maxEntries": 3, "retries": 0 }
             ],
             "transitions": [
                 { "from": "collect", "to": "reviewing", "on": "settled" },
                 { "from": "reviewing", "to": "fixing", "on": "settled",
                   "when": { "output": "verdict", "path": "approved", "op": "eq", "value": false } },
+                { "from": "reviewing", "to": "reviewing", "on": "settled", "when": { "output": "verdict", "op": "exists" } },
                 { "from": "fixing", "to": "reviewing", "on": "settled" }
             ],
             "order": ["collect", "reviewing", "fixing"]
         },
         "nodes": [
-            { "id": "collect", "status": "done", "lifecycle": "task", "entriesUsed": 1,
-              "maxEntries": 1, "attempts": 1, "entries": [ { "index": 0, "status": "done" } ],
-              "instances": [ { "index": 0, "entry": 0, "status": "done", "attempt": 1 } ] },
-            { "id": "reviewing", "status": "running", "lifecycle": "task", "entriesUsed": 1,
-              "maxEntries": 4, "attempts": 1, "entries": [ { "index": 0, "status": "running" } ],
-              "instances": [ { "index": 0, "entry": 0, "status": "running", "attempt": 1 } ] },
-            { "id": "fixing", "status": "pending", "lifecycle": "task", "entriesUsed": 0,
-              "maxEntries": 3, "attempts": 0, "entries": [], "instances": [] }
+            { "id": "collect", "status": "done", "lifecycle": "task", "attempts": 1,
+              "entriesUsed": 1, "maxEntries": 1,
+              "entries": [ { "index": 0, "status": "done", "error": null } ],
+              "instances": [ { "index": 0, "entry": 0, "status": "done", "attempt": 1, "child": "child-1", "durationMs": 5, "error": null } ] },
+            { "id": "reviewing", "status": "running", "lifecycle": "task", "attempts": 1,
+              "entriesUsed": 1, "maxEntries": 4,
+              "entries": [ { "index": 0, "status": "running", "error": null } ],
+              "instances": [ { "index": 0, "entry": 0, "status": "running", "attempt": 1, "child": "child-2", "durationMs": 0, "error": null } ] },
+            { "id": "fixing", "status": "pending", "lifecycle": "task", "attempts": 0,
+              "entriesUsed": 0, "maxEntries": 3, "entries": [], "instances": [] }
         ],
         "activeNodes": ["reviewing"],
-        "last_fired": [ { "from": "collect", "to": "reviewing", "seq": 4 } ],
+        "lastFired": [ { "from": "collect", "to": "reviewing", "seq": 7 } ],
         "events": [
-            { "kind": "milestone", "milestone": "started", "stage": "delivered" },
-            { "kind": "transition_fired", "from": "collect", "to": "reviewing", "seq": 4 }
+            { "seq": 1, "kind": "milestone", "stage": "shown", "milestone": "started" },
+            { "seq": 7, "kind": "transition_fired", "stage": "recorded", "from": "collect", "to": "reviewing" }
         ],
         "usage": { "spawns": 2, "settled": 1, "toolUses": 5, "maxParallel": 4,
-                   "running": 1, "transitionsFired": 1 }
+                   "running": 1, "transitionsFired": 1 },
+        "budget": { "limitMs": 600_000, "consumedMs": 45_000 }
     })
+}
+
+/// The same reply in the KERNEL's conversation shape (the wire fixture
+/// with every key re-spelled `snake_case`): the parser tolerates both
+/// spellings, so this fixture must parse to the identical struct.
+fn kernel_shape_snapshot() -> serde_json::Value {
+    rekey_snake(&scripted_snapshot())
+}
+
+/// Re-spell a wire fixture's keys `snake_case` (`runId` -> `run_id`),
+/// the mechanical mirror of the kernel's `_wire_payload` so the two
+/// fixtures can never drift.
+fn rekey_snake(value: &serde_json::Value) -> serde_json::Value {
+    fn snake(key: &str) -> String {
+        let mut out = String::with_capacity(key.len() + 4);
+        for character in key.chars() {
+            if character.is_ascii_uppercase() {
+                out.push('_');
+                out.push(character.to_ascii_lowercase());
+            } else {
+                out.push(character);
+            }
+        }
+        out
+    }
+    match value {
+        serde_json::Value::Object(object) => object
+            .iter()
+            .map(|(key, item)| (snake(key), rekey_snake(item)))
+            .collect(),
+        serde_json::Value::Array(rows) => rows.iter().map(rekey_snake).collect(),
+        other => other.clone(),
+    }
 }
 
 fn runs_response(snapshot: &serde_json::Value) -> serde_json::Value {
     json!({ "runs": [snapshot] })
 }
 
-/// The parser fuses the structure and the live overlay.
+/// Two live runs for the window battery: the second panel's name differs
+/// so the header rows tell the runs apart.
+fn two_run_response() -> serde_json::Value {
+    let mut response = runs_response(&scripted_snapshot());
+    let second = scripted_snapshot();
+    response["runs"].as_array_mut().unwrap().push(second);
+    response["runs"][1]["runId"] = json!("run-def67890");
+    response["runs"][1]["name"] = json!("second-run");
+    response
+}
+
+/// The parser fuses the structure and the live overlay from the wire
+/// reply's `camelCase` keys (a wrong-spelling read defaults every field,
+/// so each field below is the mutation check on its key).
 #[test]
 fn parsing_fuses_structure_and_live_state() {
     let runs = parse_factory_runs(&runs_response(&scripted_snapshot()));
     assert_eq!(runs.len(), 1);
     let run = &runs[0];
     assert_eq!(run.run_id, "run-abc12345");
+    assert_eq!(run.spec_id, "review-loop");
     assert_eq!(run.state.as_deref(), Some("running"));
+    assert_eq!(run.elapsed_ms, 45_000, "elapsedMs (the wire spelling)");
+    assert_eq!(run.budget_limit_ms, Some(600_000), "budget.limitMs");
     assert_eq!(run.states.len(), 3);
     assert!(run.states[0].entry);
-    assert_eq!(run.transitions.len(), 3);
+    assert_eq!(run.states[1].max_entries, 4, "state maxEntries");
+    assert_eq!(run.transitions.len(), 4);
     assert_eq!(run.nodes["reviewing"].status, "running");
+    assert_eq!(run.nodes["reviewing"].entries_used, 1, "node entriesUsed");
+    assert_eq!(run.nodes["reviewing"].max_entries, 4, "node maxEntries");
     assert_eq!(run.last_fired[0].to, "reviewing");
     assert_eq!(run.milestones, vec!["started".to_string()]);
-    assert_eq!(run.usage.as_ref().unwrap().running, 1);
+    let usage = run.usage.as_ref().expect("usage parses");
+    assert_eq!(usage.running, 1);
+    assert_eq!(usage.tool_uses, 5, "usage toolUses");
+    assert_eq!(usage.max_parallel, 4, "usage maxParallel");
+    assert_eq!(usage.transitions_fired, 1, "usage transitionsFired");
     assert_eq!(
         run.active_state_ids(),
         vec!["reviewing".to_string()],
         "the running node is the active one"
     );
+}
+
+/// Both spellings parse: the activity wire's `camelCase` reply and the
+/// kernel's `snake_case` conversation shape fuse to the identical
+/// struct (the tolerance pin — a single-spelling parser drops the other
+/// side's rows, which is exactly the always-empty-view bug).
+#[test]
+fn parsing_tolerates_both_wire_spellings() {
+    let wire = parse_factory_runs(&runs_response(&scripted_snapshot()));
+    let kernel = parse_factory_runs(&runs_response(&kernel_shape_snapshot()));
+    assert_eq!(kernel.len(), 1, "the snake_case conversation shape parses");
+    assert_eq!(kernel[0].run_id, "run-abc12345");
+    assert_eq!(kernel[0].usage.as_ref().unwrap().tool_uses, 5);
+    assert_eq!(wire.len(), 1, "the camelCase wire shape parses");
+    assert_eq!(wire[0], kernel[0], "both spellings fuse to the same run");
 }
 
 /// The diagram renders the machine's rows and connectors, with the fired
@@ -129,6 +208,14 @@ fn the_diagram_renders_states_edges_and_the_fired_marker() {
     );
     assert!(joined.contains("milestones: started"), "{joined}");
     assert!(joined.contains("1 running"), "{joined}");
+    assert!(
+        joined.contains("1/4 parallel"),
+        "the max_parallel stat: {joined}"
+    );
+    assert!(
+        joined.contains("1 transitions"),
+        "the transitions_fired stat: {joined}"
+    );
 }
 
 /// The highlighting: the active node's row paints in the accent (bright)
@@ -161,7 +248,8 @@ fn active_nodes_paint_bright_and_pending_paints_dim() {
 
 /// The Mermaid emission: the same graph model, with the active class and
 /// the last-fired link styles — pasteable and rendering the same
-/// highlighting.
+/// highlighting (the pending node carries the dim pending class, never
+/// the bright active one — the mutation check on the class assignment).
 #[test]
 fn mermaid_source_carries_the_active_classdef_and_fired_link_styles() {
     let runs = parse_factory_runs(&runs_response(&scripted_snapshot()));
@@ -180,8 +268,20 @@ fn mermaid_source_carries_the_active_classdef_and_fired_link_styles() {
         "the active classDef: {source}"
     );
     assert!(
+        source.contains("classDef pending fill:#1e293b"),
+        "the dim pending classDef: {source}"
+    );
+    assert!(
         source.contains("class s1 active"),
         "the running node carries the active class: {source}"
+    );
+    assert!(
+        source.contains("class s2 pending"),
+        "the queued node carries the dim pending class: {source}"
+    );
+    assert!(
+        !source.contains("class s2 active"),
+        "the queued node never paints active: {source}"
     );
     assert!(
         source.contains("class s0 done"),
@@ -202,6 +302,29 @@ fn mermaid_source_carries_the_active_classdef_and_fired_link_styles() {
     assert!(
         source.contains("s2 -->|settled| s1"),
         "the back edge renders like every plain edge: {source}"
+    );
+}
+
+/// The reply-shape contract: a graph reply without the runs list is a
+/// malformed lane, never zero runs (the empty state reflects real
+/// emptiness — the mutation check on the malformed-reply guard).
+#[test]
+fn a_reply_without_the_runs_list_is_malformed_not_empty() {
+    assert!(
+        factory_reply_lists_runs(&json!({ "runs": [] })),
+        "the empty runs list IS the real empty state"
+    );
+    assert!(
+        !factory_reply_lists_runs(&json!({})),
+        "a missing runs list is a malformed lane"
+    );
+    assert!(
+        !factory_reply_lists_runs(&json!({ "machine": {} })),
+        "a wrong-shape reply is a malformed lane"
+    );
+    assert!(
+        !factory_reply_lists_runs(&json!("runs")),
+        "a non-object reply is a malformed lane"
     );
 }
 
@@ -253,8 +376,10 @@ fn the_key_loop_resolves_the_orchestration_actions() {
 }
 
 /// The repaint hysteresis: an unchanged snapshot applies without a
-/// changed marker, and a state/instance change lights it exactly for
-/// that run.
+/// changed marker, a state/instance change lights it exactly for that
+/// run, the marker decays once quiescent, and the clock never trips it
+/// (elapsed-only movement is not notice-worthy — the mutation check on
+/// the signature).
 #[test]
 fn apply_runs_lights_the_marker_only_on_notice_worthy_changes() {
     let runs = parse_factory_runs(&runs_response(&scripted_snapshot()));
@@ -286,17 +411,26 @@ fn apply_runs_lights_the_marker_only_on_notice_worthy_changes() {
         !rows.join("\n").contains("changed"),
         "the marker decays once quiescent"
     );
+    // The clock never trips the marker: an elapsed-only bump repaints the
+    // stats line but is not a notice-worthy run-shape change.
+    let mut older = settled;
+    older["elapsed_ms"] = json!(120_000);
+    let changed = view.apply_runs(parse_factory_runs(&runs_response(&older)));
+    assert!(
+        !changed,
+        "an elapsed-only bump is not a notice-worthy change"
+    );
+    let rows = frame_text(&mut view);
+    assert!(
+        !rows.join("\n").contains("changed"),
+        "the clock keeps the changed marker off"
+    );
 }
 
 /// Two runs: the selection moves and the panels keep their identities.
 #[test]
 fn multiple_runs_keep_the_selection_on_the_same_run() {
-    let second = scripted_snapshot();
-    let mut response = runs_response(&scripted_snapshot());
-    response["runs"].as_array_mut().unwrap().push(second);
-    response["runs"][1]["runId"] = json!("run-def67890");
-    response["runs"][1]["nodes"][1]["status"] = json!("done");
-    let runs = parse_factory_runs(&response);
+    let runs = parse_factory_runs(&two_run_response());
     let mut view = FactoryView::new(runs, 40);
     assert_eq!(view.selected, 0);
     let _ = view.handle_key("j", &kb());
@@ -306,9 +440,61 @@ fn multiple_runs_keep_the_selection_on_the_same_run() {
         Some("run-def67890".to_string())
     );
     // The refresh keeps the selection on the same run id.
-    view.apply_runs(parse_factory_runs(&response));
+    view.apply_runs(parse_factory_runs(&two_run_response()));
     assert_eq!(
         view.selected_run().map(|run| run.run_id.clone()),
         Some("run-def67890".to_string())
+    );
+}
+
+/// The render budget window (a tall view at a small viewport): the view
+/// never renders more rows than the viewport asked for, the trailing key
+/// hint always stays painted, and the selected run's panel header stays
+/// visible even when the selection sits outside the trailing window —
+/// a stop/resume target never hides behind the budget (the mutation
+/// checks: leading-row truncation drops the hint, tail-only retention
+/// drops the selected header).
+#[test]
+fn the_budget_window_keeps_the_hint_and_the_selected_panel() {
+    let mut view = FactoryView::new(parse_factory_runs(&two_run_response()), 8);
+    let rows = frame_text(&mut view);
+    let joined = rows.join("\n");
+    // The budget contract: never more than the viewport asked for.
+    assert!(
+        rows.len() <= 8,
+        "the view stays inside the budget: {joined}"
+    );
+    // The key hint stays painted (the trailing chrome never truncates).
+    assert!(
+        joined.contains("copy mermaid"),
+        "the key hint stays painted: {joined}"
+    );
+    // The selected (first) run's header stays visible with its marker.
+    assert!(
+        joined.contains("▸ factory: review-loop — running"),
+        "the selected run's header stays visible: {joined}"
+    );
+
+    // The selection on the newest run: the window follows the selection,
+    // keeps the hint, and drops the older panel instead.
+    let mut selected_newest = FactoryView::new(parse_factory_runs(&two_run_response()), 8);
+    let _ = selected_newest.handle_key("j", &kb());
+    let rows = frame_text(&mut selected_newest);
+    let joined = rows.join("\n");
+    assert!(
+        rows.len() <= 8,
+        "the view stays inside the budget: {joined}"
+    );
+    assert!(
+        joined.contains("copy mermaid"),
+        "the key hint stays painted: {joined}"
+    );
+    assert!(
+        joined.contains("▸ factory: second-run — running"),
+        "the newest selection's header stays visible: {joined}"
+    );
+    assert!(
+        !joined.contains("factory: review-loop"),
+        "the older panel drops instead of the chrome: {joined}"
     );
 }

@@ -4548,6 +4548,44 @@ class FactoryGraphWatchTest(unittest.TestCase):
         self.assertTrue(graph["events"], "the ledger tail rides the snapshot")
 
     @async_test
+    async def test_graph_transition_from_lists_are_snapshot_owned(self) -> None:
+        # Regression (bot review): ``graph()`` exposed each transition's
+        # ``from`` list by reference, so a consumer mutating the snapshot's
+        # join row corrupted the active run's machine — an appended source
+        # made the join wait for a state that never settles, so the
+        # transition never fired. The snapshot owns its ``from``, exactly
+        # like the already-copied ``when`` guard.
+        self.harness.create_factory(
+            "Join",
+            "Join content",
+            id="join",
+            machine={
+                "run": {"failure_policy": "continue"},
+                "states": [
+                    {"id": "a", "entry": True, "subagent": "worker"},
+                    {"id": "b", "entry": True, "subagent": "worker"},
+                    {"id": "c", "subagent": "worker"},
+                ],
+                "transitions": [{"from": ["a", "b"], "to": "c"}],
+            },
+        )
+        result = await self.start("join")
+        run_id = result["run_id"]
+        graph = await rlm_module.rlm.factory.graph(run_id)
+        join = next(t for t in graph["machine"]["transitions"] if t["to"] == "c")
+        self.assertEqual(join["from"], ["a", "b"])
+        # A consumer corrupting the snapshot never touches the run.
+        join["from"].append("ghost")
+        self.assertEqual(
+            self.executor._runs[run_id].machine["transitions"][0]["from"], ["a", "b"]
+        )
+        graph_again = await rlm_module.rlm.factory.graph(run_id)
+        join_again = next(
+            t for t in graph_again["machine"]["transitions"] if t["to"] == "c"
+        )
+        self.assertEqual(join_again["from"], ["a", "b"])
+
+    @async_test
     async def test_graph_is_status_data_plus_the_static_graph(self) -> None:
         result = await self.start()
         run_id = result["run_id"]
@@ -4712,45 +4750,104 @@ class FactoryGraphWatchTest(unittest.TestCase):
     async def test_activity_routes_every_action(self) -> None:
         result = await self.start()
         run_id = result["run_id"]
-        # graph (all runs) / graph (one run) / graph (spec)
+        # graph (all runs) / graph (one run) / graph (spec) — the reply
+        # carries the wire's camelCase keys (_wire_payload's contract)
         listed = await factory_module.default_factory_executor().activity(
             {"action": "graph"}
         )
-        self.assertEqual([run["run_id"] for run in listed["runs"]], [run_id])
+        self.assertEqual([run["runId"] for run in listed["runs"]], [run_id])
         one = await factory_module.default_factory_executor().activity(
             {"action": "graph", "runId": run_id}
         )
-        self.assertEqual(one["run_id"], run_id)
+        self.assertEqual(one["runId"], run_id)
         spec_graph = await factory_module.default_factory_executor().activity(
             {"action": "graph", "specId": "sw"}
         )
-        self.assertEqual(spec_graph["spec_id"], "sw")
+        self.assertEqual(spec_graph["specId"], "sw")
         # status
         status = await factory_module.default_factory_executor().activity(
             {"action": "status", "runId": run_id}
         )
-        self.assertEqual(status["run_id"], run_id)
+        self.assertEqual(status["runId"], run_id)
         await self.settle(result)
         # a fresh run through the activity lane, then stop it and prove
         # resume's paused-only contract from the same lane
         second = await factory_module.default_factory_executor().activity(
             {"action": "run", "specId": "sw"}
         )
-        self.assertIn("run_id", second)
+        self.assertIn("runId", second)
         stopped = await factory_module.default_factory_executor().activity(
-            {"action": "stop", "runId": second["run_id"]}
+            {"action": "stop", "runId": second["runId"]}
         )
         self.assertEqual(stopped["state"], "stopped")
         with self.assertRaisesRegex(ValueError, "not paused"):
             await factory_module.default_factory_executor().activity(
-                {"action": "resume", "runId": second["run_id"]}
+                {"action": "resume", "runId": second["runId"]}
             )
         # watch through the activity lane answers with `changed` + snapshot
         watched = await factory_module.default_factory_executor().activity(
-            {"action": "watch", "runId": second["run_id"], "timeoutMs": 5}
+            {"action": "watch", "runId": second["runId"], "timeoutMs": 5}
         )
         self.assertIn("changed", watched)
-        self.assertEqual(watched["run_id"], second["run_id"])
+        self.assertEqual(watched["runId"], second["runId"])
+
+    @async_test
+    async def test_activity_reply_carries_the_wire_keys(self) -> None:
+        # Regression (live probe): the activity lane's replies once
+        # carried the conversation API's snake_case keys while the TUI
+        # parsed camelCase wire keys, so every run row dropped at the
+        # identity guard and the factory view stayed empty regardless of
+        # live runs. The factory_activity protocol is camelCase end to
+        # end (the request frame's runId/specId/timeoutMs): the reply's
+        # result payload converts every nested key to the wire spelling,
+        # while the in-kernel conversation API stays snake_case.
+        result = await self.start()
+        run_id = result["run_id"]
+        self.clock.advance(3.0)
+        listed = await factory_module.default_factory_executor().activity(
+            {"action": "graph"}
+        )
+        row = listed["runs"][0]
+        self.assertEqual(row["runId"], run_id, "the wire row key is runId")
+        self.assertEqual(row["specId"], "sw")
+        self.assertEqual(row["state"], "running")
+        self.assertEqual(row["elapsedMs"], 3_000, "elapsed_ms -> elapsedMs")
+        self.assertEqual(row["budget"]["limitMs"], 600_000, "limit_ms -> limitMs")
+        self.assertIn("toolUses", row["usage"], "tool_uses -> toolUses")
+        self.assertIn("maxParallel", row["usage"], "max_parallel -> maxParallel")
+        self.assertIn(
+            "transitionsFired", row["usage"], "transitions_fired -> transitionsFired"
+        )
+        node = row["nodes"][0]
+        self.assertIn("entriesUsed", node, "entries_used -> entriesUsed")
+        self.assertIn("maxEntries", node, "max_entries -> maxEntries")
+        self.assertEqual(
+            row["machine"]["run"]["maxParallel"],
+            4,
+            "the machine run block rides the wire too",
+        )
+        self.assertNotIn("run_id", row, "no snake_case keys ride the wire")
+        self.assertNotIn("elapsed_ms", row)
+        self.assertNotIn("tool_uses", row["usage"])
+        # watch and status answers ride the same wire conversion.
+        watched = await factory_module.default_factory_executor().activity(
+            {"action": "watch", "runId": run_id, "timeoutMs": 0}
+        )
+        self.assertIn("changed", watched)
+        self.assertEqual(watched["runId"], run_id)
+        self.assertNotIn("run_id", watched)
+        status = await factory_module.default_factory_executor().activity(
+            {"action": "status", "runId": run_id}
+        )
+        self.assertEqual(status["runId"], run_id)
+        self.assertNotIn("run_id", status)
+        # The conversation API keeps its snake_case keys: only the wire
+        # lane converts.
+        graph = await rlm_module.rlm.factory.graph(run_id)
+        self.assertEqual(graph["run_id"], run_id)
+        self.assertEqual(graph["elapsed_ms"], 3_000)
+        self.assertIn("tool_uses", graph["usage"])
+        self.assertNotIn("runId", graph)
 
     @async_test
     async def test_activity_validates_its_request_shape(self) -> None:

@@ -1,6 +1,7 @@
-//! The `/factory` session surface: the command handler, the view's key
-//! loop, the refresh cadence, and the daemon `factory_activity` lane the
-//! view's actions ride.
+//! The factory page's session surface: the page open (the activity
+//! dock's factory group's destination), the view's key loop, the
+//! refresh cadence, and the daemon `factory_activity` lane the page's
+//! actions ride.
 
 use std::time::Duration;
 
@@ -49,58 +50,32 @@ impl super::SessionUi {
             })
     }
 
-    /// Whether the `/factory` view is mounted (the refresh tick's gate).
-    pub(crate) fn factory_view_open(&self) -> bool {
-        self.factory_view_open_flag
-    }
-
-    /// `/factory`: open the live view over the session's factory runs.
-    pub(crate) async fn handle_factory_command(&mut self, view: &mut AgentView) -> Result<()> {
-        self.track_command_used("factory");
+    /// Open the factory page: the activity dock's factory group's
+    /// destination (the subagents/heartbeats/shells pages' navigation
+    /// family — the dock's Enter and the click both dispatch here). The
+    /// keypress never waits on the daemon (the heartbeats/bash page
+    /// pattern): the poll cycle's cached graph mounts at once and the
+    /// refresh cadence keeps it current; a daemon without the lane
+    /// reports exactly that instead of mounting nothing silently.
+    pub(crate) fn open_factory_page(&mut self, view: &mut AgentView) {
         if !self.factory_activity_supported() {
-            self.error_row(
-                "/factory needs a daemon that advertises the factory view",
+            self.note(
+                "The factory page needs a daemon that advertises the factory lane",
                 view,
             );
-            return Ok(());
+            return;
         }
-        self.open_factory_view("/factory", view).await
-    }
-
-    /// Open the view: the first graph snapshot mounts synchronously with
-    /// the open (a failed fetch reports the command and leaves nothing
-    /// mounted), and the refresh cadence keeps it current.
-    async fn open_factory_view(&mut self, command: &str, view: &mut AgentView) -> Result<()> {
-        match self
-            .bounded_request(
-                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                DaemonCommand::FactoryActivity {
-                    id: None,
-                    active_session_id: self.active_session_id.clone(),
-                    action: "graph".to_string(),
-                    run_id: None,
-                    spec_id: None,
-                    timeout_ms: None,
-                    rest: Map::default(),
-                },
-            )
-            .await
-        {
-            Ok(data) => {
-                self.factory_view_open_flag = true;
-                view.factory_view = Some(FactoryView::new(
-                    parse_factory_runs(&data),
-                    picker_viewport_rows(view.terminal_rows()),
-                ));
-                self.sync_factory_selection(view);
-                self.dirty = true;
-                self.spawn_factory_refresh();
-            }
-            Err(error) => {
-                self.note(&format!("{command} failed: {error:#}"), view);
-            }
-        }
-        Ok(())
+        self.factory_view_open_flag = true;
+        // The mounted view belongs to this durable session: a later
+        // rebind fold keeps it only across the SAME session's reattach.
+        self.factory_view_session = Some(self.session_id.clone());
+        view.factory_view = Some(FactoryView::new(
+            parse_factory_runs(&self.factory_graph),
+            picker_viewport_rows(view.terminal_rows()),
+        ));
+        self.sync_factory_selection(view);
+        self.dirty = true;
+        self.spawn_factory_refresh();
     }
 
     /// One key press while the view is open: the view resolves the key;
@@ -127,6 +102,7 @@ impl super::SessionUi {
             Some(FactoryViewAction::Close) => {
                 self.factory_view_open_flag = false;
                 self.factory_selected_run = None;
+                self.factory_view_session = None;
                 view.factory_view = None;
                 self.dirty = true;
             }
@@ -187,13 +163,27 @@ impl super::SessionUi {
     }
 
     /// The refresh cadence (the run's collect cycle): a bounded watch on
-    /// the selected run — the kernel returns as soon as it changed — then
-    /// the full graph list. Every request stamps the epoch it was issued
+    /// the selected run — the kernel returns as soon as it changed —
+    /// then the full graph list. The cycle runs on the bash poll's
+    /// always-on 2-second cadence (the dock's factory count stays live
+    /// while the page is closed); an open page adds its selected run's
+    /// watch ahead of the graph. At most one refresh runs in flight with
+    /// one queued trailing refresh (the heartbeat refresh's
+    /// serialization): a tick that fires while the watch/graph pair is
+    /// still in flight queues behind it instead of minting a newer epoch
+    /// the in-flight reply could never match (the watch alone can span a
+    /// whole tick, so overlapping cycles would leave the view
+    /// permanently stale). Every request stamps the epoch it was issued
     /// under, and only the latest issued request's response lands.
     pub(crate) fn spawn_factory_refresh(&mut self) {
-        if !self.factory_activity_supported() || !self.factory_view_open() {
+        if !self.factory_activity_supported() {
             return;
         }
+        if self.factory_refresh_in_flight {
+            self.factory_refresh_queued = true;
+            return;
+        }
+        self.factory_refresh_in_flight = true;
         self.factory_list_epoch += 1;
         let epoch = self.factory_list_epoch;
         let client = self.client.clone();
@@ -204,54 +194,79 @@ impl super::SessionUi {
             // The watch first: the selected run's change wakes the refresh
             // at the run's own pace instead of a fixed poll interval; a
             // failed or unsupported watch degrades to the plain cadence.
-            if let Some(run_id) = selected_run {
-                let _ = client
+            // The whole cycle sits inside the shared request bound so the
+            // refresh slot always frees (a hung request must never pin
+            // the cadence), exactly like the heartbeat refresh.
+            let cycle = async {
+                if let Some(run_id) = selected_run {
+                    let _ = client
+                        .request_ok(DaemonCommand::FactoryActivity {
+                            id: None,
+                            active_session_id: active_session_id.clone(),
+                            action: "watch".to_string(),
+                            run_id: Some(run_id),
+                            spec_id: None,
+                            timeout_ms: Some(FACTORY_WATCH_TICK_MS),
+                            rest: Map::default(),
+                        })
+                        .await;
+                }
+                client
                     .request_ok(DaemonCommand::FactoryActivity {
                         id: None,
                         active_session_id: active_session_id.clone(),
-                        action: "watch".to_string(),
-                        run_id: Some(run_id),
+                        action: "graph".to_string(),
+                        run_id: None,
                         spec_id: None,
-                        timeout_ms: Some(FACTORY_WATCH_TICK_MS),
+                        timeout_ms: None,
                         rest: Map::default(),
                     })
-                    .await;
-            }
-            match client
-                .request_ok(DaemonCommand::FactoryActivity {
-                    id: None,
-                    active_session_id: active_session_id.clone(),
-                    action: "graph".to_string(),
-                    run_id: None,
-                    spec_id: None,
-                    timeout_ms: None,
-                    rest: Map::default(),
-                })
-                .await
-            {
-                Ok(data) => {
+                    .await
+            };
+            let fetched =
+                tokio::time::timeout(Duration::from_millis(UI_REQUEST_TIMEOUT_MS), cycle).await;
+            match fetched {
+                Ok(Ok(data)) => {
                     let _ = tx.send(FactoryUpdate::Snapshot {
                         session: active_session_id,
                         epoch,
                         data,
                     });
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     let _ = tx.send(FactoryUpdate::Error {
                         session: active_session_id,
                         epoch,
                         message: format!("{error:#}"),
                     });
                 }
+                Err(_) => {
+                    let _ = tx.send(FactoryUpdate::Error {
+                        session: active_session_id,
+                        epoch,
+                        message: "timed out waiting for the Prime Agent daemon response"
+                            .to_string(),
+                    });
+                }
             }
         });
     }
 
-    /// Fold one refresh delivery into the open view: a stale epoch (a
-    /// newer request already landed) or a foreign session drops. The
-    /// changed markers land with the snapshot (the repaint hysteresis —
-    /// only a notice-worthy run-shape change repaints the diagram).
+    /// Fold one refresh delivery into the session: the dock's count
+    /// cache always absorbs the snapshot, the open view applies it, and
+    /// a stale epoch (a newer request already landed) or a foreign
+    /// session drops. The refresh slot frees whether the response
+    /// landed, failed, or timed out, and a tick's queued refresh runs
+    /// next (the heartbeat fold's shape). The changed markers land with
+    /// the snapshot (the repaint hysteresis — only a notice-worthy
+    /// run-shape change repaints the diagram). A reply without the
+    /// runs list is a malformed lane, not zero runs: the open view
+    /// reports it on its error line instead of painting a fake empty
+    /// state (the emptiness the view shows is real).
     pub(crate) fn apply_factory_update(&mut self, update: FactoryUpdate, view: &mut AgentView) {
+        // The slot frees on every delivery path; a queued tick fires next.
+        self.factory_refresh_in_flight = false;
+        let queued = std::mem::take(&mut self.factory_refresh_queued);
         let (session, epoch, payload) = match update {
             FactoryUpdate::Snapshot {
                 session,
@@ -265,19 +280,37 @@ impl super::SessionUi {
             } => (session, epoch, Err(message)),
         };
         if session != self.active_session_id || epoch != self.factory_list_epoch {
+            if queued {
+                self.spawn_factory_refresh();
+            }
             return;
         }
-        if let Some(factory_view) = view.factory_view.as_mut() {
-            match payload {
-                Ok(data) => {
-                    factory_view.set_error(None);
-                    factory_view.apply_runs(parse_factory_runs(&data));
+        match payload {
+            Ok(data) => {
+                let runs_list = crate::factory_view::factory_reply_lists_runs(&data);
+                self.factory_graph = data;
+                if let Some(factory_view) = view.factory_view.as_mut() {
+                    if runs_list {
+                        factory_view.set_error(None);
+                        factory_view.apply_runs(parse_factory_runs(&self.factory_graph));
+                    } else {
+                        factory_view
+                            .set_error(Some("malformed factory reply (no runs list)".to_string()));
+                    }
                 }
-                Err(message) => factory_view.set_error(Some(message)),
+            }
+            Err(message) => {
+                if let Some(factory_view) = view.factory_view.as_mut() {
+                    factory_view.set_error(Some(message));
+                }
             }
         }
         self.sync_factory_selection(view);
+        self.sync_activity_dock(view);
         self.dirty = true;
+        if queued {
+            self.spawn_factory_refresh();
+        }
     }
 
     /// Record the view's selected run id (the watch target for the next

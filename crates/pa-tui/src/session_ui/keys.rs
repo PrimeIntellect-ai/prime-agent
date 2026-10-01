@@ -434,7 +434,7 @@ impl SessionUi {
         if view.mcp_view.is_some() {
             return self.handle_mcp_view_key(key, view);
         }
-        // The `/factory` live view owns the frame the same way.
+        // The factory page owns the frame the same way.
         if view.factory_view.is_some() {
             return self.handle_factory_view_key(key, view).await;
         }

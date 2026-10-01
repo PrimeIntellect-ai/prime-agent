@@ -136,9 +136,15 @@ impl FactoryHost {
             } else {
                 // A harness subagent reference: the metadata carries the
                 // spawn settings (the kernel resolves the same way). An
-                // unknown reference is the kernel's own `run()` error, not
-                // the preflight's (this read stays best-effort).
-                let reference = subagent.as_str()?;
+                // unreadable reference (a non-string value, or a name no
+                // harness entry carries) is the kernel's own `run()`
+                // error, not the preflight's (this read stays
+                // best-effort): skip the state, never the whole spec —
+                // one unresolved reference must not exempt the other
+                // states' declared models from the preflight.
+                let Some(reference) = subagent.as_str() else {
+                    continue;
+                };
                 subagents
                     .iter()
                     .find(|candidate| candidate.id == reference)
@@ -146,9 +152,8 @@ impl FactoryHost {
                         subagents
                             .iter()
                             .find(|candidate| candidate.title == reference)
-                    })?
-                    .metadata
-                    .get("model")
+                    })
+                    .and_then(|entry| entry.metadata.get("model"))
                     .and_then(Value::as_str)
             };
             if let Some(model) = model.filter(|model| !model.trim().is_empty()) {

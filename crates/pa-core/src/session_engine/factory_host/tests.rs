@@ -235,6 +235,57 @@ fn local_state_shadows_the_global_spec() {
     );
 }
 
+/// An unresolvable subagent reference skips only its own state's read
+/// (the kernel's `run()` owns the unknown-reference error): every other
+/// state's declared models still preflight — one unknown reference must
+/// not exempt a spec's declared models from the catalog, allowlist, and
+/// auth checks (the mutation check on the best-effort read: the whole-spec
+/// `None` read would pass both specs through untouched).
+#[test]
+fn an_unknown_reference_skips_only_its_own_state() {
+    let dir = tempfile::tempdir().unwrap();
+    write_catalog(dir.path());
+    write_harness_state(
+        dir.path(),
+        &[
+            harness_entry("researcher", RefinementKind::Subagent, &json!({})),
+            machine_entry(
+                "mixed",
+                &json!({
+                    "states": [
+                        { "id": "ghosted", "entry": true, "subagent": "ghost" },
+                        { "id": "declared",
+                          "subagent": { "prompt": "p", "model": "missingprov/model-x" } }
+                    ]
+                }),
+            ),
+            machine_entry(
+                "allghost",
+                &json!({ "states": [{ "id": "a", "entry": true, "subagent": "ghost" }] }),
+            ),
+        ],
+        &[],
+    );
+    let bridge = host(dir.path(), None, None, false);
+    // The sibling state's declared model still preflights loudly.
+    assert_eq!(
+        bridge.spec_model_selectors("mixed").unwrap(),
+        vec!["missingprov/model-x".to_string()]
+    );
+    let error = bridge.preflight_run("mixed").unwrap_err().to_string();
+    assert!(
+        error.starts_with("Requested factory model \"missingprov/model-x\" is unavailable"),
+        "{error}"
+    );
+    // A spec whose only reference is unknown stays best-effort clean: the
+    // kernel's own `run()` owns the unknown-reference error.
+    assert_eq!(
+        bridge.spec_model_selectors("allghost").unwrap(),
+        Vec::<String>::new()
+    );
+    bridge.preflight_run("allghost").unwrap();
+}
+
 /// The `run` preflight: a declared model resolves through the catalog
 /// (exact form and the TS short form) and passes with request auth.
 #[test]

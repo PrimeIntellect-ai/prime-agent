@@ -6,6 +6,7 @@
 
 use serde_json::Value;
 
+use super::get_either;
 use crate::theme::ThemeColor;
 
 /// One machine state's declared shape.
@@ -28,7 +29,9 @@ impl FactoryState {
                 .and_then(Value::as_str)
                 .unwrap_or("task")
                 .to_string(),
-            max_entries: value.get("maxEntries").and_then(Value::as_u64).unwrap_or(1),
+            max_entries: get_either(value, "max_entries", "maxEntries")
+                .and_then(Value::as_u64)
+                .unwrap_or(1),
             subagent: value
                 .get("subagent")
                 .and_then(Value::as_str)
@@ -147,11 +150,12 @@ impl FactoryNodeState {
         Some(Self {
             status: value.get("status")?.as_str()?.to_string(),
             entries,
-            entries_used: value
-                .get("entriesUsed")
+            entries_used: get_either(value, "entries_used", "entriesUsed")
                 .and_then(Value::as_u64)
                 .unwrap_or_default(),
-            max_entries: value.get("maxEntries").and_then(Value::as_u64).unwrap_or(1),
+            max_entries: get_either(value, "max_entries", "maxEntries")
+                .and_then(Value::as_u64)
+                .unwrap_or(1),
             instances: value
                 .get("instances")
                 .and_then(Value::as_array)
@@ -251,16 +255,13 @@ impl FactoryUsage {
                 .get("spawns")
                 .and_then(Value::as_u64)
                 .unwrap_or_default(),
-            tool_uses: value
-                .get("toolUses")
+            tool_uses: get_either(value, "tool_uses", "toolUses")
                 .and_then(Value::as_u64)
                 .unwrap_or_default(),
-            max_parallel: value
-                .get("maxParallel")
+            max_parallel: get_either(value, "max_parallel", "maxParallel")
                 .and_then(Value::as_u64)
                 .unwrap_or_default(),
-            transitions_fired: value
-                .get("transitionsFired")
+            transitions_fired: get_either(value, "transitions_fired", "transitionsFired")
                 .and_then(Value::as_u64)
                 .unwrap_or_default(),
         })
@@ -346,8 +347,9 @@ pub fn format_guard(when: &Value) -> Option<String> {
 }
 
 /// The Mermaid source for one run: a `flowchart TD` with the same graph
-/// model as the ASCII diagram, `classDef active` styling for the
-/// in-flight nodes (the bright class), and `linkStyle` marks on the
+/// model as the ASCII diagram, `classDef` styling matching the terminal
+/// diagram's highlighting (`active` bright for the in-flight nodes,
+/// `pending` dim for the queued ones), and `linkStyle` marks on the
 /// last-fired edges — pasteable to GitHub or mermaid.live, rendering the
 /// same highlighting.
 ///
@@ -413,9 +415,15 @@ pub fn mermaid_source(run: &super::FactoryRunSnapshot) -> String {
             edge_index += 1;
         }
     }
-    // The class definitions: `active` is the diagram's bright class.
+    // The class definitions: `active` is the diagram's bright class,
+    // `pending` its dim queued class (the terminal diagram's dim `pending`
+    // glyph — queued nodes never paint bright).
     lines.push(
         "    classDef active fill:#16a34a,stroke:#15803d,stroke-width:3px,color:#f8fafc"
+            .to_string(),
+    );
+    lines.push(
+        "    classDef pending fill:#1e293b,stroke:#475569,stroke-width:1px,color:#cbd5e1"
             .to_string(),
     );
     lines.push(
@@ -424,10 +432,12 @@ pub fn mermaid_source(run: &super::FactoryRunSnapshot) -> String {
     lines.push(
         "    classDef error fill:#b91c1c,stroke:#dc2626,stroke-width:2px,color:#fee2e2".to_string(),
     );
-    // Class assignments from the live overlay.
+    // Class assignments from the live overlay: running bright (active),
+    // queued dim (pending), errors red, everything settled done.
     for (index, state) in run.states.iter().enumerate() {
         let class = match run.nodes.get(&state.id) {
-            Some(node) if node.status == "running" || node.status == "pending" => "active",
+            Some(node) if node.status == "running" => "active",
+            Some(node) if node.status == "pending" => "pending",
             Some(node) if node.status == "error" => "error",
             Some(_) => "done",
             None => continue,

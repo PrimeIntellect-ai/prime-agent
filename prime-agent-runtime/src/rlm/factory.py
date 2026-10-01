@@ -1637,7 +1637,11 @@ class FactoryExecutor:
         and ``watch`` answer with the compact snapshots (the host lane
         renders diagrams, not answers); ``run`` is the lane that starts a
         run from the daemon or TUI, so it rides the full ``run()``
-        validation.
+        validation. The reply's result payload carries the WIRE's
+        camelCase keys (``_wire_payload`` re-keys the snake_case rows: the
+        protocol's request frame is camelCase end to end) — the
+        conversation API (``rlm.factory.graph()`` in-kernel) stays
+        snake_case.
         """
         action = request.get("action")
         if action not in ACTIVITY_ACTIONS:
@@ -1655,24 +1659,26 @@ class FactoryExecutor:
                 f"factory activity timeoutMs must be an integer between 0 and {ACTIVITY_TIMEOUT_MS_CAP}"
             )
         if action == "graph":
-            return self.graph(run_id or spec_id, compact=True)
+            return _wire_payload(self.graph(run_id or spec_id, compact=True))
         if action == "status":
             if not run_id:
                 raise ValueError("factory activity status requires runId")
-            return await self.status(run_id)
+            return _wire_payload(await self.status(run_id))
         if action == "watch":
             if not run_id:
                 raise ValueError("factory activity watch requires runId")
-            return await self.watch(run_id, timeout_ms / 1000.0, compact=True)
+            return _wire_payload(
+                await self.watch(run_id, timeout_ms / 1000.0, compact=True)
+            )
         if action == "run":
             if not spec_id:
                 raise ValueError("factory activity run requires specId")
-            return await self.run(spec_id)
+            return _wire_payload(await self.run(spec_id))
         if not run_id:
             raise ValueError(f"factory activity {action} requires runId")
         if action == "stop":
-            return await self.stop(run_id)
-        return await self.resume(run_id)
+            return _wire_payload(await self.stop(run_id))
+        return _wire_payload(await self.resume(run_id))
 
     # -- setup --------------------------------------------------------------
 
@@ -2913,8 +2919,13 @@ def _machine_structure(
         states_out.append(row)
     transitions_out: list[dict[str, Any]] = []
     for transition in machine.get("transitions") or []:
+        # The snapshot owns its mutable rows: a join's ``from`` list is
+        # deep-copied like ``when`` so a consumer mutating the snapshot
+        # (appending an unknown source) can never corrupt the active run's
+        # machine — a corrupted join would wait for a state that never
+        # settles and the transition would never fire.
         row_transition: dict[str, Any] = {
-            "from": transition["from"],
+            "from": copy.deepcopy(transition["from"]),
             "to": transition["to"],
             "on": transition.get("on", TRANSITION_ON_KINDS[0]),
         }
@@ -2927,6 +2938,28 @@ def _machine_structure(
         "transitions": transitions_out,
         "order": [state["id"] for state in machine["states"]],
     }
+
+
+def _wire_keys(key: str) -> str:
+    """snake_case -> the wire's camelCase (``run_id`` -> ``runId``)."""
+    head, *rest = key.split("_")
+    return head + "".join(part.capitalize() for part in rest)
+
+
+def _wire_payload(value: Any) -> Any:
+    """The activity lane's wire conversion: the ``factory_activity``
+    protocol is camelCase end to end (the request frame's ``runId``/
+    ``specId``/``timeoutMs``), so the reply's result payload re-keys its
+    own snake_case rows to the same wire spelling. Only dict KEYS convert
+    (values ride verbatim: state ids, milestone text, guard fields); the
+    in-kernel conversation API (``rlm.factory.graph()`` and friends)
+    stays snake_case.
+    """
+    if isinstance(value, dict):
+        return {_wire_keys(key): _wire_payload(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_wire_payload(item) for item in value]
+    return value
 
 
 def schedule_activity(request: dict[str, Any]) -> None:

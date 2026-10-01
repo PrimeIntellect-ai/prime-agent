@@ -20,7 +20,7 @@ fn the_dock_segments_cover_each_groups_own_cells() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell"
+        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory"
     );
     let ordered: Vec<ActivityGroup> = segments.iter().map(|segment| segment.group).collect();
     assert_eq!(
@@ -28,7 +28,8 @@ fn the_dock_segments_cover_each_groups_own_cells() {
         vec![
             ActivityGroup::Subagents,
             ActivityGroup::Heartbeats,
-            ActivityGroup::Bash
+            ActivityGroup::Bash,
+            ActivityGroup::Factory,
         ],
         "the segments follow the row's group order"
     );
@@ -154,7 +155,7 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  Pursuing goal (0s)"
+        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory  ·  Pursuing goal (0s)"
     );
     // The color-coding (the operator's 2026-09-24 directive): every
     // above-zero count segment and the active goal render green.
@@ -202,7 +203,10 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         .iter()
         .map(|span| span.content.as_str())
         .collect::<String>();
-    assert_eq!(text, " ◆ 0 subagents  ·  ◷ 1 heartbeat  ·  ▸ 0 shells");
+    assert_eq!(
+        text,
+        " ◆ 0 subagents  ·  ◷ 1 heartbeat  ·  ▸ 0 shells  ·  ⚙ 0 factory"
+    );
     // The all-zero dock renders its own empty state — the zero
     // readout — and the zero segments stay neutral, never green.
     let frame = render_activity_dock(&ActivityDock::default(), &theme, 100);
@@ -212,7 +216,7 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         .collect::<String>();
     assert_eq!(
         text,
-        " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells"
+        " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells  \u{b7}  \u{2699} 0 factory"
     );
     assert!(frame[1]
         .iter()
@@ -281,7 +285,10 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
         .iter()
         .map(|span| span.content.as_str())
         .collect::<String>();
-    assert_eq!(text, " ◆ 2 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
+    assert_eq!(
+        text,
+        " ◆ 2 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
+    );
     // Two running children plus seven running descendants: ONE
     // number — the summed total, never the pair, never the
     // descendant total, and no category breakdown.
@@ -295,7 +302,10 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
         .iter()
         .map(|span| span.content.as_str())
         .collect::<String>();
-    assert_eq!(text, " ◆ 9 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
+    assert_eq!(
+        text,
+        " ◆ 9 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
+    );
     assert!(!text.contains("2,"), "no direct/nested pair: {text}");
     assert!(!text.contains("idle"), "no category breakdown: {text}");
     assert!(
@@ -313,7 +323,10 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
         .iter()
         .map(|span| span.content.as_str())
         .collect::<String>();
-    assert_eq!(text, " ◆ 1 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
+    assert_eq!(
+        text,
+        " ◆ 1 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
+    );
 }
 
 /// The focused dock's selection reads as the ONE shared selection
@@ -331,6 +344,7 @@ fn activity_dock_selection_is_the_hover_colored_band() {
         heartbeats: 3,
         heartbeats_paused: 1,
         bash_running: 1,
+        factory_runs: 1,
         goal_label: Some("Pursuing goal (0s)".to_string()),
         selected: ActivityGroup::Heartbeats,
         focused: true,
@@ -394,8 +408,8 @@ fn activity_dock_selection_is_the_hover_colored_band() {
 /// in both directions and N groups take exactly N presses to cycle.
 #[test]
 fn dock_arrows_visit_every_group_even_when_empty() {
-    // The all-zero dock: the heartbeats and shells groups are empty
-    // and stay in the cycle.
+    // The all-zero dock: the heartbeats, shells, and factory groups
+    // are empty and stay in the cycle.
     let dock = ActivityDock::default();
     assert_eq!(
         dock.groups(),
@@ -403,6 +417,7 @@ fn dock_arrows_visit_every_group_even_when_empty() {
             ActivityGroup::Subagents,
             ActivityGroup::Heartbeats,
             ActivityGroup::Bash,
+            ActivityGroup::Factory,
         ]
     );
     // Right: the neighbors in order, the empty groups included,
@@ -417,14 +432,22 @@ fn dock_arrows_visit_every_group_even_when_empty() {
     );
     assert_eq!(
         dock.step(ActivityGroup::Bash, ActivityDirection::Next),
+        ActivityGroup::Factory
+    );
+    assert_eq!(
+        dock.step(ActivityGroup::Factory, ActivityDirection::Next),
         ActivityGroup::Subagents,
         "the cycle wraps past the last group"
     );
     // Left: the same groups in reverse, wrapping past the first.
     assert_eq!(
         dock.step(ActivityGroup::Subagents, ActivityDirection::Prev),
-        ActivityGroup::Bash,
+        ActivityGroup::Factory,
         "the cycle wraps past the first group"
+    );
+    assert_eq!(
+        dock.step(ActivityGroup::Factory, ActivityDirection::Prev),
+        ActivityGroup::Bash
     );
     assert_eq!(
         dock.step(ActivityGroup::Bash, ActivityDirection::Prev),
@@ -471,15 +494,17 @@ fn dock_arrows_visit_the_same_groups_with_items() {
             ActivityGroup::Subagents,
             ActivityGroup::Heartbeats,
             ActivityGroup::Bash,
+            ActivityGroup::Factory,
             ActivityGroup::Goal,
         ]
     );
     // The full cycle right: every group in order, the goal group
-    // included, back to the start in four presses.
+    // included, back to the start in five presses.
     let mut walked = ActivityGroup::Subagents;
     for expected in [
         ActivityGroup::Heartbeats,
         ActivityGroup::Bash,
+        ActivityGroup::Factory,
         ActivityGroup::Goal,
         ActivityGroup::Subagents,
     ] {
@@ -490,6 +515,7 @@ fn dock_arrows_visit_the_same_groups_with_items() {
     let mut walked = ActivityGroup::Subagents;
     for expected in [
         ActivityGroup::Goal,
+        ActivityGroup::Factory,
         ActivityGroup::Bash,
         ActivityGroup::Heartbeats,
         ActivityGroup::Subagents,
@@ -516,7 +542,7 @@ fn dock_goal_group_unmounts_with_its_row() {
     );
     assert_eq!(
         ended.step(ActivityGroup::Goal, ActivityDirection::Prev),
-        ActivityGroup::Bash,
+        ActivityGroup::Factory,
         "a stale goal selection lands on the row's last group"
     );
     assert_eq!(
@@ -544,7 +570,10 @@ fn dock_renders_the_focused_empty_group() {
         .iter()
         .map(|span| span.content.as_str())
         .collect::<String>();
-    assert_eq!(text, " ◆ 0 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
+    assert_eq!(
+        text,
+        " ◆ 0 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
+    );
     // The selection's band rides exactly the entered empty group's
     // zero readout, which keeps its own muted color (the selection
     // never repaints the text).

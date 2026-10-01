@@ -149,6 +149,10 @@ impl SessionUi {
             bash_list_epoch: 0,
             bash_updates: activity_updates.bash,
             factory_view_open_flag: false,
+            factory_graph: serde_json::json!({"runs": []}),
+            factory_view_session: None,
+            factory_refresh_in_flight: false,
+            factory_refresh_queued: false,
             factory_list_epoch: 0,
             factory_updates: activity_updates.factory,
             factory_selected_run: None,
@@ -624,13 +628,22 @@ impl SessionUi {
         // stats and clears the readout left over from the previous session.
         if matches!(kind, RebuildKind::Rebind) {
             view.bash_view = None;
-            // The factory view dies the same death: it snapshots the
+            // The factory view dies the same death — it snapshots the
             // previous session's kernel runs, and its refresh lane must
-            // not keep polling the new session's kernel for a view nobody
-            // mounted.
-            view.factory_view = None;
-            self.factory_view_open_flag = false;
-            self.factory_selected_run = None;
+            // not keep polling the new session's kernel for a view
+            // nobody mounted — but ONLY when a different session actually
+            // took the view's place. A same-session rebind (the `Unknown
+            // active session` reattach in `prompt.rs` replays over the
+            // same durable session) keeps the view mounted: the user
+            // neither switched sessions nor closed the view, and its
+            // refresh lane re-targets the reattached session's kernel on
+            // the next tick.
+            if self.factory_view_session.as_deref() != Some(self.session_id.as_str()) {
+                view.factory_view = None;
+                self.factory_view_open_flag = false;
+                self.factory_selected_run = None;
+                self.factory_view_session = None;
+            }
             // The goal panel dies with the old session too: it is a
             // snapshot of the previous session's goal state, and until
             // the new session's own `goal_update` lands it would keep

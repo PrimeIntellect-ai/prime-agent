@@ -110,6 +110,12 @@ pub enum ActivityGroup {
     Subagents,
     Heartbeats,
     Bash,
+    /// The factory page: live factory runs. Its group is always
+    /// traversable (an empty one reads its zero count) and opens the
+    /// `/factory`-successor page over the daemon's `factory_activity`
+    /// lane — the same navigation family as the subagents, heartbeats,
+    /// and shells pages.
+    Factory,
     /// The active goal: its group is mounted while a goal is being
     /// pursued and opens the read-only goal panel (the objective and
     /// its facts); a goal that ended unmounts the row with it.
@@ -147,6 +153,11 @@ pub struct ActivityDock {
     /// kernel registry only): finished runs never inflate the indicator
     /// — they stay as rows inside the bash view.
     pub bash_running: usize,
+    /// Factory runs actively live right now (running, stopping, or
+    /// paused — the current session's kernel registry only): terminal
+    /// runs never inflate the indicator, exactly like the bash group's
+    /// running-only count.
+    pub factory_runs: usize,
     /// The active goal's dock label — `Pursuing goal (12m 05s)`-style,
     /// the elapsed-time form (the operator's 2026-09-24 directive: the
     /// row reads the time, the token budget lives inside the goal
@@ -159,16 +170,17 @@ pub struct ActivityDock {
 
 impl ActivityDock {
     /// The groups this dock renders, left to right — the arrow
-    /// traversal order. The subagents, heartbeats, and shells groups
-    /// always render (an empty one reads its zero count and stays
-    /// traversable); the goal group renders exactly while a live goal
-    /// keeps its row mounted.
+    /// traversal order. The subagents, heartbeats, shells, and factory
+    /// groups always render (an empty one reads its zero count and
+    /// stays traversable); the goal group renders exactly while a live
+    /// goal keeps its row mounted.
     #[must_use]
     pub fn groups(&self) -> Vec<ActivityGroup> {
         let mut groups = vec![
             ActivityGroup::Subagents,
             ActivityGroup::Heartbeats,
             ActivityGroup::Bash,
+            ActivityGroup::Factory,
         ];
         if self.goal_label.is_some() {
             groups.push(ActivityGroup::Goal);
@@ -691,10 +703,10 @@ fn land_marker(out: &mut Vec<crate::Span>, width: usize) {
 ///
 /// The row color-codes live activity (the operator's 2026-09-24
 /// directive): every count-holding segment goes green while its count
-/// is above zero (subagents, heartbeats, shells, the active goal) and
-/// stays neutral at zero. The subagents segment is one consolidated
-/// item — `◆ x subagents` (the operator's 2026-09-25 consolidation:
-/// the separate running cluster was redundant).
+/// is above zero (subagents, heartbeats, shells, factory, the active
+/// goal) and stays neutral at zero. The subagents segment is one
+/// consolidated item — `◆ x subagents` (the operator's 2026-09-25
+/// consolidation: the separate running cluster was redundant).
 #[must_use]
 pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) -> Vec<Line> {
     render_activity_dock_segments(dock, theme, width).0
@@ -796,6 +808,13 @@ pub fn render_activity_dock_segments(
                     dock.bash_running,
                     if dock.bash_running == 1 { "" } else { "s" }
                 ),
+            )],
+            // The factory page's indicator counts live runs only
+            // (running, stopping, paused): done and failed runs stay as
+            // panels inside the factory page, never in the indicator.
+            ActivityGroup::Factory => vec![theme.fg_span(
+                running_color(dock.factory_runs),
+                format!("⚙ {} factory", dock.factory_runs),
             )],
             // The goal row carries the dock's activity convention: an
             // actively pursued goal reads green, and the paused and

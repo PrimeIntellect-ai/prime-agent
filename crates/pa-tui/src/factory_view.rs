@@ -73,12 +73,14 @@ impl FactoryRunSnapshot {
     /// The hysteresis signature: the run's notice-worthy shape (the run
     /// state, every node's entry/instance statuses, and the fired-edge
     /// set). Two snapshots with the same signature paint the same panel.
+    /// The clock never trips the signature: `elapsed_ms` advances on every
+    /// poll, so including it would light the changed marker on every
+    /// refresh and the marker would never decay (the elapsed display
+    /// repaints on the refresh cadence; only a run-shape change is
+    /// notice-worthy).
     #[must_use]
     pub fn signature(&self) -> String {
-        let mut parts = vec![
-            self.state.clone().unwrap_or_default(),
-            self.elapsed_ms.to_string(),
-        ];
+        let mut parts = vec![self.state.clone().unwrap_or_default()];
         for state in &self.states {
             let node = self.nodes.get(&state.id);
             parts.push(state.id.clone());
@@ -116,6 +118,16 @@ pub fn parse_factory_runs(data: &Value) -> Vec<FactoryRunSnapshot> {
     runs.iter().filter_map(parse_run).collect()
 }
 
+/// Whether a reply is the graph list shape at all: a reply without the
+/// `runs` list is a malformed lane, not zero runs — the session UI
+/// reports it on the open page's error line instead of painting a fake
+/// empty state (the emptiness the view shows is real).
+#[must_use]
+pub fn factory_reply_lists_runs(data: &Value) -> bool {
+    data.as_object()
+        .is_some_and(|object| object.contains_key("runs"))
+}
+
 fn opt_string(value: Option<&Value>) -> Option<String> {
     value
         .and_then(Value::as_str)
@@ -123,9 +135,25 @@ fn opt_string(value: Option<&Value>) -> Option<String> {
         .filter(|text| !text.is_empty())
 }
 
+/// One field read that tolerates both spellings: the kernel's
+/// conversation shape (`snake_case`) and the activity lane's wire shape
+/// (`camelCase` — `_wire_payload` re-keys the reply before it travels).
+/// The two spellings never coexist in one reply; either resolves.
+fn get_either<'a>(value: &'a Value, snake: &str, camel: &str) -> Option<&'a Value> {
+    value.get(snake).or_else(|| value.get(camel))
+}
+
+/// Parse one run row: the kernel's compact snapshot shape
+/// (`_graph_snapshot` in `rlm/factory.py`) with `run_id`/`spec_id`
+/// carrying the identity, `elapsed_ms`/`budget.limit_ms` the clock and
+/// budget, `usage` the counters, and `machine`/`nodes`/`last_fired`/
+/// `events` the fused structure and live overlay. Every key read
+/// tolerates both spellings: the activity wire carries the `camelCase`
+/// form (`_wire_payload` converts the reply before it travels) and the
+/// kernel's conversation shape stays `snake_case`.
 fn parse_run(run: &Value) -> Option<FactoryRunSnapshot> {
-    let run_id = opt_string(run.get("runId")).unwrap_or_default();
-    let spec_id = opt_string(run.get("specId")).unwrap_or_default();
+    let run_id = opt_string(get_either(run, "run_id", "runId")).unwrap_or_default();
+    let spec_id = opt_string(get_either(run, "spec_id", "specId")).unwrap_or_default();
     if run_id.is_empty() && spec_id.is_empty() {
         return None;
     }
@@ -140,8 +168,7 @@ fn parse_run(run: &Value) -> Option<FactoryRunSnapshot> {
         .and_then(Value::as_array)
         .map(|rows| rows.iter().filter_map(FactoryTransition::parse).collect())
         .unwrap_or_default();
-    let last_fired = run
-        .get("last_fired")
+    let last_fired = get_either(run, "last_fired", "lastFired")
         .and_then(Value::as_array)
         .map(|rows| rows.iter().filter_map(FactoryEdge::parse).collect())
         .unwrap_or_default();
@@ -170,13 +197,12 @@ fn parse_run(run: &Value) -> Option<FactoryRunSnapshot> {
         spec_id,
         name: opt_string(run.get("name")),
         state: opt_string(run.get("state")),
-        elapsed_ms: run
-            .get("elapsedMs")
+        elapsed_ms: get_either(run, "elapsed_ms", "elapsedMs")
             .and_then(Value::as_u64)
             .unwrap_or_default(),
         budget_limit_ms: run
             .get("budget")
-            .and_then(|budget| budget.get("limitMs"))
+            .and_then(|budget| get_either(budget, "limit_ms", "limitMs"))
             .and_then(Value::as_u64),
         usage: FactoryUsage::parse(run.get("usage")),
         states,
@@ -328,14 +354,17 @@ impl FactoryView {
     /// trailing key hint.
     #[must_use]
     pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
-        let mut rows: Vec<Line> = Vec::new();
+        // The panel area: one panel per run, each panel's row range
+        // recorded for the budget window below.
+        let mut panels: Vec<Line> = Vec::new();
+        let mut panel_ranges: Vec<(usize, usize)> = Vec::new();
         if self.runs.is_empty() {
-            rows.push(vec![Span::raw("")]);
-            rows.push(vec![
+            panels.push(vec![Span::raw("")]);
+            panels.push(vec![
                 Span::raw("  "),
                 theme.fg_span(ThemeColor::Text, "No live factory runs."),
             ]);
-            rows.push(vec![
+            panels.push(vec![
                 Span::raw("  "),
                 theme.fg_span(
                     ThemeColor::Muted,
@@ -345,10 +374,37 @@ impl FactoryView {
         }
         for (index, run) in self.runs.iter().enumerate() {
             if index > 0 {
-                rows.push(vec![Span::raw("")]);
+                panels.push(vec![Span::raw("")]);
             }
-            self.render_panel(theme, width, run, index, &mut rows);
+            let panel_start = panels.len();
+            self.render_panel(theme, width, run, index, &mut panels);
+            panel_ranges.push((panel_start, panels.len()));
         }
+        // The chrome area: the error line from the last failed refresh and
+        // the trailing key hint. The chrome always renders — the hint is
+        // the view's only key legend.
+        let mut chrome_rows = 2usize;
+        if self.error.is_some() {
+            chrome_rows += 2;
+        }
+        // The dock's frame budget owns the final trim; the view never
+        // renders more rows than the viewport asked for. A tall view
+        // windows over the panel area: the trailing window keeps the
+        // newest panels, and when the selected run's panel falls outside
+        // it the window slides to the selection (a stop/resume target
+        // never hides behind the budget); the chrome stays pinned at the
+        // end either way.
+        let budget = self.viewport_rows.max(6);
+        let panel_budget = budget.saturating_sub(chrome_rows).max(1);
+        if panels.len() > panel_budget {
+            let mut start = panels.len() - panel_budget;
+            if let Some((selected_start, _)) = panel_ranges.get(self.selected) {
+                start = start.min(*selected_start);
+            }
+            panels.drain(..start);
+            panels.truncate(panel_budget);
+        }
+        let mut rows = panels;
         if let Some(error) = &self.error {
             rows.push(vec![Span::raw("")]);
             rows.push(vec![
@@ -372,18 +428,9 @@ impl FactoryView {
             ),
         ]);
         let _ = kb;
-        // The dock's frame budget owns the final trim; the view never
-        // renders more rows than the viewport asked for (a long view
-        // truncates at the bottom — the newest panels and the hint stay).
-        let mut rows: Vec<Line> = rows
-            .into_iter()
+        rows.into_iter()
             .map(|row| truncate_line(&row, width, ""))
-            .collect();
-        let budget = self.viewport_rows.max(6);
-        if rows.len() > budget {
-            rows.truncate(budget);
-        }
-        rows
+            .collect()
     }
 
     /// One run panel: the header (name, state, changed marker), the stats
