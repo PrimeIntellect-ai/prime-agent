@@ -467,7 +467,11 @@ mod tests {
         let loaded =
             load_supervisor_config(&path, &socket).expect("the unsynced persist stays parseable");
         assert_eq!(
-            (loaded.version, loaded.socket_path, loaded.default_session_dir),
+            (
+                loaded.version,
+                loaded.socket_path,
+                loaded.default_session_dir
+            ),
             (
                 1,
                 socket.to_string_lossy().to_string(),
