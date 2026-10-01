@@ -64,21 +64,9 @@ $script:primeAgentInstallScratch = $null
 $script:primeAgentInstallStage = $null
 $script:primeAgentInstallLock = $null
 
+# Fail only throws: the catch at the bottom sweeps the installer's own
+# state on every failure path (a Fail and any other terminating error alike).
 function Fail($message) {
-    # The installer's own state (the download dir, the stage tree, and the
-    # publication lock it claimed) rides every exit path: Fail sweeps
-    # exactly what THIS script created - the ambient caller's variables
-    # never enter the cleanup, and a refused install never leaks its lock
-    # (the bots' finding: the preflight Fail path).
-    if ($script:primeAgentInstallScratch) {
-        Remove-Item -Recurse -Force $script:primeAgentInstallScratch -ErrorAction SilentlyContinue
-    }
-    if ($script:primeAgentInstallStage) {
-        Remove-Item -Recurse -Force $script:primeAgentInstallStage -ErrorAction SilentlyContinue
-    }
-    if ($script:primeAgentInstallLock) {
-        Remove-Item -Recurse -Force $script:primeAgentInstallLock -ErrorAction SilentlyContinue
-    }
     throw "install.ps1: $message"
 }
 
@@ -202,19 +190,9 @@ $download = Join-Path ([IO.Path]::GetTempPath()) ("prime-agent-download-{0}" -f 
 New-Item -ItemType Directory -Path $download | Out-Null
 $script:primeAgentInstallScratch = $download
 # THE DOWNLOAD SWEEP: the scratch (the tarball + the sums) is removed when
-# this script exits - success, a Fail, or a terminating error (install-
-# rust.sh's `rm -rf "$dl"` discipline; the bots' finding: accumulated
-# release tarballs in the temp folder). A script-scoped trap carries the
-# cleanup through the non-local Fail exits.
-trap {
-    if ($script:primeAgentInstallScratch) {
-        Remove-Item -Recurse -Force $script:primeAgentInstallScratch -ErrorAction SilentlyContinue
-    }
-    if ($script:primeAgentInstallStage) {
-        Remove-Item -Recurse -Force $script:primeAgentInstallStage -ErrorAction SilentlyContinue
-    }
-    break
-}
+# this script exits - success below, a Fail or a terminating error in the
+# catch at the bottom (install-rust.sh's `rm -rf "$dl"` discipline; the
+# bots' finding: accumulated release tarballs in the temp folder).
 $tarball = Join-Path $download $expectedFile
 $sumsPath = Join-Path $download 'SHA256SUMS'
 try {
@@ -242,7 +220,7 @@ New-Item -ItemType Directory -Path (Join-Path $prefix 'share') -Force | Out-Null
 New-Item -ItemType Directory -Path $bin -Force | Out-Null
 $stage = Join-Path (Join-Path $prefix 'share') ("prime-agent.stage-{0}" -f [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $stage | Out-Null
-# The stage rides every exit path once created (Fail + the trap sweep it:
+# The stage rides every exit path once created (the failure sweep at the bottom:
 # a failed extraction/validation must not leave the extracted payload
 # behind - the bots' finding).
 $script:primeAgentInstallStage = $stage
@@ -517,6 +495,24 @@ $script:ownedLauncherBackups = @()
 if ($download) { Remove-Item -Recurse -Force $download -ErrorAction SilentlyContinue }
 }
 } catch {
+    # THE FAILURE SWEEP, the one cleanup path for every failure: exactly
+    # what THIS script created - the download scratch, the stage tree, and
+    # the publication lock it claimed (a refused install never leaks its
+    # lock; the publish's finally has already released it when the failure
+    # came from there). The names were cleared at the top, so an ambient
+    # caller's variables never enter the cleanup.
+    if ($script:primeAgentInstallScratch) {
+        Remove-Item -Recurse -Force $script:primeAgentInstallScratch -ErrorAction SilentlyContinue
+    }
+    if ($script:primeAgentInstallStage) {
+        Remove-Item -Recurse -Force $script:primeAgentInstallStage -ErrorAction SilentlyContinue
+    }
+    if ($script:primeAgentInstallLock) {
+        Remove-Item -Recurse -Force $script:primeAgentInstallLock -ErrorAction SilentlyContinue
+    }
+    $script:primeAgentInstallScratch = $null
+    $script:primeAgentInstallStage = $null
+    $script:primeAgentInstallLock = $null
     if ($PSCommandPath) {
         $Host.UI.WriteErrorLine($_.Exception.Message)
         exit 1

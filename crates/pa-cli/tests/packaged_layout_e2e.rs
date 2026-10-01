@@ -40,6 +40,18 @@ fn repo_root() -> PathBuf {
         .expect("worktree root")
 }
 
+/// The interpreter the release scripts run under: `python3`, or `python`
+/// where only that spelling exists (the Windows runner images; the release
+/// workflow resolves it the same way).
+fn python_interpreter() -> Option<&'static str> {
+    ["python3", "python"].into_iter().find(|name| {
+        Command::new(name)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    })
+}
+
 /// These tests stage full packaged layouts and boot the kernel; they are
 /// heavy and contend on a small box, so each one holds this lock for its
 /// whole body.
@@ -547,7 +559,7 @@ struct PairedFixture {
     decoder: std::path::PathBuf,
 }
 
-fn split_paired_fixture(version: &str, target: &str, alias: &str) -> PairedFixture {
+fn split_paired_fixture(python: &str, version: &str, target: &str, alias: &str) -> PairedFixture {
     let dir = tempfile::TempDir::new().expect("split fixture dir");
     let source = dir.path().join("prime-agent.c");
     // The packer's version pin runs `--version` and compares the output:
@@ -572,7 +584,7 @@ fn split_paired_fixture(version: &str, target: &str, alias: &str) -> PairedFixtu
         String::from_utf8_lossy(&compiled.stderr)
     );
     let shipped = dir.path().join("prime-agent");
-    let split = Command::new("python3")
+    let split = Command::new(python)
         .arg(
             repo_root()
                 .join("scripts")
@@ -615,14 +627,10 @@ fn split_paired_fixture(version: &str, target: &str, alias: &str) -> PairedFixtu
 #[test]
 fn packaging_dry_run_produces_artifact() {
     let _guard = serial_lock();
-    if !Command::new("python3")
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success())
-    {
-        eprintln!("python3 not available; skipping the packaging dry-run e2e");
+    let Some(python) = python_interpreter() else {
+        eprintln!("python3/python not available; skipping the packaging dry-run e2e");
         return;
-    }
+    };
     // A synthetic tree: the packaging must ship the sidecar without its
     // .venv or bytecode caches.
     let tree = tempfile::TempDir::new().expect("packaging tree");
@@ -673,7 +681,7 @@ fn packaging_dry_run_produces_artifact() {
     // fixture snapshot first (deterministic, stdlib-only — the same mode
     // the CI build jobs use) and passes it through.
     let assets = tempfile::TempDir::new().expect("catalog assets dir");
-    let bundle = Command::new("python3")
+    let bundle = Command::new(python)
         .arg(
             repo_root()
                 .join("scripts")
@@ -706,6 +714,7 @@ fn packaging_dry_run_produces_artifact() {
         Option<tempfile::TempDir>,
     ) = if std::env::consts::OS == "linux" {
         let fixture = split_paired_fixture(
+            python,
             env!("CARGO_PKG_VERSION"),
             "x86_64-unknown-linux-gnu",
             "linux-x64",
@@ -732,7 +741,7 @@ fn packaging_dry_run_produces_artifact() {
     } else {
         "prime-agent"
     };
-    let mut command = Command::new("python3");
+    let mut command = Command::new(python);
     command
         .arg(repo_root().join("scripts").join("package_release.py"))
         .arg("--root")
