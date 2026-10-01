@@ -74,7 +74,22 @@ pub(super) fn append_event(path: &Path, event: &SemanticEdgeLedgerEvent) -> std:
     options.create(true).append(true);
     crate::platform::perms::set_private_mode(&mut options);
     let mut file = options.open(path)?;
-    file.write_all(line.as_bytes())
+    write_line_once(&mut file, line.as_bytes(), path)
+}
+
+/// Issue exactly one write: a short append cannot be completed safely after
+/// another writer's append, and must disable the recorder instead (TS
+/// `EventLog.appendSync`'s short-write check).
+fn write_line_once(writer: &mut impl Write, line: &[u8], path: &Path) -> std::io::Result<()> {
+    let written = writer.write(line)?;
+    if written != line.len() {
+        return Err(std::io::Error::other(format!(
+            "semantic-edge ledger {}: short write ({written} of {} bytes)",
+            path.display(),
+            line.len()
+        )));
+    }
+    Ok(())
 }
 
 /// Truncate an unterminated tail at its byte offset (all offsets are BYTE
@@ -113,4 +128,41 @@ fn repair_torn_tail(path: &Path) -> std::io::Result<()> {
         .rposition(|byte| *byte == b'\n')
         .map_or(0, |position| position + 1);
     file.set_len(keep as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Write};
+
+    use super::write_line_once;
+
+    /// A partial append must not be retried: a rival's complete line could
+    /// land between writes and turn two valid records into interior poison.
+    struct ShortWriter {
+        writes: usize,
+    }
+
+    impl Write for ShortWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.writes += 1;
+            Ok(bytes.len() / 2)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn short_append_fails_without_a_second_write() {
+        let mut writer = ShortWriter { writes: 0 };
+        let error = write_line_once(
+            &mut writer,
+            b"{\"type\":\"request_started\"}\n",
+            std::path::Path::new("ledger"),
+        )
+        .expect_err("a short append must fail");
+        assert_eq!(writer.writes, 1);
+        assert!(error.to_string().contains("short write"));
+    }
 }
