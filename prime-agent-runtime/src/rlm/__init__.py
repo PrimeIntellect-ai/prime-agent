@@ -9,7 +9,14 @@ from pathlib import Path
 from typing import Any
 
 from .bash import BashHandle, BashResult, bash
-from .factory import resume_factory, run_factory, status_factory, stop_factory
+from .factory import (
+    graph_factory,
+    resume_factory,
+    run_factory,
+    status_factory,
+    stop_factory,
+    watch_factory,
+)
 from .harness import HarnessEntry, HarnessScope, HarnessState, RefinementEvent, get_harness_state
 
 _NOT_CALLABLE_MESSAGE = "'rlm' is not callable; spawn a child with: handle = await rlm.spawn('sub-task', name='worker')"
@@ -529,7 +536,8 @@ _harness_state = _HarnessProxy()
 
 
 class _RLMFactoryNamespace:
-    """Run stored state-machine factories: rlm.factory.run/status/stop/resume.
+    """Run stored state-machine factories: rlm.factory.run/status/stop/resume,
+    plus graph/watch for live monitoring.
 
     ``run('<spec_id>')`` validates a stored factory entry (machine form, or
     dag sugar that compiles to one), enters the entry states up to the
@@ -537,6 +545,15 @@ class _RLMFactoryNamespace:
     continues the run (nonblocking control loop). Runs live in kernel
     memory only; children stay supervisor-owned. Every call is async, so
     always await it: ``await rlm.factory.run('<id>')``.
+
+    ``graph()`` returns the machine structure fused with live runtime state
+    (``status()``'s data plus the static graph): pass a live run id for one
+    run's snapshot, a stored spec id for the static structure, or nothing
+    for every live run. ``watch('<run_id>', timeout)`` blocks until the
+    run's state/instance shape changes or the timeout elapses (bounded),
+    then returns the same snapshot with ``changed`` — an agent can stream
+    progress and drive orchestration programmatically, and the emitted
+    graph model renders as ASCII or genuine Mermaid from one shape.
     """
 
     async def run(self, spec_id: str, *, name: str | None = None) -> dict[str, Any]:
@@ -550,6 +567,12 @@ class _RLMFactoryNamespace:
 
     async def resume(self, run_id: str) -> dict[str, Any]:
         return await resume_factory(run_id)
+
+    async def graph(self, ref: str | None = None) -> dict[str, Any]:
+        return graph_factory(ref)
+
+    async def watch(self, run_id: str, timeout: float = 0.0) -> dict[str, Any]:
+        return await watch_factory(run_id, timeout)
 
 
 class _RLMNamespace:

@@ -890,6 +890,32 @@ impl AgentSessionEngine {
         engine.bash_activity(action, activity_id, lines).await
     }
 
+    /// One factory activity over this session's kernel (the `/factory`
+    /// view's lane); never builds a new session/kernel.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no session kernel is running ("Kernel is
+    /// not running"), the preflight fails, or the kernel's own factory
+    /// activity call fails.
+    pub async fn factory_activity(
+        &self,
+        action: &str,
+        run_id: Option<&str>,
+        spec_id: Option<&str>,
+        timeout_ms: Option<u64>,
+    ) -> anyhow::Result<Value> {
+        let engine = self
+            .session
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Kernel is not running"))?;
+        engine
+            .factory_activity(action, run_id, spec_id, timeout_ms)
+            .await
+    }
+
     /// Build the core session once (same once-only rule as `session_agent`),
     /// through the same guarded funnel.
     pub(crate) fn ensure_core_session(&self, model: &Model) -> anyhow::Result<()> {

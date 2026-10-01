@@ -167,6 +167,38 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(event["ename"], "ProtocolError")
         self.assertIn("256", event["evalue"])
 
+    def test_factory_activity_is_available_while_cell_is_running(self):
+        self.repl.send({"type": "execute", "id": "cell", "code": "import asyncio\nawait asyncio.sleep(20)"})
+        # The factory graph answers out of band while the cell runs: no
+        # live runs exist yet, so the graph action lists the empty registry.
+        self.repl.send({"type": "factory_activity", "id": "g", "action": "graph"})
+        listed = self.repl.until_done("g")[-1]
+        self.assertEqual(listed["status"], "ok")
+        self.assertEqual(listed["result"]["runs"], [])
+        # unknown-run watch answers with the error reply (not a hang)
+        self.repl.send({"type": "factory_activity", "id": "w", "action": "watch", "runId": "nope", "timeoutMs": 100})
+        missing = self.repl.until_done("w")[-1]
+        self.assertEqual(missing["status"], "error")
+        self.assertIn("unknown factory run", missing["reason"])
+        self.repl.send({"type": "interrupt", "id": "cell"})
+        self.repl.until_done("cell")
+
+    def test_factory_activity_rejects_malformed_frames(self):
+        for frame, fragment in (
+            ({"type": "factory_activity", "id": "b", "action": "bogus"}, "unknown factory activity action"),
+            ({"type": "factory_activity", "id": "x" * 300, "action": "graph"}, "256"),
+            (
+                {"type": "factory_activity", "id": "t", "action": "watch", "runId": "r", "timeoutMs": "soon"},
+                "timeoutMs",
+            ),
+            ({"type": "factory_activity", "id": "n", "action": "graph", "runId": 5}, "runId"),
+        ):
+            self.repl.send(frame)
+            event = self.repl.read_event()
+            self.assertEqual(event["event"], "error", frame)
+            self.assertEqual(event["ename"], "ProtocolError")
+            self.assertIn(fragment, event["evalue"], frame)
+
     def test_ready_handshake_and_startup_time(self):
         self.assertEqual(self.ready_event["event"], "ready")
         self.assertEqual(self.ready_event["protocol"], 3)

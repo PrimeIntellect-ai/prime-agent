@@ -549,6 +549,23 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// The `/factory` view's bridge lane over the session kernel's factory
+    /// executor (`graph`/`status`/`watch`/`run`/`stop`/`resume`).
+    /// Rust-native extension, advertised by the `factory_activity` capability.
+    FactoryActivity {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        active_session_id: String,
+        action: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spec_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     CancelRlmChild {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,

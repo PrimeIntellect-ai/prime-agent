@@ -148,6 +148,10 @@ impl SessionUi {
             bash_activities: serde_json::json!({"activities": []}),
             bash_list_epoch: 0,
             bash_updates: activity_updates.bash,
+            factory_view_open_flag: false,
+            factory_list_epoch: 0,
+            factory_updates: activity_updates.factory,
+            factory_selected_run: None,
             subagents_focused: false,
             activity_group: crate::chrome::ActivityGroup::Subagents,
             subagent_counts: crate::subagents::SubagentCounts::default(),
@@ -620,6 +624,13 @@ impl SessionUi {
         // stats and clears the readout left over from the previous session.
         if matches!(kind, RebuildKind::Rebind) {
             view.bash_view = None;
+            // The factory view dies the same death: it snapshots the
+            // previous session's kernel runs, and its refresh lane must
+            // not keep polling the new session's kernel for a view nobody
+            // mounted.
+            view.factory_view = None;
+            self.factory_view_open_flag = false;
+            self.factory_selected_run = None;
             // The goal panel dies with the old session too: it is a
             // snapshot of the previous session's goal state, and until
             // the new session's own `goal_update` lands it would keep

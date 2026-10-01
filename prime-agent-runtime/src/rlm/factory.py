@@ -849,6 +849,31 @@ parent or replay checker reads.
 POLL_TIMEOUT_MS = 2000
 """How long each control-loop ``rlm.collect`` waits for unsettled children."""
 
+WATCH_TIMEOUT_CAP_SECONDS = 60.0
+"""Upper bound on one ``factory.watch`` timeout (seconds), the agent-side
+streaming monitor's ceiling. The host bridge caps its own lane lower
+(``FACTORY_HOST_WATCH_TIMEOUT_MS``); this is the kernel-side bound."""
+
+LAST_FIRED_WINDOW = 10
+"""Trailing fired transitions the graph snapshot reports for edge marking."""
+
+GRAPH_EVENTS_TAIL = 40
+"""Trailing ledger events a compact (host-lane) graph snapshot carries."""
+
+FACTORY_FRAME_CAP = 262_144
+"""Serialized byte cap on one factory_activity reply frame. A graph for the
+full 1024-state machine cap fits; a snapshot that cannot shrink under the
+cap fails loudly instead of being silently truncated."""
+
+ACTIVITY_ACTIONS = ("graph", "status", "watch", "run", "stop", "resume")
+"""The host bridge's actions over one factory run, the ``factory_activity``
+frame's action vocabulary (the kernel namespace is the same surface plus
+``graph``/``watch`` for agents)."""
+
+ACTIVITY_TIMEOUT_MS_CAP = int(WATCH_TIMEOUT_CAP_SECONDS * 1000)
+"""Upper bound on one factory_activity frame's timeoutMs (the watch wait
+bound on the wire); the host bridge pins its own lower bound."""
+
 BACKOFF_MAX_ATTEMPTS = 5
 """Spawn admissions per node before a persistent rate limit fails the node."""
 
@@ -1124,6 +1149,10 @@ class FactoryRun:
     pause_reason: str | None = None
     states: dict[str, _StateRun] = field(default_factory=dict)
     order: list[str] = field(default_factory=list)
+    # The canonicalized machine this run executes, kept read-only: the
+    # graph snapshot's static structure (states, transitions, run block)
+    # reads it, so agents and the TUI see the machine the run validated.
+    machine: dict[str, Any] = field(default_factory=dict)
     transitions_from: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     pending_evaluations: list[tuple[str, int, int]] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
@@ -1147,6 +1176,12 @@ class FactoryRun:
     # sources settle in one collect batch fires once, not once per source
     # settle, and re-fires only when a source settles again.
     join_fired: dict[tuple[int, str], frozenset[tuple[str, int]]] = field(default_factory=dict)
+    # Watch bookkeeping: bumped on every ledger event (every observable
+    # mutation emits one), and every registered watch future resolves with
+    # the new revision. ``factory.watch`` compares signatures, so a bump
+    # that leaves the run's state/instance shape unchanged just re-arms.
+    revision: int = 0
+    watchers: list = field(default_factory=list)
 
 
 class FactoryExecutor:
@@ -1254,42 +1289,7 @@ class FactoryExecutor:
         Raises ``ValueError`` for an unknown run id.
         """
         run = self._require_run(run_id)
-        nodes: list[dict[str, Any]] = []
-        for state_id in run.order:
-            state = run.states[state_id]
-            entry_report: dict[str, Any] = {
-                "id": state.state_id,
-                "status": state.status,
-                "lifecycle": state.lifecycle,
-                "attempts": sum(
-                    instance.attempt for entry in state.entries for instance in entry.instances
-                ),
-                "entries_used": state.entries_used,
-                "max_entries": state.max_entries,
-                "entries": [
-                    {"index": entry.index, "status": entry.status, "error": entry.error}
-                    for entry in state.entries
-                ],
-                "instances": [
-                    {
-                        "index": instance.index,
-                        "entry": entry.index,
-                        "status": instance.status,
-                        "attempt": instance.attempt,
-                        "child": instance.child_id,
-                        "duration_ms": instance.duration_ms,
-                        "error": instance.error,
-                    }
-                    for entry in state.entries
-                    for instance in entry.instances
-                ],
-            }
-            latest = state.latest_settle()
-            if latest is not None and latest.answer:
-                entry_report["answer_preview"] = latest.answer
-            if state.error is not None:
-                entry_report["error"] = state.error
-            nodes.append(entry_report)
+        nodes = [self._state_report(run.states[state_id]) for state_id in run.order]
         for event in run.events:
             if event["stage"] in ("recorded", "arrived"):
                 event["stage"] = "delivered"
@@ -1328,6 +1328,7 @@ class FactoryExecutor:
         if run.state in ("stopping", "stopped"):
             return {"run_id": run.run_id, "state": run.state, "cancelled": []}
         run.state = "stopping"
+        self._touch(run)
         stopped = await self._halt_nonterminal(run, "run stopped")
         run.state = "stopped"
         self._event(run, "run_stopped", detail=f"stopped; {len(stopped)} state(s) cancelled")
@@ -1351,6 +1352,7 @@ class FactoryExecutor:
         run.loop_generation += 1
         run.state = "running"
         run.pause_reason = None
+        self._touch(run)
         self._event(run, "resumed", detail="resumed by caller")
         # Evaluate settles first: paused runs may still carry transitions to
         # fire (escalate) before anything can be admitted.
@@ -1368,6 +1370,309 @@ class FactoryExecutor:
             "started": started,
             "pending": self._pending_state_ids(run),
         }
+
+    # -- graph, watch, host activity ------------------------------------------
+
+    def _state_report(
+        self, state: _StateRun, *, include_answer: bool = True
+    ) -> dict[str, Any]:
+        """One state's live report, the exact ``status()`` node shape.
+
+        The graph snapshot reuses it verbatim so the fused view is
+        ``status()``'s data plus the static graph (``include_answer=False``
+        drops the settle answer preview on the compact host lane, where
+        nothing renders answers).
+        """
+        report: dict[str, Any] = {
+            "id": state.state_id,
+            "status": state.status,
+            "lifecycle": state.lifecycle,
+            "attempts": sum(
+                instance.attempt for entry in state.entries for instance in entry.instances
+            ),
+            "entries_used": state.entries_used,
+            "max_entries": state.max_entries,
+            "entries": [
+                {"index": entry.index, "status": entry.status, "error": entry.error}
+                for entry in state.entries
+            ],
+            "instances": [
+                {
+                    "index": instance.index,
+                    "entry": entry.index,
+                    "status": instance.status,
+                    "attempt": instance.attempt,
+                    "child": instance.child_id,
+                    "duration_ms": instance.duration_ms,
+                    "error": instance.error,
+                }
+                for entry in state.entries
+                for instance in entry.instances
+            ],
+        }
+        if include_answer:
+            latest = state.latest_settle()
+            if latest is not None and latest.answer:
+                report["answer_preview"] = latest.answer
+        if state.error is not None:
+            report["error"] = state.error
+        return report
+
+    def _usage_report(self, run: FactoryRun) -> dict[str, Any]:
+        """The usage block ``status()`` returns; the graph snapshot reuses it."""
+        return {
+            "spawns": run.spawn_count,
+            "settled": run.settle_count,
+            "tool_uses": run.tool_use_total,
+            "max_parallel": run.max_parallel,
+            "running": self._running_instance_count(run),
+            "transitions_fired": run.transitions_fired,
+        }
+
+    def _last_fired(self, run: FactoryRun) -> list[dict[str, Any]]:
+        """The trailing fired transitions (newest firing first, at most
+        ``LAST_FIRED_WINDOW`` edges) for the diagram's edge marking. The
+        ledger is the authority: an edge that fired twice keeps its latest
+        firing only."""
+        latest: dict[str, dict[str, Any]] = {}
+        for event in run.events:
+            if event.get("kind") != "transition_fired":
+                continue
+            from_field = event.get("from")
+            edge = {"from": from_field, "to": event.get("to"), "seq": event.get("seq")}
+            latest[f"{json.dumps(from_field, sort_keys=True)}->{event.get('to')}"] = edge
+        ordered = sorted(latest.values(), key=lambda edge: edge["seq"], reverse=True)
+        return ordered[:LAST_FIRED_WINDOW]
+
+    def _graph_events(self, run: FactoryRun, *, compact: bool) -> list[dict[str, Any]]:
+        """The trailing event window. The compact host lane sheds answer
+        payloads (the ``answer_captured`` rows) and carries the shorter
+        ``GRAPH_EVENTS_TAIL`` tail; the agent lane sees ``status()``'s full
+        ``EVENT_WINDOW`` window with stages untouched (``graph`` is a pure
+        read; only ``status()`` marks events delivered)."""
+        window = run.events[-(GRAPH_EVENTS_TAIL if compact else EVENT_WINDOW) :]
+        events = [dict(event) for event in window]
+        if compact:
+            events = [event for event in events if event.get("kind") != "answer_captured"]
+        return events
+
+    def _graph_snapshot(self, run: FactoryRun, *, compact: bool) -> dict[str, Any]:
+        """One live run's fused snapshot: the machine structure plus the
+        live overlay (nodes, active nodes, last-fired edges, events tail,
+        usage, budget consumed)."""
+        elapsed_ms = int((self._now_fn() - run.started_at) * 1000)
+        return {
+            "run_id": run.run_id,
+            "spec_id": run.spec_id,
+            "name": run.name,
+            "state": run.state,
+            "pause_reason": run.pause_reason,
+            "elapsed_ms": elapsed_ms,
+            "machine": _machine_structure(
+                run.machine,
+                {
+                    state_id: (run.states[state_id].model, run.states[state_id].thinking)
+                    for state_id in run.order
+                },
+            ),
+            "nodes": [
+                self._state_report(run.states[state_id], include_answer=not compact)
+                for state_id in run.order
+            ],
+            "active_nodes": [
+                state_id
+                for state_id in run.order
+                if any(
+                    entry.status in ("pending", "running")
+                    for entry in run.states[state_id].entries
+                )
+            ],
+            "last_fired": self._last_fired(run),
+            "events": self._graph_events(run, compact=compact),
+            "usage": self._usage_report(run),
+            "budget": {"limit_ms": run.run_budget_ms, "consumed_ms": elapsed_ms},
+        }
+
+    def _spec_snapshot(
+        self, spec_id: str, canonical: dict[str, Any], *, compact: bool
+    ) -> dict[str, Any]:
+        """A stored spec's static graph: no live run exists, so the overlay
+        reports the shape a fresh run starts from (nothing entered, nothing
+        consumed). The compact flag is accepted for lane symmetry; a spec
+        graph carries no answers to shed."""
+        run_block = canonical["run"]
+        return {
+            "run_id": None,
+            "spec_id": spec_id,
+            "name": None,
+            "state": None,
+            "pause_reason": None,
+            "elapsed_ms": 0,
+            "machine": _machine_structure(canonical),
+            "nodes": [],
+            "active_nodes": [],
+            "last_fired": [],
+            "events": [],
+            "usage": None,
+            "budget": {"limit_ms": run_block.get("budget_ms"), "consumed_ms": 0},
+        }
+
+    def graph(self, ref: str | None = None, *, compact: bool = False) -> dict[str, Any]:
+        """One machine's structure fused with live runtime state.
+
+        ``ref`` naming a live run id returns that run's fused snapshot
+        (``status()``'s data plus the static graph and the diagram overlay);
+        ``ref`` naming a stored factory spec id returns the static
+        structure with no live overlay. ``ref=None`` returns every live
+        run's snapshot, oldest run first, as ``{"runs": [...]}`` (the view
+        lane's polling shape). Raises ``ValueError`` when ``ref`` names
+        neither a live run nor a stored spec, or a stored spec fails its
+        own validation.
+        """
+        if ref is None:
+            # Insertion order is start order (runs append to the registry),
+            # so the oldest run reports first; a clock tie between two
+            # starts never shuffles the panels.
+            return {
+                "runs": [
+                    self._graph_snapshot(run, compact=compact) for run in self._runs.values()
+                ]
+            }
+        run = self._runs.get(ref)
+        if run is not None:
+            return self._graph_snapshot(run, compact=compact)
+        harness = self._resolve_harness()
+        entry = harness.get("factory", ref)
+        if entry is None:
+            raise ValueError(f"unknown factory run or spec {ref!r}")
+        arguments = entry.arguments if isinstance(entry.arguments, dict) else {}
+        spec = arguments.get("machine")
+        if spec is None:
+            spec = arguments.get("dag")
+        try:
+            canonical = canonicalize_factory_spec(spec)
+        except ValueError as exc:
+            raise ValueError(f"factory spec {ref!r} does not validate: {exc}") from exc
+        return self._spec_snapshot(entry.id, canonical, compact=compact)
+
+    def _signature(self, run: FactoryRun) -> tuple[Any, ...]:
+        """The run's live shape a watch treats as a change: the run state,
+        every state's entries and per-instance statuses, and the transition
+        counter. Ledger-only movement (backoff notices, repeated
+        milestones) leaves the shape unchanged, so the wait re-arms instead
+        of waking the caller with an identical graph (no per-transition
+        spam at the watch surface either).
+        """
+
+        def state_shape(state: _StateRun) -> tuple[Any, ...]:
+            return (
+                state.status,
+                state.entries_used,
+                tuple(
+                    (entry.index, entry.status, tuple(i.status for i in entry.instances))
+                    for entry in state.entries
+                ),
+            )
+
+        return (
+            run.state,
+            run.pause_reason,
+            run.transitions_fired,
+            tuple((state_id, state_shape(run.states[state_id])) for state_id in run.order),
+        )
+
+    async def watch(
+        self, run_id: str, timeout: float = 0.0, *, compact: bool = False
+    ) -> dict[str, Any]:
+        """Block until the run's state/instance shape changes or the bounded
+        ``timeout`` (seconds, capped at ``WATCH_TIMEOUT_CAP_SECONDS``)
+        elapses, then return the same fused snapshot ``graph()`` returns
+        with one extra ``changed`` key: whether a change ended the wait or
+        the deadline did. An already-changed run returns immediately; the
+        clock and sleep are the executor's injected pair, so the wait is
+        testable and bounded on the same lane the control loop uses.
+        Raises ``ValueError`` for an unknown run id or a negative or
+        non-numeric timeout.
+        """
+        import asyncio
+
+        run = self._require_run(run_id)
+        if not _is_number(timeout):
+            raise ValueError("timeout must be a non-negative number of seconds")
+        if timeout < 0:
+            raise ValueError("timeout must be a non-negative number of seconds")
+        timeout = min(float(timeout), WATCH_TIMEOUT_CAP_SECONDS)
+        deadline = self._now_fn() + timeout
+        baseline = self._signature(run)
+        changed = False
+        while True:
+            if self._signature(run) != baseline:
+                changed = True
+                break
+            remaining = deadline - self._now_fn()
+            if remaining <= 0:
+                break
+            waiter = asyncio.get_running_loop().create_future()
+            run.watchers.append(waiter)
+            sleeper = asyncio.ensure_future(self._sleep_fn(remaining))
+            try:
+                await asyncio.wait({sleeper, waiter}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                if waiter in run.watchers:
+                    run.watchers.remove(waiter)
+                sleeper.cancel()
+                try:
+                    await sleeper
+                except asyncio.CancelledError:
+                    pass
+        snapshot = self._graph_snapshot(run, compact=compact)
+        return {"changed": changed, **snapshot}
+
+    async def activity(self, request: dict[str, Any]) -> Any:
+        """Handle one out-of-band ``factory_activity`` request frame (the
+        host bridge's lane): route the action to ``graph``/``status``/
+        ``watch``/``run``/``stop``/``resume`` and return the reply's result
+        payload. Raises ``ValueError`` for malformed requests and unknown
+        runs/specs (the reply carries it as the error reason). ``graph``
+        and ``watch`` answer with the compact snapshots (the host lane
+        renders diagrams, not answers); ``run`` is the lane that starts a
+        run from the daemon or TUI, so it rides the full ``run()``
+        validation.
+        """
+        action = request.get("action")
+        if action not in ACTIVITY_ACTIONS:
+            raise ValueError(f"unknown factory activity action {action!r}")
+        run_id = request.get("runId")
+        spec_id = request.get("specId")
+        for key, value in (("runId", run_id), ("specId", spec_id)):
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"factory activity {key} must be a string when provided")
+        timeout_ms = request.get("timeoutMs")
+        if timeout_ms is None:
+            timeout_ms = 0
+        if not _is_int(timeout_ms) or not 0 <= timeout_ms <= ACTIVITY_TIMEOUT_MS_CAP:
+            raise ValueError(
+                f"factory activity timeoutMs must be an integer between 0 and {ACTIVITY_TIMEOUT_MS_CAP}"
+            )
+        if action == "graph":
+            return self.graph(run_id or spec_id, compact=True)
+        if action == "status":
+            if not run_id:
+                raise ValueError("factory activity status requires runId")
+            return await self.status(run_id)
+        if action == "watch":
+            if not run_id:
+                raise ValueError("factory activity watch requires runId")
+            return await self.watch(run_id, timeout_ms / 1000.0, compact=True)
+        if action == "run":
+            if not spec_id:
+                raise ValueError("factory activity run requires specId")
+            return await self.run(spec_id)
+        if not run_id:
+            raise ValueError(f"factory activity {action} requires runId")
+        if action == "stop":
+            return await self.stop(run_id)
+        return await self.resume(run_id)
 
     # -- setup --------------------------------------------------------------
 
@@ -1440,6 +1745,7 @@ class FactoryExecutor:
             max_parallel=run_spec["max_parallel"],
             max_transitions=run_spec["max_transitions"],
             run_budget_ms=run_spec.get("budget_ms"),
+            machine=canonical,
         )
         position_of: dict[str, int] = {}
         for position, state_spec in enumerate(canonical["states"]):
@@ -1497,7 +1803,21 @@ class FactoryExecutor:
             event["detail"] = detail
         event.update(extra)
         run.events.append(event)
+        # Every ledger event is an observable mutation, so the watch
+        # bookkeeping rides the same seam: bump the revision and resolve
+        # every registered watcher. ``watch`` re-checks its signature, so
+        # an event that leaves the state/instance shape unchanged (a
+        # backoff notice, a repeated milestone) just re-arms the wait.
+        self._touch(run)
         return event
+
+    def _touch(self, run: FactoryRun) -> None:
+        """Bump the run's watch revision and wake every registered watcher."""
+        run.revision += 1
+        for waiter in run.watchers:
+            if not waiter.done():
+                waiter.set_result(run.revision)
+        run.watchers = []
 
     async def _milestone(self, run: FactoryRun, kind: str, detail: str, *, node: str | None = None) -> None:
         """Record a run milestone and inject one quiet notice (one per kind).
@@ -2525,3 +2845,134 @@ async def stop_factory(run_id: str) -> dict[str, Any]:
 async def resume_factory(run_id: str) -> dict[str, Any]:
     """Resume a paused run (escalate, budget, or max_transitions pause)."""
     return await default_factory_executor().resume(run_id)
+
+
+def graph_factory(ref: str | None = None, *, compact: bool = False) -> dict[str, Any]:
+    """Return one machine's structure fused with live state (see
+    ``FactoryExecutor.graph``): a live run id, a stored spec id, or no ref
+    for every live run."""
+    return default_factory_executor().graph(ref, compact=compact)
+
+
+async def watch_factory(
+    run_id: str, timeout: float = 0.0, *, compact: bool = False
+) -> dict[str, Any]:
+    """Block until the run's state/instance shape changes or the bounded
+    timeout elapses, then return the same fused snapshot ``graph()``
+    returns plus ``changed``."""
+    return await default_factory_executor().watch(run_id, timeout, compact=compact)
+
+
+def _machine_structure(
+    machine: dict[str, Any],
+    resolved: "dict[str, tuple[str | None, str | None]] | None" = None,
+) -> dict[str, Any]:
+    """One canonical machine's static graph structure: the run block, every
+    state's declared shape (id, entry, lifecycle, caps, spawn settings), the
+    transitions with their guards, and the declared state order. Live runs
+    pass their resolved spawn settings (``resolved``); spec graphs pass none
+    and surface the inline-declared ones only. The diagram layers read the
+    declared order, and edge identity pairs ``from`` (a state id, or a join's
+    id list) with ``to``.
+    """
+    run_block = machine.get("run") if isinstance(machine.get("run"), dict) else {}
+    run_out: dict[str, Any] = {
+        "max_parallel": run_block.get("max_parallel", RUN_MAX_PARALLEL_DEFAULT),
+        "max_transitions": run_block.get("max_transitions", MAX_TRANSITIONS_CAP),
+        "failure_policy": run_block.get("failure_policy", RUN_FAILURE_POLICY_DEFAULT),
+    }
+    if "budget_ms" in run_block:
+        run_out["budget_ms"] = run_block["budget_ms"]
+    states_out: list[dict[str, Any]] = []
+    for state in machine["states"]:
+        row: dict[str, Any] = {
+            "id": state["id"],
+            "entry": bool(state.get("entry", STATE_ENTRY_DEFAULT)),
+            "lifecycle": state.get("lifecycle", NODE_LIFECYCLE_DEFAULT),
+            "max_entries": state.get("max_entries", STATE_MAX_ENTRIES_DEFAULT),
+            "retries": state.get("retries", NODE_RETRIES_DEFAULT),
+        }
+        model, thinking = (resolved or {}).get(state["id"], (None, None))
+        subagent = state.get("subagent")
+        if isinstance(subagent, dict):
+            # A resolved live run carries the executor's spawn settings for
+            # both subagent forms; a spec graph surfaces the inline-declared
+            # ones only (a reference form's settings resolve at run time).
+            if model is None and subagent.get("model") is not None:
+                model = subagent["model"]
+            if thinking is None and subagent.get("thinking") is not None:
+                thinking = subagent["thinking"]
+            if subagent.get("name"):
+                row["subagent"] = subagent["name"]
+        else:
+            row["subagent"] = subagent
+        if model is not None:
+            row["model"] = model
+        if thinking is not None:
+            row["thinking"] = thinking
+        states_out.append(row)
+    transitions_out: list[dict[str, Any]] = []
+    for transition in machine.get("transitions") or []:
+        row_transition: dict[str, Any] = {
+            "from": transition["from"],
+            "to": transition["to"],
+            "on": transition.get("on", TRANSITION_ON_KINDS[0]),
+        }
+        if "when" in transition:
+            row_transition["when"] = copy.deepcopy(transition["when"])
+        transitions_out.append(row_transition)
+    return {
+        "run": run_out,
+        "states": states_out,
+        "transitions": transitions_out,
+        "order": [state["id"] for state in machine["states"]],
+    }
+
+
+def schedule_activity(request: dict[str, Any]) -> None:
+    """Schedule one out-of-band ``factory_activity`` request on the running
+    loop. The kernel's reader thread calls this (the frame bypasses the
+    cell FIFO like ``bash_activity``); the activity runs as a loop task so
+    a busy cell never delays the host bridge, and the reply frame lands
+    when the activity settles."""
+    import asyncio
+
+    asyncio.get_running_loop().create_task(_run_activity(request))
+
+
+async def _run_activity(request: dict[str, Any]) -> None:
+    """Run one factory_activity request to completion and emit its reply."""
+    from .repl import _send
+
+    rid = request["id"]
+    try:
+        result = await default_factory_executor().activity(request)
+    except Exception as exc:  # noqa: BLE001 - the reply lane must never hang
+        # An internal executor error still answers: a dropped reply would
+        # leave the host waiter on its timeout instead of the reason.
+        _send({"event": "done", "id": rid, "status": "error", "reason": str(exc)})
+        return
+    frame: dict[str, Any] = {"event": "done", "id": rid, "status": "ok", "result": result}
+    _cap_factory_frame(frame)
+    _send(frame)
+
+
+def _cap_factory_frame(frame: dict[str, Any]) -> None:
+    """Keep one reply under the ``FACTORY_FRAME_CAP`` wire cap. Compacted
+    snapshots already shed answer payloads, so the events tail trims from
+    the oldest end first and an all-runs reply drops its oldest runs; a
+    frame that still cannot fit fails loudly (a graph must never truncate
+    silently)."""
+    while len(json.dumps(frame)) > FACTORY_FRAME_CAP:
+        events = frame.get("result", {}).get("events") if isinstance(frame.get("result"), dict) else None
+        if isinstance(events, list) and len(events) > 1:
+            events.pop(0)
+            continue
+        runs = frame.get("result", {}).get("runs") if isinstance(frame.get("result"), dict) else None
+        if isinstance(runs, list) and len(runs) > 1:
+            runs.pop(0)
+            continue
+        frame.pop("result", None)
+        frame["status"] = "error"
+        frame["reason"] = "factory activity reply exceeds the wire cap"
+        return

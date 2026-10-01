@@ -7,6 +7,7 @@ mod apply;
 mod auth;
 mod bash;
 mod commands;
+mod factory;
 mod heartbeats;
 mod keys;
 mod lifecycle;
@@ -24,6 +25,7 @@ pub(crate) use apply::CompactionAbortNote;
 use auth::{McpAuthIntent, PendingModelSignIn, SetModelOutcome};
 pub(crate) use bash::BashActivityUpdate;
 use bash::{ResyncBash, SideBashRun};
+pub(crate) use factory::FactoryUpdate;
 use heartbeats::paused_heartbeat_count;
 pub(crate) use heartbeats::HeartbeatsUpdate;
 use keys::SelectionAutoScroll;
@@ -412,6 +414,17 @@ pub(crate) struct SessionUi {
     /// response from an older request must not repaint a newer snapshot.
     bash_list_epoch: u64,
     bash_updates: mpsc::UnboundedSender<BashActivityUpdate>,
+    /// The `/factory` live view's open flag (the refresh tick's gate; the
+    /// view itself lives on `AgentView`, so the tick reads this instead).
+    factory_view_open_flag: bool,
+    /// Monotonic id of the latest issued factory refresh; an older
+    /// response never repaints a newer snapshot.
+    factory_list_epoch: u64,
+    /// Where background factory refreshes deliver the run graph (the run
+    /// loop folds them into the open view).
+    factory_updates: mpsc::UnboundedSender<FactoryUpdate>,
+    /// The open view's selected run id: the refresh's watch target.
+    factory_selected_run: Option<String>,
     /// The subagent summary line holds keyboard focus.
     subagents_focused: bool,
     activity_group: crate::chrome::ActivityGroup,

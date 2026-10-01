@@ -460,6 +460,21 @@ impl SessionUi {
             // hook); the other management subcommands surface through the
             // `mcp` CLI command instead of the TUI.
             "mcp" => self.handle_mcp_command(resolved, view).await?,
+            // The `/factory` live view: one panel per live run (the
+            // machine diagram with live highlighting), stop/resume keys,
+            // and the copy-mermaid action over the daemon's
+            // `factory_activity` lane.
+            "factory" => {
+                // Menu-only like `/mcp`: a submitted argument is the usage
+                // error, and the open clears the editor.
+                if !resolved.args.trim().is_empty() {
+                    view.editor.set_text(text);
+                    self.error_row("Usage: /factory", view);
+                    return Ok(());
+                }
+                view.editor.set_text("");
+                self.handle_factory_command(view).await?;
+            }
             // `/plugins [search]` (TS `handlePluginsCommand` ->
             // `showServiceCatalogPicker`): the external-services catalog
             // picker. This client folds the catalog into the `/mcp` view

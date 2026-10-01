@@ -2033,6 +2033,13 @@ class ClockSleep:
         self.clock.advance(seconds)
 
 
+async def turn_sleep(seconds: float) -> None:
+    """Injectable sleep that really waits (10ms slices, never advancing the
+    injected clock): a watch's re-arm loop yields to the event loop between
+    slices, so a concurrent mutation lands mid-wait."""
+    await asyncio.sleep(0.01)
+
+
 class GatedSleep:
     """Injectable sleep that suspends every call until released."""
 
@@ -4463,6 +4470,353 @@ class FactoryExecutorTest(unittest.TestCase):
         # both states ran to completion: neither admission failed
         self.assertEqual(self.node_status(status, "collect-findings-pass-one")["status"], "done")
         self.assertEqual(self.node_status(status, "collect-findings-pass-two")["status"], "done")
+
+
+# ---------------------------------------------------------------------------
+# Graph and watch (the fused machine view + the bounded wait)
+# ---------------------------------------------------------------------------
+
+
+class FactoryGraphWatchTest(unittest.TestCase):
+    """The graph snapshot (structure fused with live state), the bounded
+    watch, and the host bridge's out-of-band activity handler."""
+
+    def setUp(self) -> None:
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.harness = HarnessState(Path(temp.name) / "harness_state.json")
+        self.harness.create_subagent("Worker", "Do the work carefully.", id="worker")
+        self.harness.create_subagent("Researcher", "Collect the findings.", id="researcher")
+        self.clock = FakeClock()
+        self.host = FakeHost(clock=self.clock)
+        self.sleeps = ClockSleep(self.clock)
+        self.executor = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
+        previous_executor = factory_module._DEFAULT_EXECUTOR
+        factory_module._DEFAULT_EXECUTOR = self.executor
+        self.addCleanup(lambda: setattr(factory_module, "_DEFAULT_EXECUTOR", previous_executor))
+        patcher = patch.object(rlm_module, "host_request", self.host)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.harness.create_factory("Factory", "Factory content", id="sw", machine=valid_machine())
+
+    # -- helpers -------------------------------------------------------------
+
+    async def start(self, spec_id: str = "sw") -> dict[str, Any]:
+        return await rlm_module.rlm.factory.run(spec_id)
+
+    async def settle(self, run_result: dict[str, Any], *, max_polls: int = 50_000) -> dict[str, Any]:
+        run_id = run_result["run_id"]
+        for _ in range(max_polls):
+            run = self.executor._runs[run_id]
+            if run.state != "running":
+                return await rlm_module.rlm.factory.status(run_id)
+            await yield_loop_turn()
+        self.fail(f"run {run_id} never left the running state")
+
+    # -- graph: structure fusion ---------------------------------------------
+
+    @async_test
+    async def test_graph_fuses_structure_and_live_state(self) -> None:
+        result = await self.start()
+        run_id = result["run_id"]
+        self.clock.advance(12.0)
+        graph = await rlm_module.rlm.factory.graph(run_id)
+        # identity + live run state
+        self.assertEqual(graph["run_id"], run_id)
+        self.assertEqual(graph["spec_id"], "sw")
+        self.assertEqual(graph["state"], "running")
+        self.assertEqual(graph["elapsed_ms"], 12_000)
+        self.assertEqual(graph["budget"], {"limit_ms": 600_000, "consumed_ms": 12_000})
+        # the static structure: states, transitions, order, run block
+        machine = graph["machine"]
+        self.assertEqual(machine["order"], ["collect", "reviewing", "fixing"])
+        collect = next(s for s in machine["states"] if s["id"] == "collect")
+        self.assertTrue(collect["entry"])
+        self.assertEqual(collect["lifecycle"], "task")
+        self.assertEqual(machine["run"]["max_parallel"], 4)
+        self.assertEqual(machine["run"]["failure_policy"], "continue")
+        self.assertEqual(machine["run"]["budget_ms"], 600_000)
+        guarded = next(
+            t for t in machine["transitions"] if t["to"] == "fixing"
+        )
+        self.assertEqual(guarded["from"], "reviewing")
+        self.assertEqual(guarded["when"]["output"], "verdict")
+        # the live overlay rides the status() node shape
+        self.assertEqual([n["id"] for n in graph["nodes"]], ["collect", "reviewing", "fixing"])
+        self.assertIn("collect", graph["active_nodes"])
+        self.assertEqual(graph["usage"]["spawns"], len(result["started"]))
+        self.assertTrue(graph["events"], "the ledger tail rides the snapshot")
+
+    @async_test
+    async def test_graph_is_status_data_plus_the_static_graph(self) -> None:
+        result = await self.start()
+        run_id = result["run_id"]
+        status = await self.settle(result)
+        graph = await rlm_module.rlm.factory.graph(run_id)
+        # the fused snapshot reports exactly the status() node reports
+        self.assertEqual(graph["nodes"], status["nodes"])
+        self.assertEqual(graph["usage"], status["usage"])
+        self.assertEqual(graph["state"], status["state"])
+        # ...but graph is a pure read: status() marks recorded events
+        # delivered, and a graph call must not consume that marking.
+        self.executor._runs[run_id].events[0]["stage"] = "recorded"
+        graph_again = await rlm_module.rlm.factory.graph(run_id)
+        self.assertEqual(graph_again["events"][0]["stage"], "recorded")
+        marked = await rlm_module.rlm.factory.status(run_id)
+        self.assertEqual(marked["events"][0]["stage"], "delivered")
+
+    @async_test
+    async def test_graph_lists_every_live_run_and_marks_active_nodes(self) -> None:
+        first = await self.start()
+        await self.settle(first)
+        second = await self.start()
+        listing = await rlm_module.rlm.factory.graph()
+        self.assertEqual([run["run_id"] for run in listing["runs"]], [first["run_id"], second["run_id"]])
+        # the settled run has no active nodes; the fresh one has its entry
+        # state in flight
+        self.assertEqual(listing["runs"][0]["active_nodes"], [])
+        self.assertIn("collect", listing["runs"][1]["active_nodes"])
+
+    @async_test
+    async def test_graph_of_a_stored_spec_returns_the_static_structure(self) -> None:
+        graph = await rlm_module.rlm.factory.graph("sw")
+        self.assertIsNone(graph["run_id"])
+        self.assertEqual(graph["spec_id"], "sw")
+        self.assertIsNone(graph["state"])
+        self.assertEqual(graph["machine"]["order"], ["collect", "reviewing", "fixing"])
+        self.assertEqual(graph["nodes"], [])
+        self.assertEqual(graph["active_nodes"], [])
+        self.assertEqual(graph["budget"], {"limit_ms": 600_000, "consumed_ms": 0})
+        # a dag spec compiles to machine form for the graph too
+        self.harness.create_factory("Dag factory", "content", id="dag", dag=valid_dag())
+        dag_graph = await rlm_module.rlm.factory.graph("dag")
+        self.assertEqual(dag_graph["machine"]["order"], ["collect", "fan-out", "review"])
+        # unknown refs fail loudly; a corrupt spec names itself
+        with self.assertRaisesRegex(ValueError, "unknown factory run or spec 'missing'"):
+            await rlm_module.rlm.factory.graph("missing")
+        self.harness.create_factory("Broken", "content", id="broken", dag={"nodes": [node("a")]})
+        self.corrupt_spec("broken", {"nodes": []})
+        with self.assertRaisesRegex(ValueError, "does not validate"):
+            await rlm_module.rlm.factory.graph("broken")
+
+    @async_test
+    async def test_compact_snapshot_sheds_answers_and_carries_the_short_tail(self) -> None:
+        result = await self.start()
+        run_id = result["run_id"]
+        await self.settle(result)
+        run = self.executor._runs[run_id]
+        self.assertGreaterEqual(len(run.events), 3)
+        full = self.executor.graph(run_id)
+        compact = self.executor.graph(run_id, compact=True)
+        self.assertLessEqual(len(compact["events"]), factory_module.GRAPH_EVENTS_TAIL)
+        self.assertNotIn("answer_captured", [e["kind"] for e in compact["events"]])
+        self.assertIn(
+            "answer_captured", [e["kind"] for e in full["events"]]
+        )
+        self.assertFalse(
+            any("answer_preview" in node for node in compact["nodes"])
+        )
+        self.assertTrue(
+            any("answer_preview" in node for node in full["nodes"])
+        )
+
+    @async_test
+    async def test_last_fired_marks_the_recently_fired_edges(self) -> None:
+        result = await self.start()
+        run_id = result["run_id"]
+        await self.settle(result)
+        graph = await rlm_module.rlm.factory.graph(run_id)
+        fired = {(tuple(e["from"]) if isinstance(e["from"], list) else e["from"], e["to"]) for e in graph["last_fired"]}
+        self.assertIn(("collect", "reviewing"), fired)
+        # the window bounds the report at LAST_FIRED_WINDOW edges
+        self.assertLessEqual(len(graph["last_fired"]), factory_module.LAST_FIRED_WINDOW)
+
+    # -- watch: bounded change detection --------------------------------------
+
+    @async_test
+    async def test_watch_returns_the_snapshot_when_nothing_changes(self) -> None:
+        result = await self.start()
+        run_id = result["run_id"]
+        await self.settle(result)  # the run settles while no watcher waits
+        watched = await rlm_module.rlm.factory.watch(run_id, 0)
+        # the baseline is captured at watch entry, so an unchanged run
+        # reports changed=False and still returns the full snapshot
+        self.assertFalse(watched["changed"])
+        self.assertEqual(watched["run_id"], run_id)
+        self.assertIn("machine", watched)
+        self.assertIn("nodes", watched)
+        graph = await rlm_module.rlm.factory.graph(run_id)
+        del watched["changed"]
+        self.assertEqual(watched, graph)
+
+
+    @async_test
+    async def test_watch_blocks_until_the_run_changes(self) -> None:
+        # A sleep that really waits (10ms slices, no clock advance): the
+        # watch's re-arm loop yields to the loop, so the stop lands mid-wait
+        # and the waiter resolves before the deadline could matter.
+        self.executor._sleep_fn = turn_sleep
+        result = await self.start_held_run()
+        run_id = result["run_id"]
+        # a real change: stop the running child while the watch waits.
+        async def stopper() -> None:
+            for _ in range(5):
+                await yield_loop_turn()
+            await rlm_module.rlm.factory.stop(run_id)
+
+        stop_task = asyncio.ensure_future(stopper())
+        watched = await rlm_module.rlm.factory.watch(run_id, 30.0)
+        await stop_task
+        self.assertTrue(watched["changed"])
+        self.assertEqual(watched["state"], "stopped")
+
+    @async_test
+    async def test_watch_times_out_without_a_change(self) -> None:
+        result = await self.start_held_run()
+        run_id = result["run_id"]
+        # The injected sleep advances the injected clock, so the bounded
+        # timeout expires on the test lane without a wall-clock wait.
+        watched = await rlm_module.rlm.factory.watch(run_id, 0.05)
+        self.assertFalse(watched["changed"])
+        self.assertEqual(watched["run_id"], run_id)
+        self.assertEqual(watched["state"], "running")
+
+    async def start_held_run(self) -> dict[str, Any]:
+        """A run whose single child never settles (the FakeHost keeps it
+        `running`), so the machine stays in flight until the test acts. The
+        state id carries no dash: the fake host routes outcomes by the
+        dash-split spawn name."""
+        self.harness.create_subagent("Sleeper", "Never settles.", id="sleeper")
+        self.harness.create_factory(
+            "Held",
+            "content",
+            id="held",
+            machine={"states": [{"id": "heldstate", "entry": True, "subagent": "sleeper"}]},
+        )
+        self.host.outcomes["heldstate"] = {"status": "running"}
+        return await rlm_module.rlm.factory.run("held")
+
+    @async_test
+    async def test_watch_rejects_unknown_runs_and_bad_timeouts(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unknown factory run 'nope'"):
+            await rlm_module.rlm.factory.watch("nope", 1.0)
+        result = await self.start()
+        with self.assertRaisesRegex(ValueError, "timeout must be a non-negative number"):
+            await rlm_module.rlm.factory.watch(result["run_id"], -1)
+        with self.assertRaisesRegex(ValueError, "timeout must be a non-negative number"):
+            await rlm_module.rlm.factory.watch(result["run_id"], "soon")
+
+    # -- the host bridge's activity handler ------------------------------------
+
+    @async_test
+    async def test_activity_routes_every_action(self) -> None:
+        result = await self.start()
+        run_id = result["run_id"]
+        # graph (all runs) / graph (one run) / graph (spec)
+        listed = await factory_module.default_factory_executor().activity(
+            {"action": "graph"}
+        )
+        self.assertEqual([run["run_id"] for run in listed["runs"]], [run_id])
+        one = await factory_module.default_factory_executor().activity(
+            {"action": "graph", "runId": run_id}
+        )
+        self.assertEqual(one["run_id"], run_id)
+        spec_graph = await factory_module.default_factory_executor().activity(
+            {"action": "graph", "specId": "sw"}
+        )
+        self.assertEqual(spec_graph["spec_id"], "sw")
+        # status
+        status = await factory_module.default_factory_executor().activity(
+            {"action": "status", "runId": run_id}
+        )
+        self.assertEqual(status["run_id"], run_id)
+        await self.settle(result)
+        # a fresh run through the activity lane, then stop it and prove
+        # resume's paused-only contract from the same lane
+        second = await factory_module.default_factory_executor().activity(
+            {"action": "run", "specId": "sw"}
+        )
+        self.assertIn("run_id", second)
+        stopped = await factory_module.default_factory_executor().activity(
+            {"action": "stop", "runId": second["run_id"]}
+        )
+        self.assertEqual(stopped["state"], "stopped")
+        with self.assertRaisesRegex(ValueError, "not paused"):
+            await factory_module.default_factory_executor().activity(
+                {"action": "resume", "runId": second["run_id"]}
+            )
+        # watch through the activity lane answers with `changed` + snapshot
+        watched = await factory_module.default_factory_executor().activity(
+            {"action": "watch", "runId": second["run_id"], "timeoutMs": 5}
+        )
+        self.assertIn("changed", watched)
+        self.assertEqual(watched["run_id"], second["run_id"])
+
+    @async_test
+    async def test_activity_validates_its_request_shape(self) -> None:
+        for bad in (
+            {"action": "bogus"},
+            {"action": "status"},
+            {"action": "watch", "runId": 5},
+            {"action": "watch"},
+            {"action": "graph", "specId": 5},
+            {"action": "watch", "runId": "x", "timeoutMs": -1},
+            {"action": "watch", "runId": "x", "timeoutMs": "soon"},
+            {"action": "watch", "runId": "x", "timeoutMs": 10**9},
+            {"action": "run"},
+        ):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                await factory_module.default_factory_executor().activity(bad)
+
+    def corrupt_spec(self, spec_id: str, spec: Any) -> None:
+        entry = self.harness.get("factory", spec_id)
+        entry.arguments = {"dag": spec}
+
+
+# ---------------------------------------------------------------------------
+# Out-of-band frame plumbing
+# ---------------------------------------------------------------------------
+
+
+class FactoryFrameCapTest(unittest.TestCase):
+    """The reply frame's wire cap: the events tail trims first, the all-runs
+    reply drops its oldest runs, and a frame that cannot fit fails loudly."""
+
+    def test_an_oversized_reply_is_trimmed_then_failed(self) -> None:
+        events = [
+            {"kind": "settled", "seq": i, "stage": "recorded", "big": "y" * 12_000}
+            for i in range(50)
+        ]
+        frame = {"event": "done", "id": "r", "status": "ok", "result": {"events": list(events)}}
+        factory_module._cap_factory_frame(frame)
+        self.assertEqual(frame["status"], "ok")
+        self.assertLess(len(frame["result"]["events"]), 50)
+        self.assertEqual(frame["result"]["events"][-1]["seq"], 49)
+        # a single run that cannot fit under the cap keeps exactly one
+        # event before failing loudly (never a silent graph truncation)
+        single = {"events": [{"big": "y" * 300_000}]}
+        frame = {"event": "done", "id": "r", "status": "ok", "result": dict(single)}
+        factory_module._cap_factory_frame(frame)
+        self.assertEqual(frame["status"], "error")
+        self.assertIn("wire cap", frame["reason"])
+        # a single-run graph that cannot fit under the cap fails loudly
+        huge = {"result": {"machine": {"states": [{"id": "x" * 200}] * 2000}}}
+        frame = {"event": "done", "id": "r", "status": "ok", **huge}
+        factory_module._cap_factory_frame(frame)
+        self.assertEqual(frame["status"], "error")
+        self.assertIn("wire cap", frame["reason"])
+        # the all-runs reply drops its oldest runs before failing
+        run = {"run_id": "r1", "events": [{"big": "y" * 4000}] * 20, "machine": {}}
+        frame = {
+            "event": "done",
+            "id": "r",
+            "status": "ok",
+            "result": {"runs": [dict(run, run_id=f"r{i}") for i in range(40)]},
+        }
+        factory_module._cap_factory_frame(frame)
+        self.assertEqual(frame["result"]["runs"][-1]["run_id"], "r39")
+        self.assertLess(len(frame["result"]["runs"]), 40)
+
 
 
 if __name__ == "__main__":
