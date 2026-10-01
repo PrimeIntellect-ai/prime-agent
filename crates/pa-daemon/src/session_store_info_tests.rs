@@ -475,6 +475,145 @@ fn a_failed_prefix_check_rescans_from_byte_zero() {
     assert_fold_matches(&path);
 }
 
+/// The persisted scan-state sidecar: a state written at lease release and
+/// loaded on a process-cache miss resumes the fold of the appended tail -
+/// whole-row equality against the full fold, including a prefix-targeted
+/// attribution (the resumed fold must find the prefix id in the persisted
+/// per-id map). A replacement file (a new inode) rejects the stale sidecar
+/// and rescans whole. Unix-only: a state is certified into the process
+/// cache (and so persistable) only on Unix - `read_session_info_from`'s
+/// store gate - so no sidecar exists to load elsewhere.
+#[cfg(unix)]
+#[test]
+fn a_persisted_scan_state_resumes_like_the_full_fold() {
+    let dir = test_dir();
+    let path = dir.join("sidecar.jsonl");
+    let usage = |cost: f64| {
+        json!({
+            "input": 100, "output": 10, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 110,
+            "cost": { "input": 0.0, "output": cost, "cacheRead": 0.0, "cacheWrite": 0.0, "total": cost },
+        })
+    };
+    let assistant = |id: &str, cost: f64| {
+        json!({
+            "type": "message", "id": id, "timestamp": "2026-09-23T00:00:00.000Z",
+            "message": {
+                "role": "assistant", "content": format!("answer {id}"),
+                "timestamp": 1_790_110_000_000_u64, "usage": usage(cost),
+            },
+        })
+    };
+    let attribution = |id: &str, target: &str, child: f64, aggregate: f64| {
+        json!({
+            "type": "child_usage_attributed", "id": id, "timestamp": "2026-09-23T00:00:00.000Z",
+            "targetId": target, "childUsage": usage(child), "aggregateUsage": usage(aggregate),
+        })
+    };
+    append_rows(
+        &path,
+        &[
+            json!({"type":"session","id":"sc","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"}),
+            assistant("a1", 0.1),
+            assistant("a2", 0.2),
+            assistant("a3", 0.3),
+            json!({"type":"compaction","id":"c1","timestamp":"2026-09-23T00:00:00.000Z","summary":"s","usage":usage(0.25)}),
+            attribution("x1", "a2", 0.05, 0.45),
+        ],
+    );
+    assert_fold_matches(&path);
+    // The lease-release write persists the certified state beside the
+    // file; the in-process copy is gone, so the next read can only be
+    // served by the sidecar.
+    super::persist_info_sidecar(&path);
+    assert!(
+        path.with_extension("info-cache.json").is_file(),
+        "the release write persists the state"
+    );
+    // The sidecar carries message text (the search corpus, the first
+    // message): it is owner-only like the session files it derives from.
+    assert_eq!(
+        pa_core::platform::perms::file_mode(&path.with_extension("info-cache.json")),
+        Some(pa_core::platform::perms::PRIVATE_FILE_MODE)
+    );
+    super::session_info_cache()
+        .lock()
+        .unwrap()
+        .drop_state(&path);
+    append_rows(
+        &path,
+        &[attribution("x2", "a2", 0.02, 0.52), assistant("a4", 0.4)],
+    );
+    assert_fold_matches(&path);
+    // A replacement file (a new inode): the stale sidecar fails the
+    // same-file ladder and the scan runs cold from byte zero.
+    let replacement = dir.join("replacement.jsonl");
+    append_rows(
+        &replacement,
+        &[
+            json!({"type":"session","id":"sc2","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"}),
+            assistant("b1", 0.5),
+        ],
+    );
+    fs::rename(&replacement, &path).unwrap();
+    super::session_info_cache()
+        .lock()
+        .unwrap()
+        .drop_state(&path);
+    assert_fold_matches(&path);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+/// The sidecar round trip through a real lease, for a session opened by
+/// a symlinked dir (macOS `/var`, a symlinked `~/.prime`): the release
+/// persists what the holder's raw-path reads cached, though the lease
+/// keys the file canonically. The next read then serves a valid sidecar
+/// (here a name the file does not carry - a cold scan cannot produce
+/// it), and scans cold past a corrupt one or one at another version.
+/// Unix-only like its sibling: only Unix certifies a state to persist.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_lease_release_persists_a_sidecar_the_next_read_serves() {
+    let dir = test_dir();
+    let real_dir = dir.join("real");
+    fs::create_dir_all(&real_dir).unwrap();
+    std::os::unix::fs::symlink(&real_dir, dir.join("linked")).unwrap();
+    let path = dir.join("linked").join("s.jsonl");
+    append_rows(
+        &path,
+        &[
+            json!({"type":"session","id":"sl","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"}),
+            json!({"type":"message","id":"u1","timestamp":"2026-09-23T00:00:00.000Z",
+                "message":{"role":"user","content":"hi","timestamp":1_790_110_000_000_u64}}),
+        ],
+    );
+    let lease = crate::lease::acquire_runtime_session_lease(&path, &dir).unwrap();
+    let cold = read_session_info(&path).unwrap();
+    drop(lease);
+    let sidecar = real_dir.join("s.info-cache.json");
+    assert!(sidecar.is_file(), "the release persists the raw-path state");
+    let mut valid: Value = serde_json::from_slice(&fs::read(&sidecar).unwrap()).unwrap();
+    valid["state"]["acc"]["name"] = json!("from the sidecar");
+    let mut other_version = valid.clone();
+    other_version["version"] = json!(valid["version"].as_u64().unwrap() + 1);
+    let served = SessionInfo {
+        name: Some("from the sidecar".to_string()),
+        ..cold.clone()
+    };
+    for (contents, expected) in [
+        (valid.to_string(), &served),
+        (other_version.to_string(), &cold),
+        ("{".to_string(), &cold),
+    ] {
+        fs::write(&sidecar, contents).unwrap();
+        super::session_info_cache()
+            .lock()
+            .unwrap()
+            .drop_state(&path);
+        assert_eq!(read_session_info(&path).as_ref(), Some(expected));
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn a_valid_unterminated_final_line_folds_into_the_snapshot() {
     let dir = test_dir();

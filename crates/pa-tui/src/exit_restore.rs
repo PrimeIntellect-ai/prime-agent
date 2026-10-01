@@ -17,13 +17,19 @@
 //!    sync brackets or inside a styled write must not hand the shell a
 //!    terminal holding pending updates or a dangling color;
 //! 5. the alternate screen is left (`?1049l`), the cursor shows;
-//! 6. raw mode ends, and the tty is *verified* cooked — crossterm's
+//! 6. the kitty stack drains its stale levels AFTER the alt-screen
+//!    leave ([`crate::enhanced_keys::pop_stale_levels`]) — a
+//!    mode-counting relay (herdr's pane emulator) discards the
+//!    keyboard-protocol writes made while the pane's alt screen is up,
+//!    so the pair's pop needs a post-leave drain to land on the relay
+//!    (the bare pops are clamped no-ops at spec depth zero);
+//! 7. raw mode ends, and the tty is *verified* cooked — crossterm's
 //!    `disable_raw_mode` restores its first-saved "original" and
 //!    swallows errors, so a poisoned start (a killed previous run left
 //!    the tty raw and crossterm adopted that state as the baseline)
 //!    would silently restore raw ([`pa_types::platform::terminal`]'s
 //!    `stty sane` reconstruction repairs it);
-//! 7. a pending Ctrl+S output stop lifts FIRST — the stop is runtime
+//! 8. a pending Ctrl+S output stop lifts FIRST — the stop is runtime
 //!    state, not termios, and it HOLDS writes: the lift (the IXON-toggle,
 //!    [`pa_types::platform::terminal::restart_output`]) must precede the
 //!    restore's own output writes or the restore itself would hang on a
@@ -94,6 +100,11 @@ pub(crate) fn restore_terminal() {
         // screen outside the module — a partial restore, a desynced flag —
         // would otherwise keep the alt buffer up past the process death).
         crate::altscreen::force_leave(&mut out);
+        // The stale-level drain: bare kitty pops AFTER the alt-screen
+        // leave, where a mode-counting relay keeps them — the drain's
+        // own pop above, written inside the alt screen, does not (see
+        // enhanced_keys::pop_stale_levels).
+        crate::enhanced_keys::pop_stale_levels(&mut out);
         let _ = out.write_all(SYNC_OUTPUT_OFF);
         let _ = out.write_all(SGR_RESET);
         let _ = crossterm::execute!(out, crossterm::cursor::Show);
@@ -125,6 +136,12 @@ pub(crate) fn terminal_release_tail(out: &mut Stdout) {
     // every write after it), hanging the release before the lift could
     // run — the exact stall the guard's progress windows exist to catch.
     pa_types::platform::terminal::restart_output();
+    // The stale-level drain: bare kitty pops AFTER the alt-screen leave
+    // (this tail runs past `flush_to_main_screen`'s `?1049l`), where a
+    // mode-counting relay keeps them — the teardown's own pop, written
+    // inside the alt screen, never lands on the relay's stack (see
+    // enhanced_keys::pop_stale_levels).
+    crate::enhanced_keys::pop_stale_levels(out);
     let _ = out.write_all(SYNC_OUTPUT_OFF);
     let _ = out.write_all(SGR_RESET);
     let _ = crossterm::execute!(out, crossterm::cursor::Show);

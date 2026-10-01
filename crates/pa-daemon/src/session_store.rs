@@ -90,6 +90,9 @@ use view::message_role;
 // test-scoped binding keeps the scan internals' test callers in scope.
 mod info;
 
+// The persisted scan-state sidecar.
+mod info_sidecar;
+
 pub(crate) use info::read_session_info_from;
 #[cfg(test)]
 use info::{
@@ -102,6 +105,7 @@ pub use info::{
     find_most_recent_session_for_cwd, read_session_info, SessionInfo,
     SESSION_LIST_SEARCH_TEXT_MAX_CHARS,
 };
+pub(crate) use info_sidecar::persist_info_sidecar;
 
 // The inline unit battery moved to the child module at the same tree
 // position (session_store::tests); its use-super glob keeps resolving
