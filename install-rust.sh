@@ -1133,43 +1133,59 @@ def is_prime_agent_daemon(args):
         args[i] == "--mode" and args[i + 1] == "daemon" for i in range(len(args) - 1))
     return named and daemon_mode
 
+# The --force outcomes, each with its own report text:
+#   killed       a signal brought the daemon down;
+#   unverified   no signal was sent: the daemon could not be re-identified
+#                on a fresh connection;
+#   undelivered  no signal was sent: os.kill refused (e.g. permission);
+#   no-pid       no signal was sent: the hello named no usable pid;
+#   not-daemon   no signal was sent: the named pid is not a Prime Agent daemon;
+#   failed       SIGTERM and SIGKILL were sent and the daemon stayed up.
 def kill_supervisor():
     try:
         sock = connect()
     except OSError:
-        return "killed" if not listening_flag() else "failed"
+        if not listening_flag():
+            return "killed"
+        progress("  could not reconnect to identify the daemon; not signalled")
+        return "unverified"
     current = wait_hello(sock)
     sock.close()
     if current is None or (kind == "ts" and classify_hello(current) != owner):
-        return "failed"
+        progress("  could not re-identify the daemon on its socket; not signalled")
+        return "unverified"
     pid = current.get("supervisorPid")
     if not isinstance(pid, int) or pid <= 1 or pid in (os.getpid(), os.getppid()):
         progress("  the daemon names no usable pid; not signalled")
-        return "skipped"
+        return "no-pid"
     if not is_prime_agent_daemon(command_line(pid)):
         progress("  pid %d is not a Prime Agent daemon; not signalled" % pid)
-        return "skipped"
+        return "not-daemon"
+    signalled = False
     for sig, wait_s, name in ((signal.SIGTERM, FORCE_TERM_WAIT_S, "SIGTERM"),
                               (signal.SIGKILL, FORCE_KILL_WAIT_S, "SIGKILL")):
         progress("  still running; sending %s to pid %d..." % (name, pid))
         try:
             os.kill(pid, sig)
-        except ProcessLookupError:
-            return "killed" if stopped_within(1.0) else "failed"
-        except OSError:
-            return "failed"
+        except OSError as error:
+            if stopped_within(1.0):
+                return "killed"
+            if signalled:
+                break
+            progress("  could not signal pid %d (%s); not signalled" % (pid, error.strerror or error))
+            return "undelivered"
+        signalled = True
         if stopped_within(wait_s):
             return "killed"
+    progress("  still running after SIGTERM and SIGKILL")
     return "failed"
 
 if force:
     kill_result = kill_supervisor()
     if kill_result == "killed":
         print("%s:stopped-killed:%s" % (owner, count_label))
-    elif kill_result == "skipped":
-        print("%s:kill-skipped:%s" % (owner, count_label))
     else:
-        print("%s:kill-failed:%s" % (owner, count_label))
+        print("%s:kill-%s:%s" % (owner, kill_result, count_label))
     sys.exit(0)
 print("%s:stop-failed:%s" % (owner, count_label))
 
@@ -1311,35 +1327,29 @@ stop_daemon_candidate() {
       ts_stop_summary="${ts_stop_summary}daemon: WARNING replaced on ${socket_path} (the classified ${owner} was swapped mid-stop; the replacement was never commanded; stop it by hand: prime-agent shutdown --force)
 "
       ;;
-    ts:stop-failed:*|rust:stop-failed:*|ts:kill-failed:*|rust:kill-failed:*|ts:kill-skipped:*|rust:kill-skipped:*)
+    ts:stop-failed:*|rust:stop-failed:*|ts:kill-*:*|rust:kill-*:*)
       sessions="${verdict##*:}"
       owner="the TypeScript daemon"
       case "$verdict" in rust:*) owner="the Rust daemon" ;; esac
       ts_stop_found_any="yes"
-      step "  failed: still running"
-      note "WARNING: ${owner} on ${socket_path} is STILL RUNNING after this install"
-      note "  (it was serving ${sessions} session(s); the graceful and the forced shutdown"
+      manual_stop="stop it by hand: prime-agent shutdown --force, or kill the process listening on ${socket_path}"
       case "$verdict" in
-        *:kill-failed:*)
-          note "  requests both failed to bring it down, and --force's SIGTERM/SIGKILL"
-          note "  did not either). Stop it by hand: prime-agent shutdown --force, or"
-          note "  kill the process listening on ${socket_path}"
-          stop_failed_hint="--force sent SIGTERM/SIGKILL and it stayed up; stop it by hand: prime-agent shutdown --force, or kill the process listening on ${socket_path}"
-          ;;
-        *:kill-skipped:*)
-          note "  requests both failed to bring it down; --force sent no signal because"
-          note "  the pid it names is not a Prime Agent daemon). Stop it by hand:"
-          note "  prime-agent shutdown --force, or kill the process listening on ${socket_path}"
-          stop_failed_hint="--force sent no signal: the pid it names is not a Prime Agent daemon; stop it by hand: prime-agent shutdown --force, or kill the process listening on ${socket_path}"
-          ;;
+        *:kill-failed:*) stop_failed_reason="--force sent SIGTERM and SIGKILL and it stayed up" ;;
+        *:kill-not-daemon:*) stop_failed_reason="--force sent no signal: the pid it names is not a Prime Agent daemon" ;;
+        *:kill-no-pid:*) stop_failed_reason="--force sent no signal: its hello names no usable pid" ;;
+        *:kill-undelivered:*) stop_failed_reason="--force could not deliver a signal to its pid" ;;
+        *:kill-*) stop_failed_reason="--force sent no signal: it could not re-identify the daemon on its socket" ;;
         *)
-          note "  requests both failed to bring it down, and no signal was ever sent)."
-          note "  Re-run the installer with --force to kill it, or stop it by hand:"
-          note "  prime-agent shutdown --force"
-          stop_failed_hint="re-run with --force, or stop it by hand: prime-agent shutdown --force"
+          stop_failed_reason="no signal was sent"
+          manual_stop="re-run the installer with --force to kill it, or stop it by hand: prime-agent shutdown --force"
           ;;
       esac
-      ts_stop_summary="${ts_stop_summary}daemon: WARNING still running on ${socket_path} (${owner}, ${sessions} session(s); the graceful and forced requests did not bring it down; ${stop_failed_hint})
+      step "  failed: still running"
+      note "WARNING: ${owner} on ${socket_path} is STILL RUNNING after this install"
+      note "  (it was serving ${sessions} session(s); the graceful and the forced"
+      note "  shutdown requests both failed to bring it down; ${stop_failed_reason})."
+      note "  To finish: ${manual_stop}"
+      ts_stop_summary="${ts_stop_summary}daemon: WARNING still running on ${socket_path} (${owner}, ${sessions} session(s); the graceful and forced requests did not bring it down; ${stop_failed_reason}; ${manual_stop})
 "
       ;;
     unrecognized:*)
