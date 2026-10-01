@@ -39,6 +39,12 @@
 # variables must not stay behind in it, and a refusal must return to the
 # prompt (Fail throws) instead of closing the user's PowerShell. The body
 # stays unindented so the publish render's line-anchored sed still matches.
+# Any failure reaches the catch at the bottom: run as a file it exits 1 (in
+# PowerShell 7 and Windows PowerShell 5.1 alike, never relying on how an
+# uncaught error or a trap's break maps to the exit code); under `irm | iex`
+# ($PSCommandPath is empty) it rethrows to the caller instead, so the
+# caller's session stays open.
+try {
 & {
 $ErrorActionPreference = 'Stop'
 
@@ -509,4 +515,11 @@ $script:primeAgentInstallScratch = $null
 $script:preservedLaunchers = @()
 $script:ownedLauncherBackups = @()
 if ($download) { Remove-Item -Recurse -Force $download -ErrorAction SilentlyContinue }
+}
+} catch {
+    if ($PSCommandPath) {
+        $Host.UI.WriteErrorLine($_.Exception.Message)
+        exit 1
+    }
+    throw
 }
