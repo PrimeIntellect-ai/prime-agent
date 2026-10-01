@@ -932,8 +932,8 @@ async fn template_expansion_applies() {
     assert_eq!(user_text, "Fix lint please");
 }
 
-/// Git state is captured at both run boundaries (TS `_emitExtensionEvent`
-/// calls `recordGitStateIfChanged` on `agent_start`/`agent_end`): a commit
+/// Git state is captured at both run boundaries (the TS run-boundary event
+/// path calls `recordGitStateIfChanged` on `agent_start`/`agent_end`): a commit
 /// made between session creation and the run lands as a `git_state`
 /// entry, and an unchanged context at `agent_end` adds nothing.
 #[tokio::test]

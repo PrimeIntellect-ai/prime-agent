@@ -78,6 +78,7 @@ impl SessionUi {
             speed_stats: None,
             client_settings: options.client_settings.clone(),
             anthropic_subscription_warning_shown: false,
+            anthropic_warning_mark_pending: std::sync::Arc::default(),
             active_side_question_id: None,
             side_question_counter: 0,
             share: None,
@@ -344,7 +345,6 @@ impl SessionUi {
         let attach_command = |session_id: &str| DaemonCommand::Attach {
             id: None,
             active_session_id: session_id.to_string(),
-            supports_extension_ui: None,
             client_id: None,
             // `elide_snapshot_images`: the transcript arrives without the
             // base64 image payloads (their fallback-only metadata rows

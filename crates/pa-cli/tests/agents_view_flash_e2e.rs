@@ -343,6 +343,7 @@ fn view_options(socket: &Path, session_dir: &Path) -> AgentsViewOptions {
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
         incident_notice_state: None,
+        create_config: serde_json::json!({}),
     }
 }
 

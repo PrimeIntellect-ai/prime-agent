@@ -715,6 +715,11 @@ mod tests {
     use std::net::SocketAddr;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    // The thinking-channel pins (the two provider envelopes) live in
+    // their own child module with this file's test harness.
+    #[path = "stream_pins.rs"]
+    mod stream_pins;
+
     /// Serve one SSE response body for the provider's POST and return the
     /// bound address.
     async fn serve_sse(body: String) -> SocketAddr {

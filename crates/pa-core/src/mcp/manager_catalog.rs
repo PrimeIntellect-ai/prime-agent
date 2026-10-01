@@ -12,7 +12,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::catalog_plugin_views::{
-    build_connection_views, build_plugin_views, AcpServerRow, BuildViewsInputs, McpPluginView,
+    build_connection_views, build_plugin_views, AcpServerRow, BuildViewsInputs, McpCredentialView,
+    McpPluginView, API_KEY_CREDENTIALS,
 };
 use super::catalog_schema::{AuthStrategy, SetupStatus};
 use super::catalog_status_views::SnapshotCredentials;
@@ -121,6 +122,24 @@ impl McpManager {
             records: &records,
             catalog_available: self.catalog_available,
         })
+    }
+
+    /// The `/mcp` view's api-key credential rows (the credential catalog
+    /// served alongside the MCP connections): one row per catalog entry,
+    /// configured when the shared auth store holds an API key at its slot.
+    pub fn api_key_credential_views(&self) -> Vec<McpCredentialView> {
+        let credentials = self.credential_snapshot();
+        API_KEY_CREDENTIALS
+            .iter()
+            .map(|(id, label)| McpCredentialView {
+                id: (*id).to_string(),
+                label: (*label).to_string(),
+                configured: credentials
+                    .credentials
+                    .get(*id)
+                    .is_some_and(|credential| matches!(credential, AuthCredential::ApiKey { .. })),
+            })
+            .collect()
     }
 
     /// The kernel connection inventory for `mcp.list_connections` (TS

@@ -38,8 +38,7 @@
 //! beta-only, both - here one target, four targets, none) and skip with a
 //! logged reason where the box's python3 is below the floor the step
 //! scripts need (python 3.12: the merge step unpacks with
-//! `extractall(filter=)`; the promote runner's ubuntu-24.04 provides it),
-//! mirroring the extension-host tests' node guard.
+//! `extractall(filter=)`; the promote runner's ubuntu-24.04 provides it).
 
 use std::fmt::Write as _;
 use std::fs;

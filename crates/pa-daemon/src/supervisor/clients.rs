@@ -45,16 +45,8 @@ pub(crate) fn client_command_payload(
         // result's `client.capabilities`, so the response the supervisor
         // relays by bytes already carries the echo the supervisor used to
         // patch into the parsed tree.
-        if let DaemonCommand::Attach {
-            capabilities,
-            supports_extension_ui,
-            ..
-        }
-        | DaemonCommand::Reattach {
-            capabilities,
-            supports_extension_ui,
-            ..
-        } = command
+        if let DaemonCommand::Attach { capabilities, .. }
+        | DaemonCommand::Reattach { capabilities, .. } = command
         {
             object.insert(
                 "capabilities".to_string(),
@@ -63,8 +55,7 @@ pub(crate) fn client_command_payload(
             object.insert(
                 "clientCapabilities".to_string(),
                 json!(crate::snapshot_stream::attach_client_capabilities(
-                    capabilities.as_deref(),
-                    *supports_extension_ui
+                    capabilities.as_deref()
                 )),
             );
         }

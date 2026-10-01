@@ -215,6 +215,7 @@ fn view_options(
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
         incident_notice_state: None,
+        create_config: serde_json::json!({}),
     }
 }
 

@@ -121,8 +121,14 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
                     "tab".into()
                 });
             }
-            if c == ' ' && shift {
-                return Some("shift+space".into());
+            if c == ' ' {
+                // TS parseKey maps the raw space to the `space` key id
+                // (keys.ts:1280) — the printable decoders (`decode_printable`)
+                // map it back for text surfaces.
+                if shift {
+                    return Some("shift+space".into());
+                }
+                return Some("space".into());
             }
             return Some(c.to_string());
         }

@@ -132,7 +132,6 @@ fn package_provided_skill_appears_in_created_session_skill_list() {
         "skills": [],
         "prompts": [],
         "themes": [],
-        "extensions": [],
     }]}));
     let (stdout, stderr, code) = run(&filtered, &script);
     assert_eq!(code, 0, "stderr: {stderr}");

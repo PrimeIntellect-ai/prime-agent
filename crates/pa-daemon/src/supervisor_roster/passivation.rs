@@ -209,6 +209,262 @@ async fn passivation_normalizes_the_live_model_descriptor_to_the_durable_pair() 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The RLM delete's stop: the passivation's single push carries both
+/// the tombstoned child's removal and its parent's refreshed
+/// deleted-descendant bucket. The child's transcript survives under
+/// session-artifacts (the real RLM-delete shape: no catalog row
+/// exists for it), so its captured spend bills through the bucket
+/// on the parent's row - not through a row anywhere.
+#[tokio::test]
+async fn stop_carries_the_deleted_childs_spend_to_its_parent() {
+    let (dir, supervisor, root_file, child_file) = roster_fixture().await;
+    let agent_dir = dir.join("agent");
+    let sessions_dir = agent_dir.join("sessions");
+    register_root_worker(&supervisor, "w-root", &root_file).await;
+    // The parent's top-level row: the bucket's target.
+    let mut parent_summary = live_child_summary(&root_file, &child_file);
+    parent_summary["runtimeKind"] = json!("top-level");
+    parent_summary["sessionId"] = json!("root-persisted");
+    parent_summary["id"] = json!("root-persisted");
+    parent_summary["sessionFile"] = json!(root_file.to_string_lossy());
+    parent_summary.as_object_mut().unwrap().remove("rlmChildId");
+    parent_summary
+        .as_object_mut()
+        .unwrap()
+        .remove("parentSessionPath");
+    supervisor.write_roster_summary(&parent_summary, Some("w-root"));
+    // The deleted child's real transcript location: under the agent
+    // dir's session-artifacts tree (the file exists - the shape the
+    // RLM delete leaves behind).
+    let child_artifact = agent_dir
+        .join("session-artifacts")
+        .join("root-1")
+        .join("sub-9")
+        .join("sub-9.jsonl");
+    std::fs::create_dir_all(child_artifact.parent().expect("artifact dir")).unwrap();
+    write_display_file(&child_artifact, "/the/deleted/cwd");
+    // The flushed transcript carries the child's final own spend
+    // ($0.30): the kill route was the flush barrier, so the
+    // passivation fold reads this row.
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&child_artifact)
+            .expect("open the child transcript for its billed turn");
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "type": "message",
+                "id": "dm1a",
+                "parentId": null,
+                "timestamp": "2026-09-29T00:00:02.100Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "work complete"}],
+                    "timestamp": 2100,
+                    "usage": {
+                        "input": 60,
+                        "output": 6,
+                        "cacheRead": 0,
+                        "cacheWrite": 0,
+                        "totalTokens": 66,
+                        "cost": {"input": 0.0, "output": 0.3, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.3}
+                    }
+                }
+            })
+        )
+        .expect("append the billed turn");
+    }
+    append_family_edge(
+        &agent_dir,
+        &sessions_dir,
+        "sub-9",
+        &root_file,
+        &child_artifact,
+    );
+    // The RLM delete's tombstone carries no usage yet (the capture
+    // amendment lands after the stop); the passivation fold bills
+    // the flushed transcript.
+    let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
+    ledger
+        .append_delete(
+            "sub-9",
+            &child_artifact.to_string_lossy(),
+            crate::rlm_ledger::RlmLedgerDeleteReason::User,
+        )
+        .expect("append delete");
+    // The child's live roster row, owned by the stopping worker.
+    let mut events = supervisor.events.subscribe();
+    supervisor.write_roster_summary(
+        &live_child_summary(&root_file, &child_artifact),
+        Some("w-child"),
+    );
+    let child_agent_id = drain_roster_pushes(&mut events)[0]["changed"][0]["agentId"]
+        .as_str()
+        .expect("the child agent id")
+        .to_string();
+
+    supervisor.passivate_roster_worker("w-child", false).await;
+    let pushes = drain_roster_pushes(&mut events);
+    assert_eq!(pushes.len(), 1, "one settle push: {pushes:?}");
+    // The parent's refreshed row is the push's whole `changed`.
+    let parent_after = supervisor
+        .roster
+        .lock()
+        .unwrap()
+        .entries()
+        .into_iter()
+        .find(|entry| {
+            entry.summary.get("sessionId").and_then(Value::as_str) == Some("root-persisted")
+        })
+        .expect("the parent row");
+    assert_eq!(
+        pushes[0]["changed"],
+        serde_json::to_value(vec![parent_after]).expect("serialized parent"),
+        "the push carries the parent's refreshed row: {pushes:?}"
+    );
+    assert_eq!(
+        pushes[0]["changed"][0]["summary"]["deletedDescendantUsage"],
+        json!({ "inputTokens": 60, "outputTokens": 6, "cost": 0.3 }),
+        "the deleted child's captured spend bills through the parent"
+    );
+    assert_eq!(
+        pushes[0]["removed"],
+        json!([child_agent_id]),
+        "the tombstoned child's row dies in the same push: {pushes:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A saved delete of a subagent whose only row was the saved listing
+/// (no roster row - its parent is stopped, so no seed ever wrote
+/// one) still refreshes the bucket: the ledger tombstone is the
+/// event, and the parent's roster row bills the deleted child's
+/// captured spend in the delete's own push.
+#[tokio::test]
+async fn a_saved_delete_without_a_roster_row_bills_the_parent() {
+    let (dir, supervisor, root_file, child_file) = roster_fixture().await;
+    let agent_dir = dir.join("agent");
+    let sessions_dir = agent_dir.join("sessions");
+    register_root_worker(&supervisor, "w-root", &root_file).await;
+    // The parent's top-level row: the ONLY roster row (the child has
+    // none).
+    let mut parent_summary = live_child_summary(&root_file, &child_file);
+    parent_summary["runtimeKind"] = json!("top-level");
+    parent_summary["sessionId"] = json!("root-persisted");
+    parent_summary["id"] = json!("root-persisted");
+    parent_summary["sessionFile"] = json!(root_file.to_string_lossy());
+    parent_summary.as_object_mut().unwrap().remove("rlmChildId");
+    parent_summary
+        .as_object_mut()
+        .unwrap()
+        .remove("parentSessionPath");
+    supervisor.write_roster_summary(&parent_summary, Some("w-root"));
+    // The child: a transcript under the session-artifacts tree whose
+    // header links it to the parent (the capture's child shape), with
+    // one billed assistant row ($0.30), plus its spawn edge.
+    let child_artifact = agent_dir
+        .join("session-artifacts")
+        .join("root-1")
+        .join("sub-9")
+        .join("sub-9.jsonl");
+    std::fs::create_dir_all(child_artifact.parent().expect("artifact dir")).unwrap();
+    std::fs::write(
+        &child_artifact,
+        format!(
+            "{{\"type\":\"session\",\"version\":3,\"id\":\"sub-9\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"/the/deleted/cwd\",\"parentSession\":\"{}\",\"rlmDepth\":1}}\n",
+            root_file.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&child_artifact)
+            .expect("open the child transcript for its billed turn");
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "type": "message",
+                "id": "dm1a",
+                "parentId": null,
+                "timestamp": "2026-09-29T00:00:02.100Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "work complete"}],
+                    "timestamp": 2100,
+                    "usage": {
+                        "input": 60,
+                        "output": 6,
+                        "cacheRead": 0,
+                        "cacheWrite": 0,
+                        "totalTokens": 66,
+                        "cost": {"input": 0.0, "output": 0.3, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.3}
+                    }
+                }
+            })
+        )
+        .expect("append the billed turn");
+    }
+    append_family_edge(
+        &agent_dir,
+        &sessions_dir,
+        "sub-9",
+        &root_file,
+        &child_artifact,
+    );
+    // The selector-less saved delete of the child: the supervisor arm.
+    let mut events = supervisor.events.subscribe();
+    let command = pa_types::daemon::DaemonCommand::DeleteSavedSession {
+        id: None,
+        active_session_id: None,
+        session_path: child_artifact.to_string_lossy().to_string(),
+        rest: Map::default(),
+    };
+    let (responses, _) = supervisor
+        .handle_delete_saved_session(&command, "client-1", "c1", "delete_saved_session")
+        .await;
+    assert_eq!(
+        responses[0]["success"],
+        json!(true),
+        "the delete succeeded: {responses:?}"
+    );
+    assert!(!child_artifact.is_file(), "the child transcript is gone");
+    // The delete's own push carries the parent's refreshed row - the
+    // whole `changed`, with no removal (the child had no row).
+    let pushes = drain_roster_pushes(&mut events);
+    assert_eq!(pushes.len(), 1, "one refresh push: {pushes:?}");
+    let parent_after = supervisor
+        .roster
+        .lock()
+        .unwrap()
+        .entries()
+        .into_iter()
+        .find(|entry| {
+            entry.summary.get("sessionId").and_then(Value::as_str) == Some("root-persisted")
+        })
+        .expect("the parent row");
+    assert_eq!(
+        pushes[0]["changed"],
+        serde_json::to_value(vec![parent_after]).expect("serialized parent"),
+        "the push carries the parent's refreshed row: {pushes:?}"
+    );
+    assert_eq!(
+        pushes[0]["changed"][0]["summary"]["deletedDescendantUsage"],
+        json!({ "inputTokens": 60, "outputTokens": 6, "cost": 0.3 }),
+        "the deleted child's captured spend bills through the parent"
+    );
+    assert!(
+        pushes[0].get("removed").is_none() || pushes[0]["removed"].is_null(),
+        "no removal rides the push: {pushes:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Unanchored subagent rows are removed, never passivated (a
 /// tombstoned ledger edge - the user deleted the subagent - or a live
 /// edge with no resident root), a queued child and an ephemeral

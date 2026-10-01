@@ -108,6 +108,13 @@ impl Supervisor {
                 None,
             );
         };
+        // One per-worker critical section spans the roster write AND the
+        // identity follow (the resident's descriptor lock — the same lock
+        // every identity reader takes): a routing reader can never observe
+        // a half-applied swap, and an older follow can never persist after
+        // a newer one (each accepted row carries its own follow inside the
+        // same guard, so the persists apply in accept order).
+        //
         // The stale-delta gate and the write share ONE roster lock
         // acquisition: two accepted deltas must never write in reverse
         // order (each supervisor connection runs its own task), so the
@@ -123,21 +130,50 @@ impl Supervisor {
         let mut changed = Vec::new();
         let mut removed_ids = Vec::new();
         {
-            let mut roster = self.roster.lock().unwrap();
-            if !roster.accept_delta_sequence(
-                &resident.worker_id,
-                worker_instance_id.as_deref().unwrap_or(""),
-                sequence.unwrap_or(0),
-            ) {
-                return response_success(Some(command_id), type_name, None);
-            }
-            let entry = roster.write_summary(summary, Some(&resident.worker_id), None);
-            changed.push(entry);
-            for agent_id in removed {
-                if roster.get(&agent_id).is_some() {
-                    roster.delete(&agent_id);
-                    removed_ids.push(agent_id);
+            let mut descriptor = resident.descriptor.lock().await;
+            {
+                let mut roster = self.roster.lock().unwrap();
+                if !roster.accept_delta_sequence(
+                    &resident.worker_id,
+                    worker_instance_id.as_deref().unwrap_or(""),
+                    sequence.unwrap_or(0),
+                ) {
+                    return response_success(Some(command_id), type_name, None);
                 }
+                let entry = roster.write_summary(summary.clone(), Some(&resident.worker_id), None);
+                // The worker's root slot can swap to a new durable session
+                // (a `new_session`/`switch_session`/`import_jsonl`/`fork`
+                // replacement serves a new file under the same address):
+                // the row it previously owned for that address described
+                // the superseded session, and the roster must not keep
+                // presenting it as the worker's live root (TS
+                // `flushRoster`'s swapped-in-place removal).
+                for swapped in roster.swapped_out_root_rows(&resident.worker_id, &entry) {
+                    roster.delete(&swapped);
+                    removed_ids.push(swapped);
+                }
+                changed.push(entry);
+                for agent_id in removed {
+                    if roster.get(&agent_id).is_some() {
+                        roster.delete(&agent_id);
+                        removed_ids.push(agent_id);
+                    }
+                }
+            }
+            // The roster write is the worker's live word on what it
+            // serves: the supervisor-side identity follows it inside the
+            // same critical section (the fork-isolation seam — the
+            // descriptor, the persisted record, the durable create
+            // command, and the binding table all move onto the worker's
+            // current session). The boot reconciliation quarantine lifts
+            // ONLY on a root-identity-bearing write: the sync answers
+            // whether the worker's own root row carried the live word —
+            // a subagent/child summary (keying under its own address)
+            // never lifts the root's fence.
+            let root_identity_bearing =
+                self.sync_root_identity_from_roster(&resident, &mut descriptor);
+            if root_identity_bearing {
+                resident.clear_identity_quarantine();
             }
         }
         self.push_roster_update(changed, removed_ids);
@@ -194,20 +230,56 @@ impl Supervisor {
         let counter = summary
             .get("rosterDeltaSequence")
             .and_then(serde_json::Value::as_u64);
-        let entry = {
-            let mut roster = self.roster.lock().unwrap();
-            if !roster.accept_roster_pull(&resident.worker_id, &instance, counter) {
-                return None;
+        let (entry, swapped) = {
+            // The pull shares the delta path's per-worker critical
+            // section (the resident's descriptor lock across the roster
+            // write and the identity follow): the registration and
+            // refresh pulls land their descriptor/persist/binding moves
+            // as one transition, in accept order, never observable
+            // half-applied.
+            let mut descriptor = resident.descriptor.lock().await;
+            let (entry, swapped) = {
+                let mut roster = self.roster.lock().unwrap();
+                if !roster.accept_roster_pull(&resident.worker_id, &instance, counter) {
+                    return None;
+                }
+                let entry = roster.write_summary(summary.clone(), Some(&resident.worker_id), None);
+                // The pull sees the same root-slot swap the deltas do (a
+                // registration or refresh landing after a
+                // `new_session`/`switch_session`/`import_jsonl`/`fork`
+                // replacement): the superseded row retires with the write,
+                // and the identity follow below re-binds the
+                // supervisor-side identity onto the moved-to session.
+                let swapped = roster.swapped_out_root_rows(&resident.worker_id, &entry);
+                for agent_id in &swapped {
+                    roster.delete(agent_id);
+                }
+                (entry, swapped)
+            };
+            // The pull is the worker's own root state by construction, so
+            // its accepted write lifts the boot reconciliation quarantine
+            // with the identity it just reconciled.
+            let root_identity_bearing =
+                self.sync_root_identity_from_roster(resident, &mut descriptor);
+            if root_identity_bearing {
+                resident.clear_identity_quarantine();
             }
-            roster.write_summary(summary.clone(), Some(&resident.worker_id), None)
+            (entry, swapped)
         };
-        self.push_roster_update(vec![entry.clone()], Vec::new());
+        self.push_roster_update(vec![entry.clone()], swapped);
         Some(entry)
     }
 
     /// Refresh one resident worker's entry from its live `get_state`
-    /// (registration, adoption, and create flows).
-    pub(crate) async fn refresh_roster_entry(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
+    /// (registration, adoption, and create flows). Returns whether the
+    /// live state landed: the write carries the root-identity follow, so
+    /// a `false` answer means the reconciliation did not run — the caller
+    /// logs it and the persisted identity keeps serving until the next
+    /// roster write.
+    pub(crate) async fn refresh_roster_entry(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+    ) -> bool {
         let response = self
             .route_command_typed(
                 resident,
@@ -217,14 +289,18 @@ impl Supervisor {
                 RouteAdmission::SupervisorInternal,
             )
             .await;
-        if let Ok(response) = response {
-            if response.success {
-                if let Some(data) = response.data {
-                    self.write_roster_summary_for_resident(resident, &data)
-                        .await;
-                }
-            }
+        let Ok(response) = response else {
+            return false;
+        };
+        if !response.success {
+            return false;
         }
+        let Some(data) = response.data else {
+            return false;
+        };
+        self.write_roster_summary_for_resident(resident, &data)
+            .await
+            .is_some()
     }
 
     /// TS `flipWorkerRosterEntriesInactive` (the Rust form: one pass in
@@ -297,6 +373,12 @@ impl Supervisor {
         ) = (Vec::new(), HashMap::new());
         let (_, parent_by_child) = ledger_view.as_ref().unwrap_or(&empty_view);
         let roots = self.roster_seed_roots().await;
+        // The stop's own ledger event: an RLM delete tombstoned its child
+        // before the stop began, and the shutdown route was the
+        // transcript's flush barrier, so the fold beside the ledger view
+        // reads the final bucket - the later capture amendment yields the
+        // same value, so no second push follows it.
+        let bucket_fold = self.deleted_descendant_usage_bucket().await;
         // The ledger/roots awaits opened a late-write window. Only
         // rows that carry the STOPPED generation settle here: the
         // stopped worker's own in-flight delta can have written a row
@@ -321,6 +403,14 @@ impl Supervisor {
         let mut removed = Vec::new();
         {
             let mut roster = self.roster.lock().unwrap();
+            // The refreshed bucket applies FIRST: the settle loop's
+            // passivated rewrites then attach the new value at store
+            // time, and the rewritten rows ship in this same push - the
+            // child's removal and its parent's new bucket together, with
+            // no frame in between where the spend dips.
+            if let Some((ticket, bucket)) = bucket_fold {
+                changed.extend(roster.set_deleted_descendant_usage(ticket, bucket));
+            }
             let mut settle: Vec<AgentRosterEntry> = owned;
             for late in roster.entries_for_worker(worker_id).into_iter().cloned() {
                 if !settle
@@ -615,12 +705,6 @@ fn normalize_model_to_durable_pair(object: &mut serde_json::Map<String, Value>) 
     );
 }
 
-// The roster-delta serving impl stays here (the subscribe handling,
-// the delta merge, the stop-path passivation, the roster pushes); the
-// test mass split by family into the child modules at the same tree
-// position (supervisor_roster::{passivation,delta_push}); the shared
-// drain fixture (both families drive it) rides here per the
-// agents_view shared-fixture precedent.
 /// Drain the pushed roster frames (the events a subscribed client
 /// pump forwards); anything else on the channel is not a roster push.
 #[cfg(test)]

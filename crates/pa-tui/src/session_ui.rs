@@ -220,9 +220,19 @@ pub(crate) struct SessionUi {
     /// The client-process settings seam (`/settings`, `/fullscreen`);
     /// the composition root supplies it.
     client_settings: Option<std::sync::Arc<dyn crate::client_settings::ClientSettings>>,
-    /// The ban-risk warning's once-per-session gate (TS
-    /// `anthropicSubscriptionWarningShown`).
+    /// The ban-risk warning's view-local dedup (TS
+    /// `anthropicSubscriptionWarningShown`): this VIEW's own
+    /// once-per-instance gate. The once-per-SESSION-lifecycle gate (the
+    /// operator 2026-09-29 fix for the every-open re-warn) is the
+    /// daemon-side marker read through `get_state` — see
+    /// [`Self::anthropic_warning_already_shown`] and
+    /// [`Self::mark_anthropic_warning_shown`].
     anthropic_subscription_warning_shown: bool,
+    /// The in-flight `mark_anthropic_warning_shown` fire-and-forget: set
+    /// when the mark task is spawned, cleared by the task itself at its
+    /// end (ack, error, or bound) — the headless exit gate reads it so a
+    /// scripted run never ends with the durable write still in flight.
+    anthropic_warning_mark_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The side-question run currently streaming (TS `activeSideQuestionId`):
     /// at most one run per client, exactly like the daemon enforces.
     active_side_question_id: Option<String>,
@@ -326,7 +336,7 @@ pub(crate) struct SessionUi {
     /// The OSC 52 channel for clipboard writes (TS `process.stdout`):
     /// stdout in the terminal, a captured buffer in headless runs.
     pub(crate) osc_sink: crate::clipboard::OscSink,
-    /// The question the open confirm panel answers (TS `showExtensionConfirm`).
+    /// The question the open confirm panel answers.
     pending_confirm: Option<PendingConfirm>,
     /// `/traces`: the settings + credential state the composition root
     /// owns (the trace upload subsystem itself stays unported).

@@ -95,6 +95,22 @@ impl AgentSessionEngine {
                 }
             }
         };
+        // The delivery's cancel flag is consulted at the admission, before
+        // the agent run registers: an abort that landed after this
+        // delivery's pickup but before the registration (the lazy session
+        // build and the policy reads widened TS's microscopic
+        // registration gap to the whole admission prefix) is otherwise
+        // lost — `abort_in_flight_turn`'s `agent.abort()` found an empty
+        // run slot, the run registers fresh after it, and the turn runs
+        // its full provider hold (the abort-and-send idle race: the
+        // session never went idle after the abort). The probe is
+        // delivery-scoped by construction (the pickup clears the flag,
+        // the next pickup re-arms it), so this consult aborts exactly the
+        // turn the abort raced. The remaining window (the run's own
+        // registration) is TS's own gap scale.
+        if aborted() {
+            return TurnResult::Aborted;
+        }
         // A routed image-model episode applies its override BEFORE the
         // first provider call: the serving target swaps to the image
         // model and the run carries the route's model override (the
@@ -196,7 +212,14 @@ impl AgentSessionEngine {
                             drop_trailing_assistant(&agent).await;
                         }
                         match self
-                            .run_turn_once(&agent, &prompt, first, boundary_passed, &mut **emit)
+                            .run_turn_once(
+                                &agent,
+                                &prompt,
+                                first,
+                                boundary_passed,
+                                aborted,
+                                &mut **emit,
+                            )
                             .await
                         {
                             Ok(TurnOnce::Message { assistant }) => {

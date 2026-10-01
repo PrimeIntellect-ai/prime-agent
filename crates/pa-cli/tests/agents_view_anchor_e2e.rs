@@ -194,6 +194,7 @@ async fn entry_anchor_selects_the_left_session() {
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
         incident_notice_state: None,
+        create_config: serde_json::json!({}),
     };
     let plan = AgentsHeadlessPlan {
         steps: vec![
@@ -283,6 +284,7 @@ async fn continue_recent_view_preselects_the_candidate_and_renders_the_notice() 
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
         incident_notice_state: None,
+        create_config: serde_json::json!({}),
     };
     let plan = AgentsHeadlessPlan {
         steps: vec![
@@ -356,6 +358,7 @@ async fn rename_saved_session_renames_the_row_and_the_file() {
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
         show_hardware_cursor: false,
         incident_notice_state: None,
+        create_config: serde_json::json!({}),
     };
     let plan = AgentsHeadlessPlan {
         steps: vec![

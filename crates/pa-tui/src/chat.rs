@@ -12,7 +12,7 @@ use crate::snapshot::RetryStartReason;
 use crate::theme::{Theme, ThemeBg, ThemeColor};
 use crate::width::str_width;
 use crate::{Line, Span};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 
 /// How much detail the conversation shows (TS `setChatDetail` levels).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,7 +245,7 @@ pub fn format_working_elapsed(total_secs: u64) -> String {
 impl WorkingState {
     #[must_use]
     pub fn label(&self) -> String {
-        // Extensions and tool bootstrap own the message: plain
+        // A tool-provided working message owns the loader line: plain
         // "<message> <elapsed>" (TS `getWorkingLoaderMessage`).
         if let Some(message) = &self.message {
             return format!("{message} {}", format_working_elapsed(self.elapsed_secs));
@@ -371,10 +371,21 @@ pub fn render_user_block(
         // The user block colors everything `userMessageText` on the block
         // background; markdown structure (wrapping) is kept, its own colors
         // are not. The masked placeholders restore to their token colors
-        // over that base.
+        // over that base, and the link affordance survives the restyle:
+        // the underlined label keeps the underline, the URL bracket keeps
+        // the dim link slot.
         let restyled: Line = line
             .into_iter()
-            .map(|span| Span::styled(span.content, bg.patch(body)))
+            .map(|span| {
+                let mut style = bg.patch(body);
+                if span.style.add_modifier.contains(Modifier::UNDERLINED) {
+                    style = style.add_modifier(Modifier::UNDERLINED);
+                }
+                if span.style.fg == md.link_url.fg {
+                    style = style.patch(md.link_url);
+                }
+                Span::styled(span.content, style)
+            })
             .collect();
         row.extend(mask.restore_line(theme, &restyled));
         rows.push(pad_to(row, width, bg));

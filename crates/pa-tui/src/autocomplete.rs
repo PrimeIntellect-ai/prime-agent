@@ -785,10 +785,11 @@ pub struct CombinedAutocompleteProvider {
 }
 
 impl CombinedAutocompleteProvider {
-    /// Build the provider from the shared builtin registry (pa-types).
+    /// The shared builtin registry's completion entries (pa-types): every
+    /// command, its aliases, and its argument hints.
     #[must_use]
-    pub fn from_registry(base: std::path::PathBuf) -> Self {
-        let commands = SlashCommandRegistry::builtin()
+    pub fn builtin_entries() -> Vec<SlashCommandEntry> {
+        SlashCommandRegistry::builtin()
             .all()
             .iter()
             .map(|command| SlashCommandEntry {
@@ -799,7 +800,20 @@ impl CombinedAutocompleteProvider {
                 takes_argument: command.takes_argument,
                 source_tag: None,
             })
-            .collect();
+            .collect()
+    }
+
+    /// Build the provider from the shared builtin registry (pa-types).
+    #[must_use]
+    pub fn from_registry(base: std::path::PathBuf) -> Self {
+        Self::new(Self::builtin_entries(), base)
+    }
+
+    /// Build the provider from an explicit command list (TS
+    /// `new CombinedAutocompleteProvider(commands, cwd)`): the reply
+    /// composer's session-owned subset plus its view commands.
+    #[must_use]
+    pub fn new(commands: Vec<SlashCommandEntry>, base: std::path::PathBuf) -> Self {
         Self {
             commands,
             skill_commands: Vec::new(),

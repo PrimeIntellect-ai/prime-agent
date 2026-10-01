@@ -302,6 +302,9 @@ async fn run_agents_view_flow(
             // dismissed incident never comes back, and the poll does not
             // re-read consumed bytes).
             incident_notice_state: incident_notice_state.take(),
+            // TS `AgentsViewModeOptions.config`: the flow's own create
+            // config — the base a saved reply's resume derives from.
+            create_config: base.create_config(),
         };
         let view_run = pa_tui::agents_view::run_agents_view(
             view_options,

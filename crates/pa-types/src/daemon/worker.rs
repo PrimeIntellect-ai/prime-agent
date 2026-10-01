@@ -146,8 +146,6 @@ pub enum DaemonWorkerCommand {
         active_session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         capabilities: Option<Vec<DaemonClientCapability>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        supports_extension_ui: Option<bool>,
         #[serde(flatten)]
         rest: JsonMap,
     },

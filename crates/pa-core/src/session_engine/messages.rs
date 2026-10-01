@@ -542,7 +542,7 @@ mod tests {
                 rest: serde_json::Map::default(),
             }),
             AgentMessage::Custom(pa_types::session::CustomMessage {
-                custom_type: "extension_note".to_string(),
+                custom_type: "arbitrary_note".to_string(),
                 content: UserContent::Text("a note".to_string()),
                 display: true,
                 details: None,
@@ -615,7 +615,7 @@ state
             }))
             .unwrap();
         let unknown_row: pa_agent::types::AgentMessage =
-            serde_json::from_value(serde_json::json!({ "role": "extension", "payload": "x" }))
+            serde_json::from_value(serde_json::json!({ "role": "arbitrary", "payload": "x" }))
                 .unwrap();
         let user = pa_agent::types::AgentMessage::user("keep");
         let converted = loop_convert_to_llm(vec![digest_row, user, outcome_row, unknown_row]);

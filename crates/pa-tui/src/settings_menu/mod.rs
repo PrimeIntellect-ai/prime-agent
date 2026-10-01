@@ -483,7 +483,7 @@ impl SettingsMenu {
             }
             return SettingsMenuAction::None;
         }
-        if key == " " || kb.matches(key, "tui.select.confirm") {
+        if key == "space" || kb.matches(key, "tui.select.confirm") {
             return self.activate_selected();
         }
         if kb.matches(key, "tui.select.cancel") || key == "ctrl+c" {
@@ -591,7 +591,7 @@ impl SettingsMenu {
             }
             return SettingsMenuAction::None;
         }
-        if kb.matches(key, "tui.select.confirm") || key == " " {
+        if kb.matches(key, "tui.select.confirm") || key == "space" {
             let row_id = self.rows[sub.row].id;
             let value = match &sub.kind {
                 SettingsSubmenu::Thinking { levels } => {
