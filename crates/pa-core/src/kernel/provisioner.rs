@@ -174,8 +174,8 @@ struct ProvisionerState {
     /// before reading that snapshot back, so the two kernels never race
     /// over the same on-disk file. The receiver yields `true` once the
     /// recorded stop settles (a settled stop awaits instantly; a dead
-    /// sender errs and unblocks the same way); each stop supersedes the
-    /// previous.
+    /// sender errs and unblocks the same way); each stop's gate also
+    /// waits for the previous stop's gate.
     pending_stop: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
@@ -307,6 +307,7 @@ impl IpythonKernelProvisioner {
                 let inner = Arc::clone(&self.inner);
                 let pending_stop = state.pending_stop.clone();
                 let startup_progress = on_progress.clone();
+                let memo = done_rx.clone();
                 tokio::spawn(async move {
                     let boot =
                         tokio::spawn(run_startup(inner.clone(), startup_progress, pending_stop));
@@ -331,11 +332,19 @@ impl IpythonKernelProvisioner {
                     // Publish the completed result before clearing the memo:
                     // joined waiters keep the manager even if stop takes it.
                     let _ = done_tx.send(Some(result));
-                    inner
+                    let mut state = inner
                         .state
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .startup = None;
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    // A defunct manager may already have been replaced by a
+                    // newer boot; only clear the memo if it is still ours.
+                    if state
+                        .startup
+                        .as_ref()
+                        .is_some_and(|current| current.same_channel(&memo))
+                    {
+                        state.startup = None;
+                    }
                 });
                 state.startup = Some(done_rx.clone());
                 done_rx
@@ -403,7 +412,7 @@ impl IpythonKernelProvisioner {
     /// and the next `ensure()` boots fresh.
     pub async fn stop_kernel(&self, options: Option<KernelShutdownOptions>) {
         let snapshot = options.is_none_or(|o| o.snapshot);
-        let (manager, startup, stop_tx) = {
+        let (manager, startup, stop_tx, previous_stop) = {
             let mut state = self.lock_state();
             state.dispose_snapshot = snapshot;
             let manager = state.manager.take();
@@ -414,8 +423,8 @@ impl IpythonKernelProvisioner {
             // Publish the predecessor gate while holding the same lock used by
             // ensure() to select its startup; no revival can miss this stop.
             let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-            state.pending_stop = Some(stop_rx);
-            (manager, startup, stop_tx)
+            let previous_stop = state.pending_stop.replace(stop_rx);
+            (manager, startup, stop_tx, previous_stop)
         };
         let inner = Arc::clone(&self.inner);
         let stop = tokio::spawn(async move {
@@ -439,6 +448,12 @@ impl IpythonKernelProvisioner {
                         drain_host_requests: true,
                     })
                     .await;
+            }
+            // Concurrent stops can join the same boot and only one of them
+            // takes its manager, so this gate also waits for the earlier
+            // stop's shutdown before a revival may read the snapshot.
+            if let Some(mut previous_stop) = previous_stop {
+                let _ = previous_stop.wait_for(|done| *done).await;
             }
             let _ = stop_tx.send(true);
         });
@@ -671,8 +686,8 @@ async fn start_kernel_impl(
     let permit_dispose_signal = dispose_signal.clone();
     // Wait for this provisioner's own in-flight stop_kernel() — and its
     // final snapshot flush — before reading that snapshot back (TS #2483's
-    // `pendingStop` gate; a completed stop awaits instantly and each stop
-    // supersedes the previous). `ready_gate` stays the cross-provisioner
+    // `pendingStop` gate; a completed stop awaits instantly and the latest
+    // stop's gate also covers the earlier ones). `ready_gate` stays the cross-provisioner
     // /reload arm.
     if let Some(stop_gate) = &mut pending_stop {
         let _ = stop_gate.wait_for(|done| *done).await;
