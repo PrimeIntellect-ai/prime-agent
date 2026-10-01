@@ -1,5 +1,6 @@
-//! The selection under search edits: every query change, the clear
-//! included, lands on the topmost row (the top-ranked hit).
+//! The selection under search edits: every query change lands on the
+//! top-ranked hit, and clearing the query returns to the session the
+//! selection sat on before the search began.
 
 use super::*;
 
@@ -61,6 +62,7 @@ fn first_selectable(mode: &AgentsViewMode) -> usize {
 fn typing_a_query_selects_the_top_hit() {
     let mut mode = fresh_mode(search_roster());
     mode.handle_key("end");
+    assert_eq!(selected_title(&mode), "gateway");
     mode.handle_key("up");
     assert_eq!(selected_title(&mode), "refactor tests");
     for ch in "gateway".chars() {
@@ -98,16 +100,17 @@ fn a_matching_selection_still_moves_to_the_top_hit() {
     assert_eq!(mode.selected, first_selectable(&mode));
 }
 
-/// Clearing the query (backspace to empty, ctrl+u, or escape) is a query
-/// change like any other: the full list selects its topmost row.
+/// Clearing the query (backspace to empty, ctrl+u, or escape) returns
+/// the selection to the session it sat on before the search began.
 #[test]
-fn clearing_the_query_selects_the_top_row() {
+fn clearing_the_query_restores_the_pre_search_selection() {
     for clear in ["backspace", "ctrl+u", "escape"] {
         let mut mode = fresh_mode(search_roster());
         mode.handle_key("down");
         mode.handle_key("down");
+        assert_eq!(selected_title(&mode), "fix login bug");
         type_query(&mut mode, "gate");
-        mode.handle_key("down");
+        assert_eq!(mode.selected, first_selectable(&mode));
         if clear == "backspace" {
             for _ in 0..4 {
                 mode.handle_key("backspace");
@@ -116,7 +119,39 @@ fn clearing_the_query_selects_the_top_row() {
             mode.handle_key(clear);
         }
         assert!(mode.query.is_empty(), "{clear} clears the query");
-        assert_eq!(mode.selected, first_selectable(&mode), "{clear}");
-        assert_eq!(selected_title(&mode), "write docs", "{clear}");
+        assert_eq!(selected_title(&mode), "fix login bug", "{clear}");
+        assert_eq!(
+            mode.selected_identity.as_deref(),
+            Some(mode.rows[mode.selected].identity.as_str()),
+        );
     }
+}
+
+/// A row the user picks while searching is their selection: clearing
+/// the query keeps it instead of returning to the pre-search row.
+#[test]
+fn a_pick_made_while_searching_survives_the_clear() {
+    let mut mode = fresh_mode(search_roster());
+    type_query(&mut mode, "gateway");
+    mode.handle_key("down");
+    let picked = selected_title(&mode).to_string();
+    assert_ne!(picked, "gateway");
+    mode.handle_key("ctrl+u");
+    assert_eq!(selected_title(&mode), picked);
+}
+
+/// The pre-search session left while the query was up: the clear lands
+/// on the top of the list.
+#[test]
+fn clearing_after_the_pre_search_session_left_selects_the_top() {
+    let mut mode = fresh_mode(search_roster());
+    mode.handle_key("end");
+    mode.handle_key("up");
+    assert_eq!(selected_title(&mode), "refactor tests");
+    type_query(&mut mode, "gate");
+    mode.apply_roster_update(Vec::new(), vec!["s5".to_string()], false);
+    mode.handle_key("escape");
+    assert!(mode.query.is_empty());
+    assert_eq!(mode.selected, first_selectable(&mode));
+    assert_eq!(selected_title(&mode), "write docs");
 }
