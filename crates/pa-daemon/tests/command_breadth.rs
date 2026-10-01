@@ -118,7 +118,6 @@ const TS_DAEMON_COMMAND_TYPES: &[&str] = &[
     "get_system_prompt",
     "get_tool_definition",
     "set_session_entry_label",
-    "extension_ui_response",
     "prepare_update_restart",
     "retry_worker",
     "restart",
@@ -490,10 +489,6 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
         r#"{"type": "set_session_entry_label", "activeSessionId": "sess", "entryId": "e"}"#,
     ),
     (
-        "extension_ui_response",
-        r#"{"type": "extension_ui_response", "activeSessionId": "sess", "requestId": "r", "response": {"value": "pick"}}"#,
-    ),
-    (
         "prepare_update_restart",
         r#"{"type": "prepare_update_restart"}"#,
     ),
@@ -527,6 +522,10 @@ const WIRE_FIXTURES: &[(&str, &str)] = &[
         "get_mcp_connections",
         r#"{"type": "get_mcp_connections", "activeSessionId": "sess"}"#,
     ),
+    (
+        "mark_anthropic_warning_shown",
+        r#"{"type": "mark_anthropic_warning_shown", "activeSessionId": "sess"}"#,
+    ),
 ];
 
 /// The accept list is the TS list, in TS order, followed by the Rust-native
@@ -555,6 +554,7 @@ fn known_command_types_match_the_ts_list() {
                     | "list_kernel_bash"
                     | "tail_kernel_bash"
                     | "kill_kernel_bash"
+                    | "mark_anthropic_warning_shown"
             ),
             "unexpected non-TS command type: {extra}"
         );

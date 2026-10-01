@@ -46,22 +46,13 @@ impl SnapshotStreamEvents {
 
 /// The client capability set for one attach command, normalized the way the
 /// supervisor's `normalizeCapabilities` does: unsupported entries are
-/// dropped, missing capabilities default to the standard pair, and
-/// `supports_extension_ui` upgrades to `extension_ui`.
-pub(crate) fn attach_client_capabilities(
-    capabilities: Option<&[String]>,
-    supports_extension_ui: Option<bool>,
-) -> Vec<String> {
+/// dropped and missing capabilities default to the standard pair.
+pub(crate) fn attach_client_capabilities(capabilities: Option<&[String]>) -> Vec<String> {
     let capabilities = capabilities.map_or_else(
         crate::protocol::default_client_capabilities,
         |caps: &[String]| caps.to_vec(),
     );
-    let mut normalized = crate::protocol::normalize_client_capabilities(&capabilities);
-    if supports_extension_ui.unwrap_or(false) && !normalized.iter().any(|cap| cap == "extension_ui")
-    {
-        normalized.push("extension_ui".to_string());
-    }
-    normalized
+    crate::protocol::normalize_client_capabilities(&capabilities)
 }
 
 /// True when the client asked for chunked snapshot delivery.
@@ -642,24 +633,14 @@ mod tests {
     #[test]
     fn capabilities_normalize_like_the_supervisor() {
         let normalized =
-            attach_client_capabilities(Some(&["chunked_snapshot".into(), "bogus".into()]), None);
+            attach_client_capabilities(Some(&["chunked_snapshot".into(), "bogus".into()]));
         assert_eq!(normalized, vec!["chunked_snapshot".to_string()]);
         assert!(wants_chunked(&normalized));
-        let defaults = attach_client_capabilities(None, None);
+        let defaults = attach_client_capabilities(None);
         assert_eq!(
             defaults,
             vec!["attach_snapshot".to_string(), "event_sequence".to_string()]
         );
         assert!(!wants_chunked(&defaults));
-        let extension = attach_client_capabilities(None, Some(true));
-        assert!(extension.contains(&"extension_ui".to_string()));
-        let already = attach_client_capabilities(
-            Some(&["extension_ui".into(), "attach_snapshot".into()]),
-            Some(true),
-        );
-        assert_eq!(
-            already,
-            vec!["extension_ui".to_string(), "attach_snapshot".to_string()]
-        );
     }
 }

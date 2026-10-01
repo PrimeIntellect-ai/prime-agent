@@ -3,10 +3,9 @@
 //! configured-npm/git child-process flows.
 //!
 //! Session resource resolution lives here as well: `PackageManager::resolve`
-//! produces the ranked skill/prompt/theme/extension paths sessions consume.
+//! produces the ranked skill/prompt/theme paths sessions consume.
 //!
-//! Non-goals: the extension
-//! *runner* (loading/executing extension modules) and Prime Agent
+//! Non-goals: loading/executing session-resource code and Prime Agent
 //! self-updates.
 
 mod git;
@@ -26,8 +25,8 @@ pub use manager::{
     ProgressAction, ProgressEvent, ProgressEventKind, UserOrProject,
 };
 pub use resolve::{
-    MetadataSource, MissingSourceAction, PathMetadata, ResolveExtensionOptions, ResolvedPaths,
-    ResolvedResource, ResourceOrigin, ResourceType,
+    MetadataSource, MissingSourceAction, PathMetadata, ResolvedPaths, ResolvedResource,
+    ResourceOrigin, ResourceType,
 };
 pub use source::{parse_git_url, GitSource, LocalSource, NpmSource, ParsedSource, SourceScope};
 
@@ -115,9 +114,8 @@ pub(crate) fn get_bundled_skills_dir() -> PathBuf {
     packaged
 }
 
-/// Stable temporary directory for resolve-only package installs:
-/// `/tmp/pi-extensions/<prefix>/<hash8>/<suffix?>` (the hash keys on
-/// prefix+suffix so the same source always maps to one checkout).
+/// Stable temporary directory for resolve-only package installs (the hash
+/// keys on prefix+suffix so the same source always maps to one checkout).
 pub(crate) fn temporary_dir(prefix: &str, suffix: Option<&str>) -> PathBuf {
     use sha2::{Digest, Sha256};
 

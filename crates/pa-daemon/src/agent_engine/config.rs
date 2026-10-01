@@ -94,8 +94,6 @@ pub(crate) struct CreateSessionResources {
     pub(crate) append_system_prompt: Vec<String>,
     pub(crate) skills: Vec<String>,
     pub(crate) prompt_templates: Vec<String>,
-    pub(crate) extensions: Vec<String>,
-    pub(crate) tools: Option<Vec<String>>,
     pub(crate) autonomous: Option<pa_core::autonomous::AgentAutonomousConfig>,
 }
 

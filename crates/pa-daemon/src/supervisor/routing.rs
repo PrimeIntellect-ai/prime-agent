@@ -111,6 +111,13 @@ impl Supervisor {
                 }
             }
         };
+        // A retired worker admits no client request (the
+        // retire-then-release order of the idle passivation fence): the
+        // check runs after admission, so a route that passed readiness
+        // before the retire cannot enqueue behind it.
+        if matches!(admission, RouteAdmission::ClientRequest) && resident.route_state().retired {
+            return Err(anyhow!(WORKER_NOT_CONNECTED));
+        }
         let (reply_tx, reply_rx) = oneshot::channel();
         let request_id = uuid::Uuid::new_v4().to_string();
         resident
@@ -713,19 +720,10 @@ impl Supervisor {
         // supervisor's own bookkeeping; a hint-less one falls back to the
         // typed parse so the bookkeeping never silently changes shape.
         let client_wants_chunked = match command {
-            DaemonCommand::Attach {
-                capabilities,
-                supports_extension_ui,
-                ..
+            DaemonCommand::Attach { capabilities, .. }
+            | DaemonCommand::Reattach { capabilities, .. } => {
+                wants_chunked(&attach_client_capabilities(capabilities.as_deref()))
             }
-            | DaemonCommand::Reattach {
-                capabilities,
-                supports_extension_ui,
-                ..
-            } => wants_chunked(&attach_client_capabilities(
-                capabilities.as_deref(),
-                *supports_extension_ui,
-            )),
             _ => false,
         };
         let attach_family = matches!(
@@ -822,16 +820,8 @@ impl Supervisor {
                 if rebound_to.is_some() && type_name == "reattach" {
                     response.command = type_name.clone();
                 }
-                if let DaemonCommand::Attach {
-                    capabilities,
-                    supports_extension_ui,
-                    ..
-                }
-                | DaemonCommand::Reattach {
-                    capabilities,
-                    supports_extension_ui,
-                    ..
-                } = command
+                if let DaemonCommand::Attach { capabilities, .. }
+                | DaemonCommand::Reattach { capabilities, .. } = command
                 {
                     if response.success {
                         if let Some(data) = response.data.as_mut() {
@@ -867,10 +857,8 @@ impl Supervisor {
                             // The client's own capability set, not the
                             // supervisor's worker-facing one, is echoed in
                             // the attach result.
-                            let client_capabilities = attach_client_capabilities(
-                                capabilities.as_deref(),
-                                *supports_extension_ui,
-                            );
+                            let client_capabilities =
+                                attach_client_capabilities(capabilities.as_deref());
                             if let Some(client) = data.get_mut("client") {
                                 client["capabilities"] = json!(client_capabilities);
                             }
@@ -1247,6 +1235,26 @@ impl Supervisor {
         crate::saved_session_commands::remove_session_artifacts(std::path::Path::new(
             &session_file,
         ));
+        // The resident delete's end state, continued: no stop ran for
+        // this child (its worker was already passivated), so the
+        // passivation's row lingers unowned while the bucket bills the
+        // captured spend on the parent - the same settle the resident
+        // delete's pass performs, in one push.
+        let changed = self.refresh_deleted_descendant_usage().await;
+        let canonical = crate::lease::canonical_session_path(std::path::Path::new(&session_file))
+            .to_string_lossy()
+            .to_string();
+        let removed: Vec<String> = {
+            let mut roster = self.roster.lock().unwrap();
+            let agent_id = roster
+                .by_session_file(&canonical)
+                .map(|row| row.agent_id.clone());
+            if let Some(agent_id) = &agent_id {
+                roster.delete(agent_id);
+            }
+            agent_id.into_iter().collect()
+        };
+        self.push_roster_update(changed, removed);
         Ok(())
     }
 }

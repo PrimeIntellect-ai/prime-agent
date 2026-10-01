@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
-use super::{is_subagent_summary, AgentsViewScope, Rollup, SelectionKey};
+use super::{AgentsViewScope, Rollup, SelectionKey};
 use crate::agents_view_state::{summary_for_record, UnifiedRecord};
-use crate::subagents::summary_parent_keys;
+use crate::subagents::{depth_consistent_binding, is_subagent_summary, summary_parent_keys};
 
 /// The record hierarchy (TS `UnifiedSessionIndex`): every record by its
 /// aliases, and each record's children by parent linkage.
@@ -69,19 +69,23 @@ fn parent_reference_keys(record: &UnifiedRecord) -> Vec<String> {
 }
 
 /// The `parent` record's session file, live summary first, saved catalog
-/// row second (both serve absolute paths).
+/// row second (both serve absolute paths; an empty string is absent — a
+/// `--no-session` worker's in-memory store publishes one, and every other
+/// TUI accessor of the fact reads it the same way).
 fn parent_record_file(parent: &UnifiedRecord) -> Option<&str> {
     parent
         .daemon
         .as_ref()
         .and_then(|daemon| daemon.get("sessionFile"))
         .and_then(Value::as_str)
+        .filter(|file| !file.is_empty())
         .or_else(|| {
             parent
                 .saved
                 .as_ref()
                 .and_then(|saved| saved.get("path"))
                 .and_then(Value::as_str)
+                .filter(|file| !file.is_empty())
         })
 }
 
@@ -90,20 +94,6 @@ fn parent_record_file(parent: &UnifiedRecord) -> Option<&str> {
 /// one level up); a fork's source binding sits at the SAME depth and is
 /// a sibling, never a parent.
 pub(super) fn depth_consistent_parent(daemon: &Value, parent: &UnifiedRecord) -> bool {
-    let Some(depth) = daemon
-        .get("rlmDepth")
-        .and_then(Value::as_u64)
-        .filter(|depth| *depth > 0)
-    else {
-        return false;
-    };
-    let Some(parent_path) = daemon
-        .get("parentSessionPath")
-        .and_then(Value::as_str)
-        .filter(|path| !path.is_empty())
-    else {
-        return false;
-    };
     let parent_depth = parent
         .daemon
         .as_ref()
@@ -116,7 +106,7 @@ pub(super) fn depth_consistent_parent(daemon: &Value, parent: &UnifiedRecord) ->
                 .and_then(|saved| saved.get("rlmDepth"))
                 .and_then(Value::as_u64)
         });
-    parent_record_file(parent) == Some(parent_path) && parent_depth == Some(depth - 1)
+    depth_consistent_binding(daemon, parent_record_file(parent), parent_depth)
 }
 
 /// Whether `child` rolls up under `parent` (TS `isSubagentDescendantRecord`):
@@ -186,13 +176,24 @@ pub fn compute_rollups(records: &[UnifiedRecord]) -> HashMap<String, Rollup> {
         // cost: an orchestrator parent with no own billable work (the
         // own-zero gate omits `usage` entirely) still bills its deleted
         // descendants' spend — the bucket carried inside the own-cost
-        // Option would drop with it.
+        // Option would drop with it. The roster row (daemon) is the
+        // fresher writer between the two — the same `daemon ?? saved`
+        // precedence as the own cost below — so the title (roster rows
+        // only) and the agents view bill the same bucket.
         let deleted_descendants = records[*position]
-            .saved
+            .daemon
             .as_ref()
-            .and_then(|saved| saved.get("deletedDescendantUsage"))
+            .and_then(|daemon| daemon.get("deletedDescendantUsage"))
             .and_then(|deleted| deleted.get("cost"))
             .and_then(Value::as_f64)
+            .or_else(|| {
+                records[*position]
+                    .saved
+                    .as_ref()
+                    .and_then(|saved| saved.get("deletedDescendantUsage"))
+                    .and_then(|deleted| deleted.get("cost"))
+                    .and_then(Value::as_f64)
+            })
             .unwrap_or(0.0);
         // Deleted subagents keep no row, and their spend is already
         // subtracted from the parent's own usage by the attribution
@@ -345,15 +346,37 @@ pub fn has_session_children(records: &[UnifiedRecord], key: &SelectionKey) -> bo
     })
 }
 
-/// The scope root's depth label (TS `getAgentsViewDepth`:
-/// `rlmDepth + 1`); `None` when the root is not in the record set.
-#[must_use]
-pub fn scope_depth(records: &[UnifiedRecord], scope: &AgentsViewScope) -> Option<u32> {
+/// The scope root's facts the scoped view renders and creates with:
+/// `child_depth` is the root's `rlmDepth + 1` (TS `getAgentsViewDepth`) —
+/// the view's depth label and the depth a session created in this scope
+/// runs at; `session_file` is the root's file exactly as the forest links
+/// children to it ([`parent_record_file`]); `cwd` is the root's directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ScopeRoot {
+    pub(crate) child_depth: u32,
+    pub(crate) session_file: Option<String>,
+    pub(crate) cwd: Option<String>,
+}
+
+/// The scope root's facts, `None` when the root is not in the record set.
+pub(crate) fn scope_root(records: &[UnifiedRecord], scope: &AgentsViewScope) -> Option<ScopeRoot> {
     scope_root_index(records, scope).map(|root| {
-        summary_for_record(&records[root])
+        let summary = summary_for_record(&records[root]);
+        // `rlmDepth` rides the wire as a u32 (the create check enforces
+        // it); an out-of-range value falls back to the root's 0.
+        let root_depth = summary
             .get("rlmDepth")
             .and_then(Value::as_u64)
-            .unwrap_or(0) as u32
-            + 1
+            .and_then(|depth| u32::try_from(depth).ok())
+            .unwrap_or(0);
+        ScopeRoot {
+            child_depth: root_depth + 1,
+            session_file: parent_record_file(&records[root]).map(str::to_string),
+            cwd: summary
+                .get("cwd")
+                .and_then(Value::as_str)
+                .filter(|cwd| !cwd.is_empty())
+                .map(str::to_string),
+        }
     })
 }

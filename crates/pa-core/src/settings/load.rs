@@ -39,7 +39,6 @@ const KNOWN_FIELDS: &[&str] = &[
     "npmCommand",
     "mcpServers",
     "packages",
-    "extensions",
     "skills",
     "prompts",
     "themes",
@@ -136,6 +135,25 @@ mod tests {
         let settings = from_value_lenient(&value);
         assert_eq!(settings.theme.as_deref(), Some("prime"));
         assert_eq!(settings.rlm_max_depth, Some(4));
+    }
+
+    /// A config that still carries the removed `extensions` resource key
+    /// (the dead TS-extension setting) loads without error: the key is no
+    /// longer part of the schema, so it survives in `extra` and nothing
+    /// consumes it - an upgrading user's settings file never fails.
+    #[test]
+    fn removed_extensions_key_loads_gracefully() {
+        let value: Value = serde_json::json!({
+            "extensions": ["~/my-ext/index.ts"],
+            "skills": ["~/my-skill"]
+        });
+        let settings = from_value_lenient(&value);
+        assert_eq!(settings.skills, Some(vec!["~/my-skill".to_string()]));
+        assert_eq!(
+            settings.extra.get("extensions"),
+            Some(&serde_json::json!(["~/my-ext/index.ts"])),
+            "the dead key is preserved untouched in extra, never parsed"
+        );
     }
 
     /// TS #2462: a wrong-typed `requestTiming` behaves as unset (the

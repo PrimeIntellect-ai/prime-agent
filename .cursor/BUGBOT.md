@@ -24,7 +24,7 @@ either changes.
 
 ## File size (advisory)
 
-- Flag new or grown Rust files past ~500 lines (tests included) as advisory guidance: cite the growth and suggest splitting by responsibility. Size is ADVISORY per the operator's ruling - a soft cap that informs review and never blocks a merge; the repo's `codebase-health` PR check reports the same as warnings only.
+- Flag new or grown Rust files past ~2,000 lines (tests included) as advisory guidance: cite the growth and suggest splitting by responsibility. Size is ADVISORY per the operator's ruling - a soft cap that informs review and never blocks a merge; the repo's `codebase-health` PR check reports the same as warnings only.
 - Generated files are exempt from the size rule (see Generated files).
 
 ## Dependency direction

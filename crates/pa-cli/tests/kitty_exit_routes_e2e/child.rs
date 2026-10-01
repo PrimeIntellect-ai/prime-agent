@@ -49,6 +49,7 @@ pub(super) fn child_run(route: &str, socket: PathBuf) {
                     keybindings: options.keybindings.clone(),
                     show_hardware_cursor: false,
                     incident_notice_state: None,
+                    create_config: serde_json::json!({}),
                 };
                 let view_run = run_agents_view(view_options, AgentsViewUiMode::Terminal, None)
                     .await
@@ -84,6 +85,7 @@ pub(super) fn child_run(route: &str, socket: PathBuf) {
                     keybindings: options.keybindings.clone(),
                     show_hardware_cursor: false,
                     incident_notice_state: None,
+                    create_config: serde_json::json!({}),
                 };
                 let view_run = run_agents_view(view_options, AgentsViewUiMode::Terminal, None)
                     .await

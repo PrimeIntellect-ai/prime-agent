@@ -220,8 +220,8 @@ pub fn kernel_restart_notice() -> &'static str {
     "<ipython_kernel_reset>\nThe Python kernel was restarted after a previous interrupted cell kept running. Variables, imports, async tasks, and open resources from before the restart are no longer available; recreate them before using them.\n</ipython_kernel_reset>"
 }
 
-/// The UI surface the ipython tool needs from the host session
-/// (the `ExtensionContext` in TS).
+/// The UI surface the ipython tool needs from the host session (the TS
+/// tool context).
 pub trait IpythonToolUi: Send + Sync {
     /// Prompt the user to choose between `choices`.
     fn select(

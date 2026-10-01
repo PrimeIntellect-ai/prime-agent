@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 
 use crate::agents_view_forest::{
     ancestor_session_ids, build_rows, compute_rollups, has_session_children, resolve_selection,
-    scope_ancestors, scope_depth, scope_to_subtree, AgentsViewRow, RowKind, SelectionKey,
+    scope_ancestors, scope_root, scope_to_subtree, AgentsViewRow, RowKind, ScopeRoot, SelectionKey,
 };
 use crate::agents_view_state::truncate_text;
 use crate::agents_view_state::{
@@ -52,6 +52,14 @@ use delete::{spawn_delete_dispatch, DeleteAction, PendingDelete};
 
 mod rename;
 use rename::{spawn_rename_dispatch, Rename};
+
+mod reply;
+use reply::{
+    spawn_headline_fetch, spawn_kill_dispatch, spawn_reply_dispatch, KillRequest, ReplyRequest,
+};
+
+mod status;
+use status::{Status, StatusTone};
 
 /// Options for one agents-view run.
 #[derive(Debug, Clone)]
@@ -105,12 +113,19 @@ pub struct AgentsViewOptions {
     /// never comes back and the poll does not re-read consumed bytes.
     /// `None` on the first run creates a fresh state.
     pub incident_notice_state: Option<crate::incident_notices::IncidentNoticeState>,
+    /// The flow's own `create` config (TS `AgentsViewModeOptions.config`):
+    /// the base a saved reply's resume derives its config from (the
+    /// view's runtime config with the session's own cwd removed, or the
+    /// view's cwd when the saved directory no longer exists).
+    pub create_config: serde_json::Value,
 }
 
 /// The open action the run ended with (TS `AgentsViewRunResult`'s
 /// `open`/`scope_back` arms, unified): the session the flow opens plus
-/// the row metadata it carries across the view/session loop.
-#[derive(Debug, Clone)]
+/// the row metadata it carries across the view/session loop — the new
+/// sessions open the same way (TS `createNewSession`'s
+/// `finish({ type: "open" })`).
+#[derive(Debug, Clone, PartialEq)]
 pub struct OpenedRow {
     pub selection: SessionSelection,
     pub expanded_ancestors: Vec<String>,
@@ -248,6 +263,10 @@ fn saved_catalog_timeout_ms() -> u64 {
 
 enum UiInput {
     Key(String),
+    /// One paste (bracketed, or the paste-aware reader's coalesced
+    /// marker-less burst): the armed composer's editor takes it; the
+    /// search field ignores it.
+    Paste(String),
     /// The headless plan's `WaitRender` barrier: the loop holds the
     /// queued plan batch behind it until a frame rendered after arming
     /// contains the needle (the interactive harness's condition-wait
@@ -272,9 +291,11 @@ enum UiInput {
         error: String,
     },
     /// One stop-or-delete dispatch landed (the ctrl+x flow): the status
-    /// line reports the outcome.
+    /// line reports the outcome in the tone the dispatch classified it
+    /// with (success muted, a no-effect stop warning, a failure error).
     DeleteResult {
         message: String,
+        tone: StatusTone,
         /// The deleted saved session's path (the catalog key for the
         /// immediate row removal); `None` for the other arms.
         deleted_saved_path: Option<String>,
@@ -283,6 +304,28 @@ enum UiInput {
     /// reports the outcome and a saved target's row patches in place.
     RenameResult {
         rename: Rename,
+        outcome: Result<(), String>,
+    },
+    /// The armed target's last-assistant headline landed (or failed):
+    /// the header renders it; a re-targeted or disarmed composer drops
+    /// it.
+    HeadlineResult {
+        key: String,
+        result: Result<Option<String>, String>,
+    },
+    /// The saved-resume path's mid-send status (TS `sendReply`: the
+    /// "Sending reply..." after "Resuming session..." — the loop paints
+    /// each as it lands, never both at once).
+    ReplyProgress(String),
+    /// One reply send landed: the resumed summary and the sticky cwd
+    /// notice on success, the wire's error on failure.
+    ReplyResult {
+        key: String,
+        outcome: Result<reply::ReplySent, String>,
+    },
+    /// One `/kill` view-command dispatch landed.
+    KillResult {
+        key: String,
         outcome: Result<(), String>,
     },
 }
@@ -352,7 +395,10 @@ struct AgentsViewMode {
     rows: Vec<AgentsViewRow>,
     selected: usize,
     query: String,
-    status: Option<String>,
+    /// The status line (TS `statusMessage` + `statusMessageTone` + the
+    /// 4.5s timer): rendered at the bottom hint row in its tone, expired
+    /// by the loop's deadline arm, sticky lines cleared by the next key.
+    status: Option<Status>,
     /// A multi-line notice from the previous run (a daemon refusal whose
     /// ways out span lines, like the cross-product lease hold): rendered
     /// as a dismissible panel above the hint line instead of the one-line
@@ -371,6 +417,17 @@ struct AgentsViewMode {
     /// `pending_delete_action` shape: the wire call runs off the key
     /// loop with the client).
     pending_rename: Option<Rename>,
+    /// The submitted reply the run loop dispatches (the reply flow's
+    /// same shape): the send runs off the key loop with the client, and
+    /// its keyed outcome re-enters as a `ReplyResult`.
+    pending_reply: Option<ReplyRequest>,
+    /// One `/kill` view command the run loop dispatches (the reply
+    /// flow's shape): the keyed outcome re-enters as a `KillResult`.
+    pending_kill: Option<KillRequest>,
+    /// The armed target whose headline fetch runs (its key and active
+    /// id): the loop dispatches the fetch, detached — its keyed result
+    /// drops when the composer is gone or re-targeted.
+    pending_headline: Option<(String, String)>,
     /// The executed delete the run loop takes (the dispatch runs off the
     /// key loop with the client, the saved-catalog fetch's pattern).
     pending_delete_action: Option<DeleteAction>,
@@ -379,10 +436,11 @@ struct AgentsViewMode {
     /// the catalog apply filters these paths out (a deleted row never
     /// reappears behind a slow fetch).
     deleted_saved_paths: std::collections::HashSet<String>,
-    /// The scope root's `depth` metadata (`rlmDepth + 1`); `None` when the
-    /// scope root is not on the roster (the view falls back to the global
-    /// list with a status message, TS scope-resolution fallback).
-    scope_depth: Option<u32>,
+    /// The scope root's facts the scoped view renders and creates with
+    /// ([`ScopeRoot`]); `None` when the scope root is not on the roster
+    /// (the view falls back to the global list with a status message, TS
+    /// scope-resolution fallback).
+    scope_root: Option<ScopeRoot>,
     /// The scope root resolved on the last rebuild.
     scope_active: bool,
     /// Whether the scope root left the roster mid-run (TS
@@ -432,8 +490,6 @@ struct AgentsViewMode {
     scope_back: bool,
     /// The open action the run ended with (`None` while the view runs).
     opened: Option<OpenedRow>,
-    /// ctrl+n requested a fresh session (TS `app.agents.new`).
-    new_session: bool,
     /// The effective keybindings (TS `AgentsViewMode.keybindings`): every
     /// action and hint dispatches through this manager.
     keybindings: crate::keybindings::KeybindingsManager,
@@ -501,11 +557,14 @@ struct PressedMouseClick {
 
 /// The prompt's composition state (TS the editor's composer modes): the
 /// plain search field, or one action's composer that owns the prompt
-/// and the key routing. The reply composer (C3) adds its variant here.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// and the key routing. Each composer owns its [`Editor`] — the text,
+/// the provider, and the history can never leak between modes, and an
+/// editor while searching cannot be represented. [`Box`] keeps the
+/// variant against the unit `Search` under clippy's large-enum-variant.
 enum Composer {
     Search,
-    Rename(Rename),
+    Rename(Box<rename::RenameComposer>),
+    Reply(Box<reply::ReplyComposer>),
 }
 
 impl AgentsViewMode {
@@ -517,7 +576,10 @@ impl AgentsViewMode {
         // status.
         let (status, notice) = match options.status_message.clone() {
             Some(message) if message.contains('\n') => (None, Some(message)),
-            status => (status, None),
+            // TS seeds the run's status with the carried line through
+            // `setStatusMessage` (the default tone rule and the timer
+            // apply to it, exactly like any later line).
+            status => (status.as_deref().map(Status::transient), None),
         };
         let pending_ancestors =
             (!options.expanded_ancestors.is_empty()).then(|| options.expanded_ancestors.clone());
@@ -559,9 +621,12 @@ impl AgentsViewMode {
             pending_delete: None,
             composer: Composer::Search,
             pending_rename: None,
+            pending_reply: None,
+            pending_kill: None,
+            pending_headline: None,
             pending_delete_action: None,
             deleted_saved_paths: std::collections::HashSet::default(),
-            scope_depth: None,
+            scope_root: None,
             scope_active: false,
             scope_dropped: false,
             expanded_parents: std::collections::HashSet::default(),
@@ -577,7 +642,6 @@ impl AgentsViewMode {
             scope_popped: false,
             scope_back: false,
             opened: None,
-            new_session: false,
             saved_fetch_failed: false,
             saved_query_rearm: false,
             saved_stream: Vec::new(),
@@ -939,8 +1003,7 @@ async fn run_agents_view_surface(
                     // needle itself — the note renders into frames, and
                     // quoting the needle would satisfy the very
                     // condition that failed).
-                    mode.status =
-                        Some("timed out waiting for the headless render condition".to_string());
+                    mode.set_status("timed out waiting for the headless render condition");
                     redraw = true;
                     continue;
                 }
@@ -968,6 +1031,10 @@ async fn run_agents_view_surface(
             match input {
                 UiInput::Key(key) => {
                     mode.handle_key(&key);
+                    // The composer's parked suggestion request
+                    // materializes once the key's edits landed (TS's
+                    // editor materializes after the keystroke batch).
+                    mode.materialize_composer_autocomplete();
                     // TS `queryChanged` -> `armSavedSearchFetch`: a failed
                     // saved-catalog fetch re-arms on the next query change,
                     // so the Inactive section gets one honest retry behind
@@ -1008,11 +1075,38 @@ async fn run_agents_view_surface(
                             rename,
                         ));
                     }
+                    // The reply composer's dispatches (the send and the
+                    // `/kill` view command): the 2s exit drain covers an
+                    // Enter-then-exit the same way it covers a confirmed
+                    // stop-or-delete.
+                    if let Some(request) = mode.pending_reply.take() {
+                        action_dispatches.push(spawn_reply_dispatch(
+                            &client,
+                            ui_tx.clone(),
+                            request,
+                        ));
+                    }
+                    if let Some(request) = mode.pending_kill.take() {
+                        action_dispatches.push(spawn_kill_dispatch(
+                            &client,
+                            ui_tx.clone(),
+                            request,
+                        ));
+                    }
+                    // The armed target's headline fetch: detached (the
+                    // exit never waits on it), and its keyed result
+                    // drops when the composer is gone or re-targeted.
+                    if let Some((key, active_session_id)) = mode.pending_headline.take() {
+                        spawn_headline_fetch(&client, ui_tx.clone(), key, active_session_id);
+                    }
                 }
                 // A plain click opens the row under it (the Enter
                 // action); drags and wheel turns are consumed inside.
                 UiInput::Mouse(event) => {
                     mode.handle_mouse(&event);
+                }
+                UiInput::Paste(text) => {
+                    mode.handle_paste(&text);
                 }
                 // `Settled` is the plan's own settle no-op;
                 // `WaitRender` never reaches the batch pop (the
@@ -1021,12 +1115,29 @@ async fn run_agents_view_surface(
                 UiInput::Resize | UiInput::Settled | UiInput::WaitRender { .. } => {}
                 UiInput::DeleteResult {
                     message,
+                    tone,
                     deleted_saved_path,
                 } => {
-                    mode.delete_result(message, deleted_saved_path);
+                    mode.delete_result(&message, tone, deleted_saved_path);
                 }
                 UiInput::RenameResult { rename, outcome } => {
                     mode.rename_result(rename, outcome);
+                }
+                UiInput::HeadlineResult { key, result } => {
+                    mode.headline_result(&key, result);
+                }
+                // The saved-resume path's own status (TS's mid-send
+                // "Sending reply..."): it lands between the resume and
+                // the prompt like any set_status, never queued behind
+                // the result it precedes.
+                UiInput::ReplyProgress(text) => {
+                    mode.set_status(&text);
+                }
+                UiInput::ReplyResult { key, outcome } => {
+                    mode.reply_result(&key, outcome);
+                }
+                UiInput::KillResult { key, outcome } => {
+                    mode.kill_result(&key, outcome);
                 }
                 // The saved-catalog scan landed (TS `armSavedSearchFetch`
                 // applying its result): the Inactive section builds now.
@@ -1048,8 +1159,7 @@ async fn run_agents_view_surface(
                     // must not keep reporting an unavailable catalog after
                     // it loaded).
                     if mode
-                        .status
-                        .as_deref()
+                        .status_text()
                         .is_some_and(|status| status.starts_with("Saved sessions unavailable"))
                     {
                         mode.status = None;
@@ -1081,7 +1191,10 @@ async fn run_agents_view_surface(
                     catalog_request = None;
                     mode.settle_anchor_wait_on_saved_failure();
                     mode.saved_fetch_failed = true;
-                    mode.status = Some(format!("Saved sessions unavailable: {error}"));
+                    mode.set_status_tone(
+                        &format!("Saved sessions unavailable: {error}"),
+                        StatusTone::Error,
+                    );
                 }
                 // The headless plan ended: the run stops here (the
                 // interactive harness's `HeadlessDone` contract). A plan
@@ -1096,88 +1209,105 @@ async fn run_agents_view_surface(
             }
             redraw = true;
         } else {
-            // The batch window's deadline, copied out of the loop state:
-            // select evaluates EVERY branch expression whether or not its
-            // precondition passes, so the flush arm below must never
-            // unwrap the Option itself.
+            // The batch window's and the status line's deadlines, copied
+            // out of the loop state: select evaluates EVERY branch
+            // expression whether or not its precondition passes, so the
+            // arms below must never unwrap an Option themselves.
             let flush_at = saved_flush;
+            let status_at = mode.status_expiry(std::time::Instant::now());
             tokio::select! {
-                maybe_event = events.recv() => {
-                    match maybe_event {
-                        Some(DaemonClientEvent::RosterUpdate { changed, removed, resync }) => {
-                            mode.apply_roster_update(changed, removed, resync);
-                            redraw = true;
-                        }
-                        // The saved-catalog scan streams its rows while it
-                        // runs (newest first): the view buffers the live
-                        // fetch's frames and flushes them in one rebuild
-                        // per batch window, so the Inactive section (and
-                        // the entry anchor's row) appears progressively
-                        // instead of after the whole scan (TS
-                        // `refreshSavedSessions`'s `onSession` batching).
-                        Some(DaemonClientEvent::SessionListItem { session, request_id }) => {
-                            if catalog_request.as_deref() == Some(request_id.as_str()) {
-                                mode.buffer_saved_stream_item(session);
-                                if saved_flush.is_none() {
-                                    saved_flush = Some(
-                                        tokio::time::Instant::now()
-                                            + Duration::from_millis(
-                                                SAVED_CATALOG_RECONCILE_INTERVAL_MS,
-                                            ),
-                                    );
+                    maybe_event = events.recv() => {
+                        match maybe_event {
+                            Some(DaemonClientEvent::RosterUpdate { changed, removed, resync }) => {
+                                mode.apply_roster_update(changed, removed, resync);
+                                redraw = true;
+                            }
+                            // The saved-catalog scan streams its rows while it
+                            // runs (newest first): the view buffers the live
+                            // fetch's frames and flushes them in one rebuild
+                            // per batch window, so the Inactive section (and
+                            // the entry anchor's row) appears progressively
+                            // instead of after the whole scan (TS
+                            // `refreshSavedSessions`'s `onSession` batching).
+                            Some(DaemonClientEvent::SessionListItem { session, request_id }) => {
+                                if catalog_request.as_deref() == Some(request_id.as_str()) {
+                                    mode.buffer_saved_stream_item(session);
+                                    if saved_flush.is_none() {
+                                        saved_flush = Some(
+                                            tokio::time::Instant::now()
+                                                + Duration::from_millis(
+                                                    SAVED_CATALOG_RECONCILE_INTERVAL_MS,
+                                                ),
+                                        );
+                                    }
                                 }
                             }
+                            Some(_) => {}
+                            None => {
+                                mode.set_status_tone("the daemon connection closed",
+                                    StatusTone::Error
+            );
+                                mode.running = false;
+                                redraw = true;
+                            }
                         }
-                        Some(_) => {}
-                        None => {
-                            mode.status = Some("the daemon connection closed".to_string());
-                            mode.running = false;
+                    }
+                    maybe_input = ui_rx.recv() => {
+                        if let Some(input) = maybe_input {
+                            pending.push(input);
+                            continue;
+                        }
+                    }
+                    // Only a running row needs a periodic frame. The timer
+                    // stays tied to the last pulse across unrelated inputs.
+                    () = tokio::time::sleep_until(last_pulse + Duration::from_millis(PULSE_INTERVAL_MS)),
+                        if mode.rows.iter().any(|row| row.section == Section::Running) => {}
+                    // The streamed-catalog batch window: the buffered rows
+                    // flush as one rebuild. A closed window pends forever
+                    // (the copied deadline is None) instead of unwrapping.
+                    () = async {
+                        match flush_at {
+                            Some(at) => tokio::time::sleep_until(at).await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if mode.flush_saved_stream() {
                             redraw = true;
                         }
+                        saved_flush = None;
                     }
+                    // The incident-notice poll's wake-up: the deadline drain
+                    // below the select does the refresh, so the arm only ends
+                    // the wait (the pulse arm's shape).
+                    () = tokio::time::sleep_until(incident_poll_at) => {}
+                    // The render barrier's deadline: an armed hold whose
+                    // needle never lands still pops here — the plan proceeds
+                    // and the assertion then reports the actual frame — so a
+                    // quiet daemon (a catalog answer that never comes)
+                    // cannot wedge the loop waiting on events that never
+                    // arrive.
+                    () = async {
+                        match wait_render_deadline {
+                            Some(at) => tokio::time::sleep_until(at).await,
+                            None => std::future::pending().await,
+                        }
+                    } => {}
+                    // The status line's expiry wake (TS `setStatusMessage`'s
+                    // timer): the line clears at its deadline even on a quiet
+                    // view, and the expiry check below repaints it away.
+                    () = async {
+                        match status_at.map(tokio::time::Instant::from_std) {
+                            Some(at) => tokio::time::sleep_until(at).await,
+                            None => std::future::pending().await,
+                        }
+                    } => {}
                 }
-                maybe_input = ui_rx.recv() => {
-                    if let Some(input) = maybe_input {
-                        pending.push(input);
-                        continue;
-                    }
-                }
-                // Only a running row needs a periodic frame. The timer
-                // stays tied to the last pulse across unrelated inputs.
-                () = tokio::time::sleep_until(last_pulse + Duration::from_millis(PULSE_INTERVAL_MS)),
-                    if mode.rows.iter().any(|row| row.section == Section::Running) => {}
-                // The streamed-catalog batch window: the buffered rows
-                // flush as one rebuild. A closed window pends forever
-                // (the copied deadline is None) instead of unwrapping.
-                () = async {
-                    match flush_at {
-                        Some(at) => tokio::time::sleep_until(at).await,
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    if mode.flush_saved_stream() {
-                        redraw = true;
-                    }
-                    saved_flush = None;
-                }
-                // The incident-notice poll's wake-up: the deadline drain
-                // below the select does the refresh, so the arm only ends
-                // the wait (the pulse arm's shape).
-                () = tokio::time::sleep_until(incident_poll_at) => {}
-                // The render barrier's deadline: an armed hold whose
-                // needle never lands still pops here — the plan proceeds
-                // and the assertion then reports the actual frame — so a
-                // quiet daemon (a catalog answer that never comes)
-                // cannot wedge the loop waiting on events that never
-                // arrive.
-                () = async {
-                    match wait_render_deadline {
-                        Some(at) => tokio::time::sleep_until(at).await,
-                        None => std::future::pending().await,
-                    }
-                } => {}
-            }
         }
+        // The status line's timer (TS's `setTimeout`): an expired line
+        // clears here after every arm — the wake's own and any input's —
+        // so a status that aged out mid-batch never survives the
+        // redraw that follows.
+        redraw |= mode.expire_status(std::time::Instant::now());
         // Coalesce a due animation pulse with the input or roster frame,
         // and a due incident poll behind a busy input stream (the TS
         // interval fires between turns regardless).
@@ -1196,11 +1326,11 @@ async fn run_agents_view_surface(
     // after the stop-or-delete drain settles: a confirmed request
     // completes before any deadline can cut it down. `renderer.finish`
     // consumes the renderer, so the terminal check is read first.
-    let handing_off = mode.opened.is_some() || mode.new_session;
+    let handing_off = mode.opened.is_some();
     let terminal_exit = matches!(renderer, Renderer::Terminal { .. }) && !handing_off;
     // A selection hands the pane to the chat it opened (TS `result.type !== "exit"`);
     // exiting releases the alternate screen.
-    let frames = renderer.finish(mode.opened.is_some() || mode.new_session);
+    let frames = renderer.finish(mode.opened.is_some());
     // TS `AgentsViewRosterStore.dispose` fires the roster unsubscribe
     // fire-and-forget ("nobody needs the ack"; the supervisor also drops
     // the subscription with the socket), so no handoff ever waits on it.
@@ -1243,12 +1373,31 @@ async fn run_agents_view_surface(
         match input {
             UiInput::DeleteResult {
                 message,
+                tone,
                 deleted_saved_path,
             } => {
-                mode.delete_result(message, deleted_saved_path);
+                mode.delete_result(&message, tone, deleted_saved_path);
             }
             UiInput::RenameResult { rename, outcome } => {
                 mode.rename_result(rename, outcome);
+            }
+            // The reply outcomes apply on the exit path too (an
+            // Enter-then-exit): the statuses paint nothing on a run
+            // that ended, but the adoption actions (`reply_sent`,
+            // `killed`) must still reach the outcome — and a `/name`
+            // result still disarms or restores the composer's draft for
+            // the run's final state.
+            UiInput::HeadlineResult { key, result } => {
+                mode.headline_result(&key, result);
+            }
+            UiInput::ReplyProgress(text) => {
+                mode.set_status(&text);
+            }
+            UiInput::ReplyResult { key, outcome } => {
+                mode.reply_result(&key, outcome);
+            }
+            UiInput::KillResult { key, outcome } => {
+                mode.kill_result(&key, outcome);
             }
             _ => {}
         }
@@ -1265,7 +1414,7 @@ async fn run_agents_view_surface(
     }
     // A handoff returns the roster connection for the flow's next view run
     // (TS `persistentState.rosterClient`); a selection-less exit closes it.
-    let link = if opened.is_some() || mode.new_session {
+    let link = if opened.is_some() {
         // The handoff link carries the catalog the run loaded (TS
         // `persistentState.savedSessions`/`savedCatalogLoaded`): the flow's
         // next view run paints the Inactive rows it already holds on its
@@ -1283,10 +1432,7 @@ async fn run_agents_view_surface(
     Ok(AgentsViewRun {
         link,
         outcome: AgentsViewOutcome {
-            selection: opened
-                .as_ref()
-                .map(|row| row.selection.clone())
-                .or(mode.new_session.then_some(SessionSelection::New)),
+            selection: opened.as_ref().map(|row| row.selection.clone()),
             frames,
             query: (!mode.query.is_empty()).then(|| mode.query.clone()),
             scope_popped: mode.scope_popped,
@@ -1339,6 +1485,10 @@ fn is_daemon_answer(input: &UiInput) -> bool {
             | UiInput::SavedFailed { .. }
             | UiInput::DeleteResult { .. }
             | UiInput::RenameResult { .. }
+            | UiInput::HeadlineResult { .. }
+            | UiInput::ReplyProgress(_)
+            | UiInput::ReplyResult { .. }
+            | UiInput::KillResult { .. }
     )
 }
 

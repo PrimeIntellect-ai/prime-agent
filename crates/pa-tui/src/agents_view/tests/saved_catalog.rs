@@ -28,7 +28,7 @@ fn streamed_catalog_rows_land_progressively_and_settle_the_anchor() {
         mode.opened.is_some(),
         "the anchor opens without waiting for the scan's end"
     );
-    assert_ne!(mode.status.as_deref(), Some(ANCHOR_LOADING_HINT));
+    assert_ne!(mode.status_text(), Some(ANCHOR_LOADING_HINT));
 }
 
 /// The streamed upsert never duplicates: a row re-streamed by a

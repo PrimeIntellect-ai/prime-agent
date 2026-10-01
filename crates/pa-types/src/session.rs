@@ -85,7 +85,7 @@ pub struct BashExecutionMessage {
     pub exclude_from_context: Option<bool>,
 }
 
-/// `role: "custom"`: extension/bookkeeping message with a `customType` tag.
+/// `role: "custom"`: bookkeeping message with a `customType` tag.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomMessage {
@@ -225,7 +225,7 @@ pub struct BranchSummaryEntry {
     pub usage: Option<Usage>,
 }
 
-/// `type: "custom"`: opaque extension data with a `customType` tag.
+/// `type: "custom"`: opaque custom data with a `customType` tag.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomEntry {

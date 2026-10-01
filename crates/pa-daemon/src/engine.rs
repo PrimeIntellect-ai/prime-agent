@@ -74,23 +74,25 @@ pub trait SessionEngine: Send + Sync {
     /// fires this best-effort from its park arm once the worker core
     /// proved the parent-owned, unattached, unqueued idle state;
     /// engines that cannot release (scripted harness engines, engines
-    /// without a kernel or with unsettled descendants or registered
-    /// scheduled jobs) no-op and the child stays resident.
+    /// without a kernel, or engines whose settled gates fail) no-op
+    /// and the child stays resident.
     fn release_settled_child_kernel(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         Box::pin(std::future::ready(()))
     }
 
-    /// Whether the settled-child passivation gates pass (TS #2483's
-    /// `canPassivateSettledSession` minus the release itself): no
-    /// unsettled RLM descendants and no registered active-or-paused
-    /// scheduled job. The whole-worker idle passivation (the
-    /// `idleEvictionMinutes` consumer) re-checks these engine-side gates
-    /// before asking the supervisor for the graceful stop. The default
-    /// `false` keeps scripted harness engines and kernel-less embeddings
-    /// resident — the same conservative arm as the release default.
-    fn can_passivate_settled_session(
+    /// Whether the whole-worker idle passivation gates pass (the
+    /// `idleEvictionMinutes` consumer re-checks them before asking the
+    /// supervisor for the graceful stop): the engine's settled gates
+    /// plus an empty RLM child registry. The registry rule holds
+    /// because the port does not rebuild a revived session's subagent
+    /// registry from the spawn ledger (TS `listPassiveRlmSubagents`
+    /// does), so the stop would discard state the revival cannot
+    /// restore. The default `false` keeps scripted harness engines and
+    /// kernel-less embeddings resident — the same conservative arm as
+    /// the release default.
+    fn can_passivate_worker(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
         Box::pin(std::future::ready(false))
@@ -542,10 +544,9 @@ pub trait SessionEngine: Send + Sync {
     }
 
     /// The connection-surface command catalog (TS
-    /// `createAgentConnectionCommands`): extension commands, prompt
-    /// templates, then skills. The core session and the extension
-    /// registry lock are async, so the engine answers through a boxed
-    /// future. Engines without a resource surface report none.
+    /// `createAgentConnectionCommands`): prompt templates, then skills.
+    /// The core session lock is async, so the engine answers through a
+    /// boxed future. Engines without a resource surface report none.
     fn connection_commands(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Value>> + Send + '_>> {
@@ -554,10 +555,9 @@ pub trait SessionEngine: Send + Sync {
 
     /// The connection resource snapshot (TS
     /// `createAgentConnectionResourceSnapshot`): context files, skills,
-    /// prompts, extensions, and their diagnostics. The core session and
-    /// the extension registry lock are async, so the engine answers
-    /// through a boxed future. Engines without a resource surface report
-    /// the empty snapshot.
+    /// prompts, and their diagnostics. The core session lock is async,
+    /// so the engine answers through a boxed future. Engines without a
+    /// resource surface report the empty snapshot.
     fn resource_snapshot(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send + '_>> {

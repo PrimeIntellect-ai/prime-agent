@@ -5,9 +5,10 @@
 //! (moved with their concern).
 use super::{
     build_rows, compute_rollups, filter_empty_sessions, filter_unified_sessions,
-    parse_search_query, reconcile_unified_sessions, resolve_selection, scope_ancestors,
-    scope_depth, scope_to_subtree, AgentsViewMode, AgentsViewScope, Composer, PressedMouseClick,
-    RowKind, SelectionEdge, Value, ANCHOR_LOADING_HINT,
+    parse_search_query, reconcile_unified_sessions, resolve_selection, scope_ancestors, scope_root,
+    scope_to_subtree, AgentsViewMode, AgentsViewScope, Composer, OpenedRow, PathBuf,
+    PressedMouseClick, RowKind, ScopeRoot, SelectionEdge, SelectionKey, SessionSelection, Value,
+    ANCHOR_LOADING_HINT,
 };
 
 impl AgentsViewMode {
@@ -34,14 +35,12 @@ impl AgentsViewMode {
             Some(scope) if !self.scope_dropped => {
                 if let Some(scoped) = scope_to_subtree(&records, scope) {
                     scope_active = true;
-                    self.scope_depth = scope_depth(&records, scope);
+                    self.scope_root = scope_root(&records, scope);
                     Some(scoped)
                 } else {
-                    self.scope_depth = None;
+                    self.scope_root = None;
                     self.scope_dropped = true;
-                    self.status = Some(
-                        "Scope is no longer available; returned to the global view".to_string(),
-                    );
+                    self.set_status("Scope is no longer available; returned to the global view");
                     None
                 }
             }
@@ -258,6 +257,9 @@ impl AgentsViewMode {
         let next = (current as isize + delta).clamp(0, selectable.len() as isize - 1) as usize;
         self.selected = selectable[next];
         self.sync_selected_row_state();
+        // TS `moveSelection` (:1487-1493): the reply stays armed only
+        // while the selection sits on the targeted agent row.
+        self.disarm_reply_off_selected();
     }
 
     /// Jump the selection to the first or last selectable row
@@ -281,6 +283,9 @@ impl AgentsViewMode {
         }
         .unwrap_or(0);
         self.sync_selected_row_state();
+        // The list-edge jumps are moves like TS's `moveSelection`: the
+        // reply disarms when the selection leaves the targeted row.
+        self.disarm_reply_off_selected();
     }
 
     /// Open the selected row (TS `openSelected`): the summary row toggles
@@ -405,7 +410,7 @@ impl AgentsViewMode {
     /// catalog-failure message included — instead of a stale loading
     /// message.
     pub(super) fn clear_anchor_loading_hint(&mut self) {
-        if self.status.as_deref() == Some(ANCHOR_LOADING_HINT) {
+        if self.status_text() == Some(ANCHOR_LOADING_HINT) {
             self.status = None;
         }
     }
@@ -424,6 +429,9 @@ impl AgentsViewMode {
     /// `keybindings.json` override moves both the handler and the hint —
     /// the same contract as the session view (#184).
     pub(super) fn handle_key(&mut self, key: &str) {
+        // TS `handleInput`'s first call: a sticky line clears on any
+        // keypress (the transient lines ride their own expiry).
+        self.clear_sticky_status();
         let was_armed = self.exit_armed;
         // The notice panel: any key closes it (the refusal's ways out
         // stay copy-pasteable while it is up), except the exit key,
@@ -441,12 +449,20 @@ impl AgentsViewMode {
         self.exit_armed = false;
         let was_delete_armed = self.pending_delete.take();
         let has_query = !self.query.is_empty();
-        // TS `handleInput`'s rename branch (:1119-1126): the rename
-        // composer owns every key before the app-level handlers. The
-        // draft comes out owned; a non-rename composer parks Search.
-        if let Composer::Rename(rename) = std::mem::replace(&mut self.composer, Composer::Search) {
-            self.handle_rename_key(rename, key);
-            return;
+        // TS `handleInput`'s composer branches (:1119-1126 and the
+        // armed-reply gates before `editor.handleInput`): the armed
+        // composer owns every key before the app-level handlers — the
+        // draft comes out owned, and an unarmed Search parks nothing.
+        match std::mem::replace(&mut self.composer, Composer::Search) {
+            Composer::Rename(rename) => {
+                self.handle_rename_key(rename, key);
+                return;
+            }
+            Composer::Reply(reply) => {
+                self.handle_reply_key(reply, was_delete_armed, key);
+                return;
+            }
+            Composer::Search => {}
         }
         // TS `app.clear` (default ctrl+c): the first press arms the exit
         // hint, a second press while armed exits the view (TS
@@ -494,31 +510,54 @@ impl AgentsViewMode {
         // `hasLiveWork`), the second press on the same row executes, and
         // any other key clears the arm.
         if !has_query && self.keybindings.matches(key, "app.agents.delete") {
-            if was_delete_armed.as_ref().is_some_and(|pending| {
-                self.rows.get(self.selected).is_some_and(|row| {
-                    row.identity == pending.identity
-                        // The armed word must still match the row's live
-                        // work: a row that settled between the presses
-                        // (running -> idle) re-arms rather than executing
-                        // the stale word (the hint said stop; the row now
-                        // deletes - the confirm rides the CURRENT state).
-                        && Self::delete_arm_word(row) == pending.stop
-                })
-            }) {
-                if let Some(action) = self.delete_action_for_selected() {
-                    self.pending_delete_action = Some(action);
-                }
-            } else if let Some(pending) = self.delete_arm_target() {
-                self.pending_delete = Some(pending);
-            }
+            self.confirm_delete_for_selected(was_delete_armed);
+            return;
+        }
+        // TS `app.agents.reply` (default space, empty editor only —
+        // TS :1164): arm the reply composer over the selected agent row;
+        // the same target disarms. A space with a query is search text.
+        if !has_query && self.keybindings.matches(key, "app.agents.reply") {
+            self.toggle_reply();
             return;
         }
         // TS `app.agents.new` (default ctrl+n): start a session; a plain
-        // "n" is search text like any other character.
+        // "n" is search text like any other character. Scoped (the
+        // operator's 2026-09-28 directive, a deliberate TS divergence -
+        // TS always starts a root session): the session starts under the
+        // scope root, one level below it and in its directory, so it
+        // lists in this view and the agents-back return lands here. A
+        // root with no session file (a `--no-session` root) has nothing
+        // to bind and starts a root session.
         if self.keybindings.matches(key, "app.agents.new") {
-            self.opened = None;
+            let (selection, rlm_depth, cwd) = match self.scope_root.clone() {
+                Some(ScopeRoot {
+                    child_depth,
+                    session_file: Some(file),
+                    cwd,
+                }) => (
+                    SessionSelection::NewChild {
+                        parent_session_file: PathBuf::from(file),
+                        rlm_depth: child_depth,
+                    },
+                    Some(child_depth),
+                    cwd,
+                ),
+                Some(ScopeRoot {
+                    session_file: None, ..
+                })
+                | None => (SessionSelection::New, None, None),
+            };
+            self.opened = Some(OpenedRow {
+                selection,
+                expanded_ancestors: Vec::new(),
+                selected_row_identity: String::new(),
+                selected_key: SelectionKey::default(),
+                rlm_depth,
+                has_children: false,
+                status_message: None,
+                cwd,
+            });
             self.running = false;
-            self.new_session = true;
             return;
         }
         // TS `app.agents.program` (default ctrl+o, empty editor only,
@@ -638,10 +677,49 @@ impl AgentsViewMode {
             self.rebuild_rows();
             return;
         }
-        if key.chars().count() == 1 {
-            self.query.push_str(key);
+        // The printable decode the editor uses (`decode_printable`):
+        // the space arrives as the `space` key id (TS parseKey maps the
+        // raw space there), and the shift+letter ids decode to their
+        // characters.
+        if let Some(text) = crate::editor::decode_printable(key) {
+            self.query.push_str(&text);
             self.note_query_changed();
             self.rebuild_rows();
+        }
+    }
+
+    /// Materialize the armed composer's parked suggestion request (TS's
+    /// editor contract: `getSuggestions` resolves after the keystroke
+    /// batch, so the host materializes it — the chat's
+    /// `materialize_editor_autocomplete`). The search field and the
+    /// provider-less editors park nothing.
+    pub(super) fn materialize_composer_autocomplete(&mut self) {
+        match &mut self.composer {
+            Composer::Search => {}
+            Composer::Rename(rename) => rename.editor.materialize_autocomplete(),
+            Composer::Reply(reply) => reply.editor.materialize_autocomplete(),
+        }
+    }
+
+    /// One paste (bracketed, or the paste-aware reader's coalesced
+    /// marker-less burst — tmux ≤3.2 forwards pastes without markers,
+    /// and Enter submits in the composers, so a burst typed line by
+    /// line would submit per line): the armed composer's editor takes
+    /// it through TS's paste path (inline, or an atomic marker for a
+    /// large one); the search field ignores it, exactly as before.
+    pub(super) fn handle_paste(&mut self, text: &str) {
+        match std::mem::replace(&mut self.composer, Composer::Search) {
+            Composer::Search => {}
+            Composer::Rename(mut rename) => {
+                rename.editor.handle_paste(text);
+                let _ = rename.editor.take_events();
+                self.composer = Composer::Rename(rename);
+            }
+            Composer::Reply(mut reply) => {
+                reply.editor.handle_paste(text);
+                let _ = reply.editor.take_events();
+                self.composer = Composer::Reply(reply);
+            }
         }
     }
 
@@ -738,6 +816,11 @@ impl AgentsViewMode {
         self.anchor_selection_pending = false;
         self.clear_anchor_loading_hint();
         self.sync_selected_row_state();
+        // The click moves the selection like a direction key, so the
+        // keyboard rule applies before the open: a toggle-click (a
+        // subagent summary or code row) stays in the view, and the
+        // composer never stays armed against a row the highlight left.
+        self.disarm_reply_off_selected();
         self.open_selected();
     }
 }

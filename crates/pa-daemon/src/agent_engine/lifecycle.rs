@@ -1141,9 +1141,6 @@ impl AgentSessionEngine {
             }),
             rlm_depth: Some(self.rlm_depth.load(std::sync::atomic::Ordering::Relaxed)),
             model_info: Some(model.clone()),
-            // Without `-e`/`--tools` flags, sessions load configured/discovered extensions only.
-            cli_extension_sources: create_resources.extensions,
-            extension_tool_allow_list: create_resources.tools,
             // TS main.ts `createDefaultRuntimeFactory` passes
             // `prewarmIpythonKernel: true` for every session it hosts; the
             // engine's depth gate keeps subagent workers (rlmDepth > 0) on

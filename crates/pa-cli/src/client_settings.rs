@@ -279,5 +279,8 @@ mod tests {
             std::fs::read_to_string(agent_dir.join("settings.json")).expect("settings file");
         let value: serde_json::Value = serde_json::from_str(&content).expect("parse");
         assert_eq!(value["updateChannel"], "stable");
+        // ...and the /nightly on path's.
+        settings.set_update_channel("nightly").expect("channel");
+        assert_eq!(settings.update_channel().as_deref(), Some("nightly"));
     }
 }

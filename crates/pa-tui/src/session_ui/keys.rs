@@ -456,8 +456,8 @@ impl SessionUi {
         if view.fork_selector.is_some() {
             return self.handle_fork_selector_key(key, view).await;
         }
-        // A pending extension confirm owns the frame the same way (TS
-        // `showExtensionConfirm` mounts its selector over the prompt).
+        // A pending confirm owns the frame the same way (TS mounts its
+        // selector over the prompt).
         if view.confirm.is_some() {
             return self.handle_confirm_key(key, view).await;
         }

@@ -47,7 +47,6 @@ pub enum ToolCategory {
     Ls,
     Ipython,
     Mcp,
-    Extension,
     Custom,
     Unknown,
 }
@@ -68,7 +67,6 @@ impl ToolCategory {
             "ls" => Self::Ls,
             "ipython" => Self::Ipython,
             "mcp" => Self::Mcp,
-            "extension" => Self::Extension,
             "" => Self::Unknown,
             _ => Self::Custom,
         }
@@ -85,7 +83,6 @@ impl ToolCategory {
             Self::Ls => "ls",
             Self::Ipython => "ipython",
             Self::Mcp => "mcp",
-            Self::Extension => "extension",
             Self::Custom => "custom",
             Self::Unknown => "unknown",
         }
