@@ -291,6 +291,7 @@ impl SessionFile {
                 forked.adopt_entry(entry);
             }
         }
+        forked.hydrate_anthropic_warning_flag();
         forked.rewrite().context("write forked session file")?;
         Ok(forked)
     }
@@ -371,6 +372,9 @@ impl SessionFile {
                 self.adopt_entry(entry);
             }
         }
+        // The kept path decides the gate from here on (the in-memory fork
+        // IS the new session; its entries are the new session's rows).
+        self.hydrate_anthropic_warning_flag();
         Ok(())
     }
 }
@@ -576,6 +580,53 @@ mod tests {
         assert_eq!(store.entries().len(), 2);
         assert_eq!(store.leaf_id(), Some(b.as_str()));
         let _ = a;
+    }
+
+    /// The Anthropic subscription warning's gate on the fork arms
+    /// (operator directive 2026-09-29): a fork builds its store by
+    /// ADOPTING the copied rows, so its live gate must agree with its own
+    /// file — a fork whose kept path carries the marker answers open (its
+    /// first open draws no second warning), and a fork cut ABOVE the
+    /// marker (the genuinely-new-session case) answers closed.
+    #[test]
+    fn forked_stores_hydrate_the_warning_gate_from_their_own_rows() {
+        let (dir, mut store) = temp_store();
+        let a = message_entry(&mut store, "user", "first");
+        let _ = a;
+        // The marker row, on the session's chain.
+        store.mark_anthropic_warning_shown().expect("mark the gate");
+        let b = message_entry(&mut store, "assistant", "after the marker");
+        assert!(
+            store.anthropic_warning_shown(),
+            "the live store serves its marked gate"
+        );
+
+        // The file-backed fork BELOW the marker: the marker rides the kept
+        // path, so the fork's own file answers open.
+        let forked = store.create_branched_file(&b, dir.path()).unwrap();
+        assert!(
+            forked.anthropic_warning_shown(),
+            "the fork of a marked path serves the gate its rows carry"
+        );
+        let text = std::fs::read_to_string(&forked.path).unwrap();
+        assert!(
+            text.contains("anthropic_subscription_warning_shown"),
+            "the forked file carries the marker row: {text}"
+        );
+
+        // The in-memory fork below the marker serves the same answer.
+        let mut in_memory = store.clone();
+        in_memory.replace_with_branch(Some(&b)).unwrap();
+        assert!(in_memory.anthropic_warning_shown());
+
+        // The fork cut ABOVE the marker is a genuinely new session: the
+        // kept path carries no marker row, and the gate closes.
+        let a = store.entries()[0].id.clone();
+        let forked_above = store.create_branched_file(&a, dir.path()).unwrap();
+        assert!(
+            !forked_above.anthropic_warning_shown(),
+            "a fork cut above the marker answers closed"
+        );
     }
 
     #[test]

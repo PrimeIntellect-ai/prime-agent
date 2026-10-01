@@ -2,6 +2,7 @@
 //! streamed and windowed opens, the bounded header-only readers, the
 //! file-layout helpers, and the in-memory create.
 
+use super::view::is_warning_shown_row;
 use super::{
     anyhow, fold_child_usage_attributions, fs, message_text, BufRead, Context, HashMap, Map, Path,
     PathBuf, Read, Result, SessionEntry, SessionFile, SessionHeader, SessionWindow, Value,
@@ -168,6 +169,7 @@ impl SessionFile {
             leaf_id: None,
             window: None,
             lease: None,
+            anthropic_warning_shown: false,
         };
         for line in lines {
             let line = line.with_context(read_context)?;
@@ -181,6 +183,12 @@ impl SessionFile {
             }
         }
         fold_child_usage_attributions(&mut file.entries);
+        // The once-per-lifecycle gate rides the ACTIVE branch, exactly
+        // like the windowed walk below: a marker on an abandoned or
+        // sibling branch never suppresses the warning for the open leaf
+        // (fail-open — an off-path marker must not hide the warning on a
+        // branch that never showed it).
+        file.anthropic_warning_shown = file.branch().iter().copied().any(is_warning_shown_row);
         Ok(file)
     }
 
@@ -203,6 +211,10 @@ impl SessionFile {
                 _ => None,
             })
             .ok_or_else(|| anyhow!("window has no session header"))?;
+        // The window's walk already hydrated the once-per-session-lifecycle
+        // warning gate from the whole active branch (the row may sit in the
+        // discarded prefix, far outside this store's retained rows).
+        let anthropic_warning_shown = window.anthropic_warning_shown();
         let mut file = Self {
             path: path.to_owned(),
             header,
@@ -211,6 +223,7 @@ impl SessionFile {
             leaf_id: None,
             window: None,
             lease: None,
+            anthropic_warning_shown,
         };
         // The raw rows are consumed in place: each line String drops as
         // soon as its parsed entry joins the store, instead of keeping the
@@ -281,6 +294,11 @@ impl SessionFile {
         }
         full.leaf_id.clone_from(&self.leaf_id);
         full.lease.clone_from(&self.lease);
+        // The merged store's leaf is the window's leaf: re-derive the gate
+        // from the merged ACTIVE branch — the full open's own-leaf answer
+        // can disagree, a post-snapshot marker must hydrate, and an
+        // off-path one must not (the full scan never wins here).
+        full.anthropic_warning_shown = full.branch().iter().copied().any(is_warning_shown_row);
         *self = full;
     }
 
@@ -304,6 +322,7 @@ impl SessionFile {
             leaf_id: None,
             window: None,
             lease: None,
+            anthropic_warning_shown: false,
         }
     }
 }

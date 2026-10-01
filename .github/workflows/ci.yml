@@ -235,10 +235,13 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cache-on-failure: true
-          # Per-shard caches (the default key carries the job id, which is
-          # identical for all matrix legs); parallel legs would otherwise
-          # race onto one cache entry and only the first save would stick.
-          shared-key: shard-${{ matrix.shard }}
+          # One shared dependency cache for all legs: every shard compiles
+          # the same dependency set, so per-shard keys held 8x ~500 MB per
+          # ref and evicted the release-build caches (the repo sits at the
+          # 10 GB Actions-cache quota; the shards were 83% of it). Parallel
+          # legs race on the single entry and only the first save sticks,
+          # which is fine: the content is the pruned dependency tree.
+          shared-key: test-shards
       - name: Install uv (the kernel tests bootstrap the Python kernel venv with it)
         run: |
           python3 -m pip install --user uv

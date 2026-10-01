@@ -569,7 +569,14 @@ fn scoped_rows_lift_direct_children_and_exclude_the_root() {
     // The scope's ancestors: the root has none; its depth label is
     // rlmDepth + 1.
     assert!(scope_ancestors(&records, &scope).is_empty());
-    assert_eq!(scope_depth(&records, &scope), Some(1));
+    assert_eq!(
+        scope_root(&records, &scope),
+        Some(ScopeRoot {
+            child_depth: 1,
+            session_file: Some("/x/p.jsonl".to_string()),
+            cwd: None,
+        })
+    );
     assert!(has_session_children(
         &records,
         &SelectionKey {
@@ -577,6 +584,33 @@ fn scoped_rows_lift_direct_children_and_exclude_the_root() {
             active_session_id: Some("p-live".to_string()),
         }
     ));
+}
+
+/// A `--no-session` root's live summary publishes an empty `sessionFile`
+/// (the daemon's in-memory store maps its empty path unconditionally):
+/// the scope root reads it as absent, so ctrl+n falls back to a plain new
+/// root session instead of binding to an empty path.
+#[test]
+fn a_root_with_an_empty_session_file_binds_nothing() {
+    let roster = vec![roster_entry("p", "idle", &{
+        let mut summary = parent_summary("p");
+        summary["sessionFile"] = json!("");
+        summary
+    })];
+    let scope = AgentsViewScope {
+        session_id: Some("p".to_string()),
+        active_session_id: Some("p-live".to_string()),
+        session_name: None,
+    };
+    let records = reconcile_unified_sessions(&roster, &[]);
+    assert_eq!(
+        scope_root(&records, &scope),
+        Some(ScopeRoot {
+            child_depth: 1,
+            session_file: None,
+            cwd: None,
+        })
+    );
 }
 
 #[test]

@@ -1,5 +1,5 @@
 //! Golden differential tests: replay the corpus recorded from the REAL
-//! TypeScript tools (see `tests/golden/harness.mjs`) against the Rust port
+//! TypeScript tools (frozen in `tests/golden/corpus/`) against the Rust port
 //! and assert identical model-facing output.
 //!
 //! Corpus cases cover fuzzy edits, file-not-found, bash timeouts and
@@ -30,7 +30,7 @@ fn corpus(name: &str) -> serde_json::Value {
     serde_json::from_str(&std::fs::read_to_string(path).expect("corpus file")).expect("corpus JSON")
 }
 
-/// Normalize temp paths the same way harness.mjs does.
+/// Normalize temp paths to the forms the recorded corpus uses.
 fn norm_string(s: &str, tmp: &str) -> String {
     let out = s.replace(&format!("{tmp}/"), "<TMP>/");
     let re = regex_lite("golden-[A-Za-z0-9_]{6}");
@@ -127,7 +127,7 @@ async fn golden_edit_group_matches_ts() {
         let mut input = case["input"].clone();
         if case["applyPrepareArguments"].as_bool().unwrap_or(false) {
             input = crate::tools::edit::prepare_edit_arguments(input);
-            // The TS harness records the prepared input for such cases.
+            // The TS harness recorded the prepared input for such cases.
             assert_json_eq(
                 &input.clone(),
                 &case["preparedInput"].clone(),

@@ -458,6 +458,8 @@ pub(crate) fn session_summary(
         model_fallback_message,
         runtime_kind: Some(core.runtime_kind.clone()),
         unfinished_action_count: Some(0),
+        anthropic_warning_shown: store
+            .map(crate::session_store::SessionFile::anthropic_warning_shown),
     }
 }
 
