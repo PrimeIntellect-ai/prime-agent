@@ -502,15 +502,29 @@ async fn child_usage_attributed_event_shape() {
     assert!((events[0]["cost"].as_f64().unwrap() - 0.008_995_7).abs() < 1e-9);
 }
 
-/// `build_client`: settings-provided `PostHog` endpoint + the local mirror.
+/// `build_client` reuses the installation id a TS install wrote to
+/// `telemetry.json` (one user across both products) and mirrors events to
+/// the local JSONL file under that id.
 #[tokio::test]
-async fn build_client_resolves_settings_posthog_and_mirror() {
+async fn build_client_reuses_the_ts_installation_id_and_mirrors() {
     let dir = tempfile::tempdir().unwrap();
-    let settings = crate::settings::SettingsManager::create(dir.path(), dir.path().join("agent"));
-    // FileSink writes to the agent dir regardless of the PostHog sink.
-    let client = build_client(&settings, &dir.path().join("agent"));
-    assert!(!client.install_id().is_empty());
-    assert_eq!(client.dropped_count(), 0);
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let ts_id = "6f1c2b3a-4d5e-4f60-8a7b-9c0d1e2f3a4b";
+    std::fs::write(
+        agent_dir.join("telemetry.json"),
+        format!("{{\n  \"version\": 1,\n  \"installationId\": \"{ts_id}\"\n}}"),
+    )
+    .unwrap();
+    let settings = crate::settings::SettingsManager::create(dir.path(), &agent_dir);
+    let client = build_client(&settings, &agent_dir);
+    assert_eq!(client.install_id(), ts_id);
+    client.track("agent started", base_properties("interactive"));
+    client.flush().await.unwrap();
+    let mirror = std::fs::read_to_string(agent_dir.join("telemetry.jsonl")).unwrap();
+    let line: serde_json::Value = serde_json::from_str(mirror.lines().next().unwrap()).unwrap();
+    assert_eq!(line["distinct_id"], ts_id);
+    assert_eq!(line["name"], "agent started");
 }
 
 /// Two runs in one session: totals merge, per-run events separate.

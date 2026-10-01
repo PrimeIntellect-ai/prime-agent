@@ -28,7 +28,6 @@ mod client;
 mod env;
 mod event;
 mod events;
-mod flags;
 mod install_id;
 mod platform;
 mod properties;
@@ -59,13 +58,12 @@ pub use events::{
     AgentStartupStage, AgentTiming, AgentToolSummary, ErrorEventKind, OnboardingStage, RunTrigger,
     TimingStage, ToolCategory,
 };
-pub use flags::{FlagsClient, FLAG_CACHE_TTL};
 pub use install_id::install_id;
 pub use platform::{base_properties, SCHEMA_VERSION};
 pub use properties::Properties;
 pub use rename::rename_onto;
 pub use sink::{SinkOutcome, TelemetrySink};
-pub use sinks::{FileSink, MockSink, NoopSink, PostHogEndpoint, PostHogSink, RecordedBatch};
+pub use sinks::{AnalyticsSink, FileSink, MockSink, NoopSink, RecordedBatch, ANALYTICS_ENDPOINT};
 
 #[cfg(test)]
 mod tests {

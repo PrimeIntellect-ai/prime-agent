@@ -116,7 +116,7 @@ pub enum SessionSelection {
 }
 
 /// Cap on the exit-path telemetry flush (the `tui exit` event's bound):
-/// the `PostHog` sink alone allows up to 1.5s, so an exit-path event is
+/// the analytics sink alone allows up to 1.5s, so an exit-path event is
 /// dropped rather than awaited past the exit-within-1s contract. The
 /// interactive loop and the composition root's exit paths share this one
 /// bound.

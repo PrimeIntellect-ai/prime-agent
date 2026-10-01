@@ -1064,12 +1064,12 @@ fn stop_reason(last_assistant: Option<&AssistantMessage>) -> &'static str {
 }
 
 /// Build the product telemetry client from settings (opt-in already
-/// resolved by the caller): `PostHog` sink when endpoint+key are configured
-/// (env `PRIME_AGENT_TELEMETRY_ENDPOINT`/`_API_KEY` override settings
-/// `telemetry.posthog.*`), the no-op sink when they are not (the operator
-/// supplies values at deploy time), plus the local JSONL transparency
-/// mirror (default on, `telemetry.localMirror` disables it). Never fails:
-/// a broken install id falls back to a no-op client (TS parity — capture
+/// resolved by the caller): the Prime Intellect analytics sink (the TS
+/// endpoint and wire format) plus the local JSONL transparency mirror
+/// (default on, `telemetry.localMirror` disables it). Debug builds (every
+/// `cargo test`, every dev run) install no analytics sink, so tests and
+/// local development never reach production analytics. Never fails: a
+/// broken install id falls back to a no-op client (TS parity: capture
 /// disables itself when the installation identity cannot be created).
 pub fn build_client(
     settings: &crate::settings::SettingsManager,
@@ -1081,13 +1081,10 @@ pub fn build_client(
         Ok(id) => {
             config.install_id = id;
             let mut sinks: Vec<Arc<dyn pa_telemetry::TelemetrySink>> = Vec::new();
-            let endpoint = posthog_endpoint(settings);
-            if let Some(endpoint) = endpoint {
-                sinks.push(Arc::new(pa_telemetry::PostHogSink::new(&endpoint)));
-            } else {
-                // Empty configuration: events queue nowhere (no-op), the
-                // same posture an opt-out installs.
-                sinks.push(Arc::new(pa_telemetry::NoopSink));
+            if !cfg!(debug_assertions) {
+                sinks.push(Arc::new(pa_telemetry::AnalyticsSink::new(
+                    pa_telemetry::ANALYTICS_ENDPOINT,
+                )));
             }
             let local_mirror = settings
                 .settings()
@@ -1111,21 +1108,6 @@ pub fn build_client(
         tracing::warn!(error = %error, "telemetry worker unavailable; events will drop");
         TelemetryClient::inert()
     })
-}
-
-/// Env overrides first, then settings `telemetry.posthog`.
-fn posthog_endpoint(
-    settings: &crate::settings::SettingsManager,
-) -> Option<pa_telemetry::PostHogEndpoint> {
-    if let Some(endpoint) = pa_telemetry::PostHogEndpoint::from_env() {
-        return Some(endpoint);
-    }
-    let posthog = settings.settings().telemetry.as_ref()?.posthog.as_ref()?;
-    let (endpoint, api_key) = (posthog.endpoint.as_deref()?, posthog.api_key.as_deref()?);
-    if endpoint.trim().is_empty() || api_key.trim().is_empty() {
-        return None;
-    }
-    Some(pa_telemetry::PostHogEndpoint::new(endpoint, api_key))
 }
 
 fn uuid() -> String {

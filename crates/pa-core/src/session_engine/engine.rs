@@ -65,7 +65,7 @@ pub struct SessionEngineConfig {
     /// The full registry model (input modalities for `model.info`); the
     /// engine derives minimal facts from `model` when absent.
     pub model_info: Option<pa_types::ai::Model>,
-    /// Session telemetry wiring (`PostHog` client + execution mode). `None`
+    /// Session telemetry wiring (the telemetry client + execution mode). `None`
     /// (opt-out) installs nothing; non-depth-0 sessions never install.
     pub telemetry: Option<super::telemetry::TelemetryWiring>,
     /// The embedding's queued-goal-context purge (TS

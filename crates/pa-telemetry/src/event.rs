@@ -7,9 +7,13 @@ use crate::properties::Properties;
 use crate::time::EpochMs;
 
 /// A single telemetry event. Carries a stable event name and a
-/// primitive-only property map. Timestamps are captured at `track()` time.
+/// primitive-only property map. The id and timestamp are captured at
+/// `track()` time, so a retried batch re-sends the same ids (the analytics
+/// endpoint forwards the id as the `PostHog` event uuid, which dedupes).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TelemetryEvent {
+    /// Random uuid v4 per event.
+    pub id: String,
     /// Stable event name, e.g. `agent started`.
     pub name: String,
     /// Milliseconds since the Unix epoch at emission time.
@@ -22,6 +26,7 @@ impl TelemetryEvent {
     /// New event stamped with the current time.
     pub fn new(name: impl Into<String>, properties: Properties) -> Self {
         Self {
+            id: uuid::Uuid::new_v4().to_string(),
             name: name.into(),
             timestamp_ms: EpochMs::now().0,
             properties,
@@ -40,11 +45,13 @@ impl TelemetryEvent {
         serde_json::to_string(&self.to_value()).map_or(0, |text| text.len())
     }
 
-    /// The sink-facing object form: `{"name", "timestamp" (ISO-8601),
-    /// "properties"}`. Sinks lift fields from this shape into their wire
-    /// format (`PostHog` `event`/`timestamp`, JSONL mirror adds `distinct_id`).
+    /// The sink-facing object form: `{"id", "name", "timestamp" (ISO-8601),
+    /// "properties"}` - the analytics endpoint's event shape. Other sinks
+    /// lift fields from it (`PostHog` `event`/`timestamp`, JSONL mirror adds
+    /// `distinct_id`).
     pub(crate) fn to_value(&self) -> Value {
         json!({
+            "id": self.id,
             "name": self.name,
             "timestamp": self.timestamp_iso8601(),
             "properties": Value::Object(self.properties.to_map().clone()),

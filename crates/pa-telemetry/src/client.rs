@@ -80,8 +80,8 @@ struct Channel {
 /// Client configuration.
 #[derive(Clone)]
 pub struct TelemetryClientConfig {
-    /// Pseudonymous installation id (sink-side identity, e.g. `PostHog`
-    /// `distinct_id`). Load via [`crate::install_id`].
+    /// Pseudonymous installation id (the analytics body's
+    /// `installation_id`). Load via [`crate::install_id`].
     pub install_id: String,
     /// Base properties merged under every event's own properties
     /// (version, os, execution mode...).
@@ -781,11 +781,13 @@ mod tests {
             next_retry_at: None,
         };
         let fresh = TelemetryEvent {
+            id: "fresh-id".into(),
             name: "fresh".into(),
             timestamp_ms: now_epoch_ms_for_tests(),
             properties: Properties::new(),
         };
         let stale = TelemetryEvent {
+            id: "stale-id".into(),
             name: "stale".into(),
             timestamp_ms: now_epoch_ms_for_tests().saturating_sub(MAX_AGE.as_millis() as u64 + 1),
             properties: Properties::new(),
