@@ -6,6 +6,7 @@ use super::{
     SessionSelection, SessionUi, TreeSelector, TreeSelectorAction, UserMessageSelector,
     UserMessageSelectorAction, Value, UI_REQUEST_TIMEOUT_MS,
 };
+use pa_types::daemon::DaemonSessionLifecycle;
 
 impl SessionUi {
     // ------------------------------------------------------------------
@@ -538,7 +539,10 @@ pub(super) async fn create_session(
             config: Some(options.create_config()),
             telemetry_disabled: options.telemetry_disabled.filter(|disabled| *disabled),
             runtime_metadata: None,
-            lifecycle: None,
+            // TS `clientOwned: parsed.noSession`: only a noSession create is client-owned.
+            lifecycle: options
+                .no_session
+                .then_some(DaemonSessionLifecycle::ClientOwned),
             env: None,
             launch_env: None,
             rest: Map::default(),

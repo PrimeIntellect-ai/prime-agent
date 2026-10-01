@@ -471,10 +471,14 @@ impl TreeNavigation {
         let _ =
             tokio::task::spawn_blocking(move || crate::session_store::read_session_info(&primed))
                 .await;
-        {
+        let previous = {
             let mut core = self.core.lock().unwrap();
-            core.store = Some(forked);
-        }
+            core.store.replace(forked)
+        };
+        // The old store's lease release flushes the window and info
+        // sidecars (megabytes for a large session): off the core lock
+        // and the runtime.
+        let _ = tokio::task::spawn_blocking(move || drop(previous)).await;
         self.engine.set_session_file(new_path.clone());
         // TS re-restores the forked session's saved model at its runtime
         // recreation (`createRuntime` -> `createAgentSession`): the fork

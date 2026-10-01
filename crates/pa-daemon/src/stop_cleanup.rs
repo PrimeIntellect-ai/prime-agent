@@ -791,10 +791,9 @@ mod tests {
             .clone()
             .expect("the snapshot rides the edge");
         assert!((snapshot.cost - 0.06).abs() < 1e-9);
-        // While the transcript still exists its own archived row carries
-        // the spend — the bucket skips live files (the rollup sums the
-        // child row AND the parent bucket, so billing both would double
-        // the spend).
+        // A transcript directly in the sessions dir keeps its catalog
+        // row, so the bucket skips it (the rollup sums the row AND the
+        // parent bucket; billing both would double the spend).
         let live_bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
         let parent_key = canonical_session_path(&parent_file)
             .to_string_lossy()

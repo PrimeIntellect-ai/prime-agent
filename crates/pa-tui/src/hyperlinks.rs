@@ -93,8 +93,10 @@ pub fn resolve_link_href(token_href: &str) -> String {
 /// parsing percent-encodes on every parseable target in both products.
 /// The TS renderer shares the hole (its fragment and unparseable targets
 /// reach `hyperlink()` unsanitized); this is deliberate hardening past
-/// parity on an input class no battery covers.
-fn sanitize_control_bytes(target: String) -> String {
+/// parity on an input class no battery covers. The markdown URL bracket
+/// applies the same hardening to the destination it renders as visible
+/// text.
+pub(crate) fn sanitize_control_bytes(target: String) -> String {
     if !target
         .as_bytes()
         .iter()
