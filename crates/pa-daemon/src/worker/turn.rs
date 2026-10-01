@@ -15,7 +15,7 @@ pub(super) struct TurnRunner {
     /// The input-pause table (the admission gate holds queued input).
     pub(super) input_pauses: crate::session_input_pause::InputPauseTable,
     /// The prompt-admission registry: a queued admitted prompt commits
-    /// when its turn starts and clears when the turn settles.
+    /// at pickup and clears when the turn settles.
     pub(super) prompt_admissions: crate::prompt_admission::WorkerAdmissions,
     pub(super) work_notify: Arc<Notify>,
     pub(super) idle_notify: Arc<Notify>,
@@ -86,7 +86,20 @@ impl TurnRunner {
                     core.busy = false;
                     None
                 } else if core.steering.front().is_some() {
-                    let items = gather_delivery_batch(&mut core, Lane::Steering);
+                    let mut items = gather_delivery_batch(&mut core, Lane::Steering);
+                    // The queued admission commits at pickup, under the
+                    // core lock (TS commits it before its turn can
+                    // start): a cancellation that flipped it while it
+                    // sat queued drops its item here, so the cancelled
+                    // prompt never runs.
+                    items.retain(|item| {
+                        item.admission_id
+                            .as_deref()
+                            .is_none_or(|id| self.prompt_admissions.commit(id))
+                    });
+                    if items.is_empty() {
+                        continue;
+                    }
                     core.busy = true;
                     core.abort_requested = false;
                     core.retry_abort_requested = false;
@@ -95,7 +108,15 @@ impl TurnRunner {
                     core.running_tool_calls.clear();
                     Some(items)
                 } else if core.follow_up.front().is_some() {
-                    let items = gather_delivery_batch(&mut core, Lane::FollowUp);
+                    let mut items = gather_delivery_batch(&mut core, Lane::FollowUp);
+                    items.retain(|item| {
+                        item.admission_id
+                            .as_deref()
+                            .is_none_or(|id| self.prompt_admissions.commit(id))
+                    });
+                    if items.is_empty() {
+                        continue;
+                    }
                     core.busy = true;
                     core.abort_requested = false;
                     core.retry_abort_requested = false;
@@ -410,11 +431,6 @@ impl TurnRunner {
         let Some((first, batched)) = items.split_first() else {
             return;
         };
-        // An admitted prompt's turn started: its prompt admission commits
-        // (TS `commitAdmission`) — one per batched item, in delivery order.
-        for admission_id in items.iter().filter_map(|item| item.admission_id.as_ref()) {
-            self.prompt_admissions.commit(admission_id);
-        }
         self.emit_turn_event(json!({ "type": "agent_start" }));
         self.emit_turn_event(json!({ "type": "turn_start" }));
 

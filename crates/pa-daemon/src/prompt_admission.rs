@@ -534,7 +534,7 @@ impl Supervisor {
 
 /// The worker's admission registry: admission id -> status (the TS
 /// daemon-mode `promptAdmissions` map). Shared with the turn runner,
-/// which commits a queued admission when its turn starts.
+/// which commits a queued admission at pickup.
 #[derive(Default, Clone)]
 pub(crate) struct WorkerAdmissions {
     admissions: Arc<Mutex<HashMap<String, AdmissionStatus>>>,
@@ -552,16 +552,21 @@ impl WorkerAdmissions {
             .insert(admission_id.to_string(), AdmissionStatus::Waiting);
     }
 
-    /// The queued prompt's turn started: a waiting admission commits.
-    pub(crate) fn commit(&self, admission_id: &str) {
+    /// The queued prompt's pickup: a waiting admission commits. A
+    /// cancelled admission never commits — the runner drops its prompt
+    /// instead of running it. An unknown id stays a no-op.
+    pub(crate) fn commit(&self, admission_id: &str) -> bool {
         let mut admissions = self
             .admissions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(status) = admissions.get_mut(admission_id) {
-            if *status == AdmissionStatus::Waiting {
+        match admissions.get_mut(admission_id) {
+            Some(status @ AdmissionStatus::Waiting) => {
                 *status = AdmissionStatus::Owned;
+                true
             }
+            Some(AdmissionStatus::Cancelled) => false,
+            _ => true,
         }
     }
 

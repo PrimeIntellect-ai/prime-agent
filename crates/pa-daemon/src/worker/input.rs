@@ -67,7 +67,7 @@ impl Worker {
         }
         // The prompt-admission bookkeeping (wave b9): a prompt carrying an
         // admission id registers it worker-side; the queued item carries
-        // it so the turn runner commits the admission when its turn starts.
+        // it so the turn runner commits the admission at pickup.
         let admission_id = payload
             .get("admissionId")
             .and_then(Value::as_str)

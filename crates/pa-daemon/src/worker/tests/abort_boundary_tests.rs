@@ -540,7 +540,10 @@ async fn abort_and_clear_queue_suspends_plain_prompts() {
 
 /// `cancel_prompt_admission` with `cancelOwned` on a running prompt (TS
 /// `admission.controller?.abort()`): the worker answers `owned`, aborts
-/// the turn, and the settle clears the admission.
+/// the turn, and the settle clears the admission. A prompt cancelled
+/// while it sits queued behind that turn never runs: the runner commits
+/// its admission at pickup, under the core lock, and drops a cancelled
+/// admission's item instead of starting its turn.
 #[tokio::test]
 async fn cancel_owned_admission_aborts_the_running_prompt() {
     let dir = std::env::temp_dir().join(format!("pa-worker-cancel-owned-{}", uuid::Uuid::new_v4()));
@@ -590,6 +593,24 @@ async fn cancel_owned_admission_aborts_the_running_prompt() {
             break;
         }
     }
+    // The held turn keeps the session busy, so a second prompt queues
+    // behind it; flip its admission only — the cancel arm's status flip,
+    // before its lane drop — so it is still queued at the pickup.
+    let queued = worker
+        .dispatch(
+            "prompt",
+            &json!({
+                "activeSessionId": "cancel-owned-session",
+                "message": "queued behind the held turn",
+                "admissionId": "adm-2",
+            }),
+        )
+        .await;
+    assert!(queued.success, "queued prompt failed: {queued:?}");
+    assert_eq!(
+        worker.prompt_admissions.cancel("adm-2"),
+        Some(crate::prompt_admission::AdmissionStatus::Cancelled)
+    );
     let cancel = json!({
         "activeSessionId": "cancel-owned-session",
         "admissionId": "adm-1",
@@ -598,8 +619,14 @@ async fn cancel_owned_admission_aborts_the_running_prompt() {
     let owned = worker.dispatch("cancel_prompt_admission", &cancel).await;
     assert_eq!(owned.data, Some(json!({ "status": "owned" })), "{owned:?}");
     wait.await.unwrap();
+    let idle = worker.dispatch("wait_for_idle", &json!({})).await;
+    assert!(idle.success, "never went idle: {idle:?}");
     let messages = worker.dispatch("get_messages", &json!({})).await;
     let messages = serde_json::to_string(&messages.data).unwrap();
+    assert!(
+        !messages.contains("queued behind the held turn"),
+        "the cancelled admission's prompt ran: {messages}"
+    );
     assert!(
         !messages.contains("held reply"),
         "the turn ran to the end: {messages}"
