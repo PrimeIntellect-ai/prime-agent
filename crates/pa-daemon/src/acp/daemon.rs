@@ -797,8 +797,12 @@ async fn handle_session_prompt(
         input: pa_types::daemon::PromptInput {
             content: None,
             images: None,
-            streaming_behavior: None,
-            queue_if_busy: None,
+            // TS sends `followUp` + `queueIfBusy: true` on every ACP
+            // prompt (acp-mode.ts): a prompt carrying a streaming
+            // behavior is the worker's resume site for the post-abort
+            // queued-input suspension, so a prompt after a Stop runs.
+            streaming_behavior: Some(pa_types::daemon::StreamingBehavior::FollowUp),
+            queue_if_busy: Some(true),
             expand_prompt_templates: None,
             source: None,
             agent_message_id: None,
