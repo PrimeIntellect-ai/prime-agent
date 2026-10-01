@@ -253,6 +253,13 @@ impl Worker {
         let listener = bind_transport(&self.config.socket_path)
             .await
             .with_context(|| format!("bind worker socket {}", self.config.socket_path.display()))?;
+        // Capture the bound file's identity before anything can replace
+        // it (TS daemon-mode.ts:718, the listen callback, between the
+        // identity capture and `restrictDaemonSocketPath`): the exit
+        // cleanups compare against THIS value, never a fresh read, so a
+        // successor's file at the same path survives this worker's exit.
+        *self.bound_socket_identity.lock().unwrap() =
+            crate::socket::socket_identity(&self.config.socket_path);
         crate::socket::restrict_socket_path(&self.config.socket_path);
         loop {
             let stream = match listener.accept().await {
