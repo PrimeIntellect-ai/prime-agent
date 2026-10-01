@@ -384,9 +384,18 @@ fn settings_sink_completes_a_provisioned_home_without_touching_the_choice() {
 
 /// A flow that ran but did not complete reports `onboarding completed`
 /// with the `aborted` outcome (TS `runStartupOnboarding`'s `finally`), and
-/// a completed flow never reports a second, aborted outcome.
-#[tokio::test]
-async fn settings_sink_reports_an_aborted_flow_once() {
+/// a completed flow never reports a second, aborted outcome. Telemetry is
+/// on for this test (the repo's `cargo test` env opts out).
+#[test]
+fn settings_sink_reports_an_aborted_flow_once() {
+    crate::mode::tests::with_clean_telemetry_env(|| {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(report_an_aborted_flow_once());
+    });
+}
+
+async fn report_an_aborted_flow_once() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
@@ -407,13 +416,6 @@ async fn settings_sink_reports_an_aborted_flow_once() {
             api_key: None,
         },
     };
-    if crate::mode::telemetry_disabled(&pa_core::settings::SettingsManager::create(
-        dir.path(),
-        &agent_dir,
-    )) {
-        // An ambient opt-out (DO_NOT_TRACK in the test env) sends nothing.
-        return;
-    }
     sink.onboarding_incomplete("aborted");
     let mirror = agent_dir.join("telemetry.jsonl");
     let mut line = None;

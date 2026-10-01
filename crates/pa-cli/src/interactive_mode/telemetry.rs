@@ -304,8 +304,14 @@ mod tests {
 
     /// Interactions while telemetry is off never count, so a later
     /// `/telemetry on` cannot send them with `tui exit`.
-    #[tokio::test]
-    async fn interactions_while_off_never_count() {
+    #[test]
+    fn interactions_while_off_never_count() {
+        crate::mode::tests::with_clean_telemetry_env(|| {
+            futures::executor::block_on(count_interactions_while_off());
+        });
+    }
+
+    async fn count_interactions_while_off() {
         let dir = tempfile::TempDir::new().unwrap();
         let agent_dir = dir.path().join("agent");
         pa_core::settings::SettingsManager::create(dir.path(), &agent_dir)
@@ -317,8 +323,16 @@ mod tests {
             .input_stage(String::new(), "received", "ok", 5)
             .await;
         telemetry.hyperlinks_active(true).await;
+        {
+            let counters = telemetry.counters.lock().unwrap();
+            assert!(counters.counts.is_empty());
+            assert!(counters.flags.is_empty());
+        }
+        pa_core::settings::SettingsManager::create(dir.path(), dir.path().join("agent"))
+            .set_telemetry_enabled(true)
+            .unwrap();
+        telemetry.scroll_used("page", false).await;
         let counters = telemetry.counters.lock().unwrap();
-        assert!(counters.counts.is_empty());
-        assert!(counters.flags.is_empty());
+        assert_eq!(counters.counts.get("tui_scroll_count"), Some(&1));
     }
 }

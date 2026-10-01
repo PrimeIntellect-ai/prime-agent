@@ -23,7 +23,7 @@ impl Default for DaemonEventCounts {
     }
 }
 
-fn send_daemon_event_summary(client: &pa_telemetry::TelemetryClient, counts: DaemonEventCounts) {
+fn send_daemon_event_summary(client: &pa_telemetry::TelemetryClient, counts: &DaemonEventCounts) {
     pa_core::session_engine::telemetry::track_daemon_event_summary(
         client,
         counts.window_started.elapsed().as_millis() as u64,
@@ -110,7 +110,7 @@ impl Supervisor {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         update(&mut counts);
         if counts.window_started.elapsed() >= DAEMON_EVENT_SUMMARY_WINDOW {
-            send_daemon_event_summary(&client, std::mem::take(&mut *counts));
+            send_daemon_event_summary(&client, &std::mem::take(&mut *counts));
         }
     }
 
@@ -128,7 +128,7 @@ impl Supervisor {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
         if !counts.counts.is_empty() {
-            send_daemon_event_summary(&client, counts);
+            send_daemon_event_summary(&client, &counts);
         }
         let _ = client.shutdown().await;
     }
