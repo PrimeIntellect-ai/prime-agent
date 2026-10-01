@@ -28,6 +28,25 @@ pub fn set_new_process_group(command: &mut Command) {
     command.process_group(0);
 }
 
+/// Start the spawned child in a new session with no controlling terminal
+/// (`setsid`): the child cannot open `/dev/tty`, and job-control signals
+/// from the parent's terminal never reach it. A new process group alone
+/// is not enough: the group can still open the terminal, and a background
+/// read then stops it with SIGTTIN.
+#[cfg(unix)]
+pub fn set_new_session(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: the hook runs in the forked child before exec and only calls
+    // setsid(2), which is async-signal-safe.
+    unsafe {
+        command.pre_exec(|| {
+            nix::unistd::setsid()
+                .map(drop)
+                .map_err(std::io::Error::from)
+        });
+    }
+}
+
 /// Windows: the libuv mapping of Node `detached: true` on win32 -
 /// `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS`, plus `CREATE_NO_WINDOW`
 /// because every non-interactive spawn in the product is window-hidden
@@ -227,25 +246,37 @@ pub fn pid_exists(pid: u32) -> bool {
 
 /// The kernel-held process handle (`pidfd_open`): pins the exact process
 /// behind the pid, so a signal through it ([`pidfd_signal`]) reaches that
-/// process even if the numeric pid is recycled afterwards. `None` when
-/// the platform or kernel has no pidfd, or the process is already gone
-/// (the caller treats an unobtainable handle as never-signal: a missed
-/// stop is recoverable, a wrong one is not).
+/// process even if the numeric pid is recycled afterwards. The caller
+/// treats an unobtainable handle as never-signal: a missed stop is
+/// recoverable, a wrong one is not.
+///
+/// # Errors
+///
+/// Returns the open failure verbatim: `ESRCH` names a process that is
+/// already gone, `Unsupported` a platform with no pidfd arm.
 #[cfg(all(
     unix,
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
-#[must_use]
-pub fn open_pidfd(pid: u32) -> Option<i32> {
+pub fn open_pidfd(pid: u32) -> std::io::Result<i32> {
     // `SYS_pidfd_open`/`SYS_pidfd_send_signal` share their numbers across
     // x86_64 and aarch64 (the platforms this workspace ships) — Linux only:
     // pidfd is a Linux syscall family, and the macOS libc crate carries no
     // `SYS_pidfd_*` constants for the same cfg to compile against.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
-    (fd >= 0).then_some(fd as i32)
+    if fd < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(fd as i32)
+    }
 }
 
+/// No pidfd arm on this platform or kernel: the handle is unobtainable.
+///
+/// # Errors
+///
+/// Always `Unsupported`.
 #[cfg(all(
     unix,
     not(all(
@@ -253,14 +284,18 @@ pub fn open_pidfd(pid: u32) -> Option<i32> {
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))
 ))]
-pub fn open_pidfd(_pid: u32) -> Option<i32> {
-    None
+pub fn open_pidfd(_pid: u32) -> std::io::Result<i32> {
+    Err(std::io::ErrorKind::Unsupported.into())
 }
 
+/// No pidfd arm on this platform or kernel: the handle is unobtainable.
+///
+/// # Errors
+///
+/// Always `Unsupported`.
 #[cfg(not(unix))]
-#[must_use]
-pub fn open_pidfd(_pid: u32) -> Option<i32> {
-    None
+pub fn open_pidfd(_pid: u32) -> std::io::Result<i32> {
+    Err(std::io::ErrorKind::Unsupported.into())
 }
 
 /// Signal through the kernel-held handle (`pidfd_send_signal`): the
@@ -313,6 +348,160 @@ pub fn close_pidfd(fd: i32) {
     }
     #[cfg(not(unix))]
     let _ = fd;
+}
+
+/// Resolve once the process behind `pid` has exited, parked on the kernel's
+/// exit notification (Linux pidfd readability, macOS kqueue
+/// `EVFILT_PROC`/`NOTE_EXIT`), with no timer. A pid that names no process
+/// (already exited and reaped) resolves at once. The kernel handle pins
+/// the process instance, so a pid recycled after registration is never
+/// mistaken for it.
+///
+/// # Errors
+///
+/// The OS error when the watch cannot register (no pidfd, descriptor
+/// exhaustion, an unsupported platform); the caller owns its fallback.
+#[cfg(target_os = "linux")]
+pub async fn wait_for_exit(pid: u32) -> std::io::Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use tokio::io::{unix::AsyncFd, Interest};
+
+    let fd = match open_pidfd(pid) {
+        Ok(fd) => fd,
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    // SAFETY: `open_pidfd` returned a fresh descriptor this call owns
+    // (and closes on drop, on every path).
+    let fd = AsyncFd::with_interest(unsafe { OwnedFd::from_raw_fd(fd) }, Interest::READABLE)?;
+    // Every wake is confirmed by a zero-timeout poll (AsyncFd readiness
+    // can be spurious).
+    loop {
+        let mut ready = fd.readable().await?;
+        if let Ok(result) = ready.try_io(|fd| {
+            let mut probe = libc::pollfd {
+                fd: fd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: polls one descriptor this call owns, without
+            // blocking.
+            match unsafe { libc::poll(&raw mut probe, 1, 0) } {
+                1 => Ok(()),
+                0 => Err(std::io::ErrorKind::WouldBlock.into()),
+                _ => Err(std::io::Error::last_os_error()),
+            }
+        }) {
+            return result;
+        }
+    }
+}
+
+/// macOS: kqueue `EVFILT_PROC`/`NOTE_EXIT` on a pollable kqueue.
+///
+/// # Errors
+///
+/// The OS error when the watch cannot register; the caller owns its
+/// fallback.
+#[cfg(target_os = "macos")]
+pub async fn wait_for_exit(pid: u32) -> std::io::Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use tokio::io::{unix::AsyncFd, Interest};
+
+    // SAFETY: `kqueue()` takes no arguments.
+    let kq = unsafe { libc::kqueue() };
+    if kq < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: a fresh descriptor this call owns (and closes on drop, on
+    // every path).
+    let kq = unsafe { OwnedFd::from_raw_fd(kq) };
+    // The block drops the `kevent` value (its `udata` raw pointer is
+    // `!Send`) before the first `.await`.
+    {
+        let change = libc::kevent {
+            ident: pid as libc::uintptr_t,
+            filter: libc::EVFILT_PROC,
+            flags: libc::EV_ADD,
+            fflags: libc::NOTE_EXIT,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        // SAFETY: registers one change and reads no events; `change`
+        // outlives the call. With no event space, an attach failure comes
+        // back as -1/errno (kevent(2)), not an `EV_ERROR` event.
+        if unsafe {
+            libc::kevent(
+                kq.as_raw_fd(),
+                &raw const change,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        } < 0
+        {
+            // `ESRCH` means the pid names no attachable process (reaped,
+            // or already past its exit ref-drain - XNU runs the drain
+            // before the exit knote fires): the exit already happened.
+            // Every other errno (EMFILE, ENOMEM, ...) is a watch that
+            // could not register; the caller falls back.
+            let error = std::io::Error::last_os_error();
+            return match error.raw_os_error() {
+                Some(libc::ESRCH) => Ok(()),
+                _ => Err(error),
+            };
+        }
+    }
+    let kq = AsyncFd::with_interest(kq, Interest::READABLE)?;
+    // Only the exit knote is registered, so a drained event is the exit.
+    loop {
+        let mut ready = kq.readable().await?;
+        if let Ok(result) = ready.try_io(|kq| {
+            let zero = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            let mut event = libc::kevent {
+                ident: 0,
+                filter: 0,
+                flags: 0,
+                fflags: 0,
+                data: 0,
+                udata: std::ptr::null_mut(),
+            };
+            // SAFETY: drains one event with a zero timeout; `event` and
+            // `zero` outlive the call.
+            match unsafe {
+                libc::kevent(
+                    kq.as_raw_fd(),
+                    std::ptr::null(),
+                    0,
+                    &raw mut event,
+                    1,
+                    &raw const zero,
+                )
+            } {
+                1 => Ok(()),
+                0 => Err(std::io::ErrorKind::WouldBlock.into()),
+                _ => Err(std::io::Error::last_os_error()),
+            }
+        }) {
+            return result;
+        }
+    }
+}
+
+/// No kernel exit watch on this platform: the caller takes its own
+/// liveness-poll fallback.
+///
+/// # Errors
+///
+/// Always `Unsupported`.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[allow(clippy::unused_async)] // one awaitable signature across the kernel-watch arms
+pub async fn wait_for_exit(_pid: u32) -> std::io::Result<()> {
+    Err(std::io::ErrorKind::Unsupported.into())
 }
 
 /// Windows: the shared handle probe (win32 has no unreaped-zombie state,
@@ -397,5 +586,29 @@ mod windows_tests {
         assert!(!kill_pid(-1, Signal::Kill));
         assert!(!kill_pid(0, Signal::Term));
         assert!(!kill_process_group_or_pid(-1));
+    }
+}
+
+/// The kernel-watch arms' shared exit contract: a pid that names no live
+/// process resolves at once, so a worker that died before its watch
+/// registered still reports an exit. Both kernel-watch platforms only
+/// (the other targets take the caller's fallback by design).
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod exit_wait_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn wait_for_exit_resolves_at_once_for_a_reaped_pid() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("600")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        child.kill().expect("kill sleep");
+        child.wait().expect("reap sleep");
+        assert!(
+            wait_for_exit(pid).await.is_ok(),
+            "a reaped pid resolves at once"
+        );
     }
 }

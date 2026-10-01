@@ -311,7 +311,7 @@ async fn stop_target_within(
     // first, then verify the pid still names our process, and only then
     // does any signal ride the held fd (a signal through this fd can
     // reach the pinned process and nothing else, ever).
-    let Some(pidfd) = pa_core::platform::process::open_pidfd(target.pid) else {
+    let Ok(pidfd) = pa_core::platform::process::open_pidfd(target.pid) else {
         // The kernel-held handle is unavailable (an unsupported platform,
         // an old kernel, or a process that just exited): the conservative
         // default never signals - a missed reap is recoverable, a wrong
@@ -947,7 +947,7 @@ mod tests {
             .expect("spawn sleep");
         let pid = child.id();
         assert!(
-            pa_core::platform::process::open_pidfd(pid).is_some(),
+            pa_core::platform::process::open_pidfd(pid).is_ok(),
             "the kernel-held handle opens"
         );
         let outcome = stop_target(&target(pid)).await;
