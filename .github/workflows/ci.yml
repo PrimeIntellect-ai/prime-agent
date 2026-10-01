@@ -121,7 +121,7 @@ jobs:
     needs: trust
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     outputs:
       crates: ${{ steps.select.outputs.crates }}
       scope: ${{ steps.select.outputs.scope }}
@@ -195,7 +195,7 @@ jobs:
     timeout-minutes: 30
     # Draft PRs do not gate (no billing on work-in-progress pushes); the
     # ready_for_review trigger runs the gates once a draft is marked ready.
-    if: needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -211,7 +211,7 @@ jobs:
     needs: trust
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    if: needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -252,7 +252,7 @@ jobs:
     name: test shard ${{ matrix.shard }}/${{ strategy.job-total }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    if: needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     strategy:
       # One red shard must not cancel the others: their own conclusions are
       # the per-shard signal the summary merges.
@@ -327,7 +327,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: [trust, test-shard]
-    if: always() && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    if: always() && needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -367,16 +367,15 @@ jobs:
   windows-cross:
     name: windows cross-check + clippy (x86_64-pc-windows-gnu)
     needs: trust
-    if: needs.trust.outputs.allowed == 'true' && (github.event_name == 'push' || !github.event.pull_request.draft)
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name == 'push' || !github.event.pull_request.draft)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; toolchain pinned below
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # the ref IS the 1.98.1 toolchain; the action ignores the toolchain input
         with:
-          toolchain: "1.98.1"
           targets: x86_64-pc-windows-gnu
           components: clippy
       - name: Install the mingw-w64 cross toolchain (ring C for the target)
@@ -390,7 +389,7 @@ jobs:
   deny:
     name: deny (cargo-deny advisories + licenses)
     needs: trust
-    if: needs.trust.outputs.allowed == 'true' && (github.event_name == 'push' || !github.event.pull_request.draft)
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name == 'push' || !github.event.pull_request.draft)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -403,3 +402,28 @@ jobs:
           command: check
           arguments: --all-features --workspace
           command-arguments: advisories licenses
+
+  # The trust gate's own failure made visible: a vouch-step error (the
+  # action's setup, the runner) would otherwise leave every dependent job
+  # skipped, and skipped required checks read as passing to branch
+  # protection - a green-looking wave with no gates run. This audit runs
+  # unconditionally (always()) and fails the required-check set when the
+  # trust job itself did not conclude success. The deliberate not-vouched
+  # path is unaffected: there the trust job SUCCEEDS with allowed=false,
+  # the dependents skip by design, and the contribution-gate auto-close
+  # enforces.
+  trust-audit:
+    name: trust gate audit
+    needs: [trust, changes, fmt, clippy-test, test-shard, test-summary, windows-cross, deny]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Audit the contributor-trust gate's own outcome
+        run: |
+          set -euo pipefail
+          if [ "${{ needs.trust.result }}" != "success" ]; then
+            echo "::error::the contributor-trust gate did not conclude cleanly (result: ${{ needs.trust.result }}) - the wave is NOT trustworthy: every gate below it skipped"
+            exit 1
+          fi
+          echo "trust gate concluded cleanly (the allowed verdict: ${{ needs.trust.outputs.allowed }})"

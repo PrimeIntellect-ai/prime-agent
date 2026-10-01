@@ -314,9 +314,12 @@ impl SessionScanState {
     }
 
     /// TS `seedRosterLedger`-side identity: the resume requires the same
-    /// file (dev/ino) with a grown-or-equal length.
-    // The unix arm reads `self.generation`; the not-unix arm is the
-    // length-only check (the pipe surfaces carry no dev/ino identity).
+    /// file (dev/ino) with a grown-or-equal length (the grown-or-equal
+    /// length check itself lives at the call sites; this predicate is the
+    /// same-file part only).
+    // The unix arm reads `self.generation`; the not-unix arm carries no
+    // dev/ino identity at all, so it always answers false (every grown
+    // file rescans whole - see the arm's own comment).
     #[cfg_attr(not(unix), allow(clippy::unused_self))]
     fn same_file_identity(
         &self,
