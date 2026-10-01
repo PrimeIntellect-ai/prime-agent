@@ -361,8 +361,11 @@ try {
     # --- failure after a preserve puts the user's file back. An
     # --- INSTALLER-OWNED launcher is snapshotted first (an I/O failure at
     # --- Set-Content can truncate a live, working launcher).
-    $preservedLaunchers = @()
-    $ownedLauncherBackups = @()
+    # Script scope, the scope the helpers below append to: the reset must
+    # hit the same arrays, or an earlier `irm | iex` run's entries in the
+    # same session would be replayed by this run's recovery.
+    $script:preservedLaunchers = @()
+    $script:ownedLauncherBackups = @()
     function Backup-ExistingLauncher($path) {
         if (-not (Test-Path $path -PathType Leaf)) { return }
         $backup = "$path.install-backup"
@@ -503,5 +506,7 @@ Write-Host 'next steps: the README''s Install section ships inside the payload:'
 Write-Host "  $share\README.md"
 
 $script:primeAgentInstallScratch = $null
+$script:preservedLaunchers = @()
+$script:ownedLauncherBackups = @()
 if ($download) { Remove-Item -Recurse -Force $download -ErrorAction SilentlyContinue }
 }
