@@ -1,9 +1,7 @@
-//! The roster-delta push family (moved with its concern): the supervisor
+//! The roster-delta push family: the supervisor
 //! fixture, the sequence-drop, the flip/push batching, and the
 //! push benchmark.
 use super::*;
-
-// --- the `worker_roster_delta` push contract ---
 
 /// A supervisor with one registered resident worker, carrying the
 /// token `handle_worker_roster_delta` authenticates.

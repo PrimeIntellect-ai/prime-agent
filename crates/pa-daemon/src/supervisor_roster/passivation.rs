@@ -1,4 +1,4 @@
-//! The roster passivation + snapshot family (moved with its concern): the
+//! The roster passivation + snapshot family: the
 //! stop-path passivation (the anchored-child preservation, the live-field
 //! stripping, the family pruning), the rewrite/diff-baseline snapshots, and
 //! the registration-mark + re-registration rules.
