@@ -464,6 +464,46 @@ fn daemon_text_never_carries_terminal_control_sequences() {
     );
 }
 
+/// The mount contract (the open path's malformed cache): a cached reply
+/// without the runs list is a malformed lane, not zero runs — mounting
+/// from it sets the malformed-reply error at once instead of painting a
+/// silent fake empty state for a poll cycle until the first fold
+/// reports the lane (the fold's contract, held at mount; the mutation
+/// check: mounting without the check paints no error line).
+#[test]
+fn a_malformed_cached_reply_mounts_with_the_error_not_a_silent_empty() {
+    // A malformed cache mounts with the error line painted.
+    let mut view = FactoryView::from_reply(&json!({ "machine": {} }), 40);
+    let joined = frame_text(&mut view).join("\n");
+    assert!(
+        joined.contains("Error: malformed factory reply (no runs list)"),
+        "the malformed cache reports itself at mount: {joined}"
+    );
+    // A real empty reply (the runs list present) mounts clean: the
+    // genuine empty state, no error line.
+    let mut view = FactoryView::from_reply(&json!({ "runs": [] }), 40);
+    let joined = frame_text(&mut view).join("\n");
+    assert!(
+        joined.contains("No live factory runs."),
+        "an empty runs list is the real empty state: {joined}"
+    );
+    assert!(
+        !joined.contains("Error:"),
+        "a real empty state never reports a malformed lane: {joined}"
+    );
+    // A good cache mounts its runs with no error line.
+    let mut view = FactoryView::from_reply(&two_run_response(), 40);
+    let joined = frame_text(&mut view).join("\n");
+    assert!(
+        joined.contains("factory: second-run"),
+        "the cached runs mount newest-first: {joined}"
+    );
+    assert!(
+        !joined.contains("Error:"),
+        "a good cache mounts clean: {joined}"
+    );
+}
+
 /// The fired-edge identity includes the guard: two transitions may share
 /// one from+to pair with different guards, so the fired marking must
 /// light only the one that fired (the mutation check: matching on

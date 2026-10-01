@@ -145,6 +145,11 @@ pub fn factory_reply_lists_runs(data: &Value) -> bool {
     data.get("runs").is_some_and(Value::is_array)
 }
 
+/// The malformed-lane error line (one message for the mount and the
+/// fold): a reply without the runs list is a malformed lane, never
+/// zero runs.
+pub const MALFORMED_REPLY_ERROR: &str = "malformed factory reply (no runs list)";
+
 fn opt_string(value: Option<&Value>) -> Option<String> {
     value
         .and_then(Value::as_str)
@@ -297,6 +302,22 @@ impl FactoryView {
             error: None,
             viewport_rows,
         }
+    }
+
+    /// Mount the view from the poll cache (the open path's builder): the
+    /// parsed panels, and — when the cached reply is a malformed lane (no
+    /// runs list) — the malformed-reply error set at once. A malformed
+    /// cache can never mount as a silent fake empty state: the fold's
+    /// malformed-reply contract holds at mount too, so the page's first
+    /// frame already says why the list is empty instead of waiting a
+    /// poll cycle for the fold to say it.
+    #[must_use]
+    pub fn from_reply(data: &Value, viewport_rows: usize) -> Self {
+        let mut view = Self::new(parse_factory_runs(data), viewport_rows);
+        if !factory_reply_lists_runs(data) {
+            view.set_error(Some(MALFORMED_REPLY_ERROR.to_string()));
+        }
+        view
     }
 
     /// Apply one refreshed snapshot batch: keep the selection on the same

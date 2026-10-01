@@ -69,8 +69,11 @@ impl super::SessionUi {
         // The mounted view belongs to this durable session: a later
         // rebind fold keeps it only across the SAME session's reattach.
         self.factory_view_session = Some(self.session_id.clone());
-        view.factory_view = Some(FactoryView::new(
-            parse_factory_runs(&self.factory_graph),
+        // The mount holds the fold's malformed-reply contract: a cached
+        // malformed lane mounts with its error line, never as a silent
+        // fake empty state waiting for the first fold.
+        view.factory_view = Some(FactoryView::from_reply(
+            &self.factory_graph,
             picker_viewport_rows(view.terminal_rows()),
         ));
         self.sync_factory_selection(view);
@@ -301,8 +304,9 @@ impl super::SessionUi {
                         factory_view.set_error(None);
                         factory_view.apply_runs(parse_factory_runs(&self.factory_graph));
                     } else {
-                        factory_view
-                            .set_error(Some("malformed factory reply (no runs list)".to_string()));
+                        factory_view.set_error(Some(
+                            crate::factory_view::MALFORMED_REPLY_ERROR.to_string(),
+                        ));
                     }
                 }
             }
