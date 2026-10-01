@@ -307,13 +307,11 @@ fn the_rolling_nightly_refresh_is_a_serialized_job() {
             "${{ !cancelled() && needs.promote.result == 'success' \
 && contains(github.ref_name, '-') }}",
         ),
-        "the refresh gate is the explicit result form (the promote precedent): \
-         an `if` without a status function is auto-prefixed with success(), and \
-         the default needs gate skips every job downstream of a skipped job in \
-         the dependency chain - on a -beta* tag the two stable-route build jobs \
-         are skipped, and as promote's needs they are the refresh's transitive \
-         needs, so the bare form skipped the refresh on every green beta \
-         promote while the payload uploaded inside the same promote"
+        "the refresh gate is the explicit result form: the status function \
+         overrides the implicit success() gate that skips a job whose needs \
+         chain holds a skipped job (on a -beta* tag the stable-route build legs \
+         are skipped and sit transitively upstream through promote), and it \
+         admits exactly a green promote on a -beta* tag"
     );
     // The refresh is the workflow's only shared mutable state, so it alone
     // serializes (a queued refresh superseded by a newer tag is harmless:
@@ -331,9 +329,8 @@ fn the_rolling_nightly_refresh_is_a_serialized_job() {
     // The refresh step's gh calls are repo-relative (gh release view /
     // download / upload / create) and this job never checks out: gh resolves
     // the repo from the git remote or GH_REPO - never from GITHUB_REPOSITORY
-    // - so the GH_REPO row is load-bearing. Probe-pinned: with the gate
-    // fixed but GH_REPO absent, the job's first gh call fails with
-    // "failed to run git: not a git repository".
+    // - so the GH_REPO row is load-bearing (without it the first gh call
+    // fails with "failed to run git: not a git repository").
     let refresh_step = step(refresh, "Refresh the rolling nightly release");
     let refresh_env = refresh_step
         .env

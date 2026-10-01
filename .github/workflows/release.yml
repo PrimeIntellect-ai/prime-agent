@@ -953,20 +953,15 @@ jobs:
   # refuses to clobber a newer rolling beta.json (re-runs of older tags).
   nightly-refresh:
     needs: promote
-    # THE GATE IS EXPLICIT (the promote precedent: an `if` without a status
-    # function is auto-prefixed with success(), and GitHub's default needs
-    # gate skips every job downstream of a skipped job in the dependency
-    # chain). On a -beta* tag the two stable-route build jobs skip themselves
-    # by their own gates; they are promote's needs and therefore this job's
-    # TRANSITIVE needs, so the bare `if: contains(github.ref_name, '-')` that
-    # lived here skipped the refresh on every
-    # green beta promote since the flow went live - the rolling `nightly`
-    # release never materialized (releases/tags/nightly 404s) while the
-    # per-tag prereleases and the R2 beta.json published and the payload
-    # uploaded inside the same green promote. The explicit form admits
-    # exactly the one healthy state: a green promote - the only producer of
-    # the nightly-refresh-payload artifact - on a -beta* tag. A failed,
-    # skipped, or cancelled promote leaves the refresh skipped.
+    # The explicit result gate (the promote precedent): an `if` without a
+    # status function is auto-prefixed with success(), which is false when
+    # any job in the needs chain is skipped - the two stable-route build
+    # jobs are skipped on every -beta* tag and sit transitively upstream
+    # through promote. The form admits exactly the one healthy state: a
+    # green promote - the only producer of the nightly-refresh-payload
+    # artifact - on a -beta* tag. A failed, skipped, or cancelled promote
+    # leaves the refresh skipped; a stable tag skips it too (the payload
+    # upload step inside promote is itself beta-only).
     if: ${{ !cancelled() && needs.promote.result == 'success' && contains(github.ref_name, '-') }}
     name: rolling nightly release refresh (the nightly channel's discoverable base)
     concurrency:
@@ -984,12 +979,10 @@ jobs:
       - name: Refresh the rolling nightly release
         env:
           GH_TOKEN: ${{ github.token }}
-          # gh resolves the repo from the git remote - absent: this job never
-          # checks out - or GH_REPO, and never from GITHUB_REPOSITORY, so
-          # without this row every `gh release ...` call below dies with
-          # "failed to run git: not a git repository" (probe-pinned: the gate
-          # fix alone let the job run and its first gh call failed exactly
-          # so).
+          # gh resolves the repo from the git remote - absent: this job
+          # never checks out - or GH_REPO, and never from GITHUB_REPOSITORY;
+          # without this row every `gh release ...` call below fails with
+          # "failed to run git: not a git repository".
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
