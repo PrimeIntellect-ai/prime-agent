@@ -22,8 +22,10 @@
 //! `session/set_config_option` applies selections — the effort select
 //! offers the session model's supported levels, invalid values are
 //! `-32602` invalid params, and real selections publish the
-//! `config_option_update` notification. Model switches are not
-//! observable on the faux-pinned worker yet (PR-8b).
+//! `config_option_update` notification. Model switches are observable:
+//! the faux worker resolves a switched selection through the registry
+//! (a models.json faux-api model streams through the same scripted
+//! provider), so the pickers follow the switch.
 //!
 //! The daemon-attached transport covers the surface: the pickers ride
 //! the worker's own wire commands, with a models.json fixture in the
@@ -184,8 +186,9 @@ fn faux_models_fixture() -> serde_json::Value {
 
 /// The daemon-attached transport: the pickers ride the worker's own wire
 /// commands — advertised at `session/new`, the effort selection applied
-/// through `set_thinking_level`, invalid values refused, and the turn
-/// after a switch still settles.
+/// through `set_thinking_level`, invalid values refused, and a real
+/// model switch observable (the plain model drops the effort picker, the
+/// map model accepts `xhigh`, and the turn after a switch settles).
 #[test]
 fn acp_daemon_attached_config_option_pickers() {
     let home = tempfile::TempDir::new().unwrap();
@@ -205,7 +208,7 @@ fn acp_daemon_attached_config_option_pickers() {
         json!({
             "engine": "faux",
             "reasoning": true,
-            "responses": ["The Thames flows through London."],
+            "responses": ["The Thames flows through London.", "The switched model still streams."],
         })
         .to_string(),
     )
@@ -320,8 +323,7 @@ fn acp_daemon_attached_config_option_pickers() {
         "the change publishes config_option_update: {notifications:?}"
     );
 
-    // Unsupported levels and models are refused with the TS reasons; the
-    // current model re-selects cleanly.
+    // Unsupported levels and models are refused with the TS reasons.
     for (config_id, value, reason) in [
         (
             "thought_level",
@@ -354,14 +356,108 @@ fn acp_daemon_attached_config_option_pickers() {
         response["error"]["data"]["reason"],
         "Unknown ACP session: missing-session"
     );
+    // A real model switch: the plain model drops the effort picker (its
+    // supported levels are `off` only) and the effort selection now
+    // refuses.
+    let plain = r#"["faux","plain-model"]"#;
     let select = client.request(
         "session/set_config_option",
-        &select_params(&session_id, "model", &json!(r#"["faux","faux-1"]"#)),
+        &select_params(&session_id, "model", &json!(plain)),
+    );
+    let (response, notifications) = client.wait_response(select, TIMEOUT);
+    let options = &response["result"]["configOptions"];
+    assert_eq!(options.as_array().map(Vec::len), Some(1), "{options}");
+    assert_eq!(options[0]["currentValue"], plain, "{response}");
+    let updates = config_updates(&notifications);
+    assert!(
+        updates
+            .iter()
+            .any(|update| update["params"]["update"]["configOptions"][0]["currentValue"] == plain),
+        "the switch publishes config_option_update: {notifications:?}"
+    );
+    let select = client.request(
+        "session/set_config_option",
+        &select_params(&session_id, "thought_level", &json!("high")),
+    );
+    let (response, _) = client.wait_response(select, TIMEOUT);
+    assert_eq!(response["error"]["code"], -32602);
+    assert_eq!(
+        response["error"]["data"]["reason"],
+        "Unsupported reasoning effort: high"
+    );
+
+    // The switched session still turns: the provider target followed the
+    // switch, so the next prompt streams on the selected model.
+    let prompt = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "hello" }] }),
+    );
+    let (prompt_response, _) = client.wait_response(prompt, Duration::from_mins(2));
+    assert_eq!(prompt_response["result"]["stopReason"], "end_turn");
+
+    // Switching back restores the effort picker at the persisted default
+    // (the level saved while the reasoning model was active).
+    let reasoner = r#"["faux","faux-1"]"#;
+    let select = client.request(
+        "session/set_config_option",
+        &select_params(&session_id, "model", &json!(reasoner)),
+    );
+    let (response, _) = client.wait_response(select, TIMEOUT);
+    let options = &response["result"]["configOptions"];
+    assert_eq!(options.as_array().map(Vec::len), Some(2), "{options}");
+    assert_eq!(options[0]["currentValue"], reasoner);
+    assert_eq!(options[1]["currentValue"], "high", "{options}");
+
+    // The current model re-selected: refresh only, no discovery needed.
+    let select = client.request(
+        "session/set_config_option",
+        &select_params(&session_id, "model", &json!(reasoner)),
     );
     let (response, _) = client.wait_response(select, TIMEOUT);
     assert_eq!(
         response["result"]["configOptions"][0]["currentValue"],
-        r#"["faux","faux-1"]"#
+        reasoner
+    );
+
+    // #2858's map-driven capability: the map model (`reasoning: false`
+    // with an addressable `xhigh`) serves its effort picker and accepts
+    // the mapped level — the coarse flag must not veto what the map
+    // addresses.
+    let map = r#"["faux","map-model"]"#;
+    let select = client.request(
+        "session/set_config_option",
+        &select_params(&session_id, "model", &json!(map)),
+    );
+    let (response, _) = client.wait_response(select, TIMEOUT);
+    let options = &response["result"]["configOptions"];
+    assert_eq!(options.as_array().map(Vec::len), Some(2), "{options}");
+    assert_eq!(options[0]["currentValue"], map);
+    assert_eq!(
+        options[1]["currentValue"], "high",
+        "the level clamped: {options}"
+    );
+    let levels: Vec<String> = options[1]["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|option| option["value"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(levels, vec!["minimal", "low", "medium", "high", "xhigh"]);
+    let select = client.request(
+        "session/set_config_option",
+        &select_params(&session_id, "thought_level", &json!("xhigh")),
+    );
+    let (response, notifications) = client.wait_response(select, TIMEOUT);
+    assert_eq!(
+        response["result"]["configOptions"][1]["currentValue"], "xhigh",
+        "the mapped level applies: {response}"
+    );
+    let updates = config_updates(&notifications);
+    assert!(
+        updates.iter().any(
+            |update| update["params"]["update"]["configOptions"][1]["currentValue"] == "xhigh"
+        ),
+        "the mapped level publishes config_option_update: {notifications:?}"
     );
 
     // The switched level survives a turn: the prompt still settles.
