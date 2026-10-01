@@ -911,6 +911,40 @@ fn acp_daemon_attached_overlapping_prompt_is_refused() {
 }
 
 #[test]
+fn acp_daemon_attached_close_mid_turn_answers_cancelled() {
+    let (mut client, _socket) = AcpChild::spawn_daemon_attached(
+        &["--mode", "acp", "--no-session"],
+        &json!({ "engine": "faux", "tokensPerSecond": 2, "responses": [
+            { "text": "a paced answer that streams slowly enough to close mid-turn" },
+        ] }),
+    );
+    let init = client.request("initialize", &initialize_params());
+    let _ = client.wait_response(init, TIMEOUT);
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
+    let (new_response, _) = client.wait_response(new, TIMEOUT);
+    let session_id = new_response["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let prompt = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "a slow question" }] }),
+    );
+    client.wait_update("agent_message_chunk", TIMEOUT);
+    let close = client.request("session/close", &json!({ "sessionId": session_id }));
+    let (prompt_response, frames) = client.wait_response(prompt, TIMEOUT);
+    assert_eq!(
+        prompt_response["result"]["stopReason"], "cancelled",
+        "a prompt closed mid-turn answers cancelled: {prompt_response}"
+    );
+    let close_response = frames
+        .into_iter()
+        .find(|frame| frame["id"] == close)
+        .unwrap_or_else(|| client.wait_response(close, TIMEOUT).0);
+    assert_eq!(close_response["result"], json!({}));
+}
+
+#[test]
 fn acp_daemon_attached_prompt_during_cancel_is_refused() {
     // A prompt behind a cancel is refused while the stop runs, and the
     // cancelled response comes after the stop, so a resend right after it

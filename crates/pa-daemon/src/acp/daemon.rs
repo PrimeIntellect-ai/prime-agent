@@ -974,12 +974,14 @@ async fn release_turn_slot(state: &Arc<Mutex<DaemonAcpState>>, admission_id: &st
     }
 }
 
+/// Whether this prompt lost its turn: cancelled, or its session was closed
+/// (close, or close + new, takes the slot - like TS close aborting the turn).
 fn turn_cancelled(state: &DaemonAcpState, admission_id: &str) -> bool {
-    state
+    !state
         .session
         .as_ref()
         .and_then(|hosted| hosted.turn.as_ref())
-        .is_some_and(|turn| turn.cancelled && turn.admission_id == admission_id)
+        .is_some_and(|turn| turn.admission_id == admission_id && !turn.cancelled)
 }
 
 fn cancelled_response(id: &Value) -> Value {
@@ -1012,12 +1014,8 @@ async fn prompt_turn(
                 Arc::clone(&hosted.producer),
                 hosted.daemon_active_session_id.clone(),
             ),
-            _ => {
-                return super::internal_error(
-                    &id,
-                    &format!("Unknown ACP session: {}", params.session_id),
-                );
-            }
+            // Admission checked the session id: a miss is a close since.
+            _ => return cancelled_response(&id),
         }
     };
     let turn_id = producer.begin_prompt().await;
@@ -1128,6 +1126,12 @@ async fn prompt_turn(
     // autonomous meta (the envelope still settles, like an in-process
     // session without a run).
     let autonomous_status = fetch_autonomous_status(link, &hosted_daemon_session_id).await;
+    // TS `abort.signal.aborted` after `waitForHeadlessCompletion`: queued
+    // continuations (goal, post-compaction autonomous) run inside that wait.
+    if turn_cancelled(&*state.lock().await, admission_id) {
+        producer.finish_prompt(turn_id).await;
+        return cancelled_response(&id);
+    }
     let autonomous_meta = autonomous_status
         .as_ref()
         .filter(|status| status.enabled)
