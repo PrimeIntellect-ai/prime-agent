@@ -44,7 +44,7 @@ use crate::rlm_children::{ParentIdentity, SupervisorChildSessions, DEFAULT_RLM_M
 // the child module at the same tree position (agent_engine::tests); the
 // FAUX_TEST_LOCK re-export keeps the facade's FAUX_TEST_LOCK paths stable
 // for the sibling test modules (overflow_compaction, compact_autorefine,
-// session_navigation, acp/{autorefine,compaction_arms,goal_continuation}).
+// session_navigation).
 #[cfg(test)]
 pub(crate) mod tests;
 

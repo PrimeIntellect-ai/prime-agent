@@ -7,7 +7,7 @@
 //! `replace_acp_mcp_servers` wire command, and every prompt runs
 //! `prompt_and_wait` while the streamed session events fan out as ACP
 //! updates. The turn settlement (response boundary, quiescence envelope,
-//! stop reason) mirrors the in-process mode: both serve the same captures.
+//! stop reason) mirrors the TS captures.
 //! The daemon worker's `goal_update` session events surface through the
 //! wire mapping (`wire_events.rs`), and the autonomous accounting rides the
 //! `wait_for_headless_completion` response into the completion envelope
@@ -283,8 +283,7 @@ struct ActiveTurn {
     stop_done_rx: Option<oneshot::Receiver<()>>,
 }
 
-/// The daemon-attached transport state: one hosted session at most, like
-/// the in-process connection state.
+/// The ACP transport state: one hosted session at most.
 #[derive(Default)]
 pub(crate) struct DaemonAcpState {
     pub(crate) session: Option<HostedSession>,
@@ -760,7 +759,7 @@ async fn handle_incoming(
     };
     match method.as_str() {
         "initialize" => {
-            super::handle_initialize(&id, &params, &options.product_version, &tx);
+            handle_initialize(&id, &params, &options.product_version, &tx);
         }
         "session/new" => {
             handle_session_new(id, params, link, state, options, binding, tx).await;
@@ -779,6 +778,42 @@ async fn handle_incoming(
                 Some(&json!({ "method": other })),
             ));
         }
+    }
+}
+
+fn handle_initialize(id: &Value, params: &Value, product_version: &str, tx: &producer::FrameSink) {
+    if let Err(error_response) = validate_initialize(id, params) {
+        let _ = tx.send(error_response);
+        return;
+    }
+    let result =
+        serde_json::to_value(types::initialize_result(product_version)).expect("serializes");
+    let _ = tx.send(jsonrpc::response(id, &result));
+}
+
+/// The `initialize` schema check the TS SDK performs: the protocol version
+/// must be a number. The error body mirrors the observed TS response.
+fn validate_initialize(id: &Value, params: &Value) -> std::result::Result<(), Value> {
+    let field_error = |received: &str| {
+        jsonrpc::error_response(
+            id,
+            jsonrpc::INVALID_PARAMS,
+            "Invalid params",
+            Some(&json!({
+                "_errors": [],
+                "protocolVersion": {
+                    "_errors": [format!("Invalid input: expected number, received {received}")]
+                },
+            })),
+        )
+    };
+    match params.get("protocolVersion") {
+        None => Err(field_error("undefined")),
+        Some(value) if value.is_number() => Ok(()),
+        Some(Value::String(_)) => Err(field_error("string")),
+        Some(Value::Bool(_)) => Err(field_error("boolean")),
+        Some(Value::Null) => Err(field_error("null")),
+        Some(_) => Err(field_error("object")),
     }
 }
 
@@ -807,8 +842,8 @@ async fn handle_session_new(
     // Failures below clear the in-flight flag on the way out; on success
     // the hosted session takes the slot.
     let params = types::NewSessionParams::parse(&params);
-    // MCP admission runs first, exactly like the in-process path: a
-    // rejected list fails the request with the same error payloads.
+    // MCP admission runs first: a rejected list fails the request with
+    // the same error payloads.
     let resolved =
         match super::mcp::resolve_acp_mcp_servers(&params.mcp_servers, &options.actual_cwd) {
             Ok(resolved) => resolved,
@@ -906,8 +941,7 @@ async fn handle_session_new(
     producer.commit_session_new_response().await;
 }
 
-/// Send the MCP replacement for one hosted session (the wire form of the
-/// in-process manager call).
+/// Send the MCP replacement for one hosted session.
 async fn replace_session_servers(
     link: &Arc<DaemonLink>,
     hosted: &HostedSession,
@@ -991,6 +1025,18 @@ fn cancelled_response(id: &Value) -> Value {
     )
 }
 
+/// Render a prompt-block failure as the ACP invalid-params error. The TS
+/// SDK validates the request schema; the Rust port validates the blocks it
+/// actually reads.
+fn prompt_block_error(id: &Value, error: &types::PromptBlockError) -> Value {
+    jsonrpc::error_response(
+        id,
+        jsonrpc::INVALID_PARAMS,
+        "Invalid params",
+        Some(&json!({ "reason": error.to_string() })),
+    )
+}
+
 /// Run one admitted prompt turn and return its reply frame.
 async fn prompt_turn(
     id: Value,
@@ -1000,9 +1046,9 @@ async fn prompt_turn(
     state: &Arc<Mutex<DaemonAcpState>>,
 ) -> Value {
     let params = types::PromptParams::parse(&params);
-    let admitted = match super::session::AdmittedPrompt::parse(&params.prompt) {
+    let admitted = match types::AdmittedPrompt::parse(&params.prompt) {
         Ok(admitted) => admitted,
-        Err(error) => return super::session::prompt_block_error(&id, &error),
+        Err(error) => return prompt_block_error(&id, &error),
     };
     let (producer, hosted_daemon_session_id) = {
         let guard = state.lock().await;
@@ -1120,8 +1166,7 @@ async fn prompt_turn(
     // The autonomous accounting for the completion envelope: the daemon's
     // headless-completion status (TS `waitForHeadlessCompletion`), fetched
     // after the turn marker settled the run. A failed fetch degrades to no
-    // autonomous meta (the envelope still settles, like an in-process
-    // session without a run).
+    // autonomous meta (the envelope still settles without a run).
     let autonomous_status = fetch_autonomous_status(link, &hosted_daemon_session_id).await;
     // TS `abort.signal.aborted` after `waitForHeadlessCompletion`: queued
     // continuations (goal, post-compaction autonomous) run inside that wait.
@@ -1133,8 +1178,7 @@ async fn prompt_turn(
         .as_ref()
         .filter(|status| status.enabled)
         .map(meta::autonomous_meta);
-    // The remaining continuation slots the quiescence observation reports
-    // (the in-process settlement computes the same subtraction).
+    // The remaining continuation slots the quiescence observation reports.
     let remaining_continuations = autonomous_status
         .as_ref()
         .filter(|status| status.enabled)
@@ -1145,7 +1189,7 @@ async fn prompt_turn(
                 .saturating_sub(status.continuations_used)
         });
     // The boundary, completion, and terminal quiescence frames match the
-    // in-process settlement because both serve the same captures.
+    // TS captures.
     let boundary = types::AcpSessionUpdate::SessionInfoUpdate {
         meta: meta::prime_agent_meta(&PrimeAgentSessionMeta {
             terminal_quiescence_expected: Some(true),
@@ -1160,9 +1204,9 @@ async fn prompt_turn(
             Some(PrimeAgentOutcome::Result),
         )
         .await;
-    // The completion envelope mirrors the in-process settlement: the
-    // autonomous accounting rides the quiescence event, then the terminal
-    // quiescence envelope repeats the observation.
+    // The completion envelope: the autonomous accounting rides the
+    // quiescence event, then the terminal quiescence envelope repeats the
+    // observation.
     let quiescence = types::AcpSessionUpdate::SessionInfoUpdate {
         meta: meta::prime_agent_meta(&PrimeAgentSessionMeta {
             autonomous: autonomous_meta.clone(),

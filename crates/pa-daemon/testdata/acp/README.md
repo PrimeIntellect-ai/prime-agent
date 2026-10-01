@@ -70,29 +70,25 @@ scenario client against the Rust build with the same provider/model
 (`z-ai/glm-5.3-flash`) and the kernel sidecar resolved through
 `PI_PACKAGE_DIR` (a cargo-built binary has no sidecar next to the exe).
 
-Since slice 4 the Rust ACP mode prefers the daemon-attached transport
+Since slice 4 the Rust ACP mode serves over the daemon-attached transport
 (the TS `shouldUseDaemonClient` behavior): the binary spawns a supervisor
 on the sandboxed `--daemon-socket`, hosts a client-owned daemon session,
 and streams its session events as ACP updates. The daemon-attached
 captures are: happy_path, cwd_mismatch, errors, second_initialize,
 tool_call, compact_command, mcp_stdio, mcp_replace, mcp_errors — all
-MATCH in full mode. The in-process engine stays the fallback when no
-daemon is reachable, and three captures still ride it (they exercise
-surfaces the daemon plane serves differently today):
+MATCH in full mode. `cancel`, `goal_command`, `autonomous_limit`, and
+`autonomous_gate` were captured on the since-removed in-process
+transport; recapture is pending (the files stay):
 
-- `cancel`: the in-process capture matched in full mode; the
-  daemon-attached run resolves the same `{stopReason: "cancelled"}` shape
-  with no boundary frames, but a fresh worker's first-token latency
-  exceeds the scenario's 2s cancel window, so the pre-cancel chunk count
-  differs per run. The daemon-attached cancel semantics are locked by
-  the deterministic e2e (`acp_daemon_attached_cancels_mid_turn`).
-- `goal_command` / `autonomous_limit`: the daemon worker executes the
-  commands (durable rows, goal continuations, the autonomous loop) and
-  emits the `goal_update` / autonomous-accounting session events (the
-  offline e2e locks those namespaced metas on the daemon path). The
-  captures predate those producers and still ride the in-process
-  engine; recapture is pending. `autonomous_gate` matches in full mode
-  on the in-process capture.
+- `cancel`: the capture matched in full mode; the daemon-attached run
+  resolves the same `{stopReason: "cancelled"}` shape with no boundary
+  frames, but a fresh worker's first-token latency exceeds the
+  scenario's 2s cancel window, so the pre-cancel chunk count differs
+  per run. The daemon-attached cancel semantics are locked by the
+  deterministic e2e (`acp_daemon_attached_cancels_mid_turn`).
+- `goal_command` / `autonomous_limit` / `autonomous_gate`: the captures
+  predate the daemon's `goal_update` / autonomous-accounting producers;
+  recapture is pending.
 
 ## Comparing a Rust run
 

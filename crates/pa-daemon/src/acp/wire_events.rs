@@ -1,9 +1,7 @@
 //! Daemon session-event mapping: the TS `acpUpdatesForSessionEvent` port
 //! for the wire shapes a daemon worker streams (`message_start/update/end`,
-//! `tool_execution_*`, `compaction_end`, `goal_update`, ...). The
-//! daemon-attached ACP transport rides this instead of the in-process
-//! loop-event projection (`events.rs`): same ACP frames, different producer
-//! side.
+//! `tool_execution_*`, `compaction_end`, `goal_update`, ...): the ACP
+//! frames the daemon worker's session events produce.
 //!
 //! Events with no ACP counterpart (`turn_end`, `auto_retry_*`,
 //! `agent_begin/end`, `session_action_update`) map to nothing, exactly like
@@ -11,9 +9,11 @@
 
 use serde_json::{json, Value};
 
-use super::events::{AcpToolKind, AcpToolStatus, IPYTHON_TOOL_NAME};
 use super::meta::{prime_agent_meta, PrimeAgentCompactionMeta, PrimeAgentSessionMeta};
-use super::types::{AcpSessionUpdate, TextBlock};
+use super::types::{AcpSessionUpdate, AcpToolKind, AcpToolStatus, TextBlock};
+
+/// The model-facing Python REPL tool.
+const IPYTHON_TOOL_NAME: &str = "ipython";
 
 /// Correlates streamed chunks with their owning assistant message (the
 /// daemon stream carries the delta on `assistantMessageEvent`).

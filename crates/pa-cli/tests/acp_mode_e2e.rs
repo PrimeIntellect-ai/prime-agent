@@ -1399,7 +1399,7 @@ fn acp_goal_command_publishes_goal_meta_and_runs_the_continuation() {
     // `/goal` start schedules its continuation as the turn's model segment:
     // the goal meta frame precedes the streamed answer, and the usage
     // accounting publishes a second goal frame after the message settles.
-    // The tiny budget bounds the goal loop the direct-ACP settle loop now
+    // The tiny budget bounds the goal loop the worker turn loop
     // hosts (TS parity: the continuation loop runs inside the same
     // session/prompt request): the crossing turn's budget-limit steer is
     // the second model segment, and the budget_limited goal settles the
