@@ -596,6 +596,14 @@ jobs:
                   tar.extractall(unpacked, filter="data")
           PY
           ls -la release-out release-unpacked
+      # THE CHECKSUM GATE: the merged SHA256SUMS covers every tarball the
+      # build jobs produced, and it must pass before anything is attested,
+      # attached to the GitHub release, or uploaded to R2 - a mismatched
+      # artifact or sums file never gets signed or published.
+      - name: Verify SHA256SUMS before attest, attach, or upload
+        run: |
+          set -euo pipefail
+          (cd release-out && sha256sum --check SHA256SUMS)
       - name: Emit the channel manifest (latest.json stable / beta.json nightly)
         run: |
           set -euo pipefail
@@ -727,9 +735,10 @@ jobs:
       #     approval click — is the ONLY job that ever holds the R2 secrets.
       #     The build is not the release: the approval gate IS the release
       #     decision, and every s3 cp below runs only after it.
-      #   - CHECKSUM FIRST: sha256sum --check SHA256SUMS passes before any
-      #     upload — a corrupt or mismatched artifact never reaches the
-      #     bucket.
+      #   - CHECKSUM FIRST: sha256sum --check SHA256SUMS passes (its own
+      #     step, right after the merge) before the attestation, the GitHub
+      #     attach, and any R2 upload — a corrupt or mismatched artifact is
+      #     never attested, attached, or uploaded.
       #   - HEADER FORM (TS parity): the version-prefixed artifacts
       #     (releases/v<version>/) are immutable (1y) with their content
       #     types; the root pointers (latest.json, stable, beta, beta.json,
@@ -762,10 +771,6 @@ jobs:
           test -n "$R2_PUBLIC_BASE_URL"
           INSTALL_BASE_URL="${R2_PUBLIC_BASE_URL%/}"
           test -n "$INSTALL_BASE_URL"
-
-          # THE CHECKSUM GATE FIRST: the merged SHA256SUMS covers every
-          # tarball the build jobs produced; a mismatch never uploads.
-          (cd release-out && sha256sum --check SHA256SUMS)
 
           RELEASE_PREFIX="releases/${RELEASE_VERSION}"
           for artifact in release-out/prime-agent-*.tar.gz; do

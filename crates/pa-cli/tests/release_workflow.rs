@@ -54,6 +54,10 @@ const VERSION: &str = "0.9.9";
 /// The promote step that refuses archives a TS 0.9.8 updater would install.
 const TS_GUARD_STEP: &str = "Refuse archives the TypeScript updater would install";
 
+/// The promote step that checks the merged SHA256SUMS before anything is
+/// attested, attached to the GitHub release, or uploaded to R2.
+const CHECKSUM_STEP: &str = "Verify SHA256SUMS before attest, attach, or upload";
+
 /// The current build matrix (release.yml `build`): the four standalone
 /// targets. The single-artifact case stands in for a trimmed matrix; the
 /// four-target case is today's full release.
@@ -286,8 +290,9 @@ fn expected_merged_sums(rows: &[serde_json::Value]) -> String {
     sums
 }
 
-/// Execute the normalize -> verify -> merge chain in `cwd` and return the
-/// normalize step's stdout plus the merged manifest the workflow would attach.
+/// Execute the normalize -> verify -> merge -> checksum chain in `cwd` and
+/// return the normalize step's stdout plus the merged manifest the workflow
+/// would attach.
 fn run_promote_gates(cwd: &Path, steps: &[Step]) -> (String, serde_json::Value) {
     let normalize = &steps[step_position(
         steps,
@@ -308,6 +313,10 @@ fn run_promote_gates(cwd: &Path, steps: &[Step]) -> (String, serde_json::Value) 
     );
     assert_success(&run_step(cwd, ts_guard), TS_GUARD_STEP);
     assert_success(&run_step(cwd, merge), "merge per-target manifests");
+    assert_success(
+        &run_step(cwd, &steps[step_position(steps, CHECKSUM_STEP)]),
+        CHECKSUM_STEP,
+    );
 
     let merged: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(cwd.join("release-out/manifest.json"))
@@ -383,6 +392,59 @@ fn promote_download_layout_contract() {
     assert!(
         normalize < ts_guard && ts_guard < merge,
         "the TS-updater gate must check every archive before anything is merged or published"
+    );
+}
+
+/// The merged SHA256SUMS is checked in its own step right after the merge,
+/// before the provenance attestation, the GitHub release attach (the
+/// installer downloads from there), and the R2 publish.
+#[test]
+fn checksum_gate_runs_before_attest_attach_and_publish() {
+    let steps = promote_steps();
+    let checksum = step_position(&steps, CHECKSUM_STEP);
+    assert!(
+        steps[checksum]
+            .run
+            .as_deref()
+            .is_some_and(|run| run.contains("(cd release-out && sha256sum --check SHA256SUMS)")),
+        "the checksum step must check the merged SHA256SUMS"
+    );
+    let merge = step_position(&steps, "Merge per-target manifests + SHA256SUMS");
+    let attest = step_position(&steps, "Attest build provenance (SLSA)");
+    let attach = step_position(&steps, "Attach to GitHub release");
+    let publish = step_position(&steps, "Publish the R2 channel");
+    assert!(
+        merge < checksum && checksum < attest && attest < attach && attach < publish,
+        "the checksum gate must pass after the merge and before anything is attested, \
+         attached, or uploaded"
+    );
+}
+
+/// A merged archive whose bytes no longer match SHA256SUMS fails the
+/// checksum gate.
+#[test]
+fn a_mismatched_archive_fails_the_checksum_gate() {
+    let Some(_python3) = python3_binary((3, 12)) else {
+        return;
+    };
+    let steps = promote_steps();
+    let cwd = tempfile::tempdir().expect("scratch dir");
+    let incoming = cwd.path().join("incoming");
+    for target in &TARGETS[..2] {
+        write_artifact(&incoming.join(format!("artifacts-{target}")), target);
+    }
+    run_promote_gates(cwd.path(), &steps);
+
+    let corrupted = format!("prime-agent-{VERSION}-{}.tar.gz", TARGETS[1]);
+    fs::write(cwd.path().join("release-out").join(&corrupted), b"corrupt")
+        .expect("corrupt a merged archive");
+    let output = assert_failure(
+        &run_step(cwd.path(), &steps[step_position(&steps, CHECKSUM_STEP)]),
+        CHECKSUM_STEP,
+    );
+    assert!(
+        output.contains(&format!("{corrupted}: FAILED")),
+        "the checksum gate must name the mismatched archive\n{output}"
     );
 }
 
