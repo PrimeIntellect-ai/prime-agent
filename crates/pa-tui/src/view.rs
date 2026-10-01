@@ -12,6 +12,7 @@ use crate::theme::Theme;
 use crate::Line;
 
 pub(crate) mod click;
+pub(crate) mod editor_surface;
 mod expansion;
 mod flush;
 mod frame;
@@ -97,8 +98,7 @@ pub struct AgentView {
     pub model_picker: Option<crate::model_picker::ModelPicker>,
     /// The `/tree` selector (owns the frame while open).
     pub tree_selector: Option<crate::tree_selector::TreeSelector>,
-    /// A pending extension confirm (TS `showExtensionConfirm`: the
-    /// Yes/No selector over the editor dock).
+    /// A pending confirm: the Yes/No selector over the editor dock.
     pub confirm: Option<crate::confirm::ConfirmPanel>,
     /// The `/login` / `/logout` provider selector (TS
     /// `OAuthSelectorComponent` inline): owns the frame while open.

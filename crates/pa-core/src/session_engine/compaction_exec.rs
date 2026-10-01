@@ -378,12 +378,10 @@ pub async fn compact_with(
 
 /// The compaction entry to persist for a result.
 ///
-/// `fromHook` carries the TS `fromExtension` origin: whether a compaction
-/// extension produced the summary (`agent-session.ts` passes its
-/// `fromExtension` flag into `appendCompaction`). The Rust engine has no
-/// extension seam yet, so every built-in compaction records `fromHook:
-/// false`, the exact durable value TS writes for its built-in path — never
-/// a missing key.
+/// `fromHook` carries the compaction origin (TS `agent-session.ts` passes
+/// its producing path's flag into `appendCompaction`). Every Rust compaction
+/// records `fromHook: false`, the exact durable value TS writes for its
+/// built-in path — never a missing key.
 pub fn compaction_entry_for(
     result: &CompactionResult,
     details: &CompactionDetails,
@@ -481,7 +479,7 @@ mod tests {
     }
 
     /// The entry records the TS wire record: `fromHook: false` (the
-    /// built-in origin — TS passes `fromExtension`), the file-operation
+    /// built-in origin), the file-operation
     /// details, the summarizer usage, and the custom instructions.
     #[test]
     fn compaction_entry_records_the_ts_wire_fields() {

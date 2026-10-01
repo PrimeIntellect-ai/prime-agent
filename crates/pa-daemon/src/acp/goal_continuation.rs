@@ -285,8 +285,6 @@ mod tests {
                     rlm_subagent_host: None,
                     rlm_depth: None,
                     model_info: Some(model.clone()),
-                    cli_extension_sources: Vec::new(),
-                    extension_tool_allow_list: None,
                     prewarm_ipython_kernel: None,
                     on_background_work_settled: None,
                     queued_goal_context_purge: None,

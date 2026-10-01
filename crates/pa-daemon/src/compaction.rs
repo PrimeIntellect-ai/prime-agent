@@ -377,8 +377,7 @@ pub(crate) fn compaction_summary_delta_event(delta: &str) -> Value {
 /// firstKeptEntryId, tokensBefore, and the durable entry's file-op
 /// `details` verbatim. `usage` never rides the wire result (TS keeps it on
 /// the persisted entry), and a run whose entry carries no `details` drops
-/// the key exactly like the TS extension arm's `undefined` under JSON
-/// serialization.
+/// the key exactly like TS's `undefined` under JSON serialization.
 pub(crate) fn compaction_result_value(
     result: &pa_core::session_engine::compaction_exec::CompactionResult,
     entry: &pa_types::session::CompactionEntry,
@@ -570,8 +569,8 @@ mod tests {
             serde_json::to_string(&compaction_result_value(&result, &entry)).unwrap(),
             "{\"summary\":\"the story so far\",\"firstKeptEntryId\":\"abcd1234\",\"tokensBefore\":1234,\"details\":{\"readFiles\":[\"a.rs\"],\"modifiedFiles\":[\"b.rs\"]}}"
         );
-        // A run whose entry carries no details drops the key, like the TS
-        // extension arm's `undefined` under JSON serialization.
+        // A run whose entry carries no details drops the key, like TS's
+        // `undefined` under JSON serialization.
         let bare = pa_types::session::CompactionEntry {
             details: None,
             ..entry

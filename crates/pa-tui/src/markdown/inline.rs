@@ -4,14 +4,31 @@ use ratatui::style::Modifier;
 /// Inline rendering: bold, italic, strikethrough, code, links.
 #[must_use]
 pub fn render_inline(text: &str, style: &MarkdownStyle) -> Line {
+    render_inline_with_url_slots(text, style).0
+}
+
+/// The same inline render, plus the `link_url` slot indices: which
+/// spans of the returned line carry a link's `[url]` bracket, in
+/// ascending span order. Style-tapering callers (headings) preserve
+/// those spans by origin — a code or body span that merely renders in
+/// the `link_url` style (a theme whose colors collide) is not a slot
+/// and tapers like any other span.
+#[must_use]
+pub(crate) fn render_inline_with_url_slots(
+    text: &str,
+    style: &MarkdownStyle,
+) -> (Line, Vec<usize>) {
     render_inline_ctx(text, style, false)
 }
 
 /// `in_link` mirrors marked's `lexer.state.inLink`: set while a link
 /// label's tokens are produced, and the gfm bare-url rule is skipped
-/// inside one (the angle `autolink` rule is not).
-fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
+/// inside one (the angle `autolink` rule is not). The second return
+/// half lists the `[url]` bracket indices inside the returned spans,
+/// remapped across every recursive extend.
+fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line, Vec<usize>) {
     let mut spans: Vec<Span> = Vec::new();
+    let mut url_slots: Vec<usize> = Vec::new();
     let bytes: Vec<char> = text.chars().collect();
     // Byte offset per char index: the autolink rules run on a slice of the
     // original text (zero-copy) instead of a copy of the remaining tail,
@@ -80,7 +97,31 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
             if j + 1 < bytes.len() && bytes[j] == ']' && bytes[j + 1] == '(' {
                 let mut k = j + 2;
                 let mut url = String::new();
-                while k < bytes.len() && bytes[k] != ')' {
+                // CommonMark link destination: parentheses ride only as
+                // a balanced pair (TS marked's lexer), so the destination
+                // ends at the `)` that closes it — not at the first `)`
+                // inside, which a Wikipedia-style url carries. A
+                // backslash-escaped char rides through verbatim and
+                // never counts toward the balance either (so `\(` does
+                // not swallow the real closer); unescaping stays out of
+                // this port's inline subset.
+                let mut paren_depth = 0usize;
+                while k < bytes.len() {
+                    if bytes[k] == ')' && paren_depth == 0 {
+                        break;
+                    }
+                    if bytes[k] == '\\' && k + 1 < bytes.len() {
+                        url.push(bytes[k]);
+                        k += 1;
+                        url.push(bytes[k]);
+                        k += 1;
+                        continue;
+                    }
+                    if bytes[k] == '(' {
+                        paren_depth += 1;
+                    } else if bytes[k] == ')' {
+                        paren_depth -= 1;
+                    }
                     url.push(bytes[k]);
                     k += 1;
                 }
@@ -93,19 +134,16 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
                     if italic {
                         modifier |= style.italic;
                     }
-                    // The observed TS binary output (0.9.5, the parity ground
-                    // truth) renders the link label with the body color only:
-                    // the link color is shadowed by the body color applied
-                    // inside the label, and the underline wrapper never
-                    // reaches the wire. `modifier` carries the emphasis context.
+                    // The label renders underlined (the standard
+                    // terminal link affordance); `modifier` carries the
+                    // emphasis context.
                     let href = crate::hyperlinks::resolve_link_href(&url);
-                    let mut label_spans = render_inline_ctx(&label, style, true);
+                    let (mut label_spans, mut label_slots) = render_inline_ctx(&label, style, true);
                     for s in &mut label_spans {
-                        s.style = s.style.add_modifier(modifier);
+                        s.style = s.style.add_modifier(modifier | Modifier::UNDERLINED);
                     }
                     if crate::hyperlinks::hyperlinks_enabled() {
-                        // OSC 8: the label is clickable, the URL never
-                        // printed inline (TS `hyperlink()`).
+                        // OSC 8: the label stays clickable (TS `hyperlink()`).
                         let open = crate::hyperlinks::osc8_open(&href);
                         if let Some(first) = label_spans.first_mut() {
                             first.content.insert_str(0, &open);
@@ -113,16 +151,29 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
                         if let Some(last) = label_spans.last_mut() {
                             last.content.push_str(crate::hyperlinks::OSC8_CLOSE);
                         }
-                        spans.extend(label_spans);
-                    } else {
-                        spans.extend(label_spans);
-                        // Legacy form: the URL shows after the text unless
-                        // the label is the URL (mailto stripped for the
-                        // comparison, like autolinked emails).
-                        let comparison = url.strip_prefix("mailto:").unwrap_or(url.as_str());
-                        if label != url && label != comparison {
-                            spans.push(Span::styled(format!(" ({url})"), style.link_url));
-                        }
+                    }
+                    let offset = spans.len();
+                    for slot in &mut label_slots {
+                        *slot += offset;
+                    }
+                    url_slots.append(&mut label_slots);
+                    spans.extend(label_spans);
+                    // The URL rides beside every link, in both the OSC 8
+                    // and legacy forms — after the wrap, so the region
+                    // covers the label only — in the dim `link_url` slot,
+                    // unless the label already is the URL (mailto stripped
+                    // for the comparison, like autolinked emails).
+                    let comparison = url.strip_prefix("mailto:").unwrap_or(url.as_str());
+                    if label != url && label != comparison {
+                        // The bracket renders the destination as visible
+                        // text, so it gets the same control-byte hardening
+                        // the OSC 8 target gets (`resolve_link_href`): an
+                        // escape byte smuggled into an attacker-chosen url
+                        // can never re-enter the terminal as a live
+                        // OSC/CSI sequence.
+                        let shown = crate::hyperlinks::sanitize_control_bytes(url.clone());
+                        url_slots.push(spans.len());
+                        spans.push(Span::styled(format!(" [{shown}]"), style.link_url));
                     }
                     i = k + 1;
                     continue;
@@ -160,7 +211,13 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
                 flush!();
                 if doubled {
                     bold = !bold;
-                    let mut inner_spans = render_inline_ctx(&inner, style, in_link);
+                    let (mut inner_spans, mut inner_slots) =
+                        render_inline_ctx(&inner, style, in_link);
+                    let offset = spans.len();
+                    for slot in &mut inner_slots {
+                        *slot += offset;
+                    }
+                    url_slots.append(&mut inner_slots);
                     for s in &mut inner_spans {
                         s.style = s.style.add_modifier(style.bold);
                     }
@@ -168,7 +225,13 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
                     bold = !bold;
                 } else {
                     italic = !italic;
-                    let mut inner_spans = render_inline_ctx(&inner, style, in_link);
+                    let (mut inner_spans, mut inner_slots) =
+                        render_inline_ctx(&inner, style, in_link);
+                    let offset = spans.len();
+                    for slot in &mut inner_slots {
+                        *slot += offset;
+                    }
+                    url_slots.append(&mut inner_slots);
                     for s in &mut inner_spans {
                         s.style = s.style.add_modifier(style.italic);
                     }
@@ -184,7 +247,13 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
                 let inner: String = bytes[i + 2..close].iter().collect();
                 if !inner.trim().is_empty() {
                     flush!();
-                    let mut inner_spans = render_inline_ctx(&inner, style, in_link);
+                    let (mut inner_spans, mut inner_slots) =
+                        render_inline_ctx(&inner, style, in_link);
+                    let offset = spans.len();
+                    for slot in &mut inner_slots {
+                        *slot += offset;
+                    }
+                    url_slots.append(&mut inner_slots);
                     for s in &mut inner_spans {
                         s.style = s.style.add_modifier(style.strikethrough);
                     }
@@ -209,8 +278,8 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
             flush!();
             // The token carries one plain text token, so the label is a
             // single body-colored run carrying the current emphasis (the
-            // theme.link/underline wrapper never reaches the wire in the
-            // deployed binary, like explicit link labels).
+            // theme.link color never reaches the wire, like explicit link
+            // labels).
             let mut m = Modifier::empty();
             if bold {
                 m |= style.bold;
@@ -218,23 +287,31 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
             if italic {
                 m |= style.italic;
             }
-            let label = Span::styled(token.text.clone(), base.add_modifier(m));
+            // Every link render underlines (the standard link
+            // affordance), both capability forms.
+            let mut label = Span::styled(
+                token.text.clone(),
+                base.add_modifier(m | Modifier::UNDERLINED),
+            );
             if crate::hyperlinks::hyperlinks_enabled() {
-                // OSC 8: the label is clickable, the URL never printed
-                // inline (TS `hyperlink()`).
                 let href = crate::hyperlinks::resolve_link_href(&token.href);
-                let mut content = label.content;
-                content.insert_str(0, &crate::hyperlinks::osc8_open(&href));
-                content.push_str(crate::hyperlinks::OSC8_CLOSE);
-                spans.push(Span::styled(content, label.style));
-            } else {
-                spans.push(label);
-                // Legacy form: the URL shows after the label unless the
-                // label already is it (mailto stripped), TS token.href.
-                let comparison = token.href.strip_prefix("mailto:").unwrap_or(&token.href);
-                if token.text != token.href && token.text != comparison {
-                    spans.push(Span::styled(format!(" ({})", token.href), style.link_url));
-                }
+                label
+                    .content
+                    .insert_str(0, &crate::hyperlinks::osc8_open(&href));
+                label.content.push_str(crate::hyperlinks::OSC8_CLOSE);
+            }
+            spans.push(label);
+            // The URL rides beside the label in the dim `link_url` slot
+            // unless the label already shows it (the mailto-stripped
+            // comparison, TS token.href). The bare-url regex tail only
+            // excludes whitespace, so an escape byte can ride a bare
+            // url token's href into this visible span — the bracket gets
+            // the same control-byte hardening the OSC 8 target gets.
+            let comparison = token.href.strip_prefix("mailto:").unwrap_or(&token.href);
+            if token.text != token.href && token.text != comparison {
+                let shown = crate::hyperlinks::sanitize_control_bytes(token.href.clone());
+                url_slots.push(spans.len());
+                spans.push(Span::styled(format!(" [{shown}]"), style.link_url));
             }
             i += token.raw.chars().count();
             continue;
@@ -246,7 +323,7 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
     if spans.is_empty() {
         spans.push(Span::raw(""));
     }
-    spans
+    (spans, url_slots)
 }
 
 /// Run the marked autolink rules on the text starting at `rest` (the

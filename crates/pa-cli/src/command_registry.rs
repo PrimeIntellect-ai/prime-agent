@@ -173,7 +173,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "package <install|remove|list|update>",
         "Manage capability packages",
     )
-    .description("Packages can provide extensions, skills, prompts, and themes."),
+    .description("Packages can provide skills, prompts, and themes."),
     CommandSpec::new(
         &["package", "install"],
         "package install <source> [--local]",
@@ -332,8 +332,6 @@ const TOP_LEVEL_OPTION_GROUPS: &[OptionGroup] = &[
                 "-nbt, --no-builtin-tools",
                 "Disable built-in tools by default",
             ),
-            ("-e, --extension <source>", "Load an extension (repeatable)"),
-            ("-ne, --no-extensions", "Disable extension discovery"),
             ("--skill <path>", "Load a skill (repeatable)"),
             ("-ns, --no-skills", "Disable skill discovery"),
             (

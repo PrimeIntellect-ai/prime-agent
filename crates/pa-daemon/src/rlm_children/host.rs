@@ -136,6 +136,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     label: rlm_child_label(&request.prompt),
                     started_at_ms: now_ms(),
                     settled_status: None,
+                    settled: false,
                     answer_preview: None,
                     answer_captured: false,
                     replied_since_task: false,
@@ -215,6 +216,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                             .kill_child(&child_active_session_id, ChildCloseReason::Killed)
                             .await;
                         watcher_record.lock().await.settled_status = Some("error");
+                        watcher_this.fire_settle_hook(&watcher_record).await;
                         return;
                     }
                 }
@@ -405,6 +407,10 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     this.deliver_terminal_notice(&notice).await;
                 }
             }
+            // The deletion settles the run (TS `_finishRlmRunDeletion`,
+            // the same resume site the inactive delete funnels through):
+            // a parked barrier re-reads a removed record as settled.
+            this.fire_settle_hook(&record).await;
             Ok(RlmDeleteSubagentResult {
                 subagent: entry,
                 outcome: Some("deleted"),

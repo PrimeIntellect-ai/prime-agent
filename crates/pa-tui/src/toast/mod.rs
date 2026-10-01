@@ -4,8 +4,8 @@
 //! SANCTIONED DIVERGENCE from TS (documented per the #289 precedent): the
 //! TS product has no in-TUI toast surface — confirmations render as
 //! durable chat status rows (`showStatus`), and its "toast" surfaces are
-//! OS-level notifications (the Windows Terminal / termux notifier
-//! extensions). The Rust product keeps the chat row for anything the
+//! OS-level notifications (the Windows Terminal / termux notifier). The
+//! Rust product keeps the chat row for anything the
 //! transcript should remember and surfaces action acks the user only
 //! needs for a moment as an overlay instead: the confirmation never
 //! pollutes the transcript and the transcript never scrolls to show it.

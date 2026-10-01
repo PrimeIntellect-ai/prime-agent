@@ -849,3 +849,196 @@ async fn engine_sessions_emit_the_timeline_only_when_the_flag_is_on() {
         None => std::env::remove_var(REQUEST_TIMING_ENV),
     }
 }
+
+/// A provider seam that invokes the payload hook once with the TS
+/// `PAYLOAD` fixture, then settles with a zero-usage message (the pin is
+/// the capture, not the turn).
+fn payload_calling_provider() -> StreamFn {
+    Arc::new(move |model, _context, options| {
+        Box::pin(async move {
+            if let Some(on_payload) = options.on_payload.as_ref() {
+                let _ = on_payload(payload(), &model);
+            }
+            let (handle, consumer) = event_stream();
+            let final_msg = empty_partial(&model);
+            tokio::spawn(async move {
+                handle.push(AssistantMessageEvent::Start {
+                    partial: final_msg.clone(),
+                });
+                handle.push(AssistantMessageEvent::Done {
+                    reason: StopReason::Stop,
+                    message: final_msg,
+                });
+            });
+            Ok(Box::new(consumer) as Box<dyn ModelStream>)
+        })
+    })
+}
+
+/// The capture integration: while the flag is on, the instrumented
+/// payload hook hands the request's final outbound body — after every
+/// transform, exactly what the provider sees — to the capture's writer,
+/// with the identity fields the timeline entries correlate by.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_payload_capture_writes_the_exact_outbound_body() {
+    let _writer_lock = super::payload::WRITER_TEST_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("agent.jsonl");
+    let capture_dir = dir.path().join("request-payloads");
+    let wiring = Arc::new(
+        RequestTimingWiring::new(Arc::new(|| true), RequestTimingLog::at(&log_path))
+            .with_payload_capture(RequestPayloadCapture::at(&capture_dir, 64)),
+    );
+    let stream = run_timed_request(
+        Arc::clone(&wiring),
+        scripted_provider(test_model(), gate().1, gate().1, gate().1, false),
+    )
+    .await
+    .unwrap();
+    drain(stream).await;
+
+    super::payload::tests::wait_for_payload_files(&capture_dir, 1);
+    let names = super::payload::tests::payload_files(&capture_dir);
+    let envelope = super::payload::tests::payload_envelope(&capture_dir, &names[0]);
+    assert_eq!(
+        envelope.get("payload"),
+        Some(&payload()),
+        "the file carries the exact outbound body: {envelope}"
+    );
+    assert_eq!(
+        envelope.get("model").and_then(Value::as_str),
+        Some("bench/bench-model")
+    );
+    assert_eq!(
+        envelope.get("provider").and_then(Value::as_str),
+        Some("bench")
+    );
+    assert_eq!(envelope.get("sessionId"), Some(&json!("sess-timing")));
+    assert_eq!(envelope.get("requestSeq"), Some(&json!(1)));
+    assert_eq!(
+        envelope.get("requestBytes"),
+        Some(&json!(serde_json::to_vec(&payload()).unwrap().len() as u64)),
+        "UTF-8 bytes, not a code-unit count: {envelope}"
+    );
+    // The timeline still emits: the capture rides the same flag.
+    assert!(
+        timing_entries(&log_path)
+            .iter()
+            .any(|entry| { entry.get("phase").and_then(Value::as_str) == Some("request-sent") }),
+        "the phase timeline is unchanged"
+    );
+}
+
+/// The capture rides the request-timing flag: disabled, the same request
+/// hands off no body (and writes no timeline entry).
+#[cfg(unix)]
+#[tokio::test]
+async fn the_payload_capture_writes_nothing_when_the_flag_is_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("agent.jsonl");
+    let capture_dir = dir.path().join("request-payloads");
+    let wiring = Arc::new(
+        RequestTimingWiring::new(Arc::new(|| false), RequestTimingLog::at(&log_path))
+            .with_payload_capture(RequestPayloadCapture::at(&capture_dir, 64)),
+    );
+    let stream = run_timed_request(
+        Arc::clone(&wiring),
+        scripted_provider(test_model(), gate().1, gate().1, gate().1, false),
+    )
+    .await
+    .unwrap();
+    drain(stream).await;
+    assert!(
+        super::payload::tests::payload_files(&capture_dir).is_empty(),
+        "flag off captures no bodies"
+    );
+    assert!(
+        timing_entries(&log_path).is_empty(),
+        "flag off writes no entries"
+    );
+}
+
+/// The engine path (the daemon workers' session build is this same
+/// `create_session`): the wiring the engine installs captures while the
+/// flag is on, and writes nothing while it is off.
+#[cfg(unix)]
+#[tokio::test]
+async fn engine_sessions_capture_the_outbound_payload_when_the_flag_is_on() {
+    use crate::session_engine::engine::{create_session, SessionEngineConfig};
+
+    // Both shared-process locks: the env pin and the writer queue.
+    let _writer_lock = super::payload::WRITER_TEST_LOCK.lock().await;
+    let _env = REQUEST_TIMING_ENV_LOCK.lock().await;
+    let previous_env = std::env::var(REQUEST_TIMING_ENV).ok();
+    std::env::remove_var(REQUEST_TIMING_ENV);
+
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        r#"{"requestTiming": true}"#,
+    )
+    .unwrap();
+
+    let engine = create_session(SessionEngineConfig {
+        cwd: dir.path().to_path_buf(),
+        agent_dir: agent_dir.clone(),
+        model: Some(test_model()),
+        stream_fn: Some(payload_calling_provider()),
+        tools: Vec::new(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    engine
+        .session
+        .prompt("hello", crate::session_engine::PromptOptions::default())
+        .await
+        .unwrap();
+    engine.session.agent().wait_for_idle().await;
+
+    let capture_dir = agent_dir.join("logs").join("request-payloads");
+    super::payload::tests::wait_for_payload_files(&capture_dir, 1);
+    let names = super::payload::tests::payload_files(&capture_dir);
+    let envelope = super::payload::tests::payload_envelope(&capture_dir, &names[0]);
+    assert_eq!(
+        envelope.get("payload"),
+        Some(&payload()),
+        "the engine's capture carries the exact outbound body: {envelope}"
+    );
+    assert_eq!(
+        envelope.get("model").and_then(Value::as_str),
+        Some("bench/bench-model")
+    );
+
+    // Flag off: no capture directory at all (the wrapper passes
+    // straight through with no serialization and no writes).
+    let off_dir = tempfile::tempdir().unwrap();
+    let engine = create_session(SessionEngineConfig {
+        cwd: off_dir.path().to_path_buf(),
+        agent_dir: off_dir.path().to_path_buf(),
+        model: Some(test_model()),
+        stream_fn: Some(payload_calling_provider()),
+        tools: Vec::new(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    engine
+        .session
+        .prompt("hello", crate::session_engine::PromptOptions::default())
+        .await
+        .unwrap();
+    engine.session.agent().wait_for_idle().await;
+    let off_capture = off_dir.path().join("logs").join("request-payloads");
+    assert!(
+        super::payload::tests::payload_files(&off_capture).is_empty() && !off_capture.exists(),
+        "flag off leaves no capture"
+    );
+    match previous_env {
+        Some(value) => std::env::set_var(REQUEST_TIMING_ENV, value),
+        None => std::env::remove_var(REQUEST_TIMING_ENV),
+    }
+}

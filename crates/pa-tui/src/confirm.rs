@@ -1,8 +1,7 @@
-//! The extension-confirm selector (TS `showExtensionConfirm` →
-//! `showExtensionSelector` with the Yes/No options): the shared menu
-//! grammar (the `›` marker rows and the key-hint status row every picker
-//! renders with) over the title, the message as its description lines,
-//! and a small option list that answers the pending question.
+//! The yes/no confirm selector: the shared menu grammar (the `›` marker
+//! rows and the key-hint status row every picker renders with) over the
+//! title, the message as its description lines, and a small option list
+//! that answers the pending question.
 
 use crate::keybindings::KeybindingsManager;
 use crate::menu_panel::{hint_row, key_hint, menu_row};
@@ -21,8 +20,7 @@ pub enum ConfirmAction {
     None,
 }
 
-/// A pending confirm (TS `ExtensionSelectorComponent` with the Yes/No
-/// options). Owns the editor dock while open.
+/// A pending confirm. Owns the editor dock while open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmPanel {
     title: String,
@@ -32,7 +30,7 @@ pub struct ConfirmPanel {
 }
 
 impl ConfirmPanel {
-    /// The Yes/No confirm of TS `showExtensionConfirm(title, message)`.
+    /// The Yes/No confirm of a pending question (`title`, `message`).
     pub fn yes_no(title: &str, message: &str) -> Self {
         ConfirmPanel {
             title: title.to_string(),

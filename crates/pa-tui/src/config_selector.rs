@@ -213,7 +213,7 @@ impl ConfigSelector {
         if kb.matches(key, "app.clear") {
             return Some(SelectorAction::Exit);
         }
-        if key == " " || kb.matches(key, "tui.select.confirm") {
+        if key == "space" || kb.matches(key, "tui.select.confirm") {
             return self.toggle_selected();
         }
         if key == "backspace" {
@@ -703,7 +703,7 @@ mod tests {
         );
         let mut selector = ConfigSelector::new(rows());
         assert_eq!(
-            selector.handle_key(" ", &kb()),
+            selector.handle_key("space", &kb()),
             Some(SelectorAction::Toggle {
                 key: "kernel".to_string(),
                 enabled: false

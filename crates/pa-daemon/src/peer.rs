@@ -43,8 +43,8 @@ pub(crate) const PEER_GRANT_INVALID: &str = "Peer transport grant is invalid";
 pub(crate) const PEER_COMMAND_NOT_ALLOWED: &str =
     "Command is not allowed on this direct peer transport";
 
-/// TS purposes plus the stage-3 extension: a `worker` grant admits a peer
-/// worker (agent-message delivery), not a session client.
+/// TS purposes plus the Rust `worker` grant: a `worker` grant admits a
+/// peer worker (agent-message delivery), not a session client.
 pub(crate) const PEER_PURPOSE_SESSION_CLIENT: &str = "session_client";
 pub(crate) const PEER_PURPOSE_WORKER: &str = "worker";
 

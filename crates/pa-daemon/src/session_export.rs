@@ -197,14 +197,12 @@ impl ExportCommands {
 
 /// The export's custom-tool renderer (the TS `createToolHtmlRenderer`
 /// seam): resolves a tool by name against the session's live registry at
-/// render time. The Rust tool surface carries no render functions —
-/// extension tools' the TS TUI components cannot cross the sidecar boundary
-/// and the built-in `ipython` has none
-/// in either product — so a resolved tool reports no renderable
-/// representation and the export falls back to the template's generic
-/// tool rendering, exactly like the TS renderer for a tool without
-/// `renderCall`. The seam stays wired at the registry so a future
-/// line-oriented renderer slots in without touching the exporter.
+/// render time. The Rust tool surface carries no render functions — the
+/// built-in `ipython` has none in either product — so a resolved tool
+/// reports no renderable representation and the export falls back to the
+/// template's generic tool rendering, exactly like the TS renderer for a
+/// tool without `renderCall`. The seam stays wired at the registry so a
+/// future line-oriented renderer slots in without touching the exporter.
 pub(crate) struct ExportToolRenderer<'a> {
     /// The session's live tool registry (TS `getToolDefinition` source).
     pub tools: &'a [std::sync::Arc<dyn pa_agent::types::AgentTool>],

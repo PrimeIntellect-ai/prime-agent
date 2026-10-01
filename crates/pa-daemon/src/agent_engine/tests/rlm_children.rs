@@ -294,32 +294,37 @@ fn release_settled_child_kernel_defers_to_scheduled_jobs_and_fires_the_release_p
     assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
+/// The whole-worker idle passivation gate accepts exactly when the
+/// kernel release would fire under the shared settled gates, plus the
+/// worker-only registry rule: a child record keeps the worker resident
+/// (a revival starts with an empty registry) while the kernel release
+/// still fires — releasing a kernel keeps the worker and its registry
+/// resident.
 #[test]
-fn can_passivate_settled_session_mirrors_the_release_gates() {
-    // The whole-worker idle passivation's engine gate must accept exactly
-    // when the kernel release would fire: no unsettled descendants and no
-    // registered active-or-paused scheduled job (the shared store covers
-    // cron jobs AND armed heartbeats — the wake-blind substitution).
+fn can_passivate_worker_mirrors_the_release_gates_and_adds_the_registry_rule() {
     let dir = tempfile::TempDir::new().unwrap();
-    let engine = std::sync::Arc::new(bare_engine(dir.path()));
-    // No children and no jobs probe: the gates pass.
-    assert!(engine
-        .runtime
-        .block_on(crate::engine::SessionEngine::can_passivate_settled_session(
-            &*engine
-        )));
-    // A jobs probe reporting armed jobs blocks the passivation.
-    *engine
-        .registered_jobs_probe
-        .lock()
-        .expect("registered jobs probe lock") = Some(std::sync::Arc::new(|| true));
-    assert!(!engine
-        .runtime
-        .block_on(crate::engine::SessionEngine::can_passivate_settled_session(
-            &*engine
-        )));
-    // The release consumes the same gate: the probe never fires while a
-    // job is armed.
+    let engine = std::sync::Arc::new(
+        AgentSessionEngine::new(AgentEngineConfig {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: dir.path().join("agent"),
+            provider: None,
+            model: None,
+            api_key: None,
+            thinking: None,
+            session_dir: None,
+            session_file: None,
+            faux_script: None,
+            supervisor_link: Some(crate::agent_engine::SupervisorLinkConfig {
+                socket_path: dir.path().join("dead.sock"),
+                active_session_id: "parent-session".to_string(),
+                worker_token: "token".to_string(),
+            }),
+            telemetry_disabled: None,
+            cron_store: None,
+            queued_steering_probe: None,
+        })
+        .unwrap(),
+    );
     let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let probe_fired = std::sync::Arc::clone(&fired);
     *engine
@@ -329,10 +334,71 @@ fn can_passivate_settled_session_mirrors_the_release_gates() {
         probe_fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(std::future::ready(()))
     }));
+    // An empty registry with nothing armed: the gate passes.
+    assert!(engine
+        .runtime
+        .block_on(crate::engine::SessionEngine::can_passivate_worker(&*engine)));
+    // A live background bash handle blocks the passivation (the kernel
+    // snapshot cannot resurrect a live process), and the release consumes
+    // the same gate: the probe never fires while a handle runs.
+    *engine
+        .background_bash_probe
+        .lock()
+        .expect("background bash probe lock") = Some(std::sync::Arc::new(|| true));
+    assert!(!engine
+        .runtime
+        .block_on(crate::engine::SessionEngine::can_passivate_worker(&*engine)));
     engine
         .runtime
         .block_on(crate::engine::SessionEngine::release_settled_child_kernel(
             &*engine,
         ));
     assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 0);
+    *engine
+        .background_bash_probe
+        .lock()
+        .expect("background bash probe lock") = None;
+    // A jobs probe reporting armed jobs blocks the passivation the same
+    // way.
+    *engine
+        .registered_jobs_probe
+        .lock()
+        .expect("registered jobs probe lock") = Some(std::sync::Arc::new(|| true));
+    assert!(!engine
+        .runtime
+        .block_on(crate::engine::SessionEngine::can_passivate_worker(&*engine)));
+    engine
+        .runtime
+        .block_on(crate::engine::SessionEngine::release_settled_child_kernel(
+            &*engine,
+        ));
+    assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 0);
+    *engine
+        .registered_jobs_probe
+        .lock()
+        .expect("registered jobs probe lock") = None;
+    // A settled child record keeps the worker resident (a revival starts
+    // with an empty registry) while the kernel release still fires: the
+    // registry rule is whole-worker only.
+    let children = engine.children.clone().expect("children registry");
+    engine.runtime.block_on(async {
+        children
+            .push_test_child(crate::rlm_children::RlmChildIdentity {
+                rlm_child_id: "child-1".to_string(),
+                active_session_id: "child-session".to_string(),
+                session_id: None,
+                session_name: "worker-1".to_string(),
+            })
+            .await;
+        children.settle_test_child("child-session").await;
+    });
+    assert!(!engine
+        .runtime
+        .block_on(crate::engine::SessionEngine::can_passivate_worker(&*engine)));
+    engine
+        .runtime
+        .block_on(crate::engine::SessionEngine::release_settled_child_kernel(
+            &*engine,
+        ));
+    assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1);
 }

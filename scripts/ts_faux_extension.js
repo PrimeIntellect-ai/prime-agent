@@ -1,5 +1,5 @@
-// Shared faux-provider driver extension for the parity harnesses
-// (visual_parity.py, tool_card_parity.py, compact_parity.py): registers the
+// Shared faux-provider driver extension for the perf-wave dimensions
+// (scripts/battery/sustained_cpu.py, stream_throughput.py): registers the
 // faux provider with scripted responses read from PRIME_AGENT_FAUX_SCRIPT
 // (same harness contract the Rust rewrite uses). Verification harness only;
 // never installed for real users.

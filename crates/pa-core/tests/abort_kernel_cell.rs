@@ -212,8 +212,6 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
         rlm_depth: None,
         telemetry: None,
         model_info: None,
-        cli_extension_sources: Vec::new(),
-        extension_tool_allow_list: None,
         mcp_manager: None,
         prewarm_ipython_kernel: None,
         on_background_work_settled: None,

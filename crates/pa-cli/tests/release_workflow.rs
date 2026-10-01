@@ -38,8 +38,7 @@
 //! beta-only, both - here one target, five targets, none) and skip with a
 //! logged reason where the box's python3 is below the floor the step
 //! scripts need (python 3.12: the merge step unpacks with
-//! `extractall(filter=)`; the promote runner's ubuntu-24.04 provides it),
-//! mirroring the extension-host tests' node guard.
+//! `extractall(filter=)`; the promote runner's ubuntu-24.04 provides it).
 
 use std::fmt::Write as _;
 use std::fs;
@@ -355,12 +354,14 @@ fn windows_build_job_contract() {
             })),
         "the Windows build compiles the MSVC target (the split-debug step is linux-only)"
     );
-    // promote's needs list must include build-windows: the YAML schema of
-    // this test reads jobs' steps; the needs field is asserted through the
-    // raw text (the Workflow struct does not model needs).
+    // promote's needs list and route gate must include build-windows (it
+    // builds on both routes): the YAML schema of this test reads jobs'
+    // steps; needs/if are asserted through the raw text (the Workflow
+    // struct does not model them).
     assert!(
-        text.contains("needs: [build-gnu, build-darwin, build-windows]"),
-        "promote must wait for the Windows build"
+        text.contains("needs: [build-gnu, build-darwin, build-windows, reuse-continuous]")
+            && text.contains("needs.build-windows.result == 'success'"),
+        "promote must wait for the Windows build on both routes"
     );
     let promote = workflow
         .jobs

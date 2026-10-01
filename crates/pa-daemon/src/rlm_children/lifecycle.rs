@@ -418,9 +418,11 @@ impl SupervisorChildSessionsInner {
                 // pop (the queue snapshot and the busy flag change under
                 // different locks on the far side of a socket). A short
                 // grace closes that window; a child that went busy again
-                // (a queued continuation) keeps watching.
+                // (a queued continuation) keeps watching. An unreachable
+                // worker (an idle passivation, a crash) leaves the settled
+                // verdict standing, as in `refresh_record`.
                 tokio::time::sleep(Duration::from_millis(WATCH_SETTLE_GRACE_MS)).await;
-                if !matches!(self.child_busy(&active_session_id).await, Ok(false)) {
+                if matches!(self.child_busy(&active_session_id).await, Ok(true)) {
                     record.lock().await.settled_status = None;
                     continue;
                 }
@@ -433,7 +435,7 @@ impl SupervisorChildSessionsInner {
                 // A settled child releases an owed goal continuation (TS
                 // `_maybeResumeGoalContinuationAfterRlmWork` at the child
                 // settle sites).
-                self.fire_settle_hook();
+                self.fire_settle_hook(record).await;
                 return;
             }
             // Still running (a timed-out slice or a re-queued continuation):
@@ -456,7 +458,7 @@ impl SupervisorChildSessionsInner {
                     // holds; capture them before the terminal notice.
                     self.emit_child_usage(record).await;
                     self.deliver_settle_notice(record).await;
-                    self.fire_settle_hook();
+                    self.fire_settle_hook(record).await;
                     return;
                 }
             }

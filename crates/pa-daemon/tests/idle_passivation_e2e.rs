@@ -154,6 +154,24 @@ fn worker_token(agent_dir: &Path, active_session_id: &str) -> Option<String> {
     None
 }
 
+/// The worker's pid from its persisted descriptor (the process the
+/// passivation must retire).
+fn worker_pid(agent_dir: &Path, active_session_id: &str) -> Option<u64> {
+    let instances = std::fs::read_dir(agent_dir.join("daemon-workers")).ok()?;
+    for instance in instances.flatten() {
+        let descriptor_path = instance.path().join(format!("{active_session_id}.json"));
+        let Ok(content) = std::fs::read_to_string(&descriptor_path) else {
+            continue;
+        };
+        if let Ok(descriptor) = serde_json::from_str::<Value>(&content) {
+            if let Some(pid) = descriptor.get("pid").and_then(Value::as_u64) {
+                return Some(pid);
+            }
+        }
+    }
+    None
+}
+
 fn write_faux_script(dir: &Path, name: &str, responses: &Value) -> PathBuf {
     let path = dir.join(format!("{name}.json"));
     std::fs::write(
@@ -298,25 +316,8 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_prompt() {
     };
     let child_token =
         worker_token(&agent_dir, &child_active_session_id).expect("the child worker's token");
-    let child_pid = {
-        let instances = std::fs::read_dir(agent_dir.join("daemon-workers")).expect("workers");
-        let mut pid = None;
-        for instance in instances.flatten() {
-            let descriptor_path = instance
-                .path()
-                .join(format!("{child_active_session_id}.json"));
-            let Ok(content) = std::fs::read_to_string(&descriptor_path) else {
-                continue;
-            };
-            if let Ok(descriptor) = serde_json::from_str::<Value>(&content) {
-                if let Some(found) = descriptor.get("pid").and_then(Value::as_u64) {
-                    pid = Some(found);
-                    break;
-                }
-            }
-        }
-        pid.expect("the child worker's pid")
-    };
+    let child_pid =
+        worker_pid(&agent_dir, &child_active_session_id).expect("the child worker's pid");
     assert!(std::path::Path::new(&format!("/proc/{child_pid}")).exists());
     let child_alive = || std::path::Path::new(&format!("/proc/{child_pid}")).exists();
 
@@ -405,10 +406,11 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_prompt() {
     // wakes a fresh worker over the saved file (the route's wake arm
     // resolves the saved session and launches). The faux engine's script
     // is spawn-time config (not session-file state), so the replayed
-    // worker's turn runs the default provider — the WAKE oracle here is
-    // the respawn + the prompt's delivery into the child's session file;
-    // the model-answer revival is the VM census's leg (the real binary
-    // against the offline mock).
+    // worker's turn runs the default provider: the response's outcome
+    // depends on the host's credentials and is not asserted — the WAKE
+    // oracle is the revival prompt's row in the child's session file
+    // (only a woken worker writes it); the model-answer revival is the
+    // VM census's leg (the real binary against the offline mock).
     let child_file_rows_before = std::fs::read_to_string({
         let roster = children
             .list_subagents()
@@ -424,23 +426,16 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_prompt() {
         ))
     })
     .map_or(0, |content| content.lines().count());
+    let revive_prompt = "revive: answer again";
     client.send_command(
         "revive",
         &json!({
             "type": "prompt_and_wait",
             "activeSessionId": child_session_id,
-            "message": "revive: answer again",
+            "message": revive_prompt,
         }),
     );
     let revived = client.read_response("revive");
-    assert!(
-        revived["success"] == true
-            || revived
-                .get("error")
-                .and_then(Value::as_str)
-                .is_some_and(|error| error.contains("Insufficient balance")),
-        "the wake must relaunch the child (the faux replay's model turn may fail auth; the wake itself must not): {revived}"
-    );
     // The revival respawned a worker for the child's session (a fresh
     // pid serves the replayed file) and the prompt's row landed in the
     // child's session file (the delivery half of the revival).
@@ -470,8 +465,132 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_prompt() {
         }
         assert!(
             Instant::now() < deadline,
-            "the revival never delivered the prompt into the child's session file ({child_file:?}, rows {rows_after} <= {child_file_rows_before})"
+            "the revival never delivered the prompt into the child's session file ({child_file:?}, rows {rows_after} <= {child_file_rows_before}, response: {revived})"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    let grown = std::fs::read_to_string(&child_file).expect("the child session file");
+    assert!(
+        grown.contains(revive_prompt),
+        "the revival prompt never landed in the child's session file ({child_file:?}, response: {revived})"
+    );
+}
+
+/// An idle unowned ROOT passivates through the same worker-driven ask
+/// (TS `canEvictWorker` reaches roots and children alike) and resumes
+/// by its durable session id: the attach wakes a fresh worker over the
+/// saved file and the snapshot carries the pre-passivation transcript.
+#[tokio::test]
+async fn an_idle_root_passivates_and_resumes_by_its_durable_id_with_its_transcript() {
+    let Some(kernel_python) = kernel_python() else {
+        eprintln!("kernel python unavailable; skipping the root passivation e2e");
+        return;
+    };
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let agent_dir = dir.path().join("agent");
+    let sessions_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({ "idleEvictionMinutes": 1 }).to_string(),
+    )
+    .expect("write settings");
+    let root_script = write_faux_script(dir.path(), "root", &json!([{ "text": "root turn done" }]));
+
+    let _daemon = spawn_supervisor(&socket, &agent_dir, &kernel_python);
+    wait_socket_ready(&socket);
+    let (mut client, hello) = Client::connect(&socket);
+    assert_eq!(hello["type"], "daemon_hello");
+
+    client.send_command(
+        "create-root",
+        &json!({
+            "type": "create",
+            "name": "root",
+            "config": {
+                "cwd": dir.path().to_string_lossy(),
+                "sessionDir": sessions_dir.to_string_lossy(),
+                "script": root_script.to_string_lossy(),
+            },
+        }),
+    );
+    let created = client.read_response("create-root");
+    assert_eq!(created["success"], true, "create root failed: {created}");
+    let root_active_session_id = created["data"]["activeSessionId"]
+        .as_str()
+        .or_else(|| created["data"]["id"].as_str())
+        .expect("root active session id")
+        .to_string();
+    let root_session_id = created["data"]["sessionId"]
+        .as_str()
+        .expect("root durable session id")
+        .to_string();
+
+    client.send_command(
+        "first-turn",
+        &json!({
+            "type": "prompt_and_wait",
+            "activeSessionId": root_active_session_id,
+            "message": "first turn",
+        }),
+    );
+    let first = client.read_response("first-turn");
+    assert_eq!(first["success"], true, "the first turn failed: {first}");
+
+    let root_token =
+        worker_token(&agent_dir, &root_active_session_id).expect("the root worker's token");
+    let root_pid = worker_pid(&agent_dir, &root_active_session_id).expect("the root worker's pid");
+    assert!(std::path::Path::new(&format!("/proc/{root_pid}")).exists());
+
+    // THE PASSIVATION ASK for a ROOT: the supervisor's handler accepts an
+    // unowned worker regardless of depth (without the fix this answers
+    // the child-worker-policy refusal).
+    client.send_command(
+        "passivate-root",
+        &json!({
+            "type": "worker_idle_passivation",
+            "workerToken": root_token,
+            "idleMinutes": 1,
+        }),
+    );
+    let passivated = client.read_response("passivate-root");
+    assert_eq!(
+        passivated["success"], true,
+        "the root's idle passivation must succeed: {passivated}"
+    );
+
+    // The root worker's process is gone (the whole-worker stop).
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while std::path::Path::new(&format!("/proc/{root_pid}")).exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the root worker process survived the passivation"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // THE RESUME: a fresh client attaches by the DURABLE session id (the
+    // TUI reattach selector); the route's wake arm resolves the saved
+    // session, launches a fresh worker over the file, and the snapshot
+    // carries the pre-passivation transcript.
+    let (mut fresh, _hello) = Client::connect(&socket);
+    fresh.send_command(
+        "re-attach",
+        &json!({ "type": "attach", "activeSessionId": root_session_id }),
+    );
+    let attached = fresh.read_response("re-attach");
+    assert_eq!(
+        attached["success"], true,
+        "the attach by the durable id must wake the passivated root: {attached}"
+    );
+    let messages = attached["data"]["snapshot"]["messages"].to_string();
+    assert!(
+        messages.contains("first turn"),
+        "the snapshot must carry the first turn's user prompt: {messages}"
+    );
+    assert!(
+        messages.contains("root turn done"),
+        "the snapshot must carry the first turn's reply: {messages}"
+    );
 }

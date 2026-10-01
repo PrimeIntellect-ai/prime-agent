@@ -480,6 +480,33 @@ fn highlighted_code_lines(
     ))
 }
 
+/// Heading spans: inline-rendered, tapered to the heading color with
+/// the link affordance kept — an underlined label stays underlined and
+/// the URL bracket keeps its dim `link_url` slot, tracked by origin
+/// (the inline pass reports the bracket indices). A code or body span
+/// that merely renders in the `link_url` style (a theme whose colors
+/// collide) tapers to the heading color like any other span. Shared by
+/// the paint path and the row count, so a wrapped heading counts
+/// exactly what it paints.
+fn heading_spans(text: &str, style: &MarkdownStyle) -> Vec<Span> {
+    let (mut spans, url_slots) = inline::render_inline_with_url_slots(text, style);
+    // The slot indices arrive ascending, so one cursor walks them in
+    // step with the span iteration — a link-heavy heading stays linear.
+    let mut url_slot = 0;
+    for (i, s) in spans.iter_mut().enumerate() {
+        if url_slots.get(url_slot) == Some(&i) {
+            url_slot += 1;
+            continue;
+        }
+        let underlined = s.style.add_modifier.contains(Modifier::UNDERLINED);
+        s.style = style.heading;
+        if underlined {
+            s.style = s.style.add_modifier(Modifier::UNDERLINED);
+        }
+    }
+    spans
+}
+
 fn render_block(
     block: &Block,
     next: Option<&Block>,
@@ -497,11 +524,8 @@ fn render_block(
             // alone (probe vs the installed 0.9.5 binary: `# H1`, `## H2`,
             // and `### H3` all render bare mdHeading).
             let text = block.lines.first().cloned().unwrap_or_default();
-            let mut spans = render_inline(&text, style);
-            for s in &mut spans {
-                s.style = style.heading;
-            }
-            out.push(spans);
+            let spans = heading_spans(&text, style);
+            wrap_spans(&spans, width, style.heading, out);
             if blank_after(false) {
                 out.push(Vec::new());
             }

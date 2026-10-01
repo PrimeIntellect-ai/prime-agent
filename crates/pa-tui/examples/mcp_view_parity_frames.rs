@@ -4,8 +4,7 @@
 //! two can be diffed line-for-line. Takes the fixture JSON path, the
 //! viewport rows, the render width, and a key sequence (space-separated
 //! key ids, "-" for none); prints one trimmed frame line per stdout
-//! line. Test/evidence tooling for `scripts/mcp_view_parity.py` — never
-//! linked into the product.
+//! line. Test/evidence tooling — never linked into the product.
 // Pedantic-gate exceptions (every other pedantic warning in this crate is
 // fixed in place; each exception carries its one-line justification):
 // - the casts: terminal-layout arithmetic narrows structurally bounded
