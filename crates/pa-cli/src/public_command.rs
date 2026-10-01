@@ -617,18 +617,31 @@ fn is_self_update_source(source: &str) -> bool {
     source == "self" || source == "pi" || source == APP_NAME
 }
 
+/// A `--check` invocation: `--check` (or `--version`) with at most one
+/// `--nightly` / `--stable`. `None` when the arguments are not a check.
+fn check_invocation(args: &[String]) -> Option<crate::installer_update::UpdateOptions> {
+    use pa_core::update::version::UpdateChannel;
+    let mut check = false;
+    let mut channel = None;
+    for arg in args {
+        match arg.as_str() {
+            "--check" | "--version" => check = true,
+            "--nightly" if channel.is_none() => channel = Some(UpdateChannel::Nightly),
+            "--stable" if channel.is_none() => channel = Some(UpdateChannel::Stable),
+            _ => return None,
+        }
+    }
+    check.then_some(crate::installer_update::UpdateOptions {
+        check: true,
+        channel,
+    })
+}
+
 fn run_update(args: &[String]) -> PublicCommandResult {
-    // `--check` alone (alias `--version`) reports without installing;
-    // mixed with anything else the parse below rejects it.
-    if !args.is_empty()
-        && args
-            .iter()
-            .all(|arg| matches!(arg.as_str(), "--check" | "--version"))
-    {
-        let options = crate::installer_update::UpdateOptions {
-            check: true,
-            channel: None,
-        };
+    // `--check` (alias `--version`) reports without installing, optionally
+    // for one channel flag; mixed with anything else the parse below
+    // rejects it.
+    if let Some(options) = check_invocation(args) {
         return handled_with_exit(crate::installer_update::run(&options));
     }
     let Some(options) = parse_update_options(args) else {
@@ -922,6 +935,29 @@ mod update_options_tests {
         // The staged flags still parse (the managed-install flow keeps
         // its surface).
         assert!(parse(&["--force"]).is_some());
+    }
+
+    #[test]
+    fn check_combines_with_one_channel_flag() {
+        use pa_core::update::version::UpdateChannel;
+        let channel = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
+            check_invocation(&args).map(|options| options.channel)
+        };
+        assert_eq!(channel(&["--check"]), Some(None));
+        assert_eq!(
+            channel(&["--nightly", "--version"]),
+            Some(Some(UpdateChannel::Nightly))
+        );
+        assert_eq!(
+            channel(&["--check", "--stable"]),
+            Some(Some(UpdateChannel::Stable))
+        );
+        assert_eq!(channel(&[]), None);
+        assert_eq!(channel(&["--nightly"]), None);
+        assert_eq!(channel(&["--check", "--nightly", "--stable"]), None);
+        assert_eq!(channel(&["--check", "--force"]), None);
+        assert_eq!(channel(&["--check", "--rollback"]), None);
     }
 
     #[test]

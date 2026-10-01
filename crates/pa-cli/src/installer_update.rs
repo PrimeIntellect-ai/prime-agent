@@ -59,7 +59,7 @@ pub fn run(options: &UpdateOptions) -> i32 {
         return 1;
     };
     if options.check {
-        return runtime.block_on(run_check());
+        return runtime.block_on(run_check(options.channel));
     }
     // The RESOLVED URL, not the const: a PRIME_AGENT_RUST_INSTALLER_URL
     // pin (a test or a pinned install) changes where the funnel actually
@@ -112,15 +112,18 @@ fn save_channel(channel: UpdateChannel) {
 }
 
 /// The `--check` report: the running version vs the update channel's
-/// published release (`latest.json` / `beta.json`). Nothing downloads.
-async fn run_check() -> i32 {
+/// published release (`latest.json` / `beta.json`). The channel is the
+/// flag, else the saved setting, else the install marker, else the one
+/// the running version implies. Nothing downloads.
+async fn run_check(flag: Option<UpdateChannel>) -> i32 {
     let running = crate::config::version();
-    let channel = match requested_installer_channel(None)
-        .or_else(|| installer::installed_channel(&installer::install_prefix()))
-    {
-        Some("stable") => UpdateChannel::Stable,
-        Some(_) => UpdateChannel::Nightly,
-        None => pa_core::update::version::resolve_update_channel(running, None),
+    let channel = match flag.or_else(saved_channel) {
+        Some(channel) => channel,
+        None => match installer::installed_channel(&installer::install_prefix()) {
+            Some("stable") => UpdateChannel::Stable,
+            Some(_) => UpdateChannel::Nightly,
+            None => pa_core::update::version::resolve_update_channel(running, None),
+        },
     };
     let base = installer::download_base_url();
     println!("Running:  {running}");
@@ -145,23 +148,28 @@ async fn run_check() -> i32 {
         latest.version,
         channel.manifest_path()
     );
-    println!(
-        "{}",
-        check_verdict(!pa_core::update::version::is_newer_package_version(
-            &latest.version,
-            running
-        ))
-    );
+    println!("{}", check_verdict(&latest.version, running, channel, flag));
     0
 }
 
-/// The `--check` verdict line.
-fn check_verdict(up_to_date: bool) -> &'static str {
-    if up_to_date {
-        "Up to date."
-    } else {
-        "An update is available — run `prime-agent update` to install it."
+/// The `--check` verdict line: the channel's update policy decides (a
+/// channel switch accepts a same-base prerelease), and the suggested
+/// command repeats the channel flag the check was given.
+fn check_verdict(
+    latest: &str,
+    running: &str,
+    channel: UpdateChannel,
+    flag: Option<UpdateChannel>,
+) -> String {
+    if !pa_core::update::version::is_release_update_candidate(latest, running, Some(channel)) {
+        return "Up to date.".to_string();
     }
+    let command = match flag {
+        Some(UpdateChannel::Nightly) => "prime-agent update --nightly",
+        Some(UpdateChannel::Stable) => "prime-agent update --stable",
+        None => "prime-agent update",
+    };
+    format!("An update is available — run `{command}` to install it.")
 }
 
 #[cfg(test)]
@@ -169,11 +177,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_check_verdict_names_the_install_command() {
-        assert_eq!(check_verdict(true), "Up to date.");
+    fn the_check_verdict_follows_the_channel_policy() {
         assert_eq!(
-            check_verdict(false),
+            check_verdict("1.2.3", "1.2.3", UpdateChannel::Stable, None),
+            "Up to date."
+        );
+        assert_eq!(
+            check_verdict("1.2.4", "1.2.3", UpdateChannel::Stable, None),
             "An update is available — run `prime-agent update` to install it."
+        );
+        // A switch onto nightly accepts the same-base prerelease the
+        // installer would install.
+        assert_eq!(
+            check_verdict(
+                "1.2.3-beta.5",
+                "1.2.3",
+                UpdateChannel::Nightly,
+                Some(UpdateChannel::Nightly)
+            ),
+            "An update is available — run `prime-agent update --nightly` to install it."
+        );
+        assert_eq!(
+            check_verdict("1.2.2-beta.5", "1.2.3", UpdateChannel::Nightly, None),
+            "Up to date."
         );
     }
 
