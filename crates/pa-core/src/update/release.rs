@@ -170,6 +170,30 @@ pub fn artifact_for_platform(release: &LatestRelease) -> Result<&ReleaseArtifact
         .ok_or_else(|| anyhow!("No verified compiled archive is available for {platform}."))
 }
 
+/// Where every release's archives are published: the public GitHub
+/// release of tag `v<version>` under this prefix.
+pub const GITHUB_RELEASE_DOWNLOAD_URL: &str =
+    "https://github.com/PrimeIntellect-ai/prime-agent/releases/download";
+
+/// The download URL of one release archive. The official bucket
+/// ([`super::installer::DEFAULT_DOWNLOAD_BASE_URL`]) serves only the small
+/// channel files here: its r2.dev address throttles large downloads from
+/// datacenter IPs, so its archives come from the GitHub release of tag
+/// `v<version>`. Any other base serves the archive itself, next to its
+/// channel manifest.
+#[must_use]
+pub fn archive_url(base_url: &str, version: &str, file: &str) -> String {
+    let base_url = base_url.trim_end_matches('/');
+    if base_url == super::installer::DEFAULT_DOWNLOAD_BASE_URL {
+        format!(
+            "{GITHUB_RELEASE_DOWNLOAD_URL}/v{}/{file}",
+            version.trim_start_matches('v')
+        )
+    } else {
+        format!("{base_url}/{file}")
+    }
+}
+
 /// sha256 hex of one byte slice (shared by the download's streaming digest
 /// checks and tests that build fixture archives).
 #[must_use]
@@ -205,6 +229,23 @@ mod tests {
             }],
         };
         assert!(artifact_for_platform(&unknown).is_err());
+    }
+
+    #[test]
+    fn archive_url_sends_the_official_bucket_to_the_github_release() {
+        let file = "prime-agent-1.2.3-linux-x64.tar.gz";
+        assert_eq!(
+            archive_url(
+                &format!("{}/", super::super::installer::DEFAULT_DOWNLOAD_BASE_URL),
+                "1.2.3",
+                file
+            ),
+            format!("{GITHUB_RELEASE_DOWNLOAD_URL}/v1.2.3/{file}")
+        );
+        assert_eq!(
+            archive_url("https://mirror.example.com/", "1.2.3", file),
+            format!("https://mirror.example.com/{file}")
+        );
     }
 
     #[test]

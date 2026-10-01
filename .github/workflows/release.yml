@@ -650,9 +650,50 @@ jobs:
           out.write_text(json.dumps(document, indent=2) + "\n")
           print(f"channel manifest {out.name}: {document['version']}, {len(rows)} artifacts")
           PY
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+      - name: Generate SPDX SBOM per target (unpacked artifact tree)
+        run: |
+          set -euo pipefail
+          for dir in release-unpacked/*/; do
+            target="$(basename "${dir}")"
+            syft "dir:${dir}" -o "spdx-json=release-out/sbom-spdx-${RELEASE_VERSION#v}-${target}.json"
+          done
+          ls -la release-out/sbom-spdx-*
+      # [reserved] Apple notarization step goes here once certificates land:
+      # sign + notarize each darwin tarball's inner binary before attach.
+      - name: Attest build provenance (SLSA)
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: |
+            release-out/prime-agent-*.tar.gz
+            release-out/*.debug.gz
+      # The GitHub release attaches BEFORE the R2 channel publishes: the
+      # installer downloads the archive + SHA256SUMS from this release, so
+      # the channel pointers must never name a version whose assets are
+      # not attached yet.
+      - name: Attach to GitHub release
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          # A -beta* tag publishes the nightly channel as a GitHub PRE-RELEASE:
+          # prereleases never take the Latest pointer, so the stable channel's
+          # download base (.../releases/latest/download/) keeps serving the
+          # latest stable release's latest.json (Bugbot: beta tags steal
+          # GitHub Latest).
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
+          files: |
+            release-out/prime-agent-*.tar.gz
+            release-out/*.debug.gz
+            release-out/SHA256SUMS
+            release-out/*.json
       # THE R2 PUBLISH PHASE (the operator's distribution-model ruling: the
-      # user path is curl <domain>/install.sh and everything it reads comes
-      # from the same R2-backed base — nobody fetches a GitHub URL).
+      # user path is curl <domain>/install.sh and the channel files it reads
+      # come from the R2-backed base; the archive + SHA256SUMS it downloads
+      # come from the GitHub release attached above, because the bucket's
+      # r2.dev address throttles large downloads from datacenter IPs).
       #
       # THE SECURITY MODEL, in one block for every future reader:
       #   - SEPARATION: the build jobs (build-gnu/build-darwin) produce and
@@ -677,9 +718,10 @@ jobs:
       #     cut is coming — this publish keeps its versioned artifacts but
       #     skips the beta channel pointers (beta.json/beta/install-beta.sh),
       #     so the channel only ever advances forward.
-      #   - AUDIT SURFACE: the GitHub release below still attaches every
-      #     artifact (the TS order: the R2 publish first, GitHub second).
-      - name: Publish the R2 channel (the user path never touches GitHub)
+      #   - GITHUB FIRST: the GitHub release above attaches every artifact
+      #     before any channel pointer moves, so the installer never reads
+      #     a version whose archive is not downloadable yet.
+      - name: Publish the R2 channel
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -870,41 +912,6 @@ jobs:
               echo "stable channel advanced to ${RELEASE_VERSION} at ${INSTALL_BASE_URL}"
             fi
           fi
-      - name: Install syft
-        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
-      - name: Generate SPDX SBOM per target (unpacked artifact tree)
-        run: |
-          set -euo pipefail
-          for dir in release-unpacked/*/; do
-            target="$(basename "${dir}")"
-            syft "dir:${dir}" -o "spdx-json=release-out/sbom-spdx-${RELEASE_VERSION#v}-${target}.json"
-          done
-          ls -la release-out/sbom-spdx-*
-      # [reserved] Apple notarization step goes here once certificates land:
-      # sign + notarize each darwin tarball's inner binary before attach.
-      - name: Attest build provenance (SLSA)
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
-        with:
-          subject-path: |
-            release-out/prime-agent-*.tar.gz
-            release-out/*.debug.gz
-      - name: Attach to GitHub release
-        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          # A -beta* tag publishes the nightly channel as a GitHub PRE-RELEASE:
-          # prereleases never take the Latest pointer, so the stable channel's
-          # download base (.../releases/latest/download/) keeps serving the
-          # latest stable release's latest.json (Bugbot: beta tags steal
-          # GitHub Latest).
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          fail_on_unmatched_files: true
-          files: |
-            release-out/prime-agent-*.tar.gz
-            release-out/*.debug.gz
-            release-out/SHA256SUMS
-            release-out/*.json
       - name: Upload the nightly refresh payload (the rolling release step consumes it)
         if: contains(github.ref_name, '-')
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0

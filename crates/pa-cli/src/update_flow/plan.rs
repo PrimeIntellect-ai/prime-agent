@@ -10,7 +10,7 @@ use pa_core::update::install::{
     current_platform_alias, read_installation, read_rollback_installation, running_release,
     RunningRelease, CURRENT_LAUNCHER,
 };
-use pa_core::update::release::{artifact_for_platform, latest_release};
+use pa_core::update::release::{archive_url, artifact_for_platform, latest_release};
 use pa_core::update::version::{
     has_prerelease_tag, is_base_version_downgrade, is_release_update_candidate,
     resolve_update_channel, UpdateChannel,
@@ -208,7 +208,7 @@ pub async fn plan(
             current_platform_alias()
         )
     })?;
-    let archive_url = format!("{base_url}/{}", artifact.file);
+    let archive_url = archive_url(&base_url, &release.version, &artifact.file);
     let archive_sha256 = artifact.sha256.clone();
     Ok(UpdatePlan::Update {
         version: release.version,

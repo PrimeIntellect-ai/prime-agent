@@ -243,6 +243,9 @@ fn the_workflow_wires_the_channel_manifest_producer() {
     );
     let attach = step_position(promote, "Attach to GitHub release");
     assert!(merge < emit && emit < attach);
+    // The installer downloads archives from the GitHub release, so the
+    // release attaches before the R2 channel pointers move to it.
+    assert!(attach < step_position(promote, "Publish the R2 channel"));
     let emit_run = channel_step_run(&workflow);
     assert!(
         emit_run.contains("release-out/manifest.json"),

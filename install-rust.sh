@@ -15,10 +15,10 @@
 #
 # SOURCE: the R2-backed release channel (this repo file is the source the
 # release workflow uploads to the bucket as install.sh / install-beta.sh;
-# the channel pointers and manifests it reads - latest.json / beta.json,
-# the tarballs, SHA256SUMS - all come from the same download base). The
-# workflow-artifact bootstrap channel is retired; the user path never
-# touches GitHub.
+# the channel pointers and manifests it reads - latest.json / beta.json -
+# come from the download base; the tarball and SHA256SUMS come from the
+# public GitHub release of the same version). The workflow-artifact
+# bootstrap channel is retired.
 #
 # THE TYPESCRIPT TAKEOVER (this script is also the uninstall path for the
 # TS product — one installer owns the keyword's lifecycle):
@@ -113,7 +113,9 @@
 #   PRIME_AGENT_DOWNLOAD_BASE_URL  the R2-backed download base (default:
 #                                  the official domain, the same base the
 #                                  release pipeline renders into the
-#                                  published copy of this script)
+#                                  published copy of this script); when
+#                                  set, EVERY download comes from it, the
+#                                  release archives included (mirrors, tests)
 #   PRIME_AGENT_RELEASE_CHANNEL   stable | beta (default: stable)
 #   PRIME_AGENT_VERSION           pin an exact version instead of reading
 #                                  the channel pointer
@@ -124,11 +126,14 @@
 # THE CHANNEL (the R2 form, the TS install.sh parity): the script reads
 # the channel pointer (<base>/stable or <base>/beta) for the version,
 # reads the channel manifest (<base>/latest.json or <base>/beta.json) for
-# this platform's artifact row, fetches the tarball + SHA256SUMS from
-# <base>/releases/v<version>/, and verifies the checksum before
-# extraction. NO GITHUB SURFACE anywhere in the user path: no gh, no
-# GITHUB_TOKEN, no workflow-artifact API — the download base is the
-# R2-backed domain, and everything the installer reads comes from it.
+# this platform's artifact row, fetches the tarball + SHA256SUMS from the
+# public GitHub release of tag v<version>, and verifies the checksum
+# before extraction. The bucket keeps only the small channel files on
+# this path: its r2.dev address throttles large downloads from datacenter
+# IPs, so servers and sandboxes stalled mid-archive. No gh and no
+# GITHUB_TOKEN: the release assets are plain public URLs. With
+# PRIME_AGENT_DOWNLOAD_BASE_URL set, the archive and SHA256SUMS come from
+# <base>/releases/v<version>/ instead (the bucket layout).
 #
 # Usage: install-rust.sh [--update] — both entry points install the
 # channel's current version; the script is idempotent (a re-run replaces
@@ -189,7 +194,9 @@ Output:
 
 Environment:
   PRIME_AGENT_DOWNLOAD_BASE_URL  the R2-backed download base (the official
-                                 domain by default)
+                                 domain by default); when set, the release
+                                 archive also downloads from it instead of
+                                 the GitHub release
   PRIME_AGENT_RELEASE_CHANNEL    stable | beta (stable by default)
   PRIME_AGENT_VERSION            pin an exact version (skips the channel
                                  pointer read; the manifest + SHA256SUMS
@@ -496,12 +503,12 @@ compiled against glibc 2.35 (Ubuntu 22.04) and will not start here"
   say "glibc ${glibc} >= 2.35: supported"
 fi
 
-# --- the R2 channel (the user path never touches GitHub) --------------------
+# --- the R2 channel -----------------------------------------------------------
 # THE CHANNEL RESOLUTION (the TS install.sh parity): the channel pointer
 # file gives the version, the channel manifest gives this platform's
-# artifact row, and the versioned release prefix serves the tarball +
-# SHA256SUMS. No gh, no GITHUB_TOKEN, no workflow-artifact API — the
-# download base is the R2-backed domain and everything comes from it.
+# artifact row, and the GitHub release of tag v<version> serves the
+# tarball + SHA256SUMS (see THE CHANNEL above for why the archive does
+# not come from the bucket, and for the override).
 case "$CHANNEL" in
   stable) CHANNEL_MANIFEST="latest.json" ;;
   beta) CHANNEL_MANIFEST="beta.json" ;;
@@ -608,25 +615,30 @@ ROW_PY
 done
 fi
 
-# --- the tarball + SHA256SUMS from the versioned release prefix -------------
-RELEASE_PREFIX="releases/v${VERSION#v}"
-curl -fsSL "${BASE_URL}/${RELEASE_PREFIX}/${asset_name}" -o "$dl/${asset_name}" \
-  || die "could not download ${asset_name} from ${BASE_URL}/${RELEASE_PREFIX}/"
-curl -fsSL "${BASE_URL}/${RELEASE_PREFIX}/SHA256SUMS" -o "$dl/SHA256SUMS" \
-  || die "could not download SHA256SUMS from ${BASE_URL}/${RELEASE_PREFIX}/"
+# --- the tarball + SHA256SUMS from the release of tag v<version> ------------
+if [ -n "${PRIME_AGENT_DOWNLOAD_BASE_URL:-}" ]; then
+  RELEASE_URL="${BASE_URL}/releases/v${VERSION#v}"
+else
+  RELEASE_URL="https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v${VERSION#v}"
+fi
+say "downloading ${asset_name} from ${RELEASE_URL}/"
+curl -fsSL "${RELEASE_URL}/${asset_name}" -o "$dl/${asset_name}" \
+  || die "could not download ${asset_name} from ${RELEASE_URL}/"
+curl -fsSL "${RELEASE_URL}/SHA256SUMS" -o "$dl/SHA256SUMS" \
+  || die "could not download SHA256SUMS from ${RELEASE_URL}/"
 asset="$dl/${asset_name}"
 
 # --- verify the checksum -------------------------------------------------------
-# The release prefix's SHA256SUMS covers the tarball; the verification
-# happens before extraction, so a truncated or tampered download refuses
-# to install. The channel manifest's row sha256 is cross-checked against
-# the SHA256SUMS line first — two independent reads of the same digest
-# from the same release prefix — so a lying manifest refuses as loudly as
-# a corrupt tarball. (The checksum rides the same channel as the tarball —
+# The release's SHA256SUMS covers the tarball; the verification happens
+# before extraction, so a truncated or tampered download refuses to
+# install. The channel manifest's row sha256 is cross-checked against the
+# SHA256SUMS line first — two independent reads of the same digest (the
+# manifest from the bucket, SHA256SUMS from the release) — so a lying
+# manifest refuses as loudly as a corrupt tarball. (The checksum rides the same channel as the tarball —
 # the known same-channel limitation; the signed-asset design is the
 # graduation path in RELEASE_SECURITY.md.)
 line="$(grep "  ${asset_name}\$" "$dl/SHA256SUMS" || true)"
-[ -n "$line" ] || die "SHA256SUMS in ${RELEASE_PREFIX} has no line for ${asset_name}"
+[ -n "$line" ] || die "SHA256SUMS at ${RELEASE_URL} has no line for ${asset_name}"
 sums_sha="${line%% *}"
 if [ -n "$manifest_sha" ]; then
   [ "$sums_sha" = "$manifest_sha" ] \
