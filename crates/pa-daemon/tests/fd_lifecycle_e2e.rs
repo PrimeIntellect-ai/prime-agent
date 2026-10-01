@@ -219,9 +219,10 @@ fn worker_pid(agent_dir: &Path, socket_path: &Path, worker_id: &str) -> Option<u
         .map(|p| p as u32)
 }
 
+#[track_caller]
 fn wait_until(deadline: Duration, mut probe: impl FnMut() -> bool) {
-    let deadline = Instant::now() + deadline;
-    while Instant::now() < deadline {
+    let end = Instant::now() + deadline;
+    while Instant::now() < end {
         if probe() {
             return;
         }
@@ -424,7 +425,7 @@ fn worker_fd_count_stable_across_prompts() {
     );
     assert_eq!(client.read_response("a0")["success"], true, "attach failed");
 
-    let mut counts: Vec<usize> = Vec::new();
+    let mut baseline: Option<usize> = None;
     for turn in 0..PROMPTS {
         let id = format!("p{turn}");
         client.send_command(
@@ -446,17 +447,14 @@ fn worker_fd_count_stable_across_prompts() {
                 fd_classes(&worker_fds),
                 supervisor_fds.len(),
             );
-            counts.push(worker_fds.len());
+            // The turn's roster pushes each dial their own supervisor-link
+            // socket and may still be in flight after the reply; a leaked
+            // fd never drains, a push's socket does.
+            let baseline = *baseline.get_or_insert(worker_fds.len());
+            wait_until(Duration::from_secs(10), || {
+                fd_snapshot(pid).len() <= baseline + FD_SLACK
+            });
         }
-    }
-
-    let baseline = counts[0];
-    for (index, count) in counts.iter().enumerate() {
-        assert!(
-            *count <= baseline + FD_SLACK,
-            "worker fd count grew across turns: baseline {baseline}, sample {index} count {count} ({:?})",
-            fd_classes(&fd_snapshot(pid))
-        );
     }
 }
 

@@ -15,9 +15,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-/// The kernel Python with prime-agent-runtime installed; the release dir
-/// ships the runtime sidecar. Skipped (with a note) on machines without a
-/// live install.
+/// The kernel Python with prime-agent-runtime installed. Skipped (with a
+/// note) on machines without a live install.
 fn kernel_python() -> Option<PathBuf> {
     let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
         |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
@@ -31,36 +30,6 @@ fn kernel_python() -> Option<PathBuf> {
         candidate.display()
     );
     None
-}
-
-fn release_dir() -> Option<PathBuf> {
-    if let Some(explicit) = std::env::var_os("PI_PACKAGE_DIR") {
-        let explicit = PathBuf::from(explicit);
-        assert!(
-            explicit.join("prime-agent-runtime").exists(),
-            "PI_PACKAGE_DIR {} has no prime-agent-runtime",
-            explicit.display()
-        );
-        return Some(explicit);
-    }
-    let releases = PathBuf::from(std::env::var("HOME").map_or_else(
-        |_| "/home/ubuntu/.local/share/prime-agent/releases".to_string(),
-        |home| format!("{home}/.local/share/prime-agent/releases"),
-    ));
-    let Ok(entries) = std::fs::read_dir(&releases) else {
-        eprintln!(
-            "no releases dir at {}; skipping live kernel test",
-            releases.display()
-        );
-        return None;
-    };
-    let mut candidates: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.join("prime-agent-runtime").is_dir())
-        .collect();
-    candidates.sort();
-    candidates.pop()
 }
 
 /// The faux provider script: turn one calls the kernel with a cell that
@@ -126,7 +95,6 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, script: &Path) -> Superviso
             "PRIME_AGENT_KERNEL_PYTHON",
             kernel_python().expect("kernel python"),
         )
-        .env("PI_PACKAGE_DIR", release_dir().expect("release dir"))
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -260,9 +228,6 @@ impl Client {
 #[test]
 fn abort_during_a_kernel_cell_settles_the_daemon_turn_immediately() {
     let Some(_) = kernel_python() else {
-        return;
-    };
-    let Some(_) = release_dir() else {
         return;
     };
     let dir = tempfile::TempDir::new().expect("temp dir");
