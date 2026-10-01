@@ -48,13 +48,13 @@
 #      DRIVING this very install (the internal supervisor-socket
 #      variable a daemon exports to its workers) is never probed at all
 #      — the suite that killed the fleet daemon twice ran exactly that
-#      shape — unless PRIME_AGENT_STOP_LIVE_DAEMON=1 overrides for a
-#      deliberate in-daemon update; an operator shell never carries the
+#      shape — unless --force or PRIME_AGENT_STOP_LIVE_DAEMON=1 overrides
+#      for a deliberate in-daemon update; an operator shell never carries the
 #      internal variable, so the field contract is unchanged. Every
 #      daemon so identified is shut down REGARDLESS of busy-ness (the
 #      field ruling: an install that leaves the old daemon up is the
-#      takeover bug), by an ESCALATING ladder that never sends a signal
-#      to any pid: the graceful `shutdown` request (force:false), a 5s
+#      takeover bug), by an ESCALATING ladder that sends no signal to any
+#      pid without --force: the graceful `shutdown` request (force:false), a 5s
 #      confirm poll, then the forced request (force:true) and a
 #      DRAIN-SCALED second poll (2s per reported session over a 5s
 #      floor — the field measured a 46-worker drain at ~49s, and a fixed
@@ -716,9 +716,13 @@ say "checksum verified: ${asset_name} (${VERSION}, the ${CHANNEL} channel)"
 # The stop is ESCALATING but still clean: the graceful `shutdown`
 # request first (force:false — the daemon's own stop path), a confirm
 # poll, then a forced `shutdown` request (force:true) if the graceful
-# one did not settle, and a second confirm poll. NOTHING IS EVER KILLED
-# from here: no signal is sent to any pid at any step — even the forced
-# request is the daemon's own shutdown request over its socket. An
+# one did not settle, and a second confirm poll. Without --force NOTHING
+# IS EVER KILLED from here: no signal is sent to any pid at any step —
+# even the forced request is the daemon's own shutdown request over its
+# socket. With --force, a daemon still up after the (shorter) drain wait
+# gets SIGTERM, then SIGKILL, sent to the supervisor pid its hello names,
+# and only after that pid's command line proves it is a Prime Agent
+# daemon (a stale or fake responder never gets another process killed). An
 # unreadable session count never skips the stop (the ladder runs with
 # the count unknown).
 # THE CLASSIFICATION (the second field install's evidence: the friend's
@@ -762,8 +766,9 @@ esac
 # is identified by the internal supervisor-socket variable it exports to
 # its workers (TS parity), with the worker-role marker + the public
 # socket as the belt. A stop candidate equal to it is NEVER probed at
-# all — not even the hello — unless PRIME_AGENT_STOP_LIVE_DAEMON=1
-# explicitly overrides for a deliberate in-daemon update. An operator
+# all — not even the hello — unless --force or
+# PRIME_AGENT_STOP_LIVE_DAEMON=1 explicitly overrides for a deliberate
+# in-daemon update. An operator
 # shell never carries the internal variables (a profile-exported
 # PRIME_AGENT_DAEMON_SOCKET alone does not trigger the refusal), so the
 # field contract is unchanged.
@@ -1059,8 +1064,8 @@ if request_replaced:
     print("%s:replaced:%s" % (owner, count_label))
     sys.exit(0)
 
-# THE ESCALATING LADDER (the always-stop contract, for BOTH daemons —
-# still no signal to any pid at any step):
+# THE ESCALATING LADDER (the always-stop contract, for BOTH daemons — no
+# signal to any pid at any step unless --force, see kill_supervisor):
 #   1. the graceful shutdown request (force:false) — the clean stop an
 #      idle daemon settles on immediately;
 #   2. a confirm poll (the socket stops answering within 5s);
@@ -1103,35 +1108,68 @@ if stopped_within(drain_confirm_timeout_s()):
     sys.exit(0)
 
 # --force only: signal the supervisor pid the daemon's own hello named.
-# The pid is re-read from a fresh hello on the same socket, so the signal
-# goes to the process that is still listening there, never a stale pid.
+# The pid is re-read from a fresh hello on the same socket, and it is
+# signalled only when its command line is a Prime Agent daemon (the Rust
+# and TS shapes are both `<...prime-agent...> --mode daemon`, the npm
+# build runs `node <...prime-agent...> --mode daemon`): a stale or fake
+# responder advertising some other pid never gets that process killed.
+def command_line(pid):
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as handle:
+            return [part.decode("utf-8", "replace") for part in handle.read().split(b"\0") if part]
+    except OSError:
+        pass
+    try:
+        import subprocess
+        out = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                             capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return out.split()
+
+def is_prime_agent_daemon(args):
+    named = any("prime-agent" in arg for arg in args[:2])
+    daemon_mode = "--mode=daemon" in args or any(
+        args[i] == "--mode" and args[i + 1] == "daemon" for i in range(len(args) - 1))
+    return named and daemon_mode
+
 def kill_supervisor():
     try:
         sock = connect()
     except OSError:
-        return True
+        return "killed" if not listening_flag() else "failed"
     current = wait_hello(sock)
     sock.close()
     if current is None or (kind == "ts" and classify_hello(current) != owner):
-        return False
+        return "failed"
     pid = current.get("supervisorPid")
-    if not isinstance(pid, int) or pid <= 1 or pid == os.getpid():
-        return False
+    if not isinstance(pid, int) or pid <= 1 or pid in (os.getpid(), os.getppid()):
+        progress("  the daemon names no usable pid; not signalled")
+        return "skipped"
+    if not is_prime_agent_daemon(command_line(pid)):
+        progress("  pid %d is not a Prime Agent daemon; not signalled" % pid)
+        return "skipped"
     for sig, wait_s, name in ((signal.SIGTERM, FORCE_TERM_WAIT_S, "SIGTERM"),
                               (signal.SIGKILL, FORCE_KILL_WAIT_S, "SIGKILL")):
         progress("  still running; sending %s to pid %d..." % (name, pid))
         try:
             os.kill(pid, sig)
         except ProcessLookupError:
-            return True
+            return "killed" if stopped_within(1.0) else "failed"
         except OSError:
-            return False
+            return "failed"
         if stopped_within(wait_s):
-            return True
-    return False
+            return "killed"
+    return "failed"
 
-if force and kill_supervisor():
-    print("%s:stopped-killed:%s" % (owner, count_label))
+if force:
+    kill_result = kill_supervisor()
+    if kill_result == "killed":
+        print("%s:stopped-killed:%s" % (owner, count_label))
+    elif kill_result == "skipped":
+        print("%s:kill-skipped:%s" % (owner, count_label))
+    else:
+        print("%s:kill-failed:%s" % (owner, count_label))
     sys.exit(0)
 print("%s:stop-failed:%s" % (owner, count_label))
 
@@ -1152,8 +1190,8 @@ stop_daemon_candidate() {
   last_stop_recorded="no"
   last_stop_was_rust="no"
   # THE SELF-SOCKET REFUSAL: the candidate that is the daemon DRIVING this
-  # very install is never probed — not even the hello — unless the
-  # explicit override is set (a deliberate in-daemon update). The refusal
+  # very install is never probed — not even the hello — unless --force or
+  # the explicit override is set (a deliberate in-daemon update). The refusal
   # is loud and lands in the summary: a skipped live daemon is a fact the
   # operator must see, never a silent skip.
   # The equivalence goes BEYOND the raw string: a socket reached through
@@ -1273,7 +1311,7 @@ stop_daemon_candidate() {
       ts_stop_summary="${ts_stop_summary}daemon: WARNING replaced on ${socket_path} (the classified ${owner} was swapped mid-stop; the replacement was never commanded; stop it by hand: prime-agent shutdown --force)
 "
       ;;
-    ts:stop-failed:*|rust:stop-failed:*)
+    ts:stop-failed:*|rust:stop-failed:*|ts:kill-failed:*|rust:kill-failed:*|ts:kill-skipped:*|rust:kill-skipped:*)
       sessions="${verdict##*:}"
       owner="the TypeScript daemon"
       case "$verdict" in rust:*) owner="the Rust daemon" ;; esac
@@ -1281,15 +1319,27 @@ stop_daemon_candidate() {
       step "  failed: still running"
       note "WARNING: ${owner} on ${socket_path} is STILL RUNNING after this install"
       note "  (it was serving ${sessions} session(s); the graceful and the forced shutdown"
-      if [ "$FORCE" = 1 ]; then
-        note "  requests both failed to bring it down, and the kill did not either)."
-        note "  Stop it by hand: prime-agent shutdown --force"
-      else
-        note "  requests both failed to bring it down, and no signal was ever sent)."
-        note "  Re-run the installer with --force to kill it, or stop it by hand:"
-        note "  prime-agent shutdown --force"
-      fi
-      ts_stop_summary="${ts_stop_summary}daemon: WARNING still running on ${socket_path} (${owner}, ${sessions} session(s); the graceful and forced requests did not bring it down; re-run with --force, or stop it by hand: prime-agent shutdown --force)
+      case "$verdict" in
+        *:kill-failed:*)
+          note "  requests both failed to bring it down, and --force's SIGTERM/SIGKILL"
+          note "  did not either). Stop it by hand: prime-agent shutdown --force, or"
+          note "  kill the process listening on ${socket_path}"
+          stop_failed_hint="--force sent SIGTERM/SIGKILL and it stayed up; stop it by hand: prime-agent shutdown --force, or kill the process listening on ${socket_path}"
+          ;;
+        *:kill-skipped:*)
+          note "  requests both failed to bring it down; --force sent no signal because"
+          note "  the pid it names is not a Prime Agent daemon). Stop it by hand:"
+          note "  prime-agent shutdown --force, or kill the process listening on ${socket_path}"
+          stop_failed_hint="--force sent no signal: the pid it names is not a Prime Agent daemon; stop it by hand: prime-agent shutdown --force, or kill the process listening on ${socket_path}"
+          ;;
+        *)
+          note "  requests both failed to bring it down, and no signal was ever sent)."
+          note "  Re-run the installer with --force to kill it, or stop it by hand:"
+          note "  prime-agent shutdown --force"
+          stop_failed_hint="re-run with --force, or stop it by hand: prime-agent shutdown --force"
+          ;;
+      esac
+      ts_stop_summary="${ts_stop_summary}daemon: WARNING still running on ${socket_path} (${owner}, ${sessions} session(s); the graceful and forced requests did not bring it down; ${stop_failed_hint})
 "
       ;;
     unrecognized:*)
