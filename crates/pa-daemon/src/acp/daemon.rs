@@ -918,6 +918,11 @@ async fn handle_session_new(
     };
     // The ACP MCP servers ride the wire command, not a local manager.
     if let Err(error) = replace_session_servers(link, &hosted, &resolved).await {
+        // The worker may have applied the list before this failed (a lost
+        // acknowledgement); the clear is best-effort, like TS.
+        if !resolved.is_empty() {
+            let _ = replace_session_servers(link, &hosted, &[]).await;
+        }
         *state.lock().await = DaemonAcpState::default();
         let _ = tx.send(super::internal_error(&id, &error.to_string()));
         return;
