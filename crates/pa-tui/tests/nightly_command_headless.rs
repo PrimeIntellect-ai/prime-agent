@@ -415,25 +415,25 @@ fn nightly_status_and_usage_error_render_the_ts_wording() {
     );
 }
 
-/// `/nightly on` (or bare) explains the move: the update installs the
-/// latest continuous build, so there is no nightly channel to switch to
-/// (the 2026-09-27 operator directive — the channel no longer gates the
-/// update, and no update plan is parked).
+/// `/nightly on` (or bare) saves the nightly channel that `/update` and
+/// `prime-agent update` follow.
 #[test]
-fn nightly_on_renders_the_migration_note() {
+fn nightly_on_saves_the_nightly_channel() {
     let steps = vec![
         HeadlessStep::Submit("/nightly on".to_string()),
         HeadlessStep::WaitMs(200),
-        HeadlessStep::Submit("/nightly".to_string()),
+        HeadlessStep::Submit("/nightly status".to_string()),
         HeadlessStep::WaitMs(200),
     ];
     let frames = run_plan(steps);
     let all = frames.join("\n");
     assert!(
-        all.contains(
-            "Nightly builds are now the continuous Rust build — run /update to install the latest."
-        ),
-        "the migration note rendered:\n{all}"
+        all.contains("Updates now follow the nightly channel."),
+        "the switch note rendered:\n{all}"
+    );
+    assert!(
+        all.contains("Updates follow the nightly channel (set in settings)."),
+        "the saved channel reads back:\n{all}"
     );
 }
 

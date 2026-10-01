@@ -186,13 +186,24 @@ pub fn compute_rollups(records: &[UnifiedRecord]) -> HashMap<String, Rollup> {
         // cost: an orchestrator parent with no own billable work (the
         // own-zero gate omits `usage` entirely) still bills its deleted
         // descendants' spend — the bucket carried inside the own-cost
-        // Option would drop with it.
+        // Option would drop with it. The roster row (daemon) is the
+        // fresher writer between the two — the same `daemon ?? saved`
+        // precedence as the own cost below — so the title (roster rows
+        // only) and the agents view bill the same bucket.
         let deleted_descendants = records[*position]
-            .saved
+            .daemon
             .as_ref()
-            .and_then(|saved| saved.get("deletedDescendantUsage"))
+            .and_then(|daemon| daemon.get("deletedDescendantUsage"))
             .and_then(|deleted| deleted.get("cost"))
             .and_then(Value::as_f64)
+            .or_else(|| {
+                records[*position]
+                    .saved
+                    .as_ref()
+                    .and_then(|saved| saved.get("deletedDescendantUsage"))
+                    .and_then(|deleted| deleted.get("cost"))
+                    .and_then(Value::as_f64)
+            })
             .unwrap_or(0.0);
         // Deleted subagents keep no row, and their spend is already
         // subtracted from the parent's own usage by the attribution

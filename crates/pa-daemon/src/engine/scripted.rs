@@ -43,6 +43,14 @@ pub struct ScriptedEngine {
     compaction: CompactionScript,
     branch_summary: CompactionScript,
     goal: Option<ScriptedGoal>,
+    /// The script's resolved-model fixture (`{"model": {"id": ...,
+    /// "provider": ..., "reasoning": ...}}`, the connection-state wire
+    /// shape `model_metadata` serves): the harness reports NO model
+    /// unless the script scripts one, so the roster/list surfaces stay
+    /// empty for plain scripts exactly like before (an e2e that needs a
+    /// model-dependent client behavior — the Anthropic subscription
+    /// warning's provider gate — opts in).
+    model: Option<Value>,
 }
 
 /// A scripted thread goal (the post-compaction goal-continue fixture):
@@ -169,12 +177,17 @@ impl ScriptedEngine {
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
             });
+        let model = script
+            .get("model")
+            .filter(|model| !model.is_null())
+            .cloned();
         Ok(ScriptedEngine {
             responses,
             side_question,
             compaction,
             branch_summary,
             goal,
+            model,
         })
     }
 
@@ -222,13 +235,16 @@ fn scripted_usage() -> Value {
 }
 
 impl SessionEngine for ScriptedEngine {
-    /// No model metadata: the TS scripted harness reports no resolved
-    /// model on the session summary (`summaryForActiveSession` reads the
-    /// agent's model, unset in the harness), so the roster summary and the
-    /// CLI `list` table stay empty for scripted sessions — the `faux-1`
-    /// id rides on the message rows only.
+    /// The script's model fixture, when one is scripted (`{"model":
+    /// {"id": ..., "provider": ..., "reasoning": ...}}`): absent (the
+    /// plain harness scripts), no model is reported — the TS scripted
+    /// harness reports no resolved model on the session summary
+    /// (`summaryForActiveSession` reads the agent's model, unset in the
+    /// harness), so the roster summary and the CLI `list` table stay
+    /// empty for scripted sessions and the `faux-1` id rides on the
+    /// message rows only.
     fn model_metadata(&self) -> Option<Value> {
-        None
+        self.model.clone()
     }
 
     /// The scripted thread goal's state, or the empty state (no goal

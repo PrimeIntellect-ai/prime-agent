@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use crate::lease::canonical_session_path;
 use crate::rlm_ledger::RlmLedgerEdge;
 use crate::session_store::read_session_info;
+use crate::session_usage::SessionUsageSummary;
 use crate::supervisor::Supervisor;
 
 impl Supervisor {
@@ -155,10 +156,11 @@ impl Supervisor {
         // takes (and is awaited before its snapshot) or it spawns after
         // the take (and its pushes land after the response - either way
         // the push cannot overtake the snapshot answer). The hydration
-        // stays DETACHED inside the task: the tracked work is the
-        // lightweight seed (the ledger walk and the edge-only row
-        // writes), never the serial transcript reads - a subscribe must
-        // not block on hydration (that would reintroduce the
+        // and the deleted-descendant fold stay DETACHED inside the
+        // task: the tracked work is the lightweight seed (the ledger
+        // walk and the edge-only row writes), never the serial
+        // transcript reads or the ledger-wide bucket fold - a subscribe
+        // must not block on either (that would reintroduce the
         // large-session open latency this PR removes).
         if let Ok(mut pending) = self.pending_registration_seeds.lock() {
             // Self-pruning: a daemon without subscribers must not
@@ -179,6 +181,16 @@ impl Supervisor {
                     // themselves.
                     drop(supervisor.spawn_seeded_hydration(seeded));
                 }
+                // The newly resident root's family bills its deleted
+                // descendants, detached like the hydration: the fold
+                // reads the whole ledger and may cold-scan legacy
+                // transcripts, so it never rides the subscribe
+                // barrier. Its push applies on top of the snapshot, and
+                // the fold ticket orders it against concurrent folds.
+                drop(tokio::spawn(async move {
+                    let refreshed = supervisor.refresh_deleted_descendant_usage().await;
+                    supervisor.push_roster_update(refreshed, Vec::new());
+                }));
             });
             pending.push(handle);
         }
@@ -201,6 +213,63 @@ impl Supervisor {
             })
             .collect();
         Ok((edges, parent_by_child))
+    }
+
+    /// The deleted-descendant bucket (the spawn ledger's fold keyed by
+    /// canonical parent session path) with the fold's ticket, computed
+    /// off the async runtime: the fold reads the ledger, stats
+    /// tombstoned paths, and may cold-scan a legacy child's transcript
+    /// once. The ticket is taken under the roster lock BEFORE the ledger
+    /// is read (the folds run on independent tasks, so an older read can
+    /// otherwise finish after a newer apply). `None` is the degrade (a
+    /// failed fold is logged) - the roster keeps its last bucket instead
+    /// of billing a broken read as zero.
+    pub(crate) async fn deleted_descendant_usage_bucket(
+        self: &Arc<Self>,
+    ) -> Option<(u64, HashMap<String, SessionUsageSummary>)> {
+        let ticket = self.roster.lock().unwrap().begin_bucket_fold();
+        let bucket = match self.rlm_spawn_ledger_for(None).await {
+            Ok(ledger) => {
+                tokio::task::spawn_blocking(move || ledger.deleted_descendant_usage_by_parent())
+                    .await
+                    .unwrap_or_else(|error| Err(anyhow::anyhow!(error)))
+            }
+            Err(error) => Err(error),
+        };
+        match bucket {
+            Ok(bucket) => Some((ticket, bucket)),
+            Err(error) => {
+                self.log_line(&format!(
+                    "Could not refresh deleted-descendant usage: {error:#}"
+                ));
+                None
+            }
+        }
+    }
+
+    /// Recompute the deleted-descendant bucket and rewrite the roster
+    /// rows whose attached value changed, returning them for the
+    /// caller's push. The bucket changes only at ledger events and when
+    /// a root appears, so this runs at exactly those: a registration
+    /// seed (create, resume, and supervisor-restart re-registration),
+    /// a stop passivation (the RLM delete's tombstone landed before the
+    /// stop, and the later capture amendment yields the same value),
+    /// a stopped-child delete (the idle-passivated child's tombstone -
+    /// no stop runs for it, so the delete settles the row itself), and
+    /// a saved-session delete. The worker-process delete arm and
+    /// the forwarded-owner arm stay uncovered by design: the TUI never
+    /// sends those forms, and their tombstones are picked up at the
+    /// next registration or stop.
+    pub(crate) async fn refresh_deleted_descendant_usage(
+        self: &Arc<Self>,
+    ) -> Vec<AgentRosterEntry> {
+        let Some((ticket, bucket)) = self.deleted_descendant_usage_bucket().await else {
+            return Vec::new();
+        };
+        self.roster
+            .lock()
+            .unwrap()
+            .set_deleted_descendant_usage(ticket, bucket)
     }
 
     /// The seeded candidate's roster row when already present (TS

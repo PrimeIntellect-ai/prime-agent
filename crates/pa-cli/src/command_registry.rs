@@ -198,15 +198,15 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     ),
     CommandSpec::new(
         &["update"],
-        "update [--check]",
+        "update [--check] [--nightly|--stable]",
         "Update to the latest Rust build (uninstalls the TypeScript version)",
     )
     .options(&[
-        "--check  Print the latest available build vs the running version, without installing",
-        "--force     Reinstall even if the current version is the latest on the channel (the managed-install flow)",
+        "--check  Print the update channel's latest release vs the running version, without installing",
+        "--force     Reinstall the latest build of the channel",
         "--rollback  Restore the previous compiled release (the managed-install flow)",
-        "--nightly   Switch updates to the nightly channel (the managed-install flow)",
-        "--stable    Return updates to the stable channel (the managed-install flow)",
+        "--nightly   Switch updates to the nightly channel (the latest main build)",
+        "--stable    Return updates to the stable channel",
         "--archive <path>  Install a local release payload (the managed-install flow)",
         "--source <url>     The https:// origin recorded as the release's install source (required with --archive)",
     ])
