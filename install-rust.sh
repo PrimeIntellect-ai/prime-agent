@@ -1330,15 +1330,24 @@ fi
 # the message stays conditional (the manual-recovery contract of the link).
 if [ "$WINDOWS" = "yes" ]; then
   lock_dir="${PREFIX}/share/.prime-agent-install.lock.d"
+  pid_waits=0
   until mkdir "$lock_dir" 2>/dev/null; do
-    held_by="$(cat "$lock_dir/pid" 2>/dev/null || true)"
+    # Digits only: install.ps1's Set-Content ends the pid line with CRLF.
+    held_by="$(tr -dc '0-9' 2>/dev/null < "$lock_dir/pid" || true)"
+    # The holder writes its pid just after the mkdir claim: an empty pid is
+    # (for a few seconds) a claim in progress, not a stale lock.
+    if [ -z "$held_by" ] && [ "$pid_waits" -lt 5 ]; then
+      pid_waits=$((pid_waits + 1))
+      sleep 1
+      continue
+    fi
     if [ -n "$held_by" ] \
        && MSYS2_ARG_CONV_EXCL='*' tasklist.exe /FI "PID eq ${held_by}" /NH 2>/dev/null \
           | grep -qw "$held_by"; then
       die "another prime-agent installer (Windows pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"
     fi
     die "a publication lock (Windows pid ${held_by:-unknown}) is held at ${lock_dir}. If no prime-agent installer (install-rust.sh or install.ps1) is running, it is stale (a crashed install); remove it and retry:
-  rm -rf ${lock_dir}"
+  rm -rf \"${lock_dir}\""
   done
   printf '%s\n' "$(cat "/proc/$$/winpid" 2>/dev/null || echo $$)" > "$lock_dir/pid"
 else
@@ -1348,9 +1357,10 @@ else
       die "another install-rust.sh (pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"
     fi
     die "a previous install-rust.sh (pid ${held_by:-unknown}) left a stale publication lock (a crashed install; its cleanup trap cannot have run). Remove it and retry:
-  rm -f ${lock_link}"
+  rm -f \"${lock_link}\""
   done
 fi
+
 # THE WINDOWS DAEMON STOP, after the lock, before the publish (a Windows
 # process holds its own binary open, so the old-tree rename-aside below
 # fails while a daemon runs). THE TRUSTED STOP: the previous payload's OWN
