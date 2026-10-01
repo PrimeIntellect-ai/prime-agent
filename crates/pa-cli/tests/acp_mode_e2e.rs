@@ -1075,11 +1075,27 @@ fn acp_daemon_attached_default_session_persists_and_resumes() {
     );
     assert_eq!(sessions[0]["activeSessionId"], active_session_id);
 
+    // A relative `--resume` selector resolves against the CLI's working
+    // directory: the agent dir here, not the stored session cwd.
+    let file_name = std::path::Path::new(&session_file)
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .expect("a session file name");
+    let agent_dir = std::path::Path::new(&session_file)
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("the agent dir holding the session dir");
     let child = daemon_attached_command(
         &home_path,
         &socket,
-        &["--mode", "acp", "--resume", &session_file],
+        &[
+            "--mode",
+            "acp",
+            "--resume",
+            &format!("sessions/{file_name}"),
+        ],
     )
+    .current_dir(agent_dir)
     .spawn()
     .expect("binary present");
     let mut second = AcpChild::wrap(child, None);
@@ -1136,6 +1152,27 @@ fn acp_daemon_attached_resident_eof_mid_turn_cancels_the_prompt() {
         !saved.contains(answer),
         "the EOF cancelled the running prompt: {saved}"
     );
+}
+
+/// EOF while `session/new` is still running: the reader awaits the
+/// handler before it reads further, so the teardown at EOF releases the
+/// session it installs and the process exits.
+#[test]
+fn acp_daemon_attached_eof_during_session_new_exits() {
+    let (mut client, _socket) = AcpChild::spawn_daemon_attached(
+        &["--mode", "acp"],
+        &json!({ "engine": "faux", "responses": ["The Nile."] }),
+    );
+    let init = client.request("initialize", &initialize_params());
+    let _ = client.wait_response(init, TIMEOUT);
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
+    client.close_stdin();
+    let (new_response, _) = client.wait_response(new, TIMEOUT);
+    assert!(
+        new_response["result"]["sessionId"].is_string(),
+        "session/new answers: {new_response}"
+    );
+    assert!(client.child.wait().expect("the ACP child exits").success());
 }
 
 #[test]

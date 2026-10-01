@@ -1076,7 +1076,9 @@ fn select_headless_session(options: &RunOptions) -> Result<HeadlessSession, Stri
             .map_err(|error| render_selector_error(&error))?;
         return match resolved {
             ResolvedSession::Path(path) | ResolvedSession::Local(path) => {
-                Ok(HeadlessSession::Open(path))
+                Ok(HeadlessSession::Open(
+                    std::path::absolute(&path).map_err(|error| error.to_string())?,
+                ))
             }
             ResolvedSession::Global {
                 path: _,

@@ -459,14 +459,20 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
         // frame's handler).
         match frame_order_prefix(&incoming, &state).await {
             FrameOrder::Spawn => {
+                // `session/new` settles before the next frame is read, so
+                // EOF's teardown always sees the session it installs.
+                let session_new = matches!(&incoming, Incoming::Request { method, .. } if method == "session/new");
                 let link = Arc::clone(&link);
                 let state = Arc::clone(&state);
                 let options = options.clone();
                 let binding = binding.clone();
                 let options_tx = tx.clone();
-                tokio::spawn(async move {
+                let task = tokio::spawn(async move {
                     handle_incoming(incoming, &link, &state, &options, &binding, options_tx).await;
                 });
+                if session_new {
+                    let _ = task.await;
+                }
             }
             FrameOrder::AdmitPrompt {
                 id,
