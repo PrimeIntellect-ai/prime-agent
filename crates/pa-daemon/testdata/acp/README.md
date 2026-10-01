@@ -87,11 +87,12 @@ surfaces the daemon plane serves differently today):
   differs per run. The daemon-attached cancel semantics are locked by
   the deterministic e2e (`acp_daemon_attached_cancels_mid_turn`).
 - `goal_command` / `autonomous_limit`: the daemon worker executes the
-  commands (durable rows, goal continuations, the autonomous loop) but
-  does not yet emit `goal_update` / autonomous-accounting session events,
-  so the namespaced metas are an in-process-only surface until the
-  daemon event plane grows those producers. `autonomous_gate` matches in
-  full mode on the in-process capture.
+  commands (durable rows, goal continuations, the autonomous loop) and
+  emits the `goal_update` / autonomous-accounting session events (the
+  offline e2e locks those namespaced metas on the daemon path). The
+  captures predate those producers and still ride the in-process
+  engine; recapture is pending. `autonomous_gate` matches in full mode
+  on the in-process capture.
 
 ## Comparing a Rust run
 
@@ -104,9 +105,10 @@ binaries advertise `{ "http": true }`:
 
 Both captures must come from the same scenario client with the same
 request order. `crates/pa-cli/tests/acp_mode_e2e.rs` locks the deterministic
-scenarios offline against the scripted faux provider; the
-network-dependent scenarios (tool_call, cancel mid-turn) are verified by
-running the scenario client against both binaries on a networked box.
+scenarios offline over the daemon-attached transport (the scripted faux
+worker); the network-dependent scenarios (tool_call, cancel mid-turn) are
+verified by running the scenario client against both binaries on a
+networked box.
 
 `--landmarks` drops model-behavior-dependent work frames (tool calls,
 chunk streams, and mid-turn goal-usage updates) and compares the protocol

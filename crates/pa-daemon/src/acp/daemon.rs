@@ -760,9 +760,7 @@ async fn handle_incoming(
     };
     match method.as_str() {
         "initialize" => {
-            let result = serde_json::to_value(types::initialize_result(&options.product_version))
-                .expect("serializes");
-            let _ = tx.send(jsonrpc::response(&id, &result));
+            super::handle_initialize(&id, &params, &options.product_version, &tx);
         }
         "session/new" => {
             handle_session_new(id, params, link, state, options, binding, tx).await;
