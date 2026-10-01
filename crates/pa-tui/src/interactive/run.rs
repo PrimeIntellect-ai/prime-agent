@@ -45,8 +45,12 @@ const SPINNER_INTERVAL_MS: u128 = 80;
 /// phase change it observes — an off-by-one here parks the loop for a
 /// whole boundary instead of firing at the phase edge.
 fn next_spinner_deadline(started: Instant, now: Instant) -> Instant {
-    let phase = now.duration_since(started).as_millis() / SPINNER_INTERVAL_MS;
-    started + Duration::from_millis(((phase + 1) * SPINNER_INTERVAL_MS) as u64)
+    // The remainder form keeps the arithmetic bounded by one phase: a
+    // wide phase counter would truncate through `as usize` on 32-bit
+    // targets after ~10.9 years of continuous animation and arm an
+    // already-expired deadline, hot-spinning the select's wake.
+    let into_phase = now.duration_since(started).as_millis() % SPINNER_INTERVAL_MS;
+    now + Duration::from_millis((SPINNER_INTERVAL_MS - into_phase) as u64)
 }
 
 /// Run the interactive UI until the user exits (terminal) or the plan
