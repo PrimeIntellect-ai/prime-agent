@@ -61,15 +61,11 @@ fn session_stats_and_header_match_live_daemon_goldens() {
         "p1",
         &serde_json::json!({ "type": "prompt", "activeSessionId": session_id, "message": "hi" }),
     );
-    let ack = client.read_response("p1");
+    let (ack, mut turn_lines) = client.read_response_and_lines("p1");
     assert_eq!(ack["success"], true, "prompt failed: {ack}");
-    // Drain the streamed turn until it settles.
-    loop {
-        let line = client.read_line();
-        if line["type"] == "session_event" && line["event"]["type"].as_str() == Some("turn_end") {
-            break;
-        }
-    }
+    // The turn's events may precede the prompt reply (TS order), so the
+    // lines buffered during the ack count toward the drain.
+    client.take_session_event(&mut turn_lines, "turn_end");
 
     // get_session_header: same key set and header shape as the TS golden:
     // {"header": { type, version, id, timestamp, cwd, parentSession?, rlmDepth?, git? }}.

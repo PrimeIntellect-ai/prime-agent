@@ -514,6 +514,31 @@ jobs:
               sys.exit("hash continuity failed:\n" + "\n".join(failures))
           print(f"hash continuity verified for all archives")
           PY
+      # Prime Agent 0.9.8 (the TypeScript release) updates itself with its
+      # bundled installer, which installs any archive that carries install.sh,
+      # theme/prime.json, export-html/template.html and photon_rs_bg.wasm.
+      # The Rust archive lacks all four, and that is the only thing stopping a
+      # TS client from installing a Rust release into the TS layout (which
+      # breaks it). TS needs all four, so refusing a root-level install.sh
+      # keeps every Rust archive uninstallable by the TS updater.
+      - name: Refuse archives the TypeScript updater would install
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib, sys, tarfile
+          incoming = pathlib.Path("incoming")
+          failures = []
+          for entry_dir in sorted(p for p in incoming.iterdir() if p.is_dir()):
+              for archive in sorted(entry_dir.glob("prime-agent-*.tar.gz")):
+                  with tarfile.open(archive) as tar:
+                      names = {pathlib.PurePosixPath(m.name).parts for m in tar.getmembers()}
+                  if ("install.sh",) in names:
+                      failures.append(f"{archive.name}: contains a root-level install.sh")
+          if failures:
+              sys.exit("a TypeScript Prime Agent updater could install these archives:\n"
+                       + "\n".join(failures))
+          print("no archive carries the TypeScript installer layout")
+          PY
       - name: Verify Linux decoder integrity against installed tar ELF
         run: |
           set -euo pipefail
@@ -681,7 +706,7 @@ jobs:
       #     identity (github.token); the R2 keys are repo-level secrets
       #     read only by this job; nothing is echoed.
       #   - BETA SUPERSEDE: only the LATEST green commit gets a beta cut;
-      #     a newer rust push landing while this beta built means a newer
+      #     a newer main push landing while this beta built means a newer
       #     cut is coming — this publish keeps its versioned artifacts but
       #     skips the beta channel pointers (beta.json/beta/install-beta.sh),
       #     so the channel only ever advances forward.
@@ -831,7 +856,7 @@ jobs:
           if [[ "$RELEASE_VERSION" == *-beta* ]]; then
             # THE BETA CHANNEL: the rolling per-push cut. The supersede
             # rule — only the newest proven commit advances the channel: a
-            # newer rust push landing while this beta built means a newer
+            # newer main push landing while this beta built means a newer
             # cut is already coming; this one keeps its versioned
             # artifacts (immutable, still served to pinned installs) but
             # leaves the channel pointers alone.

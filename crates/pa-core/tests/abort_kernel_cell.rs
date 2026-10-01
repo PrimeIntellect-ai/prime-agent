@@ -55,38 +55,6 @@ fn kernel_python() -> Option<PathBuf> {
     None
 }
 
-/// The installed release directory (ships `prime-agent-runtime/`): the same
-/// resolution the sibling live-kernel verifier uses.
-fn release_dir() -> Option<PathBuf> {
-    if let Some(explicit) = std::env::var_os("PI_PACKAGE_DIR") {
-        let explicit = PathBuf::from(explicit);
-        assert!(
-            explicit.join("prime-agent-runtime").exists(),
-            "PI_PACKAGE_DIR {} has no prime-agent-runtime",
-            explicit.display()
-        );
-        return Some(explicit);
-    }
-    let releases = PathBuf::from(std::env::var("HOME").map_or_else(
-        |_| "/home/ubuntu/.local/share/prime-agent/releases".to_string(),
-        |home| format!("{home}/.local/share/prime-agent/releases"),
-    ));
-    let Ok(entries) = std::fs::read_dir(&releases) else {
-        eprintln!(
-            "no releases dir at {}; skipping live kernel test",
-            releases.display()
-        );
-        return None;
-    };
-    let mut candidates: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.join("prime-agent-runtime").is_dir())
-        .collect();
-    candidates.sort();
-    candidates.pop()
-}
-
 /// Scoped process-env overrides: applied on construction, restored on drop.
 struct EnvOverride {
     saved: Vec<(String, Option<String>)>,
@@ -149,9 +117,6 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
     let Some(kernel_python) = kernel_python() else {
         return;
     };
-    let Some(release) = release_dir() else {
-        return;
-    };
     let dir = tempfile::tempdir().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let sessions_dir = agent_dir.join("sessions");
@@ -166,7 +131,6 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
             "PRIME_AGENT_KERNEL_PYTHON",
             Some(kernel_python.display().to_string()),
         ),
-        ("PI_PACKAGE_DIR", Some(release.display().to_string())),
         ("PRIME_AGENT_CODING_AGENT_DIR", None),
         ("PRIME_API_KEY", None),
     ]);

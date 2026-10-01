@@ -125,13 +125,30 @@ impl Client {
     }
 }
 
-/// The kernel Python with the runtime installed (the child's kernel cell).
+/// The kernel Python with prime-agent-runtime installed; set
+/// `PA_E2E_KERNEL_PYTHON` to point at an explicit interpreter instead.
 fn kernel_python() -> Option<PathBuf> {
-    let path = std::env::var("PA_TEST_KERNEL_PYTHON")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    path.filter(|p| p.exists())
+    if let Some(explicit) = std::env::var_os("PA_E2E_KERNEL_PYTHON") {
+        let explicit = PathBuf::from(explicit);
+        assert!(
+            explicit.exists(),
+            "PA_E2E_KERNEL_PYTHON {} not found",
+            explicit.display()
+        );
+        return Some(explicit);
+    }
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
+    if candidate.exists() {
+        return Some(candidate);
+    }
+    eprintln!(
+        "kernel python {} not found; skipping live passivation e2e",
+        candidate.display()
+    );
+    None
 }
 
 /// The worker's token from its persisted descriptor (the same lookup the
@@ -192,7 +209,6 @@ fn write_faux_script(dir: &Path, name: &str, responses: &Value) -> PathBuf {
 #[tokio::test]
 async fn a_settled_child_passivates_stays_listable_and_revives_by_agent_message() {
     let Some(kernel_python) = kernel_python() else {
-        eprintln!("kernel python unavailable; skipping the passivation e2e");
         return;
     };
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -477,7 +493,6 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_agent_message(
 #[tokio::test]
 async fn an_idle_root_passivates_and_resumes_by_its_durable_id_with_its_transcript() {
     let Some(kernel_python) = kernel_python() else {
-        eprintln!("kernel python unavailable; skipping the root passivation e2e");
         return;
     };
     let dir = tempfile::TempDir::new().expect("temp dir");
