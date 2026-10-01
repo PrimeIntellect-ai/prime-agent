@@ -147,6 +147,7 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
     "get_mcp_connections",
     "set_mcp_static_token",
     "remove_mcp_connection",
+    "mark_anthropic_warning_shown",
 ];
 
 /// Parsed client command envelope.
@@ -867,6 +868,9 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::SetSessionEntryLabel {
             active_session_id, ..
         }
+        | DaemonCommand::MarkAnthropicWarningShown {
+            active_session_id, ..
+        }
         | DaemonCommand::RetryWorker {
             active_session_id, ..
         }
@@ -1035,6 +1039,7 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::GetSystemPrompt { .. } => "get_system_prompt",
         DaemonCommand::GetToolDefinition { .. } => "get_tool_definition",
         DaemonCommand::SetSessionEntryLabel { .. } => "set_session_entry_label",
+        DaemonCommand::MarkAnthropicWarningShown { .. } => "mark_anthropic_warning_shown",
         DaemonCommand::AckResult { .. } => "ack_result",
         DaemonCommand::PrepareUpdateRestart { .. } => "prepare_update_restart",
         DaemonCommand::CommitUpdateRestart { .. } => "commit_update_restart",

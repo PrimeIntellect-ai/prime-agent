@@ -183,7 +183,7 @@ impl TurnRunner {
                 // The whole-worker idle passivation (TS's
                 // `idleEvictionMinutes` tier, worker-driven): the same park
                 // state the kernel release proved, plus the idle clock. The
-                // window arms only for parent-owned children under a live
+                // window arms for any idle unattached session under a live
                 // threshold; the select's notified arm is the wake path — a
                 // queued delivery wins the race and the next park re-arms.
                 match self.idle_passivation_window() {
@@ -226,24 +226,24 @@ impl TurnRunner {
         }
     }
 
-    /// The idle-eviction window for a parent-owned child (TS's
-    /// `idleEvictionMinutes` consumer, worker-side): `Some(remaining)`
-    /// when the park state holds (parent-owned, unattached, not
-    /// compacting, not shutting down, no live background bash, no
-    /// queued input in the lanes — TS `isSessionActive`'s
-    /// pending-prompt-admissions arm) and the setting is a live
-    /// threshold; `None` otherwise (roots, attached children, `"off"`,
-    /// and any state the engine gates would reject stay parked without
-    /// a timer). The engine gate
-    /// (`SessionEngine::can_passivate_worker`) is re-checked at the
-    /// fire inside [`Self::maybe_request_idle_passivation`] — the
+    /// The idle-eviction window for an unowned session (TS's
+    /// `idleEvictionMinutes` consumer, worker-side; TS `canEvictWorker`
+    /// reaches roots and children alike): `Some(remaining)` when the
+    /// park state holds (unattached, not compacting, not shutting down,
+    /// no live background bash, no queued input in the lanes — TS
+    /// `isSessionActive`'s pending-prompt-admissions arm) and the
+    /// setting is a live threshold; `None` otherwise (attached
+    /// sessions, `"off"`, and any state the engine gates would reject
+    /// stay parked without a timer). The client-owned refusal is
+    /// supervisor-side (the descriptor's `ownerClientId`). The engine gate
+    /// (`SessionEngine::can_passivate_worker`) is re-checked at the fire
+    /// inside [`Self::maybe_request_idle_passivation`] — the
     /// fresh-snapshot fence — so this window only decides whether to
     /// arm.
     pub(super) fn idle_passivation_window(&self) -> Option<std::time::Duration> {
-        let (rlm_depth, attached, compacting, shutdown, queued, last_activity, cwd) = {
+        let (attached, compacting, shutdown, queued, last_activity, cwd) = {
             let core = self.core.lock().unwrap();
             (
-                core.rlm_depth,
                 core.attached_client_ids.is_empty(),
                 core.compacting,
                 core.shutdown_requested,
@@ -269,7 +269,7 @@ impl TurnRunner {
                 core.cwd.clone(),
             )
         };
-        if rlm_depth == 0 || !attached || compacting || shutdown || queued {
+        if !attached || compacting || shutdown || queued {
             return None;
         }
         // A live background bash handle keeps the worker resident (the
@@ -301,10 +301,9 @@ impl TurnRunner {
     /// next park re-arms, exactly like the kernel release's best-effort
     /// arm.
     pub(super) async fn maybe_request_idle_passivation(&self) {
-        let (rlm_depth, attached, compacting, shutdown, queued, last_activity, cwd) = {
+        let (attached, compacting, shutdown, queued, last_activity, cwd) = {
             let core = self.core.lock().unwrap();
             (
-                core.rlm_depth,
                 core.attached_client_ids.is_empty(),
                 core.compacting,
                 core.shutdown_requested,
@@ -325,7 +324,7 @@ impl TurnRunner {
         // The fresh-snapshot fence: the wake that raced the timer must
         // find the worker resident, so any state change since the window
         // armed cancels the passivation.
-        if rlm_depth == 0 || !attached || compacting || shutdown || queued {
+        if !attached || compacting || shutdown || queued {
             return;
         }
         if self.user_bash.is_running() {

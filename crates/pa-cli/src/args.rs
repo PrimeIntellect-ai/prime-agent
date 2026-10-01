@@ -22,10 +22,6 @@ pub fn parse_thinking_level(value: &str) -> Option<ModelThinkingLevel> {
     }
 }
 
-/// Removed built-in tool names that used to exist and now produce an error.
-const REMOVED_BUILTIN_TOOL_NAMES: [&str; 5] = ["read", "write", "grep", "find", "ls"];
-/// Current built-in tool names reported in tool validation errors.
-const BUILTIN_TOOL_NAMES: [&str; 1] = ["ipython"];
 /// Value flags whose free-form text may legitimately start with a dash.
 const FREEFORM_VALUE_FLAGS: [&str; 2] = ["--goal", "--autonomous-gate"];
 /// Prompt value flags whose text may look like a long option (YAML frontmatter).
@@ -158,9 +154,6 @@ pub struct Args {
     pub fork: Option<String>,
     pub session_dir: Option<String>,
     pub models: Option<Vec<String>>,
-    pub tools: Option<Vec<String>>,
-    pub no_tools: bool,
-    pub no_builtin_tools: bool,
     pub print: bool,
     pub export: Option<String>,
     pub no_skills: bool,
@@ -319,30 +312,6 @@ pub fn parse_args(args: &[String]) -> Args {
                         .map(str::to_string)
                         .collect(),
                 );
-            }
-            "--no-tools" | "-nt" => result.no_tools = true,
-            "--no-builtin-tools" | "-nbt" => result.no_builtin_tools = true,
-            "--tools" | "-t" => {
-                let value = require_value!(arg);
-                let tools: Vec<String> = value
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|name| !name.is_empty())
-                    .map(str::to_string)
-                    .collect();
-                let removed: Vec<&str> = tools
-                    .iter()
-                    .filter(|name| REMOVED_BUILTIN_TOOL_NAMES.contains(&name.as_str()))
-                    .map(String::as_str)
-                    .collect();
-                if !removed.is_empty() {
-                    result.diagnostics.push(Diagnostic::error(format!(
-                        "Unknown built-in tool(s): {}. Available built-in tools: {}",
-                        removed.join(", "),
-                        BUILTIN_TOOL_NAMES.join(", ")
-                    )));
-                }
-                result.tools = Some(tools);
             }
             "--thinking" => {
                 let level = require_value!(arg);

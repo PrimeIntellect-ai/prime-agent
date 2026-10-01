@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use pa_types::daemon::{
     DaemonCommand, DaemonCommandEnvelope, DaemonCommandFrameType, DaemonProtocolInfo,
-    DaemonResponse, DAEMON_PROTOCOL_NAME, DAEMON_PROTOCOL_VERSION,
+    DaemonResponse, DaemonSessionLifecycle, DAEMON_PROTOCOL_NAME, DAEMON_PROTOCOL_VERSION,
 };
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -553,7 +553,7 @@ async fn handle_session_new(
         // (settings + env); external clients never toggle telemetry.
         telemetry_disabled: None,
         runtime_metadata: None,
-        lifecycle: None,
+        lifecycle: Some(DaemonSessionLifecycle::ClientOwned),
         env: None,
         launch_env: None,
         rest: Map::default(),
@@ -796,9 +796,22 @@ async fn handle_session_prompt(
         message: admitted.text,
         input: pa_types::daemon::PromptInput {
             content: None,
-            images: None,
-            streaming_behavior: None,
-            queue_if_busy: None,
+            // The image blocks ride the wire form `parse_prompt_images`
+            // reads (`{type, data, mimeType}`); TS forwards `images`
+            // only when the prompt carries any.
+            images: (!admitted.images.is_empty()).then(|| {
+                json!(admitted
+                    .images
+                    .into_iter()
+                    .map(|image| json!({ "type": "image", "data": image.data, "mimeType": image.mime_type }))
+                    .collect::<Vec<_>>())
+            }),
+            // TS sends `followUp` + `queueIfBusy: true` on every ACP
+            // prompt (acp-mode.ts): a prompt carrying a streaming
+            // behavior is the worker's resume site for the post-abort
+            // queued-input suspension, so a prompt after a Stop runs.
+            streaming_behavior: Some(pa_types::daemon::StreamingBehavior::FollowUp),
+            queue_if_busy: Some(true),
             expand_prompt_templates: None,
             source: None,
             agent_message_id: None,

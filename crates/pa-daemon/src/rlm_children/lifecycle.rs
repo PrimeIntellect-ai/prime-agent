@@ -252,10 +252,10 @@ impl SupervisorChildSessionsInner {
                     for record in children.iter() {
                         let record = record.lock().await;
                         if record.active_session_id == active_session_id {
-                            durable = record
-                                .session_id
-                                .clone()
-                                .or_else(|| Some(record.rlm_child_id.clone()));
+                            durable = Some(crate::rlm_children::durable_child_selector(
+                                record.session_id.as_deref(),
+                                &record.rlm_child_id,
+                            ));
                             break;
                         }
                     }
@@ -418,9 +418,11 @@ impl SupervisorChildSessionsInner {
                 // pop (the queue snapshot and the busy flag change under
                 // different locks on the far side of a socket). A short
                 // grace closes that window; a child that went busy again
-                // (a queued continuation) keeps watching.
+                // (a queued continuation) keeps watching. An unreachable
+                // worker (an idle passivation, a crash) leaves the settled
+                // verdict standing, as in `refresh_record`.
                 tokio::time::sleep(Duration::from_millis(WATCH_SETTLE_GRACE_MS)).await;
-                if !matches!(self.child_busy(&active_session_id).await, Ok(false)) {
+                if matches!(self.child_busy(&active_session_id).await, Ok(true)) {
                     record.lock().await.settled_status = None;
                     continue;
                 }

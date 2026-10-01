@@ -2,15 +2,11 @@ use super::*;
 use crate::protocol::{response_failure, response_success};
 use pa_types::platform::transport::bind_transport;
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
-/// A scripted JSONL supervisor for the watcher tests: creates one child
-/// session, reports it idle with a final answer, and captures the
-/// `follow_up` commands routed to the parent (the terminal-notice
-/// deliveries). `idle_delay_ms` paces `wait_for_idle` so a test can act
-/// while the child is still "running".
 /// How the fake supervisor answers a child `kill`.
 enum FakeKill {
     Success,
@@ -21,16 +17,26 @@ enum FakeKill {
     Failure,
 }
 
+/// A scripted JSONL supervisor for the watcher tests: creates one child
+/// session, reports it idle with a final answer, and captures the
+/// `follow_up` commands routed to the parent (the terminal-notice
+/// deliveries). `idle_delay_ms` paces `wait_for_idle` so a test can act
+/// while the child is still "running". `worker_leaves_after_settle`
+/// fails every child read after the settle answer is captured.
 async fn spawn_fake_supervisor(
     socket: std::path::PathBuf,
     follow_up_tx: mpsc::UnboundedSender<Value>,
     idle_delay_ms: u64,
     kill_tx: mpsc::UnboundedSender<Value>,
     kill_behavior: FakeKill,
+    worker_leaves_after_settle: bool,
 ) {
     let kill_behavior = std::sync::Arc::new(kill_behavior);
     let listener = bind_transport(&socket).await.unwrap();
     tokio::spawn(async move {
+        // Shared across link connections: a left worker fails every child
+        // read on whichever connection carries it.
+        let gone = Arc::new(AtomicBool::new(false));
         loop {
             let Ok(stream) = listener.accept().await else {
                 return;
@@ -38,6 +44,7 @@ async fn spawn_fake_supervisor(
             let follow_up_tx = follow_up_tx.clone();
             let kill_tx = kill_tx.clone();
             let kill_behavior = std::sync::Arc::clone(&kill_behavior);
+            let gone = Arc::clone(&gone);
             tokio::spawn(async move {
                 let (reader, mut writer) = stream.split();
                 let mut reader = BufReader::new(reader);
@@ -57,6 +64,14 @@ async fn spawn_fake_supervisor(
                     let command = value["command"].clone();
                     let command_type: &str = command["type"].as_str().unwrap_or_default();
                     let response = match command_type {
+                        "get_state" | "wait_for_idle" if gone.load(Ordering::SeqCst) => {
+                            response_failure(
+                                Some(&id),
+                                command_type,
+                                "Unknown active session: child-live",
+                                None,
+                            )
+                        }
                         "create" => response_success(
                             Some(&id),
                             command_type,
@@ -81,11 +96,18 @@ async fn spawn_fake_supervisor(
                                 "sessionActions": { "queuedCount": 0 },
                             })),
                         ),
-                        "get_last_assistant_text" => response_success(
-                            Some(&id),
-                            command_type,
-                            Some(json!({ "text": "the child final answer" })),
-                        ),
+                        "get_last_assistant_text" => {
+                            // The settle capture: with the knob set, the
+                            // worker leaves right after its final answer.
+                            if worker_leaves_after_settle {
+                                gone.store(true, Ordering::SeqCst);
+                            }
+                            response_success(
+                                Some(&id),
+                                command_type,
+                                Some(json!({ "text": "the child final answer" })),
+                            )
+                        }
                         "kill" => {
                             let _ = kill_tx.send(command.clone());
                             match *kill_behavior {
@@ -131,6 +153,7 @@ async fn sessions_with_fake_supervisor(
     follow_up_tx: mpsc::UnboundedSender<Value>,
     idle_delay_ms: u64,
     kill_behavior: FakeKill,
+    worker_leaves_after_settle: bool,
 ) -> (SupervisorChildSessions, mpsc::UnboundedReceiver<Value>) {
     let socket = std::env::temp_dir().join(format!(
         "pa-rlm-watch-{}.sock",
@@ -143,6 +166,7 @@ async fn sessions_with_fake_supervisor(
         idle_delay_ms,
         kill_tx,
         kill_behavior,
+        worker_leaves_after_settle,
     )
     .await;
     let link = Arc::new(crate::supervisor_link::SupervisorLink::new(socket));
@@ -182,7 +206,7 @@ async fn spawn_child(sessions: &SupervisorChildSessions) -> RlmSpawnHandle {
 async fn roster_snapshot_does_not_wait_for_a_slow_child_worker() {
     let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
     let (sessions, _kill_rx) =
-        sessions_with_fake_supervisor(follow_up_tx, 1_000, FakeKill::Success).await;
+        sessions_with_fake_supervisor(follow_up_tx, 1_000, FakeKill::Success, false).await;
     sessions
         .push_test_child(RlmChildIdentity {
             rlm_child_id: "child-id".to_string(),
@@ -205,7 +229,7 @@ async fn roster_snapshot_does_not_wait_for_a_slow_child_worker() {
 async fn a_settled_child_without_a_reply_delivers_the_terminal_notice() {
     let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
     let (sessions, _kill_rx) =
-        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success).await;
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, false).await;
     let handle = spawn_child(&sessions).await;
     // The worker releases the detached prompt at its turn boundary.
     sessions.notify_turn_done();
@@ -235,6 +259,32 @@ async fn a_settled_child_without_a_reply_delivers_the_terminal_notice() {
     assert!(extra.is_err(), "no second notice may arrive");
 }
 
+/// The settle grace re-marks only a BUSY child as running: a worker that
+/// leaves inside the grace (the idle passivation's stop, a crash) keeps
+/// the settled verdict, and the settle tail (notice, funnel) still runs.
+#[tokio::test]
+async fn a_worker_leaving_inside_the_settle_grace_keeps_the_verdict() {
+    let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, true).await;
+    let settled = sessions.settle_notified();
+    spawn_child(&sessions).await;
+    sessions.notify_turn_done();
+
+    tokio::time::timeout(Duration::from_secs(10), settled)
+        .await
+        .expect("the settle funnel fires although the worker left");
+    assert!(!sessions.any_running().await);
+    let roster = sessions.list_subagents().await.expect("child roster");
+    assert_eq!(roster[0].status, "completed");
+    let notice = follow_up_rx
+        .try_recv()
+        .expect("the no-reply notice is still owed");
+    assert!(notice["customMessage"]["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("the child final answer")));
+}
+
 /// One child row exists and is running before the close tests run.
 async fn one_running_child(sessions: &SupervisorChildSessions) {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -260,7 +310,7 @@ async fn close_children_stops_the_child_and_clears_the_roster() {
     // A long idle keeps the child mid-run while the close fires, so the
     // settle watcher is parked instead of raced.
     let (sessions, mut kill_rx) =
-        sessions_with_fake_supervisor(follow_up_tx, 10_000, FakeKill::Success).await;
+        sessions_with_fake_supervisor(follow_up_tx, 10_000, FakeKill::Success, false).await;
     spawn_child(&sessions).await;
     sessions.notify_turn_done();
     one_running_child(&sessions).await;
@@ -300,7 +350,7 @@ async fn close_children_stops_the_child_and_clears_the_roster() {
 async fn close_children_treats_an_already_gone_child_as_a_no_op() {
     let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
     let (sessions, _kill_rx) =
-        sessions_with_fake_supervisor(follow_up_tx, 10_000, FakeKill::UnknownSession).await;
+        sessions_with_fake_supervisor(follow_up_tx, 10_000, FakeKill::UnknownSession, false).await;
     spawn_child(&sessions).await;
     sessions.notify_turn_done();
     one_running_child(&sessions).await;
@@ -324,7 +374,7 @@ async fn close_children_treats_an_already_gone_child_as_a_no_op() {
 async fn close_children_keeps_a_failed_child_tracked() {
     let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
     let (sessions, _kill_rx) =
-        sessions_with_fake_supervisor(follow_up_tx, 10_000, FakeKill::Failure).await;
+        sessions_with_fake_supervisor(follow_up_tx, 10_000, FakeKill::Failure, false).await;
     spawn_child(&sessions).await;
     sessions.notify_turn_done();
     one_running_child(&sessions).await;
@@ -350,7 +400,7 @@ async fn a_replied_child_gets_no_terminal_notice() {
     // A slow idle wait keeps the child "running" while the test marks
     // the reply.
     let (sessions, _kill_rx) =
-        sessions_with_fake_supervisor(follow_up_tx, 250, FakeKill::Success).await;
+        sessions_with_fake_supervisor(follow_up_tx, 250, FakeKill::Success, false).await;
     let handle = spawn_child(&sessions).await;
     assert!(!handle.rlm_child_id.is_empty());
     sessions.mark_replied("child-live").await;
@@ -370,7 +420,7 @@ async fn a_replied_child_gets_no_terminal_notice() {
 async fn collect_answers_a_just_deleted_target_with_the_cancelled_envelope() {
     let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
     let (sessions, _kill_rx) =
-        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success).await;
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, false).await;
     let handle = spawn_child(&sessions).await;
     sessions.notify_turn_done();
     // The child settles with its final answer before the delete.
@@ -443,7 +493,7 @@ async fn collect_answers_a_just_deleted_target_with_the_cancelled_envelope() {
 async fn collect_answers_the_cancelled_envelope_after_an_inactive_delete() {
     let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
     let (sessions, _kill_rx) =
-        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success).await;
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, false).await;
     let handle = spawn_child(&sessions).await;
     sessions.notify_turn_done();
     // The inactive delete requires a settled child (a running child

@@ -257,6 +257,145 @@ fn the_depth_two_chain_reports_the_folded_aggregate() {
     assert_eq!(spawn.1.cost.total, pa_types::JsNumber(0.15));
 }
 
+/// The Anthropic subscription warning's once-per-session-lifecycle gate
+/// (operator directive 2026-09-29): [`SessionFile::mark_anthropic_warning_shown`]
+/// persists the marker row durably, the live flag flips, and BOTH reopen
+/// paths (the full [`SessionFile::open`] and the windowed
+/// [`SessionFile::open_windowed`]) hydrate the gate from the file — the
+/// reattach/resume contract: a session that warned once never warns again
+/// however it reopens. A fresh session serves the gate closed.
+#[test]
+fn marking_the_warning_persists_and_both_reopens_hydrate_it() {
+    let dir = temp_dir();
+    let mut session = SessionFile::create("/repo", None, 0);
+    session.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
+    let path = dir.join(session_file_name(session.session_id()));
+    session.set_path(path.clone());
+    session.rewrite().unwrap();
+    assert!(
+        !session.anthropic_warning_shown(),
+        "an unmarked session serves the gate closed"
+    );
+
+    session.mark_anthropic_warning_shown().unwrap();
+    assert!(
+        session.anthropic_warning_shown(),
+        "the live flag flipped with the mark"
+    );
+
+    // The durable row: the exact custom entry the lifecycle reads back.
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains("\"customType\":\"anthropic_subscription_warning_shown\""),
+        "the marker row reached the session file: {text}"
+    );
+
+    // The full reopen (a plain resume) and the windowed reopen (the
+    // create-over-file replay of a long session) both hydrate the gate.
+    let reopened = SessionFile::open(&path).unwrap();
+    assert!(reopened.anthropic_warning_shown());
+    let windowed = SessionFile::open_windowed(&path).unwrap();
+    assert!(windowed.anthropic_warning_shown());
+
+    // A session that never warned stays closed through both opens.
+    let mut fresh = SessionFile::create("/repo", None, 0);
+    let fresh_path = dir.join(session_file_name(fresh.session_id()));
+    fresh.set_path(fresh_path.clone());
+    fresh.rewrite().unwrap();
+    assert!(!SessionFile::open(&fresh_path)
+        .unwrap()
+        .anthropic_warning_shown());
+    assert!(!SessionFile::open_windowed(&fresh_path)
+        .unwrap()
+        .anthropic_warning_shown());
+}
+
+/// The bots' round on the full open (the PR's Medium): the gate rides
+/// the ACTIVE branch — a marker on an abandoned or sibling branch must
+/// never suppress the warning for the open leaf. The windowed walk
+/// already followed the active chain; the full open's all-entries scan
+/// disagreed, so the two reopen paths answered differently on the same
+/// file (and `install_full_history` could overwrite the windowed
+/// answer with the full scan's).
+#[test]
+fn an_off_branch_marker_never_hydrates_the_full_open_gate() {
+    let dir = temp_dir();
+    let row = |id: &str, parent: Option<&str>, message: Value| {
+        json!({
+            "type": "message", "id": id, "parentId": parent,
+            "timestamp": "2026-09-30T00:00:00.000Z",
+            "message": message,
+        })
+        .to_string()
+    };
+    let marker = |id: &str, parent: &str| {
+        json!({
+            "type": "custom", "id": id, "parentId": parent,
+            "timestamp": "2026-09-30T00:00:01.000Z",
+            "customType": "anthropic_subscription_warning_shown",
+            "data": { "shown": true },
+        })
+        .to_string()
+    };
+    let header = |id: &str| {
+        json!({"type": "session", "version": 3, "id": id, "timestamp": "2026-09-30T00:00:00.000Z", "cwd": "/tmp"}).to_string()
+    };
+
+    // The marker hangs off u1 as a SIBLING of the live branch: the open
+    // leaf (the last row, b1) walks u1 -> header and never meets it.
+    let path = dir.join("off-branch-marker.jsonl");
+    std::fs::write(
+        &path,
+        [
+            header("off-1"),
+            row("u1", None, json!({"role": "user", "content": "hi"})),
+            marker("m1", "u1"),
+            row(
+                "b1",
+                Some("u1"),
+                json!({"role": "user", "content": "the sibling turn"}),
+            ),
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    assert!(
+        !SessionFile::open(&path).unwrap().anthropic_warning_shown(),
+        "an off-branch marker never hydrates the full open's gate"
+    );
+    assert!(
+        !SessionFile::open_windowed(&path)
+            .unwrap()
+            .anthropic_warning_shown(),
+        "the windowed walk agrees: the active chain carries no marker"
+    );
+
+    // The same marker ON the active branch answers open — the sibling
+    // branch's rows stay irrelevant.
+    let path_on = dir.join("on-branch-marker.jsonl");
+    std::fs::write(
+        &path_on,
+        [
+            header("on-1"),
+            row("u1", None, json!({"role": "user", "content": "hi"})),
+            marker("m1", "u1"),
+            row(
+                "b1",
+                Some("m1"),
+                json!({"role": "user", "content": "after the marker"}),
+            ),
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    assert!(SessionFile::open(&path_on)
+        .unwrap()
+        .anthropic_warning_shown());
+    assert!(SessionFile::open_windowed(&path_on)
+        .unwrap()
+        .anthropic_warning_shown());
+}
+
 #[test]
 fn creates_and_loads_a_session() {
     let dir = temp_dir();
