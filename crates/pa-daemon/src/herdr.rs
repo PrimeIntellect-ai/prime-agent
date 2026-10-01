@@ -701,18 +701,24 @@ fn pane_socket_is_ownable(metadata: &std::fs::Metadata, own_uid: u32) -> bool {
 /// fence compares against, which is also the uid a socket this process
 /// would bind would carry. Cached once per process.
 #[cfg(unix)]
-fn effective_uid() -> u32 {
+fn effective_uid() -> Option<u32> {
+    static UID: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *UID.get_or_init(|| probe_effective_uid(&std::env::temp_dir()))
+}
+
+/// The uid probe itself: `None` when the probe file cannot be created or
+/// read — the fence FAILS CLOSED on `None` (it must never fall back to
+/// uid 0, which would accept a root-owned socket).
+#[cfg(unix)]
+fn probe_effective_uid(dir: &std::path::Path) -> Option<u32> {
     use std::os::unix::fs::MetadataExt;
-    static UID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *UID.get_or_init(|| {
-        let probe =
-            std::env::temp_dir().join(format!("pa-herdr-uid-probe-{}", uuid::Uuid::new_v4()));
-        let uid = std::fs::File::create(&probe)
-            .and_then(|file| file.metadata())
-            .map_or(0, |metadata| metadata.uid());
-        let _ = std::fs::remove_file(&probe);
-        uid
-    })
+    let probe = dir.join(format!("pa-herdr-uid-probe-{}", uuid::Uuid::new_v4()));
+    let uid = std::fs::File::create(&probe)
+        .and_then(|file| file.metadata())
+        .map(|metadata| metadata.uid())
+        .ok();
+    let _ = std::fs::remove_file(&probe);
+    uid
 }
 
 #[cfg(unix)]
@@ -723,7 +729,9 @@ fn pane_socket_acceptable(socket_target: &str) -> bool {
         // before, and reporting starts when the socket appears.
         return true;
     };
-    let acceptable = pane_socket_is_ownable(&metadata, effective_uid());
+    // A probe that cannot resolve the uid fails CLOSED (no report) —
+    // falling back to uid 0 would accept a root-owned socket.
+    let acceptable = effective_uid().is_some_and(|uid| pane_socket_is_ownable(&metadata, uid));
     if !acceptable
         && SOCKET_REFUSAL_LOGGED
             .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
@@ -1423,21 +1431,23 @@ mod tests {
         let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
         let own_metadata = std::fs::symlink_metadata(&socket_path).unwrap();
 
-        // The owner check is the process's own uid for a real socket.
-        assert!(pane_socket_is_ownable(&own_metadata, effective_uid()));
+        // The owner check is the process's own uid for a real socket
+        // (the probe succeeds on this box — the cached Some carries it).
+        let own_uid = effective_uid().expect("the uid probe succeeds in a writable temp dir");
+        assert!(pane_socket_is_ownable(&own_metadata, own_uid));
         // A foreign owner never passes (the mocked metadata check).
-        assert!(!pane_socket_is_ownable(&own_metadata, effective_uid() + 1));
+        assert!(!pane_socket_is_ownable(&own_metadata, own_uid + 1));
         // A regular file is never a pane socket.
         let file_path = socket_path.with_extension("file");
         std::fs::write(&file_path, b"not a socket").unwrap();
         let file_metadata = std::fs::symlink_metadata(&file_path).unwrap();
-        assert!(!pane_socket_is_ownable(&file_metadata, effective_uid()));
+        assert!(!pane_socket_is_ownable(&file_metadata, own_uid));
         // A symlink never passes — even one pointing at the legitimate
         // socket (lstat does not follow).
         let link_path = socket_path.with_extension("link");
         std::os::unix::fs::symlink(&socket_path, &link_path).unwrap();
         let link_metadata = std::fs::symlink_metadata(&link_path).unwrap();
-        assert!(!pane_socket_is_ownable(&link_metadata, effective_uid()));
+        assert!(!pane_socket_is_ownable(&link_metadata, own_uid));
         // The fence end of it: the real socket passes, the file and the
         // symlink do not, and a missing target passes through (the
         // connect below still fails silently on it).
@@ -1477,6 +1487,19 @@ mod tests {
             requests.lock().unwrap().is_empty(),
             "a non-socket target produced a release"
         );
+    }
+
+    /// A uid probe that cannot create its file yields `None`, and the
+    /// fence treats `None` as reject (fail closed — the probe must never
+    /// fall back to uid 0, which would accept a root-owned socket).
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_uid_probe_fails_closed() {
+        assert!(
+            probe_effective_uid(std::path::Path::new("/nonexistent-pa-herdr-probe-dir")).is_none()
+        );
+        // The fence's `None` arm is its own `is_some_and` — a refused
+        // uid never reaches the owner check at all.
     }
 
     /// Concurrent seq minting never duplicates: the first-seed race's
