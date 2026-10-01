@@ -791,13 +791,12 @@ const AGENT_SESSION_ENDED: EventRule = EventRule {
 };
 
 /// `agent command used` (v1): builtin command names only, never arguments.
+/// The TUI client sends it with the base properties and the command name
+/// alone (TS `captureAgentCommandUsed`), so it carries no session id.
 const AGENT_COMMAND_USED: EventRule = EventRule {
     name: "agent command used",
     since: 1,
-    properties: &[
-        ("session_id", required(uuid())),
-        ("command_name", required(free_string(64))),
-    ],
+    properties: &[("command_name", required(free_string(64)))],
 };
 
 /// `onboarding stage` (v2): the onboarding journey's real stages only.

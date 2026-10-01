@@ -416,10 +416,8 @@ async fn report_an_aborted_flow_once() {
             api_key: None,
         },
     };
-    let client = sink
-        .track_incomplete("aborted")
-        .expect("telemetry is on: the aborted flow reports");
-    client.shutdown().await.expect("the mirror flushed");
+    // The sink's own report resolves only once the event is delivered.
+    pa_tui::interactive::OnboardingSink::onboarding_incomplete(&sink, "aborted").await;
     let mirror = std::fs::read_to_string(agent_dir.join("telemetry.jsonl")).unwrap();
     let lines: Vec<&str> = mirror.lines().collect();
     assert_eq!(lines.len(), 1);

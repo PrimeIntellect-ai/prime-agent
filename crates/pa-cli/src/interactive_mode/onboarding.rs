@@ -265,9 +265,19 @@ impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
         Ok(())
     }
 
-    fn onboarding_incomplete(&self, outcome: &'static str) {
-        // The final flush rides the client's drop.
-        let _ = self.track_incomplete(outcome);
+    fn onboarding_incomplete(
+        &self,
+        outcome: &'static str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        let client = self.track_incomplete(outcome);
+        Box::pin(async move {
+            // The exit keys quit the app right after: wait out the final
+            // flush (bounded by the sink's request timeout) so the runtime
+            // teardown cannot abort the worker before it delivers.
+            if let Some(client) = client {
+                let _ = client.shutdown().await;
+            }
+        })
     }
 }
 
