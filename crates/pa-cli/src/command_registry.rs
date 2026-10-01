@@ -235,6 +235,49 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     ),
     CommandSpec::new(&["config"], "config", "Configure package resources"),
     CommandSpec::new(
+        &["factory"],
+        "factory <list|import|export>",
+        "Share and run factory machines from the machine library",
+    )
+    .description(
+        "Machines are MACHINE.md templates (frontmatter plus a fenced machine-spec block) \
+resolved repo-first, then from the personal library under the agent dir. \
+Run one with `await rlm.factory.run(\"<name>\")` from a session.",
+    ),
+    CommandSpec::new(
+        &["factory", "list"],
+        "factory list [--json]",
+        "List the machine library",
+    )
+    .description(
+        "Lists the shipped repo machines and the personal machines with their descriptions.",
+    )
+    .options(&["--json  Print JSON"]),
+    CommandSpec::new(
+        &["factory", "import"],
+        "factory import <path> [--json]",
+        "Validate and import a MACHINE.md into the personal library",
+    )
+    .description(
+        "The machine's spec passes the kernel's write-time validator; an invalid spec \
+never persists and the exact errors print verbatim.",
+    )
+    .options(&["--json  Print JSON"]),
+    CommandSpec::new(
+        &["factory", "export"],
+        "factory export <name> --out <path> [--json]",
+        "Export a machine to a MACHINE.md file",
+    )
+    .description(
+        "Resolves a stored factory entry, a live run, or the library machine named <name> \
+(both library levels, repo first) and writes its MACHINE.md to the output path.",
+    )
+    .options(&[
+        "--out <path>  Destination MACHINE.md path",
+        "--json        Print JSON",
+    ])
+    .examples(&["factory export review-sweep --out shared-review-sweep.MACHINE.md"]),
+    CommandSpec::new(
         &["prompt"],
         "prompt [--model <selector>] [--cwd <dir>] [--json]",
         "Print the assembled system prompt with its layer breakdown",
