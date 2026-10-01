@@ -89,7 +89,7 @@ impl AcpChild {
 
     /// The daemon-attached transport: the child spawns its own sandboxed
     /// supervisor on `<home>/daemon.sock` and hosts the scripted worker
-    /// through the `PRIME_AGENT_ACP_DAEMON_SCRIPT` create-config seam;
+    /// through the `PRIME_AGENT_FAUX_SCRIPT` create-config seam;
     /// the drop shuts the supervisor down. The socket sits on the struct
     /// for tests that speak raw daemon commands alongside the ACP frames.
     fn spawn(args: &[&str], script: &serde_json::Value) -> AcpChild {
@@ -196,10 +196,7 @@ fn daemon_attached_command(
         .arg("--daemon-socket")
         .arg(socket)
         .env("HOME", home)
-        .env(
-            "PRIME_AGENT_ACP_DAEMON_SCRIPT",
-            home.join("worker-script.json"),
-        )
+        .env("PRIME_AGENT_FAUX_SCRIPT", home.join("worker-script.json"))
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",

@@ -1,1 +1,1 @@
-- ACP mode over the daemon now rejects an `initialize` request with invalid params (for example a string `protocolVersion`), as the in-process mode and the TypeScript version do.
+- ACP mode over the daemon now rejects an `initialize` request with invalid params (for example a string `protocolVersion`), as the TypeScript version does.

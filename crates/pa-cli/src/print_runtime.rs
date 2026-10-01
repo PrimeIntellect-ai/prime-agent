@@ -66,8 +66,8 @@ impl crate::mode::Runtime for PrintRuntime {
                     }
                 }
             }
-            // ACP mode: a thin JSON-RPC stdio transport over the same
-            // in-process session engine the print mode uses.
+            // ACP mode: a thin JSON-RPC stdio transport over a daemon
+            // session.
             AppMode::Acp => match run_acp_mode(options) {
                 Ok(code) => Ok(code),
                 Err(error) => {
@@ -89,9 +89,11 @@ impl crate::mode::Runtime for PrintRuntime {
     }
 }
 
-/// The ACP headless mode: build the in-process session engine the same way
-/// the print mode does, then serve the ACP JSON-RPC surface over stdio until
-/// the client disconnects.
+/// The ACP headless mode (TS main.ts, `useDaemonClient`): ensure a
+/// supervisor is listening (spawning one detached), create the daemon
+/// session the CLI session flags select, and serve the ACP surface over it
+/// until the client disconnects. Any startup failure is an `Error:` exit 1
+/// before the first ACP frame.
 fn run_acp_mode(options: &RunOptions) -> Result<i32, String> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -101,77 +103,24 @@ fn run_acp_mode(options: &RunOptions) -> Result<i32, String> {
 }
 
 async fn acp_mode_main(options: &RunOptions) -> Result<i32, String> {
-    // TS `shouldUseDaemonClient` is true for the ACP mode: the daemon is
-    // the preferred transport, and the in-process engine stays the
-    // fallback when no daemon can be reached.
-    if let Some(exit_code) = try_daemon_attached_acp(options).await {
-        return Ok(exit_code);
-    }
-    let config = &options.config;
-    let engine = build_headless_engine_parts(options, "print").await?;
-    let exit_code = pa_daemon::acp::run_acp_mode(pa_daemon::acp::AcpOptions {
-        engine: std::sync::Arc::new(engine.engine),
-        actual_cwd: config.cwd.clone(),
+    // Flag > env > default: the same `PRIME_AGENT_DAEMON_SOCKET` contract
+    // as every other mode (the `prime-agent` launcher written by
+    // install-rust.sh pins that env, so the ACP path must honor it or it
+    // would target the TypeScript default socket and treat the schema
+    // mismatch as a stale daemon).
+    let socket_path = crate::config::resolve_daemon_socket_path(options.daemon_socket.as_deref());
+    crate::interactive_mode::ensure_daemon_running(&socket_path, &options.config.cwd)
+        .await
+        .map_err(|error| format!("{error:#}"))?;
+    let (actual_cwd, create) = daemon_acp_create(options)?;
+    pa_daemon::acp::daemon::run_daemon_attached_acp_mode(pa_daemon::acp::daemon::DaemonAcpOptions {
+        socket_path,
+        actual_cwd,
         product_version: crate::config::version().to_string(),
-        model: Some(engine.model),
-        api_key: engine.api_key,
-        agent_dir: config.agent_dir.clone(),
-        provider_target: engine.provider_target,
-        autonomous_config: options
-            .config
-            .autonomous
-            .as_ref()
-            .map(autonomous_runtime_config),
+        create,
     })
     .await
-    .map_err(|error| format!("{error:#}"))?;
-    Ok(exit_code)
-}
-
-/// Try the daemon-attached ACP transport: ensure a supervisor is
-/// listening (spawning one detached, TS daemon-launch semantics), then
-/// create the daemon session the CLI session flags select and serve the
-/// ACP surface over it. `None` means no daemon could be reached and the
-/// in-process engine serves the connection instead (logged to stderr,
-/// never stdout); a later failure is an `Error:` exit 1 before any ACP
-/// frame (TS main.ts).
-async fn try_daemon_attached_acp(options: &RunOptions) -> Option<i32> {
-    if std::env::var_os("PRIME_AGENT_FAUX_SCRIPT").is_some() {
-        return None;
-    }
-    // Flag > env > default: the ACP transport resolves the same
-    // `PRIME_AGENT_DAEMON_SOCKET` contract as every other mode (the
-    // `prime-agent` launcher written by install-rust.sh pins that env,
-    // so the ACP path must honor it or it would target the TypeScript
-    // default socket and treat the schema mismatch as a stale daemon).
-    let socket_path = crate::config::resolve_daemon_socket_path(options.daemon_socket.as_deref());
-    if let Err(error) =
-        crate::interactive_mode::ensure_daemon_running(&socket_path, &options.config.cwd).await
-    {
-        eprintln!("prime-agent: daemon-attached ACP unavailable, using in-process mode: {error:#}");
-        return None;
-    }
-    let result = async {
-        let (actual_cwd, create) = daemon_acp_create(options)?;
-        pa_daemon::acp::daemon::run_daemon_attached_acp_mode(
-            pa_daemon::acp::daemon::DaemonAcpOptions {
-                socket_path,
-                actual_cwd,
-                product_version: crate::config::version().to_string(),
-                create,
-            },
-        )
-        .await
-        .map_err(|error| format!("{error:#}"))
-    }
-    .await;
-    match result {
-        Ok(code) => Some(code),
-        Err(error) => {
-            eprintln!("Error: {error}");
-            Some(1)
-        }
-    }
+    .map_err(|error| format!("{error:#}"))
 }
 
 /// The ACP daemon session's create (TS main.ts `defaultSessionConfig` +
@@ -211,9 +160,8 @@ fn daemon_acp_create(
         };
         (cwd, session_path, DaemonSessionLifecycle::Resident)
     };
-    // The session flags the in-process engine honors, under the TS
-    // `runtimeConfigFromArgs` names. `--api-key` stays off: the
-    // in-process path ignores it too, and the create config is persisted.
+    // The CLI session flags, under the TS `runtimeConfigFromArgs`
+    // names. `--api-key` stays off: the create config is persisted.
     let mut create_config = serde_json::json!({
         "cwd": cwd.display().to_string(),
         "sessionDir": session_dir.display().to_string(),
@@ -248,10 +196,9 @@ fn daemon_acp_create(
     if let Some(autonomous) = &config.autonomous {
         create_config["autonomous"] = serde_json::json!(autonomous_runtime_config(autonomous));
     }
-    // Verification seam: a scripted daemon session (the same `{"engine":
-    // "faux", ...}` form the in-process e2e rides). The product never sets
-    // it; the supervisor turns the path into the worker's script env.
-    if let Some(script) = std::env::var_os("PRIME_AGENT_ACP_DAEMON_SCRIPT") {
+    // Verification seam (the interactive mode's contract): a scripted daemon
+    // session from a script FILE path. The product never sets it.
+    if let Some(script) = std::env::var_os("PRIME_AGENT_FAUX_SCRIPT") {
         create_config["script"] = serde_json::Value::String(script.to_string_lossy().to_string());
     }
     let create = pa_types::daemon::DaemonCommand::Create {
@@ -475,7 +422,7 @@ async fn print_mode_main(options: &RunOptions) -> Result<i32, String> {
 /// network; verification harness only, never set by the product.
 ///
 /// The switchable provider target the session's stream reads per call
-/// (shared with the ACP mode, whose picker model switches swap it live).
+/// (shared with the RPC mode, whose picker model switches swap it live).
 pub type ProviderTargetSlot = std::sync::Arc<std::sync::RwLock<Option<ProviderTarget>>>;
 
 /// The assembled headless engine plus the model and request auth it runs
@@ -486,7 +433,7 @@ struct HeadlessEngine {
     model: Model,
     api_key: Option<String>,
     /// The live provider target: the stream reads it per call, and the
-    /// ACP mode's picker switches swap it (TS `setModel`'s stream
+    /// RPC mode's picker switches swap it (TS `setModel`'s stream
     /// re-registration; `set_model` swaps it without rebuilding the
     /// session).
     provider_target: ProviderTargetSlot,

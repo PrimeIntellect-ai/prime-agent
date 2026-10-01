@@ -196,7 +196,7 @@ fn acp_daemon_attached_config_option_pickers() {
     let agent_dir = home.path().join("agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
     // The worker inherits the CLI's agent dir, so the fixture models ride
-    // the same discovery the in-process registry test used.
+    // the same discovery.
     std::fs::write(
         agent_dir.join("models.json"),
         faux_models_fixture().to_string(),
@@ -224,7 +224,7 @@ fn acp_daemon_attached_config_option_pickers() {
         ])
         .env("HOME", home.path())
         .env("PRIME_AGENT_CODING_AGENT_DIR", &agent_dir)
-        .env("PRIME_AGENT_ACP_DAEMON_SCRIPT", &script_path)
+        .env("PRIME_AGENT_FAUX_SCRIPT", &script_path)
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
