@@ -241,8 +241,8 @@ async fn bash_consumed_withdraws_the_undelivered_notice_and_settles() {
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
 
-/// Dropping a cancelled admission settles the verdict: the cancelled
-/// rows leave no busy evidence and no replayable snapshot.
+/// Cancelling an owned queued admission settles the verdict: removed rows
+/// leave no busy evidence and no replayable snapshot.
 #[tokio::test]
 async fn cancelled_admission_drop_settles_the_verdict() {
     let worker = created_worker_with_journal().await;
@@ -255,7 +255,13 @@ async fn cancelled_admission_drop_settles_the_verdict() {
         WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
         "the admitted prompt is live work"
     );
-    worker.drop_queued_admitted_prompt("a1");
+    let cancelled = worker
+        .dispatch(
+            "cancel_prompt_admission",
+            &json!({ "admissionId": "a1", "cancelOwned": true }),
+        )
+        .await;
+    assert_eq!(cancelled.data, Some(json!({ "status": "owned" })));
     assert!(
         !WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
         "the dropped rows leave no busy evidence"

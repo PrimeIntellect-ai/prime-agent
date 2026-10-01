@@ -538,12 +538,10 @@ async fn abort_and_clear_queue_suspends_plain_prompts() {
     assert!(idle.success, "never went idle: {idle:?}");
 }
 
-/// `cancel_prompt_admission` with `cancelOwned` on a running prompt (TS
-/// `admission.controller?.abort()`): the worker answers `owned`, aborts
-/// the turn, and the settle clears the admission. A prompt cancelled
-/// while it sits queued behind that turn never runs: the runner commits
-/// its admission at pickup, under the core lock, and drops a cancelled
-/// admission's item instead of starting its turn.
+/// TS commits admission before queue delivery: a queued prompt answers
+/// `owned` but does not affect the running turn unless cancelled with
+/// `cancelOwned`. The running admission's `cancelOwned` aborts its turn
+/// and the settle clears the admission.
 #[tokio::test]
 async fn cancel_owned_admission_aborts_the_running_prompt() {
     let dir = std::env::temp_dir().join(format!("pa-worker-cancel-owned-{}", uuid::Uuid::new_v4()));
@@ -594,8 +592,7 @@ async fn cancel_owned_admission_aborts_the_running_prompt() {
         }
     }
     // The held turn keeps the session busy, so a second prompt queues
-    // behind it; flip its admission only — the cancel arm's status flip,
-    // before its lane drop — so it is still queued at the pickup.
+    // behind it. Admission is already owned before delivery, as in TS.
     let queued = worker
         .dispatch(
             "prompt",
@@ -607,10 +604,38 @@ async fn cancel_owned_admission_aborts_the_running_prompt() {
         )
         .await;
     assert!(queued.success, "queued prompt failed: {queued:?}");
+    let queued_cancel = json!({
+        "activeSessionId": "cancel-owned-session",
+        "admissionId": "adm-2",
+    });
+    let queued_owned = worker
+        .dispatch("cancel_prompt_admission", &queued_cancel)
+        .await;
     assert_eq!(
-        worker.prompt_admissions.cancel("adm-2"),
-        Some(crate::prompt_admission::AdmissionStatus::Cancelled)
+        queued_owned.data,
+        Some(json!({ "status": "owned" })),
+        "{queued_owned:?}"
     );
+    // Without cancelOwned, the queued prompt remains queued.
+    let queue = worker.dispatch("get_queue", &json!({})).await;
+    assert!(serde_json::to_string(&queue.data)
+        .unwrap()
+        .contains("queued behind the held turn"));
+    let queued_removed = worker
+        .dispatch(
+            "cancel_prompt_admission",
+            &json!({"activeSessionId": "cancel-owned-session", "admissionId": "adm-2", "cancelOwned": true}),
+        )
+        .await;
+    assert_eq!(
+        queued_removed.data,
+        Some(json!({ "status": "owned" })),
+        "{queued_removed:?}"
+    );
+    let cleared_queued = worker
+        .dispatch("cancel_prompt_admission", &queued_cancel)
+        .await;
+    assert_eq!(cleared_queued.data, Some(json!({ "status": "unknown" })));
     let cancel = json!({
         "activeSessionId": "cancel-owned-session",
         "admissionId": "adm-1",
