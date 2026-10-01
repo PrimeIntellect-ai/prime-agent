@@ -239,6 +239,12 @@ jobs:
           # partial hit and compile the rest. Slower hits, no correctness
           # issue.
           shared-key: test-shards
+          # Only the push wave writes the entry: PR and merge-queue legs
+          # restore (the restore key falls back to the push wave's entry)
+          # and save nothing - a PR's save would land under the PR's own
+          # ref, and PR-ref entries are the eviction pressure on the
+          # release-build caches.
+          save-if: ${{ github.event_name == 'push' }}
       - name: Install uv (the kernel venv bootstrap below uses it)
         run: |
           python3 -m pip install --user uv
