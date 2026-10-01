@@ -6,7 +6,10 @@
 //! load, atomically replaced when the stored state is invalid. The exclusive
 //! create publishes a fully-written candidate (unique temp file + hard
 //! link), so concurrent creators converge on one id and never observe a
-//! half-written winner.
+//! half-written winner. Durability matches the TS product at both sites:
+//! neither the fresh create nor the invalid-state replacement fsyncs, so a
+//! crash may lose the state file — it is re-created on the next boot and a
+//! torn file is invalid state, replaced atomically.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -34,8 +37,8 @@ struct State {
 ///
 /// Returns an error when a filesystem step fails: creating `agent_dir`,
 /// reading an existing state file (a missing file is not an error),
-/// publishing the candidate state (exclusive create, write, sync, hard
-/// link), or atomically replacing invalid state (temp file + rename).
+/// publishing the candidate state (exclusive create, write, hard link),
+/// or atomically replacing invalid state (temp file + rename).
 pub fn install_id(agent_dir: &Path) -> Result<String> {
     let path = agent_dir.join(STATE_FILE);
     if let Some(existing) = read_install_id(&path)? {
@@ -112,8 +115,8 @@ enum Publish {
 /// written to a unique sibling temp file and hard-linked into place: `link`
 /// is an atomic exclusive create, so a loser can never observe the winner's
 /// file mid-write. Filesystems without hard links fall back to the
-/// open+write+sync exclusive create, where losers re-read after
-/// `AlreadyExists`.
+/// open+write exclusive create (unsynced, the TS posture), where losers
+/// re-read after `AlreadyExists`.
 fn publish_exclusive(path: &Path, payload: &[u8]) -> Result<Publish> {
     let tmp = unique_sibling(path);
     let linked = create_exclusive(&tmp, payload).and_then(|()| std::fs::hard_link(&tmp, path));
@@ -173,6 +176,14 @@ fn remove_quietly(path: &Path) {
 
 /// Exclusive create with 0600 permissions on unix (Windows has no portable
 /// mode; the agent dir ACLs apply).
+///
+/// No temp-file fsync: the TS product fsyncs NEITHER install-id site — the
+/// fresh create is `writeFileSync` with flag `wx` (Node never fsyncs it) and
+/// the invalid-state replacement is `writeFileAtomicSync` WITHOUT the
+/// `fsync` option, so the port's `sync_all` here was added durability the
+/// product does not have. The crash class is unchanged: a lost create just
+/// re-creates next boot (`read_install_id` fails), and a torn or empty
+/// durable file is invalid state, replaced atomically.
 fn create_exclusive(path: &Path, payload: &[u8]) -> std::io::Result<()> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -182,8 +193,7 @@ fn create_exclusive(path: &Path, payload: &[u8]) -> std::io::Result<()> {
         options.mode(0o600);
     }
     let mut file = options.open(path)?;
-    file.write_all(payload)?;
-    file.sync_all()
+    file.write_all(payload)
 }
 
 /// TS parity validation: hex uuid whose version nibble is 1-8 and variant

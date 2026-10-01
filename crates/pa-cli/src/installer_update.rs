@@ -1,7 +1,8 @@
 //! The `prime-agent update` body: the TS->Rust migration path. One step —
-//! the update fetches the installer from the OFFICIAL DOMAIN endpoint
-//! (`https://app.primeintellect.ai/prime-agent/install.sh`, never a
-//! GitHub raw or workflow URL) and runs it; the script uninstalls the
+//! the update fetches the update channel's installer (stable: the official
+//! domain's `https://app.primeintellect.ai/prime-agent/install.sh`;
+//! nightly: the download base's `install-beta.sh`; never a GitHub raw or
+//! workflow URL) and runs it; the script uninstalls the
 //! TypeScript version, installs the latest Rust build of the update
 //! channel, and never touches `~/.prime/agent` (the sessions and
 //! configuration). The TUI's `/update` runs the same core out-of-band
@@ -93,11 +94,11 @@ pub fn run(options: &UpdateOptions) -> i32 {
     // pin (a test or a pinned install) changes where the funnel actually
     // fetches from, and the banner must not claim a source the run will
     // not use.
+    let channel = requested_installer_channel(options.channel);
     println!(
         "Updating to the latest Rust build — fetching the installer from {}:",
-        installer::installer_script_url()
+        installer::installer_script_url(Some(channel))
     );
-    let channel = requested_installer_channel(options.channel);
     match runtime.block_on(installer::run_installer(
         Some(channel),
         InstallerOutput::Inherit,
