@@ -9,12 +9,16 @@ use super::{anyhow, Command, Duration, Instant, Path, Result, Stdio};
 const DAEMON_STARTUP_TIMEOUT_MS: u64 = 30_000;
 const DAEMON_SHUTDOWN_WAIT_MS: u64 = 5_000;
 /// Pause between daemon-startup probes (TS `ensureDaemonRunning` polls at
-/// 25ms). This port tightens the poll to 5ms: a cold supervisor binds its
-/// socket ~39ms after the spawn and the 25ms grid quantized every cold
-/// launch by 0-25ms (mean ~12.5ms) of pure wait (boot-floor lane record
-/// 20260926-194800 at 7064d039a). Timing-only: the probe itself, the
-/// 30s startup budget, and the timeout error are unchanged.
-const DAEMON_PROBE_INTERVAL_MS: u64 = 5;
+/// 25ms). A cold supervisor binds its socket ~39ms after the spawn, so the
+/// poll interval quantizes every cold launch: the bind lands 0-interval
+/// before the next probe, a pure wait on a floor of microseconds. The 1ms
+/// interval caps that overshoot at <=1ms for the cost of ~40 failed
+/// connects per cold launch (each ~us; bounded by the same 30s startup
+/// budget, so a hung boot adds at most ~1k connects/s of syscall work,
+/// not a spin). Overshoot tables: probe-grid record 20261001-034500 on the
+/// bench repo. Timing-only: the probe itself, the 30s startup budget, and
+/// the timeout error are unchanged.
+const DAEMON_PROBE_INTERVAL_MS: u64 = 1;
 
 /// The daemon probe outcome (TS `DaemonVersionProbe`).
 enum DaemonProbe {

@@ -521,7 +521,10 @@ pub(super) async fn create_session(
 ) -> Result<String> {
     let session_path = match selection {
         Some(SessionSelection::Resume(path)) => Some(path.to_string_lossy().to_string()),
-        _ => None,
+        Some(
+            SessionSelection::New | SessionSelection::NewChild { .. } | SessionSelection::Attach(_),
+        )
+        | None => None,
     };
     // The create consumes the path; a refusal needs it again for the
     // descriptive error.
