@@ -28,6 +28,25 @@ pub fn set_new_process_group(command: &mut Command) {
     command.process_group(0);
 }
 
+/// Start the spawned child in a new session with no controlling terminal
+/// (`setsid`): the child cannot open `/dev/tty`, and job-control signals
+/// from the parent's terminal never reach it. A new process group alone
+/// is not enough: the group can still open the terminal, and a background
+/// read then stops it with SIGTTIN.
+#[cfg(unix)]
+pub fn set_new_session(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: the hook runs in the forked child before exec and only calls
+    // setsid(2), which is async-signal-safe.
+    unsafe {
+        command.pre_exec(|| {
+            nix::unistd::setsid()
+                .map(drop)
+                .map_err(std::io::Error::from)
+        });
+    }
+}
+
 /// Windows: the libuv mapping of Node `detached: true` on win32 -
 /// `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS`, plus `CREATE_NO_WINDOW`
 /// because every non-interactive spawn in the product is window-hidden
