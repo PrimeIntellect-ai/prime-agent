@@ -343,6 +343,7 @@ impl HerdrReporter {
 async fn release_pane(
     state: &mut ReporterState,
     config: &HerdrConfig,
+    fence_hung: &mut bool,
     done: tokio::sync::oneshot::Sender<()>,
 ) {
     state.released = true;
@@ -351,9 +352,21 @@ async fn release_pane(
     state.retry_deadline = None;
     // This task serializes every write and the drain below completed
     // before the release was admitted, so the release is the last
-    // write on the wire — exactly the TS ordering contract.
+    // write on the wire — exactly the TS ordering contract. The same
+    // fence gates it: a target that never accepted reports (or a
+    // check that hung) releases nothing, and the ack still fires.
     let target = herdr_socket_target(&config.socket_path, cfg!(windows));
-    send_request(&target, release_request(&config.pane_id, next_report_seq())).await;
+    let reached = if *fence_hung {
+        false
+    } else {
+        let verdict = pane_socket_acceptable(&target).await;
+        if matches!(verdict, FenceVerdict::TimedOut) {
+            *fence_hung = true;
+        }
+        matches!(verdict, FenceVerdict::Accepted)
+            && send_request(&target, release_request(&config.pane_id, next_report_seq())).await
+    };
+    let _ = reached;
     let _ = done.send(());
 }
 
@@ -369,6 +382,12 @@ async fn run_reporter(
     // boundary events (and its pending slot) die here — only the
     // current reporter's writes reach the wire.
     let is_stale = || current_generation.load(std::sync::atomic::Ordering::Relaxed) != generation;
+    // The pane-socket fence: checked per send at the task level (never
+    // inside send_request). A missing or invalid target refuses that
+    // one send (the cheap lstat re-checks next time); a HUNG check
+    // (the 500 ms bound) refuses every later send without spawning
+    // another blocking-pool thread the runtime cannot cancel.
+    let mut fence_hung = false;
     let mut state = ReporterState {
         agent_active: false,
         retry_hold_active: false,
@@ -406,7 +425,7 @@ async fn run_reporter(
                             let _ = done.send(());
                             return;
                         }
-                        release_pane(&mut state, &config, done).await;
+                        release_pane(&mut state, &config, &mut fence_hung, done).await;
                         return;
                     }
                     Some(signal) => {
@@ -465,9 +484,18 @@ async fn run_reporter(
                 &state.session_ref,
                 next_report_seq(),
             );
-            if send_request(&target, request).await {
+            let reached_wire = if fence_hung {
+                false
+            } else {
+                let verdict = pane_socket_acceptable(&target).await;
+                if matches!(verdict, FenceVerdict::TimedOut) {
+                    fence_hung = true;
+                }
+                matches!(verdict, FenceVerdict::Accepted) && send_request(&target, request).await
+            };
+            if reached_wire {
                 // The state reached the wire (best-effort): the
-                // publish-dedup keys on it. A failed send (Herdr down)
+                // publish-dedup keys on it. A failed or refused send
                 // leaves it unpublished, so it re-queues at the next
                 // boundary instead of being deduped away.
                 state.last_state = Some(report.state);
@@ -487,7 +515,7 @@ async fn run_reporter(
                             let _ = done.send(());
                             return;
                         }
-                        release_pane(&mut state, &config, done).await;
+                        release_pane(&mut state, &config, &mut fence_hung, done).await;
                         return;
                     }
                     signal => handle_signal(&mut state, signal, &config),
@@ -733,19 +761,45 @@ fn probe_effective_uid(dir: &std::path::Path) -> Option<u32> {
     uid
 }
 
+/// The fence's verdict for one send.
+#[cfg_attr(windows, allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FenceVerdict {
+    /// The target is this process's own socket: the send may connect.
+    Accepted,
+    /// The target is missing or fails the ownership check: this send
+    /// is refused (the cheap lstat re-checks on the next send).
+    Rejected,
+    /// The lstat itself hung past the 500 ms bound: the reporter never
+    /// spawns another (a blocking-pool thread the runtime cannot
+    /// cancel) — it fails closed for the rest of its life.
+    TimedOut,
+}
+
 #[cfg(unix)]
-async fn pane_socket_acceptable(socket_target: &str) -> bool {
+async fn pane_socket_acceptable(socket_target: &str) -> FenceVerdict {
     // The lstat is a blocking syscall on a CLIENT-SUPPLIED path — it
     // moves off the async runtime (spawn_blocking) under the same
     // 500 ms bound as every other phase, so a pathological target (a
-    // hung mount) cannot stall the reporter task.
+    // hung mount) cannot stall the reporter task, and a hung check is
+    // never repeated (the pool thread cannot be cancelled).
     let target = socket_target.to_string();
     let checked = tokio::time::timeout(
         Duration::from_millis(SEND_TIMEOUT_MS),
         tokio::task::spawn_blocking(move || pane_socket_acceptable_blocking(&target)),
     )
     .await;
-    matches!(checked, Ok(Ok(true)))
+    match checked {
+        Ok(Ok(true)) => FenceVerdict::Accepted,
+        Ok(Ok(false)) => FenceVerdict::Rejected,
+        Ok(Err(_)) | Err(_) => FenceVerdict::TimedOut,
+    }
+}
+
+#[cfg(windows)]
+async fn pane_socket_acceptable(_socket_target: &str) -> FenceVerdict {
+    // Named pipes carry their own ACL model at connect time.
+    FenceVerdict::Accepted
 }
 
 /// The fence's blocking decision (runs on the blocking pool): lstat the
@@ -753,10 +807,13 @@ async fn pane_socket_acceptable(socket_target: &str) -> bool {
 #[cfg(unix)]
 fn pane_socket_acceptable_blocking(socket_target: &str) -> bool {
     let Ok(metadata) = std::fs::symlink_metadata(socket_target) else {
-        // A target that does not exist (yet) is not a refusal: Herdr
-        // may simply be down; the connect below fails silently as
-        // before, and reporting starts when the socket appears.
-        return true;
+        // A target that does not exist (yet) NEVER connects: passing it
+        // through to the connect would open a check-then-use window (a
+        // target created between the lstat and the connect bypasses the
+        // fence). Refusing is wire-identical (the connect on a missing
+        // path failed anyway) and the cheap NotFound lstat re-checks on
+        // every send, so reporting starts the moment the socket appears.
+        return false;
     };
     // A probe that cannot resolve the uid fails CLOSED (no report) —
     // falling back to uid 0 would accept a root-owned socket.
@@ -775,25 +832,11 @@ fn pane_socket_acceptable_blocking(socket_target: &str) -> bool {
     acceptable
 }
 
-#[cfg(windows)]
-async fn pane_socket_acceptable(_socket_target: &str) -> bool {
-    // Named pipes carry their own ACL model at connect time.
-    true
-}
-
 /// Send one request line: connect, write, and finish on the first
 /// response byte, an error, a close, or the 500 ms window (the TS
 /// `sendRequest`). Failures are silent — the pane state API is
 /// best-effort, and a down daemon must never wedge a session.
 async fn send_request(socket_target: &str, request: Value) -> bool {
-    // The pane-socket fence comes FIRST (the client-supplied target is
-    // untrusted): a target that is not this process's own Unix socket
-    // never reports. Missing targets pass through here — the connect
-    // below already fails silently on them, so a Herdr daemon that is
-    // merely down does not log.
-    if !pane_socket_acceptable(socket_target).await {
-        return false;
-    }
     // Every phase of the one-shot request is time-bounded — connect,
     // write, and the response's first byte — so a wedged peer (a socket
     // that accepts but never reads) can never stall the reporter task
@@ -1481,13 +1524,25 @@ mod tests {
         let link_metadata = std::fs::symlink_metadata(&link_path).unwrap();
         assert!(!pane_socket_is_ownable(&link_metadata, own_uid));
         // The fence end of it: the real socket passes, the file and the
-        // symlink do not, and a missing target passes through (the
-        // connect below still fails silently on it).
-        assert!(pane_socket_acceptable(socket_path.to_str().unwrap()).await);
-        assert!(!pane_socket_acceptable(file_path.to_str().unwrap()).await);
-        assert!(!pane_socket_acceptable(link_path.to_str().unwrap()).await);
-        assert!(
-            pane_socket_acceptable(socket_path.with_extension("absent").to_str().unwrap()).await
+        // symlink do not, and a missing target REFUSES (no connect is
+        // ever attempted on it — the check-then-use window stays
+        // closed; the cheap NotFound lstat re-checks on every send, so
+        // reporting starts the moment the socket appears).
+        assert_eq!(
+            pane_socket_acceptable(socket_path.to_str().unwrap()).await,
+            FenceVerdict::Accepted
+        );
+        assert_eq!(
+            pane_socket_acceptable(file_path.to_str().unwrap()).await,
+            FenceVerdict::Rejected
+        );
+        assert_eq!(
+            pane_socket_acceptable(link_path.to_str().unwrap()).await,
+            FenceVerdict::Rejected
+        );
+        assert_eq!(
+            pane_socket_acceptable(socket_path.with_extension("absent").to_str().unwrap()).await,
+            FenceVerdict::Rejected
         );
         drop(listener);
     }
@@ -1539,6 +1594,41 @@ mod tests {
         );
         // The fence's `None` arm is its own `is_some_and` — a refused
         // uid never reaches the owner check at all.
+    }
+
+    /// A state whose send never reached the wire (the socket down) is
+    /// NOT recorded as published: the same state re-sends at the next
+    /// boundary once the socket exists. The old queue-time marking
+    /// deduped it away forever — this test fails on that shape.
+    #[tokio::test]
+    async fn a_state_is_re_sent_after_the_socket_comes_up() {
+        let socket_path = temp_socket("late-boot");
+
+        // A full turn happens with the socket MISSING: the fence
+        // refuses every send (nothing ever reached the wire, and the
+        // pending states were never marked published).
+        let config = HerdrConfig::from_env(&pane_env(&socket_path, "w1:p10")).unwrap();
+        let (reporter, _generation) =
+            start_reporter(config, HerdrSessionRef::new(None, Some("s13".to_string())));
+        reporter.session_started(false, HerdrSessionRef::new(None, Some("s13".to_string())));
+        reporter.run_started();
+        reporter.run_ended(None, false);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Herdr boots: the socket appears at exactly that path.
+        let (requests, server) = fake_herdr(&socket_path);
+
+        // The next turn re-sends the SAME states: the run start's
+        // working must reach the wire even though an identical working
+        // never did while the socket was down (the old queue-time
+        // `last_state` marking would dedup it away forever).
+        reporter.run_started();
+        wait_for_requests(&requests, 1).await;
+        reporter.run_ended(None, false);
+        wait_for_requests(&requests, 2).await;
+        let states = states_of(&requests);
+        assert_eq!(states, ["working", "idle"], "the re-sent turn: {states:?}");
+        server.abort();
     }
 
     /// Concurrent seq minting never duplicates: the first-seed race's
