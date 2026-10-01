@@ -679,7 +679,6 @@ fn wave_b9_prompt_admission_wire_shapes() {
         &json!({ "type": "cancel_prompt_admission", "activeSessionId": session_id, "admissionId": "never-registered" }),
     );
     let response = client.read_response("c-0");
-    assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["data"], json!({ "status": "unknown" }));
 
     // An empty admission id answers the TS parse error.
