@@ -4906,6 +4906,87 @@ class FactoryGraphWatchTest(unittest.TestCase):
         self.assertIn("wire cap", frame["reason"])
 
     @async_test
+    async def test_activity_reply_carries_guards_verbatim(self) -> None:
+        # Regression (bot review): the wire conversion re-keyed EVERY dict,
+        # including a guard's comparison value — `when: {"value":
+        # {"snake_key": 1}}` came back as `{"snakeKey": 1}`, displaying a
+        # condition that no longer matches the executor's declared one. A
+        # guard dict (``output`` + ``op``) rides the wire verbatim.
+        self.harness.create_factory(
+            "Guarded",
+            "Guarded content",
+            id="guarded",
+            machine={
+                "run": {"failure_policy": "continue"},
+                "states": [
+                    {
+                        "id": "a",
+                        "entry": True,
+                        "subagent": "worker",
+                        "outputs": [{"name": "verdict", "type": "json"}],
+                    },
+                    {"id": "b", "subagent": "worker"},
+                ],
+                "transitions": [
+                    {
+                        "from": "a",
+                        "to": "b",
+                        "when": {
+                            "output": "verdict",
+                            "op": "contains",
+                            "value": [{"snake_key": 1}],
+                        },
+                    },
+                ],
+            },
+        )
+        result = await self.start("guarded")
+        reply = await factory_module.default_factory_executor().activity(
+            {"action": "graph", "runId": result["run_id"]}
+        )
+        transition = reply["machine"]["transitions"][0]
+        self.assertEqual(
+            transition["when"],
+            {"output": "verdict", "op": "contains", "value": [{"snake_key": 1}]},
+            "the guard's comparison value rides the wire verbatim",
+        )
+
+    @async_test
+    async def test_unscoped_graph_bounds_the_terminal_history(self) -> None:
+        # Regression (bot review): the all-runs reply once constructed a
+        # snapshot for EVERY run the registry retained — completed runs
+        # accumulate forever, so one polling reply built an unbounded
+        # payload before the wire cap could trim it. Every live run
+        # reports; the terminal history keeps the newest
+        # GRAPH_RUNS_WINDOW runs (by-ref snapshots stay available for
+        # all of them).
+        self.harness.create_factory(
+            "Solo",
+            "Solo content",
+            id="solo",
+            machine={
+                "run": {"failure_policy": "continue"},
+                "states": [{"id": "a", "entry": True, "subagent": "worker"}],
+                "transitions": [],
+            },
+        )
+        started = [await self.start("solo") for _ in range(25)]
+        for result in started:
+            await self.settle(result)
+        listed = await factory_module.default_factory_executor().activity({"action": "graph"})
+        ids = [run["runId"] for run in listed["runs"]]
+        self.assertEqual(len(ids), factory_module.GRAPH_RUNS_WINDOW)
+        newest = {run["run_id"] for run in started[-factory_module.GRAPH_RUNS_WINDOW:]}
+        self.assertEqual(set(ids), newest, "the newest terminal runs report")
+        # A live run reports regardless of the terminal window's bound.
+        self.host.outcomes["a"] = {"status": "running"}
+        live = await self.start("solo")
+        listed = await factory_module.default_factory_executor().activity({"action": "graph"})
+        ids = [run["runId"] for run in listed["runs"]]
+        self.assertIn(live["run_id"], ids, "every live run reports")
+        self.assertEqual(len(ids), factory_module.GRAPH_RUNS_WINDOW + 1)
+
+    @async_test
     async def test_activity_validates_its_request_shape(self) -> None:
         for bad in (
             {"action": "bogus"},

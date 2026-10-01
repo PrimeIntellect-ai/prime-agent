@@ -119,13 +119,13 @@ pub fn parse_factory_runs(data: &Value) -> Vec<FactoryRunSnapshot> {
 }
 
 /// Whether a reply is the graph list shape at all: a reply without the
-/// `runs` list is a malformed lane, not zero runs — the session UI
-/// reports it on the open page's error line instead of painting a fake
-/// empty state (the emptiness the view shows is real).
+/// `runs` LIST (absent, or present but not an array) is a malformed
+/// lane, not zero runs — the session UI reports it on the open page's
+/// error line instead of painting a fake empty state (the emptiness the
+/// view shows is real).
 #[must_use]
 pub fn factory_reply_lists_runs(data: &Value) -> bool {
-    data.as_object()
-        .is_some_and(|object| object.contains_key("runs"))
+    data.get("runs").is_some_and(Value::is_array)
 }
 
 fn opt_string(value: Option<&Value>) -> Option<String> {
@@ -533,8 +533,15 @@ impl FactoryView {
         let position = |id: &str| order.iter().position(|candidate| *candidate == id);
         for state in &run.states {
             let node = run.nodes.get(&state.id);
-            let (glyph, color) =
-                node.map_or(("○", ThemeColor::Dim), |node| node_glyph(&node.status));
+            // The row paints by the NODE's live activity, not the aggregate
+            // status: a multi-entry state whose latest entry settled while
+            // an earlier one still runs stays bright (is_active covers
+            // every entry's status, not just the newest).
+            let (glyph, color) = match node {
+                Some(node) if node.is_active() => ("●", ThemeColor::Accent),
+                Some(node) => node_glyph(&node.status),
+                None => ("○", ThemeColor::Dim),
+            };
             let mut row: Line = vec![
                 Span::raw("   "),
                 theme.fg_span(color, glyph.to_string()),

@@ -647,14 +647,22 @@ impl SessionUi {
             // neither switched sessions nor closed the view, and its
             // refresh lane re-targets the reattached session's kernel on
             // the next tick.
-            if self.factory_view_session.as_deref() != Some(self.session_id.as_str()) {
+            // The page dies only when it was mounted under a DIFFERENT
+            // session: a same-session rebind (the `Unknown active session`
+            // reattach) keeps the page and its count — the kernel and its
+            // runs did not change. A page that was never mounted owns no
+            // state here; the attach fold owns the cache's cross-session
+            // reset (every rebind path attaches first, so a switch's
+            // stale cache is cleared before the rebuild lands).
+            if self
+                .factory_view_session
+                .as_deref()
+                .is_some_and(|session| session != self.session_id)
+            {
                 view.factory_view = None;
                 self.factory_view_open_flag = false;
                 self.factory_selected_run = None;
                 self.factory_view_session = None;
-                // The cache dies with the mounted view: the dock count and
-                // the next open must never show the previous session's
-                // runs (the always-on poll refills it).
                 self.factory_graph = serde_json::json!({"runs": []});
             }
             // The goal panel dies with the old session too: it is a

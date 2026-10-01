@@ -856,6 +856,9 @@ streaming monitor's ceiling. The host bridge caps its own lane lower
 (``FACTORY_HOST_WATCH_TIMEOUT_MS``); this is the kernel-side bound."""
 
 LAST_FIRED_WINDOW = 10
+# The unscoped graph's terminal-history window: the newest terminal runs
+# the all-runs reply carries (every live run reports regardless).
+GRAPH_RUNS_WINDOW = 20
 """Trailing fired transitions the graph snapshot reports for edge marking."""
 
 GRAPH_EVENTS_TAIL = 40
@@ -1544,10 +1547,28 @@ class FactoryExecutor:
         if ref is None:
             # Insertion order is start order (runs append to the registry),
             # so the oldest run reports first; a clock tie between two
-            # starts never shuffles the panels.
+            # starts never shuffles the panels. The unscoped list is
+            # BOUNDED: every live run reports (the dock's count and the
+            # view's panels stay exact), and the terminal history keeps
+            # at most the newest ``GRAPH_RUNS_WINDOW`` runs — the wire cap
+            # would drop older terminal runs anyway, and the bound keeps
+            # one polling reply's construction O(window), not
+            # O(registry) (the registry retains every run it ever
+            # hosted; by-ref snapshots stay available for all of them).
+            live_states = ("running", "stopping", "paused")
+            # The registry's insertion order is start order, so the list's
+            # tail is the newest terminal history.
+            terminal_ids = [
+                run.run_id
+                for run in self._runs.values()
+                if run.state not in live_states
+            ]
+            newest_terminal_ids = set(terminal_ids[-GRAPH_RUNS_WINDOW:])
             return {
                 "runs": [
-                    self._graph_snapshot(run, compact=compact) for run in self._runs.values()
+                    self._graph_snapshot(run, compact=compact)
+                    for run in self._runs.values()
+                    if run.state in live_states or run.run_id in newest_terminal_ids
                 ]
             }
         run = self._runs.get(ref)
@@ -2975,11 +2996,17 @@ def _wire_payload(value: Any) -> Any:
     protocol is camelCase end to end (the request frame's ``runId``/
     ``specId``/``timeoutMs``), so the reply's result payload re-keys its
     own snake_case rows to the same wire spelling. Only dict KEYS convert
-    (values ride verbatim: state ids, milestone text, guard fields); the
-    in-kernel conversation API (``rlm.factory.graph()`` and friends)
-    stays snake_case.
+    (values ride verbatim: state ids, milestone text). A guard dict
+    (``output`` + ``op`` — the validated guard signature) rides the wire
+    VERBATIM: its structure keys are single words already, and its
+    comparison ``value`` mirrors the executor's declared condition
+    exactly, so re-keying it would display a condition that no longer
+    matches the machine. The in-kernel conversation API
+    (``rlm.factory.graph()`` and friends) stays snake_case.
     """
     if isinstance(value, dict):
+        if "output" in value and "op" in value:
+            return copy.deepcopy(value)
         return {_wire_keys(key): _wire_payload(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_wire_payload(item) for item in value]

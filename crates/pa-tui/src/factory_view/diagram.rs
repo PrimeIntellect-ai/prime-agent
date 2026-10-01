@@ -353,7 +353,10 @@ pub fn format_guard(when: &Value) -> Option<String> {
             "{output}{path} {op} {}",
             serde_json::to_string(value).ok()?
         )),
-        None => Some(format!("{output}{op}")),
+        // The valueless form reads `output.path op` (the same shape as the
+        // valued form minus the comparison target — `verdict exists`, not
+        // `verdictexists`).
+        None => Some(format!("{output}{path} {op}")),
     }
 }
 
@@ -462,11 +465,13 @@ pub fn mermaid_source(run: &super::FactoryRunSnapshot) -> String {
     lines.push(
         "    classDef error fill:#b91c1c,stroke:#dc2626,stroke-width:2px,color:#fee2e2".to_string(),
     );
-    // Class assignments from the live overlay: running bright (active),
-    // queued dim (pending), errors red, everything settled done.
+    // Class assignments from the live overlay: the node's live activity
+    // paints `active` (a multi-entry state with an in-flight earlier
+    // entry stays bright even when the newest entry settled), queued
+    // dim, errors red, everything settled done.
     for (index, state) in run.states.iter().enumerate() {
         let class = match run.nodes.get(&state.id) {
-            Some(node) if node.status == "running" => "active",
+            Some(node) if node.is_active() => "active",
             Some(node) if node.status == "pending" => "pending",
             Some(node) if node.status == "error" => "error",
             Some(_) => "done",

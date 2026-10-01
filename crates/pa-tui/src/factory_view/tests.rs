@@ -206,6 +206,10 @@ fn the_diagram_renders_states_edges_and_the_fired_marker() {
         joined.contains("when verdict.approved eq false"),
         "the guard label: {joined}"
     );
+    assert!(
+        joined.contains("when verdict exists"),
+        "the valueless guard label: {joined}"
+    );
     assert!(joined.contains("milestones: started"), "{joined}");
     assert!(joined.contains("1 running"), "{joined}");
     assert!(
@@ -244,6 +248,41 @@ fn active_nodes_paint_bright_and_pending_paints_dim() {
             .any(|span| span.content.contains("»") && span.style == success)
     });
     assert!(fired_marked, "the fired marker must paint success");
+}
+
+/// The node's live activity paints the row, not the aggregate status: a
+/// multi-entry state whose latest entry settled while an earlier one
+/// still runs stays bright in both the terminal diagram and the
+/// Mermaid export (the mutation check: keying on `status` alone paints
+/// the in-flight state settled).
+#[test]
+fn a_multi_entry_state_with_an_in_flight_entry_stays_bright() {
+    let mut snapshot = scripted_snapshot();
+    // `reviewing` has maxEntries 4: its latest entry settled (status
+    // "done") while an earlier entry still runs.
+    snapshot["nodes"][1]["status"] = json!("done");
+    snapshot["nodes"][1]["entries"] = json!([
+        { "index": 0, "status": "running", "error": null },
+        { "index": 1, "status": "done", "error": null },
+    ]);
+    let mut view = FactoryView::new(parse_factory_runs(&runs_response(&snapshot)), 40);
+    let rows = frame_spans(&mut view);
+    let accent = theme().fg_style(ThemeColor::Accent);
+    let bright = rows.iter().any(|row| {
+        row.iter()
+            .any(|span| span.content.contains("reviewing") && span.style == accent)
+    });
+    assert!(bright, "the in-flight earlier entry keeps the row accent");
+    let runs = parse_factory_runs(&runs_response(&snapshot));
+    let source = diagram::mermaid_source(&runs[0]);
+    assert!(
+        source.contains("class s1 active"),
+        "the Mermaid export paints the same live activity: {source}"
+    );
+    assert!(
+        !source.contains("class s1 done"),
+        "the settled-looking aggregate status never demotes it: {source}"
+    );
 }
 
 /// The Mermaid emission: the same graph model, with the active class and
@@ -325,6 +364,14 @@ fn a_reply_without_the_runs_list_is_malformed_not_empty() {
     assert!(
         !factory_reply_lists_runs(&json!("runs")),
         "a non-object reply is a malformed lane"
+    );
+    assert!(
+        !factory_reply_lists_runs(&json!({ "runs": {} })),
+        "a present non-array runs value is a malformed lane"
+    );
+    assert!(
+        !factory_reply_lists_runs(&json!({ "runs": "x" })),
+        "a string runs value is a malformed lane"
     );
 }
 
