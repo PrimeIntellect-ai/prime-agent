@@ -201,6 +201,13 @@ fn daemon_acp_create(
     if let Some(script) = std::env::var_os("PRIME_AGENT_FAUX_SCRIPT") {
         create_config["script"] = serde_json::Value::String(script.to_string_lossy().to_string());
     }
+    // Verification seam (the TS child runtime inherits the parent's
+    // `sessionConfig`): a scripted parent session's children run this script
+    // FILE. The product never sets it.
+    if let Some(child_script) = std::env::var_os("PRIME_AGENT_FAUX_CHILD_SCRIPT") {
+        create_config["childScript"] =
+            serde_json::Value::String(child_script.to_string_lossy().to_string());
+    }
     let create = pa_types::daemon::DaemonCommand::Create {
         id: None,
         session_path: session_path.map(|path| path.display().to_string()),

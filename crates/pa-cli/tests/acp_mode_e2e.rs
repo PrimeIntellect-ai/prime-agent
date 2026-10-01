@@ -102,6 +102,30 @@ impl AcpChild {
         Self::wrap(child, Some(home), socket)
     }
 
+    /// The daemon-attached lane whose `rlm.spawn` children are scripted:
+    /// `<home>/child-script.json` rides the `PRIME_AGENT_FAUX_CHILD_SCRIPT`
+    /// create-config seam (the worker already consumes the key), and the
+    /// parent worker's kernel runs the given interpreter (the env flows
+    /// ACP -> supervisor -> worker).
+    fn spawn_with_child_script(
+        args: &[&str],
+        script: &serde_json::Value,
+        child_script: &serde_json::Value,
+        kernel_python: &std::path::Path,
+    ) -> AcpChild {
+        let home = tempfile::TempDir::new().unwrap();
+        let socket = home.path().join("daemon.sock");
+        let child_script_path = home.path().join("child-script.json");
+        std::fs::write(home.path().join("worker-script.json"), script.to_string()).unwrap();
+        std::fs::write(&child_script_path, child_script.to_string()).unwrap();
+        let child = daemon_attached_command(home.path(), &socket, args)
+            .env("PRIME_AGENT_FAUX_CHILD_SCRIPT", &child_script_path)
+            .env("PRIME_AGENT_KERNEL_PYTHON", kernel_python)
+            .spawn()
+            .expect("binary present");
+        Self::wrap(child, Some(home), socket)
+    }
+
     fn send(&mut self, frame: &Value) {
         let mut line = serde_json::to_string(&frame).unwrap();
         line.push('\n');
@@ -157,26 +181,38 @@ impl AcpChild {
         }
     }
 
-    /// Read frames until one `sessionUpdate` of `kind` arrives — the
-    /// observed-event readiness signal, never a timer. The frames
-    /// before it are dropped.
-    fn wait_update(&mut self, kind: &str, timeout: Duration) {
+    /// Read frames until one matches — the predicate readiness signal,
+    /// never a timer. The frames before it are dropped.
+    fn wait_frame(
+        &mut self,
+        timeout: Duration,
+        mut frame_matches: impl FnMut(&Value) -> bool,
+    ) -> Value {
         let deadline = Instant::now() + timeout;
         loop {
             let timeout_left = deadline.saturating_duration_since(Instant::now());
             assert!(
                 !timeout_left.is_zero(),
-                "the stream never published a {kind} update"
+                "the stream never published the awaited frame"
             );
             let line = self
                 .lines
                 .recv_timeout(timeout_left)
                 .expect("the ACP stream stayed open");
             let frame: Value = serde_json::from_str(&line).expect("valid JSON line");
-            if frame["params"]["update"]["sessionUpdate"] == kind {
-                return;
+            if frame_matches(&frame) {
+                return frame;
             }
         }
+    }
+
+    /// Read frames until one `sessionUpdate` of `kind` arrives — the
+    /// observed-event readiness signal, never a timer. The frames
+    /// before it are dropped.
+    fn wait_update(&mut self, kind: &str, timeout: Duration) {
+        self.wait_frame(timeout, |frame| {
+            frame["params"]["update"]["sessionUpdate"] == kind
+        });
     }
 }
 
@@ -1904,4 +1940,235 @@ fn acp_overflow_recovery_compacts_and_retries_the_turn() {
     assert_eq!(metas.len(), 1, "one compaction meta: {metas:?}");
     assert_eq!(metas[0]["summary"], "the summary");
     assert!(metas[0]["tokensBefore"].as_u64().unwrap() > 0);
+}
+
+/// The kernel Python with prime-agent-runtime installed; set
+/// `PA_E2E_KERNEL_PYTHON` to point at an explicit interpreter instead.
+/// Without one, the live RLM quiescence lanes below skip (with a note).
+fn kernel_python() -> Option<std::path::PathBuf> {
+    if let Some(explicit) = std::env::var_os("PA_E2E_KERNEL_PYTHON") {
+        let explicit = std::path::PathBuf::from(explicit);
+        assert!(
+            explicit.exists(),
+            "PA_E2E_KERNEL_PYTHON {} not found",
+            explicit.display()
+        );
+        return Some(explicit);
+    }
+    let candidate = std::path::PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
+    if candidate.exists() {
+        return Some(candidate);
+    }
+    eprintln!(
+        "kernel python {} not found; skipping live RLM quiescence e2e",
+        candidate.display()
+    );
+    None
+}
+
+/// The namespaced prime-agent payload of one session/update frame.
+fn update_meta(frame: &Value) -> &Value {
+    &frame["params"]["update"]["_meta"]["ai.primeintellect.prime-agent"]
+}
+
+/// The kernel cell of the spawn turn (the worker's
+/// `rlm_quiescence_barrier_e2e` lane): spawn one RLM child through the
+/// product `rlm.spawn` surface and record its child id.
+fn spawn_cell(receipt: &std::path::Path, error_receipt: &std::path::Path) -> String {
+    format!(
+        "import json, traceback\ntry:\n    handle = await rlm.spawn(\"run the lane task\", name=\"kid\")\n    open({receipt:?}, \"w\").write(json.dumps({{\"rlm_child_id\": handle.rlm_child_id}}))\n    print(handle.rlm_child_id)\nexcept Exception:\n    open({error_receipt:?}, \"w\").write(traceback.format_exc())\n    raise",
+        receipt = receipt.display().to_string(),
+        error_receipt = error_receipt.display().to_string(),
+    )
+}
+
+/// The parent faux script whose turns run the spawn cell; the third
+/// response answers the settled child's terminal-notice turn (the no-reply
+/// notice the watcher queues on the parent).
+fn spawn_parent_script(spawn_cell: &str) -> Value {
+    json!({
+        "engine": "faux",
+        "responses": [
+            { "content": [
+                { "type": "toolCall", "name": "ipython", "arguments": { "code": spawn_cell } },
+            ] },
+            { "text": "spawn turn done" },
+            { "text": "notice seen" },
+        ],
+    })
+}
+
+/// One scripted-children lane: a daemon-attached resident session whose
+/// parent turns spawn a held scripted child (resident because the RLM spawn
+/// ledger needs the parent's session file — a `--no-session` parent cannot
+/// spawn children). The parent's active session id is read at setup, before
+/// the spawn: once a child runs, `live_sessions` lists both workers.
+fn spawn_lane(
+    args: &[&str],
+    child_hold_ms: u64,
+    kernel_python: &std::path::Path,
+) -> (AcpChild, String, String) {
+    let receipts = tempfile::TempDir::new().unwrap();
+    let parent = spawn_parent_script(&spawn_cell(
+        &receipts.path().join("spawn.json"),
+        &receipts.path().join("spawn.error"),
+    ));
+    let child_script = json!({ "responses": [ { "text": "kid done", "delayMs": child_hold_ms } ] });
+    let mut client = AcpChild::spawn_with_child_script(args, &parent, &child_script, kernel_python);
+    let init = client.request("initialize", &initialize_params());
+    let _ = client.wait_response(init, TIMEOUT);
+    let session_id = new_session(&mut client);
+    let socket = client.socket.clone();
+    let active_session_id = live_sessions(&socket).remove(0)["activeSessionId"]
+        .as_str()
+        .expect("the parent session id")
+        .to_string();
+    (client, session_id, active_session_id)
+}
+
+/// The ACP settle waits for RLM quiescence (TS #1612): the completion
+/// update reports the live outstanding-subagent count, the terminal update
+/// reports zero, and the settled child's terminal-notice turn ("notice
+/// seen") drains inside the barrier, between the two.
+#[test]
+fn acp_prompt_settles_after_rlm_quiescence() {
+    let Some(kernel_python) = kernel_python() else {
+        return;
+    };
+    let (mut client, session_id, _) = spawn_lane(&["--mode", "acp"], 5_000, &kernel_python);
+    let prompt = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "spawn the kid" }] }),
+    );
+    // Readiness is the completion update itself: the parent turn settled,
+    // the held child turn is still in flight.
+    let completion = client.wait_frame(TIMEOUT, |frame| {
+        let meta = update_meta(frame);
+        meta["phase"] == "event" && !meta["quiescence"].is_null()
+    });
+    assert_eq!(
+        update_meta(&completion)["quiescence"]["outstandingSubagents"],
+        1,
+        "the completion reports the live child: {completion}"
+    );
+    // The settled child's terminal-notice turn drains inside the barrier:
+    // its streamed answer lands between the completion and the terminal.
+    let mut notice_seen = false;
+    let terminal = client.wait_frame(TIMEOUT, |frame| {
+        let meta = update_meta(frame);
+        if meta["phase"] != "terminalQuiescence" {
+            notice_seen |= frame["params"]["update"]["content"]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("notice seen"));
+            return false;
+        }
+        true
+    });
+    assert!(
+        notice_seen,
+        "the settled child's notice turn drained inside the barrier: {terminal}"
+    );
+    assert_eq!(
+        update_meta(&terminal)["quiescence"]["outstandingSubagents"],
+        0,
+        "the terminal reports a quiet family: {terminal}"
+    );
+    let (prompt_response, updates) = client.wait_response(prompt, TIMEOUT);
+    assert!(
+        updates.is_empty(),
+        "the terminal frame is the last notification before the response: {updates:?}"
+    );
+    assert_eq!(
+        prompt_response["result"],
+        json!({ "stopReason": "end_turn" })
+    );
+}
+
+/// A cancel during the settle cancels the outstanding subagents (TS
+/// `cancelOutstandingRlmChildren` inside `stopSessionWork`): the prompt
+/// answers cancelled once the stop sequence cancelled the held child, and
+/// the roster reports the child cancelled. Close goes through the same
+/// stop sequence, so it is not retested here.
+#[test]
+fn acp_cancel_during_settle_cancels_the_subagents() {
+    let Some(kernel_python) = kernel_python() else {
+        return;
+    };
+    let (mut client, session_id, active_session_id) =
+        spawn_lane(&["--mode", "acp"], 120_000, &kernel_python);
+    let socket = client.socket.clone();
+    let prompt = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "spawn the kid" }] }),
+    );
+    // Readiness is the completion update with the held child outstanding:
+    // the settle is provably waiting on it.
+    client.wait_frame(TIMEOUT, |frame| {
+        let meta = update_meta(frame);
+        meta["phase"] == "event" && meta["quiescence"]["outstandingSubagents"] == 1
+    });
+    client.notify("session/cancel", &json!({ "sessionId": session_id }));
+    let (prompt_response, _) = client.wait_response(prompt, TIMEOUT);
+    assert_eq!(
+        prompt_response["result"],
+        json!({ "stopReason": "cancelled" }),
+        "the cancel settles the prompt: {prompt_response}"
+    );
+    // The roster shows the child the stop sequence cancelled.
+    let roster = daemon_request(
+        &socket,
+        "children",
+        &json!({ "type": "get_rlm_children", "activeSessionId": active_session_id }),
+    );
+    let children = roster["data"]["children"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a children roster: {roster}"))
+        .clone();
+    assert_eq!(children.len(), 1, "one spawned child: {children:?}");
+    assert_eq!(
+        children[0]["status"], "cancelled",
+        "the stop cancelled the held child: {children:?}"
+    );
+}
+
+/// EOF during the settle exits without waiting for the outstanding
+/// subagents (TS aborts the controller and exits): the process is gone
+/// while the resident session's held child still runs — EOF does not
+/// cancel a resident session's children.
+#[test]
+fn acp_eof_during_settle_exits_and_leaves_resident_subagents() {
+    let Some(kernel_python) = kernel_python() else {
+        return;
+    };
+    let (mut client, session_id, active_session_id) =
+        spawn_lane(&["--mode", "acp"], 120_000, &kernel_python);
+    let socket = client.socket.clone();
+    client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "spawn the kid" }] }),
+    );
+    client.wait_frame(TIMEOUT, |frame| {
+        let meta = update_meta(frame);
+        meta["phase"] == "event" && meta["quiescence"]["outstandingSubagents"] == 1
+    });
+    client.close_stdin();
+    assert!(client.child.wait().expect("the ACP child exits").success());
+    // The resident session survives with the held child still running.
+    let roster = daemon_request(
+        &socket,
+        "children",
+        &json!({ "type": "get_rlm_children", "activeSessionId": active_session_id }),
+    );
+    let children = roster["data"]["children"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a children roster: {roster}"))
+        .clone();
+    assert_eq!(children.len(), 1, "one spawned child: {children:?}");
+    assert_eq!(
+        children[0]["status"], "running",
+        "EOF left the resident child running: {children:?}"
+    );
 }

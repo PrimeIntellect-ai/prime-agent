@@ -6,8 +6,10 @@
 //! select. `session/new` binds it, admits its MCP servers through the
 //! `replace_acp_mcp_servers` wire command, and every prompt runs
 //! `prompt_and_wait` while the streamed session events fan out as ACP
-//! updates. The turn settlement (response boundary, quiescence envelope,
-//! stop reason) mirrors the TS captures.
+//! updates. The turn settlement (response boundary, completion envelope
+//! with the live outstanding-subagent count, terminal frame after the RLM
+//! family settles, stop reason) mirrors the TS captures, and the stop
+//! sequence cancels the outstanding children (TS #1612).
 //! The daemon worker's `goal_update` session events surface through the
 //! wire mapping (`wire_events.rs`), and the autonomous accounting rides the
 //! `wait_for_headless_completion` response into the completion envelope
@@ -431,6 +433,12 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
     }
     let binding = bind_daemon_session(&link, &state, options.create.clone()).await?;
 
+    // Only the prompt handlers stay owned: EOF aborts them (TS aborts the
+    // controller and exits), so the process never waits on a prompt still
+    // settling its subagents. The other handlers spawn detached: a close
+    // in flight at EOF finishes — its `tx` clone holds `writer.await` — so
+    // its session still stops and releases its servers.
+    let mut handlers = tokio::task::JoinSet::new();
     let mut stdin = BufReader::new(tokio::io::stdin());
     let mut input_line = String::new();
     loop {
@@ -460,17 +468,20 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
             FrameOrder::Spawn => {
                 // `session/new` settles before the next frame is read, so
                 // EOF's teardown always sees the session it installs.
-                let session_new = matches!(&incoming, Incoming::Request { method, .. } if method == "session/new");
-                let link = Arc::clone(&link);
-                let state = Arc::clone(&state);
-                let options = options.clone();
-                let binding = binding.clone();
-                let options_tx = tx.clone();
-                let task = tokio::spawn(async move {
+                if matches!(&incoming, Incoming::Request { method, .. } if method == "session/new")
+                {
+                    let options_tx = tx.clone();
                     handle_incoming(incoming, &link, &state, &options, &binding, options_tx).await;
-                });
-                if session_new {
-                    let _ = task.await;
+                } else {
+                    let link = Arc::clone(&link);
+                    let state = Arc::clone(&state);
+                    let options = options.clone();
+                    let binding = binding.clone();
+                    let options_tx = tx.clone();
+                    tokio::spawn(async move {
+                        handle_incoming(incoming, &link, &state, &options, &binding, options_tx)
+                            .await;
+                    });
                 }
             }
             FrameOrder::AdmitPrompt {
@@ -481,7 +492,7 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
                 let link = Arc::clone(&link);
                 let state = Arc::clone(&state);
                 let options_tx = tx.clone();
-                tokio::spawn(async move {
+                handlers.spawn(async move {
                     handle_session_prompt(id, params, admission_id, &link, &state, options_tx)
                         .await;
                 });
@@ -502,8 +513,11 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
                 }
             }
         }
+        // Reap finished prompt handlers.
+        while handlers.try_join_next().is_some() {}
     }
 
+    handlers.shutdown().await;
     teardown(&link, &state, &binding).await;
     drop(tx);
     let _ = writer.await;
@@ -679,9 +693,9 @@ async fn run_cancel_stop(stop: CancelStop, link: &Arc<DaemonLink>) {
     drop(stop.stop_done_tx);
 }
 
-/// TS `stopSessionWork`, without the RLM child cancellations. The owned
-/// admission cancel stops a prompt that was sent before the stop but
-/// committed after the abort.
+/// TS `stopSessionWork`: abort the worker's running and queued work, stop
+/// the owned admission (a prompt sent before the stop but committed after
+/// the abort), wait the idle, then cancel the RLM children.
 async fn stop_session_work(
     link: &Arc<DaemonLink>,
     daemon_session_id: &str,
@@ -705,6 +719,33 @@ async fn stop_session_work(
             rest: Map::default(),
         })
         .await;
+    cancel_outstanding_rlm_children(link, daemon_session_id).await;
+}
+
+/// TS `cancelOutstandingRlmChildren`: cancel every roster row, no status
+/// filter — a row already settling keeps its own settle, and the cancels
+/// run one after another (TS `Promise.allSettled` is the declared
+/// divergence). A failed roster fetch or cancel is ignored, like every
+/// other stop step.
+async fn cancel_outstanding_rlm_children(link: &Arc<DaemonLink>, daemon_session_id: &str) {
+    let Ok(children) = fetch_rlm_children(link, daemon_session_id).await else {
+        return;
+    };
+    for child in children {
+        let child_id = child
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let _ = link
+            .request(DaemonCommand::CancelRlmChild {
+                id: None,
+                active_session_id: daemon_session_id.to_string(),
+                child_id,
+                rest: Map::default(),
+            })
+            .await;
+    }
 }
 
 /// TS `cancel_prompt_admission` with `cancelOwned`: a committed prompt's
@@ -1147,9 +1188,26 @@ async fn prompt_turn(
     // headless-completion status (TS `waitForHeadlessCompletion`), fetched
     // after the turn marker settled the run. A failed fetch degrades to no
     // autonomous meta (the envelope still settles without a run).
-    let autonomous_status = fetch_autonomous_status(link, &hosted_daemon_session_id).await;
+    let autonomous_status = fetch_autonomous_status(link, &hosted_daemon_session_id, false)
+        .await
+        .ok();
     // TS `abort.signal.aborted` after `waitForHeadlessCompletion`: queued
     // continuations (goal, post-compaction autonomous) run inside that wait.
+    if turn_cancelled(&*state.lock().await, admission_id) {
+        producer.finish_prompt(turn_id).await;
+        return cancelled_response(&id);
+    }
+    // The completion observation's roster read (TS `getRlmChildSnapshots`
+    // throws): a failed read errors the prompt before the boundary, never
+    // publishes a wrong count.
+    let children = match fetch_rlm_children(link, &hosted_daemon_session_id).await {
+        Ok(children) => children,
+        Err(error) => {
+            publish_error_boundary(&producer, turn_id).await;
+            producer.finish_prompt(turn_id).await;
+            return super::internal_error(&id, &error.to_string());
+        }
+    };
     if turn_cancelled(&*state.lock().await, admission_id) {
         producer.finish_prompt(turn_id).await;
         return cancelled_response(&id);
@@ -1158,16 +1216,6 @@ async fn prompt_turn(
         .as_ref()
         .filter(|status| status.enabled)
         .map(meta::autonomous_meta);
-    // The remaining continuation slots the quiescence observation reports.
-    let remaining_continuations = autonomous_status
-        .as_ref()
-        .filter(|status| status.enabled)
-        .map_or(0, |status| {
-            status
-                .limits
-                .max_continuations
-                .saturating_sub(status.continuations_used)
-        });
     // The boundary, completion, and terminal quiescence frames match the
     // TS captures.
     let boundary = types::AcpSessionUpdate::SessionInfoUpdate {
@@ -1184,47 +1232,87 @@ async fn prompt_turn(
             Some(PrimeAgentOutcome::Result),
         )
         .await;
-    // The completion envelope: the autonomous accounting rides the
-    // quiescence event, then the terminal quiescence envelope repeats the
-    // observation.
+    // The completion envelope: the turn's own observation, with the
+    // live outstanding-subagent count the settle loop then waits down to
+    // zero.
     let quiescence = types::AcpSessionUpdate::SessionInfoUpdate {
         meta: meta::prime_agent_meta(&PrimeAgentSessionMeta {
-            autonomous: autonomous_meta.clone(),
-            quiescence: Some(meta::PrimeAgentQuiescenceMeta {
-                outstanding_subagents: 0,
-                remaining_autonomous_continuations: remaining_continuations,
-            }),
+            autonomous: autonomous_meta,
+            quiescence: Some(quiescence_meta(autonomous_status.as_ref(), &children)),
             ..Default::default()
         }),
     };
     let completion_published = producer
         .publish(&quiescence, turn_id, PrimeAgentEventPhase::Event, None)
         .await;
-    let terminal = types::AcpSessionUpdate::SessionInfoUpdate {
-        meta: meta::prime_agent_meta(&PrimeAgentSessionMeta {
-            autonomous: autonomous_meta.clone(),
-            quiescence: Some(meta::PrimeAgentQuiescenceMeta {
-                outstanding_subagents: 0,
-                remaining_autonomous_continuations: remaining_continuations,
+    // The settlement loop (TS `finalizePendingTerminal`): the barrier is
+    // the event, no timer, and the roster re-read is the response-cut
+    // telemetry (a child can publish a terminal status before its result
+    // reaches the parent). A failed barrier or read errors the prompt; a
+    // degraded status would spin the loop.
+    let settled_status = loop {
+        let status = match fetch_autonomous_status(link, &hosted_daemon_session_id, true).await {
+            Ok(status) => status,
+            Err(error) => {
+                producer.finish_prompt(turn_id).await;
+                return super::internal_error(
+                    &id,
+                    &format!("ACP lifecycle reconciliation failed: {error}"),
+                );
+            }
+        };
+        if turn_cancelled(&*state.lock().await, admission_id) {
+            producer.finish_prompt(turn_id).await;
+            return cancelled_response(&id);
+        }
+        let children = match fetch_rlm_children(link, &hosted_daemon_session_id).await {
+            Ok(children) => children,
+            Err(error) => {
+                producer.finish_prompt(turn_id).await;
+                return super::internal_error(
+                    &id,
+                    &format!("ACP lifecycle reconciliation failed: {error}"),
+                );
+            }
+        };
+        if turn_cancelled(&*state.lock().await, admission_id) {
+            producer.finish_prompt(turn_id).await;
+            return cancelled_response(&id);
+        }
+        let terminal_quiescence = quiescence_meta(Some(&status), &children);
+        if terminal_quiescence.outstanding_subagents != 0 {
+            continue;
+        }
+        // TS `sealTerminal`: the terminal frame is the last update stamped
+        // with this turn; later events resume turn 0.
+        producer.finish_prompt(turn_id).await;
+        let terminal = types::AcpSessionUpdate::SessionInfoUpdate {
+            meta: meta::prime_agent_meta(&PrimeAgentSessionMeta {
+                autonomous: status.enabled.then(|| meta::autonomous_meta(&status)),
+                quiescence: Some(terminal_quiescence),
+                ..Default::default()
             }),
-            ..Default::default()
-        }),
+        };
+        let terminal_published = producer
+            .publish(
+                &terminal,
+                turn_id,
+                PrimeAgentEventPhase::TerminalQuiescence,
+                Some(PrimeAgentOutcome::Result),
+            )
+            .await;
+        if !published || !completion_published || !terminal_published {
+            return super::internal_error(&id, "Failed to publish ACP completion");
+        }
+        break status;
     };
-    let terminal_published = producer
-        .publish(
-            &terminal,
-            turn_id,
-            PrimeAgentEventPhase::TerminalQuiescence,
-            Some(PrimeAgentOutcome::Result),
-        )
-        .await;
-    producer.finish_prompt(turn_id).await;
-    if !published || !completion_published || !terminal_published {
-        return super::internal_error(&id, "Failed to publish ACP completion");
-    }
-    // The stop reason follows the TS mapping (acp-stop-reason.ts): a limit
-    // reached on the enabled run is the only non-end_turn outcome.
-    let stop_reason = meta::acp_stop_reason_for_status(false, autonomous_status.as_ref());
+    // The stop reason follows the TS mapping (acp-stop-reason.ts): the
+    // abort flag read after the settlement, and the settlement's status
+    // (`pending.status`), not the first observation's.
+    let stop_reason = meta::acp_stop_reason_for_status(
+        turn_cancelled(&*state.lock().await, admission_id),
+        Some(&settled_status),
+    );
     jsonrpc::response(
         &id,
         &serde_json::to_value(types::AcpStopReasonResponse { stop_reason }).expect("serializes"),
@@ -1251,25 +1339,106 @@ async fn publish_error_boundary(producer: &Arc<UpdateProducer>, turn_id: u64) {
 }
 
 /// Fetch the session's autonomous-run status (`wait_for_headless_completion`
-/// on the daemon wire; TS `waitForHeadlessCompletion`). `None` degrades the
-/// settlement to no autonomous meta, never to a failed prompt.
+/// on the daemon wire; TS `waitForHeadlessCompletion`), once the daemon's
+/// headless run settled. With `wait_for_rlm_quiescence`, the answer comes
+/// from the quiescence barrier instead: it holds past the parent's idle
+/// until every tracked child run settled, so it is the RLM-quiescence
+/// event the settlement loop waits on. A failure is the caller's policy
+/// (TS throws for both callers): the completion observation degrades, the
+/// settlement loop errors the prompt.
+///
+/// # Errors
+///
+/// Returns an error when the daemon connection fails or closes mid-request,
+/// when the response reports a failure, or when the status payload does not
+/// deserialize.
 async fn fetch_autonomous_status(
     link: &Arc<DaemonLink>,
     active_session_id: &str,
-) -> Option<pa_core::autonomous::AgentAutonomousStatus> {
+    wait_for_rlm_quiescence: bool,
+) -> anyhow::Result<pa_core::autonomous::AgentAutonomousStatus> {
     let response = link
         .request_until_close(DaemonCommand::WaitForHeadlessCompletion {
             id: None,
             active_session_id: active_session_id.to_string(),
-            wait_for_rlm_quiescence: None,
+            wait_for_rlm_quiescence: wait_for_rlm_quiescence.then_some(true),
             rest: Map::default(),
         })
-        .await
-        .ok()?;
+        .await?;
     if !response.success {
-        return None;
+        anyhow::bail!(response
+            .error
+            .unwrap_or_else(|| "unknown error".to_string()));
     }
-    serde_json::from_value(response.data.unwrap_or(Value::Null)).ok()
+    Ok(serde_json::from_value(
+        response.data.unwrap_or(Value::Null),
+    )?)
+}
+
+/// The live child roster (`get_rlm_children` on the daemon wire; TS
+/// `getRlmChildSnapshots` throws).
+///
+/// # Errors
+///
+/// Returns an error when the daemon connection fails or closes mid-request,
+/// when the response reports a failure, or when the answer carries no
+/// children array.
+async fn fetch_rlm_children(
+    link: &Arc<DaemonLink>,
+    active_session_id: &str,
+) -> anyhow::Result<Vec<Value>> {
+    let response = link
+        .request(DaemonCommand::GetRlmChildren {
+            id: None,
+            active_session_id: active_session_id.to_string(),
+            rest: Map::default(),
+        })
+        .await?;
+    if !response.success {
+        anyhow::bail!(response
+            .error
+            .unwrap_or_else(|| "unknown error".to_string()));
+    }
+    response
+        .data
+        .unwrap_or(Value::Null)
+        .get("children")
+        .cloned()
+        .and_then(|children| children.as_array().cloned())
+        .ok_or_else(|| anyhow::anyhow!("get_rlm_children answered no children array"))
+}
+
+/// TS `outstandingSubagentCount`: the roster's live statuses, verbatim.
+fn outstanding_subagents(children: &[Value]) -> u64 {
+    children
+        .iter()
+        .filter(|child| {
+            matches!(
+                child.get("status").and_then(Value::as_str),
+                Some("queued" | "running")
+            )
+        })
+        .count() as u64
+}
+
+/// TS `quiescenceMeta`: the outstanding-subagent count plus the run's
+/// remaining continuation slots, observed together at one completion point.
+fn quiescence_meta(
+    status: Option<&pa_core::autonomous::AgentAutonomousStatus>,
+    children: &[Value],
+) -> meta::PrimeAgentQuiescenceMeta {
+    meta::PrimeAgentQuiescenceMeta {
+        outstanding_subagents: outstanding_subagents(children),
+        remaining_autonomous_continuations: status.filter(|status| status.enabled).map_or(
+            0,
+            |status| {
+                status
+                    .limits
+                    .max_continuations
+                    .saturating_sub(status.continuations_used)
+            },
+        ),
+    }
 }
 
 /// Close: stop the session's work, release the servers, and fence the
