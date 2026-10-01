@@ -1,13 +1,15 @@
 //! The `/mcp` view: the TS `ServiceCatalogPickerComponent`'s catalog
 //! surface — the resolved service catalog's cards (catalog services plus
-//! user-declared servers, connected-first) over the daemon's
+//! user-declared servers, connected-first) and the api-key credential
+//! rows (the stored keys, e.g. the web-search key) over the daemon's
 //! `get_mcp_connections` response, with the TS picker's search bands,
 //! ONE fixed detail line, and the navigate/action/close hint. Enter runs
-//! the connection's login flow (TS `onSelect` -> `authenticate`); Esc
-//! closes. The panel is the same inline shape as the `/model` picker
-//! (the bordered search field over `›`-marker rows), and its frame is
-//! budgeted so the dock can never overflow the terminal (the detail line
-//! drops when the viewport is too short, never the search field).
+//! the connection's login flow (TS `onSelect` -> `authenticate`) or the
+//! credential's paste-the-key prompt; Esc closes. The panel is the same
+//! inline shape as the `/model` picker (the bordered search field over
+//! `›`-marker rows), and its frame is budgeted so the dock can never
+//! overflow the terminal (the detail line drops when the viewport is too
+//! short, never the search field).
 
 use crate::keybindings::{format_key_text, KeybindingsManager};
 use crate::menu_panel::{menu_list_layout, search_field_lines};
@@ -16,6 +18,10 @@ use crate::theme::{Theme, ThemeColor};
 use crate::{Line, Span};
 
 use serde_json::Value;
+
+mod rows;
+
+use rows::{flatten_to_single_line, McpCredentialRow, McpRow, McpServiceRow};
 
 /// The search field's placeholder (TS `MenuSearchInput("Search MCP
 /// connections")`).
@@ -50,261 +56,6 @@ const MIN_ROWS_FOR_DETAIL: usize =
 /// The empty state's window rows (the message plus its blank row before
 /// the hint): the layout must budget them before the message renders.
 const EMPTY_STATE_ROWS: usize = 2;
-
-/// One service-catalog card (the daemon's resolved `services` array; TS
-/// `McpPluginView`): a catalog service or a user-declared server with its
-/// honestly-computed connection state.
-#[derive(Debug, Clone, PartialEq)]
-pub struct McpServiceRow {
-    pub service_id: String,
-    pub label: String,
-    pub connection_status: String,
-    pub connectable: bool,
-    pub login_pending: bool,
-    pub uses_oauth: bool,
-    pub source: String,
-    pub connection_ids: Vec<String>,
-    /// The paste-panel marker: a requires-setup token service collecting
-    /// exactly one credential. Never a connected/verified claim.
-    pub paste_token: bool,
-    pub aliases: Vec<String>,
-    pub description: Option<String>,
-    pub category: Option<String>,
-    pub publisher: Option<String>,
-    pub docs_url: Option<String>,
-    pub setup_hint: Option<String>,
-    pub tool_count: Option<usize>,
-    pub verified_at: Option<u64>,
-}
-
-impl McpServiceRow {
-    /// Parse one legacy roster entry (a daemon that predates the catalog
-    /// surface serves only `connections`): the row keeps the roster's
-    /// honest connected state; a not-connected row stays connectable.
-    fn from_roster_entry(value: &Value) -> Option<Self> {
-        let connected = value
-            .get("connected")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        Some(McpServiceRow {
-            service_id: value.get("server")?.as_str()?.to_string(),
-            label: value
-                .get("label")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            connection_status: if connected {
-                "connected"
-            } else {
-                "not_connected"
-            }
-            .to_string(),
-            connectable: !connected,
-            login_pending: false,
-            uses_oauth: value
-                .get("usesOAuth")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            source: "catalog".to_string(),
-            connection_ids: Vec::new(),
-            paste_token: false,
-            aliases: Vec::new(),
-            description: None,
-            category: None,
-            publisher: None,
-            docs_url: None,
-            setup_hint: None,
-            tool_count: None,
-            verified_at: None,
-        })
-    }
-
-    /// Parse one daemon `services` entry.
-    fn from_value(value: &Value) -> Option<Self> {
-        let connection_ids = value
-            .get("connectionIds")
-            .and_then(Value::as_array)
-            .map(|ids| {
-                ids.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
-        Some(McpServiceRow {
-            service_id: value.get("serviceId")?.as_str()?.to_string(),
-            label: value
-                .get("label")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            connection_status: value
-                .get("connectionStatus")
-                .and_then(Value::as_str)
-                .unwrap_or("not_connected")
-                .to_string(),
-            connectable: value
-                .get("connectable")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            login_pending: value
-                .get("loginPending")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            uses_oauth: value
-                .get("usesOAuth")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            source: value
-                .get("source")
-                .and_then(Value::as_str)
-                .unwrap_or("catalog")
-                .to_string(),
-            connection_ids,
-            paste_token: value
-                .get("pasteToken")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            aliases: value
-                .get("aliases")
-                .and_then(Value::as_array)
-                .map(|aliases| {
-                    aliases
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default(),
-            description: value
-                .get("description")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            category: value
-                .get("category")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            publisher: value
-                .get("publisher")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            docs_url: value
-                .get("docsUrl")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            setup_hint: value
-                .get("setupHint")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            tool_count: value
-                .get("toolCount")
-                .and_then(Value::as_u64)
-                .map(|c| c as usize),
-            verified_at: value.get("verifiedAt").and_then(Value::as_u64),
-        })
-    }
-
-    /// The trailing status text (TS `statusText`, catalog mode): the honest
-    /// state vocabulary, with the record-carried tool count on connected
-    /// rows (the picker reads local state only, like TS).
-    fn status_text(&self) -> (ThemeColor, String) {
-        if self.login_pending {
-            return (ThemeColor::Warning, "Login in progress".to_string());
-        }
-        match self.connection_status.as_str() {
-            "connected" => (
-                ThemeColor::Success,
-                match self.tool_count {
-                    Some(tool_count) => format!("Connected \u{b7} {tool_count} tools"),
-                    None => "Connected".to_string(),
-                },
-            ),
-            "pending" => (ThemeColor::Warning, "Needs verification".to_string()),
-            "error" => (
-                ThemeColor::Error,
-                if self.connectable {
-                    "Reconnect"
-                } else {
-                    "Needs attention"
-                }
-                .to_string(),
-            ),
-            "setup_required" => (ThemeColor::Warning, "Requires setup".to_string()),
-            "disabled" => (ThemeColor::Muted, "Disabled".to_string()),
-            _ => (
-                if self.connectable {
-                    ThemeColor::Text
-                } else {
-                    ThemeColor::Muted
-                },
-                if self.connectable {
-                    "Connect"
-                } else {
-                    "Not connected"
-                }
-                .to_string(),
-            ),
-        }
-    }
-
-    /// The selected row's detail copy (TS `secondaryText`, catalog mode):
-    /// the honest setup guidance for setup-required/error rows, the
-    /// description otherwise.
-    fn detail_text(&self) -> Option<String> {
-        if self.connection_status == "setup_required" || self.connection_status == "error" {
-            self.setup_hint.clone().or_else(|| self.description.clone())
-        } else {
-            self.description.clone().or_else(|| self.setup_hint.clone())
-        }
-    }
-
-    /// The rendered row's primary line (TS `MenuRow` primary: the
-    /// label alone, flattened).
-    fn primary_line(&self) -> String {
-        flatten_to_single_line(&self.label)
-    }
-
-    /// The action target (the service id).
-    fn target(&self) -> &str {
-        self.service_id.as_str()
-    }
-
-    /// The paste-panel decision (TS: a requires-setup token service with
-    /// exactly one credential and no installed account).
-    fn wants_paste(&self) -> bool {
-        self.paste_token && self.connection_ids.is_empty()
-    }
-
-    /// The Enter action hint (TS `actionText`, catalog mode, in the TS
-    /// order): the paste step for pasteable token services, the accounts
-    /// step for rows with an account, `manage` for user-declared
-    /// non-OAuth servers, then the connection-state verbs.
-    fn action_text(&self) -> &'static str {
-        if self.paste_token && self.connection_ids.is_empty() {
-            return "paste token";
-        }
-        if !self.connection_ids.is_empty() {
-            return "manage accounts";
-        }
-        if self.source == "user" && !self.uses_oauth {
-            return "manage";
-        }
-        match self.connection_status.as_str() {
-            "connected" => "re-verify",
-            "pending" => "verify",
-            _ if !self.connectable => "setup guidance",
-            "error" => "reconnect",
-            _ => "connect",
-        }
-    }
-}
-
-/// Flatten all whitespace runs to one space (TS `flattenToSingleLine`):
-/// catalog copy routinely contains newlines, and a rendered row must stay
-/// exactly one terminal line.
-fn flatten_to_single_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
 
 // Search bands (TS `service-catalog-picker.ts`): lower scores rank
 // first; identity fields (label, service id, aliases) always outrank
@@ -428,7 +179,7 @@ fn description_match_score(text: &str, token: &str) -> Option<f64> {
 /// every token must match somewhere; each token's best field score is
 /// summed into the row's total. Identity fields first; the
 /// description/setup-hint band only when no identity field matched.
-fn service_search_score(service: &McpServiceRow, query: &str) -> Option<f64> {
+fn row_search_score(row: &McpRow, query: &str) -> Option<f64> {
     let query = query.trim().to_lowercase();
     let tokens: Vec<&str> = query
         .split_whitespace()
@@ -440,16 +191,13 @@ fn service_search_score(service: &McpServiceRow, query: &str) -> Option<f64> {
     let mut total = 0.0;
     for token in tokens {
         let mut best: Option<f64> = None;
-        for field in std::iter::once(&service.label)
-            .chain(std::iter::once(&service.service_id))
-            .chain(service.aliases.iter())
-        {
+        for field in row.identity_fields() {
             if let Some(score) = identity_match_score(field, token) {
                 best = Some(best.map_or(score, |current| current.min(score)));
             }
         }
         if best.is_none() {
-            for field in service.description.iter().chain(service.setup_hint.iter()) {
+            for field in row.description_fields() {
                 if let Some(score) = description_match_score(field, token) {
                     best = Some(best.map_or(score, |current| current.min(score)));
                 }
@@ -473,6 +221,12 @@ pub enum McpViewAction {
     /// the paste flow (TS `actionText` "paste token"). `label` is the
     /// service's display name (the panel's title reads "Connect {label}").
     Paste { server: String, label: String },
+    /// Enter on an api-key credential row (the stored keys the view
+    /// manages alongside the connections): open the paste-the-key prompt
+    /// (the panel's masked paste field). `id` is the credential's auth
+    /// slot, `label` its display name (the panel's title reads "Connect
+    /// {label}").
+    Key { id: String, label: String },
     /// Esc, Ctrl+C, or back: close without selecting.
     Cancel,
     /// Navigation or search editing only.
@@ -481,11 +235,12 @@ pub enum McpViewAction {
 
 /// The `/mcp` service-catalog view: the resolved catalog's cards (the
 /// TS `ServiceCatalogPickerComponent`'s catalog surface — every resolved
-/// service plus user-declared servers, connected-first) with the TS
-/// picker's search bands and one fixed detail line.
+/// service plus user-declared servers, connected-first) and the api-key
+/// credential rows, with the TS picker's search bands and one fixed
+/// detail line.
 #[derive(Debug)]
 pub struct McpView {
-    rows: Vec<McpServiceRow>,
+    rows: Vec<McpRow>,
     search: SearchInput,
     filtered: Vec<usize>,
     selected: usize,
@@ -496,9 +251,11 @@ pub struct McpView {
 
 impl McpView {
     /// Build the view over the daemon's `get_mcp_connections` response:
-    /// the resolved `services` cards (the catalog surface). The response
-    /// carries no live tool listing — the picker opens from this local
-    /// state exactly like TS, so the open is instant.
+    /// the resolved `services` cards (the catalog surface) plus the
+    /// `credentials` rows (the api-key entries the view manages alongside
+    /// the connections). The response carries no live tool listing — the
+    /// picker opens from this local state exactly like TS, so the open is
+    /// instant.
     pub fn from_response(data: &Value, viewport_rows: usize) -> Self {
         let services: Vec<McpServiceRow> = data
             .get("services")
@@ -510,23 +267,37 @@ impl McpView {
                     .collect()
             })
             .unwrap_or_default();
-        // The catalog cards own the rows when the daemon serves them (TS
-        // `buildPluginViews` already includes user-declared servers); a
-        // daemon that predates the catalog surface serves only the legacy
-        // `connections` roster, and its rows render from the roster.
-        let rows = if services.is_empty() {
+        let credentials: Vec<McpCredentialRow> = data
+            .get("credentials")
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(McpCredentialRow::from_value)
+                    .collect()
+            })
+            .unwrap_or_default();
+        // The catalog cards own the service rows when the daemon serves
+        // them (TS `buildPluginViews` already includes user-declared
+        // servers); a daemon that predates the catalog surface serves only
+        // the legacy `connections` roster, and its rows render from the
+        // roster. The credential rows ride after the cards (the api-key
+        // class the view serves alongside the connections).
+        let mut rows: Vec<McpRow> = if services.is_empty() {
             data.get("connections")
                 .and_then(Value::as_array)
                 .map(|entries| {
                     entries
                         .iter()
                         .filter_map(McpServiceRow::from_roster_entry)
+                        .map(McpRow::Service)
                         .collect()
                 })
                 .unwrap_or_default()
         } else {
-            services
+            services.into_iter().map(McpRow::Service).collect()
         };
+        rows.extend(credentials.into_iter().map(McpRow::Credential));
         let mut view = McpView {
             rows,
             search: SearchInput::new(),
@@ -540,11 +311,12 @@ impl McpView {
         view
     }
 
-    /// The selected row's action target (Enter's service id).
+    /// The selected row's action target (Enter's service id, or the
+    /// credential's auth slot).
     pub fn selected_server(&self) -> Option<&str> {
         self.rows
             .get(*self.filtered.get(self.selected)?)
-            .map(McpServiceRow::target)
+            .map(McpRow::target)
     }
 
     /// One key press (TS `ServiceCatalogPickerComponent.handleInput`):
@@ -588,13 +360,19 @@ impl McpView {
                 .get(self.selected)
                 .and_then(|index| self.rows.get(*index));
             return match selected_row {
-                Some(row) if row.wants_paste() => McpViewAction::Paste {
-                    server: row.target().to_string(),
-                    label: row.label.clone(),
+                // The credential rows route to the paste-the-key prompt
+                // (a configured row's Enter replaces the stored key).
+                Some(McpRow::Credential(credential)) => McpViewAction::Key {
+                    id: credential.id.clone(),
+                    label: credential.label.clone(),
                 },
-                Some(row) => McpViewAction::Select {
-                    server: row.target().to_string(),
-                    label: row.label.clone(),
+                Some(McpRow::Service(service)) if service.wants_paste() => McpViewAction::Paste {
+                    server: service.target().to_string(),
+                    label: service.label.clone(),
+                },
+                Some(McpRow::Service(service)) => McpViewAction::Select {
+                    server: service.target().to_string(),
+                    label: service.label.clone(),
                 },
                 None => McpViewAction::None,
             };
@@ -728,7 +506,7 @@ impl McpView {
             .filtered
             .get(self.selected)
             .and_then(|index| self.rows.get(*index))
-            .map(McpServiceRow::action_text);
+            .map(McpRow::action_text);
         lines.push(hint_line(theme, width, kb, action));
         lines
     }
@@ -798,7 +576,7 @@ impl McpView {
                 .rows
                 .iter()
                 .enumerate()
-                .filter_map(|(index, row)| Some((service_search_score(row, &trimmed)?, index)))
+                .filter_map(|(index, row)| Some((row_search_score(row, &trimmed)?, index)))
                 .collect();
             scored.sort_by(|left, right| left.0.total_cmp(&right.0));
             scored.into_iter().map(|(_, index)| index).collect()

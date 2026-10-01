@@ -18,6 +18,16 @@ use pa_types::JsonMap;
 /// Current on-disk session format version.
 pub const CURRENT_SESSION_VERSION: u32 = 3;
 
+/// `custom` entry `customType` marking that this session has already drawn
+/// the Anthropic subscription ban-risk warning (operator directive
+/// 2026-09-29: the warning fires once per session LIFECYCLE, not once per
+/// TUI instance — the shown-state persists in the session's own durable
+/// store, exactly like `thread_goal_state`, so a reattach or a resume of
+/// the same session reads the row and skips the warning; a genuinely new
+/// session, or a fresh auth landing, shows it once). The row's `data` is
+/// `{ "shown": true }`.
+pub const ANTHROPIC_WARNING_SHOWN_CUSTOM_TYPE: &str = "anthropic_subscription_warning_shown";
+
 /// Entry types that can represent user intent (vs. daemon bookkeeping).
 pub const CONTENT_ENTRY_TYPES: [&str; 10] = [
     "message",

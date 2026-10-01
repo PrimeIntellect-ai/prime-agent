@@ -17,56 +17,33 @@ use anyhow::{anyhow, Context, Result};
 
 use super::release::update_user_agent;
 
-/// `PRIME_AGENT_RUST_REPO`: the installer's own repo knob (the funnel reads
-/// the same environment, so the script and the report always agree).
-pub const ENV_REPO: &str = "PRIME_AGENT_RUST_REPO";
 /// `PRIME_AGENT_RUST_PREFIX`: the installer's own prefix knob (the launcher
 /// probe reads the same value the script installs under).
 pub const ENV_PREFIX: &str = "PRIME_AGENT_RUST_PREFIX";
 /// `PRIME_AGENT_RUST_INSTALLER_URL`: the installer script URL override —
 /// tests serve their own script, a pinned install can point elsewhere.
 pub const ENV_INSTALLER_URL: &str = "PRIME_AGENT_RUST_INSTALLER_URL";
-/// The installer's release-channel knob (the publish-rendered default the
-/// served script carries; the env override pins it — the funnel passes the
-/// INSTALLED channel so a beta install updates on beta).
+/// The installer's release-channel knob (`stable` | `beta`): the funnel
+/// passes the requested channel, else the installed one.
 pub const ENV_RELEASE_CHANNEL: &str = "PRIME_AGENT_RELEASE_CHANNEL";
-/// `GITHUB_TOKEN`: the installer's own artifact-auth knob, sent on the
-/// run-list request when set (the run list is public; the token only lifts
-/// the anonymous rate limit).
-pub const ENV_GITHUB_TOKEN: &str = "GITHUB_TOKEN";
+/// The installer's download-base knob (the bucket holding the channel
+/// manifests and release archives).
+pub const ENV_DOWNLOAD_BASE_URL: &str = "PRIME_AGENT_DOWNLOAD_BASE_URL";
+/// `install-rust.sh`'s `DOWNLOAD_BASE_URL_DEFAULT`: where the channel
+/// manifests (`latest.json`, `beta.json`) are published.
+pub const DEFAULT_DOWNLOAD_BASE_URL: &str = "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev";
 
 /// The official domain's install endpoint — the one source the funnel
 /// fetches the installer from; never a GitHub raw or workflow URL (the
 /// override env var stays for tests and pinned installs).
 pub const OFFICIAL_INSTALLER_URL: &str = "https://app.primeintellect.ai/prime-agent/install.sh";
-/// The repo the run report resolves from (the run-list query's owner; the
-/// installer fetch itself never derives from it).
-pub const DEFAULT_REPO: &str = "PrimeIntellect-ai/prime-agent";
-/// The workflow whose artifacts the installer downloads (the same name
-/// the script's run-list query uses).
-pub const WORKFLOW: &str = "continuous";
-/// The branch the continuous runs resolve from (the run-list query's
-/// branch).
-pub const BRANCH: &str = "rust";
 
 /// The small-file budget for the script download (the script is a few KB;
 /// a hung fetch must not hang the update).
 const SCRIPT_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
-/// The run-list request budget (`--check`'s report is a quick read).
-const RUN_LIST_TIMEOUT: Duration = Duration::from_secs(10);
 /// The launcher `--version` probe budget (the same bound the release
 /// probe uses; a hung launcher must not hang the report).
 const LAUNCHER_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// The repo the update installs from (`PRIME_AGENT_RUST_REPO`, the
-/// installer's default).
-#[must_use]
-pub fn repo() -> String {
-    std::env::var(ENV_REPO)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_REPO.to_string())
-}
 
 /// The installer script URL: the official domain's install endpoint by
 /// default (`PRIME_AGENT_RUST_INSTALLER_URL` overrides it — tests serve
@@ -79,6 +56,16 @@ pub fn installer_script_url() -> String {
         }
     }
     OFFICIAL_INSTALLER_URL.to_string()
+}
+
+/// The download base `--check` reads the channel manifest from: the
+/// installer's own knob, else its default.
+#[must_use]
+pub fn download_base_url() -> String {
+    std::env::var(ENV_DOWNLOAD_BASE_URL)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_DOWNLOAD_BASE_URL.to_string())
 }
 
 /// The install prefix the launcher probe reads (`PRIME_AGENT_RUST_PREFIX`,
@@ -137,78 +124,6 @@ pub fn running_commit(version: &str) -> Option<&str> {
     hex.then_some(commit)
 }
 
-/// One resolved continuous run (`--check`'s "latest available"): the run
-/// the installer would download from, and the exact commit it built.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContinuousRun {
-    pub id: u64,
-    pub commit: String,
-}
-
-/// The newest successful `continuous` run on the branch — the same query
-/// the installer's non-`gh` path sends (`--check` only reads it; nothing
-/// downloads). `GITHUB_TOKEN`, when set, is sent as the bearer (the same
-/// token the installer itself would use).
-///
-/// # Errors
-/// Returns an error when the request or the response read fails; a run
-/// list with no successful run is an error too — there is nothing to
-/// report against.
-pub async fn latest_continuous_run() -> Result<ContinuousRun> {
-    let url = format!(
-        "https://api.github.com/repos/{}/actions/workflows/{WORKFLOW}.yml/runs?branch={BRANCH}&status=success&per_page=1",
-        repo()
-    );
-    let mut request = reqwest::Client::new()
-        .get(&url)
-        .header("User-Agent", update_user_agent(env!("CARGO_PKG_VERSION")))
-        .header("accept", "application/vnd.github+json")
-        .timeout(RUN_LIST_TIMEOUT);
-    if let Ok(token) = std::env::var(ENV_GITHUB_TOKEN) {
-        if !token.trim().is_empty() {
-            request = request.bearer_auth(token);
-        }
-    }
-    let response = request
-        .send()
-        .await
-        .with_context(|| format!("request the {WORKFLOW} run list in {}", repo()))?;
-    let status = response.status();
-    let body = response
-        .bytes()
-        .await
-        .with_context(|| "read the run list body")?;
-    if !status.is_success() {
-        anyhow::bail!("the {WORKFLOW} run list in {} answered {status}", repo());
-    }
-    parse_runs(&body).ok_or_else(|| {
-        anyhow!(
-            "no successful {WORKFLOW} run is listed for {BRANCH} in {}",
-            repo()
-        )
-    })
-}
-
-/// Parse the run-list body's newest run (the fetch half of
-/// [`latest_continuous_run`] without the network).
-#[must_use]
-pub fn parse_runs(body: &[u8]) -> Option<ContinuousRun> {
-    #[derive(serde::Deserialize)]
-    struct RunRow {
-        id: u64,
-        head_sha: String,
-    }
-    #[derive(serde::Deserialize)]
-    struct RunsDocument {
-        #[serde(default)]
-        workflow_runs: Vec<RunRow>,
-    }
-    let document: RunsDocument = serde_json::from_slice(body).ok()?;
-    let run = document.workflow_runs.first()?;
-    let commit = run.head_sha.trim().to_string();
-    (!commit.is_empty()).then_some(ContinuousRun { id: run.id, commit })
-}
-
 /// Where the installer's output goes while it runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallerOutput {
@@ -235,15 +150,18 @@ pub struct UpdateFailure {
 }
 
 /// Run the takeover update with the environment's knobs (the script URL
-/// and the install prefix): the composition root's entry.
+/// and the install prefix): the composition root's entry. `channel` is the
+/// requested release channel (`stable` | `beta`); `None` keeps the
+/// installed one.
 ///
 /// # Errors
 /// Returns the failure message for every non-installing outcome (see
 /// [`run_installer_from`]).
 pub async fn run_installer(
+    channel: Option<&'static str>,
     output: InstallerOutput,
 ) -> std::result::Result<Installed, UpdateFailure> {
-    run_installer_from(&installer_script_url(), &install_prefix(), output).await
+    run_installer_from(&installer_script_url(), &install_prefix(), channel, output).await
 }
 
 /// Run the takeover update from one explicit script URL and install
@@ -263,6 +181,7 @@ pub async fn run_installer(
 pub async fn run_installer_from(
     url: &str,
     prefix: &Path,
+    channel: Option<&'static str>,
     output: InstallerOutput,
 ) -> std::result::Result<Installed, UpdateFailure> {
     current_target().map_err(|error| UpdateFailure {
@@ -271,7 +190,7 @@ pub async fn run_installer_from(
     let script = fetch_script(url).await.map_err(|error| UpdateFailure {
         message: format!("could not download the installer from {url}: {error:#}"),
     })?;
-    execute_script(&script, prefix, output).await?;
+    execute_script(&script, prefix, channel, output).await?;
     let version = launcher_version(prefix).await;
     Ok(Installed { version })
 }
@@ -352,17 +271,15 @@ async fn fetch_script(url: &str) -> Result<PathBuf> {
 async fn execute_script(
     script: &Path,
     prefix: &Path,
+    channel: Option<&'static str>,
     output: InstallerOutput,
 ) -> std::result::Result<(), UpdateFailure> {
     let mut command = tokio::process::Command::new("/bin/sh");
     command.arg(script).env(ENV_PREFIX, prefix);
-    // THE CHANNEL-STICKINESS: an install made through install-beta.sh
-    // (the beta render) records its channel in the install marker, and
-    // the update must STAY on it — the fetched script's own default is
-    // the stable render, so without the override a beta user's `update`
-    // would silently switch channels. The marker's first line is
-    // "channel <name>" (the installer writes it at publish).
-    if let Some(channel) = installed_channel(prefix) {
+    // The requested channel wins; otherwise the update stays on the channel
+    // the install marker records (the fetched script's own default is the
+    // stable render, so a beta install would silently switch channels).
+    if let Some(channel) = channel.or_else(|| installed_channel(prefix)) {
         command.env(ENV_RELEASE_CHANNEL, channel);
     }
     match output {
@@ -603,6 +520,7 @@ set -eu
 mkdir -p "${PRIME_AGENT_RUST_PREFIX}/bin"
 printf '#!/bin/sh\necho "9.9.9-continuous.0123456789abcdef"\n' > "${PRIME_AGENT_RUST_PREFIX}/bin/prime-agent"
 chmod 0755 "${PRIME_AGENT_RUST_PREFIX}/bin/prime-agent"
+printf '%s' "${PRIME_AGENT_RELEASE_CHANNEL:-}" > "${PRIME_AGENT_RUST_PREFIX}/channel"
 echo "installed: 9.9.9-continuous.0123456789abcdef"
 "#;
 
@@ -693,31 +611,50 @@ echo "installed: 9.9.8-continuous.fedcba9876543210"
         );
     }
 
-    #[test]
-    fn the_run_list_parse_takes_the_newest_successful_run() {
-        let run = parse_runs(
-            br#"{"total_count": 3, "workflow_runs": [
-                {"id": 42424242, "head_sha": "07f42eaa3a6159f942c6c24beb0352ce120a192c"}
-            ]}"#,
+    /// The requested channel (an explicit flag or the saved setting) wins
+    /// over the install marker; without one the marker's channel rides.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn the_requested_channel_wins_over_the_install_marker() {
+        let (root, _preserve, prefix) = sandbox();
+        let share = prefix.join("share/prime-agent");
+        std::fs::create_dir_all(&share).unwrap();
+        std::fs::write(
+            share.join(".prime-agent-install"),
+            "install-rust.sh channel beta\nversion 0.10.0\n",
         )
-        .expect("the run parses");
-        assert_eq!(run.id, 42_424_242);
-        assert_eq!(run.commit, "07f42eaa3a6159f942c6c24beb0352ce120a192c");
-        assert!(
-            parse_runs(br#"{"workflow_runs": []}"#).is_none(),
-            "an empty run list reports nothing"
+        .unwrap();
+        let url = serve(MOCK_INSTALLER);
+        run_installer_from(&url, &prefix, Some("stable"), InstallerOutput::Capture)
+            .await
+            .expect("the funnel installs");
+        assert_eq!(
+            std::fs::read_to_string(prefix.join("channel")).unwrap(),
+            "stable"
         );
-        assert!(parse_runs(b"not json").is_none());
+        let url = serve(MOCK_INSTALLER);
+        run_installer_from(&url, &prefix, None, InstallerOutput::Capture)
+            .await
+            .expect("the funnel installs");
+        assert_eq!(
+            std::fs::read_to_string(prefix.join("channel")).unwrap(),
+            "beta"
+        );
+        drop(root);
     }
 
     #[tokio::test]
     #[cfg(unix)]
     async fn the_funnel_runs_the_downloaded_installer_and_preserves_the_session_store() {
         let (root, preserve, prefix) = sandbox();
-        let installed =
-            run_installer_from(&serve(MOCK_INSTALLER), &prefix, InstallerOutput::Capture)
-                .await
-                .expect("the funnel installs the mock build");
+        let installed = run_installer_from(
+            &serve(MOCK_INSTALLER),
+            &prefix,
+            None,
+            InstallerOutput::Capture,
+        )
+        .await
+        .expect("the funnel installs the mock build");
         assert_eq!(
             installed.version.as_deref(),
             Some("9.9.9-continuous.0123456789abcdef"),
@@ -735,10 +672,14 @@ echo "installed: 9.9.8-continuous.fedcba9876543210"
     #[cfg(unix)]
     async fn the_probe_still_reads_a_pre_takeover_launchers_version() {
         let (root, _preserve, prefix) = sandbox();
-        let installed =
-            run_installer_from(&serve(LEGACY_INSTALLER), &prefix, InstallerOutput::Capture)
-                .await
-                .expect("the funnel installs the legacy-named build");
+        let installed = run_installer_from(
+            &serve(LEGACY_INSTALLER),
+            &prefix,
+            None,
+            InstallerOutput::Capture,
+        )
+        .await
+        .expect("the funnel installs the legacy-named build");
         assert_eq!(
             installed.version.as_deref(),
             Some("9.9.8-continuous.fedcba9876543210"),
@@ -763,6 +704,7 @@ echo "installed: 9.9.8-continuous.fedcba9876543210"
         let failure = run_installer_from(
             &serve("#!/bin/sh\necho 'install-rust.sh: the artifact download failed' >&2\nexit 3\n"),
             &prefix,
+            None,
             InstallerOutput::Capture,
         )
         .await
@@ -787,6 +729,7 @@ echo "installed: 9.9.8-continuous.fedcba9876543210"
         let failure = run_installer_from(
             "http://127.0.0.1:9/install-rust.sh",
             &prefix,
+            None,
             InstallerOutput::Capture,
         )
         .await
