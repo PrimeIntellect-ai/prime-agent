@@ -275,12 +275,6 @@ jobs:
         if: steps.selection.outputs.units != '0'
         run: ./target/debug/prime-agent --prime-agent-bootstrap
       - name: Run this shard's test subset
-        env:
-          # The live-kernel suites that need an installed release dir take the
-          # checkout (it ships prime-agent-runtime/, the runtime the bootstrap
-          # above installed from); every other PI_PACKAGE_DIR reader resolves
-          # the same files it would without it.
-          PI_PACKAGE_DIR: ${{ github.workspace }}
         run: |
           python3 scripts/ci_test_shard.py --shard ${{ matrix.shard }} --total ${{ env.SHARD_COUNT }}             --crates "${{ needs.changes.outputs.crates }}"             --manifest "$RUNNER_TEMP/shard-manifest-${{ matrix.shard }}.json"
       - name: Upload the shard manifest (always — the summary audits it)
