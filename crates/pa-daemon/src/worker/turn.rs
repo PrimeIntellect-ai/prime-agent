@@ -238,9 +238,8 @@ impl TurnRunner {
     /// `isSessionActive`'s pending-prompt-admissions arm) and the
     /// setting is a live threshold; `None` otherwise (attached
     /// sessions, `"off"`, and any state the engine gates would reject
-    /// stay parked without a timer). The client-owned and noSession
-    /// refusals are supervisor-side (the descriptor's `ownerClientId`
-    /// and `noSession`). The engine gate
+    /// stay parked without a timer). The client-owned refusal is
+    /// supervisor-side (the descriptor's `ownerClientId`). The engine gate
     /// (`SessionEngine::can_passivate_worker`) is re-checked at the fire
     /// inside [`Self::maybe_request_idle_passivation`] — the
     /// fresh-snapshot fence — so this window only decides whether to

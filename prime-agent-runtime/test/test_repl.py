@@ -2984,5 +2984,48 @@ class OwnerWatchdogTest(unittest.TestCase):
         self.assertEqual(calls, [("OpenProcess", 0x00100000, False, 778)])
 
 
+class OwnerExitWaitTest(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, SRC)
+        self.addCleanup(sys.path.remove, SRC)
+        import rlm.repl as repl_module
+
+        self.repl_module = repl_module
+        self.owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+        self.addCleanup(self.owner.wait)
+        self.addCleanup(self.owner.kill)
+
+    def test_owner_exit_wakes_the_wait_without_polling(self):
+        real_alive = self.repl_module._owner_alive_posix
+
+        def owner_exits_once_watched(*args):
+            alive = real_alive(*args)  # runs after the exit registration, before the wait
+            self.owner.kill()
+            return alive
+
+        waiter = threading.Thread(
+            target=self.repl_module._wait_owner_posix, args=(self.owner.pid, os.getppid()), daemon=True
+        )
+        with (
+            mock.patch.object(self.repl_module, "_owner_alive_posix", owner_exits_once_watched),
+            mock.patch.object(self.repl_module.time, "sleep") as sleep,
+        ):
+            waiter.start()
+            waiter.join(timeout=10)
+        self.assertFalse(waiter.is_alive(), "the owner's exit must wake the watchdog")
+        sleep.assert_not_called()
+
+    def test_owner_wait_polls_when_exit_registration_fails(self):
+        with (
+            mock.patch.object(self.repl_module.select, "kqueue", create=True, side_effect=OSError("unavailable")),
+            mock.patch.object(self.repl_module.os, "pidfd_open", create=True, side_effect=OSError("unavailable")),
+            mock.patch.object(
+                self.repl_module.time, "sleep", side_effect=lambda _: (self.owner.kill(), self.owner.wait())
+            ) as sleep,
+        ):
+            self.repl_module._wait_owner_posix(self.owner.pid, os.getppid())
+        sleep.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,7 @@ use super::{
     SessionSelection, SessionUi, TreeSelector, TreeSelectorAction, UserMessageSelector,
     UserMessageSelectorAction, Value, UI_REQUEST_TIMEOUT_MS,
 };
+use pa_types::daemon::DaemonSessionLifecycle;
 
 impl SessionUi {
     // ------------------------------------------------------------------
@@ -520,7 +521,10 @@ pub(super) async fn create_session(
 ) -> Result<String> {
     let session_path = match selection {
         Some(SessionSelection::Resume(path)) => Some(path.to_string_lossy().to_string()),
-        _ => None,
+        Some(
+            SessionSelection::New | SessionSelection::NewChild { .. } | SessionSelection::Attach(_),
+        )
+        | None => None,
     };
     // The create consumes the path; a refusal needs it again for the
     // descriptive error.
@@ -547,7 +551,12 @@ pub(super) async fn create_session(
             config: Some(options.create_config()),
             telemetry_disabled: options.telemetry_disabled.filter(|disabled| *disabled),
             runtime_metadata: None,
-            lifecycle: None,
+            // TS `clientOwned: parsed.noSession`: only a noSession
+            // create is client-owned.
+            lifecycle: options
+                .no_session
+                .then_some(DaemonSessionLifecycle::ClientOwned),
+            // The client's Herdr pane identity travels on the create.
             env: client_env,
             launch_env: None,
             rest: Map::default(),

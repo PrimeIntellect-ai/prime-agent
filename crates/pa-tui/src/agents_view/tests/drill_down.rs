@@ -74,33 +74,13 @@ fn pending_ancestors_expand_and_selection_restores_after_reentry() {
 
 #[test]
 fn scoped_left_returns_the_root_and_pops_the_scope() {
-    let mut mode = AgentsViewMode::new(AgentsViewOptions {
-        socket_path: PathBuf::from("/tmp/agents-view-test.sock"),
-        cwd: PathBuf::from("/tmp"),
-        session_dir: None,
-        theme: "prime".to_string(),
-        version: "0.0.0".to_string(),
-        anchor_session_id: None,
-        scope: Some(AgentsViewScope {
-            session_id: Some("p".to_string()),
-            active_session_id: Some("p-live".to_string()),
-            session_name: Some("p name".to_string()),
-        }),
-        query: None,
-        expanded_ancestors: Vec::new(),
-        selected_row_identity: None,
-        selected_key: None,
-        status_message: None,
-        keybindings: crate::keybindings::KeybindingsManager::new(),
-        show_hardware_cursor: false,
-        incident_notice_state: None,
-        create_config: serde_json::json!({}),
-    });
-    mode.roster = vec![
-        roster_entry("p", "idle", &parent_summary("p")),
-        roster_entry("c", "running", &child_summary("c", "p", "worker one")),
-    ];
-    mode.rebuild_rows();
+    let mut mode = scoped_mode(
+        None,
+        vec![
+            roster_entry("p", "idle", &parent_summary("p")),
+            roster_entry("c", "running", &child_summary("c", "p", "worker one")),
+        ],
+    );
     // The scoped view lists the direct child as a top-level row.
     assert!(mode.scope_active);
     assert_eq!(mode.rows.len(), 1);
