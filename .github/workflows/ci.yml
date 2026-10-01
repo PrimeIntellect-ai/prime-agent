@@ -6,7 +6,7 @@
 # --all-targets -- -D warnings, cargo test --workspace) on the pinned
 # toolchain (1.98.1) and runner image the continuous/release builds use:
 #
-#   push to main/rust — every merge is a push. continuous.yml proves the
+#   push to main — every merge is a push. continuous.yml proves the
 #   release binaries link; THIS workflow proves the tip's test/bench/example
 #   targets compile (`cargo check --workspace --all-targets`) and the test
 #   suites pass (the test suite sharded below; the count is the SHARD_COUNT
@@ -239,7 +239,7 @@ jobs:
           # partial hit and compile the rest. Slower hits, no correctness
           # issue.
           shared-key: test-shards
-      - name: Install uv (the kernel tests bootstrap the Python kernel venv with it)
+      - name: Install uv (the kernel venv bootstrap below uses it)
         run: |
           python3 -m pip install --user uv
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
