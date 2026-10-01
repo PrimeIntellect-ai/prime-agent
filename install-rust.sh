@@ -271,6 +271,8 @@ if [ "$VERBOSE" = 1 ] && [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
 fi
 say() { printf '%s%s%s\n' "$SAY_DIM" "$*" "$SAY_RESET" >&3; }
 
+# The program text is awk, not shell: its "$PRIME_AGENT_UI_DIR" expands later.
+# shellcheck disable=SC2016
 banner_awk='# BANNER_AWK_BEGIN
 # The installer banner: the TUI first-run splash (crates/pa-tui/src/
 # onboarding.rs mark_rows + draw_field), ported cell for cell so the same
@@ -362,7 +364,9 @@ function compose(   n, line, label, detail, ppath, total, got, cmd, filled, bar,
   close(activef)
   if (label != "") {
     if (ppath != "") {
-      got = 0; cmd = "{ wc -c < \"" ppath "\"; } 2>/dev/null"
+      # The path never enters the command text: the shell expands the
+      # environment variable itself (a TMPDIR with shell syntax stays data).
+      got = 0; cmd = "{ wc -c < \"$PRIME_AGENT_UI_DIR/ui-progress\"; } 2>/dev/null"
       cmd | getline got; close(cmd); got += 0
       if (total + 0 > 0) {
         filled = int(got * 20 / total); if (filled > 20) filled = 20
@@ -414,6 +418,8 @@ BEGIN {
     exit
   }
   split("⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏", SPIN, " ")
+  uidir = ENVIRON["PRIME_AGENT_UI_DIR"]
+  activef = uidir "/ui-active"; logf = uidir "/ui-log"; brandf = uidir "/ui-brand"; stopf = uidir "/ui-stop"
   TH = height + 0; if (TH < 5) TH = 24
   frame = 0; existing = 1; cur = 0; pn = 0
   printf "%s[?25l%s[?7l", ESC, ESC
@@ -466,9 +472,10 @@ if [ "$UI_ANIM" = 1 ]; then
   [ "$ui_width" -le 120 ] || ui_width=120
   ui_banner=0
   if [ "$UI_COLOR" = 1 ] && [ "$ui_width" -ge 40 ]; then ui_banner=1; fi
-  awk -v banner="$ui_banner" -v color="$UI_COLOR" -v width="$ui_width" -v height="$ui_rows" \
-    -v ppid="$$" -v activef="$ui_active" -v logf="$ui_log" -v brandf="$ui_brand" \
-    -v stopf="$ui_stopf" "$banner_awk" >&2 &
+  # The paths ride the environment, never -v (which rewrites backslashes)
+  # and never a command string.
+  PRIME_AGENT_UI_DIR="$dl" awk -v banner="$ui_banner" -v color="$UI_COLOR" \
+    -v width="$ui_width" -v height="$ui_rows" -v ppid="$$" "$banner_awk" >&2 &
   ui_pid=$!
 fi
 # ui_stop: freeze the renderer on its last frame, then print the waiting
@@ -609,7 +616,9 @@ fetch() {
     ui_progress_total="$(curl -fsSIL --connect-timeout 10 --max-time 15 "$1" 2>/dev/null \
       | tr -d '\r' | awk 'tolower($1) == "content-length:" { size = $2 } END { print size }')"
     case "$ui_progress_total" in ""|*[!0-9]*) ui_progress_total="" ;; esac
-    ui_progress_path="$2"
+    # The renderer reads the size through a fixed link in its own dir.
+    ln -sf "$2" "${dl}/ui-progress"
+    ui_progress_path="1"
     ui_set_active "$ui_step"
   fi
   while :; do
@@ -1491,11 +1500,14 @@ def command_line(pid):
             return [part.decode("utf-8", "replace") for part in handle.read().split(b"\0") if part]
     except OSError:
         pass
+    # Python 3.3+ spelling (the installer may run a system python3); any
+    # failure means "not a Prime Agent daemon", never a crash.
     try:
         import subprocess
-        out = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
-                             capture_output=True, text=True, timeout=5).stdout
-    except (OSError, subprocess.SubprocessError):
+        out = subprocess.check_output(["ps", "-p", str(pid), "-o", "command="],
+                                      stderr=subprocess.DEVNULL,
+                                      universal_newlines=True, timeout=5)
+    except Exception:
         return []
     return out.split()
 
