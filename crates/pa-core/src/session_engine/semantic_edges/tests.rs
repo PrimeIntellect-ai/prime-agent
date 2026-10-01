@@ -51,6 +51,18 @@ fn request_started(session_id: &str, request_id: &str) -> SemanticEdgeLedgerEven
     }
 }
 
+fn request_started_slice(
+    session_id: &str,
+    compaction_id: &str,
+    request_id: &str,
+) -> SemanticEdgeLedgerEvent {
+    SemanticEdgeLedgerEvent::RequestStarted {
+        request_id: request_id.to_string(),
+        session_id: session_id.to_string(),
+        compaction_id: Some(compaction_id.to_string()),
+    }
+}
+
 #[test]
 fn a_turn_lifecycle_is_ledgered_and_reopening_replays_without_reregistering() {
     let (identity, _dir) = identity("session-a");
@@ -139,6 +151,100 @@ fn a_parked_retry_reuses_its_id_only_for_an_identical_body_in_the_same_epoch() {
             },
             request_started("session-b", &post_compaction),
         ]
+    );
+}
+
+#[tokio::test]
+async fn split_summary_slices_commit_in_resolve_order() {
+    let (identity, _dir) = identity("session-g");
+    let recorder = Arc::new(SemanticEdgeRecorder::open(identity.clone()));
+    let mut compaction = recorder.begin_compaction(None);
+    let (release_first, first_gate) = tokio::sync::oneshot::channel::<()>();
+    let mut first = Box::pin(super::summary_slice_call(
+        Some(&compaction),
+        None,
+        move |_| async move {
+            let _gate = first_gate.await;
+            Ok::<(), anyhow::Error>(())
+        },
+    ));
+    // The first slice starts (ledger) and parks on its gate; the second
+    // starts and resolves while the first is still in flight.
+    assert!(futures::poll!(first.as_mut()).is_pending());
+    super::summary_slice_call(Some(&compaction), None, |_| async {
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .expect("the second slice resolves");
+    release_first.send(()).expect("the parked slice's gate");
+    first.await.expect("the parked slice resolves");
+    compaction.commit();
+    // The started ids in start order; commit finishes them in resolve
+    // order (TS pushes `uncommittedSlices` on resolve): b then a.
+    let ledger = read_ledger(&identity);
+    let compaction_id = ledger
+        .iter()
+        .find_map(|event| match event {
+            SemanticEdgeLedgerEvent::CompactionBegun { compaction_id, .. } => {
+                Some(compaction_id.clone())
+            }
+            _ => None,
+        })
+        .expect("the compaction began");
+    let slices: Vec<String> = ledger
+        .iter()
+        .filter_map(|event| match event {
+            SemanticEdgeLedgerEvent::RequestStarted {
+                request_id,
+                compaction_id: Some(_),
+                ..
+            } => Some(request_id.clone()),
+            _ => None,
+        })
+        .collect();
+    let (a, b) = (&slices[0], &slices[1]);
+    assert_eq!(
+        read_ledger(&identity),
+        vec![
+            session_registered("session-g"),
+            SemanticEdgeLedgerEvent::CompactionBegun {
+                compaction_id: compaction_id.clone(),
+                session_id: "session-g".to_string(),
+            },
+            request_started_slice("session-g", &compaction_id, a),
+            request_started_slice("session-g", &compaction_id, b),
+            SemanticEdgeLedgerEvent::RequestFinished {
+                request_id: b.clone()
+            },
+            SemanticEdgeLedgerEvent::RequestFinished {
+                request_id: a.clone()
+            },
+            SemanticEdgeLedgerEvent::CompactionFinished {
+                compaction_id,
+                status: super::CompactionStatus::Completed,
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_ledger_failure_drops_the_spawn_anchor() {
+    let (identity, _dir) = identity("session-e");
+    let recorder = SemanticEdgeRecorder::open(identity.clone());
+    recorder
+        .start_turn_request(FINGERPRINT_A)
+        .expect("the recorder mints ids");
+    // A directory at the ledger path fails the next append (works as
+    // root too).
+    let path = identity.ledger_path.as_ref().unwrap();
+    std::fs::remove_file(path).unwrap();
+    std::fs::create_dir(path).unwrap();
+    assert_eq!(
+        (
+            recorder.start_turn_request(FINGERPRINT_B),
+            recorder.last_turn_request_id()
+        ),
+        (None, None)
     );
 }
 

@@ -50,8 +50,10 @@ pub(crate) struct SemanticCompaction {
     /// dropped mid-call): a failure removes and fails its own id, commit
     /// finishes the rest, and the drop fails the rest — so no
     /// `request_started{compaction_id}` is ever left without a terminal
-    /// event. A split turn's two slices run concurrently on one task, so
-    /// the list is interior-mutable.
+    /// event. A resolved slice moves to the tail (TS pushes
+    /// `uncommittedSlices` on resolve), so commit finishes the slices in
+    /// resolve order. A split turn's two slices run concurrently on one
+    /// task, so the list is interior-mutable.
     open_slices: std::sync::Mutex<Vec<String>>,
     committed: bool,
     /// The run's abort signal: a dropped guard records `cancelled` only
@@ -91,6 +93,19 @@ impl SemanticCompaction {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|open| open != request_id);
         self.recorder.fail_request(request_id);
+    }
+
+    /// A wire slice resolved (TS pushes `uncommittedSlices` on resolve):
+    /// it moves to the tail, so `commit` finishes the slices in resolve
+    /// order and the last-resolved slice is the session's last commit (the
+    /// compaction edge's source).
+    fn slice_resolved(&self, request_id: &str) {
+        let mut open = self
+            .open_slices
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        open.retain(|open| open != request_id);
+        open.push(request_id.to_string());
     }
 
     /// The compaction committed (ledger before effect: TS marks
@@ -183,7 +198,10 @@ where
     // and they ride even a headerless target (the common direct-key case).
     let mut headers = summary_headers.unwrap_or_default();
     headers.extend(model_request_headers(&request_id));
-    call(Some(headers))
-        .await
-        .inspect_err(|_| compaction.slice_failed(&request_id))
+    let result = call(Some(headers)).await;
+    match &result {
+        Ok(_) => compaction.slice_resolved(&request_id),
+        Err(_) => compaction.slice_failed(&request_id),
+    }
+    result
 }
