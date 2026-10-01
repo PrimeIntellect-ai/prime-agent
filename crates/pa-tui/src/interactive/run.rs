@@ -148,8 +148,8 @@ async fn settled_sequence(
     let input = pa_types::daemon::PromptInput {
         content: None,
         images: None,
-        streaming_behavior: None,
-        queue_if_busy: None,
+        streaming_behavior: Some(pa_types::daemon::StreamingBehavior::Steer),
+        queue_if_busy: Some(true),
         expand_prompt_templates: None,
         source: None,
         agent_message_id: None,
@@ -783,7 +783,6 @@ async fn run_interactive_surface(
                 // one select, so the response arriving proves nothing:
                 // hold until this run has processed the settled sequence.
                 let Some((settled, deadline)) = settle_target else {
-                    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
                     match settled_sequence(
                         &session.client,
                         session.active_session_id.clone(),
@@ -792,7 +791,10 @@ async fn run_interactive_surface(
                     )
                     .await
                     {
-                        Ok(settled) => settle_target = Some((settled, deadline)),
+                        Ok(settled) => {
+                            settle_target =
+                                Some((settled, Instant::now() + Duration::from_millis(timeout_ms)));
+                        }
                         Err(error) => {
                             session.note(&format!("settle barrier failed: {error:#}"), &mut view);
                             pending.pop_front();

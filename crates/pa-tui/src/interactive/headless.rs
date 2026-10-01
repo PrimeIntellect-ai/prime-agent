@@ -26,7 +26,8 @@ pub enum HeadlessStep {
     /// Submit text (the same editor submit path as a user typing it).
     Submit(String),
     /// Submit `text` as a `prompt_and_wait` and hold until this run has
-    /// processed every event the turn emitted (bounded by `timeout_ms`):
+    /// processed every event the turn emitted (each daemon request and the
+    /// event drain are each bounded by `timeout_ms`):
     /// the daemon answers the wait only at the turn's full settle (after
     /// its queue-projection update), `get_rlm_children` then reports the
     /// session's final event sequence, and the barrier releases once the
