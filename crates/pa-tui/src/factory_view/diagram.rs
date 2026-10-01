@@ -79,11 +79,15 @@ impl FactoryTransition {
     }
 }
 
-/// One last-fired edge from the snapshot's trailing window.
+/// One last-fired edge from the snapshot's trailing window. The optional
+/// `when` carries the guard that fired — two guarded transitions may
+/// share one from+to pair, so the guard is the identity that tells the
+/// diagram WHICH of them fired.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FactoryEdge {
     pub from: Vec<String>,
     pub to: String,
+    pub when: Option<String>,
 }
 
 impl FactoryEdge {
@@ -103,6 +107,10 @@ impl FactoryEdge {
         Some(Self {
             from,
             to: value.get("to")?.as_str()?.to_string(),
+            when: value
+                .get("when")
+                .and_then(format_guard)
+                .filter(|guard| !guard.is_empty()),
         })
     }
 
@@ -111,9 +119,11 @@ impl FactoryEdge {
         self.from.join(" + ")
     }
 
-    /// Whether this fired edge is the given transition (the same sources
-    /// and the same target; the snapshot's `from` may arrive in either
-    /// order for a join, so the comparison is order-free).
+    /// Whether this fired edge is the given transition (the same
+    /// sources, the same target, and the same guard — the snapshot's
+    /// `from` may arrive in either order for a join, so the source
+    /// comparison is order-free; a shared from+to pair with different
+    /// guards never cross-marks).
     pub fn matches(&self, transition: &FactoryTransition) -> bool {
         self.to == transition.to
             && self.from.len() == transition.from.len()
@@ -121,6 +131,7 @@ impl FactoryEdge {
                 .from
                 .iter()
                 .all(|source| transition.from.contains(source))
+            && self.when == transition.when
     }
 }
 
@@ -346,6 +357,23 @@ pub fn format_guard(when: &Value) -> Option<String> {
     }
 }
 
+/// Mermaid-safe text: labels and the header comment interpolate
+/// runtime-provided strings (state ids, guard fields, run names), so the
+/// characters that would terminate a label or a comment — the edge-label
+/// delimiter `|`, the node-label quote `"`, and line breaks — neutralize
+/// to lookalike glyphs: the copied source stays one valid diagram, never
+/// injected syntax.
+fn mermaid_safe(text: &str) -> String {
+    text.chars()
+        .map(|character| match character {
+            '|' => '¦',
+            '"' => '″',
+            '\n' | '\r' => ' ',
+            other => other,
+        })
+        .collect()
+}
+
 /// The Mermaid source for one run: a `flowchart TD` with the same graph
 /// model as the ASCII diagram, `classDef` styling matching the terminal
 /// diagram's highlighting (`active` bright for the in-flight nodes,
@@ -359,10 +387,12 @@ pub fn format_guard(when: &Value) -> Option<String> {
 #[must_use]
 pub fn mermaid_source(run: &super::FactoryRunSnapshot) -> String {
     let mut lines: Vec<String> = Vec::new();
-    let spec_id = &run.spec_id;
+    let spec_id = mermaid_safe(&run.spec_id);
     let header = match (&run.name, run.state.as_deref()) {
-        (Some(name), Some(state)) => format!("%% factory: {name} — {state}"),
-        (Some(name), None) => format!("%% factory: {name}"),
+        (Some(name), Some(state)) => {
+            format!("%% factory: {} — {state}", mermaid_safe(name))
+        }
+        (Some(name), None) => format!("%% factory: {}", mermaid_safe(name)),
         (None, Some(state)) => format!("%% factory: {spec_id} — {state}"),
         (None, None) => format!("%% factory spec: {spec_id}"),
     };
@@ -372,9 +402,9 @@ pub fn mermaid_source(run: &super::FactoryRunSnapshot) -> String {
     // entry marker).
     for (index, state) in run.states.iter().enumerate() {
         let label = if state.entry {
-            format!("{}*", state.id)
+            format!("{}*", mermaid_safe(&state.id))
         } else {
-            state.id.clone()
+            mermaid_safe(&state.id)
         };
         lines.push(format!("    s{index}[\"{label}\"]"));
     }
@@ -384,8 +414,8 @@ pub fn mermaid_source(run: &super::FactoryRunSnapshot) -> String {
     let mut fired_edges: Vec<usize> = Vec::new();
     for transition in &run.transitions {
         let label = match (&transition.when, transition.from.len() > 1) {
-            (Some(guard), true) => format!("join: {guard}"),
-            (Some(guard), false) => guard.clone(),
+            (Some(guard), true) => format!("join: {}", mermaid_safe(guard)),
+            (Some(guard), false) => mermaid_safe(guard),
             (None, true) => "join".to_string(),
             (None, false) => "settled".to_string(),
         };

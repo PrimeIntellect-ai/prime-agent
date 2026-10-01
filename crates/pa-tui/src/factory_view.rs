@@ -310,7 +310,9 @@ impl FactoryView {
     #[must_use]
     pub fn handle_key(&mut self, key: &str, _kb: &KeybindingsManager) -> FactoryViewAction {
         match key {
-            "esc" | "ctrl+c" => return FactoryViewAction::Close,
+            // `key_event_to_id` reports the Escape key as "escape"; "esc"
+            // stays accepted for the callers that already normalize.
+            "escape" | "esc" | "ctrl+c" => return FactoryViewAction::Close,
             "down" | "j" | "tab" => {
                 if !self.runs.is_empty() {
                     self.selected = (self.selected + 1).min(self.runs.len() - 1);
@@ -394,14 +396,16 @@ impl FactoryView {
         // it the window slides to the selection (a stop/resume target
         // never hides behind the budget); the chrome stays pinned at the
         // end either way.
-        let budget = self.viewport_rows.max(6);
-        let panel_budget = budget.saturating_sub(chrome_rows).max(1);
+        let budget = self.viewport_rows.max(1);
+        let panel_budget = budget.saturating_sub(chrome_rows);
         if panels.len() > panel_budget {
-            let mut start = panels.len() - panel_budget;
+            let mut start = panels.len().saturating_sub(panel_budget);
             if let Some((selected_start, _)) = panel_ranges.get(self.selected) {
                 start = start.min(*selected_start);
             }
-            panels.drain(..start);
+            if start > 0 {
+                panels.drain(..start);
+            }
             panels.truncate(panel_budget);
         }
         let mut rows = panels;
@@ -428,6 +432,11 @@ impl FactoryView {
             ),
         ]);
         let _ = kb;
+        // A degenerate budget (a sub-chrome viewport on a short terminal)
+        // tail-clips: the hint is the chrome's last row and always survives.
+        if rows.len() > budget {
+            rows.drain(..rows.len() - budget);
+        }
         rows.into_iter()
             .map(|row| truncate_line(&row, width, ""))
             .collect()

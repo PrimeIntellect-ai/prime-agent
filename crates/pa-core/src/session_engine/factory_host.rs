@@ -87,25 +87,40 @@ impl FactoryHost {
     /// subagent object's `model`, or a referenced harness subagent entry's
     /// `metadata.model`. `None` when the spec is not readable here (the
     /// kernel's `run()` remains the authority and reports unknown specs).
-    /// The spec resolves local state first, then global — the same tier
-    /// order the kernel harness's unprefixed `get` uses.
+    /// Ids carry the harness's scope prefixes (`local:`/`global:`) verbatim
+    /// — the kernel's harness `get` routes them to one store, so the
+    /// preflight resolves the exact entry the run will execute; an
+    /// unprefixed id resolves local state first, then global (the same
+    /// tier order the harness's unprefixed `get` uses).
     fn spec_model_selectors(&self, spec_id: &str) -> Option<Vec<String>> {
+        let (spec_scope, spec_id) = split_harness_scope(spec_id);
         let global = self.global_harness_state();
         let local = self.local_harness_state();
-        let entry = local
-            .as_ref()
-            .and_then(|state| {
-                state
-                    .entries
-                    .get(&crate::refinement::RefinementKind::Factory)
-                    .and_then(|entries| entries.get(spec_id))
-            })
-            .or_else(|| {
-                global
-                    .entries
-                    .get(&crate::refinement::RefinementKind::Factory)
-                    .and_then(|entries| entries.get(spec_id))
-            })?;
+        let entry = match spec_scope {
+            Scope::Local => local
+                .as_ref()?
+                .entries
+                .get(&crate::refinement::RefinementKind::Factory)
+                .and_then(|entries| entries.get(spec_id)),
+            Scope::Global => global
+                .entries
+                .get(&crate::refinement::RefinementKind::Factory)
+                .and_then(|entries| entries.get(spec_id)),
+            Scope::Any => local
+                .as_ref()
+                .and_then(|state| {
+                    state
+                        .entries
+                        .get(&crate::refinement::RefinementKind::Factory)
+                        .and_then(|entries| entries.get(spec_id))
+                })
+                .or_else(|| {
+                    global
+                        .entries
+                        .get(&crate::refinement::RefinementKind::Factory)
+                        .and_then(|entries| entries.get(spec_id))
+                }),
+        }?;
         let arguments = entry
             .arguments
             .get("machine")
@@ -117,13 +132,23 @@ impl FactoryHost {
             .get("states")
             .or_else(|| argument_object.get("nodes"))?
             .as_array()?;
-        let mut subagents: Vec<crate::refinement::HarnessEntry> = Vec::new();
-        for state in [local.as_ref(), Some(&global)].into_iter().flatten() {
-            if let Some(entries) = state
+        let mut subagents: Vec<(Scope, crate::refinement::HarnessEntry)> = Vec::new();
+        if let Some(local) = &local {
+            if let Some(entries) = local
                 .entries
                 .get(&crate::refinement::RefinementKind::Subagent)
             {
-                subagents.extend(entries.values().cloned());
+                for entry in entries.values() {
+                    subagents.push((Scope::Local, entry.clone()));
+                }
+            }
+        }
+        if let Some(entries) = global
+            .entries
+            .get(&crate::refinement::RefinementKind::Subagent)
+        {
+            for entry in entries.values() {
+                subagents.push((Scope::Global, entry.clone()));
             }
         }
         let mut selectors: Vec<String> = Vec::new();
@@ -141,19 +166,26 @@ impl FactoryHost {
                 // error, not the preflight's (this read stays
                 // best-effort): skip the state, never the whole spec —
                 // one unresolved reference must not exempt the other
-                // states' declared models from the preflight.
+                // states' declared models from the preflight. A scoped
+                // reference (`local:`/`global:`) resolves its own
+                // store's entry, exactly like the kernel's harness get.
                 let Some(reference) = subagent.as_str() else {
                     continue;
                 };
+                let (reference_scope, reference) = split_harness_scope(reference);
+                let allows = |scope: Scope| match reference_scope {
+                    Scope::Any => true,
+                    other => other == scope,
+                };
                 subagents
                     .iter()
-                    .find(|candidate| candidate.id == reference)
+                    .find(|(scope, candidate)| allows(*scope) && candidate.id == reference)
                     .or_else(|| {
-                        subagents
-                            .iter()
-                            .find(|candidate| candidate.title == reference)
+                        subagents.iter().find(|(scope, candidate)| {
+                            allows(*scope) && candidate.title == reference
+                        })
                     })
-                    .and_then(|entry| entry.metadata.get("model"))
+                    .and_then(|(_, entry)| entry.metadata.get("model"))
                     .and_then(Value::as_str)
             };
             if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
@@ -306,6 +338,33 @@ fn unavailable_error(reference: &str) -> anyhow::Error {
     anyhow!(
         "Requested factory model \"{reference}\" is unavailable, unauthenticated, or expired; selectors use the form \"provider/model-id\" (e.g. \"prime-inference/internal/glm-5.3-fast\")"
     )
+}
+
+/// One harness store a scoped id routes to (`local:`/`global:` prefixes;
+/// unprefixed ids resolve either, local first).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    Any,
+    Local,
+    Global,
+}
+
+/// Split the harness's scope prefix off an id, mirroring the kernel
+/// harness's `_strip_scope_prefix`: `local:x`/`global:x` route to one
+/// store (`x` must be non-empty, or the prefix stays part of the id),
+/// anything else is unprefixed.
+fn split_harness_scope(id: &str) -> (Scope, &str) {
+    if let Some(rest) = id.strip_prefix("local:") {
+        if !rest.is_empty() {
+            return (Scope::Local, rest);
+        }
+    }
+    if let Some(rest) = id.strip_prefix("global:") {
+        if !rest.is_empty() {
+            return (Scope::Global, rest);
+        }
+    }
+    (Scope::Any, id)
 }
 
 /// The out-of-band request the bridge sends into the kernel, validated

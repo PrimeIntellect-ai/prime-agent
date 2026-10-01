@@ -509,6 +509,11 @@ impl SessionUi {
         match dock_fold {
             DockFold::FirstFrame | DockFold::Fresh => {
                 self.bash_activities = serde_json::json!({"activities": []});
+                // The factory lane's cache dies with the previous
+                // session too: the dock count and the page mount must
+                // never show another session's runs (the 2s poll
+                // refills; the spawn below asks for the first frame).
+                self.factory_graph = serde_json::json!({"runs": []});
             }
             // The held dock keeps its registry for the same reason it
             // keeps the heartbeat catalog above.
@@ -519,6 +524,10 @@ impl SessionUi {
             DockFold::FirstFrame => self.fetch_bash_activities().await,
             DockFold::Fresh | DockFold::Held => self.spawn_bash_activity_refresh(),
         }
+        // The refilled factory cache is a background refresh away on
+        // every fold (the poll's serialization makes an immediate
+        // request safe — the in-flight slot frees on its own cycle).
+        self.spawn_factory_refresh();
         self.pending_model = reconstructed.model_id;
         self.pending_model_provider = reconstructed.model_provider;
         self.pending_thinking_suffix = reconstructed.thinking_suffix;
@@ -643,6 +652,10 @@ impl SessionUi {
                 self.factory_view_open_flag = false;
                 self.factory_selected_run = None;
                 self.factory_view_session = None;
+                // The cache dies with the mounted view: the dock count and
+                // the next open must never show the previous session's
+                // runs (the always-on poll refills it).
+                self.factory_graph = serde_json::json!({"runs": []});
             }
             // The goal panel dies with the old session too: it is a
             // snapshot of the previous session's goal state, and until

@@ -32,6 +32,7 @@ import copy
 import hashlib
 import heapq
 import json
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -1439,8 +1440,19 @@ class FactoryExecutor:
             if event.get("kind") != "transition_fired":
                 continue
             from_field = event.get("from")
-            edge = {"from": from_field, "to": event.get("to"), "seq": event.get("seq")}
-            latest[f"{json.dumps(from_field, sort_keys=True)}->{event.get('to')}"] = edge
+            # The guard rides the edge's identity: two guarded transitions
+            # may share one from+to pair, and the diagram's fired marking
+            # needs the one that actually fired (the event's ``when``).
+            edge = {
+                "from": from_field,
+                "to": event.get("to"),
+                "seq": event.get("seq"),
+                "when": event.get("when"),
+            }
+            latest[
+                f"{json.dumps(from_field, sort_keys=True)}->{event.get('to')}"
+                f"@{json.dumps(event.get('when'), sort_keys=True, default=str)}"
+            ] = edge
         ordered = sorted(latest.values(), key=lambda edge: edge["seq"], reverse=True)
         return ordered[:LAST_FIRED_WINDOW]
 
@@ -1597,7 +1609,11 @@ class FactoryExecutor:
         import asyncio
 
         run = self._require_run(run_id)
-        if not _is_number(timeout):
+        # NaN passes every arithmetic check (every comparison is false), so
+        # it must be rejected by identity: a NaN deadline would reach
+        # asyncio.sleep, which raises instead of returning the bounded
+        # snapshot (a NaN timeout is not a number here).
+        if not _is_number(timeout) or math.isnan(float(timeout)):
             raise ValueError("timeout must be a non-negative number of seconds")
         if timeout < 0:
             raise ValueError("timeout must be a non-negative number of seconds")
@@ -1958,11 +1974,19 @@ class FactoryExecutor:
                 if join_signature is not None:
                     run.join_fired[join_signature[0]] = join_signature[1]
                 run.transitions_fired += 1
+                # The guard rides the fired event (and the ``last_fired``
+                # edge the graph overlay reads): two guarded transitions may
+                # share one from+to pair, so the guard is the only identity
+                # that tells the diagram WHICH of them fired.
+                when = transition.get("when")
+                fired_fields: dict[str, Any] = {"from": from_field, "to": target.state_id}
+                if when is not None:
+                    fired_fields["when"] = copy.deepcopy(when)
                 self._event(
                     run,
                     "transition_fired",
                     detail=f"{from_field!r} -> {target.state_id!r}",
-                    **{"from": from_field, "to": target.state_id},
+                    **fired_fields,
                 )
                 self._enter_state(run, target, from_state=state_id)
 
@@ -2982,8 +3006,14 @@ async def _run_activity(request: dict[str, Any]) -> None:
         result = await default_factory_executor().activity(request)
     except Exception as exc:  # noqa: BLE001 - the reply lane must never hang
         # An internal executor error still answers: a dropped reply would
-        # leave the host waiter on its timeout instead of the reason.
-        _send({"event": "done", "id": rid, "status": "error", "reason": str(exc)})
+        # leave the host waiter on its timeout instead of the reason. The
+        # error frame rides the same wire cap as the success frame — a
+        # multi-megabyte reason (an unknown id carrying a huge value) must
+        # never exceed the transport bound; the cap's fallback replaces it
+        # with the loud wire-cap message when it cannot fit.
+        frame: dict[str, Any] = {"event": "done", "id": rid, "status": "error", "reason": str(exc)}
+        _cap_factory_frame(frame)
+        _send(frame)
         return
     frame: dict[str, Any] = {"event": "done", "id": rid, "status": "ok", "result": result}
     _cap_factory_frame(frame)

@@ -40,6 +40,7 @@ races) plus the accepted review findings from both:
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import unittest
 from pathlib import Path
@@ -3761,6 +3762,21 @@ class FactoryExecutorTest(unittest.TestCase):
         self.assertEqual(right["status"], "pending")
         self.assertEqual(self.host.spawn_calls("right"), [])
         self.assertEqual(status["usage"]["transitions_fired"], 1)
+        # The fired event and the last_fired edge carry the guard that
+        # fired: two guarded transitions may share one from+to pair, so
+        # the guard is the identity the diagram's fired marking reads.
+        fired = self.all_events_of(result, "transition_fired")
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(
+            fired[0]["when"],
+            {"output": "pick", "path": "choice", "op": "eq", "value": "left"},
+        )
+        graph = await rlm_module.rlm.factory.graph(result["run_id"])
+        self.assertEqual(len(graph["last_fired"]), 1)
+        self.assertEqual(
+            graph["last_fired"][0]["when"],
+            {"output": "pick", "path": "choice", "op": "eq", "value": "left"},
+        )
 
     @async_test
     async def test_machine_fan_out_from_one_settle_fires_all(self) -> None:
@@ -4743,6 +4759,12 @@ class FactoryGraphWatchTest(unittest.TestCase):
             await rlm_module.rlm.factory.watch(result["run_id"], -1)
         with self.assertRaisesRegex(ValueError, "timeout must be a non-negative number"):
             await rlm_module.rlm.factory.watch(result["run_id"], "soon")
+        # NaN passes every comparison (the arithmetic checks never trip),
+        # so it must be rejected by identity: a NaN deadline would reach
+        # asyncio.sleep, which raises instead of returning the bounded
+        # snapshot.
+        with self.assertRaisesRegex(ValueError, "timeout must be a non-negative number"):
+            await rlm_module.rlm.factory.watch(result["run_id"], float("nan"))
 
     # -- the host bridge's activity handler ------------------------------------
 
@@ -4850,6 +4872,40 @@ class FactoryGraphWatchTest(unittest.TestCase):
         self.assertNotIn("runId", graph)
 
     @async_test
+    async def test_run_activity_caps_the_error_reply(self) -> None:
+        # The error lane's reply rides the same wire cap as the success
+        # lane: a validation error joining thousands of rows (a stored spec
+        # corrupted the way a hand-edited store would be) must never
+        # exceed the transport bound — the cap's fallback names the wire
+        # cap (the mutation check: an uncapped error frame would carry
+        # the multi-hundred-kilobyte reason raw).
+        self.harness.create_factory(
+            "Good", "content", id="big-spec", machine=valid_machine()
+        )
+        entry = self.harness.get("factory", "big-spec")
+        entry.arguments["machine"] = {
+            "run": {"failure_policy": "continue"},
+            "states": [{"id": "a", "entry": True, "subagent": "worker"}],
+            "transitions": [{"from": "a", "to": f"missing{i}"} for i in range(6_000)],
+        }
+        sent: list[dict[str, Any]] = []
+        patcher = patch("rlm.repl._send", sent.append)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        await factory_module._run_activity(
+            {"id": "big", "action": "run", "specId": "big-spec"}
+        )
+        self.assertEqual(len(sent), 1)
+        frame = sent[0]
+        self.assertEqual(frame["status"], "error")
+        self.assertLess(
+            len(json.dumps(frame)),
+            factory_module.FACTORY_FRAME_CAP,
+            "the error reply stays under the wire cap",
+        )
+        self.assertIn("wire cap", frame["reason"])
+
+    @async_test
     async def test_activity_validates_its_request_shape(self) -> None:
         for bad in (
             {"action": "bogus"},
@@ -4878,6 +4934,20 @@ class FactoryGraphWatchTest(unittest.TestCase):
 class FactoryFrameCapTest(unittest.TestCase):
     """The reply frame's wire cap: the events tail trims first, the all-runs
     reply drops its oldest runs, and a frame that cannot fit fails loudly."""
+
+    def test_an_oversized_error_frame_fails_loudly(self) -> None:
+        # The error lane rides the same wire cap: a multi-megabyte reason
+        # (an unknown id carrying a huge value) never exceeds the
+        # transport bound; the cap's fallback names the wire cap, and a
+        # small reason passes through untouched.
+        huge_reason = "unknown factory run '" + "x" * 300_000 + "'"
+        frame = {"event": "done", "id": "r", "status": "error", "reason": huge_reason}
+        factory_module._cap_factory_frame(frame)
+        self.assertLess(len(frame["reason"]), 10_000)
+        self.assertIn("wire cap", frame["reason"])
+        small = {"event": "done", "id": "r", "status": "error", "reason": "boom"}
+        factory_module._cap_factory_frame(small)
+        self.assertEqual(small["reason"], "boom")
 
     def test_an_oversized_reply_is_trimmed_then_failed(self) -> None:
         events = [

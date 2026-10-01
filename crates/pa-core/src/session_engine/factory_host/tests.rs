@@ -286,6 +286,58 @@ fn an_unknown_reference_skips_only_its_own_state() {
     bridge.preflight_run("allghost").unwrap();
 }
 
+/// Scoped ids (`local:`/`global:`) resolve their own store, exactly like
+/// the kernel harness's `_strip_scope_prefix`: a scoped run preflights
+/// against the exact entry it will execute (the mutation check: raw-map
+/// lookups miss scoped ids entirely, so a scoped run would skip the
+/// whole preflight).
+#[test]
+fn scoped_ids_preflight_their_own_store() {
+    let dir = tempfile::tempdir().unwrap();
+    write_catalog(dir.path());
+    write_harness_state(
+        dir.path(),
+        &[
+            harness_entry("researcher", RefinementKind::Subagent, &json!({})),
+            machine_entry("global-scoped", &inline_machine("missingprov/model-x")),
+            machine_entry(
+                "byref-scoped",
+                &json!({
+                    "states": [
+                        { "id": "a", "entry": true, "subagent": "global:researcher" }
+                    ]
+                }),
+            ),
+        ],
+        &[machine_entry(
+            "local-scoped",
+            &inline_machine("testprov/other-model"),
+        )],
+    );
+    let bridge = host(dir.path(), None, None, true);
+    // The global-scoped id preflights the GLOBAL spec's declared model.
+    let error = bridge
+        .preflight_run("global:global-scoped")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.starts_with("Requested factory model \"missingprov/model-x\" is unavailable"),
+        "{error}"
+    );
+    // The local-scoped id resolves the LOCAL store's spec.
+    assert_eq!(
+        bridge.spec_model_selectors("local:local-scoped").unwrap(),
+        vec!["testprov/other-model".to_string()]
+    );
+    bridge.preflight_run("local:local-scoped").unwrap();
+    // A scoped subagent reference resolves its own store's entry.
+    assert_eq!(
+        bridge.spec_model_selectors("byref-scoped").unwrap(),
+        vec!["testprov/declared-model".to_string()],
+        "the global: reference resolves the global researcher entry"
+    );
+}
+
 /// The `run` preflight: a declared model resolves through the catalog
 /// (exact form and the TS short form) and passes with request auth.
 #[test]

@@ -328,6 +328,71 @@ fn a_reply_without_the_runs_list_is_malformed_not_empty() {
     );
 }
 
+/// The fired-edge identity includes the guard: two transitions may share
+/// one from+to pair with different guards, so the fired marking must
+/// light only the one that fired (the mutation check: matching on
+/// from+to alone cross-marks the sibling).
+#[test]
+fn the_fired_edge_identity_includes_the_guard() {
+    let mut snapshot = scripted_snapshot();
+    snapshot["machine"]["transitions"] = json!([
+        { "from": "collect", "to": "reviewing", "on": "settled" },
+        { "from": "reviewing", "to": "fixing", "on": "settled",
+          "when": { "output": "verdict", "path": "approved", "op": "eq", "value": false } },
+        { "from": "reviewing", "to": "fixing", "on": "settled",
+          "when": { "output": "verdict", "path": "approved", "op": "eq", "value": true } }
+    ]);
+    // Only the first guard fired; the edge carries its guard.
+    snapshot["lastFired"] = json!([
+        { "from": "reviewing", "to": "fixing", "seq": 9,
+          "when": { "output": "verdict", "path": "approved", "op": "eq", "value": false } }
+    ]);
+    let runs = parse_factory_runs(&runs_response(&snapshot));
+    let source = diagram::mermaid_source(&runs[0]);
+    assert!(
+        source.contains("linkStyle 1 stroke:#16a34a"),
+        "the fired guard's edge carries the fired mark: {source}"
+    );
+    assert!(
+        !source.contains("linkStyle 2"),
+        "the sibling guard with the same from+to never cross-marks: {source}"
+    );
+}
+
+/// The Mermaid source stays one valid diagram when runtime text carries
+/// Mermaid syntax characters: a guard whose value contains the
+/// edge-label delimiter `|`, a run name with a newline, and a state id
+/// with the node-label quote (the mutation check: unsanitized
+/// interpolation breaks the labels).
+#[test]
+fn the_mermaid_source_neutralizes_label_breaking_text() {
+    let mut snapshot = scripted_snapshot();
+    snapshot["name"] = json!("run\nname");
+    // An unreferenced state carries the node-label quote.
+    snapshot["machine"]["states"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({ "id": "qu\"ote", "entry": false, "lifecycle": "task", "maxEntries": 1 }));
+    snapshot["machine"]["transitions"][0]["when"] = json!({
+        "output": "verdict", "op": "eq", "value": "x|y"
+    });
+    let runs = parse_factory_runs(&runs_response(&snapshot));
+    let source = diagram::mermaid_source(&runs[0]);
+    let first_line = source.lines().next().unwrap_or_default();
+    assert!(
+        first_line.starts_with("%% factory: run name"),
+        "the header comment collapses newlines: {source}"
+    );
+    assert!(
+        source.contains("x¦y"),
+        "the pipe inside the guard neutralizes: {source}"
+    );
+    assert!(
+        source.contains("qu″ote"),
+        "the quote inside the state id neutralizes: {source}"
+    );
+}
+
 /// The empty state and the key hint.
 #[test]
 fn the_empty_state_names_the_surface() {
@@ -362,6 +427,14 @@ fn the_key_loop_resolves_the_orchestration_actions() {
         }
         other => panic!("expected CopyMermaid, got {other:?}"),
     }
+    // The real key id for the Escape key is "escape" (`key_event_to_id`)
+    // — the page must close on it (the mutation check: matching only
+    // "esc" strands the Escape key).
+    assert_eq!(
+        view.handle_key("escape", &kb()),
+        FactoryViewAction::Close,
+        "the Escape key closes the page"
+    );
     assert_eq!(view.handle_key("esc", &kb()), FactoryViewAction::Close);
     // A paused run offers resume.
     let mut paused = parse_factory_runs(&runs_response(&scripted_snapshot()));
@@ -444,6 +517,31 @@ fn multiple_runs_keep_the_selection_on_the_same_run() {
     assert_eq!(
         view.selected_run().map(|run| run.run_id.clone()),
         Some("run-def67890".to_string())
+    );
+}
+
+/// The degenerate budget (a sub-chrome viewport on a short terminal):
+/// the render still never exceeds what the viewport asked for, and the
+/// tail-clip keeps the hint (the chrome's last row) — a 1-row viewport
+/// shows the hint, never six rows (the mutation check: the old
+/// `.max(6)` floor overflowed the dock on short terminals).
+#[test]
+fn the_degenerate_budget_still_honors_the_viewport() {
+    let mut one_row = FactoryView::new(parse_factory_runs(&runs_response(&scripted_snapshot())), 1);
+    let rows = frame_text(&mut one_row);
+    assert_eq!(rows.len(), 1, "a 1-row viewport renders exactly one row");
+    assert!(
+        rows[0].contains("copy mermaid"),
+        "the tail-clip keeps the hint: {:?}",
+        rows[0]
+    );
+    let mut two_rows = FactoryView::new(parse_factory_runs(&two_run_response()), 2);
+    let rows = frame_text(&mut two_rows);
+    assert_eq!(rows.len(), 2, "a 2-row viewport renders exactly two rows");
+    assert!(
+        rows[1].contains("close"),
+        "the hint is the last row: {:?}",
+        rows[1]
     );
 }
 
