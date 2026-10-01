@@ -30,19 +30,17 @@ pub(super) const WORKER_CONNECT_PROBE_MS: u64 = 2_000;
 /// Pause between probe attempts. TS `WORKER_PROBE_BACKOFF_MIN_MS` (25ms)
 /// doubles per retry up to `WORKER_PROBE_BACKOFF_MAX_MS` (win32 2s, unix
 /// 25 - TS's min equals its max there, so the doubling is a flat grid).
-/// The boot-floor lane first tightened the unix pause to 5ms (a session
-/// worker binds its socket ~1-3ms after the fork, measured cold-open
-/// boot floor at 7064d039a, record 20260926-194800; the 25ms grid
-/// quantized every spawn by 0-25ms mean ~12.5ms of pure wait). This lane
-/// tightens it further to 1ms: the 5ms grid still quantized each cold
-/// spawn by 0-5ms (mean ~2.5ms) of pure wait on a floor of microseconds
-/// (probe-grid lane record at the 2026-10-01 tip), and a flat 1ms
-/// poll catches the ~1-3ms bind window at <=1ms overshoot for the cost
-/// of ~2-4 failed connects per spawn (each ~us). Windows doubles
-/// exactly like TS (a flat 2s first retry would sleep through the
-/// sub-second boots the doubling exists to catch). Timing-only: the
-/// probe, the connect budget, the auth floor, and the launch-failure
-/// error are unchanged.
+/// Unix keeps a flat pause (the doubling adds nothing when min==max) at
+/// 1ms: a session worker binds its socket ~1-3ms after the fork, the
+/// probe loop starts once the descriptor's durable persist has landed,
+/// and the pause quantizes the bind only in the windows where that
+/// persist finishes before the worker binds - a 1ms pause caps the
+/// overshoot at <=1ms for the cost of ~2-4 failed connects per spawn
+/// (each ~us). Windows doubles exactly like TS (a flat 2s first retry
+/// would sleep through the sub-second boots the doubling exists to
+/// catch). Overshoot tables: probe-grid record 20261001-034500 on the
+/// bench repo. Timing-only: the probe, the connect budget, the auth
+/// floor, and the launch-failure error are unchanged.
 #[cfg(unix)]
 pub(super) const WORKER_CONNECT_BACKOFF_MS: u64 = 1;
 /// TS `WORKER_PROBE_BACKOFF_MIN_MS`: the first retry pause.
