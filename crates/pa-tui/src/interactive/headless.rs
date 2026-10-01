@@ -25,6 +25,18 @@ pub struct HeadlessPlan {
 pub enum HeadlessStep {
     /// Submit text (the same editor submit path as a user typing it).
     Submit(String),
+    /// Submit `text` as a `prompt_and_wait` and hold until this run has
+    /// processed every event the turn emitted (bounded by `timeout_ms`):
+    /// the daemon answers the wait only at the turn's full settle (after
+    /// its queue-projection update), `get_rlm_children` then reports the
+    /// session's final event sequence, and the barrier releases once the
+    /// run's live tracker reaches it. The supervisor races its response
+    /// and event queues in one select, so the barrier compares sequence
+    /// values instead of trusting arrival order. The run is parked while
+    /// the turn runs (the loop neither paints nor drains events during
+    /// the submit); use `Submit` to observe mid-turn frames. `Submit`
+    /// stays the composer path.
+    SubmitAndSettle { text: String, timeout_ms: u64 },
     /// Type text character by character (raw editor input, so autocomplete
     /// and editor state react exactly as to a keystroke).
     Type(String),

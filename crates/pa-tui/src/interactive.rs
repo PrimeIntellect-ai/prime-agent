@@ -525,6 +525,11 @@ enum UiInput {
     /// the source).
     Mouse(crate::mouse::MouseEvent),
     Submit(String),
+    /// The headless `SubmitAndSettle` step (see [`HeadlessStep`]).
+    SubmitAndSettle {
+        text: String,
+        timeout_ms: u64,
+    },
     /// One materialized input-idle tick (the headless `SettleIdle` step).
     SettleIdle,
     WaitIdle {
