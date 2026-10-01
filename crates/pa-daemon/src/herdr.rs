@@ -762,6 +762,8 @@ fn probe_effective_uid(dir: &std::path::Path) -> Option<u32> {
 }
 
 /// The fence's verdict for one send.
+// Only `Accepted` is constructed on Windows (named pipes keep their
+// connect-time ACL model; the fence is unix-only).
 #[cfg_attr(windows, allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FenceVerdict {
@@ -1613,22 +1615,45 @@ mod tests {
         reporter.session_started(false, HerdrSessionRef::new(None, Some("s13".to_string())));
         reporter.run_started();
         reporter.run_ended(None, false);
-        tokio::time::sleep(Duration::from_millis(150)).await;
 
         // Herdr boots: the socket appears at exactly that path.
         let (requests, server) = fake_herdr(&socket_path);
 
-        // The next turn re-sends the SAME states: the run start's
-        // working must reach the wire even though an identical working
-        // never did while the socket was down (the old queue-time
-        // `last_state` marking would dedup it away forever).
+        // The next turn re-sends the SAME states — and then blocks: an
+        // error end produces `blocked`, a state the clean down-phase
+        // turn can never deliver, and the frame the retry grace settles
+        // is the RE-SENT `working` (the run start's working that never
+        // reached the wire while the socket was down). The old
+        // queue-time `last_state` marking deduped that working away
+        // forever, so nothing but the grace's `blocked` would land. No
+        // fixed sleep orders the phases: the reporter task is
+        // sequential, so whether the down-phase's refused sends drained
+        // before or after the listener bound, the assertion keys on the
+        // observed `blocked` and its predecessor only.
         reporter.run_started();
-        wait_for_requests(&requests, 1).await;
-        reporter.run_ended(None, false);
-        wait_for_requests(&requests, 2).await;
-        let states = states_of(&requests);
-        assert_eq!(states, ["working", "idle"], "the re-sent turn: {states:?}");
-        server.abort();
+        reporter.run_ended(Some("late provider failure".to_string()), false);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let states = states_of(&requests);
+            if let Some(blocked_at) = states.iter().position(|state| state == "blocked") {
+                assert!(
+                    blocked_at > 0 && states[blocked_at - 1] == "working",
+                    "the re-sent working never preceded the block: {states:?}"
+                );
+                let blocked = requests.lock().unwrap()[blocked_at].clone();
+                assert_eq!(
+                    blocked["params"]["message"], "late provider failure",
+                    "the block carries the error: {states:?}"
+                );
+                server.abort();
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the re-sent turn never settled blocked: {states:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     /// Concurrent seq minting never duplicates: the first-seed race's
