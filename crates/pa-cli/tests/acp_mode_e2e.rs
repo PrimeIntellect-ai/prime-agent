@@ -2164,3 +2164,87 @@ fn acp_eof_during_settle_exits_and_leaves_resident_subagents() {
         "EOF left the resident child running: {children:?}"
     );
 }
+
+/// A heartbeat change on the bound session broadcasts
+/// `heartbeats_changed` to every client; the ACP link publishes the
+/// change at origin turn 0 (connection-scoped like TS, never the active
+/// prompt turn).
+#[test]
+fn acp_heartbeat_change_publishes_turn_zero_meta() {
+    let mut client = AcpChild::spawn(
+        &["--mode", "acp"],
+        &json!({ "engine": "faux", "responses": ["The Nile."] }),
+    );
+    let socket = client.socket.clone();
+    let _session_id = initialize_and_new_session(&mut client);
+    let active_session_id = live_sessions(&socket)[0]["activeSessionId"].clone();
+    let set = daemon_request(
+        &socket,
+        "heartbeat-set",
+        &json!({
+            "type": "heartbeat_set",
+            "activeSessionId": active_session_id,
+            "schedule": "every 90 seconds",
+            "prompt": "check in",
+        }),
+    );
+    assert_eq!(set["success"], true, "{set}");
+    let change = client.wait_frame(TIMEOUT, |frame| {
+        update_meta(frame)["heartbeatsChanged"] == json!(true)
+    });
+    assert_eq!(update_meta(&change)["promptTurnId"], 0, "{change}");
+    assert_eq!(update_meta(&change)["phase"], "event", "{change}");
+}
+
+/// A bash run another client started on the bound session (the daemon's
+/// `execute_bash`) surfaces as one synthetic tool call keyed by run id:
+/// the started run, the streamed chunk, and the settled status.
+#[test]
+fn acp_user_bash_maps_to_a_synthetic_tool_call() {
+    let mut client = AcpChild::spawn(
+        &["--mode", "acp"],
+        &json!({ "engine": "faux", "responses": ["The Nile."] }),
+    );
+    let socket = client.socket.clone();
+    let _session_id = initialize_and_new_session(&mut client);
+    let active_session_id = live_sessions(&socket)[0]["activeSessionId"].clone();
+    let run = daemon_request(
+        &socket,
+        "bash",
+        &json!({
+            "type": "execute_bash",
+            "activeSessionId": active_session_id,
+            "command": "printf hi",
+            "runId": "r1",
+        }),
+    );
+    assert_eq!(run["success"], true, "{run}");
+    let start = client.wait_frame(TIMEOUT, |frame| {
+        frame["params"]["update"]["sessionUpdate"] == "tool_call"
+    });
+    assert_eq!(
+        start["params"]["update"]["toolCallId"],
+        "prime-agent-bash-r1"
+    );
+    assert_eq!(start["params"]["update"]["title"], "printf hi");
+    assert_eq!(start["params"]["update"]["kind"], "execute");
+    assert_eq!(
+        start["params"]["update"]["rawInput"],
+        json!({ "command": "printf hi" })
+    );
+    let output = client.wait_frame(TIMEOUT, |frame| {
+        frame["params"]["update"]["sessionUpdate"] == "tool_call_update"
+            && frame["params"]["update"]["toolCallId"] == "prime-agent-bash-r1"
+            && frame["params"]["update"]["status"] == "in_progress"
+    });
+    assert_eq!(
+        output["params"]["update"]["content"][0]["content"]["text"], "hi",
+        "{output}"
+    );
+    let end = client.wait_frame(TIMEOUT, |frame| {
+        frame["params"]["update"]["sessionUpdate"] == "tool_call_update"
+            && frame["params"]["update"]["toolCallId"] == "prime-agent-bash-r1"
+            && frame["params"]["update"]["status"] == "completed"
+    });
+    assert!(end["params"]["update"].get("content").is_none(), "{end}");
+}

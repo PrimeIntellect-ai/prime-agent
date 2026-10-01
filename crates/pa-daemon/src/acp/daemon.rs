@@ -49,6 +49,9 @@ const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 enum LinkFrame {
     Event(Value),
     Response(DaemonResponse),
+    /// The daemon-global heartbeat-catalog broadcast the supervisor
+    /// re-broadcasts to every client (`heartbeats_changed`).
+    HeartbeatsChanged,
 }
 
 /// A client connection to the supervisor socket: JSONL command envelopes
@@ -130,6 +133,9 @@ impl DaemonLink {
                     }
                     "session_event" => {
                         let _ = frame_tx.send(LinkFrame::Event(value));
+                    }
+                    "heartbeats_changed" => {
+                        let _ = frame_tx.send(LinkFrame::HeartbeatsChanged);
                     }
                     _ => {}
                 }
@@ -418,6 +424,29 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
                         let id = response.id.clone().unwrap_or_default();
                         if let Some(tx) = link.pending.lock().unwrap().remove(&id) {
                             let _ = tx.send(response);
+                        }
+                    }
+                    // Heartbeats are connection-scoped, not session events,
+                    // so the consumer maps the broadcast directly instead of
+                    // `wire_updates`: TS publishes the change at origin turn 0
+                    // even while a prompt runs.
+                    LinkFrame::HeartbeatsChanged => {
+                        let guard = state.lock().await;
+                        if let Some(current) = guard.session.as_ref() {
+                            let _ = current
+                                .producer
+                                .publish(
+                                    &types::AcpSessionUpdate::SessionInfoUpdate {
+                                        meta: meta::prime_agent_meta(&PrimeAgentSessionMeta {
+                                            heartbeats_changed: Some(true),
+                                            ..Default::default()
+                                        }),
+                                    },
+                                    0,
+                                    PrimeAgentEventPhase::Event,
+                                    None,
+                                )
+                                .await;
                         }
                     }
                 }
