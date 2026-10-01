@@ -20,17 +20,22 @@ impl Worker {
         // concurrent create joins this open and answers with the created
         // summary below instead of racing a second initialization.
         let _create_gate = self.create_gate.lock().await;
-        {
+        let existing_summary = {
             let core = self.core.lock().unwrap();
-            if core.created {
-                // Idempotent re-create after a supervisor restart or respawn.
-                let summary = self.summary_locked(&core);
-                return response_success(
-                    None,
-                    "create",
-                    Some(serde_json::to_value(&summary).unwrap_or(Value::Null)),
-                );
-            }
+            core.created.then(|| self.summary_locked(&core))
+        };
+        if let Some(summary) = existing_summary {
+            // Idempotent re-create after a supervisor restart or respawn.
+            // A respawned worker's re-create re-binds the pane reporter
+            // (the session may carry a fresh client env on the payload)
+            // and re-reports: a supervisor restart must not leave the
+            // pane holding a stale pre-restart state.
+            self.rebind_herdr_reporter(payload);
+            return response_success(
+                None,
+                "create",
+                Some(serde_json::to_value(&summary).unwrap_or(Value::Null)),
+            );
         }
         let session_path = match payload.get("sessionPath").and_then(Value::as_str) {
             Some(path) => match paths::expand_tilde(path) {
@@ -621,6 +626,15 @@ impl Worker {
             core.child_script.clone_from(&child_script);
             (self.summary_locked(&core), rlm_depth)
         };
+        // The built-in Herdr connector binds here, per session: the pane
+        // identity comes from the create payload's client env (the client
+        // that owns the pane sent it), never from this process's ambient
+        // environment — so sessions created in other panes report their
+        // own panes regardless of where the supervisor booted (the TS
+        // boot-context bug class, not reproduced). RLM subagents never
+        // report: they share the parent's pane, and a child's turn or
+        // quit must not flip or release it.
+        self.rebind_herdr_reporter(payload);
         // TS `sdk.ts` seeds the Agent's queue modes from the settings
         // manager at session create (`steeringMode`/`followUpMode`): the
         // engine's agent-level queues drain per the same modes the worker
@@ -713,6 +727,43 @@ impl Worker {
         // does not stay resident.
         pa_types::memory_release::trim_freed_heap();
         response_success(None, "create", Some(data))
+    }
+
+    /// (Re)bind the pane reporter from the create payload (the TS
+    /// `session_start` hook): resolve the client env the create carried,
+    /// start the reporter for this session's Herdr pane when the session
+    /// runs in one, and force-publish the current state with this
+    /// session's reference. The previous reporter (a replaced session's,
+    /// or a respawn's) is dropped here — its task goes silent without a
+    /// release, exactly like the TS replacement arm, so it cannot race
+    /// this session's reports on the pane.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a poisoned session-core mutex (a holder panicked while
+    /// holding it — the worker's standing convention).
+    pub(super) fn rebind_herdr_reporter(&self, payload: &Value) {
+        let client_env: std::collections::BTreeMap<String, String> = payload
+            .get("env")
+            .cloned()
+            .and_then(|env| serde_json::from_value(env).ok())
+            .map(|env| crate::herdr::filter_client_env(&env))
+            .unwrap_or_default();
+        let (active, session_ref, rlm_depth) = {
+            let core = self.core.lock().unwrap();
+            (core.busy, Worker::herdr_session_ref(&core), core.rlm_depth)
+        };
+        let reporter = match crate::herdr::HerdrConfig::from_env(&client_env) {
+            Some(config) if rlm_depth == 0 => {
+                crate::herdr::HerdrReporter::start(config, session_ref.clone())
+            }
+            // Not inside a Herdr pane (the no-op reporter), or an RLM
+            // subagent: subagents share the parent's pane, so their runs
+            // must not flip it and their quits must not release it.
+            _ => crate::herdr::HerdrReporter::default(),
+        };
+        reporter.session_started(active, session_ref);
+        *self.herdr.lock().unwrap() = reporter;
     }
 }
 

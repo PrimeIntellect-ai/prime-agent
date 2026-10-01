@@ -899,6 +899,38 @@ impl Worker {
             "id": client_id,
             "capabilities": echoed_client_capabilities.unwrap_or(capabilities),
         });
+        // Client-env adoption (TS `adoptClientEnv`): a pane opening an
+        // env-less session (e.g. cron-created) hands its Herdr identity
+        // to the reporter — adopt-if-absent, never overwrite: a session
+        // that already reports for its creating pane keeps it, so
+        // watchers must not send env at all (the client contract) and a
+        // second pane cannot steal the identity mid-session.
+        {
+            let client_env: std::collections::BTreeMap<String, String> = payload
+                .get("env")
+                .cloned()
+                .and_then(|env| serde_json::from_value(env).ok())
+                .map(|env| crate::herdr::filter_client_env(&env))
+                .unwrap_or_default();
+            if let Some(config) = crate::herdr::HerdrConfig::from_env(&client_env) {
+                let adopt = {
+                    let reporter = self.herdr.lock().unwrap();
+                    !reporter.enabled()
+                };
+                if adopt {
+                    let (active, session_ref, rlm_depth) = {
+                        let core = self.core.lock().unwrap();
+                        (core.busy, Worker::herdr_session_ref(&core), core.rlm_depth)
+                    };
+                    if rlm_depth == 0 {
+                        let reporter =
+                            crate::herdr::HerdrReporter::start(config, session_ref.clone());
+                        reporter.session_started(active, session_ref);
+                        *self.herdr.lock().unwrap() = reporter;
+                    }
+                }
+            }
+        }
 
         response_success(None, "attach", Some(result))
     }

@@ -33,6 +33,10 @@ pub(super) struct TurnRunner {
     /// The worker config slice the idle passivation needs (agent dir,
     /// supervisor link coordinates).
     pub(super) passivation: PassivationContext,
+    /// The shared pane-reporter slot (the Worker's `herdr` field): the
+    /// runner reads it at every boundary so a create-time rebind is always
+    /// current.
+    pub(super) herdr: std::sync::Arc<std::sync::Mutex<crate::herdr::HerdrReporter>>,
 }
 
 /// The idle-passivation context on the turn runner: the settings source
@@ -417,6 +421,8 @@ impl TurnRunner {
         }
         self.emit_turn_event(json!({ "type": "agent_start" }));
         self.emit_turn_event(json!({ "type": "turn_start" }));
+        // The pane reporter's run boundary (TS `agent_start`): working.
+        self.herdr.lock().unwrap().run_started();
 
         let prompt_index = {
             let core = self.core.lock().unwrap();
@@ -467,6 +473,7 @@ impl TurnRunner {
         let core = Arc::clone(&self.core);
         let events = self.events.clone();
         let turn_coalescer = Arc::clone(&coalescer);
+        let herdr = std::sync::Arc::clone(&self.herdr);
         let agent_dir = crate::paths::agent_dir().unwrap_or_default();
         // The settle tail's background compact-trigger servicing owns its
         // own engine clone (the turn closure below moves the shadowing
@@ -640,6 +647,31 @@ impl TurnRunner {
                     if aborted_row || matches!(&event, EngineEvent::DoneAborted) {
                         abort_gate_armed_seen.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
+                }
+                // The pane reporter's engine boundaries (the TS
+                // `agent_start` / `agent_end` hooks and the auto-retry
+                // hold): a run start or a retry keeps the pane working,
+                // and the run's end settles it — an error end holds
+                // working through the retry grace first, a queued-work
+                // end debounces the idle. A run whose `agent_end` the
+                // abort gate swallowed above never reaches here, so the
+                // pane keeps its last state exactly like the TS detached
+                // run.
+                match &event {
+                    EngineEvent::AgentStart => {
+                        herdr.lock().unwrap().run_started();
+                    }
+                    EngineEvent::AgentEnd { messages } => {
+                        let more_queued = !core.steering.is_empty() || !core.follow_up.is_empty();
+                        herdr
+                            .lock()
+                            .unwrap()
+                            .run_ended(crate::herdr::error_hold_message(messages), more_queued);
+                    }
+                    EngineEvent::AutoRetryStart { .. } => {
+                        herdr.lock().unwrap().retry_started();
+                    }
+                    _ => {}
                 }
                 // The engine cuts its in-memory entries; its
                 // `firstKeptEntryId` never matches this store's file ids,
@@ -1186,10 +1218,30 @@ impl TurnRunner {
         // (the flag stays armed until the next pickup — a settle-time
         // re-read would race `handle_abort` and silence a completed
         // session-command or pre-model-failure run).
-        if !engine_agent_end.load(std::sync::atomic::Ordering::SeqCst)
-            && !abort_gate_armed.load(std::sync::atomic::Ordering::SeqCst)
-        {
+        let engine_reported_run_end = engine_agent_end.load(std::sync::atomic::Ordering::SeqCst);
+        if !engine_reported_run_end && !abort_gate_armed.load(std::sync::atomic::Ordering::SeqCst) {
             self.emit_turn_event(json!({ "type": "agent_end" }));
+        }
+        {
+            // The settle's boundary state: the run's own `agent_end`
+            // already reported (inside the emit closure); a run that ended
+            // without one (session commands, pre-model failures) reports
+            // here — the TS fallback arm — and an aborted settle keeps
+            // the same silence as its emit (the suppressed run never
+            // flips the pane). `core.busy` flipped to false above; queued
+            // lanes still holding items keep the settle debounced so the
+            // next pickup cancels the idle flip.
+            let (report, more_queued) = {
+                let core = self.core.lock().unwrap();
+                (
+                    !engine_reported_run_end
+                        && !abort_gate_armed.load(std::sync::atomic::Ordering::SeqCst),
+                    !core.steering.is_empty() || !core.follow_up.is_empty(),
+                )
+            };
+            if report {
+                self.herdr.lock().unwrap().run_ended(None, more_queued);
+            }
         }
         let snapshot = {
             let core = self.core.lock().unwrap();
