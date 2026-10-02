@@ -326,31 +326,11 @@ impl SearchInput {
     /// grapheme that ends at the cursor and a mid-cluster cursor
     /// classifies the partial cluster the same way TS does.
     fn move_word_backward(&mut self) {
-        use unicode_segmentation::UnicodeSegmentation;
         if self.cursor == 0 {
             return;
         }
         let before: String = self.chars()[..self.cursor].iter().collect();
-        let mut graphemes: Vec<&str> = before.graphemes(true).collect();
-        while graphemes.last().is_some_and(|g| g.chars().any(is_ws)) {
-            let g = graphemes.pop().expect("last checked Some");
-            self.cursor -= g.chars().count();
-        }
-        let Some(last) = graphemes.last().copied() else {
-            return;
-        };
-        let punctuation_run = last.chars().any(is_punct);
-        while let Some(g) = graphemes.last().copied() {
-            if punctuation_run {
-                if !g.chars().any(is_punct) {
-                    break;
-                }
-            } else if g.chars().any(is_ws) || g.chars().any(is_punct) {
-                break;
-            }
-            graphemes.pop();
-            self.cursor -= g.chars().count();
-        }
+        self.cursor = word_walk_start(&before);
     }
 
     /// Word-boundary walk forward (TS `moveWordForwards`), grapheme by
@@ -417,6 +397,37 @@ fn is_ws(c: char) -> bool {
 
 fn is_punct(c: char) -> bool {
     crate::width::is_punctuation_char(c)
+}
+
+/// The word walk TS `moveWordBackwards` runs on a before-cursor slice:
+/// the char index where the run in front of the trailing whitespace
+/// starts, the last grapheme's class deciding whether the run is
+/// punctuation or word characters. The slice is segmented standalone,
+/// exactly like the TS original, so the run starts at the grapheme that
+/// ends the slice; an all-whitespace slice walks to 0. Shared by the
+/// search input's cursor walk and the plain-string word deletes that
+/// hold the caret at the slice's end.
+pub(crate) fn word_walk_start(text: &str) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut graphemes: Vec<&str> = text.graphemes(true).collect();
+    while graphemes.last().is_some_and(|g| g.chars().any(is_ws)) {
+        graphemes.pop();
+    }
+    let Some(last) = graphemes.last().copied() else {
+        return 0;
+    };
+    let punctuation_run = last.chars().any(is_punct);
+    while let Some(g) = graphemes.last().copied() {
+        if punctuation_run {
+            if !g.chars().any(is_punct) {
+                break;
+            }
+        } else if g.chars().any(is_ws) || g.chars().any(is_punct) {
+            break;
+        }
+        graphemes.pop();
+    }
+    graphemes.iter().map(|g| g.chars().count()).sum()
 }
 
 #[cfg(test)]

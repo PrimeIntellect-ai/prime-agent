@@ -866,20 +866,16 @@ impl AgentsViewMode {
     }
 }
 
-/// Delete the query's trailing word plus the whitespace before it (TS
-/// `Editor.deleteWordBackwards` with the caret at the text's end — this
-/// view's query is append-only, so the caret always sits there). Returns
+/// Delete the query's trailing word run plus the whitespace before it
+/// (TS `Editor.deleteWordBackwards` with the caret at the text's end —
+/// this view's query is append-only, so the caret always sits there):
+/// the search input's punctuation-aware walk, so a dotted query
+/// ("error.rs") loses its trailing word run and keeps "error." — a
+/// whitespace-only scan would take the whole dotted word. Returns
 /// whether anything was deleted: a no-op edit re-arms nothing.
 fn truncate_trailing_word(query: &mut String) -> bool {
     let chars: Vec<char> = query.chars().collect();
-    let mut end = chars.len();
-    while end > 0 && crate::width::is_whitespace_char(chars[end - 1]) {
-        end -= 1;
-    }
-    let mut start = end;
-    while start > 0 && !crate::width::is_whitespace_char(chars[start - 1]) {
-        start -= 1;
-    }
+    let start = crate::search_input::word_walk_start(query);
     if start == chars.len() {
         return false;
     }
