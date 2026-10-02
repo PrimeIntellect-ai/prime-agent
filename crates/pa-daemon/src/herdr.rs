@@ -725,6 +725,7 @@ fn rand_suffix() -> String {
 /// passes unchanged: Herdr's own socket under the user's runtime
 /// directory is that user's own socket (TS parity). Named pipes on
 /// Windows keep their connect-time ACL model (no lstat to check).
+#[cfg(unix)]
 static SOCKET_REFUSAL_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// The fence's pure decision (unit-testable without `chown`): the
@@ -799,6 +800,9 @@ async fn pane_socket_acceptable(socket_target: &str) -> FenceVerdict {
 }
 
 #[cfg(windows)]
+// The async stays for the shared call site (the unix arm awaits); the
+// windows pipe arm needs no await for its connect-time ACL verdict.
+#[allow(clippy::unused_async)]
 async fn pane_socket_acceptable(_socket_target: &str) -> FenceVerdict {
     // Named pipes carry their own ACL model at connect time.
     FenceVerdict::Accepted
@@ -916,7 +920,10 @@ pub(crate) fn error_hold_message(messages: &[Value]) -> Option<String> {
     Some(message.to_string())
 }
 
-#[cfg(test)]
+// Unix-only tests: the fake server binds a unix socket and the fence
+// cases use unix symlink identity (the windows pipe arm's connect-time ACL
+// model has no lstat equivalent to exercise here).
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
