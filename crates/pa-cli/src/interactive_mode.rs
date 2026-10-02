@@ -65,11 +65,11 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
         )),
     )?;
     let configuration_load_ms = configuration_load_started.elapsed().as_millis() as u64;
-    // Telemetry disclosure (TS agent-session-services): once per
-    // installation; an interactive launch defers it behind onboarding (a
-    // first interactive run belongs to the onboarding screen, so the
-    // notice surfaces on the next launch).
-    crate::telemetry_notice::print_if_due(&options.config, true);
+    // The telemetry disclosure renders inside the TUI (TS
+    // agent-session-services' session diagnostic): the interactive
+    // attach pushes the info row once per installation, deferred behind
+    // onboarding — a pre-TUI stderr print would be hidden by the alt
+    // screen.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

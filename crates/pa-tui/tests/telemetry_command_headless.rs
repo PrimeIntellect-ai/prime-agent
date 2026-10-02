@@ -196,6 +196,8 @@ fn attach_data(id: &str) -> Value {
 struct StubSettings {
     telemetry_enabled: std::sync::Mutex<Option<bool>>,
     forced_off_by: Option<&'static str>,
+    notice_due: bool,
+    notice_shown: std::sync::atomic::AtomicBool,
 }
 
 impl StubSettings {
@@ -347,6 +349,16 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
     fn effective_update_channel(&self, _version: &str) -> String {
         "stable".to_string()
     }
+    fn telemetry_notice_due(&self) -> bool {
+        // Like the real funnel: a due notice stops being due once the
+        // marker persists.
+        self.notice_due && !self.notice_shown.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn set_telemetry_notice_shown(&self) -> Result<()> {
+        self.notice_shown
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
 }
 
 fn options(socket: PathBuf, settings: Arc<StubSettings>) -> InteractiveOptions {
@@ -456,6 +468,52 @@ fn telemetry_off_and_on_persist_the_switch() {
     let all = run_plan(Arc::clone(&settings), submit("/telemetry on")).join("\n");
     assert!(all.contains("Telemetry turned on."), "{all}");
     assert_eq!(*settings.telemetry_enabled.lock().unwrap(), Some(true));
+}
+
+/// The first-run telemetry disclosure renders as a session info row
+/// (the TS session diagnostic): once per installation, from the
+/// interactive attach, and the shown marker persists with the row.
+#[test]
+fn the_first_run_telemetry_notice_renders_as_a_row() {
+    let settings = Arc::new(StubSettings {
+        notice_due: true,
+        ..StubSettings::default()
+    });
+    let all = run_plan(Arc::clone(&settings), submit("/telemetry status")).join("\n");
+    assert!(
+        all.contains("Prime Agent sends pseudonymous usage"),
+        "the disclosure row rendered:\n{all}"
+    );
+    assert!(
+        all.contains("Disable this with /telemetry off"),
+        "the interactive switch names itself:\n{all}"
+    );
+    assert!(
+        settings
+            .notice_shown
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "the shown marker persisted with the row"
+    );
+
+    // The once-per-installation gate: a second attach with the same
+    // installation draws no second row.
+    let again = run_plan(Arc::clone(&settings), submit("/telemetry status")).join("\n");
+    assert!(
+        !again.contains("Prime Agent sends pseudonymous usage"),
+        "no second disclosure row:\n{again}"
+    );
+}
+
+/// The disclosure is once per installation: a run whose notice already
+/// showed draws no second row.
+#[test]
+fn an_already_disclosed_installation_renders_no_notice_row() {
+    let settings = Arc::new(StubSettings::default());
+    let all = run_plan(Arc::clone(&settings), submit("/telemetry status")).join("\n");
+    assert!(
+        !all.contains("Prime Agent sends pseudonymous usage"),
+        "no disclosure row on an already-shown install:\n{all}"
+    );
 }
 
 /// `/telemetry on` under an environment opt-out says it stays off.

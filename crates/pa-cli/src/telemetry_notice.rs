@@ -1,28 +1,21 @@
-//! The first-run telemetry disclosure (TS `agent-session-services`): once
-//! per installation the fixed text prints to stderr before a mode's output
-//! starts. Interactive launches defer it behind onboarding (a first
-//! interactive run belongs to the onboarding screen, so the notice surfaces
-//! on the next launch); every other mode discloses immediately (TS
+//! The first-run telemetry disclosure (TS `agent-session-services`) for
+//! the headless modes: once per installation the fixed text prints to
+//! stderr before a mode's output starts (TS
 //! `deferTelemetryNoticeForOnboarding: executionMode === "interactive"`).
-//! Divergence from TS: the TS product renders the notice as a session
-//! diagnostic; the Rust build prints it to the process's stderr, which
-//! keeps the same text visible without a daemon-side diagnostics
-//! round-trip.
+//! The interactive mode renders the same disclosure inside the TUI as a
+//! session info row (pa-tui's attach) — the alt screen hides a pre-TUI
+//! stderr print, so a stderr notice would never be seen there.
 
 use crate::mode::RuntimeConfig;
 
 /// Print the once-per-installation telemetry notice when it is due:
 /// telemetry enabled (env override, then settings — the `RunOptions`
-/// resolution), not yet shown, and either not deferred or onboarding
-/// already marked itself shown.
-pub(crate) fn print_if_due(config: &RuntimeConfig, defer_for_onboarding: bool) {
+/// resolution) and not yet shown.
+pub(crate) fn print_if_due(config: &RuntimeConfig) {
     if config.telemetry_disabled {
         return;
     }
     let mut settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
-    if defer_for_onboarding && !settings.get_onboarding_shown() {
-        return;
-    }
     if settings.get_telemetry_notice_shown() {
         return;
     }
@@ -57,38 +50,17 @@ mod tests {
     fn headless_discloses_immediately_and_once() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let config = config_for(dir.path(), false);
-        print_if_due(&config, false);
+        print_if_due(&config);
         assert!(notice_shown(dir.path()), "the first headless run discloses");
-        print_if_due(&config, false);
+        print_if_due(&config);
         // The once-per-installation gate is the settings flag, so the
         // second call is a no-op by construction.
     }
 
     #[test]
-    fn deferred_disclosure_waits_for_onboarding() {
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        let config = config_for(dir.path(), false);
-        print_if_due(&config, true);
-        assert!(
-            !notice_shown(dir.path()),
-            "an interactive run without onboarding does not disclose yet"
-        );
-        let mut settings =
-            pa_core::settings::SettingsManager::create(dir.path(), dir.path().join("agent"));
-        settings
-            .set_onboarding_shown(true)
-            .expect("onboarding shown");
-        print_if_due(&config, true);
-        assert!(
-            notice_shown(dir.path()),
-            "the launch after onboarding discloses"
-        );
-    }
-
-    #[test]
     fn disabled_never_discloses() {
         let dir = tempfile::TempDir::new().expect("temp dir");
-        print_if_due(&config_for(dir.path(), true), false);
+        print_if_due(&config_for(dir.path(), true));
         assert!(
             !notice_shown(dir.path()),
             "an opted-out run sends no notice"

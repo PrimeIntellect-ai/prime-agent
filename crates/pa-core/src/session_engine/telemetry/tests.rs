@@ -108,6 +108,7 @@ fn fixture_with_clock(clock: TestClock) -> Fixture {
         active_run: None,
         tool_starts: HashMap::new(),
         telemetry_enabled: None,
+        recording: true,
         now,
     }));
     Fixture {
@@ -1174,33 +1175,6 @@ async fn legacy_events_reach_the_analytics_endpoint_in_the_ts_shape() {
     .unwrap();
 }
 
-/// A fixture wired with a full [`RecordingSwitch`] (the production
-/// shape, epoch cell included).
-fn fixture_with_switch_raw(telemetry_enabled: RecordingSwitch) -> Fixture {
-    let mock = std::sync::Arc::new(MockSink::new());
-    let client = client_for(&mock);
-    let clock = TestClock::default();
-    let now: Arc<dyn Fn() -> u64 + Send + Sync> = {
-        let millis = clock.millis.clone();
-        Arc::new(move || millis.load(std::sync::atomic::Ordering::Relaxed))
-    };
-    let state = Arc::new(Mutex::new(TelemetryState {
-        session_id: "0197d0a0-8f5c-7f2a-b0e3-2d7e0d2b3b1a".to_string(),
-        started_at: 1_000,
-        totals: SessionTotals::default(),
-        active_run: None,
-        tool_starts: HashMap::new(),
-        telemetry_enabled: Some(telemetry_enabled),
-        now,
-    }));
-    Fixture {
-        client,
-        state,
-        clock,
-        mock,
-    }
-}
-
 /// A fixture whose recording seams consult a live switch the test flips:
 /// the same shape [`install_session_telemetry`] installs from the wiring
 /// (minus the write-path epoch tracking, which the production switch
@@ -1220,6 +1194,7 @@ fn fixture_with_switch(telemetry_enabled: Arc<dyn Fn() -> bool + Send + Sync>) -
         active_run: None,
         tool_starts: HashMap::new(),
         telemetry_enabled: Some(RecordingSwitch::test(telemetry_enabled)),
+        recording: true,
         now,
     }));
     Fixture {
@@ -1354,10 +1329,12 @@ async fn off_period_run_facts_never_send() {
     assert_eq!(ended["tool_call_count"], serde_json::json!(0));
 }
 
-/// The recording switch resolves live: a mid-session opt-out (or
-/// re-enable) applies on the very next ask, with no cached answer
-/// spanning the flip. Regression for the cached-switch finding: a TTL
-/// kept recording through a quick off/on flap.
+/// The recording switch resolves live: a fresh invocation reads the
+/// settings as they are now, so the turn-boundary asks (and the
+/// client's flush gate) observe a mid-session opt-out or re-enable the
+/// moment it is saved. The events between boundaries deliberately use
+/// the boundary cache; this proves only the raw switch has no cache of
+/// its own.
 #[test]
 fn recording_switch_flips_immediately_with_the_settings() {
     let _env = CleanTelemetryEnv::default();
@@ -1376,6 +1353,55 @@ fn recording_switch_flips_immediately_with_the_settings() {
     // The re-enable lands the same way.
     settings.set_telemetry_enabled(true).unwrap();
     assert!((switch.enabled)(), "the on applies immediately too");
+}
+
+/// The opt-out is the settings write itself: no telemetry state can
+/// block it. A squatted (unwritable) install-id state — which used to
+/// fail the command — never holds the disable hostage, and the opt-out
+/// never touches (or mints) the state file.
+#[test]
+fn a_disable_lands_even_when_the_telemetry_state_is_unusable() {
+    let _env = CleanTelemetryEnv::default();
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let mut settings = crate::settings::SettingsManager::create(dir.path(), &agent_dir);
+    settings.set_telemetry_enabled(true).unwrap();
+    // The state path is unusable: a directory squats it (no create or
+    // rename could ever land there, for any user).
+    std::fs::create_dir_all(agent_dir.join("telemetry.json")).unwrap();
+
+    super::set_telemetry_enabled_text(&mut settings, &agent_dir, false).unwrap();
+    assert!(
+        !crate::settings::SettingsManager::create(dir.path(), &agent_dir).get_telemetry_enabled(),
+        "the disable lands regardless of the telemetry state"
+    );
+    super::set_telemetry_enabled_text(&mut settings, &agent_dir, true).unwrap();
+    assert!(
+        crate::settings::SettingsManager::create(dir.path(), &agent_dir).get_telemetry_enabled(),
+        "the re-enable lands the same way"
+    );
+}
+
+/// Opting out never mints an identity: a fresh installation with no
+/// install-id state disables without creating `telemetry.json`.
+#[test]
+fn a_disable_on_a_fresh_install_never_mints_the_install_id() {
+    let _env = CleanTelemetryEnv::default();
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let mut settings = crate::settings::SettingsManager::create(dir.path(), &agent_dir);
+
+    super::set_telemetry_enabled_text(&mut settings, &agent_dir, false).unwrap();
+
+    assert!(
+        !crate::settings::SettingsManager::create(dir.path(), &agent_dir).get_telemetry_enabled(),
+        "the opt-out lands"
+    );
+    assert!(
+        !agent_dir.join("telemetry.json").exists(),
+        "the opt-out never creates the install-id state"
+    );
 }
 
 /// A run active when telemetry goes off is severed, not merged: its
@@ -1455,392 +1481,4 @@ async fn a_run_active_when_telemetry_turns_off_is_severed_not_merged() {
         serde_json::json!(0),
         "the off-period tool end never counts"
     );
-}
-
-/// A run whose stream crosses the opt-out never completes: the first
-/// off-period event that belongs to it severs it, so the pre-off run
-/// cannot record, complete, or merge after a re-enable. Regression for
-/// the crossing-stream finding: the off-period `MessageUpdate` (not the
-/// boundary events) is what cuts the run.
-#[tokio::test]
-async fn a_run_crossing_an_off_period_stream_never_completes() {
-    let on = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let switch: Arc<dyn Fn() -> bool + Send + Sync> = {
-        let on = Arc::clone(&on);
-        Arc::new(move || on.load(std::sync::atomic::Ordering::Relaxed))
-    };
-    let fixture = fixture_with_switch(switch);
-    let assistant = assistant_message();
-
-    // The run starts while on and records a turn.
-    fixture.clock.set(1_000);
-    emit(&fixture, AgentEvent::AgentStart);
-    fixture.clock.set(1_050);
-    emit(&fixture, AgentEvent::TurnStart);
-    fixture.clock.set(1_100);
-    emit(&fixture, message_end_event(assistant.clone()));
-
-    // Telemetry goes off mid-run: the next stream delta belongs to the
-    // off period and severs the run.
-    on.store(false, std::sync::atomic::Ordering::Relaxed);
-    fixture.clock.set(1_200);
-    emit(&fixture, text_delta_event(&assistant));
-
-    // Back on before the run's end: the post-on events find no run -
-    // the pre-off run never completes, and its window never reports.
-    on.store(true, std::sync::atomic::Ordering::Relaxed);
-    fixture.clock.set(1_250);
-    emit(&fixture, AgentEvent::TurnStart);
-    fixture.clock.set(1_300);
-    emit(&fixture, message_end_event(assistant.clone()));
-    fixture.clock.set(1_350);
-    emit(
-        &fixture,
-        AgentEvent::AgentEnd {
-            messages: Vec::new(),
-        },
-    );
-
-    fixture.clock.set(1_400);
-    let telemetry = SessionTelemetry::detached(
-        fixture.client.clone(),
-        fixture.state.clone(),
-        "interactive".to_string(),
-    );
-    telemetry.end().await.unwrap();
-
-    let runs = event_properties(&fixture.mock, "agent run completed").await;
-    assert!(
-        runs.is_empty(),
-        "a run that crossed the opt-out never reports"
-    );
-    let ended = &event_properties(&fixture.mock, "agent session ended").await[0];
-    assert_eq!(ended["run_count"], serde_json::json!(0));
-    assert_eq!(ended["model_call_count"], serde_json::json!(0));
-    assert_eq!(ended["input_tokens"], serde_json::json!(0));
-}
-
-/// Mid-execution progress (`ToolExecutionUpdate`) and `TurnEnd` are
-/// run-scoped too: while off they sever the run, so a tool whose
-/// execution spans the opt-out never counts its off-period duration
-/// into a surviving run. Regression for the no-op-arm finding.
-#[tokio::test]
-async fn off_period_tool_progress_and_turn_end_sever_the_run() {
-    let on = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let switch: Arc<dyn Fn() -> bool + Send + Sync> = {
-        let on = Arc::clone(&on);
-        Arc::new(move || on.load(std::sync::atomic::Ordering::Relaxed))
-    };
-    let fixture = fixture_with_switch(switch);
-    let assistant = assistant_message();
-
-    // The run starts while on; a tool call begins.
-    fixture.clock.set(1_000);
-    emit(&fixture, AgentEvent::AgentStart);
-    fixture.clock.set(1_050);
-    emit(&fixture, AgentEvent::TurnStart);
-    let (tool_start, _tool_end) = tool_execution_event("bash", false);
-    emit(&fixture, tool_start);
-
-    // The tool's mid-execution progress arrives in the off period: the
-    // run severs here, not at a later boundary event.
-    on.store(false, std::sync::atomic::Ordering::Relaxed);
-    fixture.clock.set(1_200);
-    emit(
-        &fixture,
-        AgentEvent::ToolExecutionUpdate {
-            tool_call_id: "bash-1".to_string(),
-            tool_name: "bash".to_string(),
-            args: serde_json::json!({ "command": "private command" }),
-            partial_result: pa_agent::types::AgentToolResult {
-                content: vec![ToolResultContent::text("partial")],
-                details: serde_json::Value::Null,
-                terminate: None,
-            },
-        },
-    );
-
-    // Back on before the tool ends: the end finds no run and no in-flight
-    // start, so the off-spanning call never counts.
-    on.store(true, std::sync::atomic::Ordering::Relaxed);
-    fixture.clock.set(1_300);
-    let (_tool_start2, tool_end) = tool_execution_event("bash", false);
-    emit(&fixture, tool_end);
-    fixture.clock.set(1_350);
-    emit(&fixture, message_end_event(assistant.clone()));
-    emit(
-        &fixture,
-        AgentEvent::AgentEnd {
-            messages: Vec::new(),
-        },
-    );
-
-    fixture.clock.set(1_400);
-    let telemetry = SessionTelemetry::detached(
-        fixture.client.clone(),
-        fixture.state.clone(),
-        "interactive".to_string(),
-    );
-    telemetry.end().await.unwrap();
-
-    let runs = event_properties(&fixture.mock, "agent run completed").await;
-    assert!(
-        runs.is_empty(),
-        "the run severed by the off-period progress never reports"
-    );
-    let ended = &event_properties(&fixture.mock, "agent session ended").await[0];
-    assert_eq!(
-        ended["tool_call_count"],
-        serde_json::json!(0),
-        "the off-spanning tool call never counts"
-    );
-    assert_eq!(ended["run_count"], serde_json::json!(0));
-}
-
-/// A mid-session opt-out with NO telemetry event inside the off window
-/// still severs: the disabling write bumps the off-epoch cell, so a tool
-/// whose execution spans the flap never reports its opted-out duration.
-/// Regression for the zero-event-flap finding: event-driven severing
-/// alone cannot see the window.
-#[tokio::test]
-async fn a_zero_event_opt_out_flap_never_reports_the_spanning_tool() {
-    let _env = CleanTelemetryEnv::default();
-    let dir = tempfile::tempdir().unwrap();
-    let agent_dir = dir.path().join("agent");
-    let mut settings = crate::settings::SettingsManager::create(dir.path(), &agent_dir);
-    super::set_telemetry_enabled_text(&mut settings, &agent_dir, true).unwrap();
-    // The production switch: live resolution plus the persisted
-    // off-epoch the disabling write bumps (the file survives processes —
-    // the command runs where the command runs, the recording in the
-    // worker).
-    let switch = telemetry_enabled_switch(dir.path(), &agent_dir);
-    let fixture = fixture_with_switch_raw(switch);
-    let assistant = assistant_message();
-
-    // A run starts while on; a tool call begins.
-    fixture.clock.set(1_000);
-    emit(&fixture, AgentEvent::AgentStart);
-    fixture.clock.set(1_050);
-    emit(&fixture, AgentEvent::TurnStart);
-    let (tool_start, _tool_end) = tool_execution_event("bash", false);
-    emit(&fixture, tool_start);
-
-    // The zero-event flap: telemetry goes off and back on with no
-    // telemetry event in between (the /telemetry command pair, through
-    // the real command funnel).
-    super::set_telemetry_enabled_text(&mut settings, &agent_dir, false).unwrap();
-    super::set_telemetry_enabled_text(&mut settings, &agent_dir, true).unwrap();
-
-    // The tool ends while telemetry is on again: the run began before
-    // the off epoch moved, so it severs and the spanning call never
-    // counts.
-    fixture.clock.set(1_300);
-    let (_tool_start2, tool_end) = tool_execution_event("bash", false);
-    emit(&fixture, tool_end);
-    fixture.clock.set(1_350);
-    emit(&fixture, message_end_event(assistant.clone()));
-    emit(
-        &fixture,
-        AgentEvent::AgentEnd {
-            messages: Vec::new(),
-        },
-    );
-
-    fixture.clock.set(1_400);
-    let telemetry = SessionTelemetry::detached(
-        fixture.client.clone(),
-        fixture.state.clone(),
-        "interactive".to_string(),
-    );
-    telemetry.end().await.unwrap();
-
-    let runs = event_properties(&fixture.mock, "agent run completed").await;
-    assert!(
-        runs.is_empty(),
-        "a run that spans the opt-out flap never reports"
-    );
-    let ended = &event_properties(&fixture.mock, "agent session ended").await[0];
-    assert_eq!(
-        ended["tool_call_count"],
-        serde_json::json!(0),
-        "the off-spanning tool call never counts"
-    );
-    assert_eq!(ended["run_count"], serde_json::json!(0));
-}
-
-/// `end()` is the last recording seam: a run still open across a
-/// zero-event opt-out flap (no telemetry event fired inside the window,
-/// and the re-enable already landed) severs at session close instead of
-/// finalizing with the off window's span.
-#[tokio::test]
-async fn end_severs_a_run_stale_across_a_zero_event_flap() {
-    let _env = CleanTelemetryEnv::default();
-    let dir = tempfile::tempdir().unwrap();
-    let agent_dir = dir.path().join("agent");
-    let mut settings = crate::settings::SettingsManager::create(dir.path(), &agent_dir);
-    super::set_telemetry_enabled_text(&mut settings, &agent_dir, true).unwrap();
-    let switch = telemetry_enabled_switch(dir.path(), &agent_dir);
-    let fixture = fixture_with_switch_raw(switch);
-
-    // A run opens while telemetry is on.
-    fixture.clock.set(1_000);
-    emit(&fixture, AgentEvent::AgentStart);
-    fixture.clock.set(1_050);
-    emit(&fixture, AgentEvent::TurnStart);
-
-    // The zero-event flap: off and back on with no event in between.
-    super::set_telemetry_enabled_text(&mut settings, &agent_dir, false).unwrap();
-    super::set_telemetry_enabled_text(&mut settings, &agent_dir, true).unwrap();
-
-    // The session ends while telemetry is on again. The run opened
-    // before the off epoch moved, so it never finalizes.
-    fixture.clock.set(1_400);
-    let telemetry = SessionTelemetry::detached(
-        fixture.client.clone(),
-        fixture.state.clone(),
-        "interactive".to_string(),
-    );
-    telemetry.end().await.unwrap();
-
-    let runs = event_properties(&fixture.mock, "agent run completed").await;
-    assert!(
-        runs.is_empty(),
-        "end() severs the stale run: the off window's span never reports"
-    );
-    let ended = &event_properties(&fixture.mock, "agent session ended").await[0];
-    assert_eq!(ended["run_count"], serde_json::json!(0));
-}
-
-/// The off-epoch bump is lock-serialized and id-preserving: concurrent
-/// disabling writes each land exactly one increment, the installation id
-/// survives every bump, and the state file keeps its private mode.
-#[test]
-fn concurrent_disables_bump_the_epoch_once_each_and_keep_the_state_private() {
-    let _env = CleanTelemetryEnv::default();
-    let dir = tempfile::tempdir().unwrap();
-    let agent_dir = dir.path().join("agent");
-    let mut settings = crate::settings::SettingsManager::create(dir.path(), &agent_dir);
-    super::set_telemetry_enabled_text(&mut settings, &agent_dir, true).unwrap();
-    // The install-id state exists once a capture resolves it (the
-    // settings write alone does not create it).
-    let id_before = pa_telemetry::install_id(&agent_dir).unwrap();
-    assert_eq!(pa_telemetry::read_off_epoch(&agent_dir), 0);
-
-    // Two disabling writes race like two processes: each must land its
-    // own increment (a lost one is a missed flap).
-    let mut handles = Vec::new();
-    for _ in 0..2 {
-        let cwd = dir.path().to_path_buf();
-        let agent_dir = agent_dir.clone();
-        handles.push(std::thread::spawn(move || {
-            let mut writer = crate::settings::SettingsManager::create(&cwd, &agent_dir);
-            super::set_telemetry_enabled_text(&mut writer, &agent_dir, false).unwrap();
-        }));
-    }
-    for handle in handles {
-        handle.join().unwrap();
-    }
-
-    assert_eq!(
-        pa_telemetry::read_off_epoch(&agent_dir),
-        2,
-        "both disabling writes bumped once"
-    );
-    assert_eq!(
-        pa_telemetry::existing_install_id(&agent_dir),
-        Some(id_before),
-        "the installation id survives the bumps"
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(agent_dir.join("telemetry.json"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(
-            mode & 0o777,
-            0o600,
-            "the install-id state keeps its private mode"
-        );
-    }
-}
-
-/// A contended telemetry-state lock fails the disable cleanly: the
-/// settings stay unchanged and the epoch stays put, so an opt-out never
-/// reports success without its zero-event window being visible to the
-/// worker. Once the contention clears the command works and bumps.
-#[test]
-fn a_contended_state_lock_fails_the_disable_cleanly() {
-    let _env = CleanTelemetryEnv::default();
-    let dir = tempfile::tempdir().unwrap();
-    let agent_dir = dir.path().join("agent");
-    let mut settings = crate::settings::SettingsManager::create(dir.path(), &agent_dir);
-    super::set_telemetry_enabled_text(&mut settings, &agent_dir, true).unwrap();
-    let id = pa_telemetry::install_id(&agent_dir).unwrap();
-
-    // Another process holds the telemetry-state lock.
-    let held = crate::platform::lock_dir::LockDir::acquire(
-        &agent_dir.join("telemetry.json"),
-        std::time::Duration::from_secs(10),
-    )
-    .unwrap();
-
-    let mut disabling = crate::settings::SettingsManager::create(dir.path(), &agent_dir);
-    let outcome = super::set_telemetry_enabled_text(&mut disabling, &agent_dir, false);
-    assert!(
-        outcome.is_err(),
-        "the disable fails instead of skipping its epoch bump"
-    );
-    // Nothing changed: the settings still say on, the epoch never moved.
-    assert!(
-        crate::settings::SettingsManager::create(dir.path(), &agent_dir).get_telemetry_enabled()
-    );
-    assert_eq!(pa_telemetry::read_off_epoch(&agent_dir), 0);
-
-    drop(held);
-
-    // With the lock free, the same command lands: settings off, one bump.
-    let mut retry = crate::settings::SettingsManager::create(dir.path(), &agent_dir);
-    super::set_telemetry_enabled_text(&mut retry, &agent_dir, false).unwrap();
-    assert_eq!(pa_telemetry::read_off_epoch(&agent_dir), 1);
-    assert_eq!(
-        pa_telemetry::existing_install_id(&agent_dir),
-        Some(id),
-        "the installation id survives the bumps"
-    );
-}
-
-/// Any failure in the disable's state steps fails the command with the
-/// settings untouched: a state file the bump cannot publish over (a
-/// directory squatting the path - root ignores permission bits, so this
-/// is the failure that works for every user) leaves
-/// `telemetry.enabled` exactly as it was and the epoch unmoved - never
-/// a saved opt-out whose zero-event window the worker could not see.
-#[test]
-fn a_failed_state_step_fails_the_disable_without_saving() {
-    let _env = CleanTelemetryEnv::default();
-    let dir = tempfile::tempdir().unwrap();
-    let agent_dir = dir.path().join("agent");
-    let mut settings = crate::settings::SettingsManager::create(dir.path(), &agent_dir);
-    super::set_telemetry_enabled_text(&mut settings, &agent_dir, true).unwrap();
-    pa_telemetry::install_id(&agent_dir).unwrap();
-    assert_eq!(pa_telemetry::read_off_epoch(&agent_dir), 0);
-
-    // The state path turns unpublishable mid-session: no create or
-    // rename can land on a directory, for any user.
-    std::fs::remove_file(agent_dir.join("telemetry.json")).unwrap();
-    std::fs::create_dir(agent_dir.join("telemetry.json")).unwrap();
-
-    let mut disabling = crate::settings::SettingsManager::create(dir.path(), &agent_dir);
-    assert!(
-        super::set_telemetry_enabled_text(&mut disabling, &agent_dir, false).is_err(),
-        "the disable fails instead of half-landing"
-    );
-
-    // Nothing changed: the settings still say on, the epoch never moved.
-    assert!(
-        crate::settings::SettingsManager::create(dir.path(), &agent_dir).get_telemetry_enabled()
-    );
-    assert_eq!(pa_telemetry::read_off_epoch(&agent_dir), 0);
 }

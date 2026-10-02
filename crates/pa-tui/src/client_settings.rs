@@ -209,4 +209,22 @@ pub trait ClientSettings: Send + Sync {
     /// Returns `Err` when opening or persisting the settings
     /// store fails.
     fn set_telemetry_enabled(&self, enabled: bool) -> Result<String>;
+    /// Whether the first-run telemetry disclosure is due in this
+    /// interactive view (TS agent-session-services: telemetry enabled,
+    /// onboarding already shown, notice not yet shown). Defaults to
+    /// false: a client without the disclosure surface never shows it.
+    #[must_use]
+    fn telemetry_notice_due(&self) -> bool {
+        false
+    }
+    /// Persist the notice-shown marker once the disclosure renders
+    /// (TS `setTelemetryNoticeShown`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when opening or persisting the settings
+    /// store fails.
+    fn set_telemetry_notice_shown(&self) -> Result<()> {
+        Ok(())
+    }
 }

@@ -70,7 +70,7 @@ pub use event::TelemetryEvent;
 pub use events::{
     AgentInstallationStage, AgentStartupStage, OnboardingStage, RunTrigger, ToolCategory,
 };
-pub use install_id::{bump_off_epoch, existing_install_id, install_id, read_off_epoch};
+pub use install_id::{existing_install_id, install_id};
 pub use platform::{base_properties, SCHEMA_VERSION};
 pub use properties::Properties;
 pub use rename::rename_onto;

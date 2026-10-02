@@ -77,30 +77,23 @@ pub const EXECUTION_MODE_UNKNOWN: &str = "unknown";
 /// Telemetry wiring supplied by the composition root (`SessionEngineConfig`).
 /// `None` telemetry (opt-out) installs nothing.
 /// A session's live opt-out switch: the enabled answer the recording
-/// seams ask per event, plus the off-epoch cell that learns about a
-/// mid-session opt-out even when no telemetry event fires inside the off
-/// window (a disabling settings write bumps it). Facts whose span
-/// crosses an epoch bump never report.
+/// The recording seams ask the switch at turn boundaries (run and turn
+/// starts) and cache the answer for the events in between: a mid-turn
+/// opt-out is observed at the next boundary, and the client's flush
+/// drops everything queued while the switch is off.
 #[derive(Clone)]
 pub struct RecordingSwitch {
-    /// Env-then-settings resolution, asked live: false means telemetry
-    /// is off right now.
+    /// Env-then-settings resolution, asked live at the turn boundaries:
+    /// false means telemetry is off right now.
     pub enabled: Arc<dyn Fn() -> bool + Send + Sync>,
-    /// The persisted off-epoch (read live from the install-id state
-    /// file, so an opt-out written by ANOTHER process lands too);
-    /// `None` for test switches (staleness tracking off).
-    pub off_epoch: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
 }
 
 impl RecordingSwitch {
-    /// A switch without the write-path epoch tracking: recording still
-    /// gates live on `enabled`, but spans are not severed across writes.
+    /// A plain switch for the seams: recording gates live on `enabled`
+    /// at the turn boundaries.
     #[must_use]
     pub fn test(enabled: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
-        Self {
-            enabled,
-            off_epoch: None,
-        }
+        Self { enabled }
     }
 }
 
@@ -112,12 +105,11 @@ pub struct TelemetryWiring {
     /// Injectable clock (millis since epoch); defaults to system time.
     /// Tests pass a controlled clock to assert duration math.
     pub now: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
-    /// The live opt-out switch the recording seams consult: while it
-    /// answers false, neither the run state machine nor the session
-    /// counters record (the client already drops captures), and a fact
-    /// that spans a mid-session opt-out severs, so a later enable never
-    /// sends what happened while telemetry was off. `None` is always on
-    /// (tests and one-shot paths).
+    /// The live opt-out switch the recording seams consult at the turn
+    /// boundaries: while it answers false there, the run state machine
+    /// severs and nothing records until the next boundary, and the
+    /// client drops captures queued while the switch is off. `None` is
+    /// always on (tests and one-shot paths).
     pub telemetry_enabled: Option<RecordingSwitch>,
 }
 
@@ -165,10 +157,13 @@ pub(crate) struct TelemetryState {
     totals: SessionTotals,
     active_run: Option<ActiveRun>,
     tool_starts: HashMap<String, u64>,
-    /// The live opt-out switch from the wiring: while it answers false,
-    /// [`handle_event`] and the out-of-band note seams record nothing,
-    /// and the epoch cell severs facts that span an opt-out write.
+    /// The live opt-out switch from the wiring: asked at the turn
+    /// boundaries, never per event.
     telemetry_enabled: Option<RecordingSwitch>,
+    /// The cached switch answer from the last turn boundary. Recording
+    /// on any other event consults only this flag, so a streaming delta
+    /// never re-reads and re-parses the settings file.
+    recording: bool,
     now: Arc<dyn Fn() -> u64 + Send + Sync>,
 }
 
@@ -183,34 +178,23 @@ fn recording_on(state: &TelemetryState) -> bool {
 }
 
 /// While telemetry is off, the active run (if any) is severed: dropped
-/// without emitting, together with its in-flight tables. Every off-period
-/// event that belongs to a run cuts it, so a run that spans an opt-out
-/// can never complete after a re-enable — neither its facts nor the off
-/// window's timing ride a later event.
+/// without emitting, together with its in-flight tables. The switch is
+/// asked at the turn boundaries, so a run that spans an opt-out never
+/// completes after the boundary that observes the off period — neither
+/// its facts nor the off window's timing ride a later event.
 fn sever_off_period_run(state: &mut TelemetryState) {
     state.active_run = None;
     state.tool_starts.clear();
 }
 
-/// A fact that began before a telemetry-disabling write (the epoch cell
-/// moved) spans an opt-out window even when no event fired inside it;
-/// it severs exactly like a run caught by an off-period event.
-fn sever_if_stale_run(state: &mut TelemetryState) {
-    if state.active_run.is_none() {
-        return;
-    }
-    let Some(off_epoch) = state
-        .telemetry_enabled
-        .as_ref()
-        .and_then(|telemetry_switch| telemetry_switch.off_epoch.clone())
-    else {
-        return;
-    };
-    let run_is_stale = state
-        .active_run
-        .as_ref()
-        .is_some_and(|run| run.off_epoch != off_epoch());
-    if run_is_stale {
+/// One turn boundary (a run or turn start): ask the live switch, cache
+/// the answer for the events until the next boundary, and cut the run
+/// when the switch says off. Between boundaries nothing re-reads the
+/// settings file — the client's flush drops everything queued while the
+/// switch is off, which covers a mid-turn opt-out.
+fn observe_turn_boundary(state: &mut TelemetryState) {
+    state.recording = recording_on(state);
+    if !state.recording {
         sever_off_period_run(state);
     }
 }
@@ -265,9 +249,6 @@ impl UsageTotals {
 #[allow(clippy::struct_excessive_bools)]
 struct ActiveRun {
     started_at: u64,
-    /// The telemetry off-epoch the run began at: a disabling write since
-    /// means the run spans an opt-out window and never reports.
-    off_epoch: u64,
     /// `AgentEnd` fired but the run is not finalized yet: the post-run
     /// compaction drain still counts into it (TS keeps the run open until
     /// the turn action deactivates; the Rust analog defers to the next
@@ -497,6 +478,7 @@ pub async fn install_session_telemetry(
         active_run: None,
         tool_starts: HashMap::new(),
         telemetry_enabled: wiring.telemetry_enabled.clone(),
+        recording: true,
         now,
     }));
     // The counters stop recording on the same live switch, before the
@@ -556,11 +538,10 @@ impl SessionTelemetry {
     /// Panics if the telemetry state mutex is poisoned.
     pub fn note_compaction(&self, duration_ms: Option<u64>) {
         let mut state = self.state.lock().expect("telemetry state poisoned");
-        if !recording_on(&state) {
+        if !state.recording {
             sever_off_period_run(&mut state);
             return;
         }
-        sever_if_stale_run(&mut state);
         if let Some(run) = state.active_run.as_mut() {
             run.compaction_count += 1;
             run.compaction_duration_ms += duration_ms.unwrap_or(0);
@@ -581,13 +562,12 @@ impl SessionTelemetry {
     /// Panics if the telemetry state mutex is poisoned.
     pub fn note_auto_retry_event(&self, event: &AutoRetryEvent) {
         let mut state = self.state.lock().expect("telemetry state poisoned");
-        if !recording_on(&state) {
+        if !state.recording {
             // While off nothing counts, and the run severs: an off-period
             // retry never continues an on-period run across the opt-out.
             sever_off_period_run(&mut state);
             return;
         }
-        sever_if_stale_run(&mut state);
         let Some(run) = state.active_run.as_mut() else {
             return;
         };
@@ -642,13 +622,12 @@ impl SessionTelemetry {
         {
             let mut state = self.state.lock().expect("telemetry state poisoned");
             // Session close is the last recording seam: a run still open
-            // across an opt-out (off now, or a zero-event flap that came
-            // back on) severs here instead of finalizing after the
-            // re-enable.
-            if !recording_on(&state) {
+            // when the cached decision says off severs here instead of
+            // finalizing; the client's flush drops whatever the
+            // mid-turn opt-out already queued.
+            if !state.recording {
                 sever_off_period_run(&mut state);
             }
-            sever_if_stale_run(&mut state);
             finalize_run(&self.client, &self.execution_mode, &mut state);
         }
         let mut properties = self.session_properties();
@@ -759,16 +738,21 @@ fn handle_event(
     event: AgentEvent,
 ) {
     let mut state = state.lock().expect("telemetry state poisoned");
-    // While telemetry is off nothing records, and the run severs: its
-    // facts never enter the aggregates, so a later enable can neither
-    // complete it nor merge the next run into it. A fact from before a
-    // disabling write (the epoch moved) spans the opt-out window: it
-    // severs the same way.
-    if !recording_on(&state) {
+    // The switch is asked at the turn boundaries only: a run or turn
+    // start refreshes the cached decision, every other event consults
+    // the cache, and the client's flush drops everything queued while
+    // the switch is off. While recording is off nothing records, and the
+    // run severs: its facts never enter the aggregates, so a later
+    // enable can neither complete it nor merge the next run into it.
+    if matches!(event, AgentEvent::AgentStart | AgentEvent::TurnStart) {
+        observe_turn_boundary(&mut state);
+        if !state.recording {
+            return;
+        }
+    } else if !state.recording {
         sever_off_period_run(&mut state);
         return;
     }
-    sever_if_stale_run(&mut state);
     let now = (state.now)();
     match event {
         AgentEvent::AgentStart => {
@@ -790,14 +774,8 @@ fn handle_event(
             // AgentEnd (misbehaving emitter) still cannot lose run facts.
             finalize_run_locked(client, execution_mode, &mut state);
             let run_index = state.totals.run_count + 1;
-            let off_epoch = state
-                .telemetry_enabled
-                .as_ref()
-                .and_then(|telemetry_switch| telemetry_switch.off_epoch.as_ref())
-                .map_or(0, |off_epoch| off_epoch());
             state.active_run = Some(ActiveRun {
                 started_at: now,
-                off_epoch,
                 ended: false,
                 ended_at: None,
                 first_turn_started_at: None,
@@ -984,9 +962,9 @@ fn handle_event(
         }
         // TurnEnd carries no facts the TS subscriber used (turn_count comes
         // from TurnStart); ToolExecutionUpdate is mid-execution progress.
-        // Both are still run-scoped: the entry gate severs while off or
-        // across an epoch bump (a tool whose execution spans the opt-out
-        // never counts into a surviving run).
+        // Both are still run-scoped events: while the cached decision is
+        // off they sever (a tool whose execution spans an opt-out observed
+        // at a boundary never counts into a surviving run).
         AgentEvent::TurnEnd { .. } | AgentEvent::ToolExecutionUpdate { .. } => {}
     }
 }
@@ -1235,23 +1213,17 @@ pub fn build_client(
 
 /// The recording seams' live opt-out switch: the same env-then-settings
 /// resolution the delivery pass applies ([`telemetry_switch`]), resolved
-/// live on every ask. No cached answer may span a mid-session opt-out:
-/// an off (or an on) applies to the recording seams the moment the
-/// settings do, exactly like the client's delivery gate. The off-epoch
-/// cell registers for the disabling-write bumps, so a fact that spans an
-/// opt-out window with no telemetry event inside it still severs.
+/// live at the turn boundaries: an off (or an on) applies to the
+/// recording seams at the next boundary, exactly like the client's
+/// delivery gate applies it at the flush.
 #[must_use]
 pub fn telemetry_enabled_switch(
     cwd: &std::path::Path,
     agent_dir: &std::path::Path,
 ) -> RecordingSwitch {
     let settings = crate::settings::SettingsManager::create(cwd, agent_dir);
-    let epoch_agent_dir = agent_dir.to_path_buf();
     RecordingSwitch {
         enabled: Arc::new(move || telemetry_switch(&settings.reopen()).enabled()),
-        off_epoch: Some(Arc::new(move || {
-            pa_telemetry::read_off_epoch(&epoch_agent_dir)
-        })),
     }
 }
 

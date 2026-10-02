@@ -90,16 +90,51 @@ pub fn existing_install_id(agent_dir: &Path) -> Option<String> {
 
 /// Valid stored id, or `None` when the file is absent or holds invalid state.
 fn read_install_id(path: &Path) -> Result<Option<String>> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
+    // The state is opened non-blocking (unix O_NONBLOCK): a special
+    // file swapped onto the path (a FIFO) would block a plain read
+    // forever, and no caller — including the `/telemetry` confirmation
+    // after a saved opt-out — may hang on the telemetry state. A
+    // non-blocking FIFO with no writer reads empty and parses to no id.
+    let mut file = match open_state_nonblocking(path) {
+        Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
+        Err(err) => return Err(err).with_context(|| format!("open {}", path.display())),
     };
+    let mut bytes = Vec::new();
+    match std::io::Read::read_to_end(&mut file, &mut bytes) {
+        Ok(_) => {}
+        // A non-blocking empty read (EAGAIN on a writer-less FIFO) is
+        // no id, not an error.
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
+    }
     let state: Option<State> = serde_json::from_slice(&bytes).ok();
     let valid = state
         .filter(|s| s.version == STATE_VERSION && is_uuid(&s.installation_id))
         .map(|s| s.installation_id);
     Ok(valid)
+}
+
+/// Open the state file read-only, non-blocking on unix (`O_NONBLOCK`):
+/// whatever now sits on the path — a regular state file or a swapped-in
+/// special file — opens and reads without ever parking the caller.
+#[cfg(unix)]
+fn open_state_nonblocking(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(
+            rustix::fs::OFlags::NONBLOCK
+                .bits()
+                .try_into()
+                .expect("O_NONBLOCK fits the open flags"),
+        )
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_state_nonblocking(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().read(true).open(path)
 }
 
 /// Outcome of trying to publish a candidate state file exclusively.
@@ -226,6 +261,26 @@ fn is_uuid(value: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// A special file on the state path (a FIFO) is the blocking-read
+    /// hazard: the id read must come back empty (no id) instead of
+    /// parking the caller — the `/telemetry` confirmation after a saved
+    /// opt-out may never hang on the telemetry state.
+    #[test]
+    #[cfg(unix)]
+    fn a_fifo_on_the_state_path_reads_as_no_id() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).expect("agent dir");
+        // A FIFO with no writer: a plain read would block forever.
+        let fifo = agent_dir.join(STATE_FILE);
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo");
+        assert!(status.success(), "mkfifo created the fifo");
+        assert_eq!(existing_install_id(&agent_dir), None);
+    }
+
     #[test]
     fn uuid_validation() {
         assert!(is_uuid("0197d0a0-8f5c-7f2a-b0e3-2d7e0d2b3b1a"));
@@ -347,83 +402,4 @@ mod tests {
             assert_eq!(state.installation_id, ids[0], "durable state must match");
         }
     }
-}
-
-/// The persisted telemetry off-epoch: the count of telemetry-disabling
-/// writes this installation has seen. Sessions snapshot it when a run
-/// begins and compare it per event, so a fact that spans a mid-session
-/// opt-out — even one with no telemetry event inside the off window, and
-/// even when the opt-out was written by another process (`/telemetry`
-/// runs where the command runs; the recording runs in the worker) —
-/// never reports afterwards. The epoch shares the install-id state file,
-/// so the installation id is preserved; a missing or unreadable state
-/// reads as epoch 0 (fail-open: the live per-event opt-out check still
-/// guards the off period itself).
-#[derive(Debug, Serialize, Deserialize)]
-struct OffEpochState {
-    version: u64,
-    #[serde(rename = "installationId")]
-    installation_id: String,
-    #[serde(rename = "offEpoch", default)]
-    off_epoch: u64,
-}
-
-/// Read the persisted off-epoch of `<agentDir>/telemetry.json`. A missing
-/// or unreadable state is epoch 0; this never fails the session.
-#[must_use]
-pub fn read_off_epoch(agent_dir: &Path) -> u64 {
-    read_off_epoch_state(&agent_dir.join(STATE_FILE)).map_or(0, |state| state.off_epoch)
-}
-
-fn read_off_epoch_state(path: &Path) -> Option<OffEpochState> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let state: OffEpochState = serde_json::from_str(&content).ok()?;
-    (state.version == STATE_VERSION).then_some(state)
-}
-
-/// Record a telemetry-disabling write: bump the persisted off-epoch so
-/// the recording seams (this process or another) sever facts that span
-/// the opt-out. Callers that can race on the bump serialize it (the
-/// settings-locked command funnel in pa-core takes the directory lock);
-/// the epoch is a monotonic counter and a lost increment is a missed
-/// flap, so every failure propagates: the caller must fail the command
-/// before saving an opt-out whose zero-event window the worker could
-/// not see.
-///
-/// # Errors
-///
-/// Returns an error when the installation id cannot be created or the
-/// bumped state cannot be published; the state file is unchanged when
-/// that happens (the publication is an exclusive temp file renamed over
-/// the state).
-pub fn bump_off_epoch(agent_dir: &Path) -> Result<()> {
-    let path = agent_dir.join(STATE_FILE);
-    // Preserve the installation id: the state file is the identity store,
-    // and losing it would disable telemetry outright.
-    let installation_id = match read_off_epoch_state(&path) {
-        Some(state) => state.installation_id,
-        None => install_id(agent_dir)?,
-    };
-    let next = read_off_epoch_state(&path).map_or(0, |state| state.off_epoch) + 1;
-    let state = OffEpochState {
-        version: STATE_VERSION,
-        installation_id,
-        off_epoch: next,
-    };
-    let payload = serde_json::to_vec_pretty(&state)?;
-    // Same publication path as the id itself: an exclusive 0600 temp file
-    // atomically renamed over the state, so the id's privacy contract
-    // survives the bump.
-    let dir = path.parent().unwrap_or(Path::new("."));
-    let temp = dir.join(format!(".{}-{}", STATE_FILE, uuid::Uuid::new_v4().simple()));
-    let bump = create_exclusive(&temp, &payload).and_then(|()| crate::rename_onto(&temp, &path));
-    if bump.is_err() {
-        remove_quietly(&temp);
-    }
-    bump.map_err(|error| {
-        anyhow::Error::new(error).context(format!(
-            "bump the telemetry off epoch at {}",
-            path.display()
-        ))
-    })
 }

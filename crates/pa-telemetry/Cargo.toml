@@ -15,7 +15,7 @@ tracing.workspace = true
 uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["system"] }
+rustix = { version = "1", features = ["system", "fs"] }
 
 [dev-dependencies]
 tempfile = "3"
