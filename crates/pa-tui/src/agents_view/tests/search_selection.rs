@@ -100,6 +100,30 @@ fn a_matching_selection_still_moves_to_the_top_hit() {
     assert_eq!(mode.selected, first_selectable(&mode));
 }
 
+/// The editor's word-delete binding (TS `Editor.handleInput`'s
+/// `deleteWordBackward`, ctrl+w) deletes the query's trailing word —
+/// the single-character decode dropped the multi-character id (the
+/// #3309 class), so a multi-word query could only be corrected one
+/// backspace at a time.
+#[test]
+fn ctrl_w_deletes_the_query_s_trailing_word() {
+    let mut mode = fresh_mode(search_roster());
+    type_query(&mut mode, "gateway worker");
+    assert_eq!(mode.query, "gateway worker");
+    mode.handle_key("ctrl+w");
+    assert_eq!(mode.query, "gateway ");
+    mode.handle_key("alt+backspace");
+    assert_eq!(mode.query, "");
+    // An empty query's word-delete is a no-op that re-arms nothing.
+    mode.handle_key("ctrl+w");
+    assert_eq!(mode.query, "");
+    assert_eq!(
+        mode.rows.len(),
+        6,
+        "every row returns with the cleared query"
+    );
+}
+
 /// Clearing the query (backspace to empty, ctrl+u, or escape) returns
 /// the selection to the session it sat on before the search began.
 #[test]
