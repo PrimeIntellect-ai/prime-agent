@@ -1977,12 +1977,8 @@ fn update_meta(frame: &Value) -> &Value {
 /// The kernel cell of the spawn turn (the worker's
 /// `rlm_quiescence_barrier_e2e` lane): spawn one RLM child through the
 /// product `rlm.spawn` surface and record its child id.
-fn spawn_cell(receipt: &std::path::Path, error_receipt: &std::path::Path) -> String {
-    format!(
-        "import json, traceback\ntry:\n    handle = await rlm.spawn(\"run the lane task\", name=\"kid\")\n    open({receipt:?}, \"w\").write(json.dumps({{\"rlm_child_id\": handle.rlm_child_id}}))\n    print(handle.rlm_child_id)\nexcept Exception:\n    open({error_receipt:?}, \"w\").write(traceback.format_exc())\n    raise",
-        receipt = receipt.display().to_string(),
-        error_receipt = error_receipt.display().to_string(),
-    )
+fn spawn_cell() -> &'static str {
+    "handle = await rlm.spawn(\"run the lane task\", name=\"kid\")\nprint(handle.rlm_child_id)"
 }
 
 /// The parent faux script whose turns run the spawn cell; the third
@@ -2011,11 +2007,7 @@ fn spawn_lane(
     child_hold_ms: u64,
     kernel_python: &std::path::Path,
 ) -> (AcpChild, String, String) {
-    let receipts = tempfile::TempDir::new().unwrap();
-    let parent = spawn_parent_script(&spawn_cell(
-        &receipts.path().join("spawn.json"),
-        &receipts.path().join("spawn.error"),
-    ));
+    let parent = spawn_parent_script(spawn_cell());
     let child_script = json!({ "responses": [ { "text": "kid done", "delayMs": child_hold_ms } ] });
     let mut client = AcpChild::spawn_with_child_script(args, &parent, &child_script, kernel_python);
     let init = client.request("initialize", &initialize_params());
