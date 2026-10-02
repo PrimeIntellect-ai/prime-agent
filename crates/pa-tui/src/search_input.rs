@@ -249,11 +249,16 @@ impl SearchInput {
     }
 
     /// A whole-word paste (bracketed paste, newlines stripped like TS).
+    /// Control bytes never reach the value — the editor's `handle_paste`
+    /// filters them — so an ESC/OSC sequence riding a paste cannot be
+    /// stored in the query and re-emitted to the terminal on the next
+    /// render of the field.
     pub(crate) fn paste(&mut self, text: &str) {
         self.last_action = LastAction::None;
         self.push_undo();
         let mut clean = text.replace(['\r', '\n'], "");
         clean = clean.replace('\t', "    ");
+        clean = clean.chars().filter(|c| !c.is_control()).collect();
         self.insert_at_cursor(&clean);
     }
 
@@ -466,6 +471,22 @@ mod tests {
         assert_eq!(input.value(), "a ");
         input.handle_key("backspace", &kb());
         assert_eq!(input.value(), "a");
+    }
+
+    /// A paste's control bytes never reach the value (the editor's
+    /// `handle_paste` filters them): an ESC/OSC sequence riding a
+    /// bracketed paste would otherwise be stored in the query and
+    /// re-emitted to the terminal on the next render of the field.
+    #[test]
+    fn paste_rejects_control_bytes() {
+        let mut input = typed("a");
+        input.paste("\u{1b}]8;;https://evil.example\u{7}b\u{7f}");
+        // The ESC/BEL/DEL bytes are dropped (the payload's printable
+        // characters stay text, like the editor's paste filter): no
+        // control byte survives into the value, so the field's render
+        // can never re-emit a terminal control sequence.
+        assert_eq!(input.value(), "a]8;;https://evil.exampleb");
+        assert!(!input.value().chars().any(char::is_control));
     }
 
     #[test]
