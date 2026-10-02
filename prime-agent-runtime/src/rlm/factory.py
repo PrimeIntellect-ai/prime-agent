@@ -31,6 +31,11 @@ examples — is embedded in this module as ``FACTORY_HELP``;
 ``rlm.factory.help()`` returns it with no filesystem resolution, so
 packaged kernels (where the repo layout is not adjacent) see the same
 guide.
+
+The namespace is opt-in: while the ``factory.enabled`` setting is off (the
+default; the user turns it on with ``/factory on``), every ``rlm.factory``
+call except ``help()`` and every factory harness write refuses with one
+clean message (``FACTORY_DISABLED_MESSAGE``), never a crash.
 """
 
 from __future__ import annotations
@@ -39,9 +44,11 @@ import copy
 import hashlib
 import heapq
 import json
+import os
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -829,12 +836,15 @@ def topological_order(nodes: list[dict[str, Any]]) -> list[str]:
 
 
 __all__ = [
+    "FACTORY_DISABLED_MESSAGE",
     "FACTORY_HELP",
     "FactoryExecutor",
     "FactoryRun",
     "canonicalize_factory_spec",
     "compile_factory_dag",
     "default_factory_executor",
+    "factory_enabled",
+    "require_factory_enabled",
     "resume_factory",
     "run_factory",
     "status_factory",
@@ -2568,6 +2578,67 @@ class FactoryExecutor:
         return [state_id for state_id in run.order if run.states[state_id].status == "pending"]
 
 
+# ---------------------------------------------------------------------------
+# The opt-in gate: `factory.enabled` in the agent-dir settings file.
+# ---------------------------------------------------------------------------
+
+#: The single refusal every gated factory call raises while the setting is
+#: off. One exact message, so agents and tests can pin the refusal.
+FACTORY_DISABLED_MESSAGE = "the factory is disabled; run /factory on to enable it"
+
+_SETTINGS_FILE_NAME = "settings.json"
+
+
+def _agent_dir() -> Path:
+    """Resolve the Prime Agent config dir the same way the rest of the runtime does."""
+    raw = (
+        os.environ.get("PRIME_AGENT_CODING_AGENT_DIR")
+        or os.environ.get("PI_CODING_AGENT_DIR")
+        or str(Path.home() / ".prime" / "agent")
+    )
+    return Path(raw).expanduser().resolve()
+
+
+def factory_enabled() -> bool:
+    """Read the ``factory.enabled`` opt-in setting (default off).
+
+    The factory is opt-in: it ships disabled, and the user turns it on with
+    ``/factory on`` (the persisted setting is ``factory.enabled`` in the
+    agent dir's ``settings.json`` -- the same nested-camelCase document the
+    daemon and TUI settings surface write, e.g. ``{"factory": {"enabled":
+    true}}`` beside ``compaction``/``agentTraces``). The read mirrors the
+    lenient settings loading on the Rust side: a missing file or key, a
+    wrong-typed value, or a corrupt document all read as unset, and unset
+    means disabled -- the opt-in default is fail-closed, so an unreadable
+    settings file refuses the factory instead of silently enabling it.
+    """
+    path = _agent_dir() / _SETTINGS_FILE_NAME
+    try:
+        with open(path, encoding="utf-8") as handle:
+            document = json.load(handle)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(document, dict):
+        return False
+    factory = document.get("factory")
+    if not isinstance(factory, dict):
+        return False
+    return factory.get("enabled") is True
+
+
+def require_factory_enabled() -> None:
+    """Refuse with one clean error while the factory is disabled.
+
+    Every gated surface funnels through here -- the ``rlm.factory``
+    namespace calls (``run``/``status``/``stop``/``resume``, and the later
+    ``graph``/``watch``) and the factory harness writes -- so the refusal is
+    one message at every seam. ``help()`` is deliberately exempt: the
+    authoring reference must stay readable before opting in.
+    """
+    if not factory_enabled():
+        raise ValueError(FACTORY_DISABLED_MESSAGE)
+
+
 _DEFAULT_EXECUTOR: FactoryExecutor | None = None
 
 
@@ -2586,21 +2657,25 @@ def default_factory_executor() -> FactoryExecutor:
 
 async def run_factory(spec_id: str, *, name: str | None = None) -> dict[str, Any]:
     """Validate a stored factory spec and start a nonblocking run of it."""
+    require_factory_enabled()
     return await default_factory_executor().run(spec_id, name=name)
 
 
 async def status_factory(run_id: str) -> dict[str, Any]:
     """Return state states, the event window, elapsed time, and usage."""
+    require_factory_enabled()
     return await default_factory_executor().status(run_id)
 
 
 async def stop_factory(run_id: str) -> dict[str, Any]:
     """Cancel every running child of the run and mark it stopped."""
+    require_factory_enabled()
     return await default_factory_executor().stop(run_id)
 
 
 async def resume_factory(run_id: str) -> dict[str, Any]:
     """Resume a paused run (escalate, budget, or max_transitions pause)."""
+    require_factory_enabled()
     return await default_factory_executor().resume(run_id)
 
 
@@ -2615,6 +2690,16 @@ background kernel task; the call returns immediately and the run continues
 after the model turn ends. Use it when a workflow needs shape: fan-out,
 bounded loops (review/fix until a verdict approves), joins, or one child
 per list item.
+
+The factory is opt-in: it ships disabled, and the user turns it on with
+`/factory on` (`/factory off` disables it again, `/factory status` reports
+it; the persisted setting is `factory.enabled` in the agent dir's
+settings.json). While it is disabled, every `rlm.factory` call except
+`help()` — run, status, stop, resume, and the graph/watch views — plus
+every factory harness write (`create_factory` and updates of factory
+entries) refuses with one clean error:
+"the factory is disabled; run /factory on to enable it". `help()` answers
+while disabled, so this guide stays readable before opting in.
 
 ## Store the spec
 

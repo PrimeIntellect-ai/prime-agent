@@ -538,6 +538,11 @@ class _RLMFactoryNamespace:
     memory only; children stay supervisor-owned. Every call is async, so
     always await it: ``await rlm.factory.run('<id>')``.
 
+    The factory is opt-in: while the ``factory.enabled`` setting is off (the
+    default; the user turns it on with ``/factory on``), every call above
+    refuses with one clean message and only ``help()`` answers, so the
+    guide stays readable before opting in.
+
     ``help()`` returns the full embedded authoring reference and API guide
     (states, ports, guards, joins, foreach, budgets, and the API with
     worked examples): ``rlm.factory.help()``.
