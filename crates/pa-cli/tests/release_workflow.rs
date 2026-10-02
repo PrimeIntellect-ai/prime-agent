@@ -411,7 +411,7 @@ fn windows_build_job_contract() {
         .iter()
         .find(|step| {
             step.name.as_deref()
-                == Some("Publish the R2 channel (the user path never touches GitHub)")
+                == Some("Publish the R2 channel")
         })
         .expect("the R2 publish step exists")
         .run
