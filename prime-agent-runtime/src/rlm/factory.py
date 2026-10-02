@@ -473,30 +473,44 @@ def validate_factory_machine(machine: Any) -> list[str]:
         subagent = state.get("subagent")
         if isinstance(subagent, dict) and _is_nonempty_str(subagent.get("name")):
             configured_name = subagent["name"].strip()
-            shadowing = next(
-                (
-                    seen
-                    for seen in seen_subagent_names
-                    if _suffixed_spawn_form(seen, configured_name)
-                    or _suffixed_spawn_form(configured_name, seen)
-                ),
+            base_seen = next(
+                (seen for seen in seen_subagent_names if _suffixed_spawn_form(seen, configured_name)),
                 None,
+            )
+            base_current = (
+                None
+                if base_seen is not None
+                else next(
+                    (seen for seen in seen_subagent_names if _suffixed_spawn_form(configured_name, seen)),
+                    None,
+                )
             )
             if configured_name in seen_subagent_names:
                 errors.append(
                     f"state {state_id} subagent name {configured_name!r} is already configured "
                     f"by state {seen_subagent_names[configured_name]!r}"
                 )
-            elif shadowing is not None:
+            elif base_seen is not None:
                 # One state's suffixed labels are another state's verbatim
                 # name (foo vs foo-i1): the supervisor would reject the
                 # duplicate sibling name at spawn time, so reject the
-                # shadowing name at write time.
+                # shadowing name at write time. The seen name generates the
+                # labels here.
                 errors.append(
                     f"state {state_id} subagent name {configured_name!r} collides with the "
-                    f"suffixed spawn labels of state {seen_subagent_names[shadowing]!r} "
-                    f"(configured {shadowing!r}): re-entry, foreach, and retries name children "
-                    f"{shadowing!r}-i<n> and {shadowing!r}-a<n>"
+                    f"suffixed spawn labels of state {seen_subagent_names[base_seen]!r} "
+                    f"(configured {base_seen!r}): re-entry, foreach, and retries name children "
+                    f"{base_seen!r}-i<n> and {base_seen!r}-a<n>"
+                )
+            elif base_current is not None:
+                # The reverse direction: THIS state's name generates the
+                # suffixed labels, and an earlier state's name is one of
+                # them.
+                errors.append(
+                    f"state {state_id} subagent name {configured_name!r} suffixed by re-entry, "
+                    f"foreach, and retries ({configured_name!r}-i<n>, {configured_name!r}-a<n>) "
+                    f"collides with state {seen_subagent_names[base_current]!r} "
+                    f"(configured {base_current!r})"
                 )
             else:
                 seen_subagent_names[configured_name] = state_id

@@ -1268,6 +1268,10 @@ class ValidateFactoryMachineTest(unittest.TestCase):
         errors = validate_factory_machine(shadowing)
         self.assertEqual(len(errors), 1)
         self.assertIn("collides with the suffixed spawn labels of state 'a'", errors[0])
+        self.assertIn("re-entry, foreach, and retries name children 'foo'-i<n> and 'foo'-a<n>", errors[0])
+        # Reversed declaration order: the CURRENT state's name generates the
+        # suffixed labels, and the message must attribute them to it, not to
+        # the earlier state (Cursor review finding).
         reversed_shadowing = {
             "states": [
                 {"id": "a", "entry": True, "subagent": {"prompt": "p", "name": "foo-i1"}},
@@ -1275,7 +1279,13 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             ],
             "transitions": [{"from": "a", "to": "b"}],
         }
-        self.assertEqual(len(validate_factory_machine(reversed_shadowing)), 1)
+        errors = validate_factory_machine(reversed_shadowing)
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(
+            errors[0],
+            "state b subagent name 'foo' suffixed by re-entry, foreach, and retries "
+            "('foo'-i<n>, 'foo'-a<n>) collides with state 'a' (configured 'foo-i1')",
+        )
         for shadowed_name in ("foo-a2", "foo-i1-a2", "foo-i9"):
             machine = {
                 "states": [
