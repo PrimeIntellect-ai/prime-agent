@@ -725,6 +725,10 @@ fn rand_suffix() -> String {
 /// passes unchanged: Herdr's own socket under the user's runtime
 /// directory is that user's own socket (TS parity). Named pipes on
 /// Windows keep their connect-time ACL model (no lstat to check).
+// Read only by the unix fence path below (named pipes keep their
+// connect-time ACL model elsewhere), so the flag is dead weight on
+// other platforms.
+#[cfg_attr(not(unix), allow(dead_code))]
 static SOCKET_REFUSAL_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// The fence's pure decision (unit-testable without `chown`): the
@@ -1093,6 +1097,9 @@ mod tests {
 
     /// A fake Herdr socket: one listener that records every request line
     /// and answers the wire success shape.
+    // The fake binds a real unix socket (tokio's UnixListener has no
+    // Windows twin), so it and the tests that use it are Unix-only.
+    #[cfg(unix)]
     fn fake_herdr(
         socket_path: &std::path::Path,
     ) -> (
@@ -1137,6 +1144,8 @@ mod tests {
         (requests, handle)
     }
 
+    // Used only by the Unix fake-socket tests.
+    #[cfg(unix)]
     async fn wait_for_requests(
         requests: &std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
         count: usize,
@@ -1155,6 +1164,8 @@ mod tests {
         }
     }
 
+    // Used only by the Unix fake-socket tests.
+    #[cfg(unix)]
     fn states_of(requests: &std::sync::Arc<std::sync::Mutex<Vec<Value>>>) -> Vec<String> {
         requests
             .lock()
@@ -1166,6 +1177,8 @@ mod tests {
 
     /// A fresh generation counter with the reporter started at epoch 1:
     /// tests that exercise the stale-generation gate bump the counter.
+    // Used only by the Unix fake-socket tests.
+    #[cfg(unix)]
     fn start_reporter(
         config: HerdrConfig,
         session_ref: HerdrSessionRef,
@@ -1176,12 +1189,16 @@ mod tests {
         (reporter, current)
     }
 
+    // Used only by the Unix fake-socket and fence tests.
+    #[cfg(unix)]
     fn temp_socket(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("pa-herdr-{tag}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("herdr.sock")
     }
 
+    // Used only by the Unix fake-socket tests.
+    #[cfg(unix)]
     fn pane_env(socket_path: &std::path::Path, pane_id: &str) -> BTreeMap<String, String> {
         env(&[
             ("HERDR_ENV", "1"),
@@ -1192,6 +1209,8 @@ mod tests {
         ])
     }
 
+    // Unix-only: it runs against the fake unix pane socket.
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_reporter_publishes_the_wire_contract_states() {
         let socket_path = temp_socket("wire");
@@ -1247,6 +1266,8 @@ mod tests {
         server.abort();
     }
 
+    // Unix-only: it runs against the fake unix pane socket.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_error_end_holds_then_blocks_with_the_message() {
         let socket_path = temp_socket("hold");
@@ -1279,6 +1300,8 @@ mod tests {
         server.abort();
     }
 
+    // Unix-only: it runs against the fake unix pane socket.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_retry_within_the_grace_keeps_the_pane_working() {
         let socket_path = temp_socket("retry");
@@ -1317,6 +1340,8 @@ mod tests {
         server.abort();
     }
 
+    // Unix-only: it runs against the fake unix pane socket.
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_release_is_the_last_write_and_never_reclaims() {
         let socket_path = temp_socket("release");
@@ -1350,6 +1375,8 @@ mod tests {
     /// A session replacement must not inherit the predecessor's
     /// failure state: the successor's `session_start` publishes clean
     /// (idle), never the old blocked/error shape.
+    // Unix-only: it runs against the fake unix pane socket.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_replacement_resets_the_predecessor_failure_state() {
         let socket_path = temp_socket("reset");
@@ -1404,6 +1431,8 @@ mod tests {
 
     /// The stale-generation gate: a replaced reporter's racing boundary
     /// events never reach the wire — only the successor's do.
+    // Unix-only: it runs against the fake unix pane socket.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_stale_generation_reporter_never_writes() {
         let socket_path = temp_socket("stale");
@@ -1468,6 +1497,8 @@ mod tests {
     /// A stale-generation reporter never releases the successor's pane —
     /// and the dropped release still acks so the quit close does not
     /// stall on the timeout.
+    // Unix-only: it runs against the fake unix pane socket.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_stale_release_neither_writes_nor_stalls() {
         let socket_path = temp_socket("stale-release");
@@ -1552,6 +1583,9 @@ mod tests {
     /// A reporter aimed at a non-socket target stays silent: the fence
     /// drops the report before the connect, exactly like a missing
     /// socket.
+    // Unix-only: the impostor target is a unix symlink over the fake
+    // pane socket.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_reporter_into_a_non_socket_target_stays_silent() {
         // A LIVE listener exists at the real path: the impostor the
@@ -1602,6 +1636,8 @@ mod tests {
     /// NOT recorded as published: the same state re-sends at the next
     /// boundary once the socket exists. The old queue-time marking
     /// deduped it away forever — this test fails on that shape.
+    // Unix-only: it runs against the fake unix pane socket.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_state_is_re_sent_after_the_socket_comes_up() {
         let socket_path = temp_socket("late-boot");
@@ -1678,6 +1714,8 @@ mod tests {
         assert_eq!(distinct, all.len(), "duplicate seq minted: {all:?}");
     }
 
+    // Unix-only: it runs against the fake unix pane socket.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_dropped_reporter_stays_silent_without_releasing() {
         let socket_path = temp_socket("silent");

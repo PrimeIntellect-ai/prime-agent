@@ -1,4 +1,9 @@
 //! TS provisioner parity: all first-touch callers join one in-flight boot.
+// Unix-only: the fixture interpreter is armed with unix mode bits
+// (std::os::unix::fs::PermissionsExt), which have no counterpart on
+// the windows target.
+#![cfg(unix)]
+
 use pa_core::kernel::cancellation::AbortSignal;
 use pa_core::kernel::provisioner::{IpythonKernelProvisioner, IpythonKernelProvisionerOptions};
 use std::os::unix::fs::PermissionsExt;
