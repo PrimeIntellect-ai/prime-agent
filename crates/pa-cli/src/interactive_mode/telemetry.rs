@@ -150,6 +150,25 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
         Box::pin(std::future::ready(()))
     }
 
+    fn ipython_bash_rendered(
+        &self,
+        bash_lines: usize,
+        cell_lines: usize,
+        count: usize,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let Some(client) = self.client() else {
+                return;
+            };
+            let mut properties = pa_telemetry::base_properties("interactive");
+            properties.set("bash_lines", serde_json::Value::from(bash_lines));
+            properties.set("cell_lines", serde_json::Value::from(cell_lines));
+            properties.set("count", serde_json::Value::from(count));
+            client.track("tui ipython bash rendered", properties);
+            let _ = client.shutdown().await;
+        })
+    }
+
     fn scroll_used(
         &self,
         _action: &'static str,

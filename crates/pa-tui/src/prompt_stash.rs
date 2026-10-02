@@ -66,8 +66,9 @@ impl PromptStashState {
     /// Take the head draft whatever its restore semantics, promoting the
     /// next queued draft to the head (TS `restorePromptStashIfEditorEmpty`
     /// with the default `stash` argument — the manual `app.prompt.stash`
-    /// arm: the key restores whatever draft the session holds, manual or
-    /// auto). The caller owns the editor-empty condition.
+    /// arm and the post-submit restore: the key or an admitted submit
+    /// returns whatever draft the session holds, manual or auto). The
+    /// caller owns the editor-empty condition.
     pub fn take_head(&mut self) -> Option<PromptStash> {
         let head = self.stash.take();
         self.stash = if self.queued_stashes.is_empty() {

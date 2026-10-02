@@ -14,6 +14,7 @@ mod delete_stop;
 mod drill_down;
 mod edge_jumps;
 mod entry_anchor;
+mod heartbeat_badge;
 mod hints_render;
 mod hover_band;
 mod key_bindings;

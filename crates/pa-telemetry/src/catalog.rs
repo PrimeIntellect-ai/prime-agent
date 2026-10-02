@@ -1005,6 +1005,19 @@ const SESSION_ARCHIVED: EventRule = EventRule {
     ],
 };
 
+/// A settled ipython cell that rendered as bash (v2): its executed
+/// `bash()` line share and command count, never command text. Kept from
+/// the upstream #3307 fold as a per-occurrence event.
+const TUI_IPYTHON_BASH_RENDERED: EventRule = EventRule {
+    name: "tui ipython bash rendered",
+    since: 2,
+    properties: &[
+        ("bash_lines", required(count())),
+        ("cell_lines", required(count())),
+        ("count", required(count())),
+    ],
+};
+
 /// `tui exit` (v1, enriched): one per interactive session run (each agents
 /// view handoff ends one), carrying that run's adoption counters (the TUI
 /// interactions, the client-side feature outcomes, the input-stage counts
@@ -1255,6 +1268,7 @@ pub fn catalog() -> Vec<&'static EventRule> {
         &MODEL_REFUSED,
         &SESSION_ARCHIVED,
         &TUI_EXIT,
+        &TUI_IPYTHON_BASH_RENDERED,
     ];
     all.extend(UPDATE_EVENTS.iter());
     all
