@@ -28,7 +28,7 @@ describe("Prime Inference models", () => {
 				"meta-llama/llama-4-maverick",
 				"minimax/minimax-m3",
 				"moonshotai/kimi-k2.7-code",
-				"nvidia/nemotron-3-super-120b-a12b",
+				"nvidia/nemotron-3-nano-30b-a3b",
 				"openai/gpt-5.4",
 				"openai/gpt-5.5",
 				"qwen/qwen3-coder-next",
@@ -54,26 +54,26 @@ describe("Prime Inference models", () => {
 
 	it("marks flagship models as featured so pickers can pin them above the long tail", () => {
 		expect(getModel("prime-inference", "openai/gpt-5.5").featured).toBe(true);
-		expect(getModel("prime-inference", "z-ai/glm-5.2").featured).toBe(true);
+		expect(getModel("prime-inference", "z-ai/glm-5.3").featured).toBe(true);
 		expect(getModel("prime-inference", "moonshotai/kimi-k3").featured).toBe(true);
 		expect(getModel("prime-inference", "google/gemini-2.5-pro").featured).toBeUndefined();
 		expect(getModel("prime-inference", "openai/gpt-4o").featured).toBeUndefined();
 	});
 
-	it("uses mandatory provider efforts for Qwen 3.8 Max", () => {
-		const model = getModel("prime-inference", "qwen/qwen3.8-max");
+	it("uses mandatory provider efforts for GLM 5.3", () => {
+		const model = getModel("prime-inference", "z-ai/glm-5.3");
 
 		expect(model.featured).toBe(true);
 		expect(model.thinkingLevelMap).toEqual({
 			off: null,
-			minimal: "minimal",
+			minimal: null,
 			low: "low",
-			medium: "medium",
+			medium: null,
 			high: "high",
-			xhigh: "xhigh",
-			max: null,
+			xhigh: null,
+			max: "max",
 		});
-		expect(getSupportedThinkingLevels(model)).toEqual(["minimal", "low", "medium", "high", "xhigh"]);
+		expect(getSupportedThinkingLevels(model)).toEqual(["low", "high", "max"]);
 	});
 
 	it("uses reasoning toggles for models without effort selectors", () => {
@@ -96,8 +96,8 @@ describe("Prime Inference models", () => {
 			expect(model.input).toEqual(["text", "image"]);
 			expect(model.contextWindow).toBe(1048576);
 			expect(model.maxTokens).toBe(1048576);
-			expect(model.cost.input).toBe(3);
-			expect(model.cost.output).toBe(15);
+			expect(model.cost.input).toBe(provider === "prime-inference" ? 3.45 : 2.7);
+			expect(model.cost.output).toBe(provider === "prime-inference" ? 17.25 : 13.5);
 		}
 	});
 
@@ -108,11 +108,11 @@ describe("Prime Inference models", () => {
 		expect(gemini.input).toEqual(["text", "image"]);
 		expect(gemini.reasoning).toBe(true);
 
-		const nemotronSuper = getModel("prime-inference", "nvidia/nemotron-3-super-120b-a12b");
-		expect(nemotronSuper.reasoning).toBe(true);
-		expect(nemotronSuper.input).toEqual(["text"]);
-		expect(nemotronSuper.contextWindow).toBe(262144);
-		expect(nemotronSuper.maxTokens).toBe(4096);
+		const nemotronNano = getModel("prime-inference", "nvidia/nemotron-3-nano-30b-a3b");
+		expect(nemotronNano.reasoning).toBe(true);
+		expect(nemotronNano.input).toEqual(["text"]);
+		expect(nemotronNano.contextWindow).toBe(262144);
+		expect(nemotronNano.maxTokens).toBe(235929);
 
 		const maverick = getModel("prime-inference", "meta-llama/llama-4-maverick");
 		expect(maverick.contextWindow).toBe(1048576);
@@ -178,14 +178,21 @@ describe("Prime Inference models", () => {
 		expect(glm51.reasoning).toBe(true);
 		expect(glm51.compat).toMatchObject({
 			supportsReasoningEffort: false,
-			thinkingFormat: "zai",
+			thinkingFormat: "openrouter",
 		});
 		const glm52 = getModel("prime-inference", "z-ai/glm-5.2");
 		expect(glm52.reasoning).toBe(true);
 		expect(glm52.compat).toMatchObject({
-			supportsReasoningEffort: false,
-			thinkingFormat: "zai",
+			supportsReasoningEffort: true,
+			thinkingFormat: "openrouter",
 		});
+		const glm53 = getModel("prime-inference", "z-ai/glm-5.3");
+		expect(glm53.reasoning).toBe(true);
+		expect(glm53.compat).toMatchObject({
+			supportsReasoningEffort: true,
+			thinkingFormat: "openrouter",
+		});
+		expect(getSupportedThinkingLevels(glm53)).toEqual(["low", "high", "max"]);
 		expect(getModel("prime-inference", "qwen/qwen3-coder-next").reasoning).toBe(false);
 		expect(getModel("prime-inference", "x-ai/grok-4.20").reasoning).toBe(true);
 		expect(getModel("prime-inference", "minimax/minimax-m3").reasoning).toBe(true);
@@ -207,7 +214,7 @@ describe("Prime Inference models", () => {
 		expect(getModel("prime-inference", "anthropic/claude-sonnet-4.6").contextWindow).toBe(1000000);
 		expect(getModel("prime-inference", "anthropic/claude-sonnet-5").contextWindow).toBe(1000000);
 		expect(getModel("prime-inference", "anthropic/claude-haiku-4.5").contextWindow).toBe(200000);
-		expect(getModel("prime-inference", "anthropic/claude-sonnet-4.5").contextWindow).toBe(200000);
+		expect(getModel("prime-inference", "anthropic/claude-sonnet-4.5").contextWindow).toBe(1000000);
 	});
 
 	it("resolves PRIME_API_KEY from the environment", () => {

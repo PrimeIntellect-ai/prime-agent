@@ -50,6 +50,24 @@ vi.mock("openai", () => {
 	return { default: FakeOpenAI };
 });
 
+// The regenerated catalog no longer lists workers-ai passthrough models under
+// cloudflare-ai-gateway (upstream models.dev dropped them), so this fixture
+// reproduces the retired "workers-ai/@cf/moonshotai/kimi-k2.7-code" entry that
+// the /compat and session-affinity behaviors below are exercised against.
+const cloudflareGatewayKimiCompatModel: Model<"openai-completions"> = {
+	id: "workers-ai/@cf/moonshotai/kimi-k2.7-code",
+	name: "Kimi K2.7 Code",
+	api: "openai-completions",
+	provider: "cloudflare-ai-gateway",
+	baseUrl: "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/compat",
+	reasoning: true,
+	input: ["text", "image"],
+	cost: { input: 0.95, output: 4, cacheRead: 0.19, cacheWrite: 0 },
+	contextWindow: 262144,
+	maxTokens: 262144,
+	compat: { sendSessionAffinityHeaders: true },
+};
+
 describe("openai-completions empty tools handling", () => {
 	beforeEach(() => {
 		mockState.lastParams = undefined;
@@ -92,7 +110,7 @@ describe("openai-completions empty tools handling", () => {
 	it("uses conservative OpenAI-compatible fields for Cloudflare AI Gateway /compat models", async () => {
 		process.env.CLOUDFLARE_ACCOUNT_ID = "account-id";
 		process.env.CLOUDFLARE_GATEWAY_ID = "gateway-id";
-		const model = getModel("cloudflare-ai-gateway", "workers-ai/@cf/moonshotai/kimi-k2.6")!;
+		const model = cloudflareGatewayKimiCompatModel;
 
 		await streamSimple(
 			model,
@@ -177,7 +195,7 @@ describe("openai-completions empty tools handling", () => {
 	it("sends session affinity headers for Workers AI through Cloudflare AI Gateway", async () => {
 		process.env.CLOUDFLARE_ACCOUNT_ID = "account-id";
 		process.env.CLOUDFLARE_GATEWAY_ID = "gateway-id";
-		const workersModel = getModel("cloudflare-ai-gateway", "workers-ai/@cf/moonshotai/kimi-k2.6")!;
+		const workersModel = cloudflareGatewayKimiCompatModel;
 
 		await streamSimple(
 			workersModel,

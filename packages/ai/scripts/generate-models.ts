@@ -70,10 +70,6 @@ const COPILOT_STATIC_HEADERS = {
 	"Copilot-Integration-Id": "vscode-chat",
 } as const;
 
-const KIMI_STATIC_HEADERS = {
-	"User-Agent": "KimiCLI/1.5",
-} as const;
-
 const AI_GATEWAY_MODELS_URL = "https://ai-gateway.vercel.sh/v1";
 const AI_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh";
 const ZAI_TOOL_STREAM_UNSUPPORTED_MODELS = new Set(["glm-4.5", "glm-4.5-air", "glm-4.5-flash", "glm-4.5v"]);
@@ -107,9 +103,11 @@ const DEEPSEEK_V4_COMPAT: OpenAICompletionsCompat = {
 	thinkingFormat: "deepseek",
 };
 
-const ZAI_THINKING_COMPAT: OpenAICompletionsCompat = {
-	supportsReasoningEffort: false,
-	thinkingFormat: "zai",
+const // Prime Inference fronts GLM models with OpenRouter-style reasoning params.
+// The Z.ai `enable_thinking` parameter is rejected by the Prime Inference API
+// (400 "Unsupported parameter"), while `reasoning: { effort }` is accepted.
+ZAI_THINKING_COMPAT: OpenAICompletionsCompat = {
+	thinkingFormat: "openrouter",
 };
 
 const PRIME_INFERENCE_BASE_URL = "https://api.pinference.ai/api/v1";
@@ -203,7 +201,7 @@ const PRIME_INFERENCE_FEATURED_MODELS = new Set([
 	"x-ai/grok-4.20-multi-agent",
 	"z-ai/glm-5",
 	"z-ai/glm-5.1",
-	"z-ai/glm-5.2",
+	"z-ai/glm-5.3",
 ]);
 
 // Prime ids whose OpenRouter listing uses a different id. Empty today — Prime
@@ -1442,45 +1440,6 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 						maxTokens: m.limit?.output || 4096,
 					});
 				}
-			}
-		}
-
-		// Process Kimi For Coding models
-		if (data["kimi-for-coding"]?.models) {
-			const kimiModels = data["kimi-for-coding"].models as Record<string, ModelsDevModel>;
-			const hasCanonicalModel = Object.prototype.hasOwnProperty.call(kimiModels, "kimi-for-coding");
-
-			const kimiAliases = new Set(["k2p5", "k2p6"]);
-
-			for (const [modelId, model] of Object.entries(kimiModels)) {
-				const m = model as ModelsDevModel;
-				if (m.tool_call !== true) continue;
-				// models.dev may expose versioned aliases (e.g. k2p5/k2p6).
-				// Normalize aliases to the canonical model id and drop duplicates when canonical exists.
-				if (kimiAliases.has(modelId) && hasCanonicalModel) continue;
-
-				const normalizedId = kimiAliases.has(modelId) ? "kimi-for-coding" : modelId;
-				const normalizedName = kimiAliases.has(modelId) ? "Kimi For Coding" : m.name || normalizedId;
-
-				models.push({
-					id: normalizedId,
-					name: normalizedName,
-					api: "anthropic-messages",
-					provider: "kimi-coding",
-					// Kimi For Coding's Anthropic-compatible API - SDK appends /v1/messages
-					baseUrl: "https://api.kimi.com/coding",
-					headers: { ...KIMI_STATIC_HEADERS },
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
-				});
 			}
 		}
 

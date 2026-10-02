@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.js";
 import { complete } from "../src/stream.js";
 import type { Api, Context, Model, StreamOptions, Usage } from "../src/types.js";
-import { getKimiCodingTestModel } from "./kimi-test-model.js";
 import { getZaiTestModel } from "./zai-test-model.js";
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
@@ -273,12 +272,12 @@ describe("totalTokens field", () => {
 		});
 	});
 
-	describe.skipIf(!hasCloudflareAiGatewayCredentials())("Cloudflare AI Gateway", () => {
-		it("workers-ai/@cf/moonshotai/kimi-k2.6 - should return totalTokens equal to sum of components", {
+	describe.skipIf(!hasCloudflareAiGatewayCredentials())("GPT-5.1 via Cloudflare AI Gateway", () => {
+		it("gpt-5.1 - should return totalTokens equal to sum of components", {
 			retry: 3,
 			timeout: 60000,
 		}, async () => {
-			const llm = getModel("cloudflare-ai-gateway", "workers-ai/@cf/moonshotai/kimi-k2.6");
+			const llm = getModel("cloudflare-ai-gateway", "gpt-5.1");
 
 			console.log(`\nCloudflare AI Gateway / ${llm.id}:`);
 			const { first, second } = await testTotalTokensWithCache(llm, {
@@ -437,21 +436,6 @@ describe("totalTokens field", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.KIMI_API_KEY)("Kimi For Coding", () => {
-		it("should return totalTokens equal to sum of components", { retry: 3, timeout: 60000 }, async () => {
-			const llm = getKimiCodingTestModel();
-
-			console.log(`\nKimi For Coding / ${llm.id}:`);
-			const { first, second } = await testTotalTokensWithCache(llm, { apiKey: process.env.KIMI_API_KEY });
-
-			logUsage("First request", first);
-			logUsage("Second request", second);
-
-			assertTotalTokensEqualsComponents(first);
-			assertTotalTokensEqualsComponents(second);
-		});
-	});
-
 	describe.skipIf(!process.env.AI_GATEWAY_API_KEY)("Vercel AI Gateway", () => {
 		it("google/gemini-2.5-flash - should return totalTokens equal to sum of components", {
 			retry: 3,
@@ -571,10 +555,10 @@ describe("totalTokens field", () => {
 		);
 
 		it.skipIf(!githubCopilotToken)(
-			"claude-sonnet-4 - should return totalTokens equal to sum of components",
+			"claude-sonnet-4.6 - should return totalTokens equal to sum of components",
 			{ retry: 3, timeout: 60000 },
 			async () => {
-				const llm = getModel("github-copilot", "claude-sonnet-4.5");
+				const llm = getModel("github-copilot", "claude-sonnet-4.6");
 
 				console.log(`\nGitHub Copilot / ${llm.id}:`);
 				const { first, second } = await testTotalTokensWithCache(llm, { apiKey: githubCopilotToken });

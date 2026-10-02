@@ -6,7 +6,6 @@ import { completeSimple, getEnvApiKey } from "../src/stream.js";
 import type { Api, AssistantMessage, Message, Model, Tool, ToolResultMessage } from "../src/types.js";
 import { hasAzureOpenAICredentials } from "./azure-utils.js";
 import { hasCloudflareAiGatewayCredentials, hasCloudflareWorkersAICredentials } from "./cloudflare-utils.js";
-import { getKimiCodingTestModel } from "./kimi-test-model.js";
 import { resolveApiKey } from "./oauth.js";
 
 const testToolSchema = Type.Object({
@@ -40,23 +39,18 @@ const PROVIDER_MODEL_PAIRS: ProviderModelPair[] = [
 	{ provider: "azure-openai-responses", model: "gpt-4o-mini", label: "azure-openai-responses-gpt-4o-mini" },
 	{ provider: "openai-codex", model: "gpt-5.2-codex", label: "openai-codex-gpt-5.2-codex" },
 	{ provider: "prime-inference", model: "openai/gpt-5.5", label: "prime-inference-gpt-5.5" },
-	{ provider: "github-copilot", model: "claude-sonnet-4.5", label: "copilot-claude-sonnet-4.5" },
-	{ provider: "github-copilot", model: "gpt-5.2-codex", label: "copilot-gpt-5.2-codex" },
+	{ provider: "github-copilot", model: "claude-sonnet-4.6", label: "copilot-claude-sonnet-4.6" },
+	{ provider: "github-copilot", model: "gpt-5.3-codex", label: "copilot-gpt-5.3-codex" },
 	{ provider: "github-copilot", model: "gemini-3.5-flash", label: "copilot-gemini-3.5-flash" },
 	{ provider: "github-copilot", model: "grok-4.5", label: "copilot-grok-4.5" },
 	{
 		provider: "amazon-bedrock",
-		model: "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+		model: "global.anthropic.claude-sonnet-4-5-20250929-v1",
 		label: "bedrock-claude-sonnet-4-5",
 	},
 	{ provider: "xai", model: "grok-code-fast-1", label: "xai-grok-code-fast-1" },
 	{ provider: "cerebras", model: "gpt-oss-120b", label: "cerebras-gpt-oss-120b" },
 	{ provider: "cloudflare-workers-ai", model: "@cf/moonshotai/kimi-k2.6", label: "cloudflare-kimi-k2.6" },
-	{
-		provider: "cloudflare-ai-gateway",
-		model: "workers-ai/@cf/moonshotai/kimi-k2.6",
-		label: "cloudflare-gateway-kimi-k2.6",
-	},
 	{
 		provider: "cloudflare-ai-gateway",
 		model: "claude-sonnet-4.5",
@@ -71,7 +65,6 @@ const PROVIDER_MODEL_PAIRS: ProviderModelPair[] = [
 	},
 	{ provider: "groq", model: "openai/gpt-oss-120b", label: "groq-gpt-oss-120b" },
 	{ provider: "huggingface", model: "moonshotai/Kimi-K2.5", label: "huggingface-kimi-k2.5" },
-	{ provider: "kimi-coding", model: getKimiCodingTestModel().id, label: "kimi-coding" },
 	{ provider: "mistral", model: "devstral-medium-latest", label: "mistral-devstral-medium" },
 	{ provider: "minimax", model: "MiniMax-M2.7", label: "minimax-m2.7" },
 	{ provider: "minimax-cn", model: "MiniMax-M2.7", label: "minimax-m2.7" },
@@ -81,7 +74,7 @@ const PROVIDER_MODEL_PAIRS: ProviderModelPair[] = [
 	{ provider: "opencode", model: "glm-5.2", label: "zen-glm-5.2" },
 	{ provider: "opencode", model: "gpt-5.2-codex", label: "zen-gpt-5.2-codex" },
 	{ provider: "opencode", model: "minimax-m2.7", label: "zen-minimax-m2.7" },
-	{ provider: "opencode-go", model: "kimi-k2.6", label: "go-kimi-k2.6" },
+	{ provider: "opencode-go", model: "kimi-k2.7-code", label: "go-kimi-k2.7-code" },
 	{ provider: "opencode-go", model: "minimax-m2.7", label: "go-minimax-m2.7" },
 	{ provider: "xiaomi", model: "mimo-v2.5-pro", label: "xiaomi-mimo-v2.5-pro" },
 	{ provider: "xiaomi-token-plan-cn", model: "mimo-v2.5-pro", label: "xiaomi-token-plan-cn-mimo-v2.5-pro" },

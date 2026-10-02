@@ -14,7 +14,7 @@ import { isPrivatePrimeInferenceModel } from "./prime-inference-models.js";
 
 const log = getLogger("coding-agent.model-resolver");
 
-export const PRIME_INFERENCE_DEFAULT_MODEL_ID = "z-ai/glm-5.2";
+export const PRIME_INFERENCE_DEFAULT_MODEL_ID = "z-ai/glm-5.3";
 
 /** Default model IDs for each known provider */
 export const defaultModelPerProvider: Record<KnownProvider, string> = {
@@ -43,7 +43,6 @@ export const defaultModelPerProvider: Record<KnownProvider, string> = {
 	fireworks: "accounts/fireworks/models/kimi-k2p6",
 	opencode: "kimi-k2.6",
 	"opencode-go": "kimi-k2.6",
-	"kimi-coding": "kimi-for-coding",
 	"cloudflare-workers-ai": "@cf/moonshotai/kimi-k2.6",
 	"cloudflare-ai-gateway": "workers-ai/@cf/moonshotai/kimi-k2.6",
 	xiaomi: "mimo-v2.5-pro",

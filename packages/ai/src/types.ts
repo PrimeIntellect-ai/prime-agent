@@ -42,7 +42,6 @@ export type KnownProvider =
 	| "fireworks"
 	| "opencode"
 	| "opencode-go"
-	| "kimi-coding"
 	| "cloudflare-workers-ai"
 	| "cloudflare-ai-gateway"
 	| "xiaomi"

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Removed the `kimi-coding` provider; models.dev retired the Kimi For Coding catalog upstream, and Kimi Code access is now authorized through the Prime Intellect app.
+- Changed Prime Inference GLM models to use OpenRouter-style `reasoning: { effort }` parameters instead of the Z.ai `enable_thinking` parameter, which the Prime Inference API rejects with a 400 validation error.
+
 ## [0.7.3] - 2026-08-17
 
 - Added provider-derived reasoning levels for OpenRouter and Prime Inference models, including sparse, mandatory, toggle-only, and explicit-off capabilities.
