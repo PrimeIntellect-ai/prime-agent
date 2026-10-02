@@ -409,10 +409,7 @@ fn windows_build_job_contract() {
     let publish = promote
         .steps
         .iter()
-        .find(|step| {
-            step.name.as_deref()
-                == Some("Publish the R2 channel")
-        })
+        .find(|step| step.name.as_deref() == Some("Publish the R2 channel"))
         .expect("the R2 publish step exists")
         .run
         .as_deref()
