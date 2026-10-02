@@ -500,7 +500,140 @@ mod tests {
             0,
             None
         ));
+        // A dropped stream is transient at every rung of the ladder: the
+        // provider ended the response mid-block without a stop signal, so
+        // re-issuing the same request can succeed.
+        for retries_performed in 0..3 {
+            assert!(
+                !is_permanent_provider_failure_kind(Some("stream_drop"), retries_performed, None),
+                "a stream_drop is retryable at rung {retries_performed}"
+            );
+        }
         assert!(!is_permanent_provider_failure_kind(None, 0, None));
+    }
+
+    /// The stream-drop arc, end to end: the REAL provider against the
+    /// dropped-mid-thinking SSE fixture (no stop signal, no `[DONE]`),
+    /// through the real stream adapter and the retry driver — the retry
+    /// fires and the completion settles on the retry's healthy stream
+    /// (the fleet's death shape, replayed).
+    #[tokio::test]
+    async fn a_dropped_sse_stream_retries_and_completes_on_the_retry() {
+        use crate::session_engine::provider_adapter::{json_round_trip, real_stream_fn};
+        use pa_agent::stream::{LlmContext, StreamRequestOptions};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // The dropped body: a thinking delta, then the connection ends
+        // mid-block (no `finish_reason`, no `[DONE]`).
+        let dropped = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"glm-test\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Let me work through\"},\"finish_reason\":null}]}\n\n";
+        // The healthy body the retry receives.
+        let healthy = "data: {\"id\":\"c2\",\"object\":\"chat.completion.chunk\",\"model\":\"glm-test\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Recovered on the retry.\"}}]}\n\ndata: {\"id\":\"c2\",\"object\":\"chat.completion.chunk\",\"model\":\"glm-test\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for body in [dropped, healthy] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0u8; 8192];
+                let _ = socket.read(&mut request).await.unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let model: pa_types::ai::Model = serde_json::from_value(serde_json::json!({
+            "id": "glm-test", "name": "GLM test", "api": "openai-completions",
+            "provider": "prime-inference", "baseUrl": format!("http://{addr}"),
+            "reasoning": true, "input": ["text"],
+            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+            "contextWindow": 131_072, "maxTokens": 8192,
+        }))
+        .unwrap();
+        let agent_model: pa_agent::types::Model = json_round_trip(&model).unwrap();
+        let stream_fn = real_stream_fn(Some("test".to_string()), model);
+
+        let policy = ProviderRetryPolicy {
+            enabled: true,
+            max_retries: 3,
+            base_delay_ms: 5,
+            max_retry_delay_ms: 50,
+            max_delay_ms: UNBOUNDED_BACKOFF_MS,
+        };
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_attempt = std::sync::Arc::clone(&attempts);
+        let message = complete_with_provider_retry(
+            &policy,
+            None,
+            |_| async { true },
+            move || {
+                let stream_fn = std::sync::Arc::clone(&stream_fn);
+                let agent_model = agent_model.clone();
+                let attempts = std::sync::Arc::clone(&attempts_for_attempt);
+                async move {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let mut stream = stream_fn(
+                        agent_model,
+                        LlmContext::default(),
+                        StreamRequestOptions::default(),
+                    )
+                    .await?;
+                    stream.result().await
+                }
+            },
+        )
+        .await
+        .unwrap();
+        // The drop consumed one attempt; the retry completed the turn.
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        let AssistantContent::Text(text) = &message.content[0] else {
+            panic!("text content on the retried turn: {:?}", message.content);
+        };
+        assert_eq!(text.text, "Recovered on the retry.");
+    }
+
+    /// The one-shot completion arms (side questions, compaction,
+    /// refinement) take the `stream_drop` class through the same retry
+    /// ladder: a dropped stream retries and the completion settles on the
+    /// retry.
+    #[tokio::test]
+    async fn stream_drop_failures_retry_in_the_one_shot_arms() {
+        let policy = ProviderRetryPolicy {
+            enabled: true,
+            max_retries: 3,
+            base_delay_ms: 5,
+            max_retry_delay_ms: 50,
+            max_delay_ms: UNBOUNDED_BACKOFF_MS,
+        };
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_attempt = std::sync::Arc::clone(&attempts);
+        let message = complete_with_provider_retry(
+            &policy,
+            None,
+            |_| async { true },
+            move || {
+                let attempts = std::sync::Arc::clone(&attempts_for_attempt);
+                async move {
+                    let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    if attempt < 2 {
+                        Ok(error_message(Some("stream_drop"), None, None))
+                    } else {
+                        Ok(ok_message())
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        let AssistantContent::Text(text) = &message.content[0] else {
+            panic!("text content");
+        };
+        assert_eq!(text.text, "done");
     }
 
     #[tokio::test]

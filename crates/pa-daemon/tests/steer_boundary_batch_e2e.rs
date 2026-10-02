@@ -47,9 +47,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-/// The kernel Python with prime-agent-runtime installed; the release dir
-/// ships the runtime sidecar. Skipped (with a note) on machines without a
-/// live install.
+/// The kernel Python with prime-agent-runtime installed. Skipped (with a
+/// note) on machines without a live install.
 fn kernel_python() -> Option<PathBuf> {
     let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
         |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
@@ -63,27 +62,6 @@ fn kernel_python() -> Option<PathBuf> {
         candidate.display()
     );
     None
-}
-
-fn release_dir() -> Option<PathBuf> {
-    let releases = PathBuf::from(std::env::var("HOME").map_or_else(
-        |_| "/home/ubuntu/.local/share/prime-agent/releases".to_string(),
-        |home| format!("{home}/.local/share/prime-agent/releases"),
-    ));
-    let Ok(entries) = std::fs::read_dir(&releases) else {
-        eprintln!(
-            "no releases dir at {}; skipping live kernel test",
-            releases.display()
-        );
-        return None;
-    };
-    let mut candidates: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.join("prime-agent-runtime").is_dir())
-        .collect();
-    candidates.sort();
-    candidates.pop()
 }
 
 /// The faux provider script: the long turn's first model response calls a
@@ -154,7 +132,6 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, script: &Path) -> Superviso
             "PRIME_AGENT_KERNEL_PYTHON",
             kernel_python().expect("kernel python"),
         )
-        .env("PI_PACKAGE_DIR", release_dir().expect("release dir"))
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -200,11 +177,11 @@ impl Client {
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
             .expect("timeout");
+        let mut line = String::new();
         loop {
-            let mut line = String::new();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => {}
+                Ok(_) if line.trim().is_empty() => line.clear(),
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -251,9 +228,9 @@ impl Client {
     fn drain_events(&mut self, quiet_ms: Duration) {
         let deadline = Instant::now() + Duration::from_mins(1);
         let mut last_line = Instant::now();
+        let mut line = String::new();
         loop {
             assert!(Instant::now() < deadline, "event drain timed out");
-            let mut line = String::new();
             self.reader
                 .get_mut()
                 .set_read_timeout(Some(Duration::from_millis(100)))
@@ -264,6 +241,7 @@ impl Client {
                     let value: Value = serde_json::from_str(line.trim()).expect("parse line");
                     self.collect_event(&value);
                     last_line = Instant::now();
+                    line.clear();
                 }
                 Err(_) => {
                     if last_line.elapsed() >= quiet_ms {
@@ -285,9 +263,6 @@ impl Client {
 #[test]
 fn multi_steer_parked_mid_run_co_delivers_as_one_batched_turn() {
     let Some(_kernel) = kernel_python() else {
-        return;
-    };
-    let Some(_release) = release_dir() else {
         return;
     };
     let dir = tempfile::TempDir::new().expect("temp dir");

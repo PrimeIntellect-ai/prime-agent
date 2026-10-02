@@ -15,18 +15,33 @@ deny:
 	cargo deny --all-features --workspace check advisories licenses
 
 # Windows cfg-hygiene gate: cross-target check +
-# clippy at -D warnings for every crate and test. Fails loudly when the
+# clippy at -D warnings for every crate and test, the local mirror of the
+# ci.yml windows-cross job (.github/workflows/ci.yml). Fails loudly when the
 # target is missing instead of silently skipping the gate.
 windows-cross:
 	@rustup target list --installed | grep -q x86_64-pc-windows-gnu || { echo "x86_64-pc-windows-gnu target not installed (rustup target add x86_64-pc-windows-gnu)"; exit 1; }
 	cargo check --workspace --target x86_64-pc-windows-gnu --all-targets
 	cargo clippy --workspace --target x86_64-pc-windows-gnu --all-targets -- -D warnings
 
-# Lints the live workflow files (.github/workflows/).
+# Windows MSVC cross-check: the release target's own triple (release.yml's
+# build-windows job builds x86_64-pc-windows-msvc natively on windows-2022;
+# this gate type-checks the same target from a linux host). The check form
+# needs MSVC-side C tooling for the native build scripts (ring): cargo-xwin
+# wraps the build with the MSVC CRT + clang-cl/llvm-lib, so the gate fails
+# loudly when cargo-xwin (or the llvm tools) is missing instead of silently
+# skipping. The gnu gate above stays the cheap cfg-hygiene mirror; the
+# authoritative msvc build runs on the windows runner.
+windows-msvc-cross:
+	@rustup target list --installed | grep -q x86_64-pc-windows-msvc || { echo "x86_64-pc-windows-msvc target not installed (rustup target add x86_64-pc-windows-msvc)"; exit 1; }
+	@command -v cargo-xwin >/dev/null 2>&1 || { echo "cargo-xwin not installed (cargo install cargo-xwin --locked; it provisions the MSVC CRT + expects clang-cl/llvm-lib on PATH)"; exit 1; }
+	cargo xwin check --workspace --target x86_64-pc-windows-msvc --all-targets
+
+# Lints every workflow file (.github/workflows/ is the one home for
+# workflow files).
 actionlint:
 	@command -v actionlint >/dev/null 2>&1 || { echo "actionlint not installed (see rhysd/actionlint releases)"; exit 1; }
-	actionlint .github/workflows/ci.yml .github/workflows/continuous.yml \
-		.github/workflows/release.yml .github/workflows/windows-runtime-triage.yml \
+	actionlint .github/workflows/ci.yml .github/workflows/codebase-health.yml .github/workflows/contribution-gate.yml \
+		.github/workflows/continuous.yml .github/workflows/release.yml .github/workflows/windows-runtime-triage.yml \
 		.github/workflows/release-prepare.yml .github/workflows/nightly.yml
 
 # GLIBC baseline gate (the continuous.yml/release.yml build-gnu jobs): a

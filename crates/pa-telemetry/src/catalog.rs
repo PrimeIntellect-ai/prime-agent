@@ -32,7 +32,8 @@ pub const SCHEMA_VERSION: u64 = 2;
 pub const ERROR_MESSAGE_POLICY_REVISION: u64 = 1;
 
 /// The error-classifier revision (`classifier_revision` on `agent error`).
-pub const ERROR_CLASSIFIER_REVISION: u64 = 1;
+/// Bumped to 2 when the `stream_drop` subtype/code joined the vocabulary.
+pub const ERROR_CLASSIFIER_REVISION: u64 = 2;
 
 // ---------------------------------------------------------------------------
 // Rule kinds
@@ -210,6 +211,7 @@ pub const ERROR_SUBTYPES: &[&str] = &[
     "provider_unavailable",
     "refusal",
     "malformed_response",
+    "stream_drop",
     "context_limit",
     "configuration_error",
     "filesystem_error",
@@ -251,6 +253,7 @@ pub const ERROR_CODES: &[&str] = &[
     "content_filter",
     "safety",
     "malformed_response",
+    "stream_drop",
     "context_length_exceeded",
     "context_window_exceeded",
     "ENOENT",
@@ -1463,6 +1466,14 @@ const TUI_EVENTS: &[EventRule] = &[
         since: 1,
         properties: &[("children_total", required(count()))],
     },
+    // The scoped agents view's new action (the operator's 2026-09-28
+    // divergence): the created session's RLM depth, the scope root's
+    // depth + 1.
+    EventRule {
+        name: "tui agents new scoped",
+        since: 2,
+        properties: &[("depth", required(count()))],
+    },
     EventRule {
         name: "tui activity opened",
         since: 1,
@@ -1540,6 +1551,17 @@ const TUI_EVENTS: &[EventRule] = &[
                     "unknown",
                 )),
             ),
+        ],
+    },
+    // A settled ipython cell that rendered as bash: its executed bash()
+    // line share and command count, never command text.
+    EventRule {
+        name: "tui ipython bash rendered",
+        since: 2,
+        properties: &[
+            ("bash_lines", required(count())),
+            ("cell_lines", required(count())),
+            ("count", required(count())),
         ],
     },
 ];
@@ -1883,6 +1905,25 @@ mod tests {
                 "agent installation stage requires {key}"
             );
         }
+    }
+
+    #[test]
+    fn the_scoped_new_event_catalogues_only_its_depth() {
+        // The scoped ctrl+n's adoption event: the depth count stays, and
+        // no other key rides it (the parent's session path is not a
+        // catalogued property, so sanitize drops it).
+        let rule = lookup("tui agents new scoped").expect("catalogued");
+        assert_eq!(rule.since, 2);
+        let mut properties = Properties::new();
+        properties.set("depth", json!(2u64));
+        properties.set("parent_session_path", json!("/sessions/p.jsonl"));
+        let adjusted = sanitize("tui agents new scoped", &mut properties);
+        assert_eq!(properties.get("depth"), Some(&json!(2u64)));
+        assert!(
+            properties.get("parent_session_path").is_none(),
+            "the parent's path never rides the event"
+        );
+        assert_eq!(adjusted, 1, "the path key dropped");
     }
 
     #[test]

@@ -3,13 +3,13 @@
 //! `collect`) over the supervisor's child-sessions registry, with the
 //! spawn-admission helpers only this surface uses.
 use super::{
-    assert_thinking_supported, bail, create_default_rlm_subagent_session_name, json, now_ms,
-    resolve_child_model, rlm_child_label, spawn_name_unavailable, Arc, ChildCloseReason,
-    ChildRecord, Context, DaemonCommand, Duration, Instant, Mutex, Path, PathBuf, Result,
-    RlmChildResult, RlmChildTerminalNotice, RlmCreateSessionHandle, RlmCreateSessionRequest,
-    RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry,
-    RlmSubagentHost, SpawnNameReservationGuard, SupervisorChildSessions,
-    SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS,
+    assert_thinking_supported, bail, create_default_rlm_subagent_session_name,
+    create_rlm_child_terminal_notice, json, now_ms, resolve_child_model, rlm_child_label,
+    spawn_name_unavailable, Arc, ChildCloseReason, ChildRecord, Context, DaemonCommand, Duration,
+    Instant, Mutex, Path, PathBuf, Result, RlmChildResult, RlmChildTerminalNotice,
+    RlmCreateSessionHandle, RlmCreateSessionRequest, RlmDeleteSubagentResult, RlmHostFuture,
+    RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry, RlmSubagentHost, SpawnNameReservationGuard,
+    SupervisorChildSessions, SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS,
 };
 
 /// Resolve the child model with the daemon `allowedModels` allowlist
@@ -152,6 +152,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 };
                 let record = Arc::new(Mutex::new(record));
                 this.children.lock().await.push(Arc::clone(&record));
+                this.refresh_running().await;
                 anyhow::Ok((record, created, model))
             }
             .await;
@@ -215,8 +216,13 @@ impl RlmSubagentHost for SupervisorChildSessions {
                         let _ = watcher_this
                             .kill_child(&child_active_session_id, ChildCloseReason::Killed)
                             .await;
-                        watcher_record.lock().await.settled_status = Some("error");
-                        watcher_this.fire_settle_hook(&watcher_record).await;
+                        watcher_this
+                            .settle_failed(
+                                &watcher_record,
+                                format!("{retry_error:#}"),
+                                super::lifecycle::FailedArm::Prompt,
+                            )
+                            .await;
                         return;
                     }
                 }
@@ -404,7 +410,11 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     })
                 };
                 if let Some(notice) = notice {
-                    this.deliver_terminal_notice(&notice).await;
+                    this.deliver_terminal_notice(create_rlm_child_terminal_notice(
+                        &notice,
+                        now_ms(),
+                    ))
+                    .await;
                 }
             }
             // The deletion settles the run (TS `_finishRlmRunDeletion`,

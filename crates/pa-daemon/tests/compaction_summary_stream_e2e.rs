@@ -318,10 +318,9 @@ impl Client {
             .set_read_timeout(Some(Duration::from_millis(100)))
             .expect("timeout");
         loop {
-            line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => {}
+                Ok(_) if line.trim().is_empty() => line.clear(),
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -341,17 +340,18 @@ impl Client {
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(50)))
             .expect("timeout");
+        let mut line = String::new();
         loop {
-            let mut line = String::new();
             match self.reader.read_line(&mut line) {
                 Ok(0) => return,
-                Ok(_) if line.trim().is_empty() => {}
+                Ok(_) if line.trim().is_empty() => line.clear(),
                 Ok(_) => {
                     if let Ok(event) = serde_json::from_str::<Value>(line.trim()) {
                         if event.get("type").and_then(Value::as_str) == Some("session_event") {
                             self.events.push(event["event"].clone());
                         }
                     }
+                    line.clear();
                 }
                 Err(_) => {}
             }

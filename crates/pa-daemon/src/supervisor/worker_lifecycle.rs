@@ -12,7 +12,7 @@ use super::{
     anyhow, create_command_payload, json, persist_worker, socket, util, Arc, Context,
     DaemonCommand, DaemonWorkerDescriptor, DaemonWorkerLifecycle, DurableDaemonCreateCommand,
     Duration, EngineModelSelection, Map, Ordering, Path, ResidentWorker, Result, RouteAdmission,
-    Supervisor, TypedCreateRejection, Value, LONG_ROUTE_TIMEOUT_MS, ROUTE_TIMEOUT_MS,
+    Supervisor, TempSync, TypedCreateRejection, Value, LONG_ROUTE_TIMEOUT_MS, ROUTE_TIMEOUT_MS,
 };
 use crate::lease::is_process_alive;
 use crate::protocol::{response_failure, response_success, DaemonResponse};
@@ -119,11 +119,23 @@ impl Supervisor {
             config,
             telemetry_disabled,
             runtime_metadata,
+            env,
             ..
         } = create
         else {
             return Err(anyhow!("launch_worker requires a create command"));
         };
+        // The allowlisted client env (the pane identity, e.g. Herdr's
+        // `HERDR_*`) re-filtered here (the socket peer is untrusted) and
+        // carried on the durable create command: the worker resolves its
+        // session's pane identity from the create payload — never from
+        // this supervisor process's boot environment (the TS daemon
+        // boot-context bug class, not reproduced) — and a respawned
+        // worker re-receives the same identity.
+        let client_env = env
+            .as_ref()
+            .map(crate::herdr::filter_client_env)
+            .filter(|env| !env.is_empty());
         // The shutdown gate: a create dispatched while the supervisor is
         // stopping must never launch a worker the stop pass would miss (a
         // late create racing a shutdown would otherwise orphan its worker
@@ -252,6 +264,12 @@ impl Supervisor {
                 durable_rest.insert(key.to_string(), value.clone());
             }
         }
+        // The session's pane identity (the allowlisted client env) rides
+        // the durable create command so the worker's `create` payload
+        // carries it and a respawn replays it.
+        if let Some(client_env) = client_env {
+            durable_rest.insert("env".to_string(), serde_json::to_value(client_env)?);
+        }
         // A child's RLM identity rides the durable create command too, so a
         // respawned or adopted child stays identifiable for ledger appends.
         if let Some(metadata) = &runtime_metadata {
@@ -311,11 +329,16 @@ impl Supervisor {
         // self-registers on boot, and the registration handler must find its
         // identity in the registry (registration races the create replay).
         self.registry.insert(Arc::clone(&resident)).await;
-        let deadline = worker_connect_deadline();
+        let deadline = self.connect_deadline();
         // A failed launch never leaves its half-registered resident behind:
         // a later stale-id rebind (or resolve) must not select a worker
-        // that cannot route.
-        let child = match self.spawn_worker_process(&resident, deadline).await {
+        // that cannot route. The spawn record rides the unsynced TS
+        // `persistWorker` shape on this fresh create (the relaunch paths
+        // keep the synced persist).
+        let child = match self
+            .spawn_worker_process(&resident, deadline, TempSync::Unsynced)
+            .await
+        {
             Ok(child) => child,
             Err(error) => {
                 self.registry.remove(&worker_id).await;
@@ -622,10 +645,8 @@ impl Supervisor {
     /// idle state and crossed the threshold asks for its own graceful
     /// stop over the supervisor link — TS `canEvictWorker` reaches roots
     /// and children alike. The supervisor verifies the worker token,
-    /// refuses a client-owned or noSession descriptor (TS
-    /// `hasOwnerClient`: the owner's disconnect cleanup owns that stop;
-    /// an in-memory session has no file to wake from), and re-reads the
-    /// setting — the supervisor's own fresh-snapshot fence: a setting
+    /// refuses a client-owned descriptor (TS `hasOwnerClient`), and re-reads
+    /// the setting — the supervisor's own fresh-snapshot fence: a setting
     /// flipped to `"off"` (or past the threshold) between the worker's
     /// ask and the stop cancels the passivation. The stop runs under the
     /// eviction fence (TS `withEvictionFence`) and is the existing
@@ -649,21 +670,15 @@ impl Supervisor {
                 None,
             );
         };
-        // Rust clients create noSession roots unowned (`lifecycle: None`);
-        // TS makes them client-owned, so its `hasOwnerClient` refuses them.
-        // An in-memory session has no file to wake from.
-        {
-            let descriptor = resident.descriptor.lock().await;
-            if descriptor.owner_client_id.is_some()
-                || descriptor.create_command.no_session == Some(true)
-            {
-                return response_failure(
-                    Some(command_id),
-                    type_name,
-                    "Idle passivation is refused for a client-owned or in-memory (noSession) worker",
-                    None,
-                );
-            }
+        // The owner gate (TS `canEvictWorker`'s `hasOwnerClient` arm): a
+        // client-owned worker never passivates itself.
+        if resident.descriptor.lock().await.owner_client_id.is_some() {
+            return response_failure(
+                Some(command_id),
+                type_name,
+                "Idle passivation is refused for a client-owned worker",
+                None,
+            );
         }
         // The supervisor-side settings re-read (the fence): the same
         // `idleEvictionMinutes` surface the worker read.
@@ -913,6 +928,33 @@ pub(super) fn worker_connect_deadline() -> tokio::time::Instant {
     let now = tokio::time::Instant::now();
     now.checked_add(Duration::from_millis(timeout_ms))
         .unwrap_or_else(|| now + Duration::from_millis(DEFAULT_WORKER_CONNECT_TIMEOUT_MS))
+}
+
+impl Supervisor {
+    /// The launch-probe deadline: the supervisor's pinned budget when
+    /// one is set, else the process-wide env seam.
+    pub(super) fn connect_deadline(&self) -> tokio::time::Instant {
+        let budget = *self
+            .worker_connect_budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match budget {
+            Some(budget) => tokio::time::Instant::now() + budget,
+            None => worker_connect_deadline(),
+        }
+    }
+
+    /// Test-only: pin this supervisor's launch-probe budget so a launch
+    /// oracle fails its probe immediately without mutating the
+    /// process-wide env var (a set value would leak into every parallel
+    /// test's launch).
+    #[cfg(test)]
+    pub(crate) fn pin_worker_connect_budget_for_tests(&self, budget: Duration) {
+        *self
+            .worker_connect_budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(budget);
+    }
 }
 
 /// The real graceful-stop transport (spec §5 `Stopping`): the routed

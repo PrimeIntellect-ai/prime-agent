@@ -1,8 +1,8 @@
 //! The whole-worker idle passivation e2e (TS `idleEvictionMinutes`):
 //! a settled RLM child's supervisor stop leaves the session file and the
-//! parent's roster row intact; a follow-up prompt to the child's live id
-//! WAKES a fresh worker over the saved file and answers; the child's
-//! delete tombstones without a live worker.
+//! parent's roster row intact; the parent's `agent_message.send` to the
+//! passivated child WAKES a fresh worker over the saved file and
+//! delivers.
 //!
 //! The test drives the worker->supervisor passivation request directly
 //! (the child worker's supervisor-link ask, replayed with the child's own
@@ -20,12 +20,15 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use pa_core::kernel::shared::{HostRequestHandlers, HostRequestPayload};
+use pa_core::session_engine::agent_messaging::register_agent_message_host_handlers;
 use pa_core::session_engine::rlm_host::{RlmSpawnRequest, RlmSubagentHost};
+use pa_daemon::agent_messaging::LinkAgentMessageController;
 use pa_daemon::rlm_children::{ParentIdentity, SupervisorChildSessions};
 use pa_daemon::supervisor_link::SupervisorLink;
 
@@ -122,13 +125,30 @@ impl Client {
     }
 }
 
-/// The kernel Python with the runtime installed (the child's kernel cell).
+/// The kernel Python with prime-agent-runtime installed; set
+/// `PA_E2E_KERNEL_PYTHON` to point at an explicit interpreter instead.
 fn kernel_python() -> Option<PathBuf> {
-    let path = std::env::var("PA_TEST_KERNEL_PYTHON")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    path.filter(|p| p.exists())
+    if let Some(explicit) = std::env::var_os("PA_E2E_KERNEL_PYTHON") {
+        let explicit = PathBuf::from(explicit);
+        assert!(
+            explicit.exists(),
+            "PA_E2E_KERNEL_PYTHON {} not found",
+            explicit.display()
+        );
+        return Some(explicit);
+    }
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
+    if candidate.exists() {
+        return Some(candidate);
+    }
+    eprintln!(
+        "kernel python {} not found; skipping live passivation e2e",
+        candidate.display()
+    );
+    None
 }
 
 /// The worker's token from its persisted descriptor (the same lookup the
@@ -183,13 +203,12 @@ fn write_faux_script(dir: &Path, name: &str, responses: &Value) -> PathBuf {
 }
 
 /// A settled RLM child's whole-worker idle passivation: the stop keeps
-/// the parent's roster row (done — the POSITIVE verdict), a follow-up
-/// prompt WAKES a fresh worker over the child's session file and
-/// answers, and the child's delete tombstones without a live worker.
+/// the parent's roster row (done — the POSITIVE verdict), the parent's
+/// `agent_message.send` WAKES a fresh worker over the child's session
+/// file and delivers.
 #[tokio::test]
-async fn a_settled_child_passivates_stays_listable_and_revives_by_prompt() {
+async fn a_settled_child_passivates_stays_listable_and_revives_by_agent_message() {
     let Some(kernel_python) = kernel_python() else {
-        eprintln!("kernel python unavailable; skipping the passivation e2e");
         return;
     };
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -287,17 +306,6 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_prompt() {
     // this harness owns the children registry (separate from the parent
     // worker's engine), so the boundary bump is simulated here.
     children.notify_turn_done();
-
-    // The child's durable session id (the passive row keeps it; the
-    // routing id is the live-worker field TS strips at passivation —
-    // clients address a passivated session by the durable id).
-    let child_session_id = {
-        let roster = children.list_subagents().await.expect("child roster");
-        roster
-            .first()
-            .and_then(|row| row.session_id.clone())
-            .expect("the child's durable session id")
-    };
 
     // The child settles done with a resident worker.
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -402,43 +410,53 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_prompt() {
         row.status
     );
 
-    // THE REVIVAL: a prompt addressed by the child's DURABLE session id
-    // wakes a fresh worker over the saved file (the route's wake arm
-    // resolves the saved session and launches). The faux engine's script
+    // THE REVIVAL: the parent's real `agent_message.send` to the child,
+    // through the same controller and handler the worker's engine wires:
+    // the send resolves the passivated child through the family view
+    // (keyed by its durable id) and wakes a fresh worker over the saved
+    // file (the supervisor's ledger wake). The faux engine's script
     // is spawn-time config (not session-file state), so the replayed
     // worker's turn runs the default provider: the response's outcome
     // depends on the host's credentials and is not asserted — the WAKE
-    // oracle is the revival prompt's row in the child's session file
+    // oracle is the delivered message's row in the child's session file
     // (only a woken worker writes it); the model-answer revival is the
     // VM census's leg (the real binary against the offline mock).
-    let child_file_rows_before = std::fs::read_to_string({
-        let roster = children
-            .list_subagents()
-            .await
-            .expect("roster for the file");
-        let row = roster
-            .iter()
-            .find(|row| row.active_session_id.as_deref() == Some(child_active_session_id.as_str()))
-            .expect("the child row");
-        std::path::Path::new(&row.session_dir).join(format!(
-            "{}.jsonl",
-            row.session_id.clone().expect("the child's session id")
-        ))
-    })
-    .map_or(0, |content| content.lines().count());
     let revive_prompt = "revive: answer again";
-    client.send_command(
-        "revive",
-        &json!({
-            "type": "prompt_and_wait",
-            "activeSessionId": child_session_id,
+    let parent_token =
+        worker_token(&agent_dir, &parent_active_session_id).expect("the parent worker's token");
+    let own_summary = json!({
+        "activeSessionId": parent_active_session_id,
+        "sessionId": parent_session_id,
+        "sessionName": "parent",
+        "runtimeKind": "top-level",
+    });
+    let children = Arc::new(children);
+    let controller = Arc::new(LinkAgentMessageController::new(
+        Arc::clone(&link),
+        parent_active_session_id.clone(),
+        parent_token,
+        Arc::new(Mutex::new(Some(own_summary))),
+        Some(Arc::clone(&children)),
+    ));
+    let mut handlers = HostRequestHandlers::default();
+    register_agent_message_host_handlers(Arc::clone(&controller) as Arc<_>, &mut handlers);
+    let send = handlers.get("agent_message.send").expect("send handler");
+    let revived = send(HostRequestPayload {
+        data: json!({
             "message": revive_prompt,
+            "receiver_role": "child",
+            "receiver_name": "parked-kid",
         }),
-    );
-    let revived = client.read_response("revive");
-    // The revival respawned a worker for the child's session (a fresh
-    // pid serves the replayed file) and the prompt's row landed in the
-    // child's session file (the delivery half of the revival).
+        cell_source_code: None,
+    })
+    .await
+    .expect("the send must wake the passivated child and deliver");
+    // The send woke a fresh worker for the child's session (a new pid
+    // serves the replayed file); the delivery's receipt arrives before
+    // the delivered turn writes its rows, so the wake's proof is the
+    // message's row itself landing in the child's session file (the
+    // revived worker serves the SAME file — its fresh routing id
+    // differs, so only a woken worker writes it).
     let deadline = Instant::now() + Duration::from_secs(15);
     let child_file = {
         let roster = children
@@ -455,25 +473,17 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_prompt() {
         ))
     };
     loop {
-        // The delivery oracle: the woken worker replayed the file and
-        // the prompt's user row landed in it (the revived worker serves
-        // the SAME file — its fresh routing id differs, so the file's
-        // growth is the wake's proof).
-        let rows_after = std::fs::read_to_string(&child_file).map_or(0, |c| c.lines().count());
-        if rows_after > child_file_rows_before {
+        let grown = std::fs::read_to_string(&child_file).unwrap_or_default();
+        if grown.contains(revive_prompt) {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "the revival never delivered the prompt into the child's session file ({child_file:?}, rows {rows_after} <= {child_file_rows_before}, response: {revived})"
+            "the send never delivered the message into the child's session file ({child_file:?}, tail: {:?}, receipt: {revived:?})",
+            grown.lines().rev().take(3).collect::<Vec<_>>().join(" | ")
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let grown = std::fs::read_to_string(&child_file).expect("the child session file");
-    assert!(
-        grown.contains(revive_prompt),
-        "the revival prompt never landed in the child's session file ({child_file:?}, response: {revived})"
-    );
 }
 
 /// An idle unowned ROOT passivates through the same worker-driven ask
@@ -483,7 +493,6 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_prompt() {
 #[tokio::test]
 async fn an_idle_root_passivates_and_resumes_by_its_durable_id_with_its_transcript() {
     let Some(kernel_python) = kernel_python() else {
-        eprintln!("kernel python unavailable; skipping the root passivation e2e");
         return;
     };
     let dir = tempfile::TempDir::new().expect("temp dir");

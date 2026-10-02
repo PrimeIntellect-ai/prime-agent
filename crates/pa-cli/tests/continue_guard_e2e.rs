@@ -120,16 +120,16 @@ fn make_session_active(socket: &Path, session_path: &Path, cwd: &Path) -> String
     writer.write_all(line.as_bytes()).expect("send");
     writer.flush().expect("flush");
     let deadline = Instant::now() + Duration::from_secs(30);
+    let mut line = String::new();
     loop {
         assert!(Instant::now() < deadline, "no create response");
-        let mut line = String::new();
         reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
             .expect("timeout");
         match reader.read_line(&mut line) {
             Ok(0) => panic!("daemon closed during create"),
-            Ok(_) if line.trim().is_empty() => {}
+            Ok(_) if line.trim().is_empty() => line.clear(),
             Ok(_) => {
                 let response: Value = serde_json::from_str(line.trim()).expect("parse");
                 assert_eq!(response["success"], true, "create failed: {response}");

@@ -232,6 +232,7 @@ impl SupervisorChildSessionsInner {
         }
         // The walk changed the registry: wake a parked barrier (a closed
         // child is settled work, settled here by its removal).
+        self.refresh_running().await;
         self.settle_notify.notify_waiters();
         match close_error {
             Some(error) => Err(error),

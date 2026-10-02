@@ -20,7 +20,9 @@ impl Worker {
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if message.is_empty() {
+        // TS has no empty check; this port still rejects a prompt with neither text nor images.
+        let images = parse_prompt_images(payload);
+        if message.is_empty() && images.is_empty() {
             return response_failure(None, "prompt", "Prompt cannot be empty", None);
         }
         let streaming_behavior = payload.get("streamingBehavior").and_then(Value::as_str);
@@ -42,7 +44,6 @@ impl Worker {
                 );
             }
         }
-        let images = parse_prompt_images(payload);
         // TS daemon prompts map `resumeIfIdle` to
         // `command.streamingBehavior !== undefined`: while the queued-input
         // suspension is set (post `abort`/manual `compact`), a plain prompt
@@ -67,7 +68,7 @@ impl Worker {
         }
         // The prompt-admission bookkeeping (wave b9): a prompt carrying an
         // admission id registers it worker-side; the queued item carries
-        // it so the turn runner commits the admission when its turn starts.
+        // it so the turn runner clears the admission at settle.
         let admission_id = payload
             .get("admissionId")
             .and_then(Value::as_str)
@@ -80,6 +81,19 @@ impl Worker {
         let done = if wait { Some(done_tx) } else { None };
         let (snapshot, queued_behind_work) = {
             let mut core = self.core.lock().unwrap();
+            // TS commits before accepting the prompt into its action queue.
+            // Hold the queue lock across this transition and enqueue so a
+            // cancellation cannot mistake an accepted prompt for waiting.
+            if let Some(id) = &admission_id {
+                if !self.prompt_admissions.commit(id) {
+                    return response_failure(
+                        None,
+                        if wait { "prompt_and_wait" } else { "prompt" },
+                        "Prompt admission was cancelled.",
+                        None,
+                    );
+                }
+            }
             // An idle session runs the prompt immediately: the lane is the
             // work hand-off, not a queue, so the projection did not change
             // (TS prompt admission with queueIfBusy=false never queues).

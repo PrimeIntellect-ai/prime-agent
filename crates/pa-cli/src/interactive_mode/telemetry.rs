@@ -157,6 +157,25 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
         })
     }
 
+    fn ipython_bash_rendered(
+        &self,
+        bash_lines: usize,
+        cell_lines: usize,
+        count: usize,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let Some(client) = self.client() else {
+                return;
+            };
+            let mut properties = pa_telemetry::base_properties("interactive");
+            properties.set("bash_lines", serde_json::Value::from(bash_lines));
+            properties.set("cell_lines", serde_json::Value::from(cell_lines));
+            properties.set("count", serde_json::Value::from(count));
+            client.track("tui ipython bash rendered", properties);
+            let _ = client.shutdown().await;
+        })
+    }
+
     fn scroll_used(
         &self,
         action: &'static str,
@@ -256,6 +275,18 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
             let mut properties = pa_telemetry::base_properties("interactive");
             properties.set("children_total", serde_json::Value::from(children_total));
             client.track("tui subagents open", properties);
+            let _ = client.shutdown().await;
+        })
+    }
+
+    fn scoped_agent_created(&self, depth: u32) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let Some(client) = self.client() else {
+                return;
+            };
+            let mut properties = pa_telemetry::base_properties("interactive");
+            properties.set("depth", serde_json::Value::from(u64::from(depth)));
+            client.track("tui agents new scoped", properties);
             let _ = client.shutdown().await;
         })
     }

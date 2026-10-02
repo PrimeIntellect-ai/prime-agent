@@ -5,7 +5,7 @@
 use super::{
     build_layout, mpsc, pad_line, section_title, str_width, truncate_text, AgentsStep,
     AgentsViewMode, AgentsViewRow, AgentsViewUiMode, Composer, Duration, Line, Result, RowKind,
-    RowLayout, Section, Theme, ThemeColor, UiInput,
+    RowLayout, Section, Theme, ThemeColor, UiInput, Value,
 };
 
 impl AgentsViewMode {
@@ -37,8 +37,8 @@ impl AgentsViewMode {
             "agents".to_string(),
             format!("{running} running, {idle} idle, {inactive} inactive"),
         )];
-        if let Some(depth) = self.scope_depth {
-            extra_metadata.push(("depth".to_string(), depth.to_string()));
+        if let Some(root) = &self.scope_root {
+            extra_metadata.push(("depth".to_string(), root.child_depth.to_string()));
         }
         let theme = &self.theme;
         let chrome = crate::chrome::ChromeState {
@@ -570,20 +570,61 @@ impl AgentsViewMode {
             " ".to_string(),
             ratatui::style::Style::default(),
         ));
+        // Operator directive (2026-09-29, a sanctioned TS divergence): the
+        // row carries its own session's heartbeat count in the dock's `◷`
+        // vocabulary — TS renders `♥ N·<countdown>` (error/dim) and rolls
+        // descendants' jobs into ancestors; here the count is per-session
+        // (the dock's operator scoping), green while any job is active,
+        // amber when all are paused.
+        let session_id = row
+            .summary
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let active_session_id = row.summary.get("activeSessionId").and_then(Value::as_str);
+        let jobs: Vec<&crate::heartbeats_picker::HeartbeatJob> = self
+            .heartbeats
+            .iter()
+            .map(|entry| &entry.job)
+            .filter(|job| job.in_session(active_session_id, session_id))
+            .collect();
+        // The badge rides only a name column with room for the row's
+        // fixed prefix plus it: a too-narrow column would push the model
+        // and cost/age cells right, so the row renders exactly as a
+        // badge-less one instead.
+        let badge = (!jobs.is_empty())
+            .then(|| format!("\u{25f7} {}", jobs.len()))
+            .filter(|badge| layout.name_width > 2 + indent_width + str_width(badge));
+        let badge_width = badge.as_deref().map_or(0, |badge| str_width(badge) + 1);
+        if let Some(badge) = badge {
+            let color = if jobs.iter().any(|job| job.is_active()) {
+                ThemeColor::Success
+            } else {
+                ThemeColor::Warning
+            };
+            line.push(crate::Span::styled(badge, theme.fg_style(color)));
+            line.push(crate::Span::styled(
+                " ".to_string(),
+                ratatui::style::Style::default(),
+            ));
+        }
         // TS `formatTableCell(title, nameWidth)`: the name cell (indent +
-        // icon + title) clips to the column width, so a long session name
-        // can never push the model and cost/age columns off-screen. The
-        // icon and its space take the first two cells.
+        // icon + badge + title) clips to the column width, so a long
+        // session name can never push the model and cost/age columns
+        // off-screen. The icon, its space, and the badge take the
+        // leading cells.
         let title = truncate_text(
             &row.title,
-            layout.name_width.saturating_sub(2 + indent_width),
+            layout
+                .name_width
+                .saturating_sub(2 + indent_width + badge_width),
         );
         // Session titles render uniformly (no bold for named sessions);
         // explicit product decision — differs from TS `styleRowTitle`, which
         // bolds explicit session names.
         let pad = layout
             .name_width
-            .saturating_sub(str_width(&title) + 2 + indent_width);
+            .saturating_sub(str_width(&title) + 2 + indent_width + badge_width);
         line.push(crate::Span::styled(title, theme.fg_style(ThemeColor::Text)));
         line.push(crate::Span::raw(" ".repeat(pad)));
         line.push(crate::Span::styled(

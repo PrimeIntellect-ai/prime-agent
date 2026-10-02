@@ -3,9 +3,10 @@
 
 use super::{
     append_truncated, lock, parse_attachment_display, parse_diff_display, parse_sent_agent_message,
-    Arc, Event, ExecBuffers, ExecuteStatus, Guarded, Inner, KernelError, StreamName, Value,
-    AGENT_MESSAGE_DISPLAY_MIME, ATTACHMENT_DISPLAY_MIME, BASH_ACTIVITY_DISPLAY_MIME,
-    DIFF_DISPLAY_MIME, MAX_ATTACHMENT_DATA_CHARS, MAX_BACKGROUND_OUTPUT_CHARS,
+    Arc, Event, ExecBuffers, ExecuteStatus, Guarded, Inner, KernelBashCommands, KernelError,
+    StreamName, Value, AGENT_MESSAGE_DISPLAY_MIME, ATTACHMENT_DISPLAY_MIME,
+    BASH_ACTIVITY_DISPLAY_MIME, BASH_COMMAND_DISPLAY_MIME, DIFF_DISPLAY_MIME,
+    MAX_ATTACHMENT_DATA_CHARS, MAX_BACKGROUND_OUTPUT_CHARS,
 };
 use std::fmt::Write as _;
 
@@ -226,6 +227,26 @@ impl Inner {
         if let Some(payload) = data.get(AGENT_MESSAGE_DISPLAY_MIME) {
             if let Some(message) = parse_sent_agent_message(payload) {
                 buffers.sent_agent_messages.push(message);
+            }
+        }
+        if let Some(payload) = data.get(BASH_COMMAND_DISPLAY_MIME) {
+            if let (Some(command), Some(lines)) = (
+                payload.get("command").and_then(Value::as_str),
+                payload
+                    .get("lines")
+                    .and_then(Value::as_u64)
+                    .and_then(|lines| usize::try_from(lines).ok()),
+            ) {
+                if let Some(bash) = buffers.bash_commands.as_mut() {
+                    bash.count += 1;
+                    bash.lines += lines;
+                } else {
+                    buffers.bash_commands = Some(KernelBashCommands {
+                        first: command.to_string(),
+                        count: 1,
+                        lines,
+                    });
+                }
             }
         }
     }

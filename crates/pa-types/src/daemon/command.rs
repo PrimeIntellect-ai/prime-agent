@@ -569,6 +569,10 @@ pub enum DaemonCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         active_session_id: String,
+        /// Also hold until every RLM child run of the session settled
+        /// (the `wait_for_headless_completion` barrier of the same name).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait_for_rlm_quiescence: Option<bool>,
         #[serde(flatten)]
         rest: JsonMap,
     },

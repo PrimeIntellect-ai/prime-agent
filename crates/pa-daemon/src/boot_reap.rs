@@ -311,7 +311,7 @@ async fn stop_target_within(
     // first, then verify the pid still names our process, and only then
     // does any signal ride the held fd (a signal through this fd can
     // reach the pinned process and nothing else, ever).
-    let Some(pidfd) = pa_core::platform::process::open_pidfd(target.pid) else {
+    let Ok(pidfd) = pa_core::platform::process::open_pidfd(target.pid) else {
         // The kernel-held handle is unavailable (an unsupported platform,
         // an old kernel, or a process that just exited): the conservative
         // default never signals - a missed reap is recoverable, a wrong
@@ -658,7 +658,9 @@ pub(crate) fn supervisor_argv_names_socket(argv: &[String], socket: &str) -> boo
 /// removes endpoints only - a regular file at a matching name is never
 /// touched). UNIX-wide on purpose (the caller is unconditional): the
 /// std `os::unix` socket-file probe compiles on every unix - darwin
-/// included.
+/// included. No unix socket files exist on the other targets, so the
+/// probe answers false there and the unlink never fires (the not(unix)
+/// reaping stubs already collect zero targets).
 #[cfg(unix)]
 fn is_unix_socket_file(path: &Path) -> bool {
     use std::os::unix::fs::FileTypeExt;
@@ -756,8 +758,8 @@ fn protected_worker_pids(agent_dir: &Path, socket_path: &Path) -> HashSet<u32> {
 /// (`/a/b/../c/daemon.sock` vs `/a/c/daemon.sock`, a symlinked tmpdir)
 /// is still a same-socket predecessor - its lease is held either way.
 /// Pure `std` (canonicalize + components): it compiles on every unix -
-/// darwin included, which the unconditional `supervisor_argv_names_socket`
-/// (the argv-only view the supervisor census normalizes with) requires.
+/// darwin included, which `supervisor_argv_names_socket` (the argv-only
+/// view the supervisor census normalizes with) requires.
 #[cfg(unix)]
 pub(crate) fn normalize_socket_spelling(path: &Path) -> String {
     if let Ok(canonical) = path.canonicalize() {
@@ -945,7 +947,7 @@ mod tests {
             .expect("spawn sleep");
         let pid = child.id();
         assert!(
-            pa_core::platform::process::open_pidfd(pid).is_some(),
+            pa_core::platform::process::open_pidfd(pid).is_ok(),
             "the kernel-held handle opens"
         );
         let outcome = stop_target(&target(pid)).await;

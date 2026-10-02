@@ -6,6 +6,7 @@ use super::{
     SessionSelection, SessionUi, TreeSelector, TreeSelectorAction, UserMessageSelector,
     UserMessageSelectorAction, Value, UI_REQUEST_TIMEOUT_MS,
 };
+use pa_types::daemon::DaemonSessionLifecycle;
 
 impl SessionUi {
     // ------------------------------------------------------------------
@@ -520,11 +521,23 @@ pub(super) async fn create_session(
 ) -> Result<String> {
     let session_path = match selection {
         Some(SessionSelection::Resume(path)) => Some(path.to_string_lossy().to_string()),
-        _ => None,
+        Some(
+            SessionSelection::New | SessionSelection::NewChild { .. } | SessionSelection::Attach(_),
+        )
+        | None => None,
     };
     // The create consumes the path; a refusal needs it again for the
     // descriptive error.
     let refused_path = session_path.clone();
+    // The client's Herdr pane identity (the allowlisted `HERDR_*` env this
+    // process runs with, e.g. inside a Herdr-managed pane) travels on the
+    // create ONLY: the session it creates reports for THIS pane, whatever
+    // tab the daemon booted in (attach adopts-if-absent instead — never
+    // rebinds).
+    let client_env = {
+        let env = pa_types::daemon::herdr_env::collect_client_env(|key| std::env::var(key).ok());
+        (!env.is_empty()).then_some(env)
+    };
     let data = match client
         .request_ok(DaemonCommand::Create {
             id: None,
@@ -538,8 +551,13 @@ pub(super) async fn create_session(
             config: Some(options.create_config()),
             telemetry_disabled: options.telemetry_disabled.filter(|disabled| *disabled),
             runtime_metadata: None,
-            lifecycle: None,
-            env: None,
+            // TS `clientOwned: parsed.noSession`: only a noSession
+            // create is client-owned.
+            lifecycle: options
+                .no_session
+                .then_some(DaemonSessionLifecycle::ClientOwned),
+            // The client's Herdr pane identity travels on the create.
+            env: client_env,
             launch_env: None,
             rest: Map::default(),
         })
