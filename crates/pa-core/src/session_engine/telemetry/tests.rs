@@ -1476,3 +1476,80 @@ async fn a_run_crossing_an_off_period_stream_never_completes() {
     assert_eq!(ended["model_call_count"], serde_json::json!(0));
     assert_eq!(ended["input_tokens"], serde_json::json!(0));
 }
+
+/// Mid-execution progress (`ToolExecutionUpdate`) and `TurnEnd` are
+/// run-scoped too: while off they sever the run, so a tool whose
+/// execution spans the opt-out never counts its off-period duration
+/// into a surviving run. Regression for the no-op-arm finding.
+#[tokio::test]
+async fn off_period_tool_progress_and_turn_end_sever_the_run() {
+    let on = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let switch: Arc<dyn Fn() -> bool + Send + Sync> = {
+        let on = Arc::clone(&on);
+        Arc::new(move || on.load(std::sync::atomic::Ordering::Relaxed))
+    };
+    let fixture = fixture_with_switch(switch);
+    let assistant = assistant_message();
+
+    // The run starts while on; a tool call begins.
+    fixture.clock.set(1_000);
+    emit(&fixture, AgentEvent::AgentStart);
+    fixture.clock.set(1_050);
+    emit(&fixture, AgentEvent::TurnStart);
+    let (tool_start, _tool_end) = tool_execution_event("bash", false);
+    emit(&fixture, tool_start);
+
+    // The tool's mid-execution progress arrives in the off period: the
+    // run severs here, not at a later boundary event.
+    on.store(false, std::sync::atomic::Ordering::Relaxed);
+    fixture.clock.set(1_200);
+    emit(
+        &fixture,
+        AgentEvent::ToolExecutionUpdate {
+            tool_call_id: "bash-1".to_string(),
+            tool_name: "bash".to_string(),
+            args: serde_json::json!({ "command": "private command" }),
+            partial_result: pa_agent::types::AgentToolResult {
+                content: vec![ToolResultContent::text("partial")],
+                details: serde_json::Value::Null,
+                terminate: None,
+            },
+        },
+    );
+
+    // Back on before the tool ends: the end finds no run and no in-flight
+    // start, so the off-spanning call never counts.
+    on.store(true, std::sync::atomic::Ordering::Relaxed);
+    fixture.clock.set(1_300);
+    let (_tool_start2, tool_end) = tool_execution_event("bash", false);
+    emit(&fixture, tool_end);
+    fixture.clock.set(1_350);
+    emit(&fixture, message_end_event(assistant.clone()));
+    emit(
+        &fixture,
+        AgentEvent::AgentEnd {
+            messages: Vec::new(),
+        },
+    );
+
+    fixture.clock.set(1_400);
+    let telemetry = SessionTelemetry::detached(
+        fixture.client.clone(),
+        fixture.state.clone(),
+        "interactive".to_string(),
+    );
+    telemetry.end().await.unwrap();
+
+    let runs = event_properties(&fixture.mock, "agent run completed").await;
+    assert!(
+        runs.is_empty(),
+        "the run severed by the off-period progress never reports"
+    );
+    let ended = &event_properties(&fixture.mock, "agent session ended").await[0];
+    assert_eq!(
+        ended["tool_call_count"],
+        serde_json::json!(0),
+        "the off-spanning tool call never counts"
+    );
+    assert_eq!(ended["run_count"], serde_json::json!(0));
+}

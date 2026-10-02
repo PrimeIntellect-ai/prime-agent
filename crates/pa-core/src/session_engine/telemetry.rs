@@ -935,7 +935,14 @@ fn handle_event(
         }
         // TurnEnd carries no facts the TS subscriber used (turn_count comes
         // from TurnStart); ToolExecutionUpdate is mid-execution progress.
-        AgentEvent::TurnEnd { .. } | AgentEvent::ToolExecutionUpdate { .. } => {}
+        // Both are still run-scoped: while off they cut the run like every
+        // other event that belongs to it (a tool whose execution spans the
+        // opt-out never counts into a surviving run).
+        AgentEvent::TurnEnd { .. } | AgentEvent::ToolExecutionUpdate { .. } => {
+            if !recording_on(&state) {
+                sever_off_period_run(&mut state);
+            }
+        }
     }
 }
 
