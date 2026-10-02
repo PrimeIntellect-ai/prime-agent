@@ -650,6 +650,36 @@ async fn cancel_owned_admission_aborts_the_running_prompt() {
         .dispatch("cancel_prompt_admission", &queued_cancel)
         .await;
     assert_eq!(cleared_queued.data, Some(json!({ "status": "unknown" })));
+    // clear_queue withdraws the drained row: its admission clears with it (TS clearAdmission).
+    let queued_three = worker
+        .dispatch(
+            "prompt",
+            &json!({
+                "activeSessionId": "cancel-owned-session",
+                "message": "cleared by clear_queue",
+                "admissionId": "adm-3",
+            }),
+        )
+        .await;
+    assert!(
+        queued_three.success,
+        "queued adm-3 failed: {queued_three:?}"
+    );
+    assert!(
+        worker.dispatch("clear_queue", &json!({})).await.success,
+        "clear_queue failed"
+    );
+    let drained_cancel = worker
+        .dispatch(
+            "cancel_prompt_admission",
+            &json!({"activeSessionId": "cancel-owned-session", "admissionId": "adm-3"}),
+        )
+        .await;
+    assert_eq!(
+        drained_cancel.data,
+        Some(json!({ "status": "unknown" })),
+        "{drained_cancel:?}"
+    );
     let queued_result = queued_wait.await.unwrap();
     assert!(
         !queued_result.success,
