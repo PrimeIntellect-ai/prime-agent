@@ -555,6 +555,12 @@ class _RLMFactoryNamespace:
     then returns the same snapshot with ``changed`` — an agent can stream
     progress and drive orchestration programmatically, and the emitted
     graph model renders as ASCII or genuine Mermaid from one shape.
+
+    The factory is opt-in: while the ``factory.enabled`` setting is off (the
+    default; the user turns it on with ``/factory on``), every call above
+    refuses with one clean message and only ``help()`` answers, so the
+    guide stays readable before opting in.
+
     ``help()`` returns the full embedded authoring reference and API guide
     (states, ports, guards, joins, foreach, budgets, and the API with
     worked examples): ``rlm.factory.help()``.

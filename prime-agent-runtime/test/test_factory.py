@@ -32,6 +32,12 @@ races) plus the accepted review findings from both:
 - long state ids disambiguate their spawn names with a digest, so two
   states sharing a 20-character prefix never collide on the supervisor's
   unique sibling-name requirement;
+- a configured inline subagent name labels the spawned children verbatim
+  (the first instance), with the generated label's -i<n>/-a<n> suffixes on
+  re-entry, foreach fan-out, and retries; over-length names and names
+  duplicated across states are rejected at write time (Macroscope review
+  finding: the name was dropped, so children always got the generated
+  label);
 - milestone notices go to the host as validated "factory.progress"
   payloads exactly once per kind per run, and a dead bridge leaves the
   milestone in the ledger instead of wedging the run.
@@ -41,6 +47,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 import time
 import unittest
 from pathlib import Path
@@ -55,10 +63,12 @@ from rlm.factory import (
     BACKOFF_MAX_ATTEMPTS,
     EVENT_WINDOW,
     POLL_TIMEOUT_MS,
+    SUBAGENT_NAME_MAX_LENGTH,
     FactoryExecutor,
     _child_name,
     _guard_passes,
     _parse_json_output,
+    _spawn_label,
     canonicalize_factory_spec,
     compile_factory_dag,
     topological_order,
@@ -248,6 +258,17 @@ class ValidateFactorySpecTest(unittest.TestCase):
             self.assertEqual(
                 errors, [f"node a inline subagent {key} must be a non-empty string when provided"], key
             )
+
+        # The dag form compiles to machine form first, so the name rules
+        # (length, cross-state uniqueness) apply to nodes too.
+        dag_duplicate = {
+            "nodes": [
+                node("a", subagent={"prompt": "p", "name": "w"}),
+                node("b", subagent={"prompt": "p", "name": "w"}, depends_on=["a"]),
+            ]
+        }
+        errors = validate_factory_spec(dag_duplicate)
+        self.assertEqual(errors, ["state b subagent name 'w' is already configured by state 'a'"])
 
     def test_lifecycle(self) -> None:
         for good in ("task", "resident"):
@@ -1189,6 +1210,49 @@ class ValidateFactoryMachineTest(unittest.TestCase):
         }
         self.assertEqual(validate_factory_machine(inline_ok), [])
 
+    def test_inline_subagent_name_length_and_uniqueness(self) -> None:
+        # The configured name labels spawned children, and the host caps
+        # subagent session names at 64 characters: reject an over-length
+        # name at write time (a persistable factory must be spawnable)
+        # instead of failing every spawn admission.
+        too_long = {
+            "states": [state("a", entry=True, subagent={"prompt": "p", "name": "x" * (SUBAGENT_NAME_MAX_LENGTH + 1)})],
+            "transitions": [],
+        }
+        self.assertEqual(
+            validate_factory_machine(too_long),
+            [
+                f"state a inline subagent name must be at most {SUBAGENT_NAME_MAX_LENGTH} characters, "
+                f"got {SUBAGENT_NAME_MAX_LENGTH + 1}"
+            ],
+        )
+
+        # Two states configured with one name would collide on the
+        # supervisor's unique sibling-name requirement at spawn time: reject
+        # the duplicate at write time, like duplicate state ids.
+        duplicate = {
+            "states": [
+                {"id": "a", "entry": True, "subagent": {"prompt": "p", "name": "reviewer"}},
+                {"id": "b", "subagent": {"prompt": "p", "name": "reviewer"}},
+            ],
+            "transitions": [{"from": "a", "to": "b"}],
+        }
+        self.assertEqual(
+            validate_factory_machine(duplicate),
+            ["state b subagent name 'reviewer' is already configured by state 'a'"],
+        )
+        # Distinct configured names are fine, and string references never
+        # carry a name.
+        distinct = {
+            "states": [
+                {"id": "a", "entry": True, "subagent": {"prompt": "p", "name": "reviewer"}},
+                {"id": "b", "subagent": {"prompt": "p", "name": "fixer"}},
+                {"id": "c", "subagent": "worker"},
+            ],
+            "transitions": [{"from": "a", "to": "b"}, {"from": "b", "to": "c"}],
+        }
+        self.assertEqual(validate_factory_machine(distinct), [])
+
     def test_wait_states_are_gated_until_the_communication_series(self) -> None:
         # The rlm.watch.* host handlers do not exist on this stack, so wait
         # blocks are rejected outright (machine form and dag form alike).
@@ -2077,6 +2141,35 @@ class ChildNameTest(unittest.TestCase):
         self.assertTrue(_child_name("r", "collect", 0, 2).endswith("-a2"))
 
 
+class SpawnLabelTest(unittest.TestCase):
+    """The configured inline subagent name labels spawned children.
+
+    The first instance of a state spawns with the configured name verbatim
+    (the label agents message the child by); later instances and retries
+    keep the generated label's -i<n>/-a<n> suffixes, because one state's
+    settled children stay registered for the run's life and the supervisor
+    rejects duplicate sibling names. (Macroscope review finding: the name
+    was dropped, so every child got the generated label.)
+    """
+
+    def test_configured_name_labels_the_first_instance_verbatim(self) -> None:
+        self.assertEqual(_spawn_label("reviewer", "0123456789abcdef", "reviewing", 0, 1), "reviewer")
+
+    def test_configured_name_keeps_the_generated_suffixes_when_disambiguating(self) -> None:
+        self.assertEqual(_spawn_label("reviewer", "r", "reviewing", 1, 1), "reviewer-i1")
+        self.assertEqual(_spawn_label("reviewer", "r", "reviewing", 0, 2), "reviewer-a2")
+        self.assertEqual(_spawn_label("reviewer", "r", "reviewing", 2, 3), "reviewer-i2-a3")
+        self.assertNotEqual(
+            _spawn_label("reviewer", "r", "reviewing", 0, 1), _spawn_label("reviewer", "r", "reviewing", 1, 1)
+        )
+
+    def test_absent_configured_name_falls_back_to_the_generated_label(self) -> None:
+        self.assertEqual(
+            _spawn_label(None, "0123456789abcdef", "collect", 0, 1),
+            _child_name("0123456789abcdef", "collect", 0, 1),
+        )
+
+
 class FactoryHelpTest(unittest.TestCase):
     """rlm.factory.help(): the embedded authoring reference (PR #3199).
 
@@ -2099,13 +2192,23 @@ class FactoryHelpTest(unittest.TestCase):
             "## Store the spec",
             "## Authoring reference",
             "## Dag form",
-            "## Run, watch, steer",
+            "## Run and steer",
             "## Safety",
         ):
             self.assertIn(heading, doc)
 
         # Prose sections wrap at ~76 columns; flatten before matching phrases.
         flat = " ".join(doc.split())
+        # The opt-in contract in the opening: disabled by default, the
+        # /factory on|off|status pointer, the exact refusal, and help()
+        # readable while disabled.
+        self.assertIn("The factory is opt-in: it ships disabled", flat)
+        self.assertIn("`/factory on` (`/factory off` disables it again, `/factory status` reports it;", flat)
+        self.assertIn("the persisted setting is `factory.enabled` in the agent dir's settings.json", flat)
+        self.assertIn("every `rlm.factory` call except `help()`", flat)
+        self.assertIn("every factory harness write (`create_factory` and updates of factory entries)", flat)
+        self.assertIn(factory_module.FACTORY_DISABLED_MESSAGE, flat)
+        self.assertIn("`help()` answers while disabled", flat)
         # Guards: the op set evaluated over the from-state's latest settle.
         self.assertIn("`eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `exists`, `contains`", flat)
         self.assertIn("over the from-state's latest settle", flat)
@@ -2126,13 +2229,9 @@ class FactoryHelpTest(unittest.TestCase):
         self.assertIn("`stop(run_id)` cancels every running child of the run (idempotent)", flat)
         self.assertIn("`resume(run_id)` continues a paused run and raises on a non-paused one", flat)
 
-        # The run/status/stop/resume/graph/watch snippet, as the agent types it.
+        # The run/status snippet, as the agent types it.
         self.assertIn('result = await rlm.factory.run("pr-manager")', doc)
         self.assertIn('status = await rlm.factory.status(result["run_id"])', doc)
-        self.assertIn('snapshot = await rlm.factory.watch(result["run_id"], 30)', doc)
-        self.assertIn("runs = await rlm.factory.graph()", doc)
-        self.assertIn('live = await rlm.factory.graph(result["run_id"])', doc)
-        self.assertIn('spec = await rlm.factory.graph("pr-manager")', doc)
 
         # The worked examples bound their emitted payloads — captured answers
         # are capped previews (~160-200 chars), so an unbounded json payload
@@ -2140,6 +2239,114 @@ class FactoryHelpTest(unittest.TestCase):
         self.assertIn('findings": ["at most three one-line findings"]', doc)
         self.assertIn("capped at the eight most relevant", doc)
         self.assertIn("an unbounded payload truncates at the cap and fails to bind", flat)
+
+        # The configured inline subagent name contract.
+        self.assertIn("The optional `name` labels the spawned children", flat)
+        self.assertIn("the first instance is named exactly `name`", flat)
+        self.assertIn("unique across the machine's states", flat)
+
+    def test_help_advertises_only_calls_the_namespace_has(self) -> None:
+        # The guide and the namespace MUST agree exactly: every dotted
+        # `rlm.factory.<call>(...)` example the guide teaches must exist as
+        # an attribute on the namespace, or an agent following the returned
+        # reference hits an AttributeError (Macroscope review finding: the
+        # guide advertised watch()/graph() that the namespace did not carry;
+        # they arrive with the stacked live-view PR).
+        doc = rlm_module.rlm.factory.help()
+        flat = " ".join(doc.split())
+        advertised = sorted(set(re.findall(r"rlm\.factory\.(\w+)\(", doc)))
+        namespace = rlm_module.rlm.factory
+        missing = [name for name in advertised if not hasattr(namespace, name)]
+        self.assertEqual(missing, [])
+        # The core calls stay advertised (dotted examples) and the whole
+        # namespace surface stays implemented.
+        for name in ("run", "status", "stop"):
+            self.assertIn(name, advertised)
+        for name in ("run", "status", "stop", "resume", "help"):
+            self.assertTrue(hasattr(namespace, name), name)
+        # The not-yet-shipped views are named as roadmap prose, never as
+        # call examples.
+        self.assertNotRegex(doc, r"rlm\.factory\.(graph|watch)\(")
+        self.assertIn("(`graph()` and a bounded `watch()`) arrive with the stacked live-view PR", flat)
+
+
+# ---------------------------------------------------------------------------
+# The opt-in settings seam: `factory.enabled` in the agent-dir settings file
+# ---------------------------------------------------------------------------
+
+
+class FactorySettingReadTest(unittest.TestCase):
+    """The settings seam behind the opt-in gate.
+
+    The gate resolves the agent dir the way the rest of the runtime does and
+    reads the same nested-camelCase settings document the daemon and TUI
+    settings surface write. The read is lenient like the Rust loader
+    (wrong-typed values read as unset) and fail-closed (a missing or corrupt
+    document leaves the factory disabled, never a crash).
+    """
+
+    def setUp(self) -> None:
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.settings_path = Path(temp.name) / "settings.json"
+        previous = os.environ.get("PRIME_AGENT_CODING_AGENT_DIR")
+        os.environ["PRIME_AGENT_CODING_AGENT_DIR"] = str(Path(temp.name))
+
+        def restore() -> None:
+            if previous is None:
+                os.environ.pop("PRIME_AGENT_CODING_AGENT_DIR", None)
+            else:
+                os.environ["PRIME_AGENT_CODING_AGENT_DIR"] = previous
+
+        self.addCleanup(restore)
+
+    def write_settings(self, document: Any) -> None:
+        self.settings_path.write_text(json.dumps(document), encoding="utf-8")
+
+    def test_round_trips_the_real_settings_document_shape(self) -> None:
+        # A settings file as the daemon writes it: flat camelCase keys and
+        # nested feature objects (agentTraces/telemetry/terminal); the
+        # factory key is shaped exactly like the other feature toggles.
+        # /factory on writes enabled true over the same document...
+        document = {
+            "defaultProvider": "prime-inference",
+            "defaultModel": "internal/glm-5.3-fast",
+            "rlmMaxDepth": 2,
+            "theme": "dark",
+            "agentTraces": {"enabled": False},
+            "telemetry": {"enabled": None, "noticeShown": True},
+            "terminal": {"showImages": True},
+            "factory": {"enabled": True},
+        }
+        self.write_settings(document)
+        self.assertTrue(factory_module.factory_enabled())
+        # ...and /factory off writes enabled false, leaving the rest intact.
+        document["factory"] = {"enabled": False}
+        self.write_settings(document)
+        self.assertFalse(factory_module.factory_enabled())
+
+    def test_missing_or_wrong_typed_settings_read_as_disabled(self) -> None:
+        # No settings file at all: the shipped default is off.
+        self.assertFalse(factory_module.factory_enabled())
+        # A settings document without the factory key is the same default.
+        self.write_settings({})
+        self.assertFalse(factory_module.factory_enabled())
+        # Wrong-typed values read as unset, like the lenient Rust loader.
+        for document in (
+            {"factory": None},
+            {"factory": "enabled"},
+            {"factory": {"enabled": None}},
+            {"factory": {"enabled": "true"}},
+            {"factory": {"enabled": 1}},
+        ):
+            self.write_settings(document)
+            self.assertFalse(factory_module.factory_enabled(), str(document))
+        # An enabled object with unknown sibling keys still reads enabled.
+        self.write_settings({"factory": {"enabled": True, "extra": "ignored"}})
+        self.assertTrue(factory_module.factory_enabled())
+        # A corrupt document fails closed: a clean refusal, never a crash.
+        self.settings_path.write_text("{ not json", encoding="utf-8")
+        self.assertFalse(factory_module.factory_enabled())
 
 
 # ---------------------------------------------------------------------------
@@ -2216,11 +2423,23 @@ class GatedSleep:
         await self.release.wait()
 
 
+def _node_of_name(name: str) -> str:
+    """The factory node a spawn name belongs to.
+
+    Generated labels are "sw-<node id>-<run>-..."; a state with a
+    configured inline subagent name spawns children named by it verbatim,
+    so such a name keys the node by the whole string.
+    """
+    parts = name.split("-")
+    return parts[1] if parts[0] == "sw" and len(parts) > 2 else name
+
+
 class FakeHost:
     """Deterministic async host_request fake that routes by request type.
 
-    Child names carry the node id as their second dash-separated part, so
-    node ids in these tests never contain "-". Collect outcomes are
+    Child names carry the node id as their second dash-separated part (or
+    are a state's configured inline subagent name verbatim), so node ids
+    in these tests never contain "-". Collect outcomes are
     scripted per child id first (``child_outcomes``), then per node id
     (``outcomes``); a "running" outcome never settles. ``rate_limit_first``
     / ``rate_limit_forever`` make spawn admissions for a node fail with a
@@ -2261,7 +2480,7 @@ class FakeHost:
         return [payload for kind, payload in self.calls if kind == request_type]
 
     def spawn_calls(self, node_id: str) -> list[dict[str, Any]]:
-        return [p for p in self.calls_of("rlm.run") if p["kwargs"]["name"].split("-")[1] == node_id]
+        return [p for p in self.calls_of("rlm.run") if _node_of_name(p["kwargs"]["name"]) == node_id]
 
     def deleted_targets(self) -> list[str]:
         return [p["target"] for p in self.calls_of("rlm.delete_subagent")]
@@ -2311,12 +2530,12 @@ class FakeHost:
             # Count this node's prior admission calls before recording the
             # current one, so rate_limit_first<n> fails exactly the first n.
             name = payload["kwargs"]["name"]
-            node_id = name.split("-")[1]
+            node_id = _node_of_name(name)
             attempted = len(
                 [
                     p
                     for kind, p in self.calls
-                    if kind == "rlm.run" and p["kwargs"]["name"].split("-")[1] == node_id
+                    if kind == "rlm.run" and _node_of_name(p["kwargs"]["name"]) == node_id
                 ]
             )
             self.calls.append((request_type, payload))
@@ -2408,7 +2627,19 @@ class DeadNoticeHost(FakeHost):
 # ---------------------------------------------------------------------------
 
 
-class FactoryExecutorTest(unittest.TestCase):
+class _ExecutorTestCase(unittest.TestCase):
+    """The scripted in-memory kernel every executor test runs against.
+
+    A temp-dir harness with a real subagent entry, an injected clock and
+    sleeps, a ``FakeHost`` behind the ``host_request`` patch seam, and the
+    per-test default executor. The factory opt-in gate reads the
+    ``factory.enabled`` setting from the agent dir's settings file, so the
+    agent dir points at a temp dir whose settings file the tests write in
+    the real document shape the daemon writes (``{"factory": {"enabled":
+    true}}``); every executor test then runs through the live gate with the
+    setting on, and the opt-in gate tests flip the file per case.
+    """
+
     def setUp(self) -> None:
         temp = TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -2426,14 +2657,206 @@ class FactoryExecutorTest(unittest.TestCase):
         patcher = patch.object(rlm_module, "host_request", self.host)
         patcher.start()
         self.addCleanup(patcher.stop)
+        agent_temp = TemporaryDirectory()
+        self.addCleanup(agent_temp.cleanup)
+        self.settings_path = Path(agent_temp.name) / "settings.json"
+        self.write_settings({"factory": {"enabled": True}})
+        self._isolate_agent_dir(agent_temp.name)
 
-    # -- helpers -------------------------------------------------------------
+    def write_settings(self, document: Any) -> None:
+        """Write the agent-dir settings document (the real file shape)."""
+        self.settings_path.write_text(json.dumps(document), encoding="utf-8")
+
+    def _isolate_agent_dir(self, agent_dir: str) -> None:
+        previous = os.environ.get("PRIME_AGENT_CODING_AGENT_DIR")
+        os.environ["PRIME_AGENT_CODING_AGENT_DIR"] = agent_dir
+
+        def restore() -> None:
+            if previous is None:
+                os.environ.pop("PRIME_AGENT_CODING_AGENT_DIR", None)
+            else:
+                os.environ["PRIME_AGENT_CODING_AGENT_DIR"] = previous
+
+        self.addCleanup(restore)
+
+    def disable_factory(self) -> None:
+        """Flip the settings file to the disabled default."""
+        self.write_settings({"factory": {"enabled": False}})
+
+    # -- helpers shared with the opt-in gate tests ----------------------------
 
     def store_factory(self, dag: dict[str, Any], spec_id: str = "sw") -> None:
         self.harness.create_factory("Factory", "Factory content", id=spec_id, dag=dag)
 
     def store_machine(self, machine: dict[str, Any], spec_id: str = "sw") -> None:
         self.harness.create_factory("Factory", "Factory content", id=spec_id, machine=machine)
+
+    def node(self, node_id: str, **overrides: Any) -> dict[str, Any]:
+        base: dict[str, Any] = {"id": node_id, "subagent": "worker"}
+        base.update(overrides)
+        return base
+
+    async def start(self, spec_id: str = "sw") -> dict[str, Any]:
+        return await rlm_module.rlm.factory.run(spec_id)
+
+
+class FactoryOptInGateTest(_ExecutorTestCase):
+    """The opt-in gate: `factory.enabled` (default off) closes the namespace.
+
+    The factory ships disabled; the user turns it on with /factory on (the
+    persisted `factory.enabled` setting in the agent dir's settings.json).
+    While it is off, every rlm.factory call except help() and every factory
+    harness write refuses with ONE exact message, and nothing starts or
+    persists behind the refusal.
+    """
+
+    # -- namespace gate --------------------------------------------------------
+
+    @async_test
+    async def test_run_proceeds_when_the_enabled_setting_is_written(self) -> None:
+        self.store_factory({"nodes": [self.node("a")]}, spec_id="sw")
+        result = await self.start()
+        self.assertIn("run_id", result)
+        self.assertEqual(result["started"], ["a"])
+        self.assertTrue(self.host.calls)
+
+    @async_test
+    async def test_empty_settings_refuse_run_with_the_exact_message(self) -> None:
+        self.store_factory({"nodes": [self.node("a")]}, spec_id="sw")
+        # An empty settings document: the factory key absent reads as the
+        # disabled default, and the refusal precedes any spec resolution.
+        self.write_settings({})
+        with self.assertRaises(ValueError) as raised:
+            await self.start()
+        self.assertEqual(str(raised.exception), "the factory is disabled; run /factory on to enable it")
+        self.assertEqual(str(raised.exception), factory_module.FACTORY_DISABLED_MESSAGE)
+        self.assertEqual(self.host.calls, [])
+        # No settings file at all is the same disabled default.
+        self.settings_path.unlink()
+        with self.assertRaises(ValueError) as raised:
+            await self.start()
+        self.assertEqual(str(raised.exception), factory_module.FACTORY_DISABLED_MESSAGE)
+        self.assertEqual(self.host.calls, [])
+
+    @async_test
+    async def test_status_stop_and_resume_refuse_with_the_exact_message(self) -> None:
+        self.store_factory({"nodes": [self.node("a")]}, spec_id="sw")
+        result = await self.start()
+        run_id = result["run_id"]
+        self.disable_factory()
+        for call in (
+            rlm_module.rlm.factory.status(run_id),
+            rlm_module.rlm.factory.stop(run_id),
+            rlm_module.rlm.factory.resume(run_id),
+        ):
+            with self.assertRaises(ValueError) as raised:
+                await call
+            self.assertEqual(str(raised.exception), factory_module.FACTORY_DISABLED_MESSAGE)
+
+    @async_test
+    async def test_graph_and_watch_refuse_with_the_exact_message(self) -> None:
+        self.store_factory({"nodes": [self.node("a")]}, spec_id="sw")
+        result = await self.start()
+        run_id = result["run_id"]
+        self.disable_factory()
+        for call in (
+            rlm_module.rlm.factory.graph(run_id),
+            rlm_module.rlm.factory.graph(),
+            rlm_module.rlm.factory.graph("sw"),
+            rlm_module.rlm.factory.watch(run_id, 0.5),
+        ):
+            with self.assertRaises(ValueError) as raised:
+                await call
+            self.assertEqual(str(raised.exception), factory_module.FACTORY_DISABLED_MESSAGE)
+
+    @async_test
+    async def test_the_activity_lane_refuses_while_disabled(self) -> None:
+        # The daemon stops advertising the lane while the factory is off;
+        # the kernel seam fails closed behind the advertisement: a stale
+        # client that still speaks the lane gets the one refusal on every
+        # action -- run included, which would otherwise bypass the
+        # namespace's gate.
+        self.store_factory({"nodes": [self.node("a")]}, spec_id="sw")
+        result = await self.start()
+        run_id = result["run_id"]
+        self.disable_factory()
+        for action in ("graph", "watch", "status", "run", "stop", "resume"):
+            request: dict[str, Any] = {"action": action}
+            if action in ("graph", "watch", "status", "stop", "resume"):
+                request["runId"] = run_id
+            if action == "run":
+                request["specId"] = "sw"
+            with self.assertRaises(ValueError) as raised:
+                await self.executor.activity(request)
+            self.assertEqual(str(raised.exception), factory_module.FACTORY_DISABLED_MESSAGE)
+
+    def test_help_answers_while_disabled(self) -> None:
+        self.disable_factory()
+        doc = rlm_module.rlm.factory.help()
+        self.assertEqual(doc, factory_module.FACTORY_HELP)
+        self.assertIn("The factory is opt-in", doc)
+
+    # -- harness write gate ----------------------------------------------------
+
+    def test_create_factory_refuses_while_disabled(self) -> None:
+        self.disable_factory()
+        with self.assertRaises(ValueError) as raised:
+            self.harness.create_factory("Factory", "Never stores.", id="sw", dag={"nodes": [self.node("a")]})
+        self.assertEqual(str(raised.exception), factory_module.FACTORY_DISABLED_MESSAGE)
+        self.assertEqual(self.harness.list("factory"), [])
+        # The refusal precedes spec validation: an invalid spec never gets
+        # the spec error while the factory is off, only the one message.
+        with self.assertRaises(ValueError) as raised:
+            self.harness.create_factory("Broken", "Never stores.", id="bad", dag={"nodes": []})
+        self.assertEqual(str(raised.exception), factory_module.FACTORY_DISABLED_MESSAGE)
+        self.assertEqual(self.harness.list("factory"), [])
+        # The generic create path refuses identically.
+        with self.assertRaises(ValueError) as raised:
+            self.harness.create(
+                "factory",
+                "Generic",
+                "content",
+                id="generic",
+                arguments={"dag": {"nodes": [self.node("a")]}},
+            )
+        self.assertEqual(str(raised.exception), factory_module.FACTORY_DISABLED_MESSAGE)
+        self.assertEqual(self.harness.list("factory"), [])
+
+    def test_factory_entry_updates_refuse_while_disabled(self) -> None:
+        self.store_factory({"nodes": [self.node("a")]}, spec_id="sw")
+        self.disable_factory()
+        with self.assertRaises(ValueError) as raised:
+            self.harness.update_factory("sw", "Factory", "content updated")
+        self.assertEqual(str(raised.exception), factory_module.FACTORY_DISABLED_MESSAGE)
+        with self.assertRaises(ValueError) as raised:
+            self.harness.update("factory", "sw", "Factory", "content updated")
+        self.assertEqual(str(raised.exception), factory_module.FACTORY_DISABLED_MESSAGE)
+        with self.assertRaises(ValueError) as raised:
+            self.harness.upsert(
+                "factory",
+                "Factory",
+                "content",
+                id="upserted",
+                arguments={"dag": {"nodes": [self.node("a")]}},
+            )
+        self.assertEqual(str(raised.exception), factory_module.FACTORY_DISABLED_MESSAGE)
+        # The stored entry is untouched behind the refusals.
+        self.assertEqual(self.harness.get("factory", "sw").content, "Factory content")
+        self.assertEqual(self.harness.list("factory"), [self.harness.get("factory", "sw")])
+
+    def test_delete_stays_available_while_disabled(self) -> None:
+        # Deleting is cleanup, not authoring or execution: the gate list is
+        # run/status/stop/resume (and the later graph/watch) plus creates and
+        # updates, so an operator can still clear stale entries while off.
+        self.store_factory({"nodes": [self.node("a")]}, spec_id="sw")
+        self.disable_factory()
+        self.assertTrue(self.harness.delete_factory("sw"))
+        self.assertIsNone(self.harness.get("factory", "sw"))
+
+
+class FactoryExecutorTest(_ExecutorTestCase):
+
+    # -- helpers -------------------------------------------------------------
 
     def corrupt_stored_spec(self, spec_id: str, spec: Any, *, key: str = "dag") -> None:
         """Bypass write-time validation the way a hand-edited or foreign
@@ -2450,14 +2873,6 @@ class FactoryExecutorTest(unittest.TestCase):
     def all_events_of(self, run_result: dict[str, Any], kind: str) -> list[dict[str, Any]]:
         run = self.executor._runs[run_result["run_id"]]
         return [event for event in run.events if event["kind"] == kind]
-
-    def node(self, node_id: str, **overrides: Any) -> dict[str, Any]:
-        base: dict[str, Any] = {"id": node_id, "subagent": "worker"}
-        base.update(overrides)
-        return base
-
-    async def start(self, spec_id: str = "sw") -> dict[str, Any]:
-        return await rlm_module.rlm.factory.run(spec_id)
 
     async def settle(self, run_result: dict[str, Any], *, max_polls: int = 50_000) -> dict[str, Any]:
         """Yield to the control loop until the run leaves the running state."""
@@ -2551,6 +2966,98 @@ class FactoryExecutorTest(unittest.TestCase):
             self.assertEqual(spawn[0]["prompt"], "Template by title.")
             self.assertEqual(spawn[0]["kwargs"]["model"], "pi/test-model")
             self.assertEqual(spawn[0]["kwargs"]["thinking"], "low")
+
+    @async_test
+    async def test_inline_subagent_name_labels_the_spawned_child(self) -> None:
+        # Macroscope review finding: the inline subagent name was dropped by
+        # _resolve_subagents, so the child spawned with the generated label
+        # instead of the configured name agents message the child by. The
+        # name rides through run creation to the spawn call, and the spawned
+        # event's ledger entry carries the same label.
+        self.store_factory(
+            {
+                "run": {"failure_policy": "continue"},
+                "nodes": [
+                    {"id": "a", "subagent": {"prompt": "Do the review.", "name": "reviewer"}},
+                ],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(
+            [p["kwargs"]["name"] for p in self.host.calls_of("rlm.run")],
+            ["reviewer"],
+        )
+        self.assertEqual(
+            [event["name"] for event in self.all_events_of(result, "spawned")],
+            ["reviewer"],
+        )
+
+    @async_test
+    async def test_inline_subagent_name_disambiguates_reentry_and_foreach(self) -> None:
+        # One state's settled children stay registered for the run's life,
+        # and the supervisor rejects duplicate sibling names, so re-entry
+        # (max_entries > 1) and foreach fan-out keep the configured prefix
+        # with the same -i<n> suffix the generated labels use.
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue"},
+                "states": [
+                    {
+                        "id": "loop",
+                        "entry": True,
+                        "subagent": {"prompt": "Work.", "name": "worker"},
+                        "max_entries": 2,
+                    },
+                ],
+                "transitions": [{"from": "loop", "to": "loop"}],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(
+            [p["kwargs"]["name"] for p in self.host.calls_of("rlm.run")],
+            ["worker", "worker-i1"],
+        )
+
+        self.host.outcomes["src"] = {
+            "status": "done",
+            "answer": 'Here.\n```json\n{"items": ["one", "two"]}\n```',
+        }
+        self.host.calls.clear()
+        self.host.children.clear()
+        self.host.counter = 0
+        self.store_factory(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 8},
+                "nodes": [
+                    {"id": "src", "subagent": "worker", "outputs": [{"name": "items", "type": "json"}]},
+                    {
+                        "id": "fan",
+                        "subagent": {"prompt": "Expand item {items}.", "name": "expander"},
+                        "depends_on": ["src"],
+                        "inputs": [{"name": "items", "type": "json", "from": "src.items"}],
+                        "foreach": {"over": "items", "max": 4},
+                    },
+                ],
+            },
+            spec_id="fan",
+        )
+        result = await self.start("fan")
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        # The first foreach instance keeps the configured name; the second
+        # disambiguates with the instance suffix.
+        self.assertEqual(
+            [
+                p["kwargs"]["name"]
+                for p in self.host.calls_of("rlm.run")
+                if p["kwargs"]["name"].startswith("expander")
+            ],
+            ["expander", "expander-i1"],
+        )
 
     @async_test
     async def test_run_starts_ready_nodes_and_reports_counts(self) -> None:
@@ -5034,32 +5541,18 @@ class FactoryExecutorTest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class FactoryGraphWatchTest(unittest.TestCase):
+class FactoryGraphWatchTest(_ExecutorTestCase):
     """The graph snapshot (structure fused with live state), the bounded
-    watch, and the host bridge's out-of-band activity handler."""
+    watch, and the host bridge's out-of-band activity handler. The shared
+    executor setUp isolates the agent dir and writes the enabled setting,
+    so every graph/watch/activity test runs through the live opt-in gate."""
 
     def setUp(self) -> None:
-        temp = TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        self.harness = HarnessState(Path(temp.name) / "harness_state.json")
-        self.harness.create_subagent("Worker", "Do the work carefully.", id="worker")
+        super().setUp()
         self.harness.create_subagent("Researcher", "Collect the findings.", id="researcher")
-        self.clock = FakeClock()
-        self.host = FakeHost(clock=self.clock)
-        self.sleeps = ClockSleep(self.clock)
-        self.executor = FactoryExecutor(now=self.clock, sleep=self.sleeps, harness=self.harness)
-        previous_executor = factory_module._DEFAULT_EXECUTOR
-        factory_module._DEFAULT_EXECUTOR = self.executor
-        self.addCleanup(lambda: setattr(factory_module, "_DEFAULT_EXECUTOR", previous_executor))
-        patcher = patch.object(rlm_module, "host_request", self.host)
-        patcher.start()
-        self.addCleanup(patcher.stop)
         self.harness.create_factory("Factory", "Factory content", id="sw", machine=valid_machine())
 
     # -- helpers -------------------------------------------------------------
-
-    async def start(self, spec_id: str = "sw") -> dict[str, Any]:
-        return await rlm_module.rlm.factory.run(spec_id)
 
     async def settle(self, run_result: dict[str, Any], *, max_polls: int = 50_000) -> dict[str, Any]:
         run_id = run_result["run_id"]
