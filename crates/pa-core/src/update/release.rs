@@ -172,7 +172,7 @@ pub fn artifact_for_platform(release: &LatestRelease) -> Result<&ReleaseArtifact
 
 /// Where every release's archives are published: the public GitHub
 /// release of tag `v<version>` under this prefix.
-pub const GITHUB_RELEASE_DOWNLOAD_URL: &str =
+const GITHUB_RELEASE_DOWNLOAD_URL: &str =
     "https://github.com/PrimeIntellect-ai/prime-agent/releases/download";
 
 /// The download URL of one release archive. The official bucket
