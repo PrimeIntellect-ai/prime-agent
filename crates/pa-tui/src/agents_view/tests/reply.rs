@@ -105,7 +105,7 @@ fn armed_keys_route_to_the_editor_and_the_cancels_disarm() {
     // ctrl+n (the new-session action) is disabled while armed.
     mode.handle_key("ctrl+n");
     assert!(matches!(&mode.composer, Composer::Reply(_)));
-    assert!(!mode.new_session);
+    assert!(mode.opened.is_none());
     // Esc disarms; the query stays untouched (the composer never owned
     // it).
     mode.handle_key("escape");

@@ -33,6 +33,10 @@ pub(super) struct TurnRunner {
     /// The worker config slice the idle passivation needs (agent dir,
     /// supervisor link coordinates).
     pub(super) passivation: PassivationContext,
+    /// The shared pane-reporter slot (the Worker's `herdr` field): the
+    /// runner reads it at every boundary so a create-time rebind is always
+    /// current.
+    pub(super) herdr: std::sync::Arc<std::sync::Mutex<crate::herdr::HerdrReporter>>,
 }
 
 /// The idle-passivation context on the turn runner: the settings source
@@ -234,9 +238,8 @@ impl TurnRunner {
     /// `isSessionActive`'s pending-prompt-admissions arm) and the
     /// setting is a live threshold; `None` otherwise (attached
     /// sessions, `"off"`, and any state the engine gates would reject
-    /// stay parked without a timer). The client-owned and noSession
-    /// refusals are supervisor-side (the descriptor's `ownerClientId`
-    /// and `noSession`). The engine gate
+    /// stay parked without a timer). The client-owned refusal is
+    /// supervisor-side (the descriptor's `ownerClientId`). The engine gate
     /// (`SessionEngine::can_passivate_worker`) is re-checked at the fire
     /// inside [`Self::maybe_request_idle_passivation`] — the
     /// fresh-snapshot fence — so this window only decides whether to
@@ -417,6 +420,8 @@ impl TurnRunner {
         }
         self.emit_turn_event(json!({ "type": "agent_start" }));
         self.emit_turn_event(json!({ "type": "turn_start" }));
+        // The pane reporter's run boundary (TS `agent_start`): working.
+        self.herdr.lock().unwrap().run_started();
 
         let prompt_index = {
             let core = self.core.lock().unwrap();
@@ -467,6 +472,7 @@ impl TurnRunner {
         let core = Arc::clone(&self.core);
         let events = self.events.clone();
         let turn_coalescer = Arc::clone(&coalescer);
+        let herdr = std::sync::Arc::clone(&self.herdr);
         let agent_dir = crate::paths::agent_dir().unwrap_or_default();
         // The settle tail's background compact-trigger servicing owns its
         // own engine clone (the turn closure below moves the shadowing
@@ -512,6 +518,20 @@ impl TurnRunner {
         // run).
         let engine_agent_end = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let engine_agent_end_seen = Arc::clone(&engine_agent_end);
+        // The pane reporter's settle hold: a run that FAILED without the
+        // engine's `agent_end` (a provider error before any terminal
+        // assistant row) still parks its error here, so the settle's
+        // fallback report can block the pane with the message instead
+        // of a false idle.
+        let herdr_settle_error = Arc::new(std::sync::Mutex::new(None::<String>));
+        let herdr_settle_error_seen = Arc::clone(&herdr_settle_error);
+        // Whether the PANE REPORTER already received this run's end —
+        // set only where `run_ended` is actually called (the engine
+        // `agent_end` flag above is set on SIGHT, before the abort gate
+        // can drop the event, so a swallowed `agent_end` must not make
+        // the settle's pane fallback skip and strand the pane working).
+        let herdr_run_end = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let herdr_run_end_seen = Arc::clone(&herdr_run_end);
         // Whether the abort gate ever observed the delivery's cancel flag
         // DURING this turn (the per-event read below): the fallback
         // `agent_end` keys its silence on THIS association — an abort
@@ -640,6 +660,44 @@ impl TurnRunner {
                     if aborted_row || matches!(&event, EngineEvent::DoneAborted) {
                         abort_gate_armed_seen.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
+                }
+                // The pane reporter's engine boundaries (the TS
+                // `agent_start` / `agent_end` hooks and the auto-retry
+                // hold): a run start or a retry keeps the pane working,
+                // and the run's end settles it — an error end holds
+                // working through the retry grace first, a queued-work
+                // end debounces the idle. A run whose `agent_end` the
+                // abort gate swallowed above never reaches here, so the
+                // pane keeps its last state exactly like the TS detached
+                // run.
+                match &event {
+                    EngineEvent::AgentStart => {
+                        herdr.lock().unwrap().run_started();
+                        // A later run in the same turn (the retry, the
+                        // continuation) re-opens its own end: the settle
+                        // fallback keys on the flag, so a run start must
+                        // clear it or an end-swallowed abort of the
+                        // LATER run would skip the settle and strand the
+                        // pane working.
+                        herdr_run_end_seen.store(false, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    EngineEvent::AgentEnd { messages } => {
+                        let more_queued = !core.steering.is_empty() || !core.follow_up.is_empty();
+                        herdr
+                            .lock()
+                            .unwrap()
+                            .run_ended(crate::herdr::error_hold_message(messages), more_queued);
+                        herdr_run_end_seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    EngineEvent::AutoRetryStart { .. } => {
+                        herdr.lock().unwrap().retry_started();
+                        // The retry re-runs the turn body: its end (when
+                        // the abort gate lets it through) re-sets the
+                        // flag; clearing here lets a swallowed retry end
+                        // still settle at the turn's close.
+                        herdr_run_end_seen.store(false, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    _ => {}
                 }
                 // The engine cuts its in-memory entries; its
                 // `firstKeptEntryId` never matches this store's file ids,
@@ -974,6 +1032,10 @@ impl TurnRunner {
                         vec![json!({ "type": "turn_end" })]
                     }
                     EngineEvent::Done(Err(error)) if !engine_turn_ended => {
+                        herdr_settle_error_seen
+                            .lock()
+                            .unwrap()
+                            .replace(error.clone());
                         vec![json!({ "type": "turn_end", "error": error })]
                     }
                     EngineEvent::DoneAborted if !engine_turn_ended => vec![json!({
@@ -1186,10 +1248,39 @@ impl TurnRunner {
         // (the flag stays armed until the next pickup — a settle-time
         // re-read would race `handle_abort` and silence a completed
         // session-command or pre-model-failure run).
-        if !engine_agent_end.load(std::sync::atomic::Ordering::SeqCst)
-            && !abort_gate_armed.load(std::sync::atomic::Ordering::SeqCst)
-        {
+        let engine_reported_run_end = engine_agent_end.load(std::sync::atomic::Ordering::SeqCst);
+        if !engine_reported_run_end && !abort_gate_armed.load(std::sync::atomic::Ordering::SeqCst) {
             self.emit_turn_event(json!({ "type": "agent_end" }));
+        }
+        {
+            // The settle's boundary state: the run's own `agent_end`
+            // already reported (inside the emit closure) — the pane
+            // flag, not the engine's sight flag, so an `agent_end` the
+            // abort gate swallowed still settles here too; a run that
+            // ended without one reports here — the TS fallback arm.
+            // This includes the aborted settle: the run's `agent_start`
+            // already flipped the pane working, so suppressing the end
+            // would strand the pane working forever (the wire emit's
+            // abort-gate suppression is about the TUI's frames, not the
+            // pane). A failed run (Done(Err) with no `agent_end`) parks
+            // its error in the settle cell and blocks like the TS
+            // error-hold arm instead of reporting a false idle.
+            // `core.busy` flipped to false above; queued lanes still
+            // holding items keep the settle debounced so the next pickup
+            // cancels the idle flip.
+            let (error_hold, more_queued) = {
+                let core = self.core.lock().unwrap();
+                (
+                    herdr_settle_error.lock().unwrap().take(),
+                    !core.steering.is_empty() || !core.follow_up.is_empty(),
+                )
+            };
+            if !herdr_run_end.load(std::sync::atomic::Ordering::SeqCst) {
+                self.herdr
+                    .lock()
+                    .unwrap()
+                    .run_ended(error_hold, more_queued);
+            }
         }
         let snapshot = {
             let core = self.core.lock().unwrap();

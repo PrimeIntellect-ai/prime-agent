@@ -119,11 +119,23 @@ impl Supervisor {
             config,
             telemetry_disabled,
             runtime_metadata,
+            env,
             ..
         } = create
         else {
             return Err(anyhow!("launch_worker requires a create command"));
         };
+        // The allowlisted client env (the pane identity, e.g. Herdr's
+        // `HERDR_*`) re-filtered here (the socket peer is untrusted) and
+        // carried on the durable create command: the worker resolves its
+        // session's pane identity from the create payload — never from
+        // this supervisor process's boot environment (the TS daemon
+        // boot-context bug class, not reproduced) — and a respawned
+        // worker re-receives the same identity.
+        let client_env = env
+            .as_ref()
+            .map(crate::herdr::filter_client_env)
+            .filter(|env| !env.is_empty());
         // The shutdown gate: a create dispatched while the supervisor is
         // stopping must never launch a worker the stop pass would miss (a
         // late create racing a shutdown would otherwise orphan its worker
@@ -255,6 +267,12 @@ impl Supervisor {
             if let Some(value) = config_object.and_then(|config| config.get(key)) {
                 durable_rest.insert(key.to_string(), value.clone());
             }
+        }
+        // The session's pane identity (the allowlisted client env) rides
+        // the durable create command so the worker's `create` payload
+        // carries it and a respawn replays it.
+        if let Some(client_env) = client_env {
+            durable_rest.insert("env".to_string(), serde_json::to_value(client_env)?);
         }
         // A child's RLM identity rides the durable create command too, so a
         // respawned or adopted child stays identifiable for ledger appends.
@@ -626,10 +644,8 @@ impl Supervisor {
     /// idle state and crossed the threshold asks for its own graceful
     /// stop over the supervisor link — TS `canEvictWorker` reaches roots
     /// and children alike. The supervisor verifies the worker token,
-    /// refuses a client-owned or noSession descriptor (TS
-    /// `hasOwnerClient`: the owner's disconnect cleanup owns that stop;
-    /// an in-memory session has no file to wake from), and re-reads the
-    /// setting — the supervisor's own fresh-snapshot fence: a setting
+    /// refuses a client-owned descriptor (TS `hasOwnerClient`), and re-reads
+    /// the setting — the supervisor's own fresh-snapshot fence: a setting
     /// flipped to `"off"` (or past the threshold) between the worker's
     /// ask and the stop cancels the passivation. The stop runs under the
     /// eviction fence (TS `withEvictionFence`) and is the existing
@@ -653,21 +669,15 @@ impl Supervisor {
                 None,
             );
         };
-        // Rust clients create noSession roots unowned (`lifecycle: None`);
-        // TS makes them client-owned, so its `hasOwnerClient` refuses them.
-        // An in-memory session has no file to wake from.
-        {
-            let descriptor = resident.descriptor.lock().await;
-            if descriptor.owner_client_id.is_some()
-                || descriptor.create_command.no_session == Some(true)
-            {
-                return response_failure(
-                    Some(command_id),
-                    type_name,
-                    "Idle passivation is refused for a client-owned or in-memory (noSession) worker",
-                    None,
-                );
-            }
+        // The owner gate (TS `canEvictWorker`'s `hasOwnerClient` arm): a
+        // client-owned worker never passivates itself.
+        if resident.descriptor.lock().await.owner_client_id.is_some() {
+            return response_failure(
+                Some(command_id),
+                type_name,
+                "Idle passivation is refused for a client-owned worker",
+                None,
+            );
         }
         // The supervisor-side settings re-read (the fence): the same
         // `idleEvictionMinutes` surface the worker read.

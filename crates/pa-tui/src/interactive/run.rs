@@ -38,6 +38,21 @@ const MIN_RENDER_INTERVAL: Duration = Duration::from_millis(16);
 /// regardless of the render rate.
 const SPINNER_INTERVAL_MS: u128 = 80;
 
+/// The animating loader's next phase boundary, the wake the select needs
+/// while a quiet turn waits out its stream: TS `Loader`'s `setInterval`
+/// keeps painting the 80ms cadence through quiet turns, and this
+/// boundary is that interval's timer. The wake always precedes the
+/// phase change it observes — an off-by-one here parks the loop for a
+/// whole boundary instead of firing at the phase edge.
+fn next_spinner_deadline(started: Instant, now: Instant) -> Instant {
+    // The remainder form keeps the arithmetic bounded by one phase: a
+    // wide phase counter would truncate through `as usize` on 32-bit
+    // targets after ~10.9 years of continuous animation and arm an
+    // already-expired deadline, hot-spinning the select's wake.
+    let into_phase = now.duration_since(started).as_millis() % SPINNER_INTERVAL_MS;
+    now + Duration::from_millis((SPINNER_INTERVAL_MS - into_phase) as u64)
+}
+
 /// Run the interactive UI until the user exits (terminal) or the plan
 /// completes (headless).
 ///
@@ -330,7 +345,12 @@ async fn run_interactive_surface(
     // clear rides the first draw's single flush, which carries the
     // complete frame — no splash flash, no panel appearing late over a
     // half-open view.
-    if !headless && matches!(&options.session, SessionSelection::New) {
+    if !headless
+        && matches!(
+            &options.session,
+            SessionSelection::New | SessionSelection::NewChild { .. }
+        )
+    {
         if let Some(renderer) = renderer.is_terminal_mut() {
             crate::app::draw(renderer, &mut view)?;
         }
@@ -1269,6 +1289,18 @@ async fn run_interactive_surface(
                 render_deadline = Some(expiry);
             }
         }
+        // The animating loader's next phase boundary: every paint clears
+        // the deadline it satisfied, and the boundary is the only wake a
+        // quiet turn has between stream events (a running tool, a
+        // provider gap, silent thinking) — without this arm the select
+        // parked until the 2s bash-activity poll, freezing the spinner
+        // and skipping whole seconds of the elapsed counter.
+        if let Some(started) = anim_started {
+            let next = next_spinner_deadline(started, Instant::now());
+            if render_deadline.is_none_or(|armed| next < armed) {
+                render_deadline = Some(next);
+            }
+        }
         let was_active = session.turn_active;
         // The quiet tick's arming state, snapshotted before the select:
         // parked autocomplete requests and an armed selection auto-scroll
@@ -1979,8 +2011,9 @@ async fn run_interactive_surface(
             || view.compaction.is_some()
             || view.share_loader.is_some();
         if animating {
-            let started = *anim_started.get_or_insert_with(Instant::now);
-            let phase = (started.elapsed().as_millis() / SPINNER_INTERVAL_MS) as usize;
+            let now = Instant::now();
+            let started = *anim_started.get_or_insert(now);
+            let phase = (now.duration_since(started).as_millis() / SPINNER_INTERVAL_MS) as usize;
             view.pulse_frame = phase;
             if phase != last_pulse_phase {
                 session.dirty = true;
@@ -1988,8 +2021,7 @@ async fn run_interactive_surface(
             // Arm the next phase boundary: without a deadline the select
             // would only wake on the 50ms tick, adding up to a full tick
             // of spinner latency to every phase change.
-            let next_phase =
-                started + Duration::from_millis(SPINNER_INTERVAL_MS as u64 * (phase as u64 + 1));
+            let next_phase = next_spinner_deadline(started, now);
             if render_deadline.is_none_or(|deadline| deadline > next_phase) {
                 render_deadline = Some(next_phase);
             }
@@ -2061,9 +2093,14 @@ async fn run_interactive_surface(
             } else {
                 // Headless capture keeps the per-change frame sequence
                 // the verifiers assert on: no wall-clock interval applies.
+                // The paint bookkeeping matches the terminal's: a paint
+                // satisfied the armed deadline, and the pre-select
+                // inventory re-arms every wake still pending, so the
+                // harness runs the terminal's wake path.
                 renderer.render_headless(&mut session, &mut view);
                 session.dirty = false;
                 last_pulse_phase = view.pulse_frame;
+                render_deadline = None;
             }
         } else if render_deadline.is_some_and(|deadline| deadline <= Instant::now()) {
             // A fired deadline with nothing dirty to paint must not
@@ -2206,4 +2243,27 @@ async fn run_interactive_surface(
         exit_guard.cancel();
     }
     Ok(outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The boundary the select arms is always the current phase's
+    /// 80ms edge — the wake must precede the phase change it observes
+    /// (an off-by-one parks the loop for a whole boundary). Samples sit
+    /// at least a millisecond inside their phase because `Instant`
+    /// round-trips can lose sub-millisecond ticks on the platform
+    /// clock, and the phase is floored from whole milliseconds.
+    #[test]
+    fn spinner_deadline_is_the_current_phase_edge() {
+        let started = Instant::now();
+        let at = |ms: u64| started + Duration::from_millis(ms);
+        assert_eq!(next_spinner_deadline(started, started), at(80));
+        assert_eq!(next_spinner_deadline(started, at(1)), at(80));
+        assert_eq!(next_spinner_deadline(started, at(79)), at(80));
+        assert_eq!(next_spinner_deadline(started, at(81)), at(160));
+        assert_eq!(next_spinner_deadline(started, at(161)), at(240));
+        assert_eq!(next_spinner_deadline(started, at(239)), at(240));
+    }
 }

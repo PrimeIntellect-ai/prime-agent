@@ -488,10 +488,11 @@ fn a_non_escape_key_re_arms_the_double_escape_gesture() {
     for _ in 0..60 {
         steps.push(esc());
     }
-    // A real interaction: the viewport's down key (never the editor's
-    // cursor motion at the empty editor — the scroll consumes it).
+    // A real interaction with no side effect: the editor's right arrow
+    // (a cursor motion that stays put at the empty editor). Down would
+    // move the focus into the activity dock below the prompt.
     steps.push(HeadlessStep::Key(KeyEvent::new(
-        KeyCode::Down,
+        KeyCode::Right,
         KeyModifiers::NONE,
     )));
     steps.push(esc());

@@ -394,3 +394,33 @@ fn fork_from_rejects_a_non_regular_source() {
         )
     );
 }
+
+#[test]
+fn open_treats_a_path_shaped_header_id_as_corrupted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    let artifacts_root = tmp.path().join("session-artifacts");
+    let file = dir.join("crafted.jsonl");
+    for crafted in ["../../outside", "/abs/outside"] {
+        let line = serde_json::json!({
+            "type": "session", "version": 3, "id": crafted,
+            "timestamp": "2026-01-01T00:00:00.000Z", "cwd": "/w"
+        })
+        .to_string();
+        std::fs::write(&file, format!("{line}\n")).unwrap();
+        let manager = SessionManager::open(tmp.path(), &dir, &file);
+        let artifact_dir = manager.get_session_artifact_dir().unwrap();
+        assert_eq!(
+            (
+                artifact_dir.parent(),
+                read_session_header(&file).map(|header| header.id),
+            ),
+            (
+                Some(artifacts_root.as_path()),
+                Some(manager.get_session_id().to_owned()),
+            ),
+            "{crafted}: the corrupted-header reset mints a fresh id and rewrites the file",
+        );
+    }
+}

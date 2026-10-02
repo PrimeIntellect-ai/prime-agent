@@ -1,0 +1,1 @@
+- `prime-agent list` and other daemon commands no longer hang until they time out when a busy daemon sends a large response slowly.

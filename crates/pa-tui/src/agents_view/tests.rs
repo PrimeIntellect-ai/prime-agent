@@ -22,6 +22,7 @@ mod render_pulse;
 mod reply;
 mod running_lines;
 mod saved_catalog;
+mod search_selection;
 mod selection_churn;
 
 /// One idle row under test plus a holder row that keeps the selection,
@@ -174,6 +175,37 @@ fn mode_with_anchor(anchor: Option<&str>, roster: Vec<serde_json::Value>) -> Age
         version: "0.0.0".to_string(),
         anchor_session_id: anchor.map(str::to_string),
         scope: None,
+        query: None,
+        expanded_ancestors: Vec::new(),
+        selected_row_identity: None,
+        selected_key: None,
+        status_message: None,
+        keybindings: crate::keybindings::KeybindingsManager::new(),
+        show_hardware_cursor: false,
+        incident_notice_state: None,
+        create_config: serde_json::json!({}),
+    });
+    mode.roster = roster;
+    mode.rebuild_rows();
+    mode
+}
+
+/// A scoped view over the given roster (the family's shared fixture: the
+/// scope shape the subagents summary line's open action carries; the
+/// anchor names the session the agents-back handoff waits on).
+fn scoped_mode(anchor: Option<&str>, roster: Vec<serde_json::Value>) -> AgentsViewMode {
+    let mut mode = AgentsViewMode::new(AgentsViewOptions {
+        socket_path: PathBuf::from("/tmp/agents-view-test.sock"),
+        cwd: PathBuf::from("/tmp"),
+        session_dir: None,
+        theme: "prime".to_string(),
+        version: "0.0.0".to_string(),
+        anchor_session_id: anchor.map(str::to_string),
+        scope: Some(AgentsViewScope {
+            session_id: Some("p".to_string()),
+            active_session_id: Some("p-live".to_string()),
+            session_name: Some("p name".to_string()),
+        }),
         query: None,
         expanded_ancestors: Vec::new(),
         selected_row_identity: None,

@@ -915,6 +915,14 @@ async fn send_reply(
             .and_then(Value::as_bool)
             .filter(|disabled| *disabled)
             .map(|_| true);
+        // The resumed session runs in THIS pane: the create carries the
+        // client's Herdr pane identity like every create (a client
+        // outside a Herdr pane sends nothing — the wire keeps its shape).
+        let client_env = {
+            let env =
+                pa_types::daemon::herdr_env::collect_client_env(|key| std::env::var(key).ok());
+            (!env.is_empty()).then_some(env)
+        };
         let created = client
             .request(DaemonCommand::Create {
                 id: None,
@@ -926,7 +934,7 @@ async fn send_reply(
                 telemetry_disabled,
                 runtime_metadata: None,
                 lifecycle: None,
-                env: None,
+                env: client_env,
                 launch_env: None,
                 rest: serde_json::Map::default(),
             })
