@@ -12,6 +12,47 @@ fn view() -> AgentView {
     AgentView::new(Theme::builtin("prime", ColorMode::TrueColor))
 }
 
+/// A paste never reaches the editor behind an overlay (the key
+/// dispatch's frame owners): the input-bearing pickers take it, the
+/// input-less overlays consume it, and only the bare dock's editor
+/// sees it.
+#[test]
+fn a_paste_never_reaches_the_editor_behind_an_overlay() {
+    let editor_text = |view: &AgentView| view.editor.get_lines().join("\n");
+    // The /effort picker takes it into its search.
+    let mut v = view();
+    v.effort_picker = Some(crate::effort_picker::EffortPicker::new(
+        &["high".to_string()],
+        None,
+    ));
+    assert!(v.route_paste("effort"));
+    assert_eq!(editor_text(&v), "");
+    // The /login provider selector takes it into its search.
+    let mut v = view();
+    v.provider_auth = Some(crate::provider_auth::ProviderAuthSelector::new(
+        crate::provider_auth::AuthSelectorKind::Login,
+        Vec::new(),
+    ));
+    assert!(v.route_paste("login"));
+    assert_eq!(editor_text(&v), "");
+    // The settings menu takes it into its search.
+    let mut v = view();
+    v.settings_menu = Some(crate::settings_menu::SettingsMenu::new(Vec::new()));
+    assert!(v.route_paste("setting"));
+    assert_eq!(editor_text(&v), "");
+    // The input-less overlays consume it (the reload box stands in for
+    // the whole consume set).
+    let mut v = view();
+    v.reload_box = Some("reloading".to_string());
+    assert!(v.route_paste("never"));
+    assert_eq!(editor_text(&v), "");
+    // The bare dock: the editor takes it.
+    let mut v = view();
+    assert!(!v.route_paste("direct"));
+    v.editor.handle_paste("direct");
+    assert_eq!(editor_text(&v), "direct");
+}
+
 fn text_of(line: &Line) -> String {
     line.iter().map(|s| s.content.as_str()).collect::<String>()
 }

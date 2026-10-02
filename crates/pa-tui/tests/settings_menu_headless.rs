@@ -5,8 +5,9 @@
 //! (the arrows' old tab job is rebinded away), the detail block's
 //! separator rule, the description-matched hint padding, the two
 //! open-into-a-setting regression pins (the top bar and the padding-x
-//! stay), and the fullscreen setting's retirement (the always-fullscreen
-//! surface has no toggle left to advertise).
+//! stay), the search field's edit keys after a no-match query, and the
+//! fullscreen setting's retirement (the always-fullscreen surface has no
+//! toggle left to advertise).
 #![cfg(unix)]
 // Pedantic-gate exceptions (every other pedantic warning in this crate is
 // fixed in place; each exception carries its one-line justification):
@@ -727,5 +728,39 @@ fn the_fullscreen_setting_and_command_are_retired() {
     assert!(
         !all.contains("Fullscreen (alternate screen)"),
         "the retired command's description is gone: {all}"
+    );
+}
+
+/// The search field keeps its edit keys after a no-match query: the
+/// garbage backspaces away, the rows return, and Space still cycles
+/// the selected row (TS `SettingsList.handleInput`).
+#[test]
+fn a_no_match_query_backspaces_away_and_space_still_cycles() {
+    let mut steps = open_settings();
+    for c in ['z', 'q', 'x'] {
+        steps.push(HeadlessStep::Key(key(KeyCode::Char(c))));
+    }
+    steps.push(HeadlessStep::WaitRender {
+        needle: "No matching settings".to_string(),
+        timeout_ms: 5000,
+    });
+    for _ in 0..3 {
+        steps.push(HeadlessStep::Key(key(KeyCode::Backspace)));
+    }
+    steps.push(HeadlessStep::WaitRender {
+        needle: "Auto-compact".to_string(),
+        timeout_ms: 5000,
+    });
+    steps.push(HeadlessStep::Key(key(KeyCode::Char(' '))));
+    steps.push(HeadlessStep::WaitMs(300));
+    let (frames, _) = run_plan(steps);
+    let rows = frame_rows(frames.last().expect("the run captured frames"));
+    let row = rows
+        .iter()
+        .find(|row| row.contains("Auto-compact"))
+        .expect("the settings rows return once the query is backspaced away");
+    assert!(
+        row.contains("false"),
+        "Space still cycles the selected row: {row}"
     );
 }
