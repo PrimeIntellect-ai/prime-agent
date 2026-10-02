@@ -8,11 +8,12 @@ use super::launch_budget::{
 };
 #[cfg(not(unix))]
 use super::launch_budget::{WORKER_PROBE_BACKOFF_MAX_MS, WORKER_PROBE_BACKOFF_MIN_MS};
+use super::routing::WORKER_REQUEST_TIMEOUT_MS;
 use super::{
     anyhow, create_command_payload, json, persist_worker, socket, util, Arc, Context,
     DaemonCommand, DaemonWorkerDescriptor, DaemonWorkerLifecycle, DurableDaemonCreateCommand,
     Duration, EngineModelSelection, Map, Ordering, Path, ResidentWorker, Result, RouteAdmission,
-    Supervisor, TempSync, TypedCreateRejection, Value, LONG_ROUTE_TIMEOUT_MS, ROUTE_TIMEOUT_MS,
+    Supervisor, TempSync, TypedCreateRejection, Value, ROUTE_TIMEOUT_MS,
 };
 use crate::lease::is_process_alive;
 use crate::protocol::{response_failure, response_success, DaemonResponse};
@@ -369,7 +370,7 @@ impl Supervisor {
                 &resident,
                 "create",
                 create_payload,
-                LONG_ROUTE_TIMEOUT_MS,
+                WORKER_REQUEST_TIMEOUT_MS,
                 RouteAdmission::SupervisorInternal,
             )
             .await
