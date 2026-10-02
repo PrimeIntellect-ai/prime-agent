@@ -529,7 +529,13 @@ fn a_mismatched_archive_fails_the_checksum_gate() {
     }
     run_promote_gates(cwd.path(), &steps);
 
-    let corrupted = format!("prime-agent-{VERSION}-{}.tar.gz", TARGETS[1]);
+    // The archive names carry the platform alias (the channel contract),
+    // so the corruption must target the alias-named merged archive, not
+    // the triple main's fixture layout never produced.
+    let corrupted = format!(
+        "prime-agent-{VERSION}-{}.tar.gz",
+        platform_alias(TARGETS[1])
+    );
     fs::write(cwd.path().join("release-out").join(&corrupted), b"corrupt")
         .expect("corrupt a merged archive");
     let output = assert_failure(
