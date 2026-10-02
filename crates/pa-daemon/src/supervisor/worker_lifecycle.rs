@@ -329,7 +329,7 @@ impl Supervisor {
         // self-registers on boot, and the registration handler must find its
         // identity in the registry (registration races the create replay).
         self.registry.insert(Arc::clone(&resident)).await;
-        let deadline = worker_connect_deadline();
+        let deadline = self.connect_deadline();
         // A failed launch never leaves its half-registered resident behind:
         // a later stale-id rebind (or resolve) must not select a worker
         // that cannot route. The spawn record rides the unsynced TS
@@ -928,6 +928,33 @@ pub(super) fn worker_connect_deadline() -> tokio::time::Instant {
     let now = tokio::time::Instant::now();
     now.checked_add(Duration::from_millis(timeout_ms))
         .unwrap_or_else(|| now + Duration::from_millis(DEFAULT_WORKER_CONNECT_TIMEOUT_MS))
+}
+
+impl Supervisor {
+    /// The launch-probe deadline: the supervisor's pinned budget when
+    /// one is set, else the process-wide env seam.
+    pub(super) fn connect_deadline(&self) -> tokio::time::Instant {
+        let budget = *self
+            .worker_connect_budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match budget {
+            Some(budget) => tokio::time::Instant::now() + budget,
+            None => worker_connect_deadline(),
+        }
+    }
+
+    /// Test-only: pin this supervisor's launch-probe budget so a launch
+    /// oracle fails its probe immediately without mutating the
+    /// process-wide env var (a set value would leak into every parallel
+    /// test's launch).
+    #[cfg(test)]
+    pub(crate) fn pin_worker_connect_budget_for_tests(&self, budget: Duration) {
+        *self
+            .worker_connect_budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(budget);
+    }
 }
 
 /// The real graceful-stop transport (spec §5 `Stopping`): the routed

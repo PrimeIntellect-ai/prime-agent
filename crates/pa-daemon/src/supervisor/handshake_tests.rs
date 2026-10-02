@@ -160,14 +160,11 @@ async fn handshake_channel_stays_private_until_auth_answers() {
     );
 }
 
-/// The launch-storm wedge oracle (2026-09-28): a registration that lands
-/// mid-handshake must not kill the launch. Pre-fix, the registration
-/// path's roster refresh routed `get_state` onto the same unauthenticated
-/// connection the launch's `worker_auth` was handshakeing on; the worker
-/// answered the refresh as the failed unauthenticated FIRST command and
-/// closed the connection, stranding the handshake for the whole connect
-/// budget — a fully-healthy worker failing its launch "did not come up in
-/// time" (a warm ~12.5% rate on the four-launch e2e storm). Served-path:
+/// A registration that lands mid-handshake must not kill the launch:
+/// the registration's roster refresh routes onto its own authenticated
+/// channel once the handshake installs it, while the handshake's
+/// `worker_auth` keeps the unauthenticated connection to itself until
+/// the answer arrives. Served-path:
 /// the wire carries EXACTLY the auth frame (no route rides the private
 /// channel), the registration itself succeeds, and the launch completes.
 #[tokio::test]
@@ -223,8 +220,7 @@ async fn a_mid_handshake_registration_cannot_kill_the_handshake() {
         .expect("request id")
         .to_string();
 
-    // The registration lands while the handshake is still in flight — the
-    // exact interleave that wedged the launch pre-fix.
+    // The registration lands while the handshake is still in flight.
     let command = DaemonCommand::WorkerRegister {
         id: None,
         active_session_id: "w-wedge".to_string(),
@@ -269,11 +265,11 @@ async fn a_mid_handshake_registration_cannot_kill_the_handshake() {
     );
 }
 
-/// The install guard's TOCTOU pin (the Macroscope HIGH finding on the
-/// first PR head): a stale connect that passed its epoch check before a
-/// newer connection installed must never overwrite the newer channel —
-/// the recheck happens under the channel lock, so the stale install is
-/// dropped and the newer channel stays routable.
+/// The install guard's TOCTOU pin: a stale connect that passed its
+/// epoch check before a newer connection installed must never
+/// overwrite the newer channel — the recheck happens under the channel
+/// lock, so the stale install is dropped and the newer channel stays
+/// routable.
 #[tokio::test]
 async fn a_stale_epoch_never_overwrites_the_installed_channel() {
     let dir = std::env::temp_dir().join(format!("pa-install-{}", uuid::Uuid::new_v4()));
@@ -346,237 +342,4 @@ async fn a_stale_epoch_never_overwrites_the_installed_channel() {
         .expect("the newer channel answers")
         .expect("the channel stays open");
     assert_eq!(frame.command_type, "get_state");
-}
-
-/// The create-path fan-out collapse's registration pin: a known-resident
-/// registration refreshes the resident's descriptor in memory and writes
-/// nothing to disk. Pre-cut, this path paid the third durable write of
-/// every fresh create — a premature `Ready` stamped while the create
-/// replay was still in flight, durably redundant with the
-/// create-completion persist (`launch_worker`'s post-create write, which
-/// keeps its fsync as the metadata-survival barrier). The spawn-time
-/// `Starting` record stays the on-disk state until that barrier lands.
-#[tokio::test]
-async fn a_known_resident_registration_writes_nothing_to_disk() {
-    let dir = std::env::temp_dir().join(format!("pa-regskip-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let agent_dir = dir.join("agent");
-    std::fs::create_dir_all(&agent_dir).unwrap();
-    let supervisor = Arc::new(
-        Supervisor::new(SupervisorOptions {
-            socket_path: dir.join("daemon.sock"),
-            agent_dir: agent_dir.clone(),
-        })
-        .expect("supervisor"),
-    );
-    let descriptor_path = dir.join("w-regskip.json");
-    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
-        "version": 2,
-        "workerId": "w-regskip",
-        "pid": 4242,
-        "socketPath": "/tmp/w-regskip.sock",
-        "recoveryJournalPath": "/tmp/none.jsonl",
-        "supervisorSocketPath": "/tmp/none.sock",
-        "authenticationToken": "reg-token",
-        "rootActiveSessionId": "w-regskip",
-        "createdAt": "2026-10-01T00:00:00Z",
-        "updatedAt": "2026-10-01T00:00:00Z",
-        "lifecycle": "starting",
-        "createCommand": {},
-        "consecutiveFailures": 0,
-    }))
-    .expect("descriptor");
-    // The spawn-time record, exactly as the launch writes it (the TS
-    // `persistWorker` call shape: the atomic rename, no fsync), from the
-    // same descriptor value the resident is about to own.
-    crate::descriptor::persist_worker_at(
-        &descriptor_path,
-        &descriptor,
-        crate::descriptor::TempSync::Unsynced,
-    )
-    .expect("the spawn record lands");
-    let spawn_record = std::fs::read(&descriptor_path).expect("the spawn record is on disk");
-    let resident =
-        ResidentWorker::new("w-regskip".to_string(), descriptor, descriptor_path.clone());
-    supervisor.registry.insert(Arc::clone(&resident)).await;
-
-    let command = DaemonCommand::WorkerRegister {
-        id: None,
-        active_session_id: "w-regskip".to_string(),
-        session_id: None,
-        socket_path: "/tmp/w-regskip-live.sock".to_string(),
-        worker_instance_id: "inst-live".to_string(),
-        token: "reg-token".to_string(),
-        pid: 4242,
-        rest: Map::default(),
-    };
-    let response = supervisor
-        .handle_worker_register("r1", "worker_register", &command)
-        .await;
-    assert!(
-        response.success,
-        "the registration itself succeeds: {response:?}"
-    );
-
-    // DISK: byte-identical to the spawn record — the registration writes
-    // nothing; the create-completion persist owns the next durable state.
-    let after = std::fs::read(&descriptor_path).expect("the spawn record stays readable");
-    assert_eq!(
-        after, spawn_record,
-        "the registration must not write the descriptor"
-    );
-
-    // MEMORY: the resident's live identity still refreshes (the routing
-    // surfaces read it) — the registration is not a no-op, only its
-    // durable write is gone.
-    let descriptor = resident.descriptor.lock().await;
-    assert_eq!(descriptor.lifecycle, DaemonWorkerLifecycle::Ready);
-    assert_eq!(
-        descriptor.socket_path, "/tmp/w-regskip-live.sock",
-        "the live socket refreshes in memory"
-    );
-    assert_eq!(
-        descriptor.worker_instance_id.as_deref(),
-        Some("inst-live"),
-        "the live instance id refreshes in memory"
-    );
-}
-
-/// The spawn-record durability witness: the probe records every atomic
-/// write's durability class (the fsync class is not observable in the
-/// persisted bytes), so the two oracles below drive the REAL launch
-/// paths and assert the intended writer actually served. The
-/// launch-budget seam (`PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS`) keeps the
-/// probe failure immediate — no live worker socket ever serves here.
-fn spawn_record_witness(tag: &str) -> (Arc<Supervisor>, std::path::PathBuf) {
-    let dir = std::env::temp_dir().join(format!("pa-spawnrec-{tag}-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let agent_dir = dir.join("agent");
-    std::fs::create_dir_all(&agent_dir).unwrap();
-    let supervisor = Arc::new(
-        Supervisor::new(SupervisorOptions {
-            socket_path: dir.join("daemon.sock"),
-            agent_dir,
-        })
-        .expect("supervisor"),
-    );
-    (supervisor, dir)
-}
-
-/// The Macroscope HIGH remedy, served-path asserted: a relaunch REPLACES
-/// an established, already-durable descriptor, so its spawn record must
-/// be the synced persist — a torn unsynced replacement would lose the
-/// descriptor's whole payload (the recovery journal pointer and the
-/// durable create command the next boot's revival replays). The relaunch
-/// fails here at the worker probe (no live worker), but the spawn
-/// record has already been written — exactly the window the durability
-/// choice governs. Pre-remedy this same path served the unsynced writer
-/// for every relaunch class (the finding).
-#[tokio::test]
-async fn a_relaunch_spawn_record_serves_the_durable_persist() {
-    std::env::set_var("PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS", "1");
-    let (supervisor, dir) = spawn_record_witness("relaunch");
-    let descriptor_path = dir.join("w-relaunch.json");
-    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
-        "version": 2,
-        "workerId": "w-relaunch",
-        "pid": 4242,
-        "socketPath": "/tmp/w-relaunch.sock",
-        "recoveryJournalPath": "/tmp/w-relaunch.recovery.jsonl",
-        "supervisorSocketPath": "/tmp/none.sock",
-        "authenticationToken": "spawnrec-token",
-        "rootActiveSessionId": "w-relaunch",
-        "createdAt": "2026-10-01T00:00:00Z",
-        "updatedAt": "2026-10-01T00:00:00Z",
-        "lifecycle": "ready",
-        "createCommand": {},
-        "consecutiveFailures": 0,
-    }))
-    .expect("descriptor");
-    let resident = ResidentWorker::new(
-        "w-relaunch".to_string(),
-        descriptor,
-        descriptor_path.clone(),
-    );
-    supervisor.registry.insert(Arc::clone(&resident)).await;
-
-    let _ = crate::descriptor::atomic_write_probe::take_under(&descriptor_path);
-    let outcome = supervisor.relaunch_worker(&resident).await;
-    std::env::remove_var("PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS");
-    assert!(
-        outcome.is_err(),
-        "no live worker: the relaunch fails at the probe, after the spawn record served"
-    );
-    let writes = crate::descriptor::atomic_write_probe::take_under(&descriptor_path);
-    let spawn_records: Vec<_> = writes
-        .iter()
-        .filter(|(path, _)| path == &descriptor_path)
-        .collect();
-    assert!(
-        !spawn_records.is_empty(),
-        "the relaunch wrote its spawn record"
-    );
-    assert!(
-        spawn_records
-            .iter()
-            .all(|(_, sync)| matches!(sync, TempSync::Synced)),
-        "the relaunch's spawn record is the synced persist: {spawn_records:?}"
-    );
-    // The record's content is the spawn-time `Starting` state either
-    // class writes; the durability class is the probe's business.
-    let persisted: DaemonWorkerDescriptor = serde_json::from_str(
-        &std::fs::read_to_string(&descriptor_path).expect("the spawn record is readable"),
-    )
-    .expect("parse the spawn record");
-    assert_eq!(persisted.lifecycle, DaemonWorkerLifecycle::Starting);
-    assert!(persisted.pid > 0, "the spawned pid rides the record");
-}
-
-/// The fresh-create cut, served-path asserted: the launch's spawn record
-/// keeps the unsynced TS `persistWorker` shape — the pre-rename fsync is
-/// exactly the write the fan-out cut removed, and serving the synced
-/// writer here would give the measured create-window win back. The
-/// launch fails at the probe (no live worker) and reclaims its
-/// half-launched descriptor, but the served write was already recorded.
-#[tokio::test]
-async fn a_fresh_create_spawn_record_keeps_the_unsynced_shape() {
-    std::env::set_var("PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS", "1");
-    let (supervisor, dir) = spawn_record_witness("freshcreate");
-    let create = DaemonCommand::Create {
-        id: None,
-        session_path: Some(dir.join("s.jsonl").to_string_lossy().to_string()),
-        continue_recent: None,
-        no_session: None,
-        name: Some("faux".to_string()),
-        config: None,
-        telemetry_disabled: None,
-        runtime_metadata: None,
-        lifecycle: None,
-        env: None,
-        launch_env: None,
-        rest: Map::default(),
-    };
-
-    let _ = crate::descriptor::atomic_write_probe::take_under(&supervisor.descriptor_dir);
-    let outcome = supervisor.launch_worker(&create, None).await;
-    std::env::remove_var("PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS");
-    assert!(
-        outcome.is_err(),
-        "no live worker: the fresh launch fails at the probe"
-    );
-    let writes = crate::descriptor::atomic_write_probe::take_under(&supervisor.descriptor_dir);
-    let spawn_records: Vec<_> = writes
-        .iter()
-        .filter(|(path, _)| path.starts_with(&supervisor.descriptor_dir))
-        .collect();
-    assert!(
-        !spawn_records.is_empty(),
-        "the fresh create wrote its spawn record"
-    );
-    assert!(
-        spawn_records
-            .iter()
-            .all(|(_, sync)| matches!(sync, TempSync::Unsynced)),
-        "the fresh create's spawn record stays the unsynced TS shape: {spawn_records:?}"
-    );
 }

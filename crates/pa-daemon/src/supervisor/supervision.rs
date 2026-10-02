@@ -3,7 +3,7 @@
 use super::routing::fail_unsent_request;
 use super::{
     anyhow, connect_transport, create_command_payload, json, mpsc, persist_worker,
-    persist_worker_at, probe_worker_socket, util, worker_connect_deadline, write_frame, Arc, Child,
+    persist_worker_at, probe_worker_socket, util, write_frame, Arc, Child,
     ClientRouting, Command, Context, DaemonWorkerLifecycle, Duration, Ordering, PathBuf,
     PrivateFrameReader, ResidentWorker, Result, RouteAdmission, Supervisor, TempSync,
     TypedCreateRejection, Value, WorkerReply, WorkerRequest, DEFAULT_PRIVATE_FRAME_LIMITS,
@@ -240,7 +240,7 @@ impl Supervisor {
         // nothing).
         self.declare_compaction_terminal(resident, || resident.compaction.observe_worker_gone())
             .await;
-        let deadline = worker_connect_deadline();
+        let deadline = self.connect_deadline();
         // The relaunch REPLACES an established, already-durable
         // descriptor: its spawn record keeps the synced persist (the
         // fresh create is the only launch class that rides the unsynced

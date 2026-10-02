@@ -474,24 +474,13 @@ impl Supervisor {
                 descriptor.session_file.as_deref(),
             );
             // The registration refreshes the resident in memory only — no
-            // persist here. This write was the third durable write inside
-            // one fresh create and its only on-disk delta over the
-            // spawn-time `Starting` record was a premature `Ready`
-            // stamped while the create replay is still in flight; the
-            // spawn record already carries the launch-time identity (pid,
-            // socket) — the registering worker's live instance id is a
-            // fresh uuid the worker mints at boot and refreshes only in
-            // memory — and the create-completion persist
-            // (`launch_worker`'s post-create write) carries the `Ready`
-            // state together with the session identity as the
-            // metadata-survival barrier. TS has no boot-registration
-            // write at all (no `worker_register` command exists there).
-            // The crash window the skip widens — a `Starting` record on
-            // disk while the live create runs — is the state already on
-            // disk for the spawn-to-registration span of every launch,
-            // and the boot scan adopts a live worker socket-first
-            // regardless of the recorded lifecycle; a dead worker's
-            // recovery replays the durable create command, unchanged.
+            // persist here. The spawn record already carries the
+            // launch-time identity (pid, socket), and the create-completion
+            // persist (`launch_worker`'s post-create write) owns the next
+            // durable state — `Ready` with the session identity — as the
+            // metadata-survival barrier. The boot scan adopts a live worker
+            // socket-first regardless of the recorded lifecycle, and a dead
+            // worker's recovery replays the durable create command.
             let durable_session_id = match registration.session_id.clone() {
                 Some(session_id) => Some(session_id),
                 None => descriptor
