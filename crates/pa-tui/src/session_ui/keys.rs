@@ -349,6 +349,19 @@ impl SessionUi {
     /// an open `/model` picker pastes into its search field; otherwise the
     /// editor takes it.
     pub(crate) fn handle_paste(&mut self, text: &str, view: &mut AgentView) {
+        // The tree selector and the settings menu own the whole frame
+        // while open (like their key dispatch): the paste lands in
+        // their active input, never in the hidden editor prompt behind.
+        if let Some(selector) = view.tree_selector.as_mut() {
+            selector.paste(text);
+            self.dirty = true;
+            return;
+        }
+        if let Some(menu) = view.settings_menu.as_mut() {
+            menu.paste(text);
+            self.dirty = true;
+            return;
+        }
         if let Some(picker) = view.model_picker.as_mut() {
             picker.paste(text);
             self.dirty = true;

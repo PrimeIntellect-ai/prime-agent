@@ -416,6 +416,18 @@ fn a_caret_move_keeps_the_filtered_selection() {
     );
 }
 
+/// A paste lands in the search field (TS routes the raw paste to the
+/// `Input`): TS's sanitize strips the spaces (Space stays the row
+/// activation), the filter re-runs on the changed query.
+#[test]
+fn a_paste_types_into_the_search_query_without_spaces() {
+    let mut menu = menu();
+    menu.paste("auto comp");
+    assert_eq!(menu.tabs[menu.tab].search.value(), "autocomp");
+    assert_eq!(menu.tabs[menu.tab].filtered.len(), 1);
+    assert_eq!(menu.rows[menu.tabs[menu.tab].filtered[0]].id, "autocompact");
+}
+
 #[test]
 fn digits_type_into_an_active_query() {
     let mut menu = menu();

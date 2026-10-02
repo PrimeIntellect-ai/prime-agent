@@ -895,6 +895,19 @@ impl TreeList {
         action
     }
 
+    /// One bracketed paste into the search query: TS's raw-data arm
+    /// drops the control bytes (its `hasControlChars` gate), the
+    /// printable text joins the query, and the folds re-run.
+    pub fn paste(&mut self, text: &str) {
+        let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+        if clean.is_empty() {
+            return;
+        }
+        self.search_query.push_str(&clean);
+        self.folded.clear();
+        self.apply_filter();
+    }
+
     /// Update one node's label after a save (TS `updateNodeLabel`).
     pub fn update_node_label(&mut self, entry_id: &str, label: Option<String>, timestamp: &str) {
         if let Some(node) = self

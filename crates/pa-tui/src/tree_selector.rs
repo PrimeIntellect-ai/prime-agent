@@ -114,6 +114,17 @@ impl TreeSelector {
             .update_node_label(entry_id, label.map(str::to_string), "");
     }
 
+    /// One bracketed paste (TS routes the raw data to the open input):
+    /// the label and custom-prompt inputs take it, the tree search
+    /// appends it, and the summarize choice list consumes it.
+    pub fn paste(&mut self, text: &str) {
+        match &mut self.mode {
+            Mode::Tree => self.list.paste(text),
+            Mode::LabelInput { input, .. } | Mode::CustomPrompt { input, .. } => input.paste(text),
+            Mode::Summarize { .. } => {}
+        }
+    }
+
     /// Handle one key id; the emitted action carries the caller's work.
     pub fn handle_key(&mut self, kb: &KeybindingsManager, id: &str) -> TreeSelectorAction {
         match &mut self.mode {
@@ -690,6 +701,34 @@ mod tests {
             },
             "the reopened editor starts empty, so the draft is exactly the new keystroke"
         );
+    }
+
+    /// A paste lands in the active input (TS routes the raw data to the
+    /// open `Input`): the label editor takes it, the tree search appends
+    /// it, and the summarize choice list consumes it.
+    #[test]
+    fn a_paste_reaches_the_open_input() {
+        let kb = KeybindingsManager::new();
+        // The label input.
+        let mut sel = selector();
+        sel.handle_key(&kb, "shift+l");
+        sel.paste("renamed");
+        let value = match &sel.mode {
+            Mode::LabelInput { input, .. } => input.value().to_string(),
+            _ => panic!("the label input stays open"),
+        };
+        assert_eq!(value, "renamed");
+        sel.handle_key(&kb, "escape");
+        // The tree search appends it.
+        sel.paste("chain");
+        assert_eq!(sel.list.search_query(), "chain");
+        // The summarize choice list consumes it (a fresh selector, the
+        // search-filtered list above has no confirm target).
+        let mut sel = selector();
+        sel.handle_key(&kb, "enter");
+        assert!(matches!(sel.mode, Mode::Summarize { .. }));
+        sel.paste("ignored");
+        assert_eq!(sel.list.search_query(), "");
     }
 
     /// The label pane draws its caret at the cursor (TS `Input.render`'s

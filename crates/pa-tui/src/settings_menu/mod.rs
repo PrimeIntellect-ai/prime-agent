@@ -504,6 +504,21 @@ impl SettingsMenu {
         SettingsMenuAction::None
     }
 
+    /// One bracketed paste into the active tab's search field (TS routes
+    /// the raw paste data to the `Input`): the sanitize strips the spaces
+    /// (Space stays the row activation), and the filter re-runs when the
+    /// query changed.
+    pub fn paste(&mut self, text: &str) {
+        let sanitized = text.replace(' ', "");
+        let tab = self.active_mut();
+        let previous = tab.search.value().to_string();
+        tab.search.paste(&sanitized);
+        let changed = tab.search.value() != previous;
+        if changed {
+            self.apply_filter();
+        }
+    }
+
     /// Enter/Space on the selection (TS `activateItem`): submenus open;
     /// value rows cycle to the next value.
     fn activate_selected(&mut self) -> SettingsMenuAction {

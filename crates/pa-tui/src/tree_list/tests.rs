@@ -217,6 +217,37 @@ fn search_filters_and_backspace_restores() {
     assert_eq!(tree.search_query(), "secon");
 }
 
+/// One bracketed paste joins the search query: TS's raw-data gate drops
+/// the control bytes, the printable text joins, and the filter re-runs.
+#[test]
+fn a_paste_joins_the_search_query() {
+    let flat = vec![
+        message_node("u1", None, "2024-01-01T00:00:01.000Z", "fix the parser"),
+        assistant_text_node(
+            "a1",
+            Some("u1"),
+            "2024-01-01T00:00:02.000Z",
+            "parser answer",
+        ),
+        message_node("u2", Some("a1"), "2024-01-01T00:00:03.000Z", "second"),
+    ];
+    let mut tree = list(flat, Some("u2"));
+    tree.paste("parser");
+    assert_eq!(tree.search_query(), "parser");
+    let visible: Vec<&str> = tree
+        .filtered
+        .iter()
+        .map(|index| tree.flat[*index].data.entry.id().unwrap())
+        .collect();
+    assert_eq!(visible, vec!["u1", "a1"]);
+    // The control bytes drop; the printable text around them joins.
+    tree.paste("\u{1b}]8;;x\u{7}r");
+    assert_eq!(tree.search_query(), "parser]8;;xr");
+    // A control-only paste joins nothing.
+    tree.paste("\u{1b}\u{7}");
+    assert_eq!(tree.search_query(), "parser]8;;xr");
+}
+
 /// TS's final arm reads the RAW key data: only printable characters
 /// join the query, and every special key arrives as an escape sequence (a
 /// control character) and drops. This port receives parsed ids, so the
