@@ -323,6 +323,18 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // child usage, feature outcomes) ride `agent session ended`; the seams
     // below count into them instead of emitting their own events.
     let session_counters = std::sync::Arc::new(super::telemetry::SessionCounters::default());
+    // The counters gate from the very creation: the MCP and kernel setup
+    // below starts counting (prewarm boots, connector use) long before
+    // the first turn installs the session telemetry, so an off switch
+    // must already be live — otherwise the pre-install window records
+    // what a later enable would send.
+    if let Some(telemetry_switch) = config
+        .telemetry
+        .as_ref()
+        .and_then(|telemetry| telemetry.telemetry_enabled.as_ref())
+    {
+        session_counters.set_telemetry_enabled(telemetry_switch.enabled.clone());
+    }
     // The `mcp.*` host requests (config/refresh/begin_login) the kernel's
     // generic MCP registry sends while listing or calling generic servers.
     // Telemetry counts connector use (never the server name) when the

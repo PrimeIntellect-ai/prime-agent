@@ -1006,8 +1006,9 @@ const SESSION_ARCHIVED: EventRule = EventRule {
 };
 
 /// A settled ipython cell that rendered as bash (v2): its executed
-/// `bash()` line share and command count, never command text. Kept from
-/// the upstream #3307 fold as a per-occurrence event.
+/// `bash()` line share and command count, never command text. One of the
+/// two standalone TUI events (with `agent command used`), tracked per
+/// render by the upstream #3307 addition and kept intact.
 const TUI_IPYTHON_BASH_RENDERED: EventRule = EventRule {
     name: "tui ipython bash rendered",
     since: 2,

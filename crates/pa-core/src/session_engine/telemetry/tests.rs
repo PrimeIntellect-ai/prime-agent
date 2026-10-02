@@ -1225,10 +1225,13 @@ async fn off_period_session_counters_never_count() {
     );
     telemetry.counters = Arc::clone(&counters);
 
-    // Off: a skill use, a connector use, a feature outcome, and a child
-    // usage row all record nothing.
+    // Off: a skill use, a connector use, a kernel boot, a feature
+    // outcome, and a child usage row all record nothing — the counters'
+    // switch is the same live gate the engine installs at creation, so
+    // the pre-install MCP/kernel window records nothing either.
     telemetry.note_skill_used();
     counters.note_mcp_connector_use();
+    counters.note_kernel_bootstrap(true, true, 1_200);
     telemetry.note_feature_outcome("goal", "completed", Some("create"));
     telemetry.note_child_usage_attributed(50_208, 2_929, 0, 0, 0.008_995_7);
 
@@ -1249,6 +1252,11 @@ async fn off_period_session_counters_never_count() {
         ended["rlm_child_usage_count"],
         serde_json::json!(0),
         "the off-period child usage never counted"
+    );
+    assert_eq!(
+        ended["kernel_bootstrap_count"],
+        serde_json::json!(0),
+        "the off-period kernel boot never counted"
     );
     assert_eq!(
         ended["rlm_child_input_tokens"],

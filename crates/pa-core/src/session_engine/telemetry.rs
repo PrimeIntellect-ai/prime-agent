@@ -334,11 +334,12 @@ struct ToolCategoryStats {
 #[derive(Default)]
 pub struct SessionCounters {
     inner: Mutex<CounterValues>,
-    /// The live opt-out switch, installed by
-    /// [`install_session_telemetry`]. While it answers false the
-    /// counters stop recording, so a later enable never sends what
-    /// happened while telemetry was off (the TUI counters' rule). `None`
-    /// (the default, used by tests and one-shot paths) is always on.
+    /// The live opt-out switch, installed by the engine at the counters'
+    /// creation, before the MCP and kernel seams that count into them
+    /// capture their handles. While it answers false the counters stop
+    /// recording, so a later enable never sends what happened while
+    /// telemetry was off (the TUI counters' rule). `None` (the default,
+    /// used by tests and one-shot paths) is always on.
     telemetry_enabled: std::sync::OnceLock<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
@@ -361,10 +362,10 @@ struct CounterValues {
 }
 
 impl SessionCounters {
-    /// Install the live opt-out switch. Called once by
-    /// [`install_session_telemetry`] before the agent subscription
-    /// registers, so no event can count before the switch is in place.
-    /// A second call is ignored (the first switch wins).
+    /// Install the live opt-out switch. The engine calls this at the
+    /// counters' creation, ahead of the MCP and kernel counting seams,
+    /// so no event can count before the switch is in place. A second
+    /// call is ignored (the first switch wins).
     pub fn set_telemetry_enabled(&self, telemetry_enabled: Arc<dyn Fn() -> bool + Send + Sync>) {
         let _ = self.telemetry_enabled.set(telemetry_enabled);
     }
@@ -481,11 +482,10 @@ pub async fn install_session_telemetry(
         recording: true,
         now,
     }));
-    // The counters stop recording on the same live switch, before the
-    // subscription registers: nothing counts while telemetry is off.
-    if let Some(telemetry_switch) = wiring.telemetry_enabled.clone() {
-        counters.set_telemetry_enabled(telemetry_switch.enabled);
-    }
+    // The counters arrive already gated: the engine installs the same
+    // live switch on them at creation (the MCP and kernel seams count
+    // long before this install runs), so nothing counts while telemetry
+    // is off in any window.
 
     let subscriber_state = Arc::clone(&state);
     let subscriber_client = client.clone();

@@ -1,7 +1,10 @@
 //! The interaction-telemetry concern: the pa-tui interactive loop reports
 //! through the `InteractionTelemetry` trait. Interactions only count into
-//! the session run's counters, which ride its one `tui exit` event; `agent
-//! command used` stays its own event (TS parity).
+//! the session run's counters, which ride its one `tui exit` event. Two
+//! standalone events remain their own (TS parity, plus one upstream
+//! addition): `agent command used`, and `tui ipython bash rendered` —
+//! the settled-shell-cell metric upstream #3307 tracks per render, kept
+//! intact from main.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -9,9 +12,10 @@ use std::sync::Mutex;
 use super::{Future, PathBuf, Pin};
 
 /// The interactive client's telemetry: per-session-run adoption counters
-/// flushed with `tui exit`, plus the TS `agent command used` event on a
-/// one-shot client. Telemetry must never fail the session: opt-out or a
-/// broken install id drops the events.
+/// flushed with `tui exit`, plus the two standalone events — the TS
+/// `agent command used`, and the upstream #3307 `tui ipython bash
+/// rendered` — each on a one-shot client. Telemetry must never fail the
+/// session: opt-out or a broken install id drops the events.
 pub(super) struct CliInteractionTelemetry {
     pub(super) cwd: PathBuf,
     pub(super) agent_dir: PathBuf,
