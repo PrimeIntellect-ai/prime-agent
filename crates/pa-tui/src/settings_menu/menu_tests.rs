@@ -546,3 +546,87 @@ fn opening_into_a_setting_keeps_the_top_bar_and_the_padding() {
         .iter()
         .any(|row| row.starts_with("  Enter select · Esc back")));
 }
+
+/// The search field takes the WHOLE key id (TS `Input.handleInput`, the
+/// `SettingsList.handleInput` final arm): Backspace deletes the query.
+/// After garbage filters the list to the no-match row, backspacing it
+/// away must return the settings rows — the port's single-character
+/// gate dropped every multi-character key id ("backspace" first), so the
+/// menu stranded on its empty state with the field uncorrectable.
+#[test]
+fn backspace_edits_the_search_query() {
+    let mut menu = menu();
+    for key in ["z", "q", "x"] {
+        menu.handle_key(key, &kb());
+    }
+    let filtered = render_text(&menu);
+    assert!(
+        filtered
+            .iter()
+            .any(|row| row.contains("No matching settings")),
+        "the garbage query filters the list to the no-match row"
+    );
+    assert!(
+        !filtered.iter().any(|row| row.contains("Auto-compact")),
+        "no settings row matches the garbage query"
+    );
+    for _ in 0..3 {
+        menu.handle_key("backspace", &kb());
+    }
+    let text = render_text(&menu);
+    assert!(
+        text.iter().any(|row| row.contains("Auto-compact")),
+        "the settings rows return once the query is backspaced away"
+    );
+    assert!(
+        !text.iter().any(|row| row.contains("No matching settings")),
+        "the no-match row clears with the query"
+    );
+}
+
+/// Backspace at the empty-query boundary stays inside the menu (TS
+/// `Input.handleBackspace` clamps at the cursor): the action is None
+/// and the rows keep rendering — the menu neither closes nor strands on
+/// its no-match row. Like every key that reaches the search field, the
+/// press runs the filter pass, which re-lands the tab's selection on its
+/// first row (TS `applyFilter`'s reset, kept for parity).
+#[test]
+fn backspace_on_an_empty_query_keeps_the_menu_open() {
+    let mut menu = menu();
+    assert_eq!(
+        menu.handle_key("backspace", &kb()),
+        SettingsMenuAction::None,
+        "backspace with an empty query is a no-op action"
+    );
+    let text = render_text(&menu);
+    assert!(
+        text.iter().any(|row| row.contains("Auto-compact")),
+        "the rows keep rendering: {text:?}"
+    );
+    assert!(
+        !text.iter().any(|row| row.contains("No matching settings")),
+        "the empty query keeps every row matched"
+    );
+}
+
+/// Space keeps its row-activation meaning after the search field takes
+/// whole key ids (TS sanitizes a bare space out of the query): the key
+/// cycles the selected row's value and types nothing into the field.
+#[test]
+fn space_activates_instead_of_typing_into_the_query() {
+    let mut menu = menu();
+    let field_before = render_text(&menu)[1].clone();
+    assert_eq!(
+        menu.handle_key("space", &kb()),
+        SettingsMenuAction::Change {
+            id: "autocompact",
+            value: "false".to_string()
+        },
+        "Space cycles the selected row (the operator's key vocabulary)"
+    );
+    let field_after = render_text(&menu)[1].clone();
+    assert_eq!(
+        field_before, field_after,
+        "the sanitized Space never types into the search field"
+    );
+}

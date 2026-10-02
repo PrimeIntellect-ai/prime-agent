@@ -489,15 +489,17 @@ impl SettingsMenu {
         if kb.matches(key, "tui.select.cancel") || key == "ctrl+c" {
             return SettingsMenuAction::Cancel;
         }
-        // TS sanitizes the input (a bare space types nothing) and every
-        // printable key edits the active tab's search field.
-        if let [character] = key.chars().collect::<Vec<char>>()[..] {
-            if !character.is_control() {
-                let tab = self.active_mut();
-                tab.search.handle_key(key, kb);
-                self.apply_filter();
-            }
-        }
+        // TS sanitizes the input (a bare space types nothing — Space is
+        // intercepted above as the row activation) and every other key
+        // edits the active tab's search field: `Input.handleInput` takes
+        // the WHOLE key id, so its edit bindings (Backspace and friends)
+        // dispatch on their multi-character ids ("backspace",
+        // "ctrl+w", "alt+backspace"). A single-character gate here drops
+        // every one of them: after a no-match query the field cannot be
+        // corrected and the menu strands on its empty state.
+        let tab = self.active_mut();
+        tab.search.handle_key(key, kb);
+        self.apply_filter();
         SettingsMenuAction::None
     }
 
