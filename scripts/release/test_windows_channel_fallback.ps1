@@ -58,15 +58,9 @@ Set-Content -LiteralPath (Join-Path $channel 'beta') -Value $betaVersion -NoNewl
 $betaRow = '{"platform": "' + $platform + '", "file": "' + $artifactFile + '", "sha256": "' + $artifactSha + '"}'
 Set-Content -LiteralPath (Join-Path $channel 'beta.json') -Value ('{"version": "v' + $betaVersion + '", "binaries": [' + $betaRow + '], "binaries_v2": [' + $betaRow + ']}')
 
-# An isolated loopback port for the channel server (bind port 0, read the
-# assignment back, release): the test never races a listener it does not own.
-$portListener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
-$portListener.Start()
-$port = $portListener.LocalEndpoint.Port
-$portListener.Stop()
-$baseUrl = "http://127.0.0.1:$port"
-
 # One install run under a given channel knob, with the transcript captured.
+# It dials the channel server's $baseUrl, which the try block below learns
+# from the server itself.
 function Invoke-Installer {
     param([string]$ChannelKnob, [string]$Prefix)
     Remove-Item -Path 'Env:PRIME_AGENT_DOWNLOAD_BASE_URL', 'Env:PRIME_AGENT_RELEASE_CHANNEL', 'Env:PRIME_AGENT_RUST_PREFIX', 'Env:PRIME_AGENT_ALLOW_HTTP', 'Env:PRIME_AGENT_VERSION' -ErrorAction SilentlyContinue
@@ -78,12 +72,26 @@ function Invoke-Installer {
     return [pscustomobject]@{ Lines = $lines; Exit = $LASTEXITCODE }
 }
 
-$server = Start-Process -FilePath $py -ArgumentList '-m','http.server',"$port",'--directory',$channel -PassThru -WindowStyle Hidden
+# The server picks and holds its own port (http.server on port 0: the OS
+# hands the port out atomically, so no other process can claim it) and
+# announces it on stdout; -u flushes the announcement immediately, and the
+# test reads it back from the log.
+$serverLog = Join-Path $scratch 'channel-server.log'
+$server = Start-Process -FilePath $py -ArgumentList '-u','-m','http.server','0','--bind','127.0.0.1','--directory',$channel -PassThru -WindowStyle Hidden -RedirectStandardOutput $serverLog
 try {
-    # Readiness is the server answering a request for this test's own
-    # channel (beta.json), not a fixed sleep: bounded deadline, and a dead
-    # child fails fast instead of hanging the installer.
+    # The port the server itself announced, then readiness is it answering
+    # a request for this test's own channel (beta.json): bounded deadlines,
+    # and a dead child fails fast instead of hanging the installer.
     $deadline = (Get-Date).AddSeconds(30)
+    $port = $null
+    while ($null -eq $port) {
+        if ($server.HasExited) { throw "the local channel server exited early" }
+        if ((Get-Date) -gt $deadline) { throw "the local channel server did not announce its port within 30s" }
+        $announced = Select-String -LiteralPath $serverLog -Pattern 'port (\d+)' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($announced) { $port = [int]$announced.Matches[0].Groups[1].Value }
+        if ($null -eq $port) { Start-Sleep -Milliseconds 100 }
+    }
+    $baseUrl = "http://127.0.0.1:$port"
     $ready = $false
     while (-not $ready) {
         if ($server.HasExited) { throw "the local channel server exited early (port $port)" }
