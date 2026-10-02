@@ -385,6 +385,9 @@ fn read_off_epoch_state(path: &Path) -> Option<OffEpochState> {
 /// the recording seams (this process or another) sever facts that span
 /// the opt-out. Best-effort: a filesystem failure keeps the previous
 /// epoch — the live per-event opt-out check still guards the off period.
+/// Callers that can race on the bump serialize it (the settings-locked
+/// command funnel in pa-core takes the directory lock); the epoch is a
+/// monotonic counter and a lost increment is a missed flap.
 pub fn bump_off_epoch(agent_dir: &Path) {
     let path = agent_dir.join(STATE_FILE);
     // Preserve the installation id: the state file is the identity store,
@@ -405,12 +408,15 @@ pub fn bump_off_epoch(agent_dir: &Path) {
     let Ok(payload) = serde_json::to_vec_pretty(&state) else {
         return;
     };
+    // Same publication path as the id itself: an exclusive 0600 temp file
+    // atomically renamed over the state, so the id's privacy contract
+    // survives the bump.
     let dir = path.parent().unwrap_or(Path::new("."));
     let temp = dir.join(format!(".{}-{}", STATE_FILE, uuid::Uuid::new_v4().simple()));
-    if std::fs::write(&temp, &payload)
-        .and_then(|()| std::fs::rename(&temp, &path))
+    if create_exclusive(&temp, &payload)
+        .and_then(|()| crate::rename_onto(&temp, &path))
         .is_err()
     {
-        let _ = std::fs::remove_file(&temp);
+        remove_quietly(&temp);
     }
 }

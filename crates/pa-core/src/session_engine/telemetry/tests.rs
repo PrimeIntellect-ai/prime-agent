@@ -1653,3 +1653,58 @@ async fn a_zero_event_opt_out_flap_never_reports_the_spanning_tool() {
     );
     assert_eq!(ended["run_count"], serde_json::json!(0));
 }
+
+/// The off-epoch bump is lock-serialized and id-preserving: concurrent
+/// disabling writes each land exactly one increment, the installation id
+/// survives every bump, and the state file keeps its private mode.
+#[test]
+fn concurrent_disables_bump_the_epoch_once_each_and_keep_the_state_private() {
+    let _env = CleanTelemetryEnv::default();
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let mut settings = crate::settings::SettingsManager::create(dir.path(), &agent_dir);
+    super::set_telemetry_enabled_text(&mut settings, &agent_dir, true).unwrap();
+    // The install-id state exists once a capture resolves it (the
+    // settings write alone does not create it).
+    let id_before = pa_telemetry::install_id(&agent_dir).unwrap();
+    assert_eq!(pa_telemetry::read_off_epoch(&agent_dir), 0);
+
+    // Two disabling writes race like two processes: each must land its
+    // own increment (a lost one is a missed flap).
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let cwd = dir.path().to_path_buf();
+        let agent_dir = agent_dir.clone();
+        handles.push(std::thread::spawn(move || {
+            let mut writer = crate::settings::SettingsManager::create(&cwd, &agent_dir);
+            super::set_telemetry_enabled_text(&mut writer, &agent_dir, false).unwrap();
+        }));
+    }
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    assert_eq!(
+        pa_telemetry::read_off_epoch(&agent_dir),
+        2,
+        "both disabling writes bumped once"
+    );
+    assert_eq!(
+        pa_telemetry::existing_install_id(&agent_dir),
+        Some(id_before),
+        "the installation id survives the bumps"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(agent_dir.join("telemetry.json"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "the install-id state keeps its private mode"
+        );
+    }
+}

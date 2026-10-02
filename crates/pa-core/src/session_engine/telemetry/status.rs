@@ -119,8 +119,32 @@ pub fn set_telemetry_enabled_text(
         // The persisted off-epoch bumps on every successful disable: the
         // recording seams (this process or another — the worker's) sever
         // facts that span the opt-out even when no telemetry event fires
-        // inside the off window.
-        pa_telemetry::bump_off_epoch(agent_dir);
+        // inside the off window. The bump is a read-modify-write, so the
+        // command funnel serializes it cross-process with the same
+        // directory-lock protocol the settings storage uses; on lock
+        // contention past the retry window it degrades to skipping the
+        // bump (the live per-event opt-out check still guards the off
+        // period itself).
+        let state_path = agent_dir.join("telemetry.json");
+        let mut acquired = None;
+        for _ in 0..10 {
+            match crate::platform::lock_dir::LockDir::acquire(
+                &state_path,
+                std::time::Duration::from_secs(10),
+            ) {
+                Ok(guard) => {
+                    acquired = Some(guard);
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(_) => break,
+            }
+        }
+        if acquired.is_some() {
+            pa_telemetry::bump_off_epoch(agent_dir);
+        }
     }
     let switch = telemetry_switch(&settings.reopen());
     let requested = if enabled { "on" } else { "off" };
