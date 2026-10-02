@@ -201,8 +201,8 @@ async fn compact_with_paused_goal_never_continues() {
 /// `goal.complete()` (the scripted ipython tool call, the f18
 /// completion surface) settles the goal, and the completion's
 /// boundary mints nothing more. The completing cell needs a
-/// bootable kernel: a sandbox gate run must provide uv and
-/// `PI_PACKAGE_DIR` at the checkout (the guard inside names the
+/// bootable kernel: a gate run needs the kernel venv, bootstrapped
+/// or built with uv on PATH (the guard inside names the
 /// recipe when the cell fails instead of letting the loop drain
 /// the faux script into a misleading count mismatch).
 #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
@@ -260,8 +260,8 @@ async fn goal_turn_end_loop_runs_to_completion() {
     let idle = worker.dispatch("wait_for_idle", &json!({})).await;
     assert!(idle.success, "the goal loop never settled: {idle:?}");
     let events = session_events_since(&mut subscription);
-    // A gate run without the kernel environment (uv on PATH and
-    // PI_PACKAGE_DIR at the checkout) fails the
+    // A gate run without the kernel environment (the kernel venv, or
+    // uv on PATH to build it) fails the
     // completing ipython cell: the goal stays active and the loop
     // keeps minting (TS parity: goal continuations are unbounded while
     // the goal is active) until the faux script runs dry. Fail with
@@ -275,7 +275,7 @@ async fn goal_turn_end_loop_runs_to_completion() {
     if let Some(failure) = kernel_failure {
         panic!(
             "the completing ipython cell failed — this test needs the kernel \
-                 environment (uv on PATH and PI_PACKAGE_DIR at the checkout): {failure:?}"
+                 environment (the bootstrapped kernel venv, or uv on PATH to build it): {failure:?}"
         );
     }
     // Each minted continuation ran as a queued follow-up turn: the

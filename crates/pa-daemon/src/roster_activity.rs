@@ -160,6 +160,25 @@ impl RosterPushQueue {
     }
 }
 
+/// The children watcher: a session whose RLM children start or finish
+/// changes its own summary (it stays working while any child runs), so
+/// every flip of the registry's running verdict enqueues a flush request.
+/// The watcher ends when the children registry goes away.
+pub(crate) fn spawn_running_children_watch(
+    children: &crate::rlm_children::SupervisorChildSessions,
+    queue: RosterPushQueue,
+) {
+    if queue.inner.is_none() {
+        return;
+    }
+    let mut running = children.subscribe_running();
+    tokio::spawn(async move {
+        while running.changed().await.is_ok() {
+            queue.push();
+        }
+    });
+}
+
 /// The pump watcher (TS `observeRosterEvent`): every trigger frame that
 /// flows through the worker's event pump enqueues a flush request. The
 /// watcher owns a receiver on the pump's broadcast, so it ends with the

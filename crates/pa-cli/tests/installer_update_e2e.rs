@@ -53,6 +53,12 @@ const FAILING_INSTALLER: &str =
 /// Serve `body` over one plain HTTP request; return the URL the funnel
 /// fetches.
 fn serve(body: &'static str) -> String {
+    format!("{}/install-rust.sh", serve_at("/install-rust.sh", body))
+}
+
+/// Serve `body` at `path` over one plain HTTP request (any other path
+/// answers 404); return the server's base URL.
+fn serve_at(path: &'static str, body: &'static str) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let address = listener.local_addr().expect("local address");
     std::thread::spawn(move || {
@@ -68,8 +74,18 @@ fn serve(body: &'static str) -> String {
                     Ok(_) => head.push(byte[0]),
                 }
             }
+            let requested = String::from_utf8_lossy(&head)
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_string();
+            let (status, body) = if requested == path {
+                ("200 OK", body)
+            } else {
+                ("404 Not Found", "")
+            };
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body
             );
@@ -77,7 +93,7 @@ fn serve(body: &'static str) -> String {
             let _ = stream.flush();
         }
     });
-    format!("http://{address}/install-rust.sh")
+    format!("http://{address}")
 }
 
 /// One sandbox: a HOME with the session store the update must preserve,
@@ -133,17 +149,23 @@ fn uuid_probe() -> String {
 }
 
 fn run_prime_agent(args: &[&str], sandbox: &Sandbox, url: &str) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_prime-agent"))
+    let mut command = prime_agent(args, sandbox);
+    command.env(ENV_INSTALLER_URL, url);
+    command.output().expect("run the prime-agent binary")
+}
+
+fn prime_agent(args: &[&str], sandbox: &Sandbox) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_prime-agent"));
+    command
         .args(args)
         .env("HOME", sandbox.root.join("home"))
-        .env(ENV_INSTALLER_URL, url)
+        .env_remove(ENV_INSTALLER_URL)
         .env(ENV_PREFIX, &sandbox.prefix)
         .env(
             "PRIME_AGENT_CODING_AGENT_DIR",
             sandbox.root.join("home/.prime/agent"),
-        )
-        .output()
-        .expect("run the prime-agent binary")
+        );
+    command
 }
 
 /// `prime-agent update` downloads the script, runs it, the launcher
@@ -178,6 +200,43 @@ fn update_runs_the_downloaded_installer_and_preserves_the_session_store() {
     assert_eq!(
         String::from_utf8_lossy(&version.stdout).trim(),
         "9.9.9-continuous.0123456789abcdef"
+    );
+    sandbox.assert_session_preserved();
+}
+
+/// A nightly install's `prime-agent update` fetches `install-beta.sh` from
+/// the download base (no installer override): the domain only forwards
+/// the stable `install.sh`, so nightly updates go to the bucket directly.
+#[test]
+fn a_nightly_update_fetches_install_beta_from_the_download_base() {
+    let sandbox = Sandbox::new();
+    let share = sandbox.prefix.join("share/prime-agent");
+    std::fs::create_dir_all(&share).expect("share dir");
+    std::fs::write(
+        share.join(".prime-agent-install"),
+        "install-rust.sh channel beta\nversion 0.9.9-beta.11\n",
+    )
+    .expect("install marker");
+    let base = serve_at("/install-beta.sh", MOCK_INSTALLER);
+    let output = prime_agent(&["update"], &sandbox)
+        .env("PRIME_AGENT_DOWNLOAD_BASE_URL", &base)
+        .output()
+        .expect("run the prime-agent binary");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "the nightly update succeeds:\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains(&format!(
+            "fetching the installer from {base}/install-beta.sh"
+        )),
+        "the banner names the nightly installer:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("updated to 9.9.9-continuous.0123456789abcdef"),
+        "the nightly installer ran:\n{stdout}"
     );
     sandbox.assert_session_preserved();
 }

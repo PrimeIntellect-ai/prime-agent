@@ -250,6 +250,20 @@ class ValidateFactorySpecTest(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("thinking must be a non-empty string", errors[0])
 
+        # Whitespace-only values are rejected at write time: runtime
+        # resolution strips them (_resolve_subagents /
+        # _validate_spawn_settings), so a whitespace-only field is a
+        # persistable factory that can never spawn.
+        whitespace_prompt = {"nodes": [node("a", subagent={"prompt": "  \t "})]}
+        errors = validate_factory_spec(whitespace_prompt)
+        self.assertEqual(errors, ["node a inline subagent requires a non-empty prompt"])
+        for key in ("name", "model", "thinking"):
+            whitespace_field = {"nodes": [node("a", subagent={"prompt": "p", key: "  \t "})]}
+            errors = validate_factory_spec(whitespace_field)
+            self.assertEqual(
+                errors, [f"node a inline subagent {key} must be a non-empty string when provided"], key
+            )
+
     def test_lifecycle(self) -> None:
         for good in ("task", "resident"):
             self.assertEqual(validate_factory_spec({"nodes": [node("a", lifecycle=good)]}), [])
@@ -305,6 +319,14 @@ class ValidateFactorySpecTest(unittest.TestCase):
         for bad in (0, -1, 10_001, 1.5, "5", True):
             errors = validate_factory_spec({"run": {"max_transitions": bad}, "nodes": [node("a")]})
             self.assertEqual(errors, ["run max_transitions must be a positive integer no greater than 10000"], bad)
+
+    def test_run_max_children(self) -> None:
+        # The run-wide child budget: total admissions over the run's life.
+        for good in (1, 40, 1_000_000):
+            self.assertEqual(validate_factory_spec({"run": {"max_children": good}, "nodes": [node("a")]}), [])
+        for bad in (0, -1, 1_000_001, 1.5, "5", True):
+            errors = validate_factory_spec({"run": {"max_children": bad}, "nodes": [node("a")]})
+            self.assertEqual(errors, ["run max_children must be a positive integer no greater than 1000000"], bad)
 
     def test_node_failure_policy(self) -> None:
         for good in ("fail_fast", "continue", "escalate"):
@@ -378,6 +400,10 @@ class ValidateFactorySpecTest(unittest.TestCase):
         self.assertEqual(
             validate_factory_spec({"run": {"max_transitions": None}, "nodes": [node("a")]}),
             ["run max_transitions must be a positive integer no greater than 10000"],
+        )
+        self.assertEqual(
+            validate_factory_spec({"run": {"max_children": None}, "nodes": [node("a")]}),
+            ["run max_children must be a positive integer no greater than 1000000"],
         )
         self.assertEqual(
             validate_factory_spec({"run": {"budget_ms": None}, "nodes": [node("a")]}),
@@ -749,7 +775,12 @@ class CanonicalizeFactorySpecTest(unittest.TestCase):
         self.assertEqual(
             canonicalize_factory_spec(dag),
             {
-                "run": {"failure_policy": "escalate", "max_parallel": 8, "max_transitions": 10},
+                "run": {
+                    "failure_policy": "escalate",
+                    "max_parallel": 8,
+                    "max_transitions": 10,
+                    "max_children": 10_000,
+                },
                 "states": [
                     {
                         "id": "a",
@@ -767,7 +798,13 @@ class CanonicalizeFactorySpecTest(unittest.TestCase):
 
     def test_preserves_explicit_values(self) -> None:
         dag = {
-            "run": {"budget_ms": 5000, "failure_policy": "continue", "max_parallel": 2, "max_transitions": 7},
+            "run": {
+                "budget_ms": 5000,
+                "failure_policy": "continue",
+                "max_parallel": 2,
+                "max_transitions": 7,
+                "max_children": 5,
+            },
             "nodes": [
                 {
                     "id": "a",
@@ -784,7 +821,13 @@ class CanonicalizeFactorySpecTest(unittest.TestCase):
         self.assertEqual(
             canonicalize_factory_spec(dag),
             {
-                "run": {"failure_policy": "continue", "max_parallel": 2, "max_transitions": 7, "budget_ms": 5000},
+                "run": {
+                    "failure_policy": "continue",
+                    "max_parallel": 2,
+                    "max_transitions": 7,
+                    "max_children": 5,
+                    "budget_ms": 5000,
+                },
                 "states": [
                     {
                         "id": "a",
@@ -846,7 +889,13 @@ class CanonicalizeFactorySpecTest(unittest.TestCase):
         self.assertEqual(
             canonicalize_factory_spec(machine),
             {
-                "run": {"failure_policy": "continue", "max_parallel": 2, "max_transitions": 20, "budget_ms": 5000},
+                "run": {
+                    "failure_policy": "continue",
+                    "max_parallel": 2,
+                    "max_transitions": 20,
+                    "max_children": 10_000,
+                    "budget_ms": 5000,
+                },
                 "states": [
                     {
                         "id": "seed",
@@ -1133,6 +1182,21 @@ class ValidateFactoryMachineTest(unittest.TestCase):
         errors = validate_factory_machine(bad_model)
         self.assertEqual(len(errors), 1)
         self.assertIn("model must be a non-empty string", errors[0])
+
+        # Whitespace-only inline fields are write-time invalid in machine
+        # form too (the shared state validation strips like the runtime
+        # resolvers do), so no persistable machine can be unspawnable.
+        whitespace = {
+            "states": [state("a", entry=True, subagent={"prompt": "  ", "model": " \t "})],
+            "transitions": [],
+        }
+        self.assertEqual(
+            validate_factory_machine(whitespace),
+            [
+                "state a inline subagent requires a non-empty prompt",
+                "state a inline subagent model must be a non-empty string when provided",
+            ],
+        )
 
         inline_ok = {
             "states": [state("a", entry=True, subagent={"prompt": "Do work.", "name": "w", "thinking": "high"})],
@@ -1994,6 +2058,91 @@ class ChildNameTest(unittest.TestCase):
         # The instance index and the attempt disambiguate re-spawns.
         self.assertNotEqual(_child_name("r", "collect", 0, 1), _child_name("r", "collect", 1, 1))
         self.assertTrue(_child_name("r", "collect", 0, 2).endswith("-a2"))
+
+
+class FactoryHelpTest(unittest.TestCase):
+    """rlm.factory.help(): the embedded authoring reference (PR #3199).
+
+    The full agent-facing reference — authoring rules, guards/joins/cycles,
+    foreach, budgets, stall detectors, and the API with worked examples —
+    is a module-level constant in rlm/factory.py; ``help()`` returns it
+    with no filesystem resolution, so packaged kernels (where the repo
+    layout is not adjacent) see the same guide.
+    """
+
+    def test_factory_help_returns_the_full_reference(self) -> None:
+        doc = rlm_module.rlm.factory.help()
+        self.assertIsInstance(doc, str)
+        # help() returns the embedded constant, never a filesystem read.
+        self.assertEqual(doc, factory_module.FACTORY_HELP)
+
+        # The shipped section structure: store, author, dag sugar, run, safety.
+        for heading in (
+            "# Factory",
+            "## Store the spec",
+            "## Authoring reference",
+            "## Dag form",
+            "## Run, watch, steer",
+            "## Safety",
+        ):
+            self.assertIn(heading, doc)
+
+        # Prose sections wrap at ~76 columns; flatten before matching phrases.
+        flat = " ".join(doc.split())
+        # Guards: the op set evaluated over the from-state's latest settle.
+        self.assertIn("`eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `exists`, `contains`", flat)
+        self.assertIn("over the from-state's latest settle", flat)
+        # foreach: one child per item of the named json input, clamped at max.
+        self.assertIn('**foreach**: `{"over": "<input>", "max": 1..256}`', flat)
+        self.assertIn("expands one entry into one child per item of the named `json` input", flat)
+        # max_parallel is the run's global budget, not a per-node limit.
+        self.assertIn(
+            "`run.max_parallel` (1..64, default 8) is the run's global budget of "
+            "simultaneously running instances",
+            flat,
+        )
+        self.assertIn("not a per-node limit", flat)
+        # Stall detectors: dead configurations fail loudly, never wedge.
+        self.assertIn("Dead configurations fail loudly, never wedge", flat)
+        self.assertIn("nothing in flight and nothing pending", flat)
+        # The stop/resume contract.
+        self.assertIn("`stop(run_id)` cancels every running child of the run (idempotent)", flat)
+        self.assertIn("`resume(run_id)` continues a paused run and raises on a non-paused one", flat)
+
+        # The run/status/stop/resume/graph/watch snippet, as the agent types it.
+        self.assertIn('result = await rlm.factory.run("pr-manager")', doc)
+        self.assertIn('status = await rlm.factory.status(result["run_id"])', doc)
+        self.assertIn('snapshot = await rlm.factory.watch(result["run_id"], 30)', doc)
+        self.assertIn("runs = await rlm.factory.graph()", doc)
+        self.assertIn('live = await rlm.factory.graph(result["run_id"])', doc)
+        self.assertIn('spec = await rlm.factory.graph("pr-manager")', doc)
+
+        # The worked examples bound their emitted payloads — captured answers
+        # are capped previews (~160-200 chars), so an unbounded json payload
+        # would truncate at the cap and fail to bind.
+        self.assertIn('findings": ["at most three one-line findings"]', doc)
+        self.assertIn("capped at the eight most relevant", doc)
+        self.assertIn("an unbounded payload truncates at the cap and fails to bind", flat)
+
+        # The Discovery section ships the machine library as present (this
+        # branch merges it): the seed names, the CLI surface, and the
+        # run-from-library fallback — every phrase fact-checked against the
+        # machine-library code (parse/import gate/run fallback).
+        self.assertIn(
+            "The machine library: machines are `MACHINE.md` files (frontmatter plus "
+            "one fenced `machine-spec` block), one directory per machine, resolved "
+            "from the repository's `machines/` first and the personal `machines/` "
+            "library under the agent dir second",
+            flat,
+        )
+        self.assertIn(
+            "`prime-agent factory list | import | export` manages them: import runs "
+            "the same write-time validation as a stored spec, so an invalid machine "
+            "never persists",
+            flat,
+        )
+        self.assertIn("`rlm.factory.run('<name>')` runs a library machine directly", flat)
+        self.assertIn("The seeds are `builder`, `pr-manager`, and `review-sweep`", flat)
 
 
 # ---------------------------------------------------------------------------
@@ -3164,6 +3313,108 @@ class FactoryExecutorTest(unittest.TestCase):
         self.assertEqual(self.node_status(final, "c")["status"], "done")
         self.assertEqual(self.host.notice_kinds(), ["budget_exceeded", "finished"])
 
+    @async_test
+    async def test_run_max_children_pauses_at_admission_then_resume_completes(self) -> None:
+        # Macroscope finding: foreach.max bounds per-entry expansion,
+        # max_transitions bounds transitions, and max_parallel bounds
+        # concurrency — nothing bounded TOTAL admissions over the run's
+        # life. run.max_children is that budget: enforced before each
+        # admission (run()'s own phase included), pause once at the
+        # boundary, resume continues past it (explicit operator decision).
+        self.store_factory(
+            {
+                "run": {"failure_policy": "continue", "max_children": 2},
+                "nodes": [
+                    {"id": "a", "subagent": "worker"},
+                    {"id": "b", "subagent": "worker"},
+                    {"id": "c", "subagent": "worker"},
+                ],
+            }
+        )
+        result = await self.start()
+        # run()'s admission phase admits a and b; c's spawn is refused.
+        self.assertEqual(result["started"], ["a", "b"])
+        self.assertEqual(len(self.host.calls_of("rlm.run")), 2)
+        status = await rlm_module.rlm.factory.status(result["run_id"])
+        self.assertEqual(status["state"], "paused")
+        # its OWN milestone kind, distinct from the run-budget pause
+        self.assertIn("max_children_exceeded", self.host.notice_kinds())
+        self.assertNotIn("budget_exceeded", self.host.notice_kinds())
+        milestone = next(
+            event for event in self.events_of(status, "milestone") if event["milestone"] == "max_children_exceeded"
+        )
+        self.assertIn("run max_children 2 exceeded after 2 children", milestone["detail"])
+        self.assertIn("no new spawns", milestone["detail"])
+        self.assertIn("resume with await rlm.factory.resume", milestone["detail"])
+        self.assertEqual(self.executor._runs[result["run_id"]].pause_reason, "max_children exceeded")
+        self.assertEqual(status["usage"]["spawns"], 2)
+        self.assertEqual(status["usage"]["max_children"], 2)
+        # c was prepared but never admitted: entry running, instance pending.
+        c_report = self.node_status(status, "c")
+        self.assertEqual(c_report["status"], "running")
+        self.assertEqual(c_report["instances"][0]["status"], "pending")
+        self.assertEqual(self.host.spawn_calls("c"), [])
+        # resume is the explicit operator decision: c runs, no second pause
+        await rlm_module.rlm.factory.resume(result["run_id"])
+        final = await self.settle(result)
+        self.assertEqual(final["state"], "done")
+        self.assertEqual(self.node_status(final, "c")["status"], "done")
+        self.assertEqual(final["usage"]["spawns"], 3)
+        self.assertEqual(self.host.notice_kinds(), ["max_children_exceeded", "finished"])
+
+    @async_test
+    async def test_foreach_children_count_against_the_run_max_children_budget(self) -> None:
+        # The finding's scenario, pinned: nothing bounded the total
+        # children of repeated foreach expansion (10,000 transitions x
+        # foreach.max 256 = 2.56M admissions with no run budget). foreach
+        # expansions count against run.max_children: the run pauses
+        # mid-expansion with the exact error, and resume finishes the
+        # expansion exactly once past it.
+        self.host.outcomes["src"] = {
+            "status": "done",
+            "answer": '```json\n{"items": ["w", "x", "y", "z"]}\n```',
+        }
+        self.store_factory(
+            {
+                "run": {"failure_policy": "continue", "max_children": 2, "max_parallel": 8},
+                "nodes": [
+                    {"id": "src", "subagent": "worker", "outputs": [{"name": "items", "type": "json"}]},
+                    {
+                        "id": "fan",
+                        "subagent": {"prompt": "Expand item {items}."},
+                        "depends_on": ["src"],
+                        "inputs": [{"name": "items", "type": "json", "from": "src.items"}],
+                        "foreach": {"over": "items", "max": 256},
+                    },
+                ],
+            }
+        )
+        result = await self.start()
+        paused = await self.settle(result)
+        # src plus fan instance 0 hit the budget; the remaining fan
+        # instances wait: the executor refuses their spawns, it never
+        # wedges and never spends them.
+        self.assertEqual(paused["state"], "paused")
+        self.assertIn("max_children_exceeded", self.host.notice_kinds())
+        self.assertEqual(self.executor._runs[result["run_id"]].pause_reason, "max_children exceeded")
+        self.assertEqual(paused["usage"]["spawns"], 2)
+        fan = self.node_status(paused, "fan")
+        self.assertEqual(len(fan["instances"]), 4)
+        self.assertEqual([instance["status"] for instance in fan["instances"]], ["running", "pending", "pending", "pending"])
+        self.assertEqual(len(self.host.spawn_calls("fan")), 1)
+        # resume finishes the expansion: all four fan children run, no
+        # second child-budget pause fires.
+        await rlm_module.rlm.factory.resume(result["run_id"])
+        final = await self.settle(result)
+        self.assertEqual(final["state"], "done")
+        self.assertEqual(self.node_status(final, "fan")["status"], "done")
+        self.assertEqual(final["usage"]["spawns"], 5)
+        self.assertEqual(
+            sorted(call["prompt"] for call in self.host.spawn_calls("fan")),
+            ["Expand item w.", "Expand item x.", "Expand item y.", "Expand item z."],
+        )
+        self.assertEqual(self.host.notice_kinds(), ["max_children_exceeded", "finished"])
+
 
     # -- stop and rate limits -------------------------------------------------------------
 
@@ -4243,6 +4494,284 @@ class FactoryExecutorTest(unittest.TestCase):
         )
         self.assertEqual(self.state_report(status, "src")["entries_used"], 1)
         self.assertEqual(status["usage"]["transitions_fired"], 3)
+
+    @async_test
+    async def test_machine_optional_input_over_an_errored_source_binds_the_null_sentinel(self) -> None:
+        # Review finding (PR #3199): an optional input bound the null
+        # sentinel only while its source had NO settle. Once the source
+        # settled with an error, _prepare_entry still failed the dependent
+        # entry ("... unavailable (latest settle status 'error')"), so one
+        # failed fixer iteration killed the review/fix loop that the
+        # optional input exists to enable. An errored settle is not a
+        # value: the optional input binds the sentinel exactly like the
+        # never-settled case and the dependent re-enters.
+        self.host.child_outcomes["child-1"] = {"status": "done", "answer": "GO"}
+        self.host.child_outcomes["child-2"] = {
+            "status": "done",
+            "answer": '```json\n{"verdict": {"approved": false, "findings": ["AUDIT-A1"]}}\n```',
+        }
+        self.host.child_outcomes["child-3"] = {"status": "error", "error": "fixer exploded"}
+        self.host.child_outcomes["child-4"] = {
+            "status": "done",
+            "answer": '```json\n{"verdict": {"approved": true, "findings": []}}\n```',
+        }
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 4},
+                "states": [
+                    {"id": "seed", "entry": True, "subagent": "worker", "outputs": [{"name": "go", "type": "text"}]},
+                    {
+                        "id": "rev",
+                        "subagent": "worker",
+                        "inputs": [
+                            {"name": "go", "type": "text", "from": "seed.go"},
+                            {"name": "fix", "type": "json", "from": "fixer.fix", "optional": True},
+                        ],
+                        "outputs": [{"name": "verdict", "type": "json"}],
+                        "max_entries": 4,
+                    },
+                    {
+                        "id": "fixer",
+                        "subagent": "worker",
+                        "inputs": [{"name": "verdict", "type": "json", "from": "rev.verdict"}],
+                        "outputs": [{"name": "fix", "type": "json"}],
+                        "max_entries": 2,
+                    },
+                ],
+                "transitions": [
+                    {"from": "seed", "to": "rev"},
+                    {"from": "rev", "to": "fixer", "when": {"output": "verdict", "path": "approved", "op": "eq", "value": False}},
+                    {"from": "fixer", "to": "rev"},
+                ],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        # The fixer failed, so the continue-policy run still reports
+        # failed -- but the reviewer RE-ENTERED and completed instead of
+        # dying at input binding over the errored source.
+        self.assertEqual(status["state"], "failed")
+        rev = self.state_report(status, "rev")
+        self.assertEqual(rev["entries_used"], 2)
+        self.assertEqual([entry["status"] for entry in rev["entries"]], ["done", "done"])
+        self.assertNotIn("error", rev)
+        fixer = self.state_report(status, "fixer")
+        self.assertEqual(fixer["entries_used"], 1)
+        self.assertEqual(fixer["error"], "fixer exploded")
+        # Round 1 bound the sentinel (the fixer had not settled); round 2
+        # bound the sentinel AGAIN over the errored settle.
+        rev_prompts = [call["prompt"] for call in self.host.spawn_calls("rev")]
+        self.assertEqual(len(rev_prompts), 2)
+        self.assertIn("- fix: null", rev_prompts[0])
+        self.assertIn("- fix: null", rev_prompts[1])
+        self.assertEqual(len(self.host.spawn_calls("fixer")), 1)
+
+    @async_test
+    async def test_machine_optional_foreach_over_an_errored_source_expands_empty(self) -> None:
+        # The errored-settle sentinel carries to the optional foreach.over
+        # input: an errored source expands to zero items, the same
+        # done-with-no-instances path as the never-settled optional over --
+        # the entry proceeds instead of failing at binding.
+        self.host.outcomes["src"] = {"status": "error", "error": "src exploded"}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 4},
+                "states": [
+                    {"id": "seed", "entry": True, "subagent": "worker"},
+                    {
+                        "id": "fan",
+                        "subagent": {"prompt": "Process item {items}."},
+                        "inputs": [{"name": "items", "type": "json", "from": "src.items", "optional": True}],
+                        "foreach": {"over": "items", "max": 4},
+                        "max_entries": 2,
+                    },
+                    {
+                        "id": "src",
+                        "subagent": "worker",
+                        "outputs": [{"name": "items", "type": "json"}],
+                        "max_entries": 1,
+                    },
+                ],
+                "transitions": [
+                    {"from": "seed", "to": "fan"},
+                    {"from": "fan", "to": "src"},
+                    {"from": "src", "to": "fan"},
+                ],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "failed")
+        # Round 1: src never settled -> empty expansion. Round 2: src
+        # settled with an ERROR -> empty expansion again, never a spawn
+        # and never a binding failure on the fan entries.
+        fan = self.state_report(status, "fan")
+        self.assertEqual(fan["entries_used"], 2)
+        self.assertEqual([entry["status"] for entry in fan["entries"]], ["done", "done"])
+        self.assertNotIn("error", fan)
+        self.assertEqual(self.host.spawn_calls("fan"), [])
+        self.assertEqual(
+            [e for e in self.all_events_of(result, "node_error") if e.get("node") == "fan"],
+            [],
+        )
+        self.assertEqual(
+            [e["detail"] for e in self.all_events_of(result, "node_ready") if e.get("node") == "fan"],
+            ["foreach expanded to zero items; nothing to run"] * 2,
+        )
+
+    @async_test
+    async def test_machine_required_input_over_an_errored_source_fails_the_dependent_entry(self) -> None:
+        # The boundary the authoring reference pins: "their required input
+        # over the failed source then fails the dependent entry". Only the
+        # optional form binds the sentinel; a required input over an
+        # errored source is a hard binding failure (binding failures never
+        # retry), so the dependent fails without ever spawning.
+        self.host.outcomes["src"] = {"status": "error", "error": "src exploded"}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 4},
+                "states": [
+                    {"id": "seed", "entry": True, "subagent": "worker"},
+                    {
+                        "id": "src",
+                        "subagent": "worker",
+                        "outputs": [{"name": "items", "type": "json"}],
+                        "max_entries": 1,
+                    },
+                    {
+                        "id": "dep",
+                        "subagent": "worker",
+                        "inputs": [{"name": "items", "type": "json", "from": "src.items"}],
+                        "max_entries": 1,
+                    },
+                ],
+                "transitions": [
+                    {"from": "seed", "to": "src"},
+                    {"from": "src", "to": "dep"},
+                ],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "failed")
+        dep = self.state_report(status, "dep")
+        self.assertEqual(dep["entries_used"], 1)
+        self.assertEqual([entry["status"] for entry in dep["entries"]], ["error"])
+        self.assertIn(
+            "input 'items' from state 'src' is unavailable (latest settle status 'error')",
+            dep["entries"][0]["error"],
+        )
+        self.assertEqual(self.host.spawn_calls("dep"), [])
+
+    @async_test
+    async def test_machine_optional_input_over_a_settled_source_with_no_captured_value_binds_the_null_sentinel(self) -> None:
+        # Review finding (PR #3199), second no-value condition: the source
+        # settled done but captured no value for the declared port (an
+        # empty answer). The optional dependent proceeds on the null
+        # sentinel; only the required dependent over the same valueless
+        # settle fails its entry.
+        self.host.outcomes["src"] = {"status": "done", "answer": ""}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 4},
+                "states": [
+                    {"id": "seed", "entry": True, "subagent": "worker"},
+                    {
+                        "id": "src",
+                        "subagent": "worker",
+                        "outputs": [{"name": "go", "type": "text"}],
+                        "max_entries": 1,
+                    },
+                    {
+                        "id": "opt",
+                        "subagent": {"prompt": "Proceed."},
+                        "inputs": [{"name": "go", "type": "text", "from": "src.go", "optional": True}],
+                        "max_entries": 1,
+                    },
+                    {
+                        "id": "req",
+                        "subagent": {"prompt": "Proceed."},
+                        "inputs": [{"name": "go", "type": "text", "from": "src.go"}],
+                        "max_entries": 1,
+                    },
+                ],
+                "transitions": [
+                    {"from": "seed", "to": "src"},
+                    {"from": "src", "to": "opt"},
+                    {"from": "src", "to": "req"},
+                ],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "failed")
+        opt = self.state_report(status, "opt")
+        self.assertEqual(opt["entries_used"], 1)
+        self.assertEqual([entry["status"] for entry in opt["entries"]], ["done"])
+        self.assertIn("- go: None", self.host.spawn_calls("opt")[0]["prompt"])
+        req = self.state_report(status, "req")
+        self.assertEqual(req["entries_used"], 1)
+        self.assertEqual([entry["status"] for entry in req["entries"]], ["error"])
+        self.assertIn(
+            "input 'go' from state 'src' has no captured output 'go'",
+            req["entries"][0]["error"],
+        )
+        self.assertEqual(self.host.spawn_calls("req"), [])
+
+    @async_test
+    async def test_machine_optional_input_over_a_failed_json_capture_binds_the_null_sentinel(self) -> None:
+        # Review finding (PR #3199), third no-value condition: the source
+        # settled done, declared a json port, but its answer never parsed
+        # for that port (a JSON capture failure recorded on the settle).
+        # The optional dependent proceeds on the null sentinel; only the
+        # required dependent over the same failed capture fails its entry.
+        self.host.outcomes["src"] = {"status": "done", "answer": "no json here"}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 4},
+                "states": [
+                    {"id": "seed", "entry": True, "subagent": "worker"},
+                    {
+                        "id": "src",
+                        "subagent": "worker",
+                        "outputs": [{"name": "data", "type": "json"}],
+                        "max_entries": 1,
+                    },
+                    {
+                        "id": "opt",
+                        "subagent": {"prompt": "Proceed."},
+                        "inputs": [{"name": "data", "type": "json", "from": "src.data", "optional": True}],
+                        "max_entries": 1,
+                    },
+                    {
+                        "id": "req",
+                        "subagent": {"prompt": "Proceed."},
+                        "inputs": [{"name": "data", "type": "json", "from": "src.data"}],
+                        "max_entries": 1,
+                    },
+                ],
+                "transitions": [
+                    {"from": "seed", "to": "src"},
+                    {"from": "src", "to": "opt"},
+                    {"from": "src", "to": "req"},
+                ],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "failed")
+        opt = self.state_report(status, "opt")
+        self.assertEqual(opt["entries_used"], 1)
+        self.assertEqual([entry["status"] for entry in opt["entries"]], ["done"])
+        self.assertIn("- data: null", self.host.spawn_calls("opt")[0]["prompt"])
+        req = self.state_report(status, "req")
+        self.assertEqual(req["entries_used"], 1)
+        self.assertEqual([entry["status"] for entry in req["entries"]], ["error"])
+        self.assertIn(
+            "input 'data': no JSON object containing output 'data' in the upstream answer",
+            req["entries"][0]["error"],
+        )
+        self.assertEqual(self.host.spawn_calls("req"), [])
 
     @async_test
     async def test_resident_node_spawns_stays_alive_and_stops(self) -> None:

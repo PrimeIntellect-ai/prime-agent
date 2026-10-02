@@ -20,6 +20,15 @@
 //! `[<customType>]` panel. (The TS replay path `buildConversationComponents`
 //! drops unknown types instead; the live interactive path is the TUI ground
 //! truth, and the Rust engine persists those types with `display: false`.)
+//!
+//! Divergence (the operator's 2026-10-01 directive: "the factory child
+//! status notices should be like subagent messages not user messages"): the
+//! RLM child status notices (`rlm_child_terminal_notice` /
+//! `rlm_child_failure`) render in the `agent_message` component's class —
+//! child-originated mail, attributed to the exited subagent — where the TS
+//! dispatch classes them as injected-prompt rows (turn prompts). The
+//! notices still drive their turn (the daemon's `followUp` notice action is
+//! unchanged); only the transcript row's class moves.
 
 pub(crate) mod geometry;
 pub(crate) use geometry::agent_message_body_count;
@@ -31,7 +40,7 @@ pub mod skill_invocation;
 pub use skill_invocation::{skill_invocation_entries, SkillInvocationRow};
 
 use injected_prompt::injected_prompt_row;
-pub use injected_prompt::{InjectedPromptKind, InjectedPromptRow, RlmChildOutcome};
+pub use injected_prompt::{InjectedPromptKind, InjectedPromptRow};
 
 use crate::chat::{ChatEntry, StatusKind};
 use crate::theme::ThemeColor;
@@ -171,8 +180,9 @@ pub struct CustomPanelRow {
 
 /// The transcript entries for one `custom`-role message, mirroring the TS
 /// dispatch order: slash rows, compaction and refinement outcomes, agent
-/// messages, shell completions, injected prompts, then the generic panel.
-/// Non-display rows render nothing.
+/// messages (the received agent-message rows and the RLM child status
+/// notices, the same class), shell completions, injected prompts, then the
+/// generic panel. Non-display rows render nothing.
 pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
     use pa_types::slash_commands::{
         SESSION_SLASH_COMMAND_CUSTOM_TYPE, SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE,
@@ -219,13 +229,24 @@ pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
         HEARTBEAT_PROMPT_CUSTOM_TYPE
         | GOAL_CONTEXT_CUSTOM_TYPE
         | IPYTHON_STATE_RESTORED_CUSTOM_TYPE
-        | PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE
-        | RLM_CHILD_FAILURE_CUSTOM_TYPE
-        | RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE => {
+        | PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE => {
             vec![ChatEntry::InjectedPrompt(Box::new(injected_prompt_row(
                 custom_type,
                 message,
                 details,
+            )))]
+        }
+        // The RLM child status notices are child-originated mail — the
+        // spawned subagent's exit status (a factory's children included) —
+        // so they render in the same quiet, counterpart-attributed
+        // `Agent message` class the children's own `agent_message` rows
+        // use (the operator's 2026-10-01 directive: "the factory child
+        // status notices should be like subagent messages not user
+        // messages"), not as turn-prompt rows. The notice text rides as
+        // the row body, so nothing is lost.
+        RLM_CHILD_FAILURE_CUSTOM_TYPE | RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE => {
+            vec![ChatEntry::AgentMessage(Box::new(rlm_child_status_row(
+                message, details,
             )))]
         }
         // Everything else - engine bookkeeping (`harness_digest`,
@@ -352,6 +373,39 @@ fn agent_message_entry(details: &Value) -> Option<ChatEntry> {
         counterpart,
         message: message.to_string(),
     })))
+}
+
+/// One RLM child status notice (`rlm_child_terminal_notice` /
+/// `rlm_child_failure`) as the subagent-mail row: the child that exited is
+/// the mail's counterpart, the notice text is the body (the full content,
+/// header included, so the outcome wording rides intact).
+fn rlm_child_status_row(message: &Value, details: &Value) -> AgentMessageRow {
+    let content = custom_content_text(message);
+    AgentMessageRow {
+        direction: AgentMessageDirection::Received,
+        counterpart: rlm_child_session_name(details, &content),
+        message: content,
+    }
+}
+
+/// The child's session name: the `sessionName` details key, falling back to
+/// the `child:<name>]` token of the content header (the pre-details wire
+/// rows), then the agent-message row's `unknown`.
+fn rlm_child_session_name(details: &Value, content: &str) -> String {
+    details
+        .get("sessionName")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            content
+                .split_once("child:")
+                .and_then(|(_, rest)| rest.split(']').next())
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// TS `readShellCompletion` + `ShellCompletionComponent.render`: a valid
@@ -608,56 +662,78 @@ mod tests {
         ));
     }
 
-    /// The RLM child rows decode the outcome and the session name (the
-    /// render shapes live with the kind, in `injected_prompt`).
+    /// The RLM child status notices decode to the subagent-mail class
+    /// (the operator's 2026-10-01 directive: "the factory child status
+    /// notices should be like subagent messages not user messages"): the
+    /// row carries the child as its counterpart and the notice text as
+    /// the body, and it never renders as a turn-prompt (injected) or
+    /// user row — the class assertion is the mutation pin (routing the
+    /// types back through the injected-prompt arm fails it).
     #[test]
-    fn rlm_child_and_unavailable_rows_decode() {
-        let failed = decoded(&json!({
-            "role": "custom",
-            "customType": RLM_CHILD_FAILURE_CUSTOM_TYPE,
-            "content": "[child-failed child:lane]\n\nboom",
-            "display": true,
-            "details": { "childId": "sub-1", "sessionName": "lane", "error": "boom" },
-        }));
-        assert!(matches!(
-            failed.as_slice(),
-            [ChatEntry::InjectedPrompt(boxed)]
-                if matches!(
-                    &boxed.kind,
-                    InjectedPromptKind::RlmChildStatus {
-                        outcome: RlmChildOutcome::Failed,
-                        session_name,
-                    } if session_name == "lane"
-                ) && boxed.body.as_deref() == Some("boom")
-        ));
-        for (kind, outcome) in [
-            ("completed_without_reply", RlmChildOutcome::Finished),
-            ("cancelled", RlmChildOutcome::Cancelled),
-        ] {
-            let row = decoded(&json!({
+    fn rlm_child_notice_rows_decode_to_the_agent_message_class() {
+        let notices = [
+            (
+                RLM_CHILD_FAILURE_CUSTOM_TYPE,
+                "[child-failed child:lane]\n\nboom",
+                json!({ "childId": "sub-1", "sessionName": "lane", "error": "boom" }),
+            ),
+            (
+                RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+                "[child-exited: no-reply child:lane]\n\nLast assistant text: done",
+                json!({ "childId": "sub-2", "sessionName": "lane", "kind": "completed_without_reply" }),
+            ),
+            (
+                RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+                "[child-exited: cancelled child:cancel-worker]\n\nDeleted by parent",
+                json!({ "childId": "sub-3", "sessionName": "cancel-worker", "kind": "cancelled", "reason": "Deleted by parent" }),
+            ),
+        ];
+        for (custom_type, content, details) in notices {
+            let entries = decoded(&json!({
                 "role": "custom",
-                "customType": RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
-                "content": "[child-exited: no-reply child:lane]",
+                "customType": custom_type,
+                "content": content,
                 "display": true,
-                "details": { "childId": "sub-2", "sessionName": "lane", "kind": kind },
+                "details": details,
             }));
-            // Neither fixture carries a reason, so both stay
-            // header-only.
+            let row = match entries.as_slice() {
+                [ChatEntry::AgentMessage(row)] => row,
+                other => panic!("{custom_type} must decode to the agent-message class: {other:?}"),
+            };
+            assert_eq!(row.direction, AgentMessageDirection::Received);
+            assert_eq!(row.counterpart, details["sessionName"]);
+            // The content rides intact as the body (outcome wording and
+            // the child's last text included).
+            assert_eq!(row.message, content);
             assert!(
-                matches!(
-                    row.as_slice(),
-                    [ChatEntry::InjectedPrompt(boxed)]
-                        if matches!(
-                            &boxed.kind,
-                            InjectedPromptKind::RlmChildStatus { outcome: decoded_outcome, .. }
-                                if decoded_outcome == &outcome
-                        ) && boxed.body.is_none()
+                !matches!(
+                    entries.as_slice(),
+                    [ChatEntry::InjectedPrompt(_) | ChatEntry::User { .. }]
                 ),
-                "outcome {outcome:?} of kind {kind:?} did not decode"
+                "{custom_type} must not render as a turn-prompt/user row"
             );
         }
-        // The unavailable-skills row decodes the failed names and keeps
-        // the full report as its expandable body.
+        // The pre-details wire rows keep their identity: the name comes
+        // from the `child:<name>]` content token.
+        let entries = decoded(&json!({
+            "role": "custom",
+            "customType": RLM_CHILD_FAILURE_CUSTOM_TYPE,
+            "content": "[child-failed child:legacy-worker]\n\nspawn failed",
+            "display": true,
+            "details": serde_json::Value::Null,
+        }));
+        assert!(matches!(
+            entries.as_slice(),
+            [ChatEntry::AgentMessage(row)]
+                if row.counterpart == "legacy-worker"
+                    && row.message == "[child-failed child:legacy-worker]\n\nspawn failed"
+        ));
+    }
+
+    /// The unavailable-skills row decodes the failed names and keeps the
+    /// full report as its expandable body.
+    #[test]
+    fn python_skills_unavailable_row_decodes() {
         let unavailable = decoded(&json!({
             "role": "custom",
             "customType": PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE,

@@ -121,11 +121,11 @@ pub fn read_session_header(path: &Path) -> Option<SessionHeader> {
     parse_session_header_line(&first)
 }
 
-/// A session file is valid when its first line is a `session` header with an
-/// id, judged on the bounded header read.
+/// A session file is valid when its first line is a `session` header, judged
+/// on the bounded header read.
 #[must_use]
 pub fn is_valid_session_file(path: &Path) -> bool {
-    read_session_header_bounded(path).is_some_and(|header| !header.id.is_empty())
+    read_session_header_bounded(path).is_some()
 }
 
 impl SessionFile {
