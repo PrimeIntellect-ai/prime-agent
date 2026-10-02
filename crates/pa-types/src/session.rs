@@ -47,6 +47,10 @@ pub struct SessionHeader {
     /// (the workspace's `serde_json` runs with `preserve_order`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
+    /// A single file name: the session's artifact dir joins it under
+    /// `session-artifacts/`, so a header id that names another path is a
+    /// malformed header.
+    #[serde(deserialize_with = "deserialize_session_id")]
     pub id: String,
     /// ISO-8601 creation timestamp.
     pub timestamp: String,
@@ -59,6 +63,19 @@ pub struct SessionHeader {
     pub git: Option<GitContext>,
     #[serde(flatten)]
     pub rest: JsonMap,
+}
+
+fn deserialize_session_id<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    let id = String::deserialize(deserializer)?;
+    if matches!(id.as_str(), "" | "." | "..") || id.contains(['/', '\\', ':']) {
+        return Err(serde::de::Error::invalid_value(
+            serde::de::Unexpected::Str(&id),
+            &"a session id that is a single file name",
+        ));
+    }
+    Ok(id)
 }
 
 // ---------------------------------------------------------------------------
@@ -721,5 +738,34 @@ mod tests {
     #[test]
     fn non_object_entry_is_rejected() {
         assert!(serde_json::from_str::<FileEntry>(r#""not an entry""#).is_err());
+    }
+
+    #[test]
+    fn session_header_rejects_ids_that_are_not_a_file_name() {
+        let ids = [
+            "019a0000-0000-7000-8000-000000000000",
+            "../../outside",
+            "/abs/outside",
+            "a\\b",
+            "C:outside",
+            "..",
+            ".",
+            "",
+        ];
+        let parsed: Vec<bool> = ids
+            .iter()
+            .map(|id| {
+                let line = serde_json::json!({
+                    "type": "session", "version": 3, "id": id,
+                    "timestamp": "2026-01-01T00:00:00.000Z", "cwd": "/w"
+                })
+                .to_string();
+                matches!(entry(&line), FileEntry::Header { .. })
+            })
+            .collect();
+        assert_eq!(
+            parsed,
+            [true, false, false, false, false, false, false, false]
+        );
     }
 }

@@ -96,10 +96,9 @@ impl Client {
             .set_read_timeout(Some(Duration::from_millis(100)))
             .expect("timeout");
         loop {
-            line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => {}
+                Ok(_) if line.trim().is_empty() => line.clear(),
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -148,9 +147,9 @@ impl Client {
     fn drain_events(&mut self, quiet_ms: Duration) {
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut last_line = Instant::now();
+        let mut line = String::new();
         loop {
             assert!(Instant::now() < deadline, "event drain timed out");
-            let mut line = String::new();
             self.reader
                 .get_mut()
                 .set_read_timeout(Some(Duration::from_millis(100)))
@@ -161,6 +160,7 @@ impl Client {
                     let value: Value = serde_json::from_str(line.trim()).expect("parse line");
                     self.collect_event(&value);
                     last_line = Instant::now();
+                    line.clear();
                 }
                 Err(_) => {
                     if last_line.elapsed() >= quiet_ms {

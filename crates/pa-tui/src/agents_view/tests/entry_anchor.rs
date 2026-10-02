@@ -191,13 +191,13 @@ fn a_saved_catalog_failure_settles_the_anchor_wait() {
 #[test]
 fn a_failed_fetch_rearms_once_per_query_change() {
     let mut mode = mode_with_anchor(None, Vec::new());
-    mode.note_query_changed();
+    mode.query_changed(true);
     assert!(
         !mode.take_saved_fetch_rearm(),
         "a healthy fetch never re-arms"
     );
     mode.saved_fetch_failed = true;
-    mode.note_query_changed();
+    mode.query_changed(true);
     assert!(
         mode.take_saved_fetch_rearm(),
         "the query change after a failure re-arms the fetch"
@@ -208,19 +208,19 @@ fn a_failed_fetch_rearms_once_per_query_change() {
     );
     // The arm consumed the failure flag: no second concurrent retry
     // until the in-flight one fails again.
-    mode.note_query_changed();
+    mode.query_changed(true);
     assert!(
         !mode.take_saved_fetch_rearm(),
         "the retry in flight is the only one"
     );
     mode.saved_fetch_failed = true;
-    mode.note_query_changed();
+    mode.query_changed(true);
     assert!(
         mode.take_saved_fetch_rearm(),
         "a new terminal failure re-arms again"
     );
     mode.saved_fetch_failed = false;
-    mode.note_query_changed();
+    mode.query_changed(true);
     assert!(!mode.take_saved_fetch_rearm());
 }
 

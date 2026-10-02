@@ -166,10 +166,9 @@ impl Client {
             .set_read_timeout(Some(Duration::from_millis(100)))
             .expect("set timeout");
         loop {
-            line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => {}
+                Ok(_) if line.trim().is_empty() => line.clear(),
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse response line"),
                 Err(error) => {
                     assert!(
@@ -432,6 +431,36 @@ fn headless_completion_waits_for_rlm_quiescence() {
     assert_eq!(
         child_row["status"], "done",
         "the barrier answered while the child was still running"
+    );
+}
+
+/// `wait_for_idle` with `waitForRlmQuiescence: true` is the same barrier:
+/// the parent's settle watcher waits on a child this way, so a child with
+/// running subagents is not idle until its whole subtree settled.
+#[test]
+fn wait_for_idle_waits_for_rlm_quiescence() {
+    let Some(kernel_python) = kernel_python() else {
+        return;
+    };
+    let mut lane = spawn_held_child_lane(&kernel_python);
+    lane.client.send_command(
+        "w1",
+        &json!({
+            "type": "wait_for_idle",
+            "activeSessionId": lane.parent_id,
+            "waitForRlmQuiescence": true,
+        }),
+    );
+    let idle = lane.client.read_response("w1");
+    assert_eq!(idle["success"], true, "wait_for_idle failed: {idle}");
+    let rows = rlm_children_rows(&mut lane.client, "g1", &lane.parent_id);
+    let child_row = rows
+        .iter()
+        .find(|row| row["id"] == json!(lane.child_id))
+        .expect("the spawned child's roster row");
+    assert_eq!(
+        child_row["status"], "done",
+        "wait_for_idle answered while the child was still running"
     );
 }
 
