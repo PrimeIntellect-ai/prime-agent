@@ -884,17 +884,18 @@ impl TreeList {
             }
         } else if kb.matches(id, "app.tree.toggleLabelTimestamp") {
             self.show_label_timestamps = !self.show_label_timestamps;
-        } else {
-            // Printable characters build the search query (TS: control
-            // characters never append).
-            let has_control = id
-                .chars()
-                .any(|c| c.is_control() || matches!(u32::from(c), 0x7f..=0x9f));
-            if !has_control && !id.is_empty() && !id.contains('+') {
-                self.search_query.push_str(id);
-                self.folded.clear();
-                self.apply_filter();
-            }
+        } else if let Some(text) = crate::editor::decode_printable(id) {
+            // Printable characters build the search query. TS's final arm
+            // reads the RAW key data: the space byte is a plain printable
+            // that joins the query, and every special key arrives as an
+            // escape sequence (a control character) and drops. This port
+            // receives parsed ids, so the same decode gates the append —
+            // the id's own characters never join (the raw gate let the
+            // `space` id append the literal "space", and `delete`/`home`
+            // their own names).
+            self.search_query.push_str(&text);
+            self.folded.clear();
+            self.apply_filter();
         }
         action
     }
