@@ -1,8 +1,6 @@
-//! The worker-handshake boundary oracles (the launch-storm wedge class,
-//! 2026-09-28): the handshake owns its channel privately until the auth
-//! answer installs it for routing — the TS `pendingClient`/`worker.client`
-//! boundary. Split from `tests.rs` at the file-size advisory (the worker
-//! test mass precedent: one family per module).
+//! The worker-handshake boundary oracles: the handshake owns its channel
+//! privately until the auth answer installs it for routing — the TS
+//! `pendingClient`/`worker.client` boundary (one family per module).
 
 use super::*;
 
