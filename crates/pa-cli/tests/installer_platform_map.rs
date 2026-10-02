@@ -199,13 +199,21 @@ fn install_ps1_carries_the_windows_contract() {
     // The official-base routing (install-rust.sh and pa-core's archive_url
     // parity): the official base's tarball + SHA256SUMS come from the
     // public GitHub release of tag v<version>; any other base serves the
-    // releases/v<version> layout. The two published installers must agree.
+    // releases/v<version> layout. The exact branch wiring is asserted — a
+    // flipped predicate or swapped branches fails the contract, not just a
+    // missing URL string.
     assert!(
-        text.contains("$baseUrl.TrimEnd('/')"),
-        "the ps1 trims trailing slashes before the official-base compare"
+        text.contains("if ($baseTrimmed -eq $DownloadBaseUrlDefault.TrimEnd('/')) {"),
+        "the official-base predicate must be trimmed equality on the default"
     );
     assert!(
-        text.contains("https://github.com/PrimeIntellect-ai/prime-agent/releases/download"),
-        "the ps1 routes the official base's archives to the GitHub release"
+        text.contains(
+            "$releaseBase = \"https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v$version\""
+        ),
+        "the official branch must send the archives to the GitHub release"
+    );
+    assert!(
+        text.contains("$releaseBase = \"$baseTrimmed/releases/v$version\""),
+        "the mirror branch must serve the bucket layout from the trimmed base"
     );
 }
