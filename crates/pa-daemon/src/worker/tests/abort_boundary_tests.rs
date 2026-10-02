@@ -537,3 +537,194 @@ async fn abort_and_clear_queue_suspends_plain_prompts() {
     let idle = worker.dispatch("wait_for_idle", &json!({})).await;
     assert!(idle.success, "never went idle: {idle:?}");
 }
+
+/// TS commits admission before queue delivery: a queued prompt answers
+/// `owned` but does not affect the running turn unless cancelled with
+/// `cancelOwned`. The running admission's `cancelOwned` aborts its turn
+/// and the settle clears the admission.
+#[tokio::test]
+async fn cancel_owned_admission_aborts_the_running_prompt() {
+    let dir = std::env::temp_dir().join(format!("pa-worker-cancel-owned-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = WorkerConfig {
+        socket_path: dir.join("worker.sock"),
+        supervisor_socket_path: PathBuf::new(),
+        token: "token".to_string(),
+        worker_instance_id: String::new(),
+        active_session_id: "cancel-owned-session".to_string(),
+        agent_dir: dir.join("agent"),
+        recovery_journal_path: dir.join("recovery.jsonl"),
+        telemetry_disabled: None,
+        script: Some(json!({ "responses": [{ "text": "held reply", "delayMs": 60000 }] })),
+    };
+    let worker = Arc::new(Worker::new(config, None));
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({ "noSession": true, "cwd": "/tmp", "name": "cancel-owned" }),
+        )
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+    let mut subscription = worker.events.subscribe();
+    let wait = tokio::spawn({
+        let worker = Arc::clone(&worker);
+        async move {
+            worker
+                .dispatch(
+                    "prompt_and_wait",
+                    &json!({
+                        "activeSessionId": "cancel-owned-session",
+                        "message": "go",
+                        "admissionId": "adm-1",
+                    }),
+                )
+                .await
+        }
+    });
+    // The turn commits its admission before it emits `agent_start`.
+    loop {
+        let frame = subscription.recv().await.unwrap();
+        if frame.outbound_type == "session_event"
+            && serde_json::from_slice::<Value>(&frame.payload).unwrap()["event"]["type"]
+                == "agent_start"
+        {
+            break;
+        }
+    }
+    // The held turn keeps the session busy, so a second prompt queues
+    // behind it. Admission is already owned before delivery, as in TS.
+    let queued_wait = tokio::spawn({
+        let worker = Arc::clone(&worker);
+        async move {
+            worker
+                .dispatch(
+                    "prompt_and_wait",
+                    &json!({
+                        "activeSessionId": "cancel-owned-session",
+                        "message": "queued behind the held turn",
+                        "admissionId": "adm-2",
+                    }),
+                )
+                .await
+        }
+    });
+    // The queued prompt has been accepted while its response waits on the
+    // held turn; its admission is already owned, not yet settled.
+    loop {
+        if worker.prompt_admissions.cancel("adm-2")
+            == Some(crate::prompt_admission::AdmissionStatus::Owned)
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let queued_cancel = json!({
+        "activeSessionId": "cancel-owned-session",
+        "admissionId": "adm-2",
+    });
+    let queued_owned = worker
+        .dispatch("cancel_prompt_admission", &queued_cancel)
+        .await;
+    assert_eq!(
+        queued_owned.data,
+        Some(json!({ "status": "owned" })),
+        "{queued_owned:?}"
+    );
+    // Without cancelOwned, the queued prompt remains queued.
+    let queue = worker.dispatch("get_queue", &json!({})).await;
+    assert!(serde_json::to_string(&queue.data)
+        .unwrap()
+        .contains("queued behind the held turn"));
+    let queued_removed = worker
+        .dispatch(
+            "cancel_prompt_admission",
+            &json!({"activeSessionId": "cancel-owned-session", "admissionId": "adm-2", "cancelOwned": true}),
+        )
+        .await;
+    assert_eq!(
+        queued_removed.data,
+        Some(json!({ "status": "owned" })),
+        "{queued_removed:?}"
+    );
+    let cleared_queued = worker
+        .dispatch("cancel_prompt_admission", &queued_cancel)
+        .await;
+    assert_eq!(cleared_queued.data, Some(json!({ "status": "unknown" })));
+    // clear_queue withdraws the drained row: its admission clears with it (TS clearAdmission).
+    let queued_three = worker
+        .dispatch(
+            "prompt",
+            &json!({
+                "activeSessionId": "cancel-owned-session",
+                "message": "cleared by clear_queue",
+                "admissionId": "adm-3",
+            }),
+        )
+        .await;
+    assert!(
+        queued_three.success,
+        "queued adm-3 failed: {queued_three:?}"
+    );
+    assert!(
+        worker.dispatch("clear_queue", &json!({})).await.success,
+        "clear_queue failed"
+    );
+    let drained_cancel = worker
+        .dispatch(
+            "cancel_prompt_admission",
+            &json!({"activeSessionId": "cancel-owned-session", "admissionId": "adm-3"}),
+        )
+        .await;
+    assert_eq!(
+        drained_cancel.data,
+        Some(json!({ "status": "unknown" })),
+        "{drained_cancel:?}"
+    );
+    let queued_result = queued_wait.await.unwrap();
+    assert!(
+        !queued_result.success,
+        "the withdrawn prompt cannot complete"
+    );
+    // Simulate the narrow settle gap: an earlier owned admission still
+    // exists in the registry, but this different turn is now running.
+    worker.register_prompt_admission("stale-owned");
+    assert!(worker.prompt_admissions.commit("stale-owned"));
+    let stale = worker
+        .dispatch(
+            "cancel_prompt_admission",
+            &json!({"activeSessionId": "cancel-owned-session", "admissionId": "stale-owned", "cancelOwned": true}),
+        )
+        .await;
+    assert_eq!(stale.data, Some(json!({ "status": "owned" })));
+    assert!(
+        !worker.core.lock().unwrap().abort_requested,
+        "stale admission must not abort the unrelated running turn"
+    );
+    let cancel = json!({
+        "activeSessionId": "cancel-owned-session",
+        "admissionId": "adm-1",
+        "cancelOwned": true,
+    });
+    let owned = worker.dispatch("cancel_prompt_admission", &cancel).await;
+    assert_eq!(owned.data, Some(json!({ "status": "owned" })), "{owned:?}");
+    wait.await.unwrap();
+    let idle = worker.dispatch("wait_for_idle", &json!({})).await;
+    assert!(idle.success, "never went idle: {idle:?}");
+    let messages = worker.dispatch("get_messages", &json!({})).await;
+    let messages = serde_json::to_string(&messages.data).unwrap();
+    assert!(
+        !messages.contains("queued behind the held turn"),
+        "the cancelled admission's prompt ran: {messages}"
+    );
+    assert!(
+        !messages.contains("held reply"),
+        "the turn ran to the end: {messages}"
+    );
+    let cleared = worker.dispatch("cancel_prompt_admission", &cancel).await;
+    assert_eq!(
+        cleared.data,
+        Some(json!({ "status": "unknown" })),
+        "{cleared:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

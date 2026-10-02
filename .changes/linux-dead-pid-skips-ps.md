@@ -1,0 +1,1 @@
+- On Linux the daemon no longer spawns a `ps` process each time it checks the identity of a process that has already exited (stale session leases, session reuse, update checks).

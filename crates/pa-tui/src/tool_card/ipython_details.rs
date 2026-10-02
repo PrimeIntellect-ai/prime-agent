@@ -19,12 +19,36 @@ pub(crate) struct IpythonDetails {
     pub(crate) error: Option<IpythonError>,
     pub(crate) diffs: Vec<Value>,
     pub(crate) sent_agent_messages: Vec<Value>,
+    pub(crate) bash_commands: Option<BashCommands>,
 }
 
 pub(crate) struct IpythonError {
     pub(crate) ename: String,
     pub(crate) evalue: String,
     pub(crate) traceback: Vec<String>,
+}
+
+/// The `bashCommands` details field: the first executed `bash()` command,
+/// how many ran, and their summed non-blank line count.
+pub(crate) struct BashCommands {
+    pub(crate) first: String,
+    pub(crate) count: usize,
+    pub(crate) lines: usize,
+}
+
+fn read_bash_commands(value: &Value) -> Option<BashCommands> {
+    let record = value.as_object()?;
+    Some(BashCommands {
+        first: record.get("first")?.as_str()?.to_string(),
+        count: record
+            .get("count")?
+            .as_u64()
+            .and_then(|count| usize::try_from(count).ok())?,
+        lines: record
+            .get("lines")?
+            .as_u64()
+            .and_then(|lines| usize::try_from(lines).ok())?,
+    })
 }
 
 pub(crate) fn read_error_details(value: &Value) -> Option<IpythonError> {
@@ -63,6 +87,7 @@ impl IpythonDetails {
             error: None,
             diffs: Vec::new(),
             sent_agent_messages: Vec::new(),
+            bash_commands: None,
         };
         let Some(record) = details.as_object() else {
             return empty;
@@ -107,6 +132,7 @@ impl IpythonDetails {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default(),
+            bash_commands: record.get("bashCommands").and_then(read_bash_commands),
         }
     }
 }
