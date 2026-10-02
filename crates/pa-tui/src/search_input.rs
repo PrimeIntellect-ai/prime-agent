@@ -7,7 +7,7 @@ use crate::keybindings::KeybindingsManager;
 /// The single-line search input (TS `Input`): value, cursor, undo stack,
 /// and an Emacs-style kill ring. Dispatch happens through the shared
 /// keybinding manager; the model selector owns when keys reach it.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct SearchInput {
     value: String,
     /// Cursor position in characters.
@@ -232,13 +232,19 @@ impl SearchInput {
             self.move_word_forward();
             return;
         }
-        // Regular character input: printable characters only, one char at a
-        // time (control sequences never reach the value).
-        if let [character] = key.chars().collect::<Vec<char>>()[..] {
-            if !character.is_control() {
-                self.push_type_undo(character);
-                self.insert_at_cursor(&character.to_string());
-            }
+        // Regular character input: printable characters only, one char at
+        // a time (control sequences never reach the value). TS
+        // `Input.handleInput` reads the RAW key data here — the space
+        // byte is a plain printable — while this port receives TS's
+        // `space` key id, so the editor's printable decode (which maps
+        // it back) feeds the value: a gate on the id's own characters
+        // dropped every typed space in the pickers that mount this
+        // input.
+        if let Some(character) =
+            crate::editor::decode_printable(key).and_then(|text| text.chars().next())
+        {
+            self.push_type_undo(character);
+            self.insert_at_cursor(&character.to_string());
         }
     }
 
@@ -428,6 +434,27 @@ mod tests {
             input.handle_key(&character.to_string(), &kb());
         }
         input
+    }
+
+    /// The `space` key id types a space: TS `Input.handleInput`'s
+    /// regular-character arm reads the RAW space byte (0x20, printable),
+    /// while this port receives TS's `space` key id, so the same printable
+    /// decode that maps it back feeds the value — a gate on the id's own
+    /// characters ("space" is five of them) dropped every typed space in
+    /// the pickers that mount this input (the #3309 class, the sub-input
+    /// half).
+    #[test]
+    fn the_space_key_id_types_a_space() {
+        let mut input = typed("a");
+        input.handle_key("space", &kb());
+        input.handle_key("b", &kb());
+        assert_eq!(input.value(), "a b");
+        assert_eq!(input.cursor(), 3);
+        // Backspace walks the typed characters back out, space included.
+        input.handle_key("backspace", &kb());
+        assert_eq!(input.value(), "a ");
+        input.handle_key("backspace", &kb());
+        assert_eq!(input.value(), "a");
     }
 
     #[test]
