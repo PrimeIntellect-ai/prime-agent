@@ -65,27 +65,11 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
         )),
     )?;
     let configuration_load_ms = configuration_load_started.elapsed().as_millis() as u64;
-    // Telemetry disclosure (TS agent-session-services): once per
-    // installation, only after onboarding marked itself shown (a first
-    // interactive run belongs to the onboarding screen; the notice surfaces
-    // on the next launch). Divergence from TS: the TS product renders it as
-    // (a session diagnostic in the TUI; the Rust build prints it to stderr
-    // before the TUI starts, which keeps the same text visible without a
-    // daemon-side diagnostics round-trip).
-    if !tui_options.telemetry_disabled.unwrap_or(false) {
-        let mut settings = pa_core::settings::SettingsManager::create(
-            &options.config.cwd,
-            &options.config.agent_dir,
-        );
-        if settings.get_onboarding_shown() && !settings.get_telemetry_notice_shown() {
-            eprintln!(
-                "Prime Agent sends pseudonymous usage and performance metrics without prompts, responses, tool content, file paths, or repository data. Disable this with telemetry.enabled=false, PRIME_AGENT_TELEMETRY=0, DO_NOT_TRACK=1, or offline mode."
-            );
-            if let Err(error) = settings.set_telemetry_notice_shown(true) {
-                eprintln!("Warning: could not persist the telemetry notice: {error}");
-            }
-        }
-    }
+    // The telemetry disclosure renders inside the TUI (TS
+    // agent-session-services' session diagnostic): the interactive
+    // attach pushes the info row once per installation, deferred behind
+    // onboarding — a pre-TUI stderr print would be hidden by the alt
+    // screen.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -563,8 +547,17 @@ fn build_tui_options(
         // gates the completion marker, and the auth handle serves the
         // not-ready branch's sign-in steps.
         onboarding,
-        // Only Some(true) rides the wire (TS `telemetryDisabled`).
-        telemetry_disabled: config.telemetry_disabled.then_some(true),
+        // Only Some(true) rides the wire (TS `telemetryDisabled`), and only
+        // for an environment opt-out: a settings opt-out stays the live
+        // switch the session's client re-reads, so `/telemetry on`
+        // resumes the running session instead of waiting for a new one.
+        telemetry_disabled: matches!(
+            pa_core::session_engine::telemetry::telemetry_switch(
+                &pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir)
+            ),
+            pa_core::session_engine::telemetry::TelemetrySwitch::Env { enabled: false, .. }
+        )
+        .then_some(true),
         // `/mcp login` / `/mcp logout`: the client-side auth flows run in
         // this process (the TS interactive client's placement) and persist
         // through the shared auth store the daemon's sessions read.
@@ -588,10 +581,10 @@ fn build_tui_options(
         // `/login` + `/logout`: the provider auth flows (the API-key store,
         // the MCP device flow, the provider catalog).
         provider_auth: Some(provider_auth),
-        telemetry: Some(std::sync::Arc::new(CliInteractionTelemetry {
-            cwd: config.cwd.clone(),
-            agent_dir: config.agent_dir.clone(),
-        })),
+        telemetry: Some(std::sync::Arc::new(CliInteractionTelemetry::new(
+            config.cwd.clone(),
+            config.agent_dir.clone(),
+        ))),
         keybindings,
         // The process-wide prompt stash store (TS `ClientPromptStashStore`
         // lives in `main.ts`'s invocation scope): one store per process, so

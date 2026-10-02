@@ -1,0 +1,1 @@
+- The installer's `--force` no longer stops the daemon the install runs under, waits for the normal drain before signalling a stuck daemon, and no longer leaves a temp directory behind when it exits early.

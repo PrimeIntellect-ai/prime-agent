@@ -1,25 +1,21 @@
 # pa-telemetry
 
 Modular telemetry: the event schema, queueing/batching, sinks, and the
-pseudonymous installation identity for Prime Agent product analytics
-(PostHog-backed, self-hostable).
+pseudonymous installation identity for Prime Agent product analytics.
 
 ## Scope
 
 - `Properties`: primitive-only property maps (the privacy boundary — strings,
   numbers, booleans, null; structured values are rejected at insertion).
-- `TelemetryEvent`: `{name, timestamp, properties}` records.
+- `TelemetryEvent`: `{id, name, timestamp, properties}` records.
 - `TelemetryClient`: non-blocking `track(event, properties)`, `flush`,
   `shutdown`. One background worker, capped queue (drop-oldest), batched
   flush (size + interval + explicit), fan-out to every sink. Best-effort by
   contract: never blocks, never panics, never fails the agent.
-- `TelemetrySink` trait + shipped sinks: `PostHogSink` (batched capture API,
-  endpoint + project key from env/settings — nothing compiled in, empty
-  configuration resolves to `NoopSink`; a 401 is terminal — bad or
-  missing-scope credentials disable the sink for the process instead of
-  re-requesting every flush), `FlagsClient` (PostHog decide v3
-  feature flags with a 5-minute TTL cache, defaults offline; a 401 stops
-  the decide polling the same way),
+- `TelemetrySink` trait + shipped sinks: `AnalyticsSink` (the one product
+  destination: the TS endpoint `ANALYTICS_ENDPOINT` and wire format
+  `{installation_id, events: [{id, name, timestamp, properties}]}`, no
+  credentials, 1.5s timeout; the platform backend forwards to PostHog),
   `FileSink` (local JSONL transparency mirror at `<agentDir>/telemetry.jsonl`),
   `NoopSink` (opt-out fast path), `MockSink` (tests, also re-exported for
   downstream crate tests).
@@ -33,8 +29,9 @@ pseudonymous installation identity for Prime Agent product analytics
   crate's install id) already depends on it while it depends on no other
   workspace crate; pa-core re-exports it as `platform::rename_onto` so its
   platform wall stays the engine's single platform entry.
-- Env override resolution for the opt-in posture: `PI_OFFLINE`,
-  `DO_NOT_TRACK`, `PRIME_AGENT_TELEMETRY`.
+- The TS boolean env parsing (`parse_bool_override`); the opt-out
+  precedence (`PI_OFFLINE`, `DO_NOT_TRACK`, `PRIME_AGENT_TELEMETRY`,
+  settings) lives in pa-core's `telemetry_switch`.
 
 ## Non-goals
 
@@ -56,8 +53,9 @@ pseudonymous installation identity for Prime Agent product analytics
 - `Properties`, `TelemetryEvent`
 - `install_id(agent_dir)`
 - `rename_onto(from, to)`
-- `env_telemetry_override()`, `parse_bool_override(value)`
-- Sinks: `PostHogSink`, `FileSink`, `NoopSink`, `MockSink` (+ `RecordedBatch`)
+- `parse_bool_override(value)`, `existing_install_id(agent_dir)`
+- Sinks: `AnalyticsSink` (+ `ANALYTICS_ENDPOINT`), `FileSink`, `NoopSink`, `MockSink`
+  (+ `RecordedBatch`)
 
 ## Placement
 

@@ -46,6 +46,9 @@ _COMPLETION_SUFFIX = b"\x1f"
 _CANCEL_TERM_GRACE = 0.5
 _CANCEL_KILL_WAIT = 2.0
 _COMPLETION_NOTICE_COMMAND_CAP = 1000
+# Display MIME the host aggregates into a per-cell summary of the bash()
+# commands the cell ran (first capped command, count, line total).
+_BASH_COMMAND_MIME = "application/vnd.prime-agent.bash-command+json"
 _ASYNCIO_WRAPPER_CALLBACKS = {
     ("asyncio.tasks", "gather.<locals>._done_callback"),
     ("asyncio.tasks", "shield.<locals>._inner_done_callback"),
@@ -80,6 +83,12 @@ def _consume_notice_task(task: asyncio.Task[None]) -> None:
     """Retrieve detached notifier failures so they never become loop warnings."""
     if not task.cancelled():
         task.exception()
+
+
+def _capped(command: str) -> str:
+    if len(command) > _COMPLETION_NOTICE_COMMAND_CAP:
+        return command[:_COMPLETION_NOTICE_COMMAND_CAP] + "\n... [command truncated]"
+    return command
 
 
 def _completion_reaches(
@@ -717,9 +726,7 @@ class BashHandle:
             await cell_finished.wait()
             if self._awaited_by_creating_cell or self._result_consumed or not repl.is_active():
                 return
-            command = self.command
-            if len(command) > _COMPLETION_NOTICE_COMMAND_CAP:
-                command = command[:_COMPLETION_NOTICE_COMMAND_CAP] + "\n... [command truncated]"
+            command = _capped(self.command)
             reply = await repl.host_request(
                 {
                     "type": "bash.completed",
@@ -969,7 +976,18 @@ def bash(command: str) -> BashHandle:
     if not isinstance(command, str) or not command:
         raise TypeError("command must be a non-empty str")
     _install_shutdown_hook()
-    return BashHandle(command)
+    handle = BashHandle(command)
+    from . import repl
+
+    repl.emit(
+        {
+            _BASH_COMMAND_MIME: {
+                "command": _capped(command),
+                "lines": sum(1 for line in command.splitlines() if line.strip()),
+            }
+        }
+    )
+    return handle
 
 
 def _shell() -> str:

@@ -118,7 +118,7 @@ impl AgentSession {
         self.skills = skills;
     }
 
-    /// Bind the telemetry handle the `skill used` adoption event reports
+    /// Bind the telemetry handle the `skill_use_count` counter counts
     /// through (the engine wiring owns the telemetry lifetime and
     /// installs it once the session telemetry is assembled).
     pub fn set_skill_telemetry(&mut self, telemetry: std::sync::Arc<telemetry::SessionTelemetry>) {

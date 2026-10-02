@@ -197,4 +197,34 @@ pub trait ClientSettings: Send + Sync {
     /// composition root resolves it (a preferred channel wins, else the
     /// version's prerelease infers).
     fn effective_update_channel(&self, version: &str) -> String;
+    /// The `/telemetry status` report: on or off and why, the endpoint,
+    /// and the installation id.
+    fn telemetry_status(&self) -> String;
+    /// Persists `telemetry.enabled` (the TS key) and returns the report
+    /// after the write (it names an environment variable or project
+    /// setting that still decides).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when opening or persisting the settings
+    /// store fails.
+    fn set_telemetry_enabled(&self, enabled: bool) -> Result<String>;
+    /// Whether the first-run telemetry disclosure is due in this
+    /// interactive view (TS agent-session-services: telemetry enabled,
+    /// onboarding already shown, notice not yet shown). Defaults to
+    /// false: a client without the disclosure surface never shows it.
+    #[must_use]
+    fn telemetry_notice_due(&self) -> bool {
+        false
+    }
+    /// Persist the notice-shown marker once the disclosure renders
+    /// (TS `setTelemetryNoticeShown`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when opening or persisting the settings
+    /// store fails.
+    fn set_telemetry_notice_shown(&self) -> Result<()> {
+        Ok(())
+    }
 }

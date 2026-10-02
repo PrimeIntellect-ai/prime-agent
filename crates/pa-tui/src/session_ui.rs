@@ -471,8 +471,7 @@ pub(crate) struct SessionUi {
     /// A succeeded compaction replaced the durable transcript (TS
     /// `rebuildChatFromMessages`): the next loop pass re-fetches it.
     pub(crate) transcript_stale: bool,
-    /// Adoption telemetry (`tui scroll used` / `tui exit`); `None` drops
-    /// events.
+    /// Adoption telemetry (counted into `tui exit`); `None` drops events.
     pub(crate) telemetry: Option<std::sync::Arc<dyn crate::interactive::InteractionTelemetry>>,
     /// Whether this run already reported its first scroll action.
     scroll_adoption_emitted: bool,

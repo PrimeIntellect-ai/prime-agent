@@ -14,11 +14,6 @@ mod abort_idle_race;
 mod broadcast;
 mod burst;
 mod feed;
-// The interleave harness's probe (and every race test riding it) binds a
-// unix socket: tokio gates `UnixListener` behind `all(unix)`, so the
-// module is unix-only for the windows cross-check (the same contract as
-// feed's `#[cfg(unix)]` tests).
-#[cfg(unix)]
 mod interleave;
 mod park;
 mod queue;
@@ -62,6 +57,7 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         pending_next_turn: Vec::new(),
         active_action: None,
         running_tool_calls: std::collections::HashSet::new(),
+        running_admission_ids: std::collections::HashSet::new(),
     }));
     TurnRunner {
         core,

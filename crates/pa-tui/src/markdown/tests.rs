@@ -545,6 +545,32 @@ fn python_fence_multiline_string_carries_across_rows() {
 }
 
 #[test]
+fn long_code_rows_wrap_at_the_width() {
+    // TS renderBlock wraps every code row (wrapTextWithAnsi): the indent
+    // leads the first row only and no code text is lost.
+    let style = MarkdownStyle::default();
+    let code = (0..50)
+        .map(|i| format!("f({i}, 'x')"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    for fence in ["```", "```python"] {
+        let text = format!("intro\n\n{fence}\n{code}\n```\n\nafter");
+        let rows: Vec<String> = render_markdown(&text, 40, &style)
+            .iter()
+            .map(|row| row.iter().map(|s| s.content.as_str()).collect())
+            .collect();
+        let code_rows = &rows[2..rows.len() - 2];
+        assert!(
+            code_rows[0].starts_with("  f(0,") && !code_rows[1].starts_with(' '),
+            "{rows:?}"
+        );
+        assert!(code_rows.iter().all(|row| str_width(row) <= 40), "{rows:?}");
+        assert_eq!(code_rows.concat().replace(' ', ""), code.replace(' ', ""));
+        assert_eq!(markdown_row_count(&text, 40, &style), rows.len());
+    }
+}
+
+#[test]
 fn list_render() {
     let style = MarkdownStyle::default();
     let lines = render_markdown("- one\n- two", 40, &style);

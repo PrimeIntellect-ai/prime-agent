@@ -80,8 +80,8 @@ struct Channel {
 /// Client configuration.
 #[derive(Clone)]
 pub struct TelemetryClientConfig {
-    /// Pseudonymous installation id (sink-side identity, e.g. `PostHog`
-    /// `distinct_id`). Load via [`crate::install_id`].
+    /// Pseudonymous installation id (the analytics body's
+    /// `installation_id`). Load via [`crate::install_id`].
     pub install_id: String,
     /// Base properties merged under every event's own properties
     /// (version, os, execution mode...).
@@ -98,6 +98,11 @@ pub struct TelemetryClientConfig {
     pub retry: RetryPolicy,
     /// Fan-out sinks: every sink receives every event.
     pub sinks: Vec<Arc<dyn TelemetrySink>>,
+    /// The live on/off switch, asked for every tracked event and before
+    /// every delivery pass: while it answers false, new and queued events
+    /// are dropped unsent (a mid-session opt-out applies without a
+    /// restart). `None` is always on.
+    pub enabled: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl TelemetryClientConfig {
@@ -111,6 +116,7 @@ impl TelemetryClientConfig {
             max_batch_bytes: DEFAULT_MAX_BATCH_BYTES,
             retry: RetryPolicy::default(),
             sinks: Vec::new(),
+            enabled: None,
         }
     }
 }
@@ -288,6 +294,13 @@ impl Worker {
                     };
                     match cmd {
                         Cmd::Track(event) => {
+                            // An event recorded while the switch is off is
+                            // dropped now, so turning telemetry back on
+                            // never sends what happened while it was off.
+                            if self.drop_while_disabled() {
+                                self.queue_dropped.fetch_add(1, Ordering::Relaxed);
+                                continue;
+                            }
                             self.enqueue(&event);
                             if self.channels.iter().any(|channel| {
                                 channel.queue.len() >= self.config.batch_size
@@ -341,6 +354,21 @@ impl Worker {
         now + delay
     }
 
+    /// Ask the live switch; when it is off, drop every queued event
+    /// (counted) and report true so the pass sends nothing.
+    fn drop_while_disabled(&mut self) -> bool {
+        if self.config.enabled.as_ref().is_none_or(|enabled| enabled()) {
+            return false;
+        }
+        for channel in &mut self.channels {
+            self.queue_dropped
+                .fetch_add(channel.queue.len() as u64, Ordering::Relaxed);
+            channel.queue.clear();
+            channel.next_retry_at = None;
+        }
+        true
+    }
+
     fn enqueue(&mut self, event: &TelemetryEvent) {
         for channel in &mut self.channels {
             if channel.queue.len() >= self.config.queue_capacity {
@@ -356,6 +384,9 @@ impl Worker {
 
     /// One delivery pass over every channel: expire, batch, send, retry.
     async fn flush_pass(&mut self) {
+        if self.drop_while_disabled() {
+            return;
+        }
         let now = std::time::SystemTime::now();
         let now_epoch_ms = now
             .duration_since(std::time::UNIX_EPOCH)
@@ -432,6 +463,9 @@ impl Worker {
     /// (bounded shutdown; a hard exit may lose reports, like the TS
     /// contract).
     async fn flush_final(&mut self) {
+        if self.drop_while_disabled() {
+            return;
+        }
         for channel in &mut self.channels {
             while !channel.queue.is_empty() {
                 // The final drain honors the same batch byte cap as the
@@ -781,11 +815,13 @@ mod tests {
             next_retry_at: None,
         };
         let fresh = TelemetryEvent {
+            id: "fresh-id".into(),
             name: "fresh".into(),
             timestamp_ms: now_epoch_ms_for_tests(),
             properties: Properties::new(),
         };
         let stale = TelemetryEvent {
+            id: "stale-id".into(),
             name: "stale".into(),
             timestamp_ms: now_epoch_ms_for_tests().saturating_sub(MAX_AGE.as_millis() as u64 + 1),
             properties: Properties::new(),
@@ -843,7 +879,7 @@ mod tests {
         );
         properties.set("trigger", serde_json::Value::from("spontaneous"));
         properties.set("secret_path", serde_json::Value::from("/home/user/project"));
-        client.track("agent run started", properties);
+        client.track("agent run completed", properties);
         client.flush().await.unwrap();
         let events = mock.events();
         assert_eq!(events.len(), 1);

@@ -233,6 +233,7 @@ impl Inner {
                     .then(|| std::mem::take(&mut buffers.attachments)),
                 sent_agent_messages: (!buffers.sent_agent_messages.is_empty())
                     .then(|| std::mem::take(&mut buffers.sent_agent_messages)),
+                bash_commands: buffers.bash_commands.take(),
                 background_output: (!background_output.is_empty()).then_some(background_output),
                 status,
                 error: buffers.error.take(),
