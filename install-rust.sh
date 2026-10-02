@@ -655,14 +655,14 @@ ARCH="$(uname -m)"
 WINDOWS="no"
 # CHANNEL_PLATFORM is the channel manifest's platform alias (the TS
 # NATIVE_PLATFORMS spelling pa-core::update::install::current_platform_alias
-# reads); TARGET stays the rust triple the payload names its targets by.
+# reads).
 case "$OS:$ARCH" in
-  Darwin:arm64) TARGET=aarch64-apple-darwin; CHANNEL_PLATFORM=darwin-arm64 ;;
-  Darwin:x86_64) TARGET=x86_64-apple-darwin; CHANNEL_PLATFORM=darwin-x64 ;;
-  Linux:x86_64) TARGET=x86_64-unknown-linux-gnu; CHANNEL_PLATFORM=linux-x64 ;;
-  Linux:aarch64) TARGET=aarch64-unknown-linux-gnu; CHANNEL_PLATFORM=linux-arm64 ;;
+  Darwin:arm64) CHANNEL_PLATFORM=darwin-arm64 ;;
+  Darwin:x86_64) CHANNEL_PLATFORM=darwin-x64 ;;
+  Linux:x86_64) CHANNEL_PLATFORM=linux-x64 ;;
+  Linux:aarch64) CHANNEL_PLATFORM=linux-arm64 ;;
   MINGW64_NT*:x86_64|MINGW_NT*:x86_64|MSYS_NT*:x86_64|CYGWIN_NT*:x86_64)
-    TARGET=x86_64-pc-windows-msvc; CHANNEL_PLATFORM=win32-x64; WINDOWS=yes ;;
+    CHANNEL_PLATFORM=win32-x64; WINDOWS=yes ;;
   *)
     die "no rust build is published for ${OS} ${ARCH} (detected via uname);
 the release channel builds aarch64-apple-darwin, x86_64-apple-darwin,
@@ -2317,9 +2317,7 @@ fi
 # list (the same whitespace ruling).
 rust_leftover="no"
 verify_stopped_socket() {
-  last_verify_leftover="no"
   if [ "$("$UVPY" "$probe_py" --listening "$1" 2>/dev/null)" = "up" ]; then
-    last_verify_leftover="yes"
     if [ "$2" = "yes" ]; then
       rust_leftover="yes"
     fi
