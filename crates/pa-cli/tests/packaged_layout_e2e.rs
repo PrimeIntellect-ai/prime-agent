@@ -40,6 +40,18 @@ fn repo_root() -> PathBuf {
         .expect("worktree root")
 }
 
+/// The interpreter the release scripts run under: `python3`, or `python`
+/// where only that spelling exists (the Windows runner images; the release
+/// workflow resolves it the same way).
+fn python_interpreter() -> Option<&'static str> {
+    ["python3", "python"].into_iter().find(|name| {
+        Command::new(name)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    })
+}
+
 /// These tests stage full packaged layouts and boot the kernel; they are
 /// heavy and contend on a small box, so each one holds this lock for its
 /// whole body.
@@ -52,13 +64,25 @@ fn serial_lock() -> std::sync::MutexGuard<'static, ()> {
     }
 }
 
+/// The staged binary name: Cargo's MSVC linker emits `prime-agent.exe` on
+/// Windows (`std::env::consts::EXE_SUFFIX`), and the packaged layout - the
+/// installer's extract target and the binary's own exe-adjacent resolution
+/// - names the platform's spelling.
+fn packaged_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "prime-agent.exe"
+    } else {
+        "prime-agent"
+    }
+}
+
 /// Stage the packaged layout into `dir`: the binary, the version manifest,
 /// and the shipped assets. `with_runtime` controls whether the
 /// prime-agent-runtime sidecar is present (the failure-UX scenario removes
 /// it).
 fn stage_packaged_layout(dir: &Path, with_runtime: bool) {
     std::fs::create_dir_all(dir).expect("stage dir");
-    let binary = dir.join("prime-agent");
+    let binary = dir.join(packaged_binary_name());
     std::fs::copy(env!("CARGO_BIN_EXE_prime-agent"), &binary).expect("copy binary");
     set_executable(&binary);
     std::fs::write(
@@ -135,9 +159,17 @@ fn kernel_python() -> Option<PathBuf> {
         );
         return Some(explicit);
     }
+    // The kernel venv's interpreter spelling is platform-shaped (the venv
+    // layout the product's own bootstrap creates: `bin/python` on unix,
+    // `Scripts\python.exe` on Windows).
+    let venv_python = if cfg!(windows) {
+        "kernel-venv/Scripts/python.exe"
+    } else {
+        "kernel-venv/bin/python"
+    };
     let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
-        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
-        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+        |_| format!("/home/ubuntu/.prime/agent/{venv_python}"),
+        |home| format!("{home}/.prime/agent/{venv_python}"),
     ));
     if candidate.exists() {
         return Some(candidate);
@@ -177,7 +209,7 @@ impl Sandbox {
     /// ambient API keys. A test that wants an override sets it after this
     /// call: a later `Command::env` wins over the scrub.
     fn command(&self, staged: &Path) -> Command {
-        let mut command = Command::new(staged.join("prime-agent"));
+        let mut command = Command::new(staged.join(packaged_binary_name()));
         command
             .env("HOME", self.home.path())
             .env("PRIME_AGENT_CODING_AGENT_DIR", &self.agent_dir)
@@ -527,7 +559,7 @@ struct PairedFixture {
     decoder: std::path::PathBuf,
 }
 
-fn split_paired_fixture(version: &str, target: &str, alias: &str) -> PairedFixture {
+fn split_paired_fixture(python: &str, version: &str, target: &str, alias: &str) -> PairedFixture {
     let dir = tempfile::TempDir::new().expect("split fixture dir");
     let source = dir.path().join("prime-agent.c");
     // The packer's version pin runs `--version` and compares the output:
@@ -552,7 +584,7 @@ fn split_paired_fixture(version: &str, target: &str, alias: &str) -> PairedFixtu
         String::from_utf8_lossy(&compiled.stderr)
     );
     let shipped = dir.path().join("prime-agent");
-    let split = Command::new("python3")
+    let split = Command::new(python)
         .arg(
             repo_root()
                 .join("scripts")
@@ -595,14 +627,10 @@ fn split_paired_fixture(version: &str, target: &str, alias: &str) -> PairedFixtu
 #[test]
 fn packaging_dry_run_produces_artifact() {
     let _guard = serial_lock();
-    if !Command::new("python3")
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success())
-    {
-        eprintln!("python3 not available; skipping the packaging dry-run e2e");
+    let Some(python) = python_interpreter() else {
+        eprintln!("python3/python not available; skipping the packaging dry-run e2e");
         return;
-    }
+    };
     // A synthetic tree: the packaging must ship the sidecar without its
     // .venv or bytecode caches.
     let tree = tempfile::TempDir::new().expect("packaging tree");
@@ -653,7 +681,7 @@ fn packaging_dry_run_produces_artifact() {
     // fixture snapshot first (deterministic, stdlib-only — the same mode
     // the CI build jobs use) and passes it through.
     let assets = tempfile::TempDir::new().expect("catalog assets dir");
-    let bundle = Command::new("python3")
+    let bundle = Command::new(python)
         .arg(
             repo_root()
                 .join("scripts")
@@ -677,13 +705,16 @@ fn packaging_dry_run_produces_artifact() {
     // Linux fail-closed: the packer accepts only a paired shipped ELF +
     // decoder from split_debug.py, so the dry run first splits a tiny real
     // ELF fixture — the same artifact shape the CI channel ships. The
-    // split fixture dir must outlive the invocation (_split_dir below).
+    // Windows arm stages the MSVC exe (the packer carries no split-debug
+    // there). The split fixture dir must outlive the invocation (_split_dir
+    // below).
     let (staged_binary, staged_decoder, _split_dir): (
         std::ffi::OsString,
         Option<std::ffi::OsString>,
         Option<tempfile::TempDir>,
     ) = if std::env::consts::OS == "linux" {
         let fixture = split_paired_fixture(
+            python,
             env!("CARGO_PKG_VERSION"),
             "x86_64-unknown-linux-gnu",
             "linux-x64",
@@ -696,7 +727,21 @@ fn packaging_dry_run_produces_artifact() {
     } else {
         (env!("CARGO_BIN_EXE_prime-agent").into(), None, None)
     };
-    let mut command = Command::new("python3");
+    // The platform tag the packer derives on this host: linux-x64 on the
+    // linux CI host, win32-x64 on the windows-latest battery (the channel
+    // alias, never a bare `windows-x64` — the naming the update reader's
+    // manifest contract requires).
+    let host_platform = if cfg!(windows) {
+        "win32-x64"
+    } else {
+        "linux-x64"
+    };
+    let staged_binary_name = if cfg!(windows) {
+        "prime-agent.exe"
+    } else {
+        "prime-agent"
+    };
+    let mut command = Command::new(python);
     command
         .arg(repo_root().join("scripts").join("package_release.py"))
         .arg("--root")
@@ -719,8 +764,13 @@ fn packaging_dry_run_produces_artifact() {
     );
 
     let version = env!("CARGO_PKG_VERSION");
-    let stage = out.path().join(format!("prime-agent-{version}-linux-x64"));
-    assert!(stage.join("prime-agent").is_file(), "staged binary missing");
+    let stage = out
+        .path()
+        .join(format!("prime-agent-{version}-{host_platform}"));
+    assert!(
+        stage.join(staged_binary_name).is_file(),
+        "staged binary missing"
+    );
     let manifest: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(stage.join("package.json")).expect("version manifest"),
     )
@@ -781,7 +831,7 @@ fn packaging_dry_run_produces_artifact() {
     // version and hashes, and the tarball lists the staged layout exactly.
     let archive = out
         .path()
-        .join(format!("prime-agent-{version}-linux-x64.tar.gz"));
+        .join(format!("prime-agent-{version}-{host_platform}.tar.gz"));
     assert!(archive.is_file(), "tarball missing");
     let sums = std::fs::read_to_string(out.path().join("SHA256SUMS")).expect("SHA256SUMS");
     let sha256 = sha256_file(&archive);
@@ -797,8 +847,8 @@ fn packaging_dry_run_produces_artifact() {
     let binaries = manifest["binaries"].as_array().expect("binaries array");
     assert_eq!(binaries.len(), 1);
     assert_eq!(binaries[0]["sha256"], sha256.as_str());
-    assert_eq!(binaries[0]["platform"], "linux-x64");
-    let executable_sha = sha256_file(&stage.join("prime-agent"));
+    assert_eq!(binaries[0]["platform"], host_platform);
+    let executable_sha = sha256_file(&stage.join(staged_binary_name));
     assert_eq!(binaries[0]["executableSha256"], executable_sha.as_str());
 }
 
@@ -994,7 +1044,13 @@ fn bootstrap_kernel_venv_from_packaged_sidecar() {
         stdout.contains("kernel python:"),
         "bootstrap stdout: {stdout}"
     );
-    let venv_python = venv.join("bin").join("python");
+    // The venv layout the product's bootstrap creates: `bin/python` on
+    // unix, `Scripts\python.exe` on Windows.
+    let venv_python = if cfg!(windows) {
+        venv.join("Scripts").join("python.exe")
+    } else {
+        venv.join("bin").join("python")
+    };
     assert!(venv_python.exists(), "kernel venv python missing");
 
     // A session boots on the fresh venv: the same kernel-cell proof as the
