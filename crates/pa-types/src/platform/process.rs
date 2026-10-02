@@ -12,11 +12,12 @@
 /// The pid-reuse identity: `/proc/<pid>/stat` field 22 (starttime) as
 /// `proc:<starttime>`, else the portable `ps:<lstart>` identity (TS
 /// `getPsProcessStartId`) - rendered in-process from the kernel process
-/// record on macOS, by running `ps -o lstart=` on other unixes. A recycled
-/// pid has a different start time, so a recorded identity that still
-/// matches proves the pid still names the same process. `None` only when
-/// the platform exposes neither - owners then trust liveness checks
-/// alone, exactly like TS records with `processStartId: undefined`.
+/// record on macOS, by running `ps -o lstart=` on other unixes when the
+/// pid still exists. A recycled pid has a different start time, so a
+/// recorded identity that still matches proves the pid still names the
+/// same process. `None` only when the platform exposes neither - owners
+/// then trust liveness checks alone, exactly like TS records with
+/// `processStartId: undefined`.
 #[cfg(unix)]
 #[must_use]
 pub fn process_start_id(pid: u32) -> Option<String> {
@@ -36,9 +37,13 @@ pub fn process_start_id(pid: u32) -> Option<String> {
 /// The `ps -p <pid> -o lstart=` fallback (TS `getPsProcessStartId`): `lstart`
 /// renders in the subprocess timezone and locale, so both are pinned for a
 /// durable identity. Formatted `ps:<lstart>` - the exact value the TS
-/// product records on macOS and BSD.
+/// product records on macOS and BSD. A pid that `kill(0)` reports gone
+/// answers `None` without spawning `ps`.
 #[cfg(all(unix, not(target_vendor = "apple")))]
 fn ps_process_start_id(pid: u32) -> Option<String> {
+    if matches!(pid_exists(pid), Ok(false)) {
+        return None;
+    }
     let output = std::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "lstart="])
         .env("LC_ALL", "C")
@@ -319,6 +324,27 @@ pub fn restore_default_sigint() -> anyhow::Result<()> {
     anyhow::bail!("suspend to background requires a POSIX process group")
 }
 
+/// TS `processIdExists`: `kill(pid, 0)` checks existence only. ESRCH and a
+/// pid beyond `pid_t`'s range (which must not wrap into kill's negative
+/// "every process" argument) do not exist; EPERM does - the pid is just
+/// not ours to signal.
+#[cfg(unix)]
+fn pid_exists(pid: u32) -> std::io::Result<bool> {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return Ok(false);
+    };
+    // SAFETY: signal 0 delivers nothing; it only checks the pid.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(false),
+        Some(libc::EPERM) => Ok(true),
+        _ => Err(error),
+    }
+}
+
 /// True only for a process that is actually running: zombies do not count
 /// (TS `isProcessAlive`). Errors when the platform cannot answer.
 ///
@@ -349,19 +375,10 @@ pub fn is_process_alive(pid: u32) -> anyhow::Result<bool> {
         return Ok(true);
     }
     // No /proc entry: either the platform has no /proc or the pid is gone.
-    // A pid beyond the pid_t range cannot name a process (and must not
-    // wrap into kill's negative "every process" argument).
-    if pid > i32::MAX as u32 {
+    if !pid_exists(pid)
+        .map_err(|error| anyhow::anyhow!("kill(0) liveness probe failed: {error}"))?
+    {
         return Ok(false);
-    }
-    // TS `processIdExists`: signal 0 checks existence only. ESRCH means
-    // dead; EPERM means alive.
-    if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
-        return match std::io::Error::last_os_error().raw_os_error() {
-            Some(libc::ESRCH) => Ok(false),
-            Some(libc::EPERM) => Ok(true),
-            code => anyhow::bail!("kill(0) liveness probe failed: {code:?}"),
-        };
     }
     // The pid resolves: demote zombies (TS `isZombieProcess`) - there is
     // no /proc state line to read here.
@@ -618,6 +635,47 @@ mod liveness_tests {
     #[test]
     fn a_nonexistent_pid_reads_dead_through_the_fallback() {
         assert!(!is_process_alive(100_000_000).expect("liveness probe"));
+    }
+
+    /// A dead pid answers `None` without spawning `ps`: the parent re-runs
+    /// this test with a `PATH` whose only `ps` is a fake that would turn
+    /// any spawn into `Some("ps:...")`.
+    #[test]
+    fn a_dead_pid_has_no_identity_and_spawns_no_ps() {
+        use std::os::unix::fs::PermissionsExt;
+        const CHILD: &str = "PA_TYPES_DEAD_PID_PS_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let fake_ps = dir.path().join("ps");
+            std::fs::write(&fake_ps, "#!/bin/sh\necho 'Thu Jan  1 00:00:00 1970'\n")
+                .expect("write the fake ps");
+            std::fs::set_permissions(&fake_ps, std::fs::Permissions::from_mode(0o755))
+                .expect("make the fake ps executable");
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "platform::process::liveness_tests::a_dead_pid_has_no_identity_and_spawns_no_ps",
+                ])
+                .env(CHILD, "1")
+                .env("PATH", dir.path())
+                .output()
+                .expect("re-run with only the fake ps on PATH");
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        // A spawned `ps` resolves to the fake and would answer `Some("ps:...")`.
+        assert!(!std::process::Command::new("ps")
+            .output()
+            .unwrap()
+            .stdout
+            .is_empty());
+        assert_eq!(process_start_id(100_000_000), None);
+        assert!(process_start_id(std::process::id()).is_some());
     }
 }
 
