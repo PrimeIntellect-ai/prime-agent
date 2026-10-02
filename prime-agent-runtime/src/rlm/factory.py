@@ -1406,7 +1406,13 @@ class FactoryExecutor:
         The graph snapshot reuses it verbatim so the fused view is
         ``status()``'s data plus the static graph (``include_answer=False``
         drops the settle answer preview on the compact host lane, where
-        nothing renders answers).
+        nothing renders answers). The report carries the stage's agent
+        occupancy — ``running`` (admitted children in flight) and
+        ``queued`` (prepared instances waiting for a parallel slot) —
+        so every surface reads "how many agents are at this stage"
+        without re-deriving it from the instance rows; both keys are
+        single words, so the wire's camelCase conversion carries them
+        unchanged.
         """
         report: dict[str, Any] = {
             "id": state.state_id,
@@ -1434,6 +1440,18 @@ class FactoryExecutor:
                 for entry in state.entries
                 for instance in entry.instances
             ],
+            "running": sum(
+                1
+                for entry in state.entries
+                for instance in entry.instances
+                if instance.status == "running"
+            ),
+            "queued": sum(
+                1
+                for entry in state.entries
+                for instance in entry.instances
+                if instance.status == "pending"
+            ),
         }
         if include_answer:
             latest = state.latest_settle()

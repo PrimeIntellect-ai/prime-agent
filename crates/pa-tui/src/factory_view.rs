@@ -14,13 +14,17 @@
 //! notice-worthy run-shape change flips the changed marker).
 //!
 //! The diagram is the honest in-terminal machine graph: every state as a
-//! status-glyphed row in the machine's declared order, its outgoing
-//! transitions as connector rows underneath (joins rendered once, back
-//! edges marked), active nodes bright, pending nodes dim, and the
-//! last-fired edges marked. The same graph model emits genuine Mermaid
-//! source (a `flowchart TD` with `classDef active` styling and
-//! `linkStyle` marks on the last-fired edges) for the copy action —
-//! pasteable to GitHub or mermaid.live, rendering the same highlighting.
+//! status-glyphed row in the machine's declared order — the row's label
+//! carrying the stage's agent occupancy (`reviewing (3 run · 2 queued)`:
+//! how many agents run at the node, how many queue behind them) — its
+//! outgoing transitions as connector rows underneath (joins rendered
+//! once, back edges marked), active nodes bright, pending nodes dim, and
+//! the last-fired edges marked. The same graph model emits genuine
+//! Mermaid source (a `flowchart TD` with the same occupancy-carrying
+//! labels, `classDef active` styling and `linkStyle` marks on the
+//! last-fired edges) for the copy action — pasteable to GitHub or
+//! mermaid.live, rendering the same highlighting and the same stage
+//! occupancy.
 
 use serde_json::Value;
 
@@ -591,7 +595,7 @@ impl FactoryView {
         let queued = run
             .nodes
             .values()
-            .map(FactoryNodeState::pending_instances)
+            .map(FactoryNodeState::queued_agents)
             .sum::<u64>();
         parts.push(format!("{running} running · {queued} queued"));
         parts.join(" · ")
@@ -624,6 +628,18 @@ impl FactoryView {
                 // red — the diagram's live highlighting.
                 theme.fg_span(color, state.id.clone()),
             ];
+            // The stage's agent occupancy rides the label — `reviewing
+            // (3 run · 2 queued)` — so the diagram reads as a page of
+            // machines with per-stage headcounts; a stage at rest
+            // carries no fragment. The counts come from the kernel's
+            // per-state report (the instance rows are the older-kernel
+            // fallback), and the row's status color is unchanged.
+            if let Some(node) = node {
+                let occupancy = node.occupancy_label();
+                if !occupancy.is_empty() {
+                    row.push(theme.fg_span(color, format!(" ({occupancy})")));
+                }
+            }
             if let Some(subagent) = &state.subagent {
                 row.push(theme.fg_span(ThemeColor::Dim, format!(" ({subagent})")));
             }

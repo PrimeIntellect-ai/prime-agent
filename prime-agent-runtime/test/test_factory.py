@@ -4596,6 +4596,64 @@ class FactoryGraphWatchTest(unittest.TestCase):
         self.assertTrue(graph["events"], "the ledger tail rides the snapshot")
 
     @async_test
+    async def test_graph_nodes_carry_per_stage_agent_counts(self) -> None:
+        # The factory page reads as a page of machine diagrams with
+        # PER-STAGE AGENT COUNTS (how many agents run at each stage and
+        # how many queue behind them), so the graph reply's node rows
+        # carry the stage occupancy at the seam: ``running`` (admitted
+        # children in flight) and ``queued`` (prepared instances
+        # waiting for a parallel slot). Both keys are single words, so
+        # the activity lane's camelCase conversion carries them
+        # unchanged, and ``status()`` shares the same node shape.
+        self.host.outcomes["collect"] = {"status": "running"}
+        result = await self.start()
+        run_id = result["run_id"]
+        graph = await rlm_module.rlm.factory.graph(run_id)
+        nodes = {node["id"]: node for node in graph["nodes"]}
+        self.assertEqual(nodes["collect"]["running"], 1, "the admitted instance is in flight")
+        self.assertEqual(nodes["collect"]["queued"], 0)
+        self.assertEqual(nodes["reviewing"]["running"], 0)
+        self.assertEqual(
+            nodes["reviewing"]["queued"], 0, "the state waits on its input; nothing is prepared"
+        )
+        # The wire lane carries the same counts under the same keys.
+        listed = await factory_module.default_factory_executor().activity({"action": "graph"})
+        wire_nodes = {node["id"]: node for node in listed["runs"][0]["nodes"]}
+        self.assertEqual(wire_nodes["collect"]["running"], 1, "the count rides the wire")
+        self.assertEqual(wire_nodes["collect"]["queued"], 0)
+        # A saturated run leaves prepared instances queued: two entry
+        # states under a one-slot cap admit one and queue the other.
+        self.harness.create_factory(
+            "Saturated",
+            "Two entry states under a one-slot cap.",
+            id="sat",
+            machine={
+                "run": {"max_parallel": 1},
+                "states": [
+                    {"id": "a", "entry": True, "subagent": "worker"},
+                    {"id": "b", "entry": True, "subagent": "worker"},
+                ],
+            },
+        )
+        self.host.outcomes["a"] = {"status": "running"}
+        self.host.outcomes["b"] = {"status": "running"}
+        sat = await rlm_module.rlm.factory.run("sat")
+        sat_id = sat["run_id"]
+        graph = await rlm_module.rlm.factory.graph(sat_id)
+        nodes = {node["id"]: node for node in graph["nodes"]}
+        self.assertEqual(nodes["a"]["running"], 1, "the single slot runs a's instance")
+        self.assertEqual(nodes["a"]["queued"], 0)
+        self.assertEqual(nodes["b"]["running"], 0)
+        self.assertEqual(nodes["b"]["queued"], 1, "b's prepared instance waits for the slot")
+        # Stopping the run drains every stage: no agent stays at a node.
+        await rlm_module.rlm.factory.stop(sat_id)
+        graph = await rlm_module.rlm.factory.graph(sat_id)
+        nodes = {node["id"]: node for node in graph["nodes"]}
+        for node in nodes.values():
+            self.assertEqual(node["running"], 0, "a stopped run has no agent at any stage")
+            self.assertEqual(node["queued"], 0)
+
+    @async_test
     async def test_graph_transition_from_lists_are_snapshot_owned(self) -> None:
         # Regression (bot review): ``graph()`` exposed each transition's
         # ``from`` list by reference, so a consumer mutating the snapshot's

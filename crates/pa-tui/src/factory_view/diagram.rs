@@ -1,11 +1,12 @@
 //! The `/factory` view's diagram model: the snapshot shapes (states,
-//! transitions, live nodes, usage), the status glyphs and colors, the
-//! compact guard rendering, and the Mermaid emitter. One graph model feeds
-//! both the ASCII diagram and the Mermaid source, so the in-terminal
-//! highlighting and the pasteable highlighting are the same statement.
-//! Every daemon-provided string the model keeps scrubs its control
-//! bytes at the parse seam (`scrubbed`): wire text can never drive the
-//! terminal.
+//! transitions, live nodes, usage — including each stage's agent
+//! occupancy counts), the status glyphs and colors, the compact guard
+//! rendering, and the Mermaid emitter. One graph model feeds both the
+//! ASCII diagram and the Mermaid source, so the in-terminal
+//! highlighting, the per-stage occupancy labels, and the pasteable
+//! highlighting are the same statement. Every daemon-provided string
+//! the model keeps scrubs its control bytes at the parse seam
+//! (`scrubbed`): wire text can never drive the terminal.
 
 use serde_json::Value;
 
@@ -151,7 +152,12 @@ impl FactoryEdge {
     }
 }
 
-/// One live node's runtime state (the `status()` node shape, compact lane).
+/// One live node's runtime state (the `status()` node shape, compact
+/// lane). `running`/`queued` are the kernel's per-stage agent counts —
+/// how many agents run at the stage and how many queue behind them —
+/// and both are single-word keys, so the wire's two spellings carry
+/// them identically. `None` on an older kernel's reply, where the
+/// accessors derive the counts from the instance rows.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FactoryNodeState {
     pub status: String,
@@ -160,6 +166,8 @@ pub struct FactoryNodeState {
     pub entries: Vec<String>,
     pub instances: Vec<String>,
     pub error: Option<String>,
+    pub running: Option<u64>,
+    pub queued: Option<u64>,
 }
 
 impl FactoryNodeState {
@@ -195,6 +203,8 @@ impl FactoryNodeState {
                 })
                 .unwrap_or_default(),
             error: value.get("error").and_then(Value::as_str).map(scrubbed),
+            running: value.get("running").and_then(Value::as_u64),
+            queued: value.get("queued").and_then(Value::as_u64),
         })
     }
 
@@ -224,12 +234,41 @@ impl FactoryNodeState {
             || self.status == "running"
     }
 
-    /// Instances still queued (prepared, never admitted).
-    pub fn pending_instances(&self) -> u64 {
-        self.instances
-            .iter()
-            .filter(|status| *status == "pending")
-            .count() as u64
+    /// Agents at this stage in flight (admitted children still
+    /// running): the kernel's per-stage count when the reply carries
+    /// it, else derived from the instance rows (an older kernel's
+    /// reply).
+    #[must_use]
+    pub fn running_agents(&self) -> u64 {
+        self.running
+            .unwrap_or_else(|| self.instance_count("running"))
+    }
+
+    /// Agents at this stage queued (prepared, never admitted): the
+    /// kernel's per-stage count when the reply carries it, else derived
+    /// from the instance rows (an older kernel's reply).
+    #[must_use]
+    pub fn queued_agents(&self) -> u64 {
+        self.queued
+            .unwrap_or_else(|| self.instance_count("pending"))
+    }
+
+    fn instance_count(&self, status: &str) -> u64 {
+        self.instances.iter().filter(|row| *row == status).count() as u64
+    }
+
+    /// The stage's occupancy label — `3 run · 2 queued` — when agents
+    /// sit at this stage; a stage at rest carries no fragment. The
+    /// ASCII row and the Mermaid label render the same statement.
+    #[must_use]
+    pub fn occupancy_label(&self) -> String {
+        let running = self.running_agents();
+        let queued = self.queued_agents();
+        if running == 0 && queued == 0 {
+            String::new()
+        } else {
+            format!("{running} run · {queued} queued")
+        }
     }
 
     /// The row's status text: the status, the entry count, and the error
@@ -398,7 +437,9 @@ fn mermaid_safe(text: &str) -> String {
 /// same highlighting.
 ///
 /// Node ids are index-based (`s0`, `s1`, ...) with the machine's state ids
-/// as labels, so any valid state id renders verbatim; join edges render
+/// as labels, so any valid state id renders verbatim; the labels carry the
+/// stage's agent occupancy (`reviewing (3 run · 2 queued)`) so a pasted
+/// diagram shows stage occupancy, not just state; join edges render
 /// dotted (one per source) with the join label.
 #[must_use]
 pub fn mermaid_source(run: &super::FactoryRunSnapshot) -> String {
@@ -414,13 +455,21 @@ pub fn mermaid_source(run: &super::FactoryRunSnapshot) -> String {
     };
     lines.push(header);
     lines.push("flowchart TD".to_string());
-    // Node declarations: index ids, label carries the state id (and the
-    // entry marker).
+    // Node declarations: index ids, label carries the state id, the
+    // entry marker, and the stage's agent occupancy — a stage at rest
+    // keeps its plain label.
     for (index, state) in run.states.iter().enumerate() {
+        let occupancy = run
+            .nodes
+            .get(&state.id)
+            .map(FactoryNodeState::occupancy_label)
+            .filter(|label| !label.is_empty())
+            .map(|label| format!(" ({label})"))
+            .unwrap_or_default();
         let label = if state.entry {
-            format!("{}*", mermaid_safe(&state.id))
+            format!("{}*{occupancy}", mermaid_safe(&state.id))
         } else {
-            mermaid_safe(&state.id)
+            format!("{}{occupancy}", mermaid_safe(&state.id))
         };
         lines.push(format!("    s{index}[\"{label}\"]"));
     }

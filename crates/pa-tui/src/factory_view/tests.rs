@@ -40,7 +40,9 @@ fn frame_spans(view: &mut FactoryView) -> Vec<Vec<crate::Span>> {
 /// keys are camelCase end to end, matching the protocol's request
 /// frame): the review-loop machine mid-flight — collect done, reviewing
 /// running (its first entry settled, so the collect edge fired), fixing
-/// pending — plus the usage and milestone tail.
+/// pending — plus the usage and milestone tail. Every node row carries
+/// the kernel's per-stage agent counts (`running`/`queued`, single-word
+/// keys both wire spellings carry identically).
 fn scripted_snapshot() -> serde_json::Value {
     json!({
         "runId": "run-abc12345",
@@ -69,13 +71,16 @@ fn scripted_snapshot() -> serde_json::Value {
             { "id": "collect", "status": "done", "lifecycle": "task", "attempts": 1,
               "entriesUsed": 1, "maxEntries": 1,
               "entries": [ { "index": 0, "status": "done", "error": null } ],
-              "instances": [ { "index": 0, "entry": 0, "status": "done", "attempt": 1, "child": "child-1", "durationMs": 5, "error": null } ] },
+              "instances": [ { "index": 0, "entry": 0, "status": "done", "attempt": 1, "child": "child-1", "durationMs": 5, "error": null } ],
+              "running": 0, "queued": 0 },
             { "id": "reviewing", "status": "running", "lifecycle": "task", "attempts": 1,
               "entriesUsed": 1, "maxEntries": 4,
               "entries": [ { "index": 0, "status": "running", "error": null } ],
-              "instances": [ { "index": 0, "entry": 0, "status": "running", "attempt": 1, "child": "child-2", "durationMs": 0, "error": null } ] },
+              "instances": [ { "index": 0, "entry": 0, "status": "running", "attempt": 1, "child": "child-2", "durationMs": 0, "error": null } ],
+              "running": 1, "queued": 0 },
             { "id": "fixing", "status": "pending", "lifecycle": "task", "attempts": 0,
-              "entriesUsed": 0, "maxEntries": 3, "entries": [], "instances": [] }
+              "entriesUsed": 0, "maxEntries": 3, "entries": [], "instances": [],
+              "running": 0, "queued": 0 }
         ],
         "activeNodes": ["reviewing"],
         "lastFired": [ { "from": "collect", "to": "reviewing", "seq": 7 } ],
@@ -167,6 +172,41 @@ fn later_pair_response() -> serde_json::Value {
     response
 }
 
+/// The same wire reply with a full per-stage occupancy: reviewing runs
+/// a five-instance entry under the run's three-slot cap — three
+/// admitted (running), two queued — with the kernel's counts and the
+/// instance rows agreeing (`maxParallel` drops to 3: the cap is why
+/// two instances queue).
+fn occupied_snapshot() -> serde_json::Value {
+    let mut snapshot = scripted_snapshot();
+    snapshot["machine"]["run"]["maxParallel"] = json!(3);
+    snapshot["usage"]["maxParallel"] = json!(3);
+    snapshot["usage"]["spawns"] = json!(3);
+    snapshot["usage"]["running"] = json!(3);
+    snapshot["nodes"][1]["running"] = json!(3);
+    snapshot["nodes"][1]["queued"] = json!(2);
+    snapshot["nodes"][1]["instances"] = json!([
+        { "index": 0, "entry": 0, "status": "running", "attempt": 1, "child": "child-2", "durationMs": 0, "error": null },
+        { "index": 1, "entry": 0, "status": "running", "attempt": 1, "child": "child-3", "durationMs": 0, "error": null },
+        { "index": 2, "entry": 0, "status": "running", "attempt": 1, "child": "child-4", "durationMs": 0, "error": null },
+        { "index": 3, "entry": 0, "status": "pending", "attempt": 0, "child": null, "durationMs": null, "error": null },
+        { "index": 4, "entry": 0, "status": "pending", "attempt": 0, "child": null, "durationMs": null, "error": null }
+    ]);
+    snapshot
+}
+
+/// The occupied reply without the kernel's count keys: an older
+/// kernel's shape, where the occupancy derives from the instance rows.
+fn occupied_snapshot_without_counts() -> serde_json::Value {
+    let mut snapshot = occupied_snapshot();
+    for node in snapshot["nodes"].as_array_mut().unwrap().iter_mut() {
+        let object = node.as_object_mut().expect("node rows are objects");
+        object.remove("running");
+        object.remove("queued");
+    }
+    snapshot
+}
+
 /// The parser fuses the structure and the live overlay from the wire
 /// reply's `camelCase` keys (a wrong-spelling read defaults every field,
 /// so each field below is the mutation check on its key).
@@ -187,6 +227,16 @@ fn parsing_fuses_structure_and_live_state() {
     assert_eq!(run.nodes["reviewing"].status, "running");
     assert_eq!(run.nodes["reviewing"].entries_used, 1, "node entriesUsed");
     assert_eq!(run.nodes["reviewing"].max_entries, 4, "node maxEntries");
+    assert_eq!(
+        run.nodes["reviewing"].running,
+        Some(1),
+        "the per-state running count"
+    );
+    assert_eq!(
+        run.nodes["reviewing"].queued,
+        Some(0),
+        "the per-state queued count"
+    );
     assert_eq!(run.last_fired[0].to, "reviewing");
     assert_eq!(run.milestones, vec!["started".to_string()]);
     let usage = run.usage.as_ref().expect("usage parses");
@@ -249,6 +299,62 @@ fn the_diagram_renders_states_edges_and_the_fired_marker() {
     assert!(
         joined.contains("1 transitions"),
         "the transitions_fired stat: {joined}"
+    );
+}
+
+/// The per-stage agent occupancy (the UX ask): a stage's label carries
+/// how many agents sit at it — `reviewing (3 run · 2 queued)` — read
+/// from the kernel's per-state counts, with the instance rows as the
+/// fallback for an older kernel's reply; a stage at rest carries no
+/// fragment (the mutation checks: removing the label render empties
+/// the row of the counts, and dropping the kernel-count parse or the
+/// instance-row fallback fails the count assertions below).
+#[test]
+fn the_diagram_renders_per_stage_agent_occupancy() {
+    let runs = parse_factory_runs(&runs_response(&occupied_snapshot()));
+    assert_eq!(
+        runs[0].nodes["reviewing"].running,
+        Some(3),
+        "the kernel's running count parses"
+    );
+    assert_eq!(
+        runs[0].nodes["reviewing"].queued,
+        Some(2),
+        "the kernel's queued count parses"
+    );
+    let mut view = FactoryView::new(runs, 40);
+    let rows = frame_text(&mut view);
+    let joined = rows.join("\n");
+    assert!(
+        joined.contains("reviewing (3 run · 2 queued)"),
+        "the occupied stage's label carries its agent counts: {joined}"
+    );
+    assert!(
+        !joined.contains("(0 run"),
+        "a stage at rest carries no occupancy fragment: {joined}"
+    );
+    // An older kernel's reply (no count keys) derives the same counts
+    // from the instance rows.
+    let runs = parse_factory_runs(&runs_response(&occupied_snapshot_without_counts()));
+    assert_eq!(
+        runs[0].nodes["reviewing"].running, None,
+        "no count keys ride the older reply"
+    );
+    assert_eq!(
+        runs[0].nodes["reviewing"].running_agents(),
+        3,
+        "running derives from the instance rows"
+    );
+    assert_eq!(
+        runs[0].nodes["reviewing"].queued_agents(),
+        2,
+        "queued derives from the instance rows"
+    );
+    let mut view = FactoryView::new(runs, 40);
+    let rows = frame_text(&mut view);
+    assert!(
+        rows.join("\n").contains("reviewing (3 run · 2 queued)"),
+        "the fallback renders the same occupancy"
     );
 }
 
@@ -371,6 +477,37 @@ fn mermaid_source_carries_the_active_classdef_and_fired_link_styles() {
     assert!(
         source.contains("s2 -->|settled| s1"),
         "the back edge renders like every plain edge: {source}"
+    );
+}
+
+/// The Mermaid labels carry the same per-stage occupancy as the ASCII
+/// labels — `s1["reviewing (3 run · 2 queued)"]` — so a pasted GitHub
+/// diagram shows stage occupancy, not just state; a stage at rest
+/// keeps its plain label (the mutation check: removing the label
+/// occupancy empties the node declarations of the counts).
+#[test]
+fn the_mermaid_labels_carry_per_stage_agent_occupancy() {
+    let runs = parse_factory_runs(&runs_response(&occupied_snapshot()));
+    let source = diagram::mermaid_source(&runs[0]);
+    assert!(
+        source.contains("s1[\"reviewing (3 run · 2 queued)\"]"),
+        "the occupied node's label carries its counts: {source}"
+    );
+    assert!(
+        source.contains("s0[\"collect*\"]"),
+        "a stage at rest keeps its plain label: {source}"
+    );
+    assert!(
+        !source.contains("(0 run"),
+        "no rest stage carries an occupancy fragment: {source}"
+    );
+    // An older kernel's reply derives the same occupancy, so the copy
+    // carries the counts against any kernel.
+    let runs = parse_factory_runs(&runs_response(&occupied_snapshot_without_counts()));
+    let source = diagram::mermaid_source(&runs[0]);
+    assert!(
+        source.contains("s1[\"reviewing (3 run · 2 queued)\"]"),
+        "the fallback derives the same label: {source}"
     );
 }
 
