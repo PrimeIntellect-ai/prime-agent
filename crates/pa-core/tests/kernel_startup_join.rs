@@ -1,7 +1,6 @@
 //! TS provisioner parity: all first-touch callers join one in-flight boot.
-// Unix-only: the fixture interpreter is armed with unix mode bits
-// (std::os::unix::fs::PermissionsExt), which have no counterpart on
-// the windows target.
+// Unix-only: the permission bits the provisioner stamps are unix mode
+// bits (std::os::unix::fs::PermissionsExt).
 #![cfg(unix)]
 
 use pa_core::kernel::cancellation::AbortSignal;

@@ -1,6 +1,8 @@
 # CI gates for the prime-agent Rust port: the tip-compiles-tests guarantee
 # plus PR gating, in one workflow (the shape of the TS product's ci.yml).
-#
+# `.github/workflows/` is the one home for workflow files; the
+# windows-cross/windows/deny jobs run live in this file alongside the unix
+# gates.
 # Two triggers, one
 # gate set mirroring `make check` exactly (fmt --all --check, clippy --workspace
 # --all-targets -- -D warnings, cargo test --workspace) on the pinned
@@ -57,9 +59,15 @@
 # assigned unit executed — and merges the failure reports into one table
 # naming the failing binaries; the gate is green only when all shards are.
 #
-# Strictly read-only: contents: read, persist-credentials: false, no secrets.
-# Windows coverage runs via the on-demand windows-runtime-triage.yml battery
-# (any ref); there is no windows or deny job in this workflow.
+# Strictly read-only: contents: read, persist-credentials: false, no secrets
+# (the trust job's vouch step reads the GitHub API with the ambient
+# GITHUB_TOKEN). The contributor-trust gate (the `trust` job, ported from
+# main's ci.yml — the vouch mechanism) precedes every job: push events are
+# always allowed; PR authors must be a bot, a collaborator with write
+# access, or a vouched contributor (mitchellh/vouch; the vouched list
+# resolves from the repo's default branch — `.github/VOUCHED.td` on main,
+# nothing local on this branch), so unvouched PR authors never bill a
+# runner minute. The auto-close enforcement lives in contribution-gate.yml.
 #
 name: ci
 
@@ -110,9 +118,10 @@ jobs:
   # feeds test shards' --crates; empty means "the full union".
   changes:
     name: touched crates (PR) / full selection (push + queue)
+    needs: trust
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     outputs:
       crates: ${{ steps.select.outputs.crates }}
       scope: ${{ steps.select.outputs.scope }}
@@ -153,13 +162,40 @@ jobs:
             echo "crates under test: ${{ steps.select.outputs.crates }}"
           fi
 
+  # The contributor-trust gate (this PR's port from main's TS-era ci.yml):
+  # the `allowed` output every job below keys on — push events are always
+  # allowed, PR authors must be a bot, a collaborator with write access,
+  # or vouched. allow-fail keeps this job green: the gate is the output,
+  # not the step.
+  trust:
+    name: contributor trust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      # merge_group auto-allows: the queued candidate already passed the
+      # vouch-gated pull_request wave (the queue only takes vouched PRs);
+      # the merge-group run is the full-selection validation of the
+      # already-vouched candidate.
+      allowed: ${{ github.event_name == 'push' || github.event_name == 'merge_group' || steps.vouch.outputs.vouched == 'true' }}
+    steps:
+      - name: Check pull request author
+        id: vouch
+        if: github.event_name == 'pull_request'
+        uses: mitchellh/vouch/action/check-user@d66fa29a64600490892131ad87597c30c91fcac4 # v1
+        with:
+          user: ${{ github.event.pull_request.user.login }}
+          allow-fail: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   fmt:
     name: fmt
+    needs: trust
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     # Draft PRs do not gate (no billing on work-in-progress pushes); the
     # ready_for_review trigger runs the gates once a draft is marked ready.
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -171,9 +207,10 @@ jobs:
 
   clippy-test:
     name: check + clippy (workspace)
+    needs: trust
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -207,13 +244,13 @@ jobs:
     # The shard legs need the wave's selection (the changes job's crates
     # output) before they can decide what to run — and whether the
     # sibling-binary build is needed at all.
-    needs: [changes]
+    needs: [changes, trust]
     # strategy.job-total (the matrix leg count) auto-derives the displayed
     # total; the env context is not reachable from a job name.
     name: test shard ${{ matrix.shard }}/${{ strategy.job-total }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     strategy:
       # One red shard must not cancel the others: their own conclusions are
       # the per-shard signal the summary merges.
@@ -239,6 +276,12 @@ jobs:
           # partial hit and compile the rest. Slower hits, no correctness
           # issue.
           shared-key: test-shards
+          # Only the push wave writes the entry: PR and merge-queue legs
+          # restore (the restore key falls back to the push wave's entry)
+          # and save nothing - a PR's save would land under the PR's own
+          # ref, and PR-ref entries are the eviction pressure on the
+          # release-build caches.
+          save-if: ${{ github.event_name == 'push' }}
       - name: Install uv (the kernel venv bootstrap below uses it)
         run: |
           python3 -m pip install --user uv
@@ -289,8 +332,8 @@ jobs:
     name: test summary
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    needs: [test-shard]
-    if: always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    needs: [trust, test-shard]
+    if: always() && needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -303,5 +346,90 @@ jobs:
       - name: Audit the shards and merge their failure reports
         run: python3 scripts/ci_test_shard_summary.py --total ${{ env.SHARD_COUNT }} --dir manifests
 
-  # Windows coverage: the on-demand windows-runtime-triage.yml battery (any
-  # ref); no windows job runs in this workflow.
+  # The Windows job set + the supply-chain deny gate:
+  #
+  #   windows-cross — the cfg-hygiene cross-target gate, the CI mirror of
+  #   `make windows-cross`. The Sep-23..25
+  #   unix-only test regressions that broke it were fixed by #2833, so it
+  #   type-checks every crate (including the cfg(windows) implementations
+  #   and the Windows-only tests) for x86_64-pc-windows-gnu; ring's C needs
+  #   the mingw cross compiler even for check builds.
+  #
+  #   windows-latest — NOT in this promotion set. The full MSVC battery
+  #   surfaced tip-side windows product debt the trunk has carried invisibly
+  #   (the on-demand windows-runtime-triage.yml battery never ran on main;
+  #   its first dispatches read deep red across crates, and the ACP
+  #   daemon-attach e2e deadlocks on the named-pipe transport). The
+  #   windows-latest promotion lands with the windows-readiness lane's
+  #   product fixes; windows-cross below stays this PR's windows authority
+  #   (the compile + clippy proof for the whole workspace incl. the
+  #   cfg(windows) implementations).
+  #
+  #   deny — cargo-deny advisories + licenses, the CI mirror of `make deny`,
+  #   the same check continuous.yml's deny job runs on every push.
+  #   Promoted on the operator's 2026-09-28 policy decision: the advisory
+  #   DB drifts daily, so a drifted advisory can gate PRs — that is the
+  #   accepted trade.
+  windows-cross:
+    name: windows cross-check + clippy (x86_64-pc-windows-gnu)
+    needs: trust
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name == 'push' || !github.event.pull_request.draft)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # the ref IS the 1.98.1 toolchain; the action ignores the toolchain input
+        with:
+          targets: x86_64-pc-windows-gnu
+          components: clippy
+      - name: Install the mingw-w64 cross toolchain (ring C for the target)
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: windows-cross
+      - run: cargo check --locked --workspace --target x86_64-pc-windows-gnu --all-targets
+      - run: cargo clippy --locked --workspace --target x86_64-pc-windows-gnu --all-targets -- -D warnings
+
+  deny:
+    name: deny (cargo-deny advisories + licenses)
+    needs: trust
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name == 'push' || !github.event.pull_request.draft)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Dependency audit (cargo-deny advisories + licenses)
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --all-features --workspace
+          command-arguments: advisories licenses
+
+  # The trust gate's own failure made visible: a vouch-step error (the
+  # action's setup, the runner) would otherwise leave every dependent job
+  # skipped, and skipped required checks read as passing to branch
+  # protection - a green-looking wave with no gates run. This audit runs
+  # unconditionally (always()) and fails the required-check set when the
+  # trust job itself did not conclude success. The deliberate not-vouched
+  # path is unaffected: there the trust job SUCCEEDS with allowed=false,
+  # the dependents skip by design, and the contribution-gate auto-close
+  # enforces.
+  trust-audit:
+    name: trust gate audit
+    needs: [trust, changes, fmt, clippy-test, test-shard, test-summary, windows-cross, deny]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Audit the contributor-trust gate's own outcome
+        run: |
+          set -euo pipefail
+          if [ "${{ needs.trust.result }}" != "success" ]; then
+            echo "::error::the contributor-trust gate did not conclude cleanly (result: ${{ needs.trust.result }}) - the wave is NOT trustworthy: every gate below it skipped"
+            exit 1
+          fi
+          echo "trust gate concluded cleanly (the allowed verdict: ${{ needs.trust.outputs.allowed }})"

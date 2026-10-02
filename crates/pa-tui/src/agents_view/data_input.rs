@@ -702,6 +702,16 @@ impl AgentsViewMode {
             }
             return;
         }
+        // TS `Editor.handleInput`'s `deleteWordBackward` (ctrl+w / alt+backspace).
+        if self
+            .keybindings
+            .matches(key, "tui.editor.deleteWordBackward")
+        {
+            if truncate_trailing_word(&mut self.query) {
+                self.query_changed(false);
+            }
+            return;
+        }
         // The printable decode the editor uses (`decode_printable`):
         // the space arrives as the `space` key id (TS parseKey maps the
         // raw space there), and the shift+letter ids decode to their
@@ -849,4 +859,21 @@ impl AgentsViewMode {
         self.disarm_reply_off_selected();
         self.open_selected();
     }
+}
+
+/// Delete the query's trailing word run plus the whitespace before it
+/// (TS `Editor.deleteWordBackwards` with the caret at the text's end —
+/// this view's query is append-only, so the caret always sits there):
+/// the search input's punctuation-aware walk, so a dotted query
+/// ("error.rs") loses its trailing word run and keeps "error." — a
+/// whitespace-only scan would take the whole dotted word. Returns
+/// whether anything was deleted: a no-op edit re-arms nothing.
+fn truncate_trailing_word(query: &mut String) -> bool {
+    let chars: Vec<char> = query.chars().collect();
+    let start = crate::search_input::word_walk_start(query);
+    if start == chars.len() {
+        return false;
+    }
+    *query = chars[..start].iter().collect();
+    true
 }

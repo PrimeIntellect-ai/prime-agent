@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use super::{
-    anyhow, json, load_descriptors, persist_worker, response_failure, response_success, socket,
+    anyhow, json, load_descriptors, response_failure, response_success, socket,
     worker_connect_deadline, Context, DaemonCommand, DaemonResponse, DaemonWorkerLifecycle,
     Duration, Ordering, Path, PathBuf, ResidentWorker, Result, Supervisor, Value,
     WorkerRegistration,
@@ -473,7 +473,14 @@ impl Supervisor {
                 descriptor.root_session_id.as_deref(),
                 descriptor.session_file.as_deref(),
             );
-            let _ = persist_worker(&resident.descriptor_path, &descriptor);
+            // The registration refreshes the resident in memory only — no
+            // persist here. The spawn record already carries the
+            // launch-time identity (pid, socket), and the create-completion
+            // persist (`launch_worker`'s post-create write) owns the next
+            // durable state — `Ready` with the session identity — as the
+            // metadata-survival barrier. The boot scan adopts a live worker
+            // socket-first regardless of the recorded lifecycle, and a dead
+            // worker's recovery replays the durable create command.
             let durable_session_id = match registration.session_id.clone() {
                 Some(session_id) => Some(session_id),
                 None => descriptor

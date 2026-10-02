@@ -129,6 +129,9 @@ mod win32 {
     /// `(tv_sec, tv_nsec)` -> FILETIME. The Windows epoch trails the Unix
     /// epoch by 11644473600 seconds; the sub-second part is nanoseconds
     /// against FILETIME's 100ns ticks.
+    // `tv_sec`/`tv_nsec` are the POSIX timespec spellings the callers
+    // pass through; the pair is the domain's own vocabulary.
+    #[allow(clippy::similar_names)]
     fn unix_to_filetime(tv_sec: i64, tv_nsec: i64) -> FileTime {
         const EPOCH_DELTA_TICKS: i64 = 11_644_473_600 * 10_000_000;
         let ticks = tv_sec * 10_000_000 + EPOCH_DELTA_TICKS + tv_nsec / 100;
@@ -138,7 +141,9 @@ mod win32 {
         }
     }
 
-    /// Set the directory's last-write time.
+    /// Set the directory's last-write time. The `tv_sec`/`tv_nsec` pair
+    /// is the POSIX timespec vocabulary, same as `unix_to_filetime`.
+    #[allow(clippy::similar_names)]
     pub(crate) fn set_last_write_time(path: &Path, tv_sec: i64, tv_nsec: i64) -> io::Result<()> {
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
         let handle = unsafe {
@@ -156,7 +161,14 @@ mod win32 {
             return Err(io::Error::last_os_error());
         }
         let last_write = unix_to_filetime(tv_sec, tv_nsec);
-        let ok = unsafe { SetFileTime(handle, std::ptr::null(), std::ptr::null(), &last_write) };
+        let ok = unsafe {
+            SetFileTime(
+                handle,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::from_ref(&last_write),
+            )
+        };
         unsafe { CloseHandle(handle) };
         if ok == 0 {
             return Err(io::Error::last_os_error());
