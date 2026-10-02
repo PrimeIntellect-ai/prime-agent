@@ -76,6 +76,7 @@ async fn faux_engine_with_mock_telemetry(
         client,
         execution_mode: Some("print".to_string()),
         now: None,
+        telemetry_enabled: None,
     };
     let (engine, dir, model) =
         faux_engine_with_telemetry(script, settings, None, Some(telemetry)).await;

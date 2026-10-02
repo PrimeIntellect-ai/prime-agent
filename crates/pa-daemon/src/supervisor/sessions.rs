@@ -438,9 +438,7 @@ impl Supervisor {
         // agents-view spend columns' data (a count only, never session
         // payload).
         let rows_with_usage = infos.iter().filter(|info| info.usage.is_some()).count();
-        if let Some(client) = &*self.telemetry.lock().unwrap() {
-            pa_core::session_engine::telemetry::track_saved_sessions_usage(client, rows_with_usage);
-        }
+        self.note_saved_sessions_listed(rows_with_usage);
         lines
     }
 

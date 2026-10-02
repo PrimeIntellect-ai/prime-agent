@@ -1,9 +1,9 @@
-//! Headless e2e for the `/nightly` command (TS `interactive-mode.ts`
-//! 5455-5484): the status arm resolves the effective channel from the
-//! running version when no preferred channel is set, the usage error keeps
-//! the TS wording, and the off arm pins the channel through the settings
-//! seam (a stub seam: the write lands in memory; the persisted wire form is
-//! covered by the pa-cli seam round-trip test).
+//! Headless e2e for the `/telemetry` command: bare and `status` render the
+//! seam's report, `on`/`off` persist through the settings seam and render
+//! the report after the write (including the "stays off" answer when an
+//! environment variable forces telemetry off), and a bad argument gets the
+//! usage error. The report text and the settings round-trip are covered by
+//! the pa-core telemetry status tests over the real settings store.
 #![cfg(unix)]
 // Pedantic-gate exceptions (every other pedantic warning in this crate is
 // fixed in place; each exception carries its one-line justification):
@@ -32,6 +32,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Result;
 use pa_tui::interactive::{
@@ -172,7 +173,7 @@ fn attach_data(id: &str) -> Value {
                     "activeSessionId": "s1",
                     "cwd": "/tmp",
                     "sessionId": "sess-1",
-                    "sessionName": "nightly session",
+                    "sessionName": "telemetry session",
                     "model": null,
                     "isStreaming": false,
                     "isCompacting": false,
@@ -189,12 +190,27 @@ fn attach_data(id: &str) -> Value {
     })
 }
 
-/// A minimal settings seam for the harness: every getter returns its TS
-/// default, writes succeed without persistence, and the channel pair
-/// resolves like the composition root (the version infers when unset).
+/// The settings seam stub: the telemetry switch lives in memory, and an
+/// optional environment opt-out mimics `DO_NOT_TRACK`.
 #[derive(Default)]
 struct StubSettings {
-    update_channel: std::sync::Mutex<Option<String>>,
+    telemetry_enabled: std::sync::Mutex<Option<bool>>,
+    forced_off_by: Option<&'static str>,
+    notice_due: bool,
+    notice_shown: std::sync::atomic::AtomicBool,
+}
+
+impl StubSettings {
+    fn state(&self) -> (&'static str, String) {
+        if let Some(var) = self.forced_off_by {
+            return ("off", format!("forced off by {var}"));
+        }
+        match *self.telemetry_enabled.lock().expect("telemetry lock") {
+            None => ("on", "on by default".to_string()),
+            Some(true) => ("on", "turned on in settings".to_string()),
+            Some(false) => ("off", "turned off in settings".to_string()),
+        }
+    }
 }
 
 impl pa_tui::client_settings::ClientSettings for StubSettings {
@@ -310,33 +326,42 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
         Ok(())
     }
     fn update_channel(&self) -> Option<String> {
-        self.update_channel.lock().expect("channel lock").clone()
+        None
     }
-    fn set_update_channel(&self, channel: &str) -> Result<()> {
-        *self.update_channel.lock().expect("channel lock") = Some(channel.to_string());
+    fn set_update_channel(&self, _channel: &str) -> Result<()> {
         Ok(())
     }
     fn telemetry_status(&self) -> String {
-        String::new()
+        let (state, reason) = self.state();
+        format!("Telemetry is {state} ({reason}).\nInstallation id: stub-id")
     }
-    fn set_telemetry_enabled(&self, _enabled: bool) -> Result<String> {
-        Ok(String::new())
-    }
-    fn effective_update_channel(&self, version: &str) -> String {
-        if let Some(channel) = self.update_channel() {
-            return channel;
-        }
-        // The inference TS resolveUpdateChannel applies: a -beta*
-        // prerelease reads nightly, anything else stable.
-        if version.contains("-beta") {
-            "nightly".to_string()
+    fn set_telemetry_enabled(&self, enabled: bool) -> Result<String> {
+        *self.telemetry_enabled.lock().expect("telemetry lock") = Some(enabled);
+        let headline = if self.forced_off_by.is_some() && enabled {
+            "Saved telemetry on in settings, but it stays off."
+        } else if enabled {
+            "Telemetry turned on."
         } else {
-            "stable".to_string()
-        }
+            "Telemetry turned off."
+        };
+        Ok(format!("{headline}\n{}", self.telemetry_status()))
+    }
+    fn effective_update_channel(&self, _version: &str) -> String {
+        "stable".to_string()
+    }
+    fn telemetry_notice_due(&self) -> bool {
+        // Like the real funnel: a due notice stops being due once the
+        // marker persists.
+        self.notice_due && !self.notice_shown.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn set_telemetry_notice_shown(&self) -> Result<()> {
+        self.notice_shown
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 }
 
-fn options(socket: PathBuf) -> InteractiveOptions {
+fn options(socket: PathBuf, settings: Arc<StubSettings>) -> InteractiveOptions {
     InteractiveOptions {
         models: None,
         socket_path: socket,
@@ -370,11 +395,11 @@ fn options(socket: PathBuf) -> InteractiveOptions {
         prompt_stash: std::sync::Arc::default(),
         session_has_children: false,
         restore_dock_focus: false,
-        client_settings: Some(std::sync::Arc::new(StubSettings::default())),
+        client_settings: Some(settings),
     }
 }
 
-fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
+fn run_plan(settings: Arc<StubSettings>, steps: Vec<HeadlessStep>) -> Vec<String> {
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
@@ -391,72 +416,120 @@ fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
         height: 30,
     };
     let outcome = runtime
-        .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
+        .block_on(run_interactive(
+            options(socket, settings),
+            UiMode::Headless(plan),
+        ))
         .expect("interactive run");
     handle.join().expect("mock supervisor finished");
     outcome.frames
 }
 
-/// `/nightly status` reports the inferred channel (the headless harness
-/// has no settings seam, so no preferred channel is set) and the running
-/// version; a bad argument gets the TS usage error.
+fn submit(text: &str) -> Vec<HeadlessStep> {
+    vec![
+        HeadlessStep::Submit(text.to_string()),
+        HeadlessStep::WaitMs(200),
+    ]
+}
+
+/// Bare `/telemetry` and `/telemetry status` render the report; a bad
+/// argument gets the usage error.
 #[test]
-fn nightly_status_and_usage_error_render_the_ts_wording() {
-    let steps = vec![
-        HeadlessStep::Submit("/nightly status".to_string()),
-        HeadlessStep::WaitMs(200),
-        HeadlessStep::Submit("/nightly maybe".to_string()),
-        HeadlessStep::WaitMs(200),
-    ];
-    let frames = run_plan(steps);
-    assert!(!frames.is_empty(), "frames were captured");
-    let all = frames.join("\n");
+fn telemetry_status_renders_the_report() {
+    let settings = Arc::new(StubSettings::default());
+    let mut steps = submit("/telemetry");
+    steps.extend(submit("/telemetry status"));
+    steps.extend(submit("/telemetry maybe"));
+    let all = run_plan(Arc::clone(&settings), steps).join("\n");
     assert!(
-        all.contains("Updates follow the stable channel (inferred from the running version). v0.0.0 installed."),
-        "the status note rendered:\n{all}"
+        all.matches("Telemetry is on (on by default).").count() >= 2,
+        "bare and status both report:\n{all}"
     );
+    assert!(all.contains("Installation id: stub-id"), "{all}");
     assert!(
-        all.contains("Usage: /nightly [on|off|status]"),
+        all.contains("Usage: /telemetry [status|on|off]"),
         "the usage error rendered:\n{all}"
     );
 }
 
-/// `/nightly on` (or bare) saves the nightly channel that `/update` and
-/// `prime-agent update` follow.
+/// `/telemetry off` then `/telemetry on` persist through the seam.
 #[test]
-fn nightly_on_saves_the_nightly_channel() {
-    let steps = vec![
-        HeadlessStep::Submit("/nightly on".to_string()),
-        HeadlessStep::WaitMs(200),
-        HeadlessStep::Submit("/nightly status".to_string()),
-        HeadlessStep::WaitMs(200),
-    ];
-    let frames = run_plan(steps);
-    let all = frames.join("\n");
+fn telemetry_off_and_on_persist_the_switch() {
+    let settings = Arc::new(StubSettings::default());
+    let steps = submit("/telemetry off");
+    let all = run_plan(Arc::clone(&settings), steps).join("\n");
+    assert!(all.contains("Telemetry turned off."), "{all}");
     assert!(
-        all.contains("Updates now follow the nightly channel."),
-        "the switch note rendered:\n{all}"
+        all.contains("Telemetry is off (turned off in settings)."),
+        "{all}"
+    );
+    assert_eq!(*settings.telemetry_enabled.lock().unwrap(), Some(false));
+
+    let all = run_plan(Arc::clone(&settings), submit("/telemetry on")).join("\n");
+    assert!(all.contains("Telemetry turned on."), "{all}");
+    assert_eq!(*settings.telemetry_enabled.lock().unwrap(), Some(true));
+}
+
+/// The first-run telemetry disclosure renders as a session info row
+/// (the TS session diagnostic): once per installation, from the
+/// interactive attach, and the shown marker persists with the row.
+#[test]
+fn the_first_run_telemetry_notice_renders_as_a_row() {
+    let settings = Arc::new(StubSettings {
+        notice_due: true,
+        ..StubSettings::default()
+    });
+    let all = run_plan(Arc::clone(&settings), submit("/telemetry status")).join("\n");
+    assert!(
+        all.contains("Prime Agent sends pseudonymous usage"),
+        "the disclosure row rendered:\n{all}"
     );
     assert!(
-        all.contains("Updates follow the nightly channel (set in settings)."),
-        "the saved channel reads back:\n{all}"
+        all.contains("Disable this with /telemetry off"),
+        "the interactive switch names itself:\n{all}"
+    );
+    assert!(
+        settings
+            .notice_shown
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "the shown marker persisted with the row"
+    );
+
+    // The once-per-installation gate: a second attach with the same
+    // installation draws no second row.
+    let again = run_plan(Arc::clone(&settings), submit("/telemetry status")).join("\n");
+    assert!(
+        !again.contains("Prime Agent sends pseudonymous usage"),
+        "no second disclosure row:\n{again}"
     );
 }
 
-/// `/nightly off` pins the channel through the settings seam and renders
-/// the TS stable-pin note.
+/// The disclosure is once per installation: a run whose notice already
+/// showed draws no second row.
 #[test]
-fn nightly_off_renders_the_stable_pin_note() {
-    let steps = vec![
-        HeadlessStep::Submit("/nightly off".to_string()),
-        HeadlessStep::WaitMs(200),
-    ];
-    let frames = run_plan(steps);
-    let all = frames.join("\n");
+fn an_already_disclosed_installation_renders_no_notice_row() {
+    let settings = Arc::new(StubSettings::default());
+    let all = run_plan(Arc::clone(&settings), submit("/telemetry status")).join("\n");
     assert!(
-        all.contains(
-            "Updates now follow the stable channel. Run /update to install the latest build."
-        ),
-        "the stable-pin note rendered:\n{all}"
+        !all.contains("Prime Agent sends pseudonymous usage"),
+        "no disclosure row on an already-shown install:\n{all}"
+    );
+}
+
+/// `/telemetry on` under an environment opt-out says it stays off.
+#[test]
+fn telemetry_on_says_an_environment_opt_out_still_wins() {
+    let settings = Arc::new(StubSettings {
+        forced_off_by: Some("DO_NOT_TRACK"),
+        ..StubSettings::default()
+    });
+    let all = run_plan(Arc::clone(&settings), submit("/telemetry on")).join("\n");
+    assert!(
+        all.contains("Saved telemetry on in settings, but it stays off."),
+        "{all}"
+    );
+    assert!(
+        all.contains("Telemetry is off (forced off by DO_NOT_TRACK)."),
+        "{all}"
     );
 }

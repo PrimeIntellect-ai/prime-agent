@@ -1,8 +1,8 @@
 //! Millisecond-epoch to ISO-8601 (UTC) formatting, no time crate.
 //!
 //! Telemetry timestamps are stored as epoch milliseconds and rendered as
-//! `YYYY-MM-DDTHH:MM:SS.mmmZ` for the `PostHog` `timestamp` field and the local
-//! JSONL mirror. Civil-date math per Howard Hinnant's `civil_from_days`.
+//! `YYYY-MM-DDTHH:MM:SS.mmmZ` (JS `toISOString`) for the analytics `timestamp`
+//! field and the local JSONL mirror. Civil-date math per Howard Hinnant's `civil_from_days`.
 
 /// Milliseconds since the Unix epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
