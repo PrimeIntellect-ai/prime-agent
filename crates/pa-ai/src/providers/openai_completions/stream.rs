@@ -31,7 +31,9 @@ use crate::utils_inner::json_parse::{
     parse_json_with_repair, parse_streaming_json, StreamingJsonAccumulator,
 };
 use crate::utils_inner::sse::{ServerSentEvent, SseDecoder};
-use crate::utils_inner::stream_failure::{record_stream_failure, ProviderError};
+use crate::utils_inner::stream_failure::{
+    record_stream_failure, stream_drop_failure, OpenStreamBlock, ProviderError,
+};
 
 struct StreamingState {
     output: AssistantMessage,
@@ -44,6 +46,10 @@ struct StreamingState {
     next_reasoning_details_index: u64,
     reasoning_details_block: Option<usize>,
     response_service_tier: Option<String>,
+    /// The stop signal arrived in a chunk (`choices[0].finish_reason`).
+    saw_finish_reason: bool,
+    /// The SSE terminal marker (`data: [DONE]`) arrived.
+    saw_done_marker: bool,
 }
 
 impl StreamingState {
@@ -59,6 +65,8 @@ impl StreamingState {
             next_reasoning_details_index: 0,
             reasoning_details_block: None,
             response_service_tier: None,
+            saw_finish_reason: false,
+            saw_done_marker: false,
         }
     }
 
@@ -246,6 +254,7 @@ fn handle_chunk(
     }
 
     if let Some(finish_reason) = choice.get("finish_reason").and_then(|value| value.as_str()) {
+        state.saw_finish_reason = true;
         let (stop_reason, error_message) = map_stop_reason(finish_reason);
         state.output.stop_reason = stop_reason;
         if error_message.is_some() {
@@ -648,12 +657,18 @@ async fn run_stream(
         };
         let events = decoder.push_text(&chunk);
         for event in &events {
+            if mark_done_marker(event, &mut state) {
+                continue;
+            }
             if let Some(chunk) = parse_sse_event_data(event) {
                 handle_chunk(&chunk, model, cache_write_cost, &mut state, writer);
             }
         }
     }
     for event in decoder.finish() {
+        if mark_done_marker(&event, &mut state) {
+            continue;
+        }
         if let Some(chunk) = parse_sse_event_data(&event) {
             handle_chunk(&chunk, model, cache_write_cost, &mut state, writer);
         }
@@ -690,14 +705,52 @@ async fn run_stream(
                 .unwrap_or_else(|| "Provider returned an error stop reason".to_string()),
         ));
     }
+    // The drop: the provider ended the stream without its terminal marker —
+    // no stop signal (`finish_reason`), no `[DONE]`, no error frame. A
+    // healthy completion always carries one; an end without one means the
+    // response was cut off mid-flight, so the turn must not settle as a
+    // completed (partial or empty) message. Classified as the retryable
+    // `stream_drop` failure: the auto-retry arms re-issue the same request,
+    // and the exhaustion discloses instead of the silent empty turn.
+    if !state.saw_finish_reason && !state.saw_done_marker {
+        return Err(ProviderError::StreamFailure(stream_drop_failure(
+            open_stream_block(output),
+        )));
+    }
 
     Ok(())
+}
+
+/// Record the SSE terminal marker (`data: [DONE]`); `true` when the event
+/// carried it.
+fn mark_done_marker(event: &ServerSentEvent, state: &mut StreamingState) -> bool {
+    if event.data.trim() == "[DONE]" {
+        state.saw_done_marker = true;
+        true
+    } else {
+        false
+    }
+}
+
+/// The block a dropped stream was inside when the connection ended.
+fn open_stream_block(output: &AssistantMessage) -> OpenStreamBlock {
+    match output.content.last() {
+        Some(AssistantContent::Thinking(_)) => OpenStreamBlock::Thinking,
+        Some(AssistantContent::Text(_)) => OpenStreamBlock::Text,
+        Some(AssistantContent::ToolCall(_)) => OpenStreamBlock::ToolCall,
+        None => OpenStreamBlock::None,
+    }
 }
 
 /// Parse the JSON payload of an SSE event; `None` for `[DONE]` and comments.
 #[cfg(test)]
 #[path = "stream_bench.rs"]
 mod stream_bench;
+
+/// The stream-drop pins (the SSE fixtures that end without a stop signal).
+#[cfg(test)]
+#[path = "stream_drop.rs"]
+mod stream_drop;
 
 fn parse_sse_event_data(event: &ServerSentEvent) -> Option<Value> {
     if event.data.trim() == "[DONE]" {

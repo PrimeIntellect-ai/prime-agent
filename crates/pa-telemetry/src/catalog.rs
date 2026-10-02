@@ -202,6 +202,7 @@ pub const ERROR_SUBTYPES: &[&str] = &[
     "provider_unavailable",
     "refusal",
     "malformed_response",
+    "stream_drop",
     "context_limit",
     "configuration_error",
     "filesystem_error",
