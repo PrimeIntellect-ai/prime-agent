@@ -35,7 +35,10 @@
 //! lower-seq reports per source, which would stick a pane at working).
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+// AtomicBool feeds the unix-gated SOCKET_REFUSAL_LOGGED static only.
+#[cfg(unix)]
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use serde_json::{json, Map, Value};
