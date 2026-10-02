@@ -2340,15 +2340,15 @@ class FactoryHelpTest(unittest.TestCase):
         missing = [name for name in advertised if not hasattr(namespace, name)]
         self.assertEqual(missing, [])
         # The core calls stay advertised (dotted examples) and the whole
-        # namespace surface stays implemented.
-        for name in ("run", "status", "stop"):
+        # namespace surface stays implemented. This branch IS the stacked
+        # live-view PR: it ships the graph()/watch() implementations, so
+        # the guide teaches them as call examples and the namespace
+        # carries them (the same invariant the core pins on its own tree,
+        # which trims them because its namespace stops at resume()).
+        for name in ("run", "status", "stop", "graph", "watch"):
             self.assertIn(name, advertised)
-        for name in ("run", "status", "stop", "resume", "help"):
+        for name in ("run", "status", "stop", "resume", "help", "graph", "watch"):
             self.assertTrue(hasattr(namespace, name), name)
-        # The not-yet-shipped views are named as roadmap prose, never as
-        # call examples.
-        self.assertNotRegex(doc, r"rlm\.factory\.(graph|watch)\(")
-        self.assertIn("(`graph()` and a bounded `watch()`) arrive with the stacked live-view PR", flat)
 
 
 # ---------------------------------------------------------------------------

@@ -40,55 +40,6 @@ pub(crate) fn advertised_server_capabilities(agent_dir: &Path) -> Vec<String> {
     capabilities
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The opt-in default: no settings file, no factory lane.
-    #[test]
-    fn the_factory_lane_stays_unadvertised_until_enabled() {
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        let agent_dir = dir.path().join("agent");
-        std::fs::create_dir_all(&agent_dir).expect("agent dir");
-
-        let disabled = advertised_server_capabilities(&agent_dir);
-        assert!(
-            !disabled.iter().any(|capability| capability == "factory_activity"),
-            "the default factory gate stays off: {disabled:?}"
-        );
-
-        // `/factory on` persists `factory.enabled` in the settings file —
-        // the exact shared key the lane advertisement reads.
-        let settings = serde_json::json!({ "factory": { "enabled": true } });
-        std::fs::write(
-            agent_dir.join("settings.json"),
-            serde_json::to_string(&settings).expect("serialize"),
-        )
-        .expect("write settings");
-        let enabled = advertised_server_capabilities(&agent_dir);
-        assert!(
-            enabled.iter().any(|capability| capability == "factory_activity"),
-            "the enabled factory advertises its lane: {enabled:?}"
-        );
-
-        // `/factory off` re-reads as disabled: the lane leaves the
-        // advertisement again.
-        let off = serde_json::json!({ "factory": { "enabled": false } });
-        std::fs::write(
-            agent_dir.join("settings.json"),
-            serde_json::to_string(&off).expect("serialize"),
-        )
-        .expect("write settings");
-        let disabled_again = advertised_server_capabilities(&agent_dir);
-        assert!(
-            !disabled_again
-                .iter()
-                .any(|capability| capability == "factory_activity"),
-            "the disabled factory lane leaves the advertisement: {disabled_again:?}"
-        );
-    }
-}
-
 impl Worker {
     /// `factory_activity`: one factory action over this session's kernel.
     /// The arm mirrors `handle_kernel_bash_activity`: the engine owns the
@@ -125,5 +76,58 @@ impl Worker {
             Ok(result) => response_success(None, "factory_activity", Some(result)),
             Err(error) => response_failure(None, "factory_activity", &format!("{error:#}"), None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The opt-in default: no settings file, no factory lane.
+    #[test]
+    fn the_factory_lane_stays_unadvertised_until_enabled() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).expect("agent dir");
+
+        let disabled = advertised_server_capabilities(&agent_dir);
+        assert!(
+            !disabled
+                .iter()
+                .any(|capability| capability == "factory_activity"),
+            "the default factory gate stays off: {disabled:?}"
+        );
+
+        // `/factory on` persists `factory.enabled` in the settings file —
+        // the exact shared key the lane advertisement reads.
+        let settings = serde_json::json!({ "factory": { "enabled": true } });
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            serde_json::to_string(&settings).expect("serialize"),
+        )
+        .expect("write settings");
+        let enabled = advertised_server_capabilities(&agent_dir);
+        assert!(
+            enabled
+                .iter()
+                .any(|capability| capability == "factory_activity"),
+            "the enabled factory advertises its lane: {enabled:?}"
+        );
+
+        // `/factory off` re-reads as disabled: the lane leaves the
+        // advertisement again.
+        let off = serde_json::json!({ "factory": { "enabled": false } });
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            serde_json::to_string(&off).expect("serialize"),
+        )
+        .expect("write settings");
+        let disabled_again = advertised_server_capabilities(&agent_dir);
+        assert!(
+            !disabled_again
+                .iter()
+                .any(|capability| capability == "factory_activity"),
+            "the disabled factory lane leaves the advertisement: {disabled_again:?}"
+        );
     }
 }

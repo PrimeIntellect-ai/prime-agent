@@ -25,6 +25,20 @@ run/status/stop/resume/graph/watch calls with worked examples — call
 PR; on builds without it, the module docstring in
 `prime-agent-runtime/src/rlm/factory.py` is the source of truth.
 
+## The opt-in gate
+
+The factory ships disabled. `rlm.factory.help()` answers while it is off
+(the authoring guide stays readable before opting in), but every other
+`rlm.factory` call and every factory harness write refuses with one
+message: `the factory is disabled; run /factory on to enable it`. The
+user turns it on with `/factory on` in the client (`/factory off`
+disables it again, `/factory status` reports it), which persists the
+`factory.enabled` setting in the agent dir's settings.json — the same
+setting the daemon's `factory_activity` lane advertisement reads, so the
+TUI's factory dock group and page surface only on a client started while
+the factory is enabled. If a call refuses with that message, tell the
+user to run `/factory on` and restart the client.
+
 ## Discovering machines
 
 - The machine library (arriving on the stacked machine-library PR):

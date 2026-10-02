@@ -599,7 +599,9 @@ fn an_unadvertised_factory_lane_mounts_no_factory_group() {
         "no factory segment renders: {text}"
     );
     assert!(
-        segments.iter().all(|segment| segment.group != ActivityGroup::Factory),
+        segments
+            .iter()
+            .all(|segment| segment.group != ActivityGroup::Factory),
         "no factory click region records"
     );
     // The arrows wrap the remaining groups exactly: a stale Factory

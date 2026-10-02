@@ -3666,9 +3666,35 @@ status["usage"]    # spawns, settled, tool_uses, max_parallel, max_children, run
                     # transitions_fired
 ```
 
-The live monitoring views (`graph()` and a bounded `watch()`) arrive
-with the stacked live-view PR; `status()` covers the run state, node
-detail, and the event ledger until then.
+`graph()` and `watch()` are the live monitoring views this namespace
+ships alongside the stacked live-view PR's TUI page:
+
+```python
+graph = await rlm.factory.graph(result["run_id"])
+# {"run_id": "...", "spec_id": "pr-manager", "state": "running",
+#  "machine": {"order": [...], "states": [...],
+#              "transitions": [...], "run": {...}},
+#  "nodes": [...], "active_nodes": [...], "last_fired": [...],
+#  "events": [...], "usage": {...}, "budget": {"limit_ms": ...,
+#  "consumed_ms": ...}}  — structure fused with live state.
+
+every = await rlm.factory.graph()        # every live run ({"runs": [...]})
+spec = await rlm.factory.graph("pr-manager")  # a stored spec's static graph
+
+watched = await rlm.factory.watch(result["run_id"], 30)
+# the same fused snapshot plus "changed" — the call blocks until the
+# run's state/instance shape changes or the bounded timeout elapses,
+# so one call streams a run's progress without polling `status()`.
+```
+
+- `graph(ref)` fuses the machine's structure (states, guarded
+  transitions, the declared order) with the live run's overlay (the
+  node reports, active nodes, recently fired edges, the event tail,
+  usage, budget consumed); a stored spec id answers the static
+  structure, and no ref answers every live run.
+- `watch(run_id, timeout)` returns immediately with the snapshot when
+  nothing changed, blocks until the run's state/instance shape changes,
+  and answers `"changed": false` on the bounded timeout.
 
 - `run` re-validates the spec and resolves every subagent reference first,
   reporting all failures in one `ValueError` and starting nothing on any
@@ -3692,9 +3718,11 @@ detail, and the event ledger until then.
   seeds are `builder`, `pr-manager`, and `review-sweep`; the worked
   examples above derive from their shapes.
 - The TUI factory page: the activity dock's `⚙ N factory` group (Enter or
-  click) opens one live diagram per run, newest run first. `j`/`k` move the
-  selection, `s` stops the selected run, `r` resumes it, `m` copies it as
-  Mermaid source, Esc closes.
+  click) opens one live diagram per run, newest run first. The up/down
+  arrows move the run selection, Enter opens the selected run's action
+  rows (stop, or resume first while the run is paused — the arrows walk
+  the rows, Enter runs the tracked action), and Esc backs out of the rows
+  before it closes the page.
 
 ## Safety
 

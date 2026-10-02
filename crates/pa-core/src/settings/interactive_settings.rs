@@ -374,7 +374,10 @@ impl SettingsManager {
     ///
     /// Returns an error when the global settings scope cannot be saved.
     pub fn set_factory_enabled(&mut self, enabled: bool) -> Result<()> {
-        self.global_mut().factory.get_or_insert_with(Default::default).enabled = Some(enabled);
+        self.global_mut()
+            .factory
+            .get_or_insert_with(Default::default)
+            .enabled = Some(enabled);
         self.save_global_scope()
     }
 
