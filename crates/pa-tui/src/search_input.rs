@@ -7,7 +7,7 @@ use crate::keybindings::KeybindingsManager;
 /// The single-line search input (TS `Input`): value, cursor, undo stack,
 /// and an Emacs-style kill ring. Dispatch happens through the shared
 /// keybinding manager; the model selector owns when keys reach it.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct SearchInput {
     value: String,
     /// Cursor position in characters.
@@ -232,22 +232,35 @@ impl SearchInput {
             self.move_word_forward();
             return;
         }
-        // Regular character input: printable characters only, one char at a
-        // time (control sequences never reach the value).
-        if let [character] = key.chars().collect::<Vec<char>>()[..] {
-            if !character.is_control() {
-                self.push_type_undo(character);
-                self.insert_at_cursor(&character.to_string());
-            }
+        // Regular character input (TS `Input.handleInput`'s printable arm):
+        // TS reads the raw space byte; the port gets the `space` key id,
+        // which `decode_printable` maps back.
+        if let Some(character) =
+            crate::editor::decode_printable(key).and_then(|text| text.chars().next())
+        {
+            self.push_type_undo(character);
+            self.insert_at_cursor(&character.to_string());
         }
     }
 
     /// A whole-word paste (bracketed paste, newlines stripped like TS).
+    /// Control bytes never reach the value — the editor's `handle_paste`
+    /// filters them — so an ESC/OSC sequence riding a paste cannot be
+    /// stored in the query and re-emitted to the terminal on the next
+    /// render of the field.
     pub(crate) fn paste(&mut self, text: &str) {
-        self.last_action = LastAction::None;
-        self.push_undo();
         let mut clean = text.replace(['\r', '\n'], "");
         clean = clean.replace('\t', "    ");
+        clean = clean.chars().filter(|c| !c.is_control()).collect();
+        // A payload that filters to nothing (control-only bytes, empty
+        // bracketed paste) changes nothing: no undo step is pushed, so
+        // the next undo still undoes the typing (the editor's
+        // `handle_paste` rule).
+        if clean.is_empty() {
+            return;
+        }
+        self.last_action = LastAction::None;
+        self.push_undo();
         self.insert_at_cursor(&clean);
     }
 
@@ -320,31 +333,11 @@ impl SearchInput {
     /// grapheme that ends at the cursor and a mid-cluster cursor
     /// classifies the partial cluster the same way TS does.
     fn move_word_backward(&mut self) {
-        use unicode_segmentation::UnicodeSegmentation;
         if self.cursor == 0 {
             return;
         }
         let before: String = self.chars()[..self.cursor].iter().collect();
-        let mut graphemes: Vec<&str> = before.graphemes(true).collect();
-        while graphemes.last().is_some_and(|g| g.chars().any(is_ws)) {
-            let g = graphemes.pop().expect("last checked Some");
-            self.cursor -= g.chars().count();
-        }
-        let Some(last) = graphemes.last().copied() else {
-            return;
-        };
-        let punctuation_run = last.chars().any(is_punct);
-        while let Some(g) = graphemes.last().copied() {
-            if punctuation_run {
-                if !g.chars().any(is_punct) {
-                    break;
-                }
-            } else if g.chars().any(is_ws) || g.chars().any(is_punct) {
-                break;
-            }
-            graphemes.pop();
-            self.cursor -= g.chars().count();
-        }
+        self.cursor = word_walk_start(&before);
     }
 
     /// Word-boundary walk forward (TS `moveWordForwards`), grapheme by
@@ -413,6 +406,37 @@ fn is_punct(c: char) -> bool {
     crate::width::is_punctuation_char(c)
 }
 
+/// The word walk TS `moveWordBackwards` runs on a before-cursor slice:
+/// the char index where the run in front of the trailing whitespace
+/// starts, the last grapheme's class deciding whether the run is
+/// punctuation or word characters. The slice is segmented standalone,
+/// exactly like the TS original, so the run starts at the grapheme that
+/// ends the slice; an all-whitespace slice walks to 0. Shared by the
+/// search input's cursor walk and the plain-string word deletes that
+/// hold the caret at the slice's end.
+pub(crate) fn word_walk_start(text: &str) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut graphemes: Vec<&str> = text.graphemes(true).collect();
+    while graphemes.last().is_some_and(|g| g.chars().any(is_ws)) {
+        graphemes.pop();
+    }
+    let Some(last) = graphemes.last().copied() else {
+        return 0;
+    };
+    let punctuation_run = last.chars().any(is_punct);
+    while let Some(g) = graphemes.last().copied() {
+        if punctuation_run {
+            if !g.chars().any(is_punct) {
+                break;
+            }
+        } else if g.chars().any(is_ws) || g.chars().any(is_punct) {
+            break;
+        }
+        graphemes.pop();
+    }
+    graphemes.iter().map(|g| g.chars().count()).sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,6 +452,52 @@ mod tests {
             input.handle_key(&character.to_string(), &kb());
         }
         input
+    }
+
+    /// The `space` key id types a space: TS `Input.handleInput`'s
+    /// regular-character arm reads the RAW space byte (0x20, printable),
+    /// while this port receives TS's `space` key id, so the same printable
+    /// decode that maps it back feeds the value.
+    #[test]
+    fn the_space_key_id_types_a_space() {
+        let mut input = typed("a");
+        input.handle_key("space", &kb());
+        input.handle_key("b", &kb());
+        assert_eq!(input.value(), "a b");
+        assert_eq!(input.cursor(), 3);
+        // Backspace walks the typed characters back out, space included.
+        input.handle_key("backspace", &kb());
+        assert_eq!(input.value(), "a ");
+        input.handle_key("backspace", &kb());
+        assert_eq!(input.value(), "a");
+    }
+
+    /// A paste's control bytes never reach the value (the editor's
+    /// `handle_paste` filters them): an ESC/OSC sequence riding a
+    /// bracketed paste would otherwise be stored in the query and
+    /// re-emitted to the terminal on the next render of the field.
+    #[test]
+    fn paste_rejects_control_bytes() {
+        let mut input = typed("a");
+        input.paste("\u{1b}]8;;https://evil.example\u{7}b\u{7f}");
+        // The ESC/BEL/DEL bytes are dropped (the payload's printable
+        // characters stay text, like the editor's paste filter): no
+        // control byte survives into the value, so the field's render
+        // can never re-emit a terminal control sequence.
+        assert_eq!(input.value(), "a]8;;https://evil.exampleb");
+        assert!(!input.value().chars().any(char::is_control));
+    }
+
+    /// A control-only paste filters to nothing and changes nothing: no
+    /// empty undo step is pushed (the editor's `handle_paste` rule), so
+    /// the next undo still undoes the typing.
+    #[test]
+    fn a_control_only_paste_leaves_the_undo_stack_alone() {
+        let mut input = typed("ab");
+        input.paste("\u{1b}\u{7}");
+        assert_eq!(input.value(), "ab");
+        input.handle_key("ctrl+-", &kb());
+        assert_eq!(input.value(), "", "undo removes the typing, not a no-op");
     }
 
     #[test]
