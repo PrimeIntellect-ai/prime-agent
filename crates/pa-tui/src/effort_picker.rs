@@ -107,6 +107,12 @@ impl EffortPicker {
         }
     }
 
+    /// One bracketed paste into the search (the config selector's own
+    /// paste path).
+    pub fn paste(&mut self, text: &str) {
+        self.selector.paste(text);
+    }
+
     /// The session's levels the picker was built over.
     #[must_use]
     pub fn levels(&self) -> &[String] {
