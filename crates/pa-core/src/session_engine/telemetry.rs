@@ -86,9 +86,10 @@ pub struct RecordingSwitch {
     /// Env-then-settings resolution, asked live: false means telemetry
     /// is off right now.
     pub enabled: Arc<dyn Fn() -> bool + Send + Sync>,
-    /// Bumped by telemetry-disabling settings writes; `None` for test
-    /// switches (staleness tracking off).
-    pub off_epoch: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// The persisted off-epoch (read live from the install-id state
+    /// file, so an opt-out written by ANOTHER process lands too);
+    /// `None` for test switches (staleness tracking off).
+    pub off_epoch: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
 }
 
 impl RecordingSwitch {
@@ -195,6 +196,9 @@ fn sever_off_period_run(state: &mut TelemetryState) {
 /// moved) spans an opt-out window even when no event fired inside it;
 /// it severs exactly like a run caught by an off-period event.
 fn sever_if_stale_run(state: &mut TelemetryState) {
+    if state.active_run.is_none() {
+        return;
+    }
     let Some(off_epoch) = state
         .telemetry_enabled
         .as_ref()
@@ -205,7 +209,7 @@ fn sever_if_stale_run(state: &mut TelemetryState) {
     let run_is_stale = state
         .active_run
         .as_ref()
-        .is_some_and(|run| run.off_epoch != off_epoch.load(std::sync::atomic::Ordering::Relaxed));
+        .is_some_and(|run| run.off_epoch != off_epoch());
     if run_is_stale {
         sever_off_period_run(state);
     }
@@ -780,9 +784,7 @@ fn handle_event(
                 .telemetry_enabled
                 .as_ref()
                 .and_then(|telemetry_switch| telemetry_switch.off_epoch.as_ref())
-                .map_or(0, |off_epoch| {
-                    off_epoch.load(std::sync::atomic::Ordering::Relaxed)
-                });
+                .map_or(0, |off_epoch| off_epoch());
             state.active_run = Some(ActiveRun {
                 started_at: now,
                 off_epoch,
@@ -1234,11 +1236,12 @@ pub fn telemetry_enabled_switch(
     agent_dir: &std::path::Path,
 ) -> RecordingSwitch {
     let settings = crate::settings::SettingsManager::create(cwd, agent_dir);
-    let off_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    crate::settings::register_telemetry_off_epoch_cell(&off_epoch);
+    let epoch_agent_dir = agent_dir.to_path_buf();
     RecordingSwitch {
         enabled: Arc::new(move || telemetry_switch(&settings.reopen()).enabled()),
-        off_epoch: Some(off_epoch),
+        off_epoch: Some(Arc::new(move || {
+            pa_telemetry::read_off_epoch(&epoch_agent_dir)
+        })),
     }
 }
 

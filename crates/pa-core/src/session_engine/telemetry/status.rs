@@ -115,6 +115,13 @@ pub fn set_telemetry_enabled_text(
     enabled: bool,
 ) -> anyhow::Result<String> {
     settings.set_telemetry_enabled(enabled)?;
+    if !enabled {
+        // The persisted off-epoch bumps on every successful disable: the
+        // recording seams (this process or another — the worker's) sever
+        // facts that span the opt-out even when no telemetry event fires
+        // inside the off window.
+        pa_telemetry::bump_off_epoch(agent_dir);
+    }
     let switch = telemetry_switch(&settings.reopen());
     let requested = if enabled { "on" } else { "off" };
     let headline = if switch.enabled() == enabled {

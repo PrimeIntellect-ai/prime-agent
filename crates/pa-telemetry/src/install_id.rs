@@ -348,3 +348,69 @@ mod tests {
         }
     }
 }
+
+/// The persisted telemetry off-epoch: the count of telemetry-disabling
+/// writes this installation has seen. Sessions snapshot it when a run
+/// begins and compare it per event, so a fact that spans a mid-session
+/// opt-out — even one with no telemetry event inside the off window, and
+/// even when the opt-out was written by another process (`/telemetry`
+/// runs where the command runs; the recording runs in the worker) —
+/// never reports afterwards. The epoch shares the install-id state file,
+/// so the installation id is preserved; a missing or unreadable state
+/// reads as epoch 0 (fail-open: the live per-event opt-out check still
+/// guards the off period itself).
+#[derive(Debug, Serialize, Deserialize)]
+struct OffEpochState {
+    version: u64,
+    #[serde(rename = "installationId")]
+    installation_id: String,
+    #[serde(rename = "offEpoch", default)]
+    off_epoch: u64,
+}
+
+/// Read the persisted off-epoch of `<agentDir>/telemetry.json`. A missing
+/// or unreadable state is epoch 0; this never fails the session.
+#[must_use]
+pub fn read_off_epoch(agent_dir: &Path) -> u64 {
+    read_off_epoch_state(&agent_dir.join(STATE_FILE)).map_or(0, |state| state.off_epoch)
+}
+
+fn read_off_epoch_state(path: &Path) -> Option<OffEpochState> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let state: OffEpochState = serde_json::from_str(&content).ok()?;
+    (state.version == STATE_VERSION).then_some(state)
+}
+
+/// Record a telemetry-disabling write: bump the persisted off-epoch so
+/// the recording seams (this process or another) sever facts that span
+/// the opt-out. Best-effort: a filesystem failure keeps the previous
+/// epoch — the live per-event opt-out check still guards the off period.
+pub fn bump_off_epoch(agent_dir: &Path) {
+    let path = agent_dir.join(STATE_FILE);
+    // Preserve the installation id: the state file is the identity store,
+    // and losing it would disable telemetry outright.
+    let installation_id = match read_off_epoch_state(&path) {
+        Some(state) => state.installation_id,
+        None => match install_id(agent_dir) {
+            Ok(existing) => existing,
+            Err(_) => return,
+        },
+    };
+    let next = read_off_epoch_state(&path).map_or(0, |state| state.off_epoch) + 1;
+    let state = OffEpochState {
+        version: STATE_VERSION,
+        installation_id,
+        off_epoch: next,
+    };
+    let Ok(payload) = serde_json::to_vec_pretty(&state) else {
+        return;
+    };
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let temp = dir.join(format!(".{}-{}", STATE_FILE, uuid::Uuid::new_v4().simple()));
+    if std::fs::write(&temp, &payload)
+        .and_then(|()| std::fs::rename(&temp, &path))
+        .is_err()
+    {
+        let _ = std::fs::remove_file(&temp);
+    }
+}

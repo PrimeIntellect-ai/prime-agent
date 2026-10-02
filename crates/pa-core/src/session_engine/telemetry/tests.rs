@@ -1594,9 +1594,11 @@ async fn a_zero_event_opt_out_flap_never_reports_the_spanning_tool() {
     let dir = tempfile::tempdir().unwrap();
     let agent_dir = dir.path().join("agent");
     let mut settings = crate::settings::SettingsManager::create(dir.path(), &agent_dir);
-    settings.set_telemetry_enabled(true).unwrap();
-    // The production switch: live resolution plus the registered
-    // off-epoch cell the disabling write bumps.
+    super::set_telemetry_enabled_text(&mut settings, &agent_dir, true).unwrap();
+    // The production switch: live resolution plus the persisted
+    // off-epoch the disabling write bumps (the file survives processes —
+    // the command runs where the command runs, the recording in the
+    // worker).
     let switch = telemetry_enabled_switch(dir.path(), &agent_dir);
     let fixture = fixture_with_switch_raw(switch);
     let assistant = assistant_message();
@@ -1610,9 +1612,10 @@ async fn a_zero_event_opt_out_flap_never_reports_the_spanning_tool() {
     emit(&fixture, tool_start);
 
     // The zero-event flap: telemetry goes off and back on with no
-    // telemetry event in between (the /telemetry command pair).
-    settings.set_telemetry_enabled(false).unwrap();
-    settings.set_telemetry_enabled(true).unwrap();
+    // telemetry event in between (the /telemetry command pair, through
+    // the real command funnel).
+    super::set_telemetry_enabled_text(&mut settings, &agent_dir, false).unwrap();
+    super::set_telemetry_enabled_text(&mut settings, &agent_dir, true).unwrap();
 
     // The tool ends while telemetry is on again: the run began before
     // the off epoch moved, so it severs and the spanning call never

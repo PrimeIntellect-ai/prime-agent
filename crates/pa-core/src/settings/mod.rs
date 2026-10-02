@@ -9,8 +9,8 @@ pub(crate) mod storage;
 pub(crate) mod types;
 
 pub use manager::{
-    register_telemetry_off_epoch_cell, IdleEviction, SessionArchivePolicy, SettingsError,
-    SettingsManager, DEFAULT_IDLE_EVICTION_MINUTES, DEFAULT_SESSION_ARCHIVE_MAX_AGE_DAYS,
+    IdleEviction, SessionArchivePolicy, SettingsError, SettingsManager,
+    DEFAULT_IDLE_EVICTION_MINUTES, DEFAULT_SESSION_ARCHIVE_MAX_AGE_DAYS,
     DEFAULT_SESSION_ARCHIVE_MAX_SESSIONS,
 };
 pub use storage::{
