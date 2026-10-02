@@ -99,6 +99,9 @@ fn parse_headers(bytes: &[u8]) -> Vec<(String, Option<String>)> {
                 }
                 let len = read_u16(&bytes[offset..]) as usize;
                 offset += 2;
+                if offset + len > bytes.len() {
+                    break;
+                }
                 let value = String::from_utf8_lossy(&bytes[offset..offset + len]).to_string();
                 offset += len;
                 Some(value)
@@ -159,6 +162,11 @@ impl EventStreamDecoder {
                 self.buffer.drain(..total_len);
                 continue;
             }
+            if headers_len > total_len - 16 {
+                // Header section overruns the frame; skip past it.
+                self.buffer.drain(..total_len);
+                continue;
+            }
             let headers = parse_headers(&message[12..12 + headers_len]);
             let payload = message[12 + headers_len..total_len - 4].to_vec();
             let header = |name: &str| {
@@ -199,16 +207,22 @@ mod tests {
         push_header(":message-type", "event");
         push_header(":content-type", "application/json");
         push_header(":event-type", event_type);
+        let headers_len = headers.len();
+        headers.extend_from_slice(payload);
+        raw_frame(headers_len, &headers)
+    }
+
+    /// Frame `body` (header section + payload) with a prelude declaring `headers_len`.
+    fn raw_frame(headers_len: usize, body: &[u8]) -> Vec<u8> {
         let mut message = Vec::new();
-        let total_len = 12 + headers.len() + payload.len() + 4;
+        let total_len = 12 + body.len() + 4;
         // Test frames are tiny; the event-stream wire lengths are u32.
         #[allow(clippy::cast_possible_truncation)]
         message.extend_from_slice(&(total_len as u32).to_be_bytes());
         #[allow(clippy::cast_possible_truncation)]
-        message.extend_from_slice(&(headers.len() as u32).to_be_bytes());
+        message.extend_from_slice(&(headers_len as u32).to_be_bytes());
         message.extend_from_slice(&crc32(&message[..8]).to_be_bytes());
-        message.extend_from_slice(&headers);
-        message.extend_from_slice(payload);
+        message.extend_from_slice(body);
         message.extend_from_slice(&crc32(&message).to_be_bytes());
         message
     }
@@ -234,6 +248,31 @@ mod tests {
             r#"{"messageStart":{"role":"assistant"}}"#
         );
         assert_eq!(all[1].event_type.as_deref(), Some("metadata"));
+    }
+
+    #[test]
+    fn string_header_overrunning_the_section_stops_header_parsing() {
+        // Header section: name_len 0, type 7, string len 0xFF7E past the section end.
+        let mut stream = raw_frame(4, &[0, 7, 255, 126]);
+        stream.extend(frame("metadata", b"{}"));
+        let messages = EventStreamDecoder::new().push(&stream);
+        let decoded: Vec<_> = messages
+            .iter()
+            .map(|m| (m.event_type.as_deref(), m.payload.as_slice()))
+            .collect();
+        assert_eq!(decoded, [(None, &b""[..]), (Some("metadata"), &b"{}"[..])]);
+    }
+
+    #[test]
+    fn frame_whose_headers_len_overruns_it_is_skipped() {
+        let mut stream = raw_frame(0xFF7E, &[]);
+        stream.extend(frame("metadata", b"{}"));
+        let messages = EventStreamDecoder::new().push(&stream);
+        let decoded: Vec<_> = messages
+            .iter()
+            .map(|m| (m.event_type.as_deref(), m.payload.as_slice()))
+            .collect();
+        assert_eq!(decoded, [(Some("metadata"), &b"{}"[..])]);
     }
 
     #[test]

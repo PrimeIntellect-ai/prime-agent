@@ -189,6 +189,11 @@ pub fn session_activity_detail(summary: &Value, options: &SessionActivityOptions
     if active("isBashRunning") {
         return "running bash".to_string();
     }
+    // The session's own turn ended, but its subagents still work: the
+    // worker reports `activity: "working"` for it, and the label says why.
+    if active("hasRunningSubagents") {
+        return "subagents running".to_string();
+    }
     if str_field("lifecycle") == Some("archived") {
         return "archived".to_string();
     }
@@ -297,6 +302,18 @@ mod tests {
             classify_summary_value(&summary, false),
             AgentRosterStatus::Running
         );
+        // Own turn done, subagents still running: the worker reports the
+        // session as working, so it classifies running.
+        let summary = json!({
+            "activeSessionId": "a1",
+            "activity": "working",
+            "isSessionActive": false,
+            "hasRunningSubagents": true,
+        });
+        assert_eq!(
+            classify_summary_value(&summary, false),
+            AgentRosterStatus::Running
+        );
         // No active session id: not resident.
         let summary = json!({ "activity": "working" });
         assert_eq!(
@@ -387,6 +404,10 @@ mod tests {
         assert_eq!(
             detail(json!({ "activity": "working", "isCompacting": true })),
             "compacting"
+        );
+        assert_eq!(
+            detail(json!({ "activity": "working", "hasRunningSubagents": true })),
+            "subagents running"
         );
         assert_eq!(
             detail(json!({ "activity": "working", "workerState": "starting" })),

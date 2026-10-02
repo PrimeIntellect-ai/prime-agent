@@ -538,7 +538,8 @@ fn write_all(out: &mut Stdout, sequence: &[u8]) -> Result<()> {
 /// Enable the kitty protocol (TS writes `\x1b[>7u` when the query answer
 /// arrives). Skipped when the surface that started the probe is already
 /// gone — a stray enable would leave the flags pushed over the next
-/// surface's own setup.
+/// surface's own setup. Unix only: the kitty probe is the unix surface
+/// (see `spawn_kitty_probe`).
 #[cfg(unix)]
 fn enable_kitty(out: &mut Stdout) {
     // The capability is the durable truth: a later start re-applies the
@@ -586,8 +587,10 @@ pub(crate) fn pop_stale_levels(out: &mut Stdout) {
 /// then settle. An answer within crossterm's patched 250ms query window
 /// enables kitty; no answer settles with no enhanced modes (this port
 /// never arms the modifyOtherKeys fallback — see the module docs).
-/// The kitty probe is unix-only: the vendored crossterm's raw-read
-/// support check exists only on unix (cfg(all(unix, feature = "events"))).
+/// Unix only: the kitty keyboard protocol is a unix terminal surface
+/// (the vendored crossterm exposes the raw-read check unix-only); the
+/// Windows console arm settles no-kitty below — the capability stays
+/// unresolved there, never armed.
 #[cfg(unix)]
 fn spawn_kitty_probe() {
     let probe = std::thread::Builder::new()
@@ -689,9 +692,16 @@ fn spawn_kitty_probe() {
     }
 }
 
+<<<<<<< HEAD
 /// Windows has no kitty keyboard protocol probe: the capability settles
 /// as probed-but-unsupported (the same settle the no-answer probe path
 /// takes) and the query window closes.
+=======
+/// Windows has no kitty keyboard protocol probe (the vendored crossterm
+/// ships the raw-read support check unix-only): the capability settles as
+/// probed-but-unsupported — the same settle the no-answer probe path takes —
+/// and the query window closes.
+>>>>>>> pi/main
 #[cfg(not(unix))]
 fn spawn_kitty_probe() {
     KITTY_PROBED.store(true, Ordering::SeqCst);

@@ -731,9 +731,6 @@ fn continue_recent_view(
     let cwd = options.config.cwd.clone();
     let path = pa_core::session::discovery::find_most_recent_session_for_cwd(&session_dir, &cwd)?;
     let header = pa_core::session::manager::read_session_header(&path)?;
-    if header.id.is_empty() {
-        return None;
-    }
     Some(ContinueRecentView {
         session_id: header.id.clone(),
         notice: format!(

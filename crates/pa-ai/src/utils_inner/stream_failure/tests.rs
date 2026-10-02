@@ -457,3 +457,41 @@ fn http_error_records_sdk_name() {
         "Provider rejected the request (invalid_request_error, 400): bad"
     );
 }
+
+/// The stream-drop class: the failure names the class (the telemetry
+/// classifier's `stream_drop` token rides the message) and the detail
+/// names the block the stream was inside (the disclosure the silent
+/// drop class was missing).
+#[test]
+fn stream_drop_failures_disclose_the_class_and_block() {
+    let failure = stream_drop_failure(OpenStreamBlock::Thinking);
+    assert_eq!(failure.info.kind, StreamFailureKind::StreamDrop);
+    assert_eq!(
+        failure.info.provider_error_type.as_deref(),
+        Some("stream_drop")
+    );
+    assert_eq!(
+        failure.message,
+        "Provider dropped the response stream (stream_drop): the stream ended inside a thinking block before the stop signal"
+    );
+    assert_eq!(
+        format_stream_failure_message(&ProviderError::StreamFailure(failure.clone())),
+        failure.message
+    );
+    // The serialized kind is the telemetry/telemetry-classifier token.
+    let kind_json = serde_json::to_value(failure.info.kind).expect("kind serializes");
+    assert_eq!(kind_json, serde_json::json!("stream_drop"));
+
+    assert_eq!(
+        stream_drop_failure(OpenStreamBlock::Text).message,
+        "Provider dropped the response stream (stream_drop): the stream ended inside a text block before the stop signal"
+    );
+    assert_eq!(
+        stream_drop_failure(OpenStreamBlock::ToolCall).message,
+        "Provider dropped the response stream (stream_drop): the stream ended inside a tool-call block before the stop signal"
+    );
+    assert_eq!(
+        stream_drop_failure(OpenStreamBlock::None).message,
+        "Provider dropped the response stream (stream_drop): the stream ended before any response content or stop signal"
+    );
+}

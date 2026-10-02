@@ -248,7 +248,8 @@ fn scan_socket_dir(socket_dir: &Path) -> Vec<PathBuf> {
 
 /// Windows daemon endpoints are named pipes: there is no socket directory to
 /// sweep, and discovery comes from tracked worker descriptors and the
-/// default pipe (TS `scanSocketDir` returns [] on win32).
+/// default pipe (see [`discover_daemons_with`]; TS `scanSocketDir` returns
+/// [] on win32).
 #[cfg(not(unix))]
 fn scan_socket_dir(_socket_dir: &Path) -> Vec<PathBuf> {
     Vec::new()
@@ -464,6 +465,17 @@ pub(crate) fn verify_hello_supervisor_pid(
 /// current root, tests pass their own fixture dirs. A daemon outside the
 /// root is never discovered, probed, or stopped.
 pub(crate) fn discover_daemons(root: &DaemonStateRoot) -> Vec<DaemonInfo> {
+    discover_daemons_with(root, cfg!(windows))
+}
+
+/// [`discover_daemons`] with the endpoint model explicit. With
+/// `named_pipes` (Windows) there is no listener census and no socket dir to
+/// sweep, so the fixed daemon pipe is always probed: an idle daemon with no
+/// tracked workers is otherwise invisible and `shutdown` would report
+/// success without stopping it. A pipe exists only while its server holds
+/// it, so an unanswered one with no listener or tracked worker is simply
+/// absent - there is no orphan file to report or remove.
+fn discover_daemons_with(root: &DaemonStateRoot, named_pipes: bool) -> Vec<DaemonInfo> {
     let mut process_by_socket = std::collections::HashMap::new();
     for daemon in scan_listening_daemons(root) {
         if is_worker_socket_path(&daemon.socket_path, &root.socket_dir) {
@@ -485,12 +497,13 @@ pub(crate) fn discover_daemons(root: &DaemonStateRoot) -> Vec<DaemonInfo> {
                 .filter(|path| !is_worker_socket_path(path, &root.socket_dir)),
         )
         .chain(worker_sockets.iter().cloned())
+        .chain(named_pipes.then(|| root.default_socket_path.clone()))
         .collect();
     sockets.retain(|path| state_root_matches(root, path));
 
     let mut infos: Vec<DaemonInfo> = sockets
         .into_iter()
-        .map(|socket_path| {
+        .filter_map(|socket_path| {
             let proc = process_by_socket.get(&socket_path);
             let probe = probe_daemon(&socket_path);
             let pid = proc.map(|daemon| daemon.pid).or_else(|| {
@@ -504,10 +517,12 @@ pub(crate) fn discover_daemons(root: &DaemonStateRoot) -> Vec<DaemonInfo> {
                 classify_reachable(&probe)
             } else if proc.is_some() || has_tracked_workers {
                 DaemonStatus::Unreachable
+            } else if named_pipes {
+                return None;
             } else {
                 DaemonStatus::OrphanFile
             };
-            DaemonInfo {
+            Some(DaemonInfo {
                 pid_source: pid.map(|_| {
                     if proc.is_some() {
                         PidSource::Listener
@@ -527,7 +542,7 @@ pub(crate) fn discover_daemons(root: &DaemonStateRoot) -> Vec<DaemonInfo> {
                 session_count: probe.session_count,
                 status,
                 has_tracked_workers: has_tracked_workers.then_some(true),
-            }
+            })
         })
         .collect();
     sort_daemons(&mut infos);
@@ -682,6 +697,41 @@ mod tests {
         assert_eq!(infos[0].status, DaemonStatus::OrphanFile);
         // Not the root's default path: leftover.sock, not daemon.sock.
         assert!(!infos[0].is_default);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn named_pipe_discovery_probes_the_default_endpoint_without_tracked_workers() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut root = fixture_root(tmp.path());
+        // Outside the socket dir, so the socket-dir sweep cannot find it:
+        // only the named-pipe arm's fixed endpoint does, like the Windows
+        // daemon pipe.
+        root.default_socket_path = root.agent_dir.join("daemon-pipe.sock");
+        std::fs::create_dir_all(&root.socket_dir).expect("socket dir");
+
+        // No daemon on the pipe: nothing is reported, not a fake orphan.
+        assert!(discover_daemons_with(&root, true).is_empty());
+
+        // An idle daemon with no tracked workers. Accepted connections are
+        // dropped at once, so the probe is reachable without the hello wait.
+        let listener =
+            std::os::unix::net::UnixListener::bind(&root.default_socket_path).expect("bind");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                drop(stream);
+            }
+        });
+        assert!(
+            discover_daemons_with(&root, false).is_empty(),
+            "the unix arm only sees socket-dir files and listeners"
+        );
+        let infos = discover_daemons_with(&root, true);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].socket_path, root.default_socket_path);
+        assert!(infos[0].is_default);
+        assert_eq!(infos[0].has_tracked_workers, None);
+        assert_eq!(infos[0].status, DaemonStatus::Stale);
     }
 
     #[test]
