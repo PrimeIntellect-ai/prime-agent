@@ -66,26 +66,10 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
     )?;
     let configuration_load_ms = configuration_load_started.elapsed().as_millis() as u64;
     // Telemetry disclosure (TS agent-session-services): once per
-    // installation, only after onboarding marked itself shown (a first
-    // interactive run belongs to the onboarding screen; the notice surfaces
-    // on the next launch). Divergence from TS: the TS product renders it as
-    // (a session diagnostic in the TUI; the Rust build prints it to stderr
-    // before the TUI starts, which keeps the same text visible without a
-    // daemon-side diagnostics round-trip).
-    if !options.config.telemetry_disabled {
-        let mut settings = pa_core::settings::SettingsManager::create(
-            &options.config.cwd,
-            &options.config.agent_dir,
-        );
-        if settings.get_onboarding_shown() && !settings.get_telemetry_notice_shown() {
-            eprintln!(
-                "Prime Agent sends pseudonymous usage and performance metrics without prompts, responses, tool content, file paths, or repository data. Disable this with /telemetry off, telemetry.enabled=false, PRIME_AGENT_TELEMETRY=0, DO_NOT_TRACK=1, or offline mode."
-            );
-            if let Err(error) = settings.set_telemetry_notice_shown(true) {
-                eprintln!("Warning: could not persist the telemetry notice: {error}");
-            }
-        }
-    }
+    // installation; an interactive launch defers it behind onboarding (a
+    // first interactive run belongs to the onboarding screen, so the
+    // notice surfaces on the next launch).
+    crate::telemetry_notice::print_if_due(&options.config, true);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
