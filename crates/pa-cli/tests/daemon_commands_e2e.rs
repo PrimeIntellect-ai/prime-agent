@@ -306,11 +306,15 @@ fn normalize_token(token: &str) -> String {
     if let Some(stripped) = token.strip_suffix(',') {
         return format!("{},", normalize_token(stripped));
     }
-    if is_age(token) || is_clock(token) || token == "AM" || token == "PM" {
-        return "<time>".to_string();
-    }
+    // The strict, fixed-length id shapes are matched first: a 12-char hex
+    // display id can read as an age (eleven digits plus a `d` suffix), and
+    // the age matcher would otherwise fold it into `<time>` and break the
+    // golden on a legal id draw.
     if is_hex_id(token) || is_uuid(token) || is_iso_timestamp(token) || is_local_date(token) {
         return "<timestamp>".to_string();
+    }
+    if is_age(token) || is_clock(token) || token == "AM" || token == "PM" {
+        return "<time>".to_string();
     }
     token.to_string()
 }
@@ -353,6 +357,20 @@ fn is_clock(token: &str) -> bool {
         && parts
             .iter()
             .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+}
+
+#[test]
+fn hex_display_id_normalizes_as_a_timestamp_even_when_it_reads_as_an_age() {
+    // The display id is the last 12 hex chars of a random uuid, so one
+    // draw in ~2800 is eleven digits plus `d` — the exact shape of the
+    // age matcher. It is an id, and must fold into `<timestamp>` (the
+    // CI flake this regression test pins; the real ages keep `<time>`).
+    assert_eq!(normalize_token("12345678901d"), "<timestamp>");
+    assert_eq!(normalize_token("b72ad7009b11"), "<timestamp>");
+    assert_eq!(normalize_token("3s"), "<time>");
+    assert_eq!(normalize_token("2h"), "<time>");
+    assert_eq!(normalize_token("10:34:59"), "<time>");
+    assert_eq!(normalize_token("PM"), "<time>");
 }
 
 /// Recursively sort object keys so TS (insertion order) and Rust (sorted) JSON
