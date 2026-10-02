@@ -35,7 +35,7 @@
 //! The structural gates run everywhere. The behavior gates execute the
 //! workflow's own step scripts against simulated downloads for both layout
 //! modes (the port of the TS test's per-channel triad: production-only,
-//! beta-only, both - here one target, four targets, none) and skip with a
+//! beta-only, both - here one target, five targets, none) and skip with a
 //! logged reason where the box's python3 is below the floor the step
 //! scripts need (python 3.12: the merge step unpacks with
 //! `extractall(filter=)`; the promote runner's ubuntu-24.04 provides it).
@@ -51,24 +51,40 @@ use sha2::{Digest, Sha256};
 /// The fixture version the assembled artifacts carry.
 const VERSION: &str = "0.9.9";
 
-/// The current build matrix (release.yml `build`): the four standalone
-/// targets. The single-artifact case stands in for a trimmed matrix; the
-/// four-target case is today's full release.
-const TARGETS: [&str; 4] = [
+/// The promote step that refuses archives a TS 0.9.8 updater would install.
+const TS_GUARD_STEP: &str = "Refuse archives the TypeScript updater would install";
+
+/// The current build matrix (release.yml's `build-gnu` + `build-darwin` +
+/// `build-windows` jobs): the five standalone targets. The single-artifact
+/// case stands in for a trimmed matrix; the five-target case is today's
+/// full release.
+const TARGETS: [&str; 5] = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
 ];
 
-/// The TS release-platform alias (`assemble_artifacts.py` `TARGET_ALIASES`).
+/// The release-platform alias (`assemble_artifacts.py` `TARGET_ALIASES`).
 fn platform_alias(target: &str) -> &'static str {
     match target {
         "x86_64-unknown-linux-gnu" => "linux-x64",
         "aarch64-unknown-linux-gnu" => "linux-arm64",
         "aarch64-apple-darwin" => "darwin-arm64",
         "x86_64-apple-darwin" => "darwin-x64",
+        "x86_64-pc-windows-msvc" => "win32-x64",
         _ => panic!("no fixture alias for target {target}"),
+    }
+}
+
+/// The staged payload binary name for one target
+/// (`assemble_artifacts.py` `binary_name_for_target`): the MSVC build
+/// ships `prime-agent.exe`.
+fn binary_name(target: &str) -> &'static str {
+    match target {
+        "x86_64-pc-windows-msvc" => "prime-agent.exe",
+        _ => "prime-agent",
     }
 }
 
@@ -195,23 +211,27 @@ fn sha256_file(path: &Path) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// One real (extractable) tar.gz archive: the staged `prime-agent` payload
-/// with deterministic member metadata, the `assemble_artifacts.py` shape.
-fn write_fixture_tarball(out_path: &Path) {
+/// One real (extractable) tar.gz archive: the staged payload binary
+/// (`prime-agent` — or `prime-agent.exe` on the MSVC target) with
+/// deterministic member metadata, the `assemble_artifacts.py` shape, plus
+/// any `extra_members`.
+fn write_fixture_tarball(out_path: &Path, payload_name: &str, extra_members: &[&str]) {
     let file = fs::File::create(out_path).expect("create the fixture archive");
     let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     let mut archive = tar::Builder::new(encoder);
     let payload = VERSION.as_bytes().to_vec();
-    let mut header = tar::Header::new_gnu();
-    header.set_size(payload.len() as u64);
-    header.set_mode(0o755);
-    header.set_uid(0);
-    header.set_gid(0);
-    header.set_mtime(0);
-    header.set_cksum();
-    archive
-        .append_data(&mut header, "prime-agent", payload.as_slice())
-        .expect("stage the fixture payload");
+    for name in std::iter::once(payload_name).chain(extra_members.iter().copied()) {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(payload.len() as u64);
+        header.set_mode(0o755);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, name, payload.as_slice())
+            .expect("stage the fixture payload");
+    }
     archive
         .into_inner()
         .expect("finish the tar stream")
@@ -223,9 +243,15 @@ fn write_fixture_tarball(out_path: &Path) {
 /// per-target manifest (`assemble_artifacts.py`'s schema). Returns the manifest
 /// row the merged manifest must carry back.
 fn write_artifact(dir: &Path, target: &str) -> serde_json::Value {
+    write_artifact_with(dir, target, &[])
+}
+
+fn write_artifact_with(dir: &Path, target: &str, extra_members: &[&str]) -> serde_json::Value {
     fs::create_dir_all(dir).expect("create the artifact directory");
-    let archive_name = format!("prime-agent-{VERSION}-{target}.tar.gz");
-    write_fixture_tarball(&dir.join(&archive_name));
+    // The archive name the channel contract requires: the PLATFORM ALIAS,
+    // never the target triple (the update reader drops a triple-named row).
+    let archive_name = format!("prime-agent-{VERSION}-{}.tar.gz", platform_alias(target));
+    write_fixture_tarball(&dir.join(&archive_name), binary_name(target), extra_members);
     let sha256 = sha256_file(&dir.join(&archive_name));
     fs::write(
         dir.join("SHA256SUMS"),
@@ -287,6 +313,7 @@ fn run_promote_gates(cwd: &Path, steps: &[Step]) -> (String, serde_json::Value) 
         steps,
         "Verify hash continuity (artifacts match build-job manifests)",
     )];
+    let ts_guard = &steps[step_position(steps, TS_GUARD_STEP)];
     let merge = &steps[step_position(steps, "Merge per-target manifests + SHA256SUMS")];
 
     let normalize_stdout = assert_success(&run_step(cwd, normalize), "normalize download layout");
@@ -295,6 +322,7 @@ fn run_promote_gates(cwd: &Path, steps: &[Step]) -> (String, serde_json::Value) 
         verify_stdout.contains("hash continuity verified for all archives"),
         "hash continuity must report verifying the archives"
     );
+    assert_success(&run_step(cwd, ts_guard), TS_GUARD_STEP);
     assert_success(&run_step(cwd, merge), "merge per-target manifests");
 
     let merged: serde_json::Value = serde_json::from_str(
@@ -303,6 +331,87 @@ fn run_promote_gates(cwd: &Path, steps: &[Step]) -> (String, serde_json::Value) 
     )
     .expect("parse the merged manifest");
     (normalize_stdout, merged)
+}
+
+/// The Windows build job's structural contract: the MSVC target builds on
+/// its own runner (never inside build-gnu's linux container), the livecheck
+/// names the `.exe` binary, promote needs the job, and the channel
+/// completeness gate refuses a manifest that dropped a platform row.
+#[test]
+fn windows_build_job_contract() {
+    let text = fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
+        .expect("read release.yml");
+    let workflow: Workflow = serde_yaml::from_str(&text).expect("release.yml parses as YAML");
+    let windows = workflow
+        .jobs
+        .get("build-windows")
+        .expect("the build-windows job exists");
+    assert!(
+        windows.steps.iter().any(|step| {
+            step.name.as_deref() == Some("Livecheck gate: --version prints the tag version")
+                && step
+                    .run
+                    .as_deref()
+                    .is_some_and(|run| run.contains("release/prime-agent.exe"))
+        }),
+        "the Windows livecheck must name the .exe binary Cargo's MSVC linker emits"
+    );
+    assert!(
+        windows
+            .steps
+            .iter()
+            .any(|step| step.run.as_deref().is_some_and(|run| {
+                run.contains("cargo build --release --locked --target")
+                    && !run.contains("dist/prime-agent")
+            })),
+        "the Windows build compiles the MSVC target (the split-debug step is linux-only)"
+    );
+    // promote's needs list and route gate must include build-windows (it
+    // builds on both routes): the YAML schema of this test reads jobs'
+    // steps; needs/if are asserted through the raw text (the Workflow
+    // struct does not model them).
+    assert!(
+        text.contains("needs: [build-gnu, build-darwin, build-windows, reuse-continuous]")
+            && text.contains("needs.build-windows.result == 'success'"),
+        "promote must wait for the Windows build on both routes"
+    );
+    let promote = workflow
+        .jobs
+        .get("promote")
+        .expect("the promote job exists");
+    // The completeness gate: the emission refuses a missing platform row
+    // (the platform list the installer reads must match the built set).
+    let emit = promote
+        .steps
+        .iter()
+        .find(|step| {
+            step.name.as_deref()
+                == Some("Emit the channel manifest (latest.json stable / beta.json nightly)")
+        })
+        .expect("the channel-manifest emission step exists")
+        .run
+        .as_deref()
+        .expect("the emission runs a script");
+    assert!(
+        emit.contains("missing artifact rows"),
+        "the emission must refuse a manifest missing a known platform's row"
+    );
+    // The R2 publish renders + serves the PowerShell installer pair.
+    let publish = promote
+        .steps
+        .iter()
+        .find(|step| {
+            step.name.as_deref()
+                == Some("Publish the R2 channel (the user path never touches GitHub)")
+        })
+        .expect("the R2 publish step exists")
+        .run
+        .as_deref()
+        .expect("the publish runs a script");
+    assert!(
+        publish.contains("render_installer_ps1") && publish.contains("install.ps1"),
+        "the publish must render + serve the PowerShell installer pair"
+    );
 }
 
 /// The structural gate: one count-independent download-all step, pinned to
@@ -367,6 +476,56 @@ fn promote_download_layout_contract() {
         download < normalize && normalize < verify && verify < merge,
         "the layout must be normalized between the download and the per-artifact gates"
     );
+    let ts_guard = step_position(&steps, TS_GUARD_STEP);
+    assert!(
+        normalize < ts_guard && ts_guard < merge,
+        "the TS-updater gate must check every archive before anything is merged or published"
+    );
+}
+
+/// A TS 0.9.8 updater installs any archive that carries install.sh (plus
+/// three other files the Rust archive lacks) into the TS layout. The promote
+/// gate must refuse an archive with a root-level install.sh, and only that
+/// root-level file: the same name deeper in the tree is not what TS reads.
+#[test]
+fn an_archive_with_a_root_install_sh_fails_the_ts_updater_gate() {
+    let Some(_python3) = python3_binary((3, 0)) else {
+        return;
+    };
+    let steps = promote_steps();
+    let ts_guard = &steps[step_position(&steps, TS_GUARD_STEP)];
+
+    let cwd = tempfile::tempdir().expect("scratch dir");
+    let incoming = cwd.path().join("incoming");
+    write_artifact(
+        &incoming.join(format!("artifacts-{}", TARGETS[0])),
+        TARGETS[0],
+    );
+    write_artifact_with(
+        &incoming.join(format!("artifacts-{}", TARGETS[1])),
+        TARGETS[1],
+        &["skills/install.sh"],
+    );
+    let output = assert_success(&run_step(cwd.path(), ts_guard), TS_GUARD_STEP);
+    assert!(output.contains("no archive carries the TypeScript installer layout"));
+
+    write_artifact_with(
+        &incoming.join(format!("artifacts-{}", TARGETS[2])),
+        TARGETS[2],
+        &["install.sh"],
+    );
+    let output = assert_failure(&run_step(cwd.path(), ts_guard), TS_GUARD_STEP);
+    assert!(
+        output.contains(&format!(
+            "prime-agent-{VERSION}-{}.tar.gz: contains a root-level install.sh",
+            platform_alias(TARGETS[2])
+        )),
+        "the gate must name the offending archive\n{output}"
+    );
+    assert!(
+        !output.contains(platform_alias(TARGETS[1])),
+        "a nested install.sh must not trip the gate\n{output}"
+    );
 }
 
 /// A one-target release (the TS test's beta-only/stable-only case): the
@@ -413,11 +572,13 @@ fn single_artifact_release_finds_the_downloaded_manifest() {
         .is_file());
 }
 
-/// The full four-target release (the TS test's both-channels case): every
-/// artifact arrives in its own named directory, and the merged manifest
-/// must carry all four binaries.
+/// The full five-target release (the TS test's both-channels case): every
+/// artifact arrives in its own named directory, the merged manifest must
+/// carry all five binaries (the Windows row included), and every
+/// platform's payload unpacks under its target triple with the staged
+/// binary name (`prime-agent.exe` on the MSVC target).
 #[test]
-fn four_target_release_finds_all_downloaded_manifests() {
+fn five_target_release_finds_all_downloaded_manifests() {
     let Some(_python3) = python3_binary((3, 12)) else {
         return;
     };
@@ -445,7 +606,7 @@ fn four_target_release_finds_all_downloaded_manifests() {
     assert_eq!(
         merged,
         expected_merged_manifest(&rows),
-        "the merged manifest must carry all four targets' binaries"
+        "the merged manifest must carry all five targets' binaries"
     );
     assert_eq!(
         fs::read_to_string(cwd.path().join("release-out/SHA256SUMS"))
@@ -454,10 +615,12 @@ fn four_target_release_finds_all_downloaded_manifests() {
         "every target's checksum line must survive the merge"
     );
     for target in TARGETS {
-        assert!(cwd
-            .path()
-            .join(format!("release-unpacked/{target}/prime-agent"))
-            .is_file());
+        assert!(
+            cwd.path()
+                .join(format!("release-unpacked/{target}/{}", binary_name(target)))
+                .is_file(),
+            "the {target} payload unpacks with its staged binary name"
+        );
     }
 }
 

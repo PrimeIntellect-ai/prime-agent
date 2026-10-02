@@ -89,7 +89,7 @@ impl Worker {
                 response_success(None, "abort_compaction", None)
             }
             "set_auto_compaction" => self.handle_set_auto_compaction(payload),
-            "wait_for_idle" => self.handle_wait_for_idle().await,
+            "wait_for_idle" => self.handle_wait_for_idle(payload).await,
             "wait_for_headless_completion" => {
                 self.handle_wait_for_headless_completion(payload).await
             }
@@ -746,6 +746,14 @@ impl Worker {
             .as_mut()
             .and_then(|store| store.lease.take());
         drop(lease);
+        // The session runtime ended (TS `prime-agent stop <agent>`): the
+        // pane reporter releases its pane as the last write on the wire —
+        // no report may reclaim it afterwards. The slot is taken out
+        // first (swapped to the disabled no-op) so a later attach can
+        // adopt the pane again; the taken handle's release is the
+        // release of the session this kill stopped.
+        let reporter = std::mem::take(&mut *self.herdr.lock().unwrap());
+        reporter.release().await;
         response_success(None, "kill", None)
     }
 

@@ -30,6 +30,7 @@ async fn spawn_fake_supervisor(
     kill_tx: mpsc::UnboundedSender<Value>,
     kill_behavior: FakeKill,
     worker_leaves_after_settle: bool,
+    child_subagents: Arc<FakeChildSubagents>,
 ) {
     let kill_behavior = std::sync::Arc::new(kill_behavior);
     let listener = bind_transport(&socket).await.unwrap();
@@ -45,6 +46,7 @@ async fn spawn_fake_supervisor(
             let kill_tx = kill_tx.clone();
             let kill_behavior = std::sync::Arc::clone(&kill_behavior);
             let gone = Arc::clone(&gone);
+            let child_subagents = Arc::clone(&child_subagents);
             tokio::spawn(async move {
                 let (reader, mut writer) = stream.split();
                 let mut reader = BufReader::new(reader);
@@ -86,6 +88,16 @@ async fn spawn_fake_supervisor(
                         "wait_for_idle" => {
                             tokio::time::sleep(std::time::Duration::from_millis(idle_delay_ms))
                                 .await;
+                            // The quiescence arm also waits out the
+                            // child's own running subagents.
+                            if command["waitForRlmQuiescence"] == true {
+                                child_subagents
+                                    .quiescent_waits
+                                    .fetch_add(1, Ordering::SeqCst);
+                                while child_subagents.running.load(Ordering::SeqCst) {
+                                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                                }
+                            }
                             response_success(Some(&id), command_type, None)
                         }
                         "get_state" => response_success(
@@ -93,6 +105,7 @@ async fn spawn_fake_supervisor(
                             command_type,
                             Some(json!({
                                 "isStreaming": false,
+                                "hasRunningSubagents": child_subagents.running.load(Ordering::SeqCst),
                                 "sessionActions": { "queuedCount": 0 },
                             })),
                         ),
@@ -155,6 +168,34 @@ async fn sessions_with_fake_supervisor(
     kill_behavior: FakeKill,
     worker_leaves_after_settle: bool,
 ) -> (SupervisorChildSessions, mpsc::UnboundedReceiver<Value>) {
+    sessions_with_fake_child_subagents(
+        follow_up_tx,
+        idle_delay_ms,
+        kill_behavior,
+        worker_leaves_after_settle,
+        Arc::new(FakeChildSubagents::default()),
+    )
+    .await
+}
+
+/// The fake child's own subagents: whether one still runs (the child
+/// reports `hasRunningSubagents`, and a `waitForRlmQuiescence` idle wait
+/// holds until it finishes), and how many such waits started.
+#[derive(Default)]
+struct FakeChildSubagents {
+    running: AtomicBool,
+    quiescent_waits: std::sync::atomic::AtomicUsize,
+}
+
+/// [`sessions_with_fake_supervisor`] whose child reports its own running
+/// subagents from `child_subagents` (a grandchild still running).
+async fn sessions_with_fake_child_subagents(
+    follow_up_tx: mpsc::UnboundedSender<Value>,
+    idle_delay_ms: u64,
+    kill_behavior: FakeKill,
+    worker_leaves_after_settle: bool,
+    child_subagents: Arc<FakeChildSubagents>,
+) -> (SupervisorChildSessions, mpsc::UnboundedReceiver<Value>) {
     let socket = std::env::temp_dir().join(format!(
         "pa-rlm-watch-{}.sock",
         uuid::Uuid::new_v4().simple()
@@ -167,6 +208,7 @@ async fn sessions_with_fake_supervisor(
         kill_tx,
         kill_behavior,
         worker_leaves_after_settle,
+        child_subagents,
     )
     .await;
     let link = Arc::new(crate::supervisor_link::SupervisorLink::new(socket));
@@ -283,6 +325,97 @@ async fn a_worker_leaving_inside_the_settle_grace_keeps_the_verdict() {
     assert!(notice["customMessage"]["content"]
         .as_str()
         .is_some_and(|content| content.contains("the child final answer")));
+}
+
+/// A parent counts as running while any descendant runs: the child's own
+/// turn is done, but while it reports a running grandchild the parent's
+/// row stays `running` and the registry keeps the parent's summary busy;
+/// once the grandchild finishes, the child settles and the parent is
+/// quiet again.
+#[tokio::test]
+async fn a_child_with_a_running_grandchild_keeps_the_parent_running() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let grandchild = Arc::new(FakeChildSubagents {
+        running: AtomicBool::new(true),
+        ..FakeChildSubagents::default()
+    });
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        false,
+        Arc::clone(&grandchild),
+    )
+    .await;
+    assert!(!sessions.has_running_children());
+    let mut running = sessions.subscribe_running();
+    let settled = sessions.settle_notified();
+    spawn_child(&sessions).await;
+    assert!(running.has_changed().unwrap());
+    assert!(*running.borrow_and_update());
+    sessions.notify_turn_done();
+
+    // The child is idle on its own, but its grandchild still runs: the
+    // watcher's idle wait holds for the child's whole subtree.
+    wait_for_quiescent_wait(&grandchild).await;
+    let roster = sessions.list_subagents().await.expect("child roster");
+    assert_eq!(roster[0].status, "running");
+    assert!(sessions.has_running_children());
+
+    grandchild.running.store(false, Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(10), settled)
+        .await
+        .expect("the child settles once its grandchild finished");
+    let roster = sessions.list_subagents().await.expect("child roster");
+    assert_eq!(roster[0].status, "completed");
+    assert!(!sessions.has_running_children());
+    assert!(running.has_changed().unwrap());
+}
+
+/// A `collect` with a timeout waits out a child whose own turn ended but
+/// whose grandchild still runs, instead of answering `running` at once.
+#[tokio::test]
+async fn collect_with_a_timeout_waits_for_a_running_grandchild() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let grandchild = Arc::new(FakeChildSubagents {
+        running: AtomicBool::new(true),
+        ..FakeChildSubagents::default()
+    });
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        false,
+        Arc::clone(&grandchild),
+    )
+    .await;
+    let handle = spawn_child(&sessions).await;
+    sessions.notify_turn_done();
+    wait_for_quiescent_wait(&grandchild).await;
+
+    let finish = Arc::clone(&grandchild);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        finish.running.store(false, Ordering::SeqCst);
+    });
+    let results = sessions
+        .collect(vec![handle.rlm_child_id.clone()], 10_000)
+        .await
+        .expect("collect the child");
+    assert_eq!(results[0].status, "done");
+    assert!(!grandchild.running.load(Ordering::SeqCst));
+}
+
+/// Wait until the settle watcher parks in the child's subtree idle wait.
+async fn wait_for_quiescent_wait(child_subagents: &FakeChildSubagents) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child_subagents.quiescent_waits.load(Ordering::SeqCst) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the watcher never waited for the child's subtree"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// One child row exists and is running before the close tests run.

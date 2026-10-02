@@ -175,16 +175,13 @@ impl SessionUi {
         }
         match source {
             DockFocusSource::PromptDown => {
-                // TS `SubagentSummaryLine.isSelectable()`: the prompt's
-                // Down is the subagents box's own affordance — subagents
-                // must exist, and the grab selects that group. The dock's
-                // other groups (heartbeats, shells, the goal row) never
-                // take this Down; their shortcut stays
-                // `app.subagents.focus`, so the prompt's arrows keep the
-                // input-history recall in every session shape.
-                if !(self.return_to_agents_view && self.subagent_counts.total > 0) {
-                    return false;
-                }
+                // The prompt's Down always enters the dock, whatever its
+                // counts (the operator's 2026-10-01 consistency ruling: an
+                // all-zero dock, or one with only shells running, must stay
+                // reachable — TS `SubagentSummaryLine.isSelectable()` gated
+                // this on existing subagents, a sanctioned divergence). The
+                // grab lands on the row's first group; Left/Right walk the
+                // rest.
                 self.activity_group = crate::chrome::ActivityGroup::Subagents;
             }
             DockFocusSource::Shortcut => {}

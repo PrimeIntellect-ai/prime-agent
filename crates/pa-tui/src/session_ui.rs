@@ -652,11 +652,11 @@ pub(crate) enum RebuildKind {
 
 /// Where a compact-dock focus hand-off comes from (TS
 /// `focusSubagentSummary`, shared by `app.subagents.focus` and the
-/// editor's move-below-prompt hook): the selectability gate differs per
+/// editor's move-below-prompt hook): the landing group differs per
 /// caller.
 enum DockFocusSource {
     /// The editor's Down at the prompt's end (TS `onMoveBelowPrompt`
-    /// -> `focusSubagentSummary`): the subagents box's affordance.
+    /// -> `focusSubagentSummary`): lands on the subagents group.
     PromptDown,
     /// The `app.subagents.focus` key: any rendered dock group.
     Shortcut,

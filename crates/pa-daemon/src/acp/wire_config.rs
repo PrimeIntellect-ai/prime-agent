@@ -17,7 +17,7 @@ use super::config_options::{
     config_options_value, model_value, publish_config_options, session_config_options, PickerModel,
     SessionConfigOption,
 };
-use super::daemon::{DaemonAcpState, DaemonLink, REQUEST_TIMEOUT_MS, TURN_TIMEOUT_MS};
+use super::daemon::{DaemonAcpState, DaemonLink};
 use super::jsonrpc;
 use super::producer::{self, UpdateProducer};
 use super::types;
@@ -189,16 +189,13 @@ async fn apply_wire_config(
                     WireConfigError::invalid_params(format!("Unavailable model: {value}"))
                 })?;
             let response = link
-                .request(
-                    DaemonCommand::SetModel {
-                        id: None,
-                        active_session_id: daemon_session_id.to_string(),
-                        provider: model.provider.clone(),
-                        model_id: model.id.clone(),
-                        rest: Map::default(),
-                    },
-                    TURN_TIMEOUT_MS,
-                )
+                .request(DaemonCommand::SetModel {
+                    id: None,
+                    active_session_id: daemon_session_id.to_string(),
+                    provider: model.provider.clone(),
+                    model_id: model.id.clone(),
+                    rest: Map::default(),
+                })
                 .await
                 .map_err(|error| WireConfigError::internal(error.to_string()))?;
             if !response.success {
@@ -250,15 +247,12 @@ async fn apply_wire_config(
                 )));
             }
             let response = link
-                .request(
-                    DaemonCommand::SetThinkingLevel {
-                        id: None,
-                        active_session_id: daemon_session_id.to_string(),
-                        level: value.to_string(),
-                        rest: Map::default(),
-                    },
-                    TURN_TIMEOUT_MS,
-                )
+                .request(DaemonCommand::SetThinkingLevel {
+                    id: None,
+                    active_session_id: daemon_session_id.to_string(),
+                    level: value.to_string(),
+                    rest: Map::default(),
+                })
                 .await
                 .map_err(|error| WireConfigError::internal(error.to_string()))?;
             if !response.success {
@@ -283,14 +277,11 @@ pub(super) async fn fetch_connection_state(
     active_session_id: &str,
 ) -> Option<Value> {
     let response = link
-        .request(
-            DaemonCommand::GetConnectionState {
-                id: None,
-                active_session_id: active_session_id.to_string(),
-                rest: Map::default(),
-            },
-            REQUEST_TIMEOUT_MS,
-        )
+        .request(DaemonCommand::GetConnectionState {
+            id: None,
+            active_session_id: active_session_id.to_string(),
+            rest: Map::default(),
+        })
         .await
         .ok()?;
     if !response.success {
@@ -305,14 +296,11 @@ pub(super) async fn fetch_available_models(
     active_session_id: &str,
 ) -> anyhow::Result<Vec<pa_types::ai::Model>> {
     let response = link
-        .request(
-            DaemonCommand::GetAvailableModels {
-                id: None,
-                active_session_id: active_session_id.to_string(),
-                rest: Map::default(),
-            },
-            REQUEST_TIMEOUT_MS,
-        )
+        .request(DaemonCommand::GetAvailableModels {
+            id: None,
+            active_session_id: active_session_id.to_string(),
+            rest: Map::default(),
+        })
         .await?;
     if !response.success {
         anyhow::bail!(response

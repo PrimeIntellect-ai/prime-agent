@@ -110,6 +110,7 @@ pub struct DaemonEventMeta {
 pub mod agent_roster;
 mod command;
 pub mod framing;
+pub mod herdr_env;
 mod outbound;
 mod plane;
 pub mod update_flow;

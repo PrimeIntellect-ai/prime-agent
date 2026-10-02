@@ -540,25 +540,6 @@ fn live_kernel_python() -> Option<std::path::PathBuf> {
     None
 }
 
-#[cfg(test)]
-fn live_release_dir() -> Option<std::path::PathBuf> {
-    let releases = std::path::PathBuf::from(std::env::var("HOME").map_or_else(
-        |_| "/home/ubuntu/.local/share/prime-agent/releases".to_string(),
-        |home| format!("{home}/.local/share/prime-agent/releases"),
-    ));
-    let Ok(entries) = std::fs::read_dir(&releases) else {
-        eprintln!("no releases dir at {releases:?}; skipping live kernel test");
-        return None;
-    };
-    let mut candidates: Vec<std::path::PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.join("prime-agent-runtime").is_dir())
-        .collect();
-    candidates.sort();
-    candidates.pop()
-}
-
 /// The abort wedge repro (dogfood P0): a turn executing a long kernel cell
 /// must unwind at `abort_in_flight_turn` (the kernel interrupt +
 /// force-abort path settles the tool race) - not keep the turn alive while
@@ -569,15 +550,11 @@ fn abort_in_flight_turn_cancels_a_running_kernel_cell() {
     let Some(kernel_python) = live_kernel_python() else {
         return;
     };
-    let Some(release) = live_release_dir() else {
-        return;
-    };
     let _env = KernelEnvOverride::apply(&[
         (
             "PRIME_AGENT_KERNEL_PYTHON",
             Some(kernel_python.display().to_string()),
         ),
-        ("PI_PACKAGE_DIR", Some(release.display().to_string())),
         ("PRIME_AGENT_CODING_AGENT_DIR", None),
         ("PRIME_API_KEY", None),
     ]);

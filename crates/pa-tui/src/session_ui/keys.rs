@@ -350,21 +350,11 @@ impl SessionUi {
     /// an open `/model` picker pastes into its search field; otherwise the
     /// editor takes it.
     pub(crate) fn handle_paste(&mut self, text: &str, view: &mut AgentView) {
-        if let Some(picker) = view.model_picker.as_mut() {
-            picker.paste(text);
-            self.dirty = true;
-            return;
-        }
-        if let Some(mcp_view) = view.mcp_view.as_mut() {
-            mcp_view.paste(text);
-            self.dirty = true;
-            return;
-        }
-        // The bash view owns the whole frame while open (like its key
-        // dispatch): a paste never lands in the hidden editor prompt,
-        // where a later Enter would submit it unedited. The read-only
-        // goal panel and info panel consume it the same way.
-        if view.bash_view.is_some() || view.goal_panel.is_some() || view.info_panel.is_some() {
+        // The overlays own the whole frame while open (like their key
+        // dispatch): the paste lands in the overlay's own input or is
+        // consumed by the input-less ones, never in the hidden editor
+        // prompt behind.
+        if view.route_paste(text) {
             self.dirty = true;
             return;
         }
@@ -1089,13 +1079,11 @@ impl SessionUi {
         // TS `CustomEditor.handleInput`'s move-below-prompt hook
         // (`onMoveBelowPrompt` -> `focusSubagentSummary`): Down at the end
         // of the prompt — no autocomplete open, no history browse, the
-        // cursor at the last line's end — hands the focus to the subagent
-        // summary line when it is selectable; every other Down falls
-        // through to the editor's cursor motion (a non-selectable line
-        // never takes it). TS `SubagentSummaryLine.isSelectable()` grants
-        // the grab only when subagents exist — the dock's other groups
-        // keep their `app.subagents.focus` shortcut, so the prompt's
-        // arrows stay the input-history recall in every session shape.
+        // cursor at the last line's end — hands the focus to the activity
+        // dock in every session shape, all-zero counts included; every
+        // other Down falls through to the editor's cursor motion. Only the
+        // tray override (the armed exit hint, the streaming follow-up
+        // hint) keeps the editor's Down.
         if view
             .editor
             .keybindings()

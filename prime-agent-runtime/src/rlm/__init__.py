@@ -10,6 +10,7 @@ from typing import Any
 
 from .bash import BashHandle, BashResult, bash
 from .factory import (
+    FACTORY_HELP,
     graph_factory,
     resume_factory,
     run_factory,
@@ -554,6 +555,9 @@ class _RLMFactoryNamespace:
     then returns the same snapshot with ``changed`` — an agent can stream
     progress and drive orchestration programmatically, and the emitted
     graph model renders as ASCII or genuine Mermaid from one shape.
+    ``help()`` returns the full embedded authoring reference and API guide
+    (states, ports, guards, joins, foreach, budgets, and the API with
+    worked examples): ``rlm.factory.help()``.
     """
 
     async def run(self, spec_id: str, *, name: str | None = None) -> dict[str, Any]:
@@ -573,6 +577,10 @@ class _RLMFactoryNamespace:
 
     async def watch(self, run_id: str, timeout: float = 0.0) -> dict[str, Any]:
         return await watch_factory(run_id, timeout)
+
+    def help(self) -> str:
+        """Return the embedded factory authoring reference and API guide."""
+        return FACTORY_HELP
 
 
 class _RLMNamespace:
