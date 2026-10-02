@@ -5077,6 +5077,65 @@ class FactoryGraphWatchTest(unittest.TestCase):
         self.assertEqual(len(ids), factory_module.GRAPH_RUNS_WINDOW + 1)
 
     @async_test
+    async def test_a_done_run_with_children_in_flight_reports_live(self) -> None:
+        # Regression (bot review): liveness in the unscoped graph was
+        # state-shaped alone, so a ``done`` run whose resident child is
+        # still in flight (residents never block completion — the
+        # finished milestone tells the operator to ``rlm.factory.stop()``
+        # them) dropped out of the reply once it left the terminal-history
+        # window: the page lost the run and its stop control while the
+        # child kept running. A run with a child in flight is live: it
+        # reports regardless of the window, and the window holds only
+        # runs with no child in flight.
+        self.harness.create_factory(
+            "Resident",
+            "One resident entry state.",
+            id="resident",
+            machine={
+                "states": [
+                    {"id": "watcher", "entry": True, "subagent": "worker", "lifecycle": "resident"},
+                ],
+                "transitions": [],
+            },
+        )
+        self.host.outcomes["watcher"] = {"status": "running"}
+        resident = await self.start("resident")
+        resident_id = resident["run_id"]
+        status = await self.settle(resident)
+        self.assertEqual(status["state"], "done", "the resident never blocks completion")
+        nodes = {node["id"]: node for node in status["nodes"]}
+        self.assertEqual(nodes["watcher"]["running"], 1, "the resident child is still in flight")
+        # GRAPH_RUNS_WINDOW newer drained runs push the done run outside
+        # the terminal-history window; the in-flight child keeps it live.
+        self.harness.create_factory(
+            "Solo",
+            "Solo content",
+            id="solo",
+            machine={
+                "run": {"failure_policy": "continue"},
+                "states": [{"id": "a", "entry": True, "subagent": "worker"}],
+                "transitions": [],
+            },
+        )
+        for _ in range(factory_module.GRAPH_RUNS_WINDOW):
+            await self.settle(await self.start("solo"))
+        listed = await factory_module.default_factory_executor().activity({"action": "graph"})
+        ids = [run["runId"] for run in listed["runs"]]
+        self.assertIn(resident_id, ids, "a run with a child in flight reports regardless of the window")
+        self.assertEqual(len(ids), factory_module.GRAPH_RUNS_WINDOW + 1)
+        resident_row = next(run for run in listed["runs"] if run["runId"] == resident_id)
+        self.assertEqual(resident_row["state"], "done")
+        wire_nodes = {node["id"]: node for node in resident_row["nodes"]}
+        self.assertEqual(wire_nodes["watcher"]["running"], 1, "the in-flight count rides the wire")
+        # Stopping drains the run: no child in flight, so the genuinely
+        # terminal run (older than the window's runs) leaves the reply.
+        await rlm_module.rlm.factory.stop(resident_id)
+        listed = await factory_module.default_factory_executor().activity({"action": "graph"})
+        ids = [run["runId"] for run in listed["runs"]]
+        self.assertNotIn(resident_id, ids, "a drained run outside the window leaves the reply")
+        self.assertEqual(len(ids), factory_module.GRAPH_RUNS_WINDOW)
+
+    @async_test
     async def test_activity_validates_its_request_shape(self) -> None:
         for bad in (
             {"action": "bogus"},

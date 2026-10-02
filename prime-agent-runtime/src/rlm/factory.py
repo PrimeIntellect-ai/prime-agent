@@ -1594,20 +1594,30 @@ class FactoryExecutor:
             # one polling reply's construction O(window), not
             # O(registry) (the registry retains every run it ever
             # hosted; by-ref snapshots stay available for all of them).
+            # Liveness is children-shaped, not state-shaped alone: a
+            # ``done``/``failed`` run whose instances are still in
+            # flight (the resident lifecycle — admitted residents never
+            # block completion, and the finished milestone tells the
+            # operator to ``rlm.factory.stop()`` them) is LIVE, so the
+            # page keeps the run and its stop control while any child
+            # runs; the terminal history window holds only runs with no
+            # child in flight.
             live_states = ("running", "stopping", "paused")
             # The registry's insertion order is start order, so the list's
             # tail is the newest terminal history.
             terminal_ids = [
                 run.run_id
                 for run in self._runs.values()
-                if run.state not in live_states
+                if run.state not in live_states and self._running_instance_count(run) == 0
             ]
             newest_terminal_ids = set(terminal_ids[-GRAPH_RUNS_WINDOW:])
             return {
                 "runs": [
                     self._graph_snapshot(run, compact=compact)
                     for run in self._runs.values()
-                    if run.state in live_states or run.run_id in newest_terminal_ids
+                    if run.state in live_states
+                    or self._running_instance_count(run) > 0
+                    or run.run_id in newest_terminal_ids
                 ]
             }
         run = self._runs.get(ref)
