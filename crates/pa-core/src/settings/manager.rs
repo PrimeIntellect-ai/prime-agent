@@ -1,7 +1,39 @@
 //! `SettingsManager`: loads global + project settings, merges them, tracks
 //! modified fields, and writes back only what this session changed.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+
+/// The live telemetry off-epoch cells of this process's sessions: one per
+/// installed session recording switch, bumped by every successful
+/// telemetry-disabling write. A session's recording compares the cell
+/// with the epoch its facts began at, so a fact that spans a mid-session
+/// opt-out (even one with no telemetry event inside the off window) never
+/// reports afterwards. Dead cells are pruned on every walk.
+static LIVE_TELEMETRY_OFF_EPOCH_CELLS: Mutex<Vec<Weak<AtomicU64>>> = Mutex::new(Vec::new());
+
+/// Register a session's off-epoch cell for the disabling-write bumps.
+/// Registering prunes cells whose sessions have ended.
+pub fn register_telemetry_off_epoch_cell(cell: &Arc<AtomicU64>) {
+    let mut cells = LIVE_TELEMETRY_OFF_EPOCH_CELLS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cells.retain(|weak| weak.strong_count() > 0);
+    cells.push(Arc::downgrade(cell));
+}
+
+/// Bump every live off-epoch cell: an opt-out happened, and any fact a
+/// session started before this moment must never report after a
+/// re-enable.
+fn bump_live_telemetry_off_epochs() {
+    let mut cells = LIVE_TELEMETRY_OFF_EPOCH_CELLS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cells.retain(|weak| weak.strong_count() > 0);
+    for cell in cells.iter().filter_map(std::sync::Weak::upgrade) {
+        cell.fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 use anyhow::Result;
 
@@ -407,13 +439,23 @@ impl SettingsManager {
 
     /// `telemetry.enabled` setter.
     ///
+    /// A disabling write also bumps every live telemetry off-epoch cell
+    /// ([`register_telemetry_off_epoch_cell`]): the sessions' recording
+    /// seams learn a mid-session opt-out happened even when no telemetry
+    /// event fires inside the off window, so a fact that spans the window
+    /// (a tool call, a run) never reports afterwards.
+    ///
     /// # Errors
     ///
     /// Returns an error when the global settings file cannot be written.
     pub fn set_telemetry_enabled(&mut self, enabled: bool) -> Result<()> {
         let telemetry = self.global.telemetry.get_or_insert_with(Default::default);
         telemetry.enabled = Some(enabled);
-        self.save_global()
+        let saved = self.save_global();
+        if !enabled && saved.is_ok() {
+            bump_live_telemetry_off_epochs();
+        }
+        saved
     }
 
     /// `telemetry.noticeShown` setter.

@@ -76,6 +76,33 @@ pub const EXECUTION_MODE_UNKNOWN: &str = "unknown";
 
 /// Telemetry wiring supplied by the composition root (`SessionEngineConfig`).
 /// `None` telemetry (opt-out) installs nothing.
+/// A session's live opt-out switch: the enabled answer the recording
+/// seams ask per event, plus the off-epoch cell that learns about a
+/// mid-session opt-out even when no telemetry event fires inside the off
+/// window (a disabling settings write bumps it). Facts whose span
+/// crosses an epoch bump never report.
+#[derive(Clone)]
+pub struct RecordingSwitch {
+    /// Env-then-settings resolution, asked live: false means telemetry
+    /// is off right now.
+    pub enabled: Arc<dyn Fn() -> bool + Send + Sync>,
+    /// Bumped by telemetry-disabling settings writes; `None` for test
+    /// switches (staleness tracking off).
+    pub off_epoch: Option<Arc<std::sync::atomic::AtomicU64>>,
+}
+
+impl RecordingSwitch {
+    /// A switch without the write-path epoch tracking: recording still
+    /// gates live on `enabled`, but spans are not severed across writes.
+    #[must_use]
+    pub fn test(enabled: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
+        Self {
+            enabled,
+            off_epoch: None,
+        }
+    }
+}
+
 pub struct TelemetryWiring {
     /// The shared client (base properties are stamped here, per event).
     pub client: TelemetryClient,
@@ -86,10 +113,11 @@ pub struct TelemetryWiring {
     pub now: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
     /// The live opt-out switch the recording seams consult: while it
     /// answers false, neither the run state machine nor the session
-    /// counters record (the client already drops captures), so a later
-    /// enable never sends what happened while telemetry was off. `None`
-    /// is always on (tests and one-shot paths).
-    pub telemetry_enabled: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// counters record (the client already drops captures), and a fact
+    /// that spans a mid-session opt-out severs, so a later enable never
+    /// sends what happened while telemetry was off. `None` is always on
+    /// (tests and one-shot paths).
+    pub telemetry_enabled: Option<RecordingSwitch>,
 }
 
 /// Installed session telemetry: the event subscription plus the in-memory
@@ -137,8 +165,9 @@ pub(crate) struct TelemetryState {
     active_run: Option<ActiveRun>,
     tool_starts: HashMap<String, u64>,
     /// The live opt-out switch from the wiring: while it answers false,
-    /// [`handle_event`] and the out-of-band note seams record nothing.
-    telemetry_enabled: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// [`handle_event`] and the out-of-band note seams record nothing,
+    /// and the epoch cell severs facts that span an opt-out write.
+    telemetry_enabled: Option<RecordingSwitch>,
     now: Arc<dyn Fn() -> u64 + Send + Sync>,
 }
 
@@ -149,7 +178,7 @@ fn recording_on(state: &TelemetryState) -> bool {
     state
         .telemetry_enabled
         .as_ref()
-        .is_none_or(|telemetry_enabled| telemetry_enabled())
+        .is_none_or(|telemetry_switch| (telemetry_switch.enabled)())
 }
 
 /// While telemetry is off, the active run (if any) is severed: dropped
@@ -160,6 +189,26 @@ fn recording_on(state: &TelemetryState) -> bool {
 fn sever_off_period_run(state: &mut TelemetryState) {
     state.active_run = None;
     state.tool_starts.clear();
+}
+
+/// A fact that began before a telemetry-disabling write (the epoch cell
+/// moved) spans an opt-out window even when no event fired inside it;
+/// it severs exactly like a run caught by an off-period event.
+fn sever_if_stale_run(state: &mut TelemetryState) {
+    let Some(off_epoch) = state
+        .telemetry_enabled
+        .as_ref()
+        .and_then(|telemetry_switch| telemetry_switch.off_epoch.clone())
+    else {
+        return;
+    };
+    let run_is_stale = state
+        .active_run
+        .as_ref()
+        .is_some_and(|run| run.off_epoch != off_epoch.load(std::sync::atomic::Ordering::Relaxed));
+    if run_is_stale {
+        sever_off_period_run(state);
+    }
 }
 
 #[derive(Default)]
@@ -212,6 +261,9 @@ impl UsageTotals {
 #[allow(clippy::struct_excessive_bools)]
 struct ActiveRun {
     started_at: u64,
+    /// The telemetry off-epoch the run began at: a disabling write since
+    /// means the run spans an opt-out window and never reports.
+    off_epoch: u64,
     /// `AgentEnd` fired but the run is not finalized yet: the post-run
     /// compaction drain still counts into it (TS keeps the run open until
     /// the turn action deactivates; the Rust analog defers to the next
@@ -445,8 +497,8 @@ pub async fn install_session_telemetry(
     }));
     // The counters stop recording on the same live switch, before the
     // subscription registers: nothing counts while telemetry is off.
-    if let Some(telemetry_enabled) = wiring.telemetry_enabled.clone() {
-        counters.set_telemetry_enabled(telemetry_enabled);
+    if let Some(telemetry_switch) = wiring.telemetry_enabled.clone() {
+        counters.set_telemetry_enabled(telemetry_switch.enabled);
     }
 
     let subscriber_state = Arc::clone(&state);
@@ -504,6 +556,7 @@ impl SessionTelemetry {
             sever_off_period_run(&mut state);
             return;
         }
+        sever_if_stale_run(&mut state);
         if let Some(run) = state.active_run.as_mut() {
             run.compaction_count += 1;
             run.compaction_duration_ms += duration_ms.unwrap_or(0);
@@ -530,6 +583,7 @@ impl SessionTelemetry {
             sever_off_period_run(&mut state);
             return;
         }
+        sever_if_stale_run(&mut state);
         let Some(run) = state.active_run.as_mut() else {
             return;
         };
@@ -691,13 +745,19 @@ fn handle_event(
     event: AgentEvent,
 ) {
     let mut state = state.lock().expect("telemetry state poisoned");
+    // While telemetry is off nothing records, and the run severs: its
+    // facts never enter the aggregates, so a later enable can neither
+    // complete it nor merge the next run into it. A fact from before a
+    // disabling write (the epoch moved) spans the opt-out window: it
+    // severs the same way.
+    if !recording_on(&state) {
+        sever_off_period_run(&mut state);
+        return;
+    }
+    sever_if_stale_run(&mut state);
     let now = (state.now)();
     match event {
         AgentEvent::AgentStart => {
-            if !recording_on(&state) {
-                sever_off_period_run(&mut state);
-                return;
-            }
             // A retried attempt continues its turn's run (TS keeps one run
             // across `auto_retry_start`: `activeRun ??= ...`).
             if let Some(run) = state.active_run.as_mut().filter(|run| run.retry_pending) {
@@ -716,8 +776,16 @@ fn handle_event(
             // AgentEnd (misbehaving emitter) still cannot lose run facts.
             finalize_run_locked(client, execution_mode, &mut state);
             let run_index = state.totals.run_count + 1;
+            let off_epoch = state
+                .telemetry_enabled
+                .as_ref()
+                .and_then(|telemetry_switch| telemetry_switch.off_epoch.as_ref())
+                .map_or(0, |off_epoch| {
+                    off_epoch.load(std::sync::atomic::Ordering::Relaxed)
+                });
             state.active_run = Some(ActiveRun {
                 started_at: now,
+                off_epoch,
                 ended: false,
                 ended_at: None,
                 first_turn_started_at: None,
@@ -756,10 +824,6 @@ fn handle_event(
             });
         }
         AgentEvent::MessageStart { message } => {
-            if !recording_on(&state) {
-                sever_off_period_run(&mut state);
-                return;
-            }
             if message.role() == "user" {
                 state.totals.prompt_count += 1;
                 // A prompt-run's user message lands right after
@@ -768,10 +832,6 @@ fn handle_event(
             }
         }
         AgentEvent::TurnStart => {
-            if !recording_on(&state) {
-                sever_off_period_run(&mut state);
-                return;
-            }
             if let Some(run) = state.active_run.as_mut() {
                 if run.first_turn_started_at.is_none() {
                     run.first_turn_started_at = Some(now);
@@ -784,10 +844,6 @@ fn handle_event(
             assistant_message_event,
             ..
         } => {
-            if !recording_on(&state) {
-                sever_off_period_run(&mut state);
-                return;
-            }
             if state.active_run.is_some() {
                 // A continuation-run's first event is a model event (no
                 // user message ever lands inside it): the retry/goal
@@ -843,10 +899,6 @@ fn handle_event(
             }
         }
         AgentEvent::MessageEnd { message } => {
-            if !recording_on(&state) {
-                sever_off_period_run(&mut state);
-                return;
-            }
             if let pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::Assistant(
                 assistant,
             )) = message
@@ -888,10 +940,6 @@ fn handle_event(
             }
         }
         AgentEvent::ToolExecutionStart { tool_call_id, .. } => {
-            if !recording_on(&state) {
-                sever_off_period_run(&mut state);
-                return;
-            }
             state.tool_starts.insert(tool_call_id, now);
         }
         AgentEvent::ToolExecutionEnd {
@@ -901,13 +949,6 @@ fn handle_event(
             ..
         } => {
             let started_at = state.tool_starts.remove(&tool_call_id);
-            if !recording_on(&state) {
-                // The in-flight entry pops either way (a start recorded
-                // while on never leaks into a later on-period end), and
-                // the run severs: nothing counts.
-                sever_off_period_run(&mut state);
-                return;
-            }
             let duration_ms = started_at.map_or(0, |start| now.saturating_sub(start));
             let category = ToolCategory::from_tool_name(&tool_name);
             if let Some(run) = state.active_run.as_mut() {
@@ -924,10 +965,6 @@ fn handle_event(
             }
         }
         AgentEvent::AgentEnd { .. } => {
-            if !recording_on(&state) {
-                sever_off_period_run(&mut state);
-                return;
-            }
             if let Some(run) = state.active_run.as_mut() {
                 run.ended = true;
                 run.ended_at = Some(now);
@@ -935,14 +972,10 @@ fn handle_event(
         }
         // TurnEnd carries no facts the TS subscriber used (turn_count comes
         // from TurnStart); ToolExecutionUpdate is mid-execution progress.
-        // Both are still run-scoped: while off they cut the run like every
-        // other event that belongs to it (a tool whose execution spans the
-        // opt-out never counts into a surviving run).
-        AgentEvent::TurnEnd { .. } | AgentEvent::ToolExecutionUpdate { .. } => {
-            if !recording_on(&state) {
-                sever_off_period_run(&mut state);
-            }
-        }
+        // Both are still run-scoped: the entry gate severs while off or
+        // across an epoch bump (a tool whose execution spans the opt-out
+        // never counts into a surviving run).
+        AgentEvent::TurnEnd { .. } | AgentEvent::ToolExecutionUpdate { .. } => {}
     }
 }
 
@@ -1192,14 +1225,21 @@ pub fn build_client(
 /// resolution the delivery pass applies ([`telemetry_switch`]), resolved
 /// live on every ask. No cached answer may span a mid-session opt-out:
 /// an off (or an on) applies to the recording seams the moment the
-/// settings do, exactly like the client's delivery gate.
+/// settings do, exactly like the client's delivery gate. The off-epoch
+/// cell registers for the disabling-write bumps, so a fact that spans an
+/// opt-out window with no telemetry event inside it still severs.
 #[must_use]
 pub fn telemetry_enabled_switch(
     cwd: &std::path::Path,
     agent_dir: &std::path::Path,
-) -> Arc<dyn Fn() -> bool + Send + Sync> {
+) -> RecordingSwitch {
     let settings = crate::settings::SettingsManager::create(cwd, agent_dir);
-    Arc::new(move || telemetry_switch(&settings.reopen()).enabled())
+    let off_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    crate::settings::register_telemetry_off_epoch_cell(&off_epoch);
+    RecordingSwitch {
+        enabled: Arc::new(move || telemetry_switch(&settings.reopen()).enabled()),
+        off_epoch: Some(off_epoch),
+    }
 }
 
 fn uuid() -> String {

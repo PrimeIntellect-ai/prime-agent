@@ -1160,9 +1160,9 @@ async fn legacy_events_reach_the_analytics_endpoint_in_the_ts_shape() {
     .unwrap();
 }
 
-/// A fixture whose recording seams consult a live switch the test flips:
-/// the same shape [`install_session_telemetry`] installs from the wiring.
-fn fixture_with_switch(telemetry_enabled: Arc<dyn Fn() -> bool + Send + Sync>) -> Fixture {
+/// A fixture wired with a full [`RecordingSwitch`] (the production
+/// shape, epoch cell included).
+fn fixture_with_switch_raw(telemetry_enabled: RecordingSwitch) -> Fixture {
     let mock = std::sync::Arc::new(MockSink::new());
     let client = client_for(&mock);
     let clock = TestClock::default();
@@ -1177,6 +1177,35 @@ fn fixture_with_switch(telemetry_enabled: Arc<dyn Fn() -> bool + Send + Sync>) -
         active_run: None,
         tool_starts: HashMap::new(),
         telemetry_enabled: Some(telemetry_enabled),
+        now,
+    }));
+    Fixture {
+        client,
+        state,
+        clock,
+        mock,
+    }
+}
+
+/// A fixture whose recording seams consult a live switch the test flips:
+/// the same shape [`install_session_telemetry`] installs from the wiring
+/// (minus the write-path epoch tracking, which the production switch
+/// registers and the zero-event-flap test exercises separately).
+fn fixture_with_switch(telemetry_enabled: Arc<dyn Fn() -> bool + Send + Sync>) -> Fixture {
+    let mock = std::sync::Arc::new(MockSink::new());
+    let client = client_for(&mock);
+    let clock = TestClock::default();
+    let now: Arc<dyn Fn() -> u64 + Send + Sync> = {
+        let millis = clock.millis.clone();
+        Arc::new(move || millis.load(std::sync::atomic::Ordering::Relaxed))
+    };
+    let state = Arc::new(Mutex::new(TelemetryState {
+        session_id: "0197d0a0-8f5c-7f2a-b0e3-2d7e0d2b3b1a".to_string(),
+        started_at: 1_000,
+        totals: SessionTotals::default(),
+        active_run: None,
+        tool_starts: HashMap::new(),
+        telemetry_enabled: Some(RecordingSwitch::test(telemetry_enabled)),
         now,
     }));
     Fixture {
@@ -1323,16 +1352,16 @@ fn recording_switch_flips_immediately_with_the_settings() {
     let mut settings = crate::settings::SettingsManager::create(dir.path(), &agent_dir);
     settings.set_telemetry_enabled(true).unwrap();
     let switch = telemetry_enabled_switch(dir.path(), &agent_dir);
-    assert!(switch(), "on in settings records");
+    assert!((switch.enabled)(), "on in settings records");
 
     // The off lands without a cache window: nothing the seams ask
     // after the flip may still see the pre-flip answer.
     settings.set_telemetry_enabled(false).unwrap();
-    assert!(!switch(), "the off applies immediately");
+    assert!(!(switch.enabled)(), "the off applies immediately");
 
     // The re-enable lands the same way.
     settings.set_telemetry_enabled(true).unwrap();
-    assert!(switch(), "the on applies immediately too");
+    assert!((switch.enabled)(), "the on applies immediately too");
 }
 
 /// A run active when telemetry goes off is severed, not merged: its
@@ -1544,6 +1573,74 @@ async fn off_period_tool_progress_and_turn_end_sever_the_run() {
     assert!(
         runs.is_empty(),
         "the run severed by the off-period progress never reports"
+    );
+    let ended = &event_properties(&fixture.mock, "agent session ended").await[0];
+    assert_eq!(
+        ended["tool_call_count"],
+        serde_json::json!(0),
+        "the off-spanning tool call never counts"
+    );
+    assert_eq!(ended["run_count"], serde_json::json!(0));
+}
+
+/// A mid-session opt-out with NO telemetry event inside the off window
+/// still severs: the disabling write bumps the off-epoch cell, so a tool
+/// whose execution spans the flap never reports its opted-out duration.
+/// Regression for the zero-event-flap finding: event-driven severing
+/// alone cannot see the window.
+#[tokio::test]
+async fn a_zero_event_opt_out_flap_never_reports_the_spanning_tool() {
+    let _env = CleanTelemetryEnv::default();
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let mut settings = crate::settings::SettingsManager::create(dir.path(), &agent_dir);
+    settings.set_telemetry_enabled(true).unwrap();
+    // The production switch: live resolution plus the registered
+    // off-epoch cell the disabling write bumps.
+    let switch = telemetry_enabled_switch(dir.path(), &agent_dir);
+    let fixture = fixture_with_switch_raw(switch);
+    let assistant = assistant_message();
+
+    // A run starts while on; a tool call begins.
+    fixture.clock.set(1_000);
+    emit(&fixture, AgentEvent::AgentStart);
+    fixture.clock.set(1_050);
+    emit(&fixture, AgentEvent::TurnStart);
+    let (tool_start, _tool_end) = tool_execution_event("bash", false);
+    emit(&fixture, tool_start);
+
+    // The zero-event flap: telemetry goes off and back on with no
+    // telemetry event in between (the /telemetry command pair).
+    settings.set_telemetry_enabled(false).unwrap();
+    settings.set_telemetry_enabled(true).unwrap();
+
+    // The tool ends while telemetry is on again: the run began before
+    // the off epoch moved, so it severs and the spanning call never
+    // counts.
+    fixture.clock.set(1_300);
+    let (_tool_start2, tool_end) = tool_execution_event("bash", false);
+    emit(&fixture, tool_end);
+    fixture.clock.set(1_350);
+    emit(&fixture, message_end_event(assistant.clone()));
+    emit(
+        &fixture,
+        AgentEvent::AgentEnd {
+            messages: Vec::new(),
+        },
+    );
+
+    fixture.clock.set(1_400);
+    let telemetry = SessionTelemetry::detached(
+        fixture.client.clone(),
+        fixture.state.clone(),
+        "interactive".to_string(),
+    );
+    telemetry.end().await.unwrap();
+
+    let runs = event_properties(&fixture.mock, "agent run completed").await;
+    assert!(
+        runs.is_empty(),
+        "a run that spans the opt-out flap never reports"
     );
     let ended = &event_properties(&fixture.mock, "agent session ended").await[0];
     assert_eq!(
