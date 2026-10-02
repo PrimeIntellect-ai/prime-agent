@@ -702,12 +702,7 @@ impl AgentsViewMode {
             }
             return;
         }
-        // TS `Editor.handleInput`'s `deleteWordBackward` (ctrl+w /
-        // alt+backspace): the editor deletes the trailing word (and the
-        // whitespace before it), the same edit the prompt bar runs; the
-        // single-character decode below dropped the multi-character id
-        // (the #3309 class), so a multi-word query could only be
-        // corrected one Backspace at a time.
+        // TS `Editor.handleInput`'s `deleteWordBackward` (ctrl+w / alt+backspace).
         if self
             .keybindings
             .matches(key, "tui.editor.deleteWordBackward")

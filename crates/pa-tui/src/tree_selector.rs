@@ -136,10 +136,8 @@ impl TreeSelector {
                 }
                 TreeListAction::Cancel => TreeSelectorAction::Cancel,
                 TreeListAction::EditLabel(entry_id) => {
-                    // TS `LabelInput`'s constructor seeds the input with
-                    // the current label (`setValue`); the prefill keeps
-                    // the caret at its end, so Backspace deletes the
-                    // tail exactly as the pre-fix port did.
+                    // TS `LabelInput` seeds the input with the current label; the
+                    // caret starts at its end.
                     let current = self.list.label_of(&entry_id).unwrap_or_default();
                     let mut input = SearchInput::new();
                     input.prefill(&current);
@@ -162,12 +160,7 @@ impl TreeSelector {
                     self.mode = Mode::Tree;
                     TreeSelectorAction::None
                 } else {
-                    // TS `LabelInput.handleInput`'s final arm: every other
-                    // key goes to the `Input`, whose edit bindings
-                    // dispatch on their whole multi-character key ids —
-                    // a single-character gate here dropped them (the
-                    // #3309 class), so the label could only be corrected
-                    // one Backspace at a time.
+                    // TS `LabelInput.handleInput`: every other key id goes whole to the input.
                     input.handle_key(id, kb);
                     TreeSelectorAction::None
                 }
@@ -238,12 +231,8 @@ impl TreeSelector {
                     };
                     TreeSelectorAction::None
                 } else {
-                    // TS's custom-prompt editor (the
-                    // `ExtensionEditorComponent`) hands every other key
-                    // to the full editor grammar; the port's
-                    // single-character gate dropped the multi-character
-                    // edit ids (the #3309 class), so a mistyped prompt
-                    // could only be corrected one Backspace at a time.
+                    // TS's custom-prompt editor (`ExtensionEditorComponent`) takes
+                    // every other key id whole.
                     input.handle_key(id, kb);
                     TreeSelectorAction::None
                 }
@@ -593,11 +582,9 @@ mod tests {
         assert!(!text.contains("Esc back"), "{text}");
     }
 
-    /// TS `LabelInput.handleInput`'s final arm hands every non-intercepted
-    /// key to the `Input`, whose edit bindings dispatch on their whole
-    /// multi-character key ids — the port's single-character gate dropped
-    /// them (the #3309 class): the typed space lands, ctrl+w deletes the
-    /// trailing word, ctrl+u clears the draft.
+    /// Every non-intercepted key reaches the label input: the typed
+    /// space lands, ctrl+w deletes the trailing word, ctrl+u clears the
+    /// draft.
     #[test]
     fn label_input_edits_through_the_full_key_grammar() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
@@ -643,10 +630,7 @@ mod tests {
     }
 
     /// TS's custom-prompt editor (the `ExtensionEditorComponent`) hands
-    /// every non-intercepted key to the full editor grammar; the port's
-    /// single-character gate dropped the multi-character edit ids (the
-    /// #3309 class), so a prompt typed wrong could never be word-deleted
-    /// or cleared.
+    /// every non-intercepted key to the full editor grammar.
     #[test]
     fn custom_prompt_edits_through_the_full_key_grammar() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);

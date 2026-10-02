@@ -232,14 +232,9 @@ impl SearchInput {
             self.move_word_forward();
             return;
         }
-        // Regular character input: printable characters only, one char at
-        // a time (control sequences never reach the value). TS
-        // `Input.handleInput` reads the RAW key data here — the space
-        // byte is a plain printable — while this port receives TS's
-        // `space` key id, so the editor's printable decode (which maps
-        // it back) feeds the value: a gate on the id's own characters
-        // dropped every typed space in the pickers that mount this
-        // input.
+        // Regular character input (TS `Input.handleInput`'s printable arm):
+        // TS reads the raw space byte; the port gets the `space` key id,
+        // which `decode_printable` maps back.
         if let Some(character) =
             crate::editor::decode_printable(key).and_then(|text| text.chars().next())
         {

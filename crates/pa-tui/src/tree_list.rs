@@ -886,13 +886,8 @@ impl TreeList {
             self.show_label_timestamps = !self.show_label_timestamps;
         } else if let Some(text) = crate::editor::decode_printable(id) {
             // Printable characters build the search query. TS's final arm
-            // reads the RAW key data: the space byte is a plain printable
-            // that joins the query, and every special key arrives as an
-            // escape sequence (a control character) and drops. This port
-            // receives parsed ids, so the same decode gates the append —
-            // the id's own characters never join (the raw gate let the
-            // `space` id append the literal "space", and `delete`/`home`
-            // their own names).
+            // reads raw key data, where only printables join; the port gets
+            // parsed ids, so the editor's printable decode gates the append.
             self.search_query.push_str(&text);
             self.folded.clear();
             self.apply_filter();

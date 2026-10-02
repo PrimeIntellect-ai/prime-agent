@@ -224,13 +224,8 @@ impl ConfigSelector {
         if key == "space" || kb.matches(key, "tui.select.confirm") {
             return self.toggle_selected();
         }
-        // TS `ConfigSelectorComponent.handleInput`'s final arm: every other
-        // key goes to the search `Input`, whose edit bindings (Backspace,
-        // Delete, the word/line kills, undo) dispatch on their whole
-        // multi-character key ids. The port's single-character gate here
-        // dropped each of them — and its hard-coded backspace strayed
-        // from the keybindings table on a rebind — so forward the whole
-        // key id and re-filter on the value's change.
+        // TS `ConfigSelectorComponent.handleInput`'s final arm: every
+        // other key id goes whole to the search `Input`.
         let previous = self.search.value().to_string();
         self.search.handle_key(key, kb);
         if self.search.value() != previous {
