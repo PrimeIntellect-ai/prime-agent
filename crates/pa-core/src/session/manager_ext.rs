@@ -67,16 +67,11 @@ impl SessionManager {
         Ok(id)
     }
 
-    /// Append git state when it changed on the active branch.
-    pub fn record_git_state_if_changed(&mut self) -> Option<String> {
-        if !self.is_persisted() {
+    /// Append `git` as a `git_state` row when it differs from the nearest
+    /// git context on the active branch (or the header); returns the new id.
+    pub fn record_git_state_if_changed(&mut self, git: GitContext) -> Option<String> {
+        if self.active_git_context().as_ref() == Some(&git) {
             return None;
-        }
-        let git = super::manager::capture_git_context(self.get_cwd())?;
-        if let Some(last) = self.active_git_context() {
-            if git_contexts_equal(&last, &git) {
-                return None;
-            }
         }
         self.append_git_state(git).ok()
     }
@@ -296,10 +291,6 @@ fn entry_type(entry: &FileEntry) -> &'static str {
         FileEntry::GitState { .. } => "git_state",
         FileEntry::Unknown { .. } => "unknown",
     }
-}
-
-fn git_contexts_equal(left: &GitContext, right: &GitContext) -> bool {
-    left.commit == right.commit && left.branch == right.branch && left.repo_url == right.repo_url
 }
 
 #[cfg(test)]

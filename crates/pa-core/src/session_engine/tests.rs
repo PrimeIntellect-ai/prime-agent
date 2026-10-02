@@ -934,8 +934,9 @@ async fn template_expansion_applies() {
 
 /// Git state is captured at both run boundaries (the TS run-boundary event
 /// path calls `recordGitStateIfChanged` on `agent_start`/`agent_end`): a commit
-/// made between session creation and the run lands as a `git_state`
-/// entry, and an unchanged context at `agent_end` adds nothing.
+/// made between session creation and the run lands as a `git_state` entry, a
+/// branch switch between turns is recorded by the next run, and an unchanged
+/// context at `agent_end` adds nothing.
 #[tokio::test]
 async fn run_boundaries_record_git_state() {
     fn git(cwd: &std::path::Path, args: &[&str]) {
@@ -986,6 +987,14 @@ async fn run_boundaries_record_git_state() {
     engine.prompt("hi", PromptOptions::default()).await.unwrap();
     engine.agent().wait_for_idle().await;
 
+    git(repo.path(), &["checkout", "-q", "-b", "feature"]);
+    provider.push_text_turn("ok");
+    engine
+        .prompt("again", PromptOptions::default())
+        .await
+        .unwrap();
+    engine.agent().wait_for_idle().await;
+
     let entries = engine.entries().await;
     let git_states: Vec<_> = entries
         .iter()
@@ -994,7 +1003,19 @@ async fn run_boundaries_record_git_state() {
             _ => None,
         })
         .collect();
-    assert_eq!(git_states.len(), 1, "one git_state per changed context");
-    assert_eq!(git_states[0].commit.as_deref(), Some(second_sha.as_str()));
-    assert_eq!(git_states[0].branch.as_deref(), Some("main"));
+    assert_eq!(
+        git_states,
+        vec![
+            pa_types::session::GitContext {
+                repo_url: None,
+                commit: Some(second_sha.clone()),
+                branch: Some("main".to_string()),
+            },
+            pa_types::session::GitContext {
+                repo_url: None,
+                commit: Some(second_sha),
+                branch: Some("feature".to_string()),
+            },
+        ]
+    );
 }

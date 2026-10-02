@@ -187,7 +187,7 @@ fn stat_identity(metadata: &fs::Metadata) -> Option<FileIdentity> {
         dev: 0,
         ino: 0,
         mtime_sec: since.as_secs() as i64,
-        mtime_nsec: since.subsec_nanos() as i64,
+        mtime_nsec: i64::from(since.subsec_nanos()),
         len: metadata.len(),
     })
 }

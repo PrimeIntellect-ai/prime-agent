@@ -823,9 +823,6 @@ impl Worker {
             .and_then(|value| serde_json::from_value::<DaemonResumeCursor>(value).ok());
 
         let mut core = self.core.lock().unwrap();
-        if !core.attached_client_ids.iter().any(|id| id == &client_id) {
-            core.attached_client_ids.push(client_id.clone());
-        }
         // The connection-scoped registry (the fresh bots' release
         // findings): the attach's retention is keyed by the connection
         // token so the release on ANY return path (the guard's Drop)
@@ -833,8 +830,20 @@ impl Worker {
         // clientId's `anonymous` fallback included. The core lock stays
         // held (the registry's lock nests inside it — the same order
         // the release path uses).
-        if let Some(token) = payload.get("connectionToken").and_then(Value::as_str) {
-            self.register_session_attach(token, &client_id);
+        //
+        // The core retain rides the registration's verdict: a token the
+        // guard already released (the close beat the detached handler)
+        // must not recreate an unowned hold - the registry entry stays
+        // empty, so nothing would ever release it and the idle
+        // passivation's unattached gate closes forever. A routed attach
+        // without a connection token (the supervisor's shape) owns its
+        // lifecycle on the routed detach path, so its retain stands.
+        let retained = match payload.get("connectionToken").and_then(Value::as_str) {
+            Some(token) => self.register_session_attach(token, &client_id),
+            None => true,
+        };
+        if retained && !core.attached_client_ids.iter().any(|id| id == &client_id) {
+            core.attached_client_ids.push(client_id.clone());
         }
         let summary = self.summary_locked(&core);
         let mut messages: Vec<Value> = core
@@ -961,16 +970,22 @@ impl Worker {
     /// already released is REJECTED (the round-8 bots' finding: the
     /// attach dispatch is detached, so the connection's close can beat
     /// the handler's registration - a late registration would recreate
-    /// an unowned attachment that leaks the hold forever).
-    pub(crate) fn register_session_attach(&self, token: &str, client_id: &str) {
+    /// an unowned attachment that leaks the hold forever). The verdict
+    /// rides back to the caller: the attach's CORE retain is taken only
+    /// on an accepted registration (the interleave harness's residual
+    /// finding - the round-8 belt closed the registry entry, but the
+    /// ungated core push still leaked the id in `attached_client_ids`
+    /// with no registry entry left to release it).
+    pub(crate) fn register_session_attach(&self, token: &str, client_id: &str) -> bool {
         let mut attachments = self.session_attachments.lock().unwrap();
         if self.released_attach_tokens.lock().unwrap().contains(token) {
-            return;
+            return false;
         }
         let ids = attachments.entry(token.to_string()).or_default();
         if !ids.iter().any(|id| id == client_id) {
             ids.push(client_id.to_string());
         }
+        true
     }
 
     /// Release one connection's retained attaches (the registry's
@@ -989,10 +1004,13 @@ impl Worker {
         // and leak the hold).
         if final_release {
             let mut released = self.released_attach_tokens.lock().unwrap();
-            released.insert(token.to_string());
-            if released.len() > 8192 {
+            // Clear before the insert: the token released right now is
+            // the one most likely to race a late registration, so the
+            // overflow must never forget it.
+            if released.len() >= 8192 {
                 released.clear();
             }
+            released.insert(token.to_string());
         }
         let mut core = self.core.lock().unwrap();
         let ids = {
