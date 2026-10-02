@@ -356,10 +356,15 @@ impl SettingsManager {
 
     /// `factory.enabled` (the agent factory's opt-in gate): unset reads
     /// as disabled — the factory stays off until the user runs
-    /// `/factory on`.
+    /// `/factory on`. The read is GLOBAL SCOPE ONLY, exactly the agent-dir
+    /// document `set_factory_enabled` writes and the kernel's factory gate
+    /// reads, so no project-scope override can flip the gate out from
+    /// under the kernel (a project `.prime/agent/settings.json` with
+    /// `factory.enabled` never diverges the daemon's lane advertisement
+    /// or the client's `/factory status` from what the kernel will do).
     #[must_use]
     pub fn get_factory_enabled(&self) -> bool {
-        self.settings()
+        self.global_settings()
             .factory
             .as_ref()
             .and_then(|factory| factory.enabled)

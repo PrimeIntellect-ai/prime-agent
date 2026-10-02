@@ -65,7 +65,6 @@ impl super::SessionUi {
             );
             return;
         }
-        self.factory_view_open_flag = true;
         // The mounted view belongs to this durable session: a later
         // rebind fold keeps it only across the SAME session's reattach.
         self.factory_view_session = Some(self.session_id.clone());
@@ -103,7 +102,6 @@ impl super::SessionUi {
         match action {
             Some(FactoryViewAction::None) | None => {}
             Some(FactoryViewAction::Close) => {
-                self.factory_view_open_flag = false;
                 self.factory_selected_run = None;
                 self.factory_view_session = None;
                 view.factory_view = None;
@@ -256,6 +254,24 @@ impl super::SessionUi {
         });
     }
 
+    /// The fold's cache decision (the Cursor review finding: a malformed
+    /// batch used to clobber the dock's cached reply anyway): a
+    /// well-formed batch replaces the cache and parses; a malformed one
+    /// keeps the last good reply, so the dock's live-run count and a
+    /// later remount never paint a fake empty state (the malformed
+    /// contract the view's mount already carries).
+    fn fold_factory_reply(
+        cache: &mut Value,
+        incoming: Value,
+    ) -> Option<Vec<crate::factory_view::FactoryRunSnapshot>> {
+        if !crate::factory_view::factory_reply_lists_runs(&incoming) {
+            return None;
+        }
+        let runs = parse_factory_runs(&incoming);
+        *cache = incoming;
+        Some(runs)
+    }
+
     /// Fold one refresh delivery into the session: the dock's count
     /// cache always absorbs the snapshot, the open view applies it, and
     /// a stale epoch (a newer request already landed) or a foreign
@@ -290,20 +306,21 @@ impl super::SessionUi {
             return;
         }
         match payload {
-            Ok(data) => {
-                let runs_list = crate::factory_view::factory_reply_lists_runs(&data);
-                self.factory_graph = data;
-                if let Some(factory_view) = view.factory_view.as_mut() {
-                    if runs_list {
+            Ok(data) => match Self::fold_factory_reply(&mut self.factory_graph, data) {
+                Some(runs) => {
+                    if let Some(factory_view) = view.factory_view.as_mut() {
                         factory_view.set_error(None);
-                        factory_view.apply_runs(parse_factory_runs(&self.factory_graph));
-                    } else {
+                        factory_view.apply_runs(runs);
+                    }
+                }
+                None => {
+                    if let Some(factory_view) = view.factory_view.as_mut() {
                         factory_view.set_error(Some(
                             crate::factory_view::MALFORMED_REPLY_ERROR.to_string(),
                         ));
                     }
                 }
-            }
+            },
             Err(message) => {
                 if let Some(factory_view) = view.factory_view.as_mut() {
                     factory_view.set_error(Some(message));
@@ -328,5 +345,37 @@ impl super::SessionUi {
             .and_then(|factory_view| factory_view.selected_run())
             .map(|run| run.run_id.clone())
             .filter(|run_id| !run_id.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::super::SessionUi;
+    use serde_json::json;
+
+    /// The malformed fold keeps the dock's cached reply (the Cursor
+    /// review finding): a bad batch never replaces the last good reply,
+    /// so the dock's live-run count and a later remount keep reading it
+    /// instead of painting a fake empty state.
+    #[test]
+    fn a_malformed_batch_never_replaces_the_cached_reply() {
+        let mut cache = json!({"runs": [{"runId": "r1", "machine": {}}]});
+        let taken = SessionUi::fold_factory_reply(&mut cache, json!({"boom": true}));
+        assert!(
+            taken.is_none(),
+            "a reply without the runs list is not taken"
+        );
+        assert_eq!(
+            cache["runs"][0]["runId"], "r1",
+            "the last good reply survives the malformed fold"
+        );
+        // ...and a well-formed batch replaces the cache and parses.
+        let taken = SessionUi::fold_factory_reply(
+            &mut cache,
+            json!({"runs": [{"runId": "r2", "machine": {}}]}),
+        );
+        let runs = taken.expect("the well-formed batch is taken");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(cache["runs"][0]["runId"], "r2");
     }
 }

@@ -414,9 +414,6 @@ pub(crate) struct SessionUi {
     /// response from an older request must not repaint a newer snapshot.
     bash_list_epoch: u64,
     bash_updates: mpsc::UnboundedSender<BashActivityUpdate>,
-    /// The factory page's open flag (the view itself lives on `AgentView`;
-    /// the rebind fold and the close arm read this).
-    factory_view_open_flag: bool,
     /// The last `factory_activity` graph reply (the dock count's cache and
     /// the page open's mount, the `bash_activities` pattern): the
     /// always-on 2s poll keeps it current whether or not the page is

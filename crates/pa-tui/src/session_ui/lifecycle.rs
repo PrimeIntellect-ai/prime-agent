@@ -148,7 +148,6 @@ impl SessionUi {
             bash_activities: serde_json::json!({"activities": []}),
             bash_list_epoch: 0,
             bash_updates: activity_updates.bash,
-            factory_view_open_flag: false,
             factory_graph: serde_json::json!({"runs": []}),
             factory_view_session: None,
             factory_refresh_in_flight: false,
@@ -670,7 +669,6 @@ impl SessionUi {
                 .is_some_and(|session| session != self.session_id)
             {
                 view.factory_view = None;
-                self.factory_view_open_flag = false;
                 self.factory_selected_run = None;
                 self.factory_view_session = None;
                 self.factory_graph = serde_json::json!({"runs": []});

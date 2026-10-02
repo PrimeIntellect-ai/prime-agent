@@ -64,6 +64,8 @@ from rlm.factory import (
     BACKOFF_MAX_ATTEMPTS,
     EVENT_WINDOW,
     POLL_TIMEOUT_MS,
+    RUN_MAX_CHILDREN_DEFAULT,
+    RUN_MAX_PARALLEL_DEFAULT,
     SUBAGENT_NAME_MAX_LENGTH,
     FactoryExecutor,
     _child_name,
@@ -5667,6 +5669,11 @@ class FactoryGraphWatchTest(_ExecutorTestCase):
         self.assertEqual(machine["run"]["max_parallel"], 4)
         self.assertEqual(machine["run"]["failure_policy"], "continue")
         self.assertEqual(machine["run"]["budget_ms"], 600_000)
+        # the machine block is the validated configuration: the declared
+        # run limits ride it (the fixture declares none, so the canonical
+        # default surfaces).
+        self.assertEqual(machine["run"]["max_transitions"], 40)
+        self.assertEqual(machine["run"]["max_children"], RUN_MAX_CHILDREN_DEFAULT)
         guarded = next(
             t for t in machine["transitions"] if t["to"] == "fixing"
         )
@@ -5677,6 +5684,31 @@ class FactoryGraphWatchTest(_ExecutorTestCase):
         self.assertIn("collect", graph["active_nodes"])
         self.assertEqual(graph["usage"]["spawns"], len(result["started"]))
         self.assertTrue(graph["events"], "the ledger tail rides the snapshot")
+
+    @async_test
+    async def test_graph_machine_carries_the_declared_run_limits(self) -> None:
+        # Macroscope review finding: the machine block omitted the
+        # canonical `run.max_children` — the total-admission limit that
+        # governs execution — so a consumer could not reconstruct the
+        # validated configuration from the graph. The declared value
+        # rides beside max_parallel/max_transitions.
+        self.store_machine(
+            {
+                "run": {"max_children": 2},
+                "states": [
+                    {"id": "a", "entry": True, "subagent": "worker"},
+                    {"id": "b", "subagent": "worker"},
+                ],
+                "transitions": [{"from": "a", "to": "b"}],
+            },
+            spec_id="limits",
+        )
+        result = await self.start("limits")
+        graph = await rlm_module.rlm.factory.graph(result["run_id"])
+        self.assertEqual(graph["machine"]["run"]["max_children"], 2)
+        self.assertEqual(
+            graph["machine"]["run"]["max_parallel"], RUN_MAX_PARALLEL_DEFAULT
+        )
 
     @async_test
     async def test_graph_nodes_carry_per_stage_agent_counts(self) -> None:

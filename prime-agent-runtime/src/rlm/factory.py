@@ -3259,6 +3259,7 @@ def _machine_structure(
         "max_parallel": run_block.get("max_parallel", RUN_MAX_PARALLEL_DEFAULT),
         "max_transitions": run_block.get("max_transitions", MAX_TRANSITIONS_CAP),
         "failure_policy": run_block.get("failure_policy", RUN_FAILURE_POLICY_DEFAULT),
+        "max_children": run_block.get("max_children", RUN_MAX_CHILDREN_DEFAULT),
     }
     if "budget_ms" in run_block:
         run_out["budget_ms"] = run_block["budget_ms"]

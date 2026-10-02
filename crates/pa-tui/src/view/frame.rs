@@ -340,6 +340,7 @@ impl AgentView {
             || self.auth_panel.is_some()
             || self.reload_box.is_some()
             || self.settings_menu.is_some()
+            || self.factory_view.is_some()
         {
             return None;
         }
