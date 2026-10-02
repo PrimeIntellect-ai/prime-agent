@@ -14,9 +14,6 @@ mod abort_idle_race;
 mod broadcast;
 mod burst;
 mod feed;
-// The interleave harness's recording probe speaks the supervisor link over
-// a unix domain socket, so the family only exists on unix.
-#[cfg(unix)]
 mod interleave;
 mod park;
 mod queue;
@@ -60,6 +57,7 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         pending_next_turn: Vec::new(),
         active_action: None,
         running_tool_calls: std::collections::HashSet::new(),
+        running_admission_ids: std::collections::HashSet::new(),
     }));
     TurnRunner {
         core,
