@@ -480,6 +480,31 @@ fn highlighted_code_lines(
     ))
 }
 
+/// The block's unwrapped rows (TS `renderCodeBlock`): the indent outside
+/// each highlighted or uniform code line; an empty block is one indented
+/// empty row. Paint wraps these rows and the count measures the same rows.
+fn code_rows(block: &Block, lang: Option<&str>, style: &MarkdownStyle) -> Vec<Line> {
+    let indent = style.code_block_indent.as_str();
+    let lines = highlighted_code_lines(block, lang, style).unwrap_or_else(|| {
+        block
+            .lines
+            .iter()
+            .map(|line| vec![Span::styled(line.clone(), style.code_block)])
+            .collect()
+    });
+    if lines.is_empty() {
+        return vec![vec![Span::raw(indent)]];
+    }
+    lines
+        .into_iter()
+        .map(|line| {
+            let mut row: Line = vec![Span::raw(indent)];
+            row.extend(line);
+            row
+        })
+        .collect()
+}
+
 /// Heading spans: inline-rendered, tapered to the heading color with
 /// the link affordance kept — an underlined label stays underlined and
 /// the URL bracket keeps its dim `link_url` slot, tracked by origin
@@ -547,29 +572,11 @@ fn render_block(
             // outside the styled code line, each source line rendered with
             // the codeBlock style. The theme's `codeBlockBorder` hook exists
             // in the TS MarkdownTheme too and is unused by the renderer on
-            // both sides.
-            let indent = style.code_block_indent.as_str();
-            match highlighted_code_lines(block, lang.as_deref(), style) {
-                Some(code_lines) => {
-                    for line in code_lines {
-                        let mut row: Line = vec![Span::raw(indent)];
-                        row.extend(line);
-                        out.push(row);
-                    }
-                }
-                None => {
-                    for line in &block.lines {
-                        out.push(vec![
-                            Span::raw(indent),
-                            Span::styled(line.clone(), style.code_block),
-                        ]);
-                    }
-                }
-            }
-            if block.lines.is_empty() {
-                // An empty block still renders one indented empty line
-                // (TS maps a lone codeBlock("")).
-                out.push(vec![Span::raw(indent)]);
+            // both sides. TS `renderBlock` then wraps every code row
+            // (wrapTextWithAnsi), so a continuation row starts at column 0
+            // with no re-added indent.
+            for row in code_rows(block, lang.as_deref(), style) {
+                wrap_spans(&row, width, style.code_block, out);
             }
             if blank_after(false) {
                 out.push(Vec::new());

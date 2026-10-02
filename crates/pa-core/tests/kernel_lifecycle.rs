@@ -30,7 +30,7 @@ use std::time::Duration;
 use pa_core::kernel::bootstrap::build_rlm_bootstrap_code;
 use pa_core::kernel::manager::{KernelStartOptions, ReplKernelManager};
 use pa_core::kernel::shared::{
-    ExecuteOptions, ExecuteStatus, HostRequestHandlers, KernelManagerOptions,
+    ExecuteOptions, ExecuteStatus, HostRequestHandlers, KernelBashCommands, KernelManagerOptions,
     KernelShutdownOptions, KernelSnapshotConfig,
 };
 use pa_core::kernel::state_snapshot::{manifest_path_in, snapshot_path_in};
@@ -478,6 +478,39 @@ async fn kernel_teardown_with_live_handles_settles_the_callback_once() {
     manager.kill();
     assert!(!manager.has_background_work());
     assert_eq!(settled.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// Each `bash()` call a cell starts reports its command text and line
+/// count through the bash-command display MIME, aggregated into the cell's
+/// execute result — including calls routed through a helper function,
+/// which a static scan of the cell source cannot see.
+#[tokio::test]
+async fn cell_result_summarizes_the_bash_commands_it_ran() {
+    let Some(options) = test_options(None) else {
+        return;
+    };
+    let manager = started_manager(options).await;
+    execute(&manager, "from rlm import bash").await;
+
+    let result = execute(
+        &manager,
+        "async def sh(cmd):\n    return await bash(cmd)\nawait sh(\"echo one\\necho two\")\nawait bash(\"true\")",
+    )
+    .await;
+
+    assert_eq!(result.status, ExecuteStatus::Ok);
+    assert_eq!(
+        result.bash_commands,
+        Some(KernelBashCommands {
+            first: "echo one\necho two".to_string(),
+            count: 2,
+            lines: 3,
+        })
+    );
+    manager
+        .shutdown(KernelShutdownOptions::default())
+        .await
+        .expect("shutdown");
 }
 
 #[tokio::test]

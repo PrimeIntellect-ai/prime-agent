@@ -186,6 +186,28 @@ impl AcpChild {
             }
         }
     }
+
+    /// Read frames until one `sessionUpdate` of `kind` arrives — the
+    /// observed-event readiness signal, never a timer. The frames
+    /// before it are dropped.
+    fn wait_update(&mut self, kind: &str, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let timeout_left = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !timeout_left.is_zero(),
+                "the stream never published a {kind} update"
+            );
+            let line = self
+                .lines
+                .recv_timeout(timeout_left)
+                .expect("the ACP stream stayed open");
+            let frame: Value = serde_json::from_str(&line).expect("valid JSON line");
+            if frame["params"]["update"]["sessionUpdate"] == kind {
+                return;
+            }
+        }
+    }
 }
 
 impl Drop for AcpChild {
@@ -824,18 +846,13 @@ fn acp_daemon_attached_cancels_mid_turn() {
 }
 
 #[test]
-fn acp_daemon_attached_prompt_after_cancel_runs() {
-    // A Stop -> resend flow: a mid-turn cancel leaves the worker's
-    // queued-input admission suspended (TS `requestAbort`), and the next
-    // ACP prompt resumes it through its streaming behavior (TS sends
-    // `followUp` + `queueIfBusy: true` on every prompt, acp-mode.ts).
-    // The first response streams at a fixed token rate, so the test
-    // cancels only after its first chunk: the turn is observably running,
-    // and the cancel cannot land before the worker admitted it.
+fn acp_daemon_attached_overlapping_prompt_is_refused() {
+    // A second prompt while the first runs is refused; the running turn
+    // is untouched and the next prompt after its settle runs.
     let (mut client, _socket) = AcpChild::spawn_daemon_attached(
         &["--mode", "acp", "--no-session"],
         &json!({ "engine": "faux", "tokensPerSecond": 2, "responses": [
-            { "text": "a paced answer that streams slowly enough to cancel mid-turn" },
+            { "text": "a paced answer that streams slowly enough to overlap a prompt" },
             "SECOND-OK",
         ] }),
     );
@@ -852,44 +869,259 @@ fn acp_daemon_attached_prompt_after_cancel_runs() {
         &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "a slow question" }] }),
     );
     // Readiness is the turn's own first streamed chunk, not a timer.
-    let deadline = Instant::now() + TIMEOUT;
-    loop {
-        let timeout_left = deadline.saturating_duration_since(Instant::now());
-        assert!(
-            !timeout_left.is_zero(),
-            "the paced turn never streamed a chunk"
-        );
-        let line = client
-            .lines
-            .recv_timeout(timeout_left)
-            .expect("the ACP stream stayed open");
-        let frame: Value = serde_json::from_str(&line).expect("valid JSON line");
-        if frame["params"]["update"]["sessionUpdate"] == "agent_message_chunk" {
-            break;
-        }
-    }
-    client.notify("session/cancel", &json!({ "sessionId": session_id }));
-    let (first_response, _) = client.wait_response(first, TIMEOUT);
-    assert_eq!(
-        first_response["result"]["stopReason"], "cancelled",
-        "the mid-turn cancel settles the first prompt: {first_response}"
-    );
+    client.wait_update("agent_message_chunk", TIMEOUT);
     let second = client.request(
         "session/prompt",
-        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "the resend" }] }),
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "the overlap" }] }),
     );
-    let (second_response, updates) = client.wait_response(second, TIMEOUT);
+    let (second_response, _) = client.wait_response(second, TIMEOUT);
     assert_eq!(
-        second_response["result"]["stopReason"], "end_turn",
-        "the prompt after a cancel runs: {second_response}"
+        second_response["error"]["code"], -32603,
+        "the overlapping prompt is refused: {second_response}"
+    );
+    assert!(
+        second_response["error"]["data"]["details"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("A prompt turn is already running for this ACP session"),
+        "the refusal names the running-turn rule: {second_response}"
+    );
+    let (first_response, _) = client.wait_response(first, TIMEOUT);
+    assert_eq!(
+        first_response["result"]["stopReason"], "end_turn",
+        "the refused overlap never touched the running turn: {first_response}"
+    );
+    let third = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "after the settle" }] }),
+    );
+    let (third_response, updates) = client.wait_response(third, TIMEOUT);
+    assert_eq!(
+        third_response["result"]["stopReason"], "end_turn",
+        "the turn slot frees at the settle: {third_response}"
     );
     let chunk = updates
         .iter()
         .find(|update| update["params"]["update"]["sessionUpdate"] == "agent_message_chunk")
-        .expect("the resumed turn streams its scripted answer");
+        .expect("the next turn streams its scripted answer");
     assert_eq!(
         chunk["params"]["update"]["content"],
         json!({ "type": "text", "text": "SECOND-OK" })
+    );
+}
+
+#[test]
+fn acp_daemon_attached_close_mid_turn_answers_cancelled() {
+    let (mut client, _socket) = AcpChild::spawn_daemon_attached(
+        &["--mode", "acp", "--no-session"],
+        &json!({ "engine": "faux", "tokensPerSecond": 2, "responses": [
+            { "text": "a paced answer that streams slowly enough to close mid-turn" },
+        ] }),
+    );
+    let init = client.request("initialize", &initialize_params());
+    let _ = client.wait_response(init, TIMEOUT);
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
+    let (new_response, _) = client.wait_response(new, TIMEOUT);
+    let session_id = new_response["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let prompt = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "a slow question" }] }),
+    );
+    client.wait_update("agent_message_chunk", TIMEOUT);
+    let close = client.request("session/close", &json!({ "sessionId": session_id }));
+    let (prompt_response, frames) = client.wait_response(prompt, TIMEOUT);
+    assert_eq!(
+        prompt_response["result"]["stopReason"], "cancelled",
+        "a prompt closed mid-turn answers cancelled: {prompt_response}"
+    );
+    let close_response = frames
+        .into_iter()
+        .find(|frame| frame["id"] == close)
+        .unwrap_or_else(|| client.wait_response(close, TIMEOUT).0);
+    assert_eq!(close_response["result"], json!({}));
+}
+
+#[test]
+fn acp_daemon_attached_prompt_during_cancel_is_refused() {
+    // A prompt behind a cancel is refused while the stop runs, and the
+    // cancelled response comes after the stop, so a resend right after it
+    // runs.
+    let (mut client, _socket) = AcpChild::spawn_daemon_attached(
+        &["--mode", "acp", "--no-session"],
+        &json!({ "engine": "faux", "tokensPerSecond": 2, "responses": [
+            { "text": "a paced answer that streams slowly enough to cancel mid-turn" },
+            "AFTER-STOP",
+        ] }),
+    );
+    let init = client.request("initialize", &initialize_params());
+    let _ = client.wait_response(init, TIMEOUT);
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
+    let (new_response, _) = client.wait_response(new, TIMEOUT);
+    let session_id = new_response["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let first = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "a slow question" }] }),
+    );
+    client.wait_update("agent_message_chunk", TIMEOUT);
+    client.notify("session/cancel", &json!({ "sessionId": session_id }));
+    let second = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "behind the stop" }] }),
+    );
+    let (second_response, _) = client.wait_response(second, TIMEOUT);
+    assert_eq!(
+        second_response["error"]["code"], -32603,
+        "the prompt behind the cancel is refused: {second_response}"
+    );
+    assert_eq!(
+        second_response["error"]["data"]["details"],
+        format!("ACP session is cancelling: {session_id}"),
+        "the refusal names the cancelling window: {second_response}"
+    );
+    let (first_response, _) = client.wait_response(first, TIMEOUT);
+    assert_eq!(
+        first_response["result"]["stopReason"], "cancelled",
+        "the cancel settles the running turn: {first_response}"
+    );
+    // The resend also resumes the queued-input admission the cancel
+    // suspended (TS sends `followUp` + `queueIfBusy: true`).
+    let third = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "the resend" }] }),
+    );
+    let (third_response, updates) = client.wait_response(third, TIMEOUT);
+    assert_eq!(
+        third_response["result"]["stopReason"], "end_turn",
+        "the stop cleared before the cancelled response: {third_response}"
+    );
+    let chunk = updates
+        .iter()
+        .find(|update| update["params"]["update"]["sessionUpdate"] == "agent_message_chunk")
+        .expect("the resent turn streams its scripted answer");
+    assert_eq!(
+        chunk["params"]["update"]["content"],
+        json!({ "type": "text", "text": "AFTER-STOP" })
+    );
+}
+
+#[test]
+fn acp_daemon_attached_failed_turn_publishes_only_the_error_boundary() {
+    // A failed turn (here: the empty-prompt rejection) publishes one
+    // error boundary and no terminal-quiescence update (TS settle catch).
+    let (mut client, _socket) = AcpChild::spawn_daemon_attached(
+        &["--mode", "acp", "--no-session"],
+        &json!({ "engine": "faux", "responses": [] }),
+    );
+    let init = client.request("initialize", &initialize_params());
+    let _ = client.wait_response(init, TIMEOUT);
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
+    let (new_response, _) = client.wait_response(new, TIMEOUT);
+    let session_id = new_response["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let prompt = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [] }),
+    );
+    let (prompt_response, updates) = client.wait_response(prompt, TIMEOUT);
+    assert_eq!(
+        prompt_response["error"]["code"], -32603,
+        "the failed turn errors the request: {prompt_response}"
+    );
+    assert!(
+        prompt_response["error"]["data"]["details"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Prompt cannot be empty"),
+        "the worker's failure is the error: {prompt_response}"
+    );
+    let mut boundaries = 0;
+    for update in &updates {
+        let body = &update["params"]["update"];
+        let meta = &body["_meta"]["ai.primeintellect.prime-agent"];
+        assert_ne!(
+            meta["phase"], "terminalQuiescence",
+            "a failed turn never publishes a terminal frame: {updates:?}"
+        );
+        if meta["phase"] == "responseBoundary" {
+            boundaries += 1;
+            assert_eq!(
+                meta["terminalQuiescenceExpected"], false,
+                "the one boundary declares no terminal expectation: {updates:?}"
+            );
+            assert_eq!(meta["outcome"], "error");
+        }
+    }
+    assert_eq!(
+        boundaries, 1,
+        "the failed turn published exactly one correlated error boundary: {updates:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn acp_daemon_attached_supervisor_loss_fails_the_prompt() {
+    // The supervisor dies while a prompt is in flight: the pending
+    // request must fail fast with an error response, never hang, because
+    // the link close is the turn's liveness bound (turn-long requests
+    // carry no timer).
+    let (mut client, socket) = AcpChild::spawn_daemon_attached(
+        &["--mode", "acp", "--no-session"],
+        &json!({ "engine": "faux", "tokensPerSecond": 2, "responses": [
+            { "text": "a paced answer that streams slowly enough to outlive the supervisor" },
+        ] }),
+    );
+    let init = client.request("initialize", &initialize_params());
+    let _ = client.wait_response(init, TIMEOUT);
+    let new = client.request("session/new", &json!({ "mcpServers": [] }));
+    let (new_response, _) = client.wait_response(new, TIMEOUT);
+    let session_id = new_response["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let prompt = client.request(
+        "session/prompt",
+        &json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "a slow question" }] }),
+    );
+    // Readiness is the turn's own first streamed chunk: the prompt is
+    // provably in flight before the supervisor goes away.
+    client.wait_update("agent_message_chunk", TIMEOUT);
+    // Crash the supervisor (no graceful drain, so the in-flight response
+    // can never arrive). Its pid comes from the hello frame every new
+    // connection receives.
+    let probe = pa_types::platform::transport::connect_blocking(&socket).expect("daemon socket");
+    let reader = probe.try_clone_box().expect("daemon socket clone");
+    let _ = reader.set_read_timeout(Duration::from_mins(2));
+    let hello = BufReader::new(reader)
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(&line.expect("daemon line")).expect("daemon JSON")
+        })
+        .find(|frame| frame["type"] == json!("daemon_hello"))
+        .expect("the daemon closed without a hello");
+    let pid = hello["supervisorPid"].as_u64().expect("supervisor pid");
+    drop(probe);
+    let killed = std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .status()
+        .expect("kill the supervisor");
+    assert!(killed.success(), "the supervisor crash did not run");
+    let (prompt_response, _) = client.wait_response(prompt, TIMEOUT);
+    assert_eq!(
+        prompt_response["error"],
+        json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": { "details": "the daemon connection closed mid-request" }
+        }),
+        "the in-flight prompt fails fast on supervisor loss: {prompt_response}"
     );
 }
 

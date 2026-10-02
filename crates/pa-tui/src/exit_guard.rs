@@ -490,11 +490,13 @@ mod tests {
     #[test]
     fn arm_for_exit_arms_from_now() {
         let guard = ExitGuard::new();
+        // Bracket the arming: a millisecond can tick on either side of it.
+        let before = guard.ms(Instant::now());
         guard.arm_for_exit();
+        let after = guard.ms(Instant::now());
         let deadline = guard.state.force_deadline_ms.load(Ordering::SeqCst);
-        let now_ms = guard.ms(Instant::now());
-        assert!(deadline >= now_ms + FORCE_QUIT_AFTER_MS);
-        assert!(deadline <= guard.ms(Instant::now()) + FORCE_QUIT_AFTER_MS);
+        assert!(before + FORCE_QUIT_AFTER_MS <= deadline);
+        assert!(deadline <= after + FORCE_QUIT_AFTER_MS);
         guard.cancel();
     }
 

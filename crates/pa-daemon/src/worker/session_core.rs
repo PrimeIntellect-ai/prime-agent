@@ -42,6 +42,9 @@ pub(crate) struct SessionCore {
     /// and remove ids, and the roster summary derives `isRunningTools`
     /// (`isStreaming && pendingToolCalls.size > 0`) from its size.
     pub(crate) running_tool_calls: std::collections::HashSet<String>,
+    /// Admission ids belonging to the current in-flight turn. The queue
+    /// handoff and owned cancellation both inspect this under the core lock.
+    pub(crate) running_admission_ids: std::collections::HashSet<String>,
     /// TS `autoCompactionEnabled` (settings default: on).
     pub(crate) auto_compaction_enabled: bool,
     /// The last broadcast queue snapshot (TS `_lastSessionActionSnapshot`):
@@ -159,6 +162,7 @@ impl SessionCore {
             last_activity_ms: 0,
             compacting: false,
             running_tool_calls: std::collections::HashSet::new(),
+            running_admission_ids: std::collections::HashSet::new(),
             auto_compaction_enabled: true,
             last_action_snapshot: Some(SessionActionSnapshot::default()),
             rlm_depth: 0,
