@@ -131,18 +131,16 @@ impl SessionUi {
             .iter()
             .filter(|activity| activity.running())
             .count();
-        // The dock's factory indicator counts live runs only (running,
-        // stopping, paused): terminal runs stay as panels inside the
-        // factory page, never in the indicator — the bash group's
-        // running-only scoping, one lane over.
+        // The dock's factory indicator counts live runs only — the
+        // view's one liveness rule (`FactoryRunSnapshot::is_live`: a
+        // live state, or children still in flight — a `done` run whose
+        // resident children still run keeps its count like its panel
+        // and its stop control). Fully terminal runs stay as panels
+        // inside the factory page, never in the indicator — the bash
+        // group's running-only scoping, one lane over.
         let factory_runs = crate::factory_view::parse_factory_runs(&self.factory_graph)
             .iter()
-            .filter(|run| {
-                matches!(
-                    run.state.as_deref(),
-                    Some("running" | "stopping" | "paused")
-                )
-            })
+            .filter(|run| run.is_live())
             .count();
         // The dock's subagent count is the live running count only:
         // idle and dead registry rows (passivated children the ledger

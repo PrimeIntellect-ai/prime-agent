@@ -33,6 +33,7 @@ PR; on builds without it, the module docstring in
   agent dir; `prime-agent factory list | import | export` manages them. The
   seeds are `builder`, `pr-manager`, and `review-sweep`.
 - The TUI factory page: the activity dock's `⚙ N factory` group (Enter or
-  click) opens one live diagram per run, newest run first. `j`/`k` move the
-  selection, `s` stops the selected run, `r` resumes it, `m` copies it as
-  Mermaid source, Esc closes.
+  click) opens one live diagram per run, newest run first. The up/down
+  arrows move the selection, Enter opens the selected run's action rows
+  (stop, or resume while it is paused — arrows to walk, Enter to run),
+  Esc closes.

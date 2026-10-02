@@ -1,7 +1,10 @@
 //! The `/factory` view's battery: the snapshot parsing, the diagram's
 //! highlighted rendering (asserted per span, so removing the active-node
-//! marking fails the test — the mutation check), the Mermaid emission,
-//! the key loop, and the repaint hysteresis.
+//! marking fails the test — the mutation check), the picker keyset (the
+//! arrows + Enter + Esc loop and the in-page action rows), the repaint
+//! hysteresis, and the scale battery (the complex machine and the
+//! fifteen-run world: selection stability, the dock's liveness count,
+//! the render window, the refresh markers, and the churn discipline).
 
 use super::*;
 use crate::keybindings::KeybindingsManager;
@@ -388,9 +391,8 @@ fn active_nodes_paint_bright_and_pending_paints_dim() {
 
 /// The node's live activity paints the row, not the aggregate status: a
 /// multi-entry state whose latest entry settled while an earlier one
-/// still runs stays bright in both the terminal diagram and the
-/// Mermaid export (the mutation check: keying on `status` alone paints
-/// the in-flight state settled).
+/// still runs stays bright in the terminal diagram (the mutation check:
+/// keying on `status` alone paints the in-flight state settled).
 #[test]
 fn a_multi_entry_state_with_an_in_flight_entry_stays_bright() {
     let mut snapshot = scripted_snapshot();
@@ -409,106 +411,6 @@ fn a_multi_entry_state_with_an_in_flight_entry_stays_bright() {
             .any(|span| span.content.contains("reviewing") && span.style == accent)
     });
     assert!(bright, "the in-flight earlier entry keeps the row accent");
-    let runs = parse_factory_runs(&runs_response(&snapshot));
-    let source = diagram::mermaid_source(&runs[0]);
-    assert!(
-        source.contains("class s1 active"),
-        "the Mermaid export paints the same live activity: {source}"
-    );
-    assert!(
-        !source.contains("class s1 done"),
-        "the settled-looking aggregate status never demotes it: {source}"
-    );
-}
-
-/// The Mermaid emission: the same graph model, with the active class and
-/// the last-fired link styles — pasteable and rendering the same
-/// highlighting (the pending node carries the dim pending class, never
-/// the bright active one — the mutation check on the class assignment).
-#[test]
-fn mermaid_source_carries_the_active_classdef_and_fired_link_styles() {
-    let runs = parse_factory_runs(&runs_response(&scripted_snapshot()));
-    let source = diagram::mermaid_source(&runs[0]);
-    assert!(
-        source.starts_with("%% factory: review-loop — running"),
-        "{source}"
-    );
-    assert!(source.contains("flowchart TD"), "{source}");
-    assert!(
-        source.contains("s0[\"collect*\"]"),
-        "the entry marker: {source}"
-    );
-    assert!(
-        source.contains("classDef active fill:#16a34a"),
-        "the active classDef: {source}"
-    );
-    assert!(
-        source.contains("classDef pending fill:#1e293b"),
-        "the dim pending classDef: {source}"
-    );
-    assert!(
-        source.contains("class s1 active"),
-        "the running node carries the active class: {source}"
-    );
-    assert!(
-        source.contains("class s2 pending"),
-        "the queued node carries the dim pending class: {source}"
-    );
-    assert!(
-        !source.contains("class s2 active"),
-        "the queued node never paints active: {source}"
-    );
-    assert!(
-        source.contains("class s0 done"),
-        "the settled node carries the done class: {source}"
-    );
-    assert!(
-        source.contains("s0 -->|settled| s1"),
-        "the plain edge: {source}"
-    );
-    assert!(
-        source.contains("s1 -->|verdict.approved eq false| s2"),
-        "the guarded edge label: {source}"
-    );
-    assert!(
-        source.contains("linkStyle 0 stroke:#16a34a"),
-        "the fired edge's link style: {source}"
-    );
-    assert!(
-        source.contains("s2 -->|settled| s1"),
-        "the back edge renders like every plain edge: {source}"
-    );
-}
-
-/// The Mermaid labels carry the same per-stage occupancy as the ASCII
-/// labels — `s1["reviewing (3 run · 2 queued)"]` — so a pasted GitHub
-/// diagram shows stage occupancy, not just state; a stage at rest
-/// keeps its plain label (the mutation check: removing the label
-/// occupancy empties the node declarations of the counts).
-#[test]
-fn the_mermaid_labels_carry_per_stage_agent_occupancy() {
-    let runs = parse_factory_runs(&runs_response(&occupied_snapshot()));
-    let source = diagram::mermaid_source(&runs[0]);
-    assert!(
-        source.contains("s1[\"reviewing (3 run · 2 queued)\"]"),
-        "the occupied node's label carries its counts: {source}"
-    );
-    assert!(
-        source.contains("s0[\"collect*\"]"),
-        "a stage at rest keeps its plain label: {source}"
-    );
-    assert!(
-        !source.contains("(0 run"),
-        "no rest stage carries an occupancy fragment: {source}"
-    );
-    // An older kernel's reply derives the same occupancy, so the copy
-    // carries the counts against any kernel.
-    let runs = parse_factory_runs(&runs_response(&occupied_snapshot_without_counts()));
-    let source = diagram::mermaid_source(&runs[0]);
-    assert!(
-        source.contains("s1[\"reviewing (3 run · 2 queued)\"]"),
-        "the fallback derives the same label: {source}"
-    );
 }
 
 /// The reply-shape contract: a graph reply without the runs list is a
@@ -577,9 +479,8 @@ fn daemon_text_never_carries_terminal_control_sequences() {
     // The run id stays raw: it never paints, and the kernel's registry
     // answers it verbatim.
     assert_eq!(runs[0].run_id, "run-abc12345");
-    // The painted frame and the copied Mermaid source carry no control
-    // byte either — scrubbed text is the only thing that reaches a
-    // span or the clipboard.
+    // The painted frame carries no control byte either — scrubbed
+    // text is the only thing that reaches a span.
     let mut view = FactoryView::new(runs, 40);
     view.set_error(Some("boom\x1b]52;c;evil\x07".to_string()));
     let rows = frame_text(&mut view);
@@ -592,12 +493,6 @@ fn daemon_text_never_carries_terminal_control_sequences() {
     assert!(
         rows.iter().any(|row| row.contains("Error: boom")),
         "the scrubbed error text still paints: {rows:?}"
-    );
-    let run = view.selected_run().expect("a run is live");
-    let source = diagram::mermaid_source(run);
-    assert!(
-        !has_control(&source),
-        "the Mermaid copy carries no control byte: {source}"
     );
 }
 
@@ -660,49 +555,26 @@ fn the_fired_edge_identity_includes_the_guard() {
         { "from": "reviewing", "to": "fixing", "seq": 9,
           "when": { "output": "verdict", "path": "approved", "op": "eq", "value": false } }
     ]);
-    let runs = parse_factory_runs(&runs_response(&snapshot));
-    let source = diagram::mermaid_source(&runs[0]);
+    let mut view = FactoryView::new(parse_factory_runs(&runs_response(&snapshot)), 40);
+    let rows = frame_text(&mut view);
+    // Both sibling edges render; the fired `»` sits ONLY on the row of
+    // the guard that fired — the sibling row with the same from+to
+    // carries no marker.
+    let fired_row = rows
+        .iter()
+        .find(|row| row.contains("\u{bb}"))
+        .expect("the fired marker renders");
     assert!(
-        source.contains("linkStyle 1 stroke:#16a34a"),
-        "the fired guard's edge carries the fired mark: {source}"
+        fired_row.contains("verdict.approved eq false"),
+        "the fired marker sits on the fired guard's edge: {fired_row}"
     );
+    let sibling = rows
+        .iter()
+        .find(|row| row.contains("verdict.approved eq true"))
+        .expect("the sibling guard's edge renders");
     assert!(
-        !source.contains("linkStyle 2"),
-        "the sibling guard with the same from+to never cross-marks: {source}"
-    );
-}
-
-/// The Mermaid source stays one valid diagram when runtime text carries
-/// Mermaid syntax characters: a guard whose value contains the
-/// edge-label delimiter `|`, a run name with a newline, and a state id
-/// with the node-label quote (the mutation check: unsanitized
-/// interpolation breaks the labels).
-#[test]
-fn the_mermaid_source_neutralizes_label_breaking_text() {
-    let mut snapshot = scripted_snapshot();
-    snapshot["name"] = json!("run\nname");
-    // An unreferenced state carries the node-label quote.
-    snapshot["machine"]["states"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!({ "id": "qu\"ote", "entry": false, "lifecycle": "task", "maxEntries": 1 }));
-    snapshot["machine"]["transitions"][0]["when"] = json!({
-        "output": "verdict", "op": "eq", "value": "x|y"
-    });
-    let runs = parse_factory_runs(&runs_response(&snapshot));
-    let source = diagram::mermaid_source(&runs[0]);
-    let first_line = source.lines().next().unwrap_or_default();
-    assert!(
-        first_line.starts_with("%% factory: run name"),
-        "the header comment collapses newlines: {source}"
-    );
-    assert!(
-        source.contains("x¦y"),
-        "the pipe inside the guard neutralizes: {source}"
-    );
-    assert!(
-        source.contains("qu″ote"),
-        "the quote inside the state id neutralizes: {source}"
+        !sibling.contains("\u{bb}"),
+        "the sibling guard with the same from+to never cross-marks: {sibling}"
     );
 }
 
@@ -714,32 +586,72 @@ fn the_empty_state_names_the_surface() {
     let joined = rows.join("\n");
     assert!(joined.contains("No live factory runs."), "{joined}");
     assert!(joined.contains("await rlm.factory.run"), "{joined}");
-    assert!(joined.contains("select"), "{joined}");
-    assert!(joined.contains("copy mermaid"), "{joined}");
+    assert!(
+        joined.contains("move"),
+        "the hint names the arrows: {joined}"
+    );
+    assert!(joined.contains("actions"), "{joined}");
+    assert!(joined.contains("close"), "{joined}");
 }
 
-/// The key loop: stop/resume ride the selected run, resume only while
-/// paused, the mermaid copy carries the source, and Esc closes.
+/// The picker keyset (arrows + Enter + Esc — the heartbeats/bash pages'
+/// family): the arrows move the run selection, Enter opens the selected
+/// run's in-page action rows (stop/resume, the offered set derived from
+/// the run's state) and runs the tracked action, Esc backs out of the
+/// action rows before it closes the page.
 #[test]
 fn the_key_loop_resolves_the_orchestration_actions() {
-    let runs = parse_factory_runs(&runs_response(&scripted_snapshot()));
+    let runs = parse_factory_runs(&two_run_response());
     let mut view = FactoryView::new(runs, 40);
-    // Stop the selected run.
+    // The feed: the newest run is selected, the arrows walk the feed —
+    // down reads older, up reads newer, and both ends clamp.
     assert_eq!(
-        view.handle_key("s", &kb()),
+        view.selected_run().map(|run| run.run_id.clone()),
+        Some("run-def67890".to_string())
+    );
+    let _ = view.handle_key("down", &kb());
+    assert_eq!(view.selected, 1);
+    let _ = view.handle_key("down", &kb());
+    assert_eq!(view.selected, 1, "down clamps at the oldest run");
+    let _ = view.handle_key("up", &kb());
+    assert_eq!(view.selected, 0);
+    let _ = view.handle_key("up", &kb());
+    assert_eq!(view.selected, 0, "up clamps at the newest run");
+    // The letters are not page keys (the keyset is arrows + Enter + Esc):
+    // j/k/s/r move nothing and act on nothing (the mutation check: a
+    // restored j/k arm moves the selection and fails this pin).
+    for letter in ["j", "k", "s", "r", "m"] {
+        assert_eq!(view.handle_key(letter, &kb()), FactoryViewAction::None);
+        assert_eq!(view.selected, 0, "{letter} moved nothing");
+    }
+    assert_eq!(
+        view.selected_run().map(|run| run.run_id.clone()),
+        Some("run-def67890".to_string()),
+        "no letter changed the focused run"
+    );
+    // Enter opens the selected run's action rows: a running run offers
+    // exactly stop, the block names the run, and the hint flips to the
+    // action grammar.
+    assert_eq!(view.handle_key("enter", &kb()), FactoryViewAction::None);
+    let rows = frame_text(&mut view);
+    let joined = rows.join("\n");
+    assert!(joined.contains("actions: second-run"), "{joined}");
+    assert!(joined.contains("▸ Stop the run"), "{joined}");
+    assert!(joined.contains("action · Enter run · Esc back"), "{joined}");
+    // Enter runs the tracked action: the stop rides the SELECTED run.
+    assert_eq!(
+        view.handle_key("enter", &kb()),
         FactoryViewAction::Stop {
-            run_id: "run-abc12345".to_string()
+            run_id: "run-def67890".to_string()
         }
     );
-    // A running run never offers resume.
-    assert_eq!(view.handle_key("r", &kb()), FactoryViewAction::None);
-    // The mermaid copy carries genuine source.
-    match view.handle_key("m", &kb()) {
-        FactoryViewAction::CopyMermaid { source } => {
-            assert!(source.contains("flowchart TD"), "{source}");
-        }
-        other => panic!("expected CopyMermaid, got {other:?}"),
-    }
+    // Esc backs out of the action rows to the feed, then closes.
+    let _ = view.handle_key("enter", &kb());
+    assert_eq!(view.handle_key("escape", &kb()), FactoryViewAction::None);
+    assert!(
+        frame_text(&mut view).join("\n").contains("Enter actions"),
+        "Esc returns the feed's hint"
+    );
     // The real key id for the Escape key is "escape" (`key_event_to_id`)
     // — the page must close on it (the mutation check: matching only
     // "esc" strands the Escape key).
@@ -749,15 +661,43 @@ fn the_key_loop_resolves_the_orchestration_actions() {
         "the Escape key closes the page"
     );
     assert_eq!(view.handle_key("esc", &kb()), FactoryViewAction::Close);
-    // A paused run offers resume.
+    assert_eq!(view.handle_key("ctrl+c", &kb()), FactoryViewAction::Close);
+    // A paused run offers the pause complement first — resume — then
+    // stop; the arrows walk the offered set, Enter runs the tracked
+    // one.
     let mut paused = parse_factory_runs(&runs_response(&scripted_snapshot()));
     paused[0].state = Some("paused".to_string());
     let mut view = FactoryView::new(paused, 40);
+    let _ = view.handle_key("enter", &kb());
+    let rows = frame_text(&mut view);
+    let joined = rows.join("\n");
+    assert!(joined.contains("▸ Resume the run"), "{joined}");
+    assert!(joined.contains("Stop the run"), "{joined}");
+    // The tracked action is resume (the complement first); walking down
+    // lands on stop, and Enter runs stop.
     assert_eq!(
-        view.handle_key("r", &kb()),
+        view.handle_key("enter", &kb()),
         FactoryViewAction::Resume {
             run_id: "run-abc12345".to_string()
         }
+    );
+    let _ = view.handle_key("enter", &kb());
+    let _ = view.handle_key("down", &kb());
+    assert_eq!(
+        view.handle_key("enter", &kb()),
+        FactoryViewAction::Stop {
+            run_id: "run-abc12345".to_string()
+        }
+    );
+    // A fully terminal run offers nothing: Enter answers no rows.
+    let mut terminal = parse_factory_runs(&runs_response(&scripted_snapshot()));
+    terminal[0].state = Some("done".to_string());
+    terminal[0].usage.as_mut().unwrap().running = 0;
+    let mut view = FactoryView::new(terminal, 40);
+    assert_eq!(view.handle_key("enter", &kb()), FactoryViewAction::None);
+    assert!(
+        !frame_text(&mut view).join("\n").contains("actions: "),
+        "a terminal run opens no action rows"
     );
 }
 
@@ -879,8 +819,8 @@ fn multiple_runs_keep_the_selection_on_the_same_run() {
         view.selected_run().map(|run| run.run_id.clone()),
         Some("run-def67890".to_string())
     );
-    // j moves the selection down the feed, to the older run.
-    let _ = view.handle_key("j", &kb());
+    // The down arrow moves the selection down the feed, to the older run.
+    let _ = view.handle_key("down", &kb());
     assert_eq!(view.selected, 1);
     assert_eq!(
         view.selected_run().map(|run| run.run_id.clone()),
@@ -924,7 +864,7 @@ fn the_degenerate_budget_still_honors_the_viewport() {
     let rows = frame_text(&mut one_row);
     assert_eq!(rows.len(), 1, "a 1-row viewport renders exactly one row");
     assert!(
-        rows[0].contains("copy mermaid"),
+        rows[0].contains("close"),
         "the tail-clip keeps the hint: {:?}",
         rows[0]
     );
@@ -959,7 +899,7 @@ fn the_budget_window_keeps_the_hint_and_the_selected_panel() {
     );
     // The key hint stays painted (the trailing chrome never truncates).
     assert!(
-        joined.contains("copy mermaid"),
+        joined.contains("Enter actions"),
         "the key hint stays painted: {joined}"
     );
     // The default selection is the newest run: its header stays visible
@@ -977,7 +917,7 @@ fn the_budget_window_keeps_the_hint_and_the_selected_panel() {
     // follows the selection, keeps the hint, and drops the newest
     // panel instead.
     let mut selected_older = FactoryView::new(parse_factory_runs(&two_run_response()), 8);
-    let _ = selected_older.handle_key("j", &kb());
+    let _ = selected_older.handle_key("down", &kb());
     let rows = frame_text(&mut selected_older);
     let joined = rows.join("\n");
     assert!(
@@ -985,7 +925,7 @@ fn the_budget_window_keeps_the_hint_and_the_selected_panel() {
         "the view stays inside the budget: {joined}"
     );
     assert!(
-        joined.contains("copy mermaid"),
+        joined.contains("Enter actions"),
         "the key hint stays painted: {joined}"
     );
     assert!(
@@ -995,5 +935,978 @@ fn the_budget_window_keeps_the_hint_and_the_selected_panel() {
     assert!(
         !joined.contains("factory: second-run"),
         "the unselected newest panel drops instead of the chrome: {joined}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The scale battery's scenario data: the complex machine (the seed
+// pr-manager shape) and the synthetic many-run world.
+// ---------------------------------------------------------------------------
+
+/// One pr-manager-shaped run (the machine-library seed's shape, the wire
+/// lane's camelCase): SEVEN states — the `triage` entry, the bounded
+/// review loop (`review` ⇄ `fix` on the verdict's two guarded branches),
+/// the `verify` pass, the `merge`, the resident `watchdog` (admitted
+/// once triage settles, running until stop), and the `report` behind the
+/// fan-in join `[merge, verify]` — mid-flight: triage settled (both its
+/// edges fired), the review entry in flight, the watchdog resident
+/// running.
+fn pr_manager_run(run_id: &str, name: &str) -> serde_json::Value {
+    json!({
+        "runId": run_id,
+        "specId": "pr-manager",
+        "name": name,
+        "state": "running",
+        "pauseReason": null,
+        "elapsedMs": 120_000,
+        "machine": {
+            "run": { "maxParallel": 4, "maxTransitions": 40, "failurePolicy": "continue", "budgetMs": 900_000 },
+            "states": [
+                { "id": "triage", "entry": true, "lifecycle": "task", "maxEntries": 1, "retries": 0, "subagent": "triager" },
+                { "id": "review", "entry": false, "lifecycle": "task", "maxEntries": 4, "retries": 1, "subagent": "reviewer" },
+                { "id": "fix", "entry": false, "lifecycle": "task", "maxEntries": 3, "retries": 0, "subagent": "fixer" },
+                { "id": "verify", "entry": false, "lifecycle": "task", "maxEntries": 1, "retries": 0, "subagent": "verifier" },
+                { "id": "merge", "entry": false, "lifecycle": "task", "maxEntries": 1, "retries": 0, "subagent": "merger" },
+                { "id": "watchdog", "entry": false, "lifecycle": "resident", "maxEntries": 1, "retries": 0, "subagent": "watchdog" },
+                { "id": "report", "entry": false, "lifecycle": "task", "maxEntries": 1, "retries": 0, "subagent": "reporter" }
+            ],
+            "transitions": [
+                { "from": "triage", "to": "review", "on": "settled" },
+                { "from": "triage", "to": "watchdog", "on": "settled" },
+                { "from": "review", "to": "fix", "on": "settled",
+                  "when": { "output": "verdict", "path": "approved", "op": "eq", "value": false } },
+                { "from": "review", "to": "merge", "on": "settled",
+                  "when": { "output": "verdict", "path": "approved", "op": "eq", "value": true } },
+                { "from": "fix", "to": "review", "on": "settled" },
+                { "from": "fix", "to": "verify", "on": "settled" },
+                { "from": "verify", "to": "merge", "on": "settled" },
+                { "from": ["merge", "verify"], "to": "report", "on": "settled" }
+            ],
+            "order": ["triage", "review", "fix", "verify", "merge", "watchdog", "report"]
+        },
+        "nodes": [
+            { "id": "triage", "status": "done", "lifecycle": "task", "attempts": 1,
+              "entriesUsed": 1, "maxEntries": 1,
+              "entries": [ { "index": 0, "status": "done", "error": null } ],
+              "instances": [ { "index": 0, "entry": 0, "status": "done", "attempt": 1, "child": "child-t1", "durationMs": 8, "error": null } ],
+              "running": 0, "queued": 0 },
+            { "id": "review", "status": "running", "lifecycle": "task", "attempts": 1,
+              "entriesUsed": 1, "maxEntries": 4,
+              "entries": [ { "index": 0, "status": "running", "error": null } ],
+              "instances": [ { "index": 0, "entry": 0, "status": "running", "attempt": 1, "child": "child-r1", "durationMs": 0, "error": null } ],
+              "running": 1, "queued": 0 },
+            { "id": "fix", "status": "pending", "lifecycle": "task", "attempts": 0,
+              "entriesUsed": 0, "maxEntries": 3, "entries": [], "instances": [],
+              "running": 0, "queued": 0 },
+            { "id": "verify", "status": "pending", "lifecycle": "task", "attempts": 0,
+              "entriesUsed": 0, "maxEntries": 1, "entries": [], "instances": [],
+              "running": 0, "queued": 0 },
+            { "id": "merge", "status": "pending", "lifecycle": "task", "attempts": 0,
+              "entriesUsed": 0, "maxEntries": 1, "entries": [], "instances": [],
+              "running": 0, "queued": 0 },
+            { "id": "watchdog", "status": "running", "lifecycle": "resident", "attempts": 1,
+              "entriesUsed": 1, "maxEntries": 1,
+              "entries": [ { "index": 0, "status": "running", "error": null } ],
+              "instances": [ { "index": 0, "entry": 0, "status": "running", "attempt": 1, "child": "child-w1", "durationMs": 0, "error": null } ],
+              "running": 1, "queued": 0 },
+            { "id": "report", "status": "pending", "lifecycle": "task", "attempts": 0,
+              "entriesUsed": 0, "maxEntries": 1, "entries": [], "instances": [],
+              "running": 0, "queued": 0 }
+        ],
+        "activeNodes": ["review", "watchdog"],
+        "lastFired": [
+            { "from": "triage", "to": "review", "seq": 2 },
+            { "from": "triage", "to": "watchdog", "seq": 3 }
+        ],
+        "events": [
+            { "seq": 1, "kind": "milestone", "stage": "shown", "milestone": "started" },
+            { "seq": 2, "kind": "transition_fired", "stage": "recorded", "from": "triage", "to": "review" },
+            { "seq": 3, "kind": "transition_fired", "stage": "recorded", "from": "triage", "to": "watchdog" },
+            { "seq": 4, "kind": "milestone", "stage": "shown", "milestone": "triaged" }
+        ],
+        "usage": { "spawns": 2, "settled": 1, "toolUses": 12, "maxParallel": 4,
+                   "running": 2, "transitionsFired": 2 },
+        "budget": { "limitMs": 900_000, "consumedMs": 120_000 }
+    })
+}
+
+/// The review node's many-instance variant (the occupied stage): one
+/// entry holding four prepared instances — three admitted under the
+/// run's four-slot cap (the resident watchdog holds the fourth), one
+/// queued; with `queued_too`, two more queue behind the cap.
+fn occupied_review_node(run: &mut serde_json::Value, queued_too: bool) {
+    let mut instances = vec![
+        json!({ "index": 0, "entry": 0, "status": "running", "attempt": 1, "child": "child-r1", "durationMs": 0, "error": null }),
+        json!({ "index": 1, "entry": 0, "status": "running", "attempt": 1, "child": "child-r2", "durationMs": 0, "error": null }),
+        json!({ "index": 2, "entry": 0, "status": "running", "attempt": 1, "child": "child-r3", "durationMs": 0, "error": null }),
+    ];
+    let mut queued = 0;
+    if queued_too {
+        instances.push(json!({ "index": 3, "entry": 0, "status": "pending", "attempt": 0, "child": null, "durationMs": null, "error": null }));
+        instances.push(json!({ "index": 4, "entry": 0, "status": "pending", "attempt": 0, "child": null, "durationMs": null, "error": null }));
+        queued = 2;
+    }
+    run["nodes"][1]["instances"] = json!(instances);
+    run["nodes"][1]["running"] = json!(3);
+    run["nodes"][1]["queued"] = json!(queued);
+    run["usage"]["spawns"] = json!(4 + queued);
+    run["usage"]["running"] = json!(4);
+}
+
+/// One world run at its scripted stage: the orchestrated page's varied
+/// world — eight live (two carrying many instances at a stage), one
+/// stopping, two paused, two done-with-residents (the resident still
+/// running), one failed (torn down), one stopped (the residents
+/// teardown's terminal state, no child in flight).
+fn world_run(index: usize) -> serde_json::Value {
+    let mut run = pr_manager_run(&format!("run-w{index:02}"), &format!("world-run-{index}"));
+    match index % 15 {
+        2 => occupied_review_node(&mut run, false),
+        5 => occupied_review_node(&mut run, true),
+        8 => {
+            // The stop was issued mid-review: the transitional state, the
+            // children still in flight while they tear down.
+            run["state"] = json!("stopping");
+        }
+        9 | 10 => {
+            run["state"] = json!("paused");
+        }
+        11 | 12 => {
+            // The machine completed with the resident still watching: a
+            // `done` run whose children are in flight stays live.
+            run["state"] = json!("done");
+            run["nodes"][1] = json!({
+                "id": "review", "status": "done", "lifecycle": "task", "attempts": 1,
+                "entriesUsed": 1, "maxEntries": 4,
+                "entries": [ { "index": 0, "status": "done", "error": null } ],
+                "instances": [ { "index": 0, "entry": 0, "status": "done", "attempt": 1, "child": "child-r1", "durationMs": 30, "error": null } ],
+                "running": 0, "queued": 0
+            });
+            for (node, status) in [(3, "done"), (4, "done"), (6, "done")] {
+                run["nodes"][node]["status"] = json!(status);
+                run["nodes"][node]["attempts"] = json!(1);
+                run["nodes"][node]["entriesUsed"] = json!(1);
+                run["nodes"][node]["entries"] =
+                    json!([ { "index": 0, "status": "done", "error": null } ]);
+                run["nodes"][node]["instances"] = json!([
+                    { "index": 0, "entry": 0, "status": "done", "attempt": 1, "child": "child-x1", "durationMs": 5, "error": null }
+                ]);
+            }
+            run["activeNodes"] = json!(["watchdog"]);
+            run["lastFired"] = json!([
+                { "from": ["merge", "verify"], "to": "report", "seq": 9 },
+                { "from": "verify", "to": "merge", "seq": 8 },
+                { "from": "review", "to": "merge", "seq": 7,
+                  "when": { "output": "verdict", "path": "approved", "op": "eq", "value": true } },
+                { "from": "triage", "to": "review", "seq": 2 },
+                { "from": "triage", "to": "watchdog", "seq": 3 }
+            ]);
+            run["usage"] = json!({ "spawns": 5, "settled": 5, "toolUses": 41, "maxParallel": 4,
+                                   "running": 1, "transitionsFired": 5 });
+        }
+        13 => {
+            // The failure policy failed the run: the review error, the
+            // residents torn down, no child in flight.
+            run["state"] = json!("failed");
+            run["nodes"][1]["status"] = json!("error");
+            run["nodes"][1]["error"] = json!("the reviewer rejected the diff: malformed patch");
+            run["nodes"][5]["status"] = json!("cancelled");
+            run["nodes"][5]["entries"] =
+                json!([ { "index": 0, "status": "cancelled", "error": null } ]);
+            run["nodes"][5]["instances"] = json!([
+                { "index": 0, "entry": 0, "status": "cancelled", "attempt": 1, "child": "child-w1", "durationMs": 12, "error": null }
+            ]);
+            run["nodes"][5]["running"] = json!(0);
+            run["activeNodes"] = json!([]);
+            run["usage"]["running"] = json!(0);
+            run["usage"]["settled"] = json!(2);
+        }
+        14 => {
+            // The operator stopped it mid-review: the terminal teardown
+            // state, no child in flight.
+            run["state"] = json!("stopped");
+            run["nodes"][1]["status"] = json!("cancelled");
+            run["nodes"][1]["entries"] =
+                json!([ { "index": 0, "status": "cancelled", "error": null } ]);
+            run["nodes"][1]["instances"] = json!([
+                { "index": 0, "entry": 0, "status": "cancelled", "attempt": 1, "child": "child-r1", "durationMs": 9, "error": null }
+            ]);
+            run["nodes"][1]["running"] = json!(0);
+            run["nodes"][5]["status"] = json!("cancelled");
+            run["nodes"][5]["entries"] =
+                json!([ { "index": 0, "status": "cancelled", "error": null } ]);
+            run["nodes"][5]["instances"] = json!([
+                { "index": 0, "entry": 0, "status": "cancelled", "attempt": 1, "child": "child-w1", "durationMs": 9, "error": null }
+            ]);
+            run["nodes"][5]["running"] = json!(0);
+            run["activeNodes"] = json!([]);
+            run["usage"]["running"] = json!(0);
+            run["usage"]["settled"] = json!(2);
+        }
+        _ => {}
+    }
+    run
+}
+
+/// The many-run world's first fold: fifteen runs in the reply's start
+/// order (oldest first — the kernel's documented order), every stage
+/// the page must read at once.
+fn world_response() -> serde_json::Value {
+    let runs: Vec<serde_json::Value> = (0..15).map(world_run).collect();
+    json!({ "runs": runs })
+}
+
+/// The done-with-residents pair settles: their residents stopped, the
+/// runs now fully terminal (no child in flight).
+fn stop_residents(run: &mut serde_json::Value) {
+    run["state"] = json!("stopped");
+    run["nodes"][5]["status"] = json!("cancelled");
+    run["nodes"][5]["entries"] = json!([ { "index": 0, "status": "cancelled", "error": null } ]);
+    run["nodes"][5]["instances"] = json!([
+        { "index": 0, "entry": 0, "status": "cancelled", "attempt": 1, "child": "child-w1", "durationMs": 40, "error": null }
+    ]);
+    run["nodes"][5]["running"] = json!(0);
+    run["usage"]["running"] = json!(0);
+}
+
+/// Fold two: the two OLDEST runs left the batch (the wire cap's
+/// oldest-end trim), three brand-new runs folded in on top (w15-w17),
+/// the done-with-residents pair settled to fully terminal, and one
+/// paused run resumed — one refresh tick's worth of a busy world.
+fn world_fold_two() -> serde_json::Value {
+    let mut runs: Vec<serde_json::Value> = Vec::new();
+    for index in 2..15 {
+        let mut run = world_run(index);
+        match index {
+            11 | 12 => stop_residents(&mut run),
+            9 => run["state"] = json!("running"),
+            _ => {}
+        }
+        runs.push(run);
+    }
+    for index in 15..18 {
+        runs.push(world_run(index));
+    }
+    json!({ "runs": runs })
+}
+
+/// Fold three: fold two's shape minus the selected run w07 — it left
+/// the batch mid-orchestration.
+fn world_fold_three() -> serde_json::Value {
+    let mut reply = world_fold_two();
+    reply["runs"]
+        .as_array_mut()
+        .expect("the world reply carries runs")
+        .retain(|run| run["runId"] != json!("run-w07"));
+    reply
+}
+
+/// Run w02's review entry one instance deeper (the settle script: 3
+/// run -> 2 run -> 1 run), the instance counts kept consistent with the
+/// kernel's per-stage report.
+fn w02_settled(review_running: u64) -> serde_json::Value {
+    let mut reply = world_response();
+    settle_w02_run(
+        &mut reply["runs"].as_array_mut().expect("runs")[2],
+        review_running,
+    );
+    reply
+}
+
+/// One run's review entry `review_running` instances still in flight
+/// (the earliest instances settled first, exactly how the kernel
+/// reports a draining entry).
+fn settle_w02_run(run: &mut serde_json::Value, review_running: u64) {
+    let done = 3 - review_running;
+    let mut instances = Vec::new();
+    for index in 0..3 {
+        instances.push(json!({
+            "index": index, "entry": 0,
+            "status": if (index as u64) < done { "done" } else { "running" },
+            "attempt": 1, "child": format!("child-r{}", index + 1),
+            "durationMs": if (index as u64) < done { 5 } else { 0 }, "error": null
+        }));
+    }
+    run["nodes"][1]["instances"] = json!(instances);
+    run["nodes"][1]["running"] = json!(review_running);
+    run["usage"]["running"] = json!(review_running + 1);
+    run["usage"]["settled"] = json!(1 + done);
+}
+
+/// Run w02's review entry fully settled with the verdict's
+/// disapproval: the guarded loop edge fired, `fix` entered, the review
+/// node drained — the folded snapshot one transition deeper.
+fn w02_entry_fired() -> serde_json::Value {
+    let mut reply = w02_settled(0);
+    let run = &mut reply["runs"].as_array_mut().expect("runs")[2];
+    run["nodes"][1]["status"] = json!("done");
+    run["nodes"][1]["entries"] = json!([ { "index": 0, "status": "done", "error": null } ]);
+    run["nodes"][2] = json!({
+        "id": "fix", "status": "running", "lifecycle": "task", "attempts": 1,
+        "entriesUsed": 1, "maxEntries": 3,
+        "entries": [ { "index": 0, "status": "running", "error": null } ],
+        "instances": [ { "index": 0, "entry": 0, "status": "running", "attempt": 1, "child": "child-f1", "durationMs": 0, "error": null } ],
+        "running": 1, "queued": 0
+    });
+    run["activeNodes"] = json!(["fix", "watchdog"]);
+    run["lastFired"] = json!([
+        { "from": "review", "to": "fix", "seq": 5,
+          "when": { "output": "verdict", "path": "approved", "op": "eq", "value": false } },
+        { "from": "triage", "to": "review", "seq": 2 },
+        { "from": "triage", "to": "watchdog", "seq": 3 }
+    ]);
+    run["usage"]["running"] = json!(2);
+    run["usage"]["settled"] = json!(5);
+    run["usage"]["transitionsFired"] = json!(3);
+    reply
+}
+
+/// The world with every run's elapsed clock bumped one tick — the
+/// clock-only fold: nothing is notice-worthy, no marker may fire.
+fn world_clock_tick() -> serde_json::Value {
+    let mut reply = world_response();
+    for run in reply["runs"].as_array_mut().expect("runs") {
+        run["elapsedMs"] = json!(run["elapsedMs"].as_u64().unwrap_or_default() + 2_000);
+    }
+    reply
+}
+
+/// The world with run w07's stop landed: the transitional state, its
+/// panel now reads stopping.
+fn world_w07_stopping() -> serde_json::Value {
+    let mut reply = world_response();
+    reply["runs"].as_array_mut().expect("runs")[7]["state"] = json!("stopping");
+    reply
+}
+
+/// The world with run w09 resumed (it was paused).
+fn world_w09_resumed() -> serde_json::Value {
+    let mut reply = world_response();
+    reply["runs"].as_array_mut().expect("runs")[9]["state"] = json!("running");
+    reply
+}
+
+/// A burst of five brand-new runs folded in on top of the world (the
+/// newest runs render first, the feed grows by five in one tick).
+fn world_with_burst() -> serde_json::Value {
+    let mut reply = world_response();
+    for index in 15..20 {
+        reply["runs"]
+            .as_array_mut()
+            .expect("runs")
+            .push(world_run(index));
+    }
+    reply
+}
+
+/// One busy tick at once (the churn script): the five-run burst folds in
+/// on top, w02's review entry settles one deeper, w09 resumes, and the
+/// done-with-residents pair's residents stop — many notice-worthy
+/// changes landing in a single fold, the page's rapid-change world.
+fn world_churn_tick() -> serde_json::Value {
+    let mut reply = world_with_burst();
+    for run in reply["runs"].as_array_mut().expect("runs").iter_mut() {
+        match run["runId"].as_str() {
+            Some("run-w02") => settle_w02_run(run, 2),
+            Some("run-w09") => run["state"] = json!("running"),
+            Some("run-w11" | "run-w12") => stop_residents(run),
+            _ => {}
+        }
+    }
+    reply
+}
+
+/// One run's panel rows from the rendered frame: its header through the
+/// row before the next run's header (the frame's own reading order).
+fn panel_rows<'a>(rows: &'a [String], name: &str) -> &'a [String] {
+    let start = rows
+        .iter()
+        .position(|row| row.contains(name))
+        .unwrap_or_else(|| panic!("the panel for {name} renders"));
+    let end = rows[start + 1..]
+        .iter()
+        .position(|row| row.contains("factory: "))
+        .map_or(rows.len(), |offset| start + 1 + offset);
+    &rows[start..end]
+}
+
+/// The complex machine's whole shape renders: the seven states in the
+/// declared order (entry marker, resident, guarded branches with their
+/// guards, the loop's back edge, the fan-in join rendered once), the
+/// fired markers on the fired edges, and the live highlighting on the
+/// in-flight and resident nodes.
+#[test]
+fn a_complex_machine_renders_its_whole_shape() {
+    let mut view = FactoryView::new(
+        parse_factory_runs(&runs_response(&pr_manager_run("run-pm1", "pr run"))),
+        60,
+    );
+    let rows = frame_text(&mut view);
+    let joined = rows.join("\n");
+    assert!(
+        joined.contains("factory: pr run — running"),
+        "the run header: {joined}"
+    );
+    // The declared order's rows, the entry and resident markers.
+    assert!(joined.contains("triage"), "{joined}");
+    assert!(
+        joined.contains("[entry]"),
+        "the entry state's marker: {joined}"
+    );
+    assert!(joined.contains("watchdog"), "{joined}");
+    assert!(
+        panel_rows(&rows, "factory: pr run")
+            .iter()
+            .any(|row| row.contains("✓ triage")),
+        "the settled entry state: {joined}"
+    );
+    // The two guarded branches carry their guards.
+    assert!(
+        joined.contains("when verdict.approved eq false"),
+        "the loop's guard: {joined}"
+    );
+    assert!(
+        joined.contains("when verdict.approved eq true"),
+        "the merge branch's guard: {joined}"
+    );
+    // The loop's back edge renders with the return marker; the fan-in
+    // join renders ONCE with its join label (not once per source).
+    let panel = panel_rows(&rows, "factory: pr run");
+    let back_edge = panel
+        .iter()
+        .find(|row| row.contains("↩"))
+        .expect("the loop's back edge renders");
+    assert!(
+        back_edge.contains("review"),
+        "the back edge returns to the loop head: {back_edge}"
+    );
+    let joins = panel
+        .iter()
+        .filter(|row| row.contains("join: merge + verify"))
+        .count();
+    assert_eq!(joins, 1, "the fan-in join renders once: {joined}");
+    // The fired markers sit on the fired edges (both of triage's).
+    let fired = panel.iter().filter(|row| row.contains("»")).count();
+    assert_eq!(fired, 2, "both fired edges carry the marker: {joined}");
+    // The live highlighting: the in-flight review and the resident
+    // watchdog paint accent; the never-entered states paint dim.
+    let spans = frame_spans(&mut view);
+    let accent = theme().fg_style(ThemeColor::Accent);
+    let dim = theme().fg_style(ThemeColor::Dim);
+    let accent_span = |text: &str| {
+        spans.iter().any(|row| {
+            row.iter()
+                .any(|span| span.content == text && span.style == accent)
+        })
+    };
+    let dim_span = |text: &str| {
+        spans.iter().any(|row| {
+            row.iter()
+                .any(|span| span.content == text && span.style == dim)
+        })
+    };
+    assert!(accent_span("review"), "the in-flight state paints accent");
+    assert!(
+        accent_span("watchdog"),
+        "the resident state paints accent while its child runs"
+    );
+    assert!(dim_span("fix"), "the never-entered state paints dim");
+    assert!(dim_span("report"), "{joined}");
+}
+
+/// The dock's factory count reads ONE liveness rule across the whole
+/// world: the live states count (running/stopping/paused), the
+/// done-with-residents pair counts (children still in flight — their
+/// stop control is live), and the fully terminal runs never count (the
+/// mutation check: the state-only filter drops the two resident pairs).
+#[test]
+fn the_dock_count_reads_one_liveness_rule_across_many_runs() {
+    let runs = parse_factory_runs(&world_response());
+    assert_eq!(runs.len(), 15, "the whole world parses");
+    let live = runs.iter().filter(|run| run.is_live()).count();
+    assert_eq!(
+        live, 13,
+        "eight live + one stopping + two paused + two done-with-residents"
+    );
+    let find = |id: &str| {
+        runs.iter()
+            .find(|run| run.run_id == id)
+            .unwrap_or_else(|| panic!("run {id} parses"))
+    };
+    // The done-with-residents pair: state says done, the children say
+    // live — the panel and its stop control must stay.
+    for id in ["run-w11", "run-w12"] {
+        let run = find(id);
+        assert_eq!(run.state.as_deref(), Some("done"));
+        assert!(run.children_in_flight(), "{id}'s resident still runs");
+        assert!(run.is_live(), "{id} stays live while its children run");
+        assert!(
+            !FactoryView::available_actions(run).is_empty(),
+            "{id} keeps its stop control"
+        );
+    }
+    // The fully terminal runs never count.
+    for id in ["run-w13", "run-w14"] {
+        assert!(!find(id).is_live(), "{id} is fully terminal");
+        assert!(
+            FactoryView::available_actions(find(id)).is_empty(),
+            "{id} offers nothing"
+        );
+    }
+    // The stopping and paused runs count.
+    assert!(find("run-w08").is_live());
+    assert!(find("run-w09").is_live());
+    assert!(find("run-w10").is_live());
+}
+
+/// Selection stability across many runs: selecting run #7 among fifteen
+/// and folding a busy world — new runs folding in ON TOP (newest-first),
+/// runs finishing and leaving above, the oldest-end trim dropping runs
+/// below — the selection stays on the SAME RUN, never the same index;
+/// when the selected run itself leaves the batch the trim hands the
+/// selection back to the feed's head (the mutation check:
+/// index-tracking jumps to the wrong run on every fold here).
+#[test]
+fn selection_stays_on_the_same_run_across_a_many_run_churn() {
+    let mut view = FactoryView::new(parse_factory_runs(&world_response()), 400);
+    // The head is the newest run; seven downs walk to run #7 among
+    // fifteen.
+    assert_eq!(
+        view.selected_run().map(|run| run.run_id.clone()),
+        Some("run-w14".to_string()),
+        "the page opens on the feed's head"
+    );
+    for _ in 0..7 {
+        let _ = view.handle_key("down", &kb());
+    }
+    assert_eq!(
+        view.selected_run().map(|run| run.run_id.clone()),
+        Some("run-w07".to_string())
+    );
+    // Fold two: three new runs folded in on top, the two oldest left
+    // the batch, the done-with-residents pair settled. The selection
+    // stays on run w07 — at a NEW index (the same index would name a
+    // different run).
+    view.apply_runs(parse_factory_runs(&world_fold_two()));
+    assert_eq!(view.selected, 10, "the fold moved the run down the feed");
+    assert_eq!(
+        view.selected_run().map(|run| run.run_id.clone()),
+        Some("run-w07".to_string()),
+        "the selection stays on the same run, not the same index"
+    );
+    // Fold three: the selected run itself left the batch — the trim
+    // hands the selection back to the feed's head, the newest run.
+    view.apply_runs(parse_factory_runs(&world_fold_three()));
+    assert_eq!(
+        view.selected_run().map(|run| run.run_id.clone()),
+        Some("run-w17".to_string()),
+        "a selected run that left the batch hands back to the head"
+    );
+}
+
+/// Render windowing at scale: fifteen panels on a small viewport never
+/// exceed the budget, the trailing hint always paints, and the leading
+/// window slides to the focused panel (the walk target) without
+/// clipping the chrome — the degenerate budgets still honor the
+/// viewport (the mutation check: a window without the slide hides the
+/// focused run's header).
+#[test]
+fn fifteen_panels_window_to_the_focus_on_a_small_viewport() {
+    let mut view = FactoryView::new(parse_factory_runs(&world_response()), 26);
+    let rows = frame_text(&mut view);
+    assert!(
+        rows.len() <= 26,
+        "fifteen panels never exceed the viewport: {:?}",
+        rows.len()
+    );
+    assert!(
+        rows.last().is_some_and(|row| row.contains("close")),
+        "the hint paints as the chrome's last row: {:?}",
+        rows.last()
+    );
+    // The leading window keeps the feed's head: the newest panel
+    // renders first.
+    assert!(
+        rows.iter().any(|row| row.contains("factory: world-run-14")),
+        "the newest panel renders first: {}",
+        rows.join("\n")
+    );
+    // Seven downs: the window slides to the focused run — its header
+    // paints, the head panel drops instead, and the hint survives.
+    for _ in 0..7 {
+        let _ = view.handle_key("down", &kb());
+    }
+    let rows = frame_text(&mut view);
+    let joined = rows.join("\n");
+    assert!(rows.len() <= 26, "the windowed frame stays in budget");
+    assert!(
+        joined.contains("▸ factory: world-run-7 — running"),
+        "the focused panel's header paints after the slide: {joined}"
+    );
+    assert!(
+        !joined.contains("factory: world-run-14"),
+        "the head panel dropped instead of the chrome: {joined}"
+    );
+    assert!(
+        rows.last().is_some_and(|row| row.contains("close")),
+        "the hint still paints after the slide"
+    );
+    // Degenerate budgets honor the viewport exactly.
+    let mut one_row = FactoryView::new(parse_factory_runs(&world_response()), 1);
+    let rows = frame_text(&mut one_row);
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].contains("close"), "{:?}", rows[0]);
+    let mut three_rows = FactoryView::new(parse_factory_runs(&world_response()), 3);
+    let rows = frame_text(&mut three_rows);
+    assert_eq!(rows.len(), 3);
+    assert!(rows[2].contains("close"), "{:?}", rows[2]);
+}
+
+/// The refresh tick across the fifteen-run world: the changed marker
+/// fires only on notice-worthy changes — never on the elapsed clock,
+/// never on identical structural replies, exactly on the runs that
+/// changed — and the changed shape paints: the fired-edge marker moves
+/// to the newly fired transition, the per-stage occupancy counts update
+/// as instances settle (3 run -> 2 run -> 1 run), and the active-node
+/// highlighting follows the settling states.
+#[test]
+fn the_refresh_tick_lights_only_notice_worthy_changes_across_many_runs() {
+    let mut view = FactoryView::new(parse_factory_runs(&world_response()), 400);
+    let changed_headers = |view: &mut FactoryView| {
+        frame_text(view)
+            .iter()
+            .filter(|row| row.contains("● changed"))
+            .count()
+    };
+    // An identical structural reply applies nothing.
+    assert!(!view.apply_runs(parse_factory_runs(&world_response())));
+    assert_eq!(changed_headers(&mut view), 0, "no run changed");
+    // The clock tick across the whole world lights nothing.
+    assert!(!view.apply_runs(parse_factory_runs(&world_clock_tick())));
+    assert_eq!(
+        changed_headers(&mut view),
+        0,
+        "the elapsed clock is not notice-worthy, at any scale"
+    );
+    // The settle script on run w02: one instance settles — the marker
+    // lights on THAT run alone, and its occupancy label drops to
+    // 2 run.
+    assert!(view.apply_runs(parse_factory_runs(&w02_settled(2))));
+    let rows = frame_text(&mut view);
+    assert_eq!(changed_headers(&mut view), 1, "exactly one run changed");
+    let panel = panel_rows(&rows, "factory: world-run-2");
+    assert!(
+        panel.iter().any(|row| row.contains("● changed")),
+        "the changed run is w02: {}",
+        rows.join("\n")
+    );
+    assert!(
+        panel
+            .iter()
+            .any(|row| row.contains("review (2 run · 0 queued)")),
+        "the occupancy label drops to 2 run: {panel:?}"
+    );
+    // One instance deeper: 1 run, still exactly one marker.
+    assert!(view.apply_runs(parse_factory_runs(&w02_settled(1))));
+    let rows = frame_text(&mut view);
+    assert_eq!(changed_headers(&mut view), 1);
+    assert!(
+        panel_rows(&rows, "factory: world-run-2")
+            .iter()
+            .any(|row| row.contains("review (1 run · 0 queued)")),
+        "the occupancy label drops to 1 run"
+    );
+    // The entry settles and the guarded loop edge fires: the marker
+    // moves to the newly fired transition, the review stage drains
+    // (no occupancy fragment), and the active node moves to fix.
+    assert!(view.apply_runs(parse_factory_runs(&w02_entry_fired())));
+    let rows = frame_text(&mut view);
+    assert_eq!(changed_headers(&mut view), 1, "still exactly one run");
+    let panel = panel_rows(&rows, "factory: world-run-2");
+    let fired_edge = panel
+        .iter()
+        .find(|row| row.contains("»") && row.contains("fix"))
+        .expect("the newly fired edge carries the marker");
+    assert!(
+        fired_edge.contains("verdict.approved eq false"),
+        "the fired marker sits on the loop's guarded edge: {fired_edge}"
+    );
+    assert!(
+        !panel.iter().any(|row| row.contains("review (1 run")),
+        "the drained stage carries no occupancy fragment: {panel:?}"
+    );
+    // The active-node highlighting follows the settling: the entered
+    // fix stage paints accent, the settled review stage does not.
+    let spans = frame_spans(&mut view);
+    let accent = theme().fg_style(ThemeColor::Accent);
+    let accent_ids: Vec<String> = spans
+        .iter()
+        .flat_map(|row| {
+            row.iter()
+                .filter(|span| span.style == accent)
+                .map(|span| span.content.clone())
+        })
+        .collect();
+    assert!(
+        accent_ids.iter().any(|id| id == "fix"),
+        "the entered fix stage paints accent: {accent_ids:?}"
+    );
+    let rows = frame_text(&mut view);
+    let panel = panel_rows(&rows, "factory: world-run-2");
+    let panel_start = rows
+        .iter()
+        .position(|row| row.contains("factory: world-run-2"))
+        .expect("the panel renders");
+    let panel_end = panel_start + panel.len();
+    let review_accent = spans[panel_start..panel_end].iter().any(|row| {
+        row.iter()
+            .any(|span| span.content == "review" && span.style == accent)
+    });
+    assert!(
+        !review_accent,
+        "the settled review stage loses the accent: {accent_ids:?}"
+    );
+}
+
+/// Orchestration at scale: the Enter path targets THE FOCUSED run among
+/// fifteen — no cross-run leakage — and the stop's immediate refresh
+/// updates its panel to stopping without losing the selection. The
+/// offered set reads the run's state: a paused run offers the resume
+/// complement first, a done-with-residents run keeps its stop (the
+/// residents teardown), a terminal run offers nothing. The open action
+/// rows stay honest across a fold: a state change under them clamps
+/// the tracked action to what the run still offers, and a run that
+/// leaves the batch closes them (the mutation check: confirming a
+/// blindly tracked action would fire a stale resume here).
+#[test]
+fn orchestration_targets_the_focused_run_among_many() {
+    let mut view = FactoryView::new(parse_factory_runs(&world_response()), 400);
+    // Walk to run #7 and stop it through the action rows.
+    for _ in 0..7 {
+        let _ = view.handle_key("down", &kb());
+    }
+    assert_eq!(
+        view.selected_run().map(|run| run.run_id.clone()),
+        Some("run-w07".to_string())
+    );
+    let _ = view.handle_key("enter", &kb());
+    let rows = frame_text(&mut view);
+    assert!(
+        rows.join("\n").contains("actions: world-run-7"),
+        "the action rows name the focused run"
+    );
+    assert_eq!(
+        view.handle_key("enter", &kb()),
+        FactoryViewAction::Stop {
+            run_id: "run-w07".to_string()
+        },
+        "the stop rides the focused run, none other"
+    );
+    // The stop landed: the immediate refresh folds the stopping state
+    // — the panel updates, the selection never moves.
+    view.apply_runs(parse_factory_runs(&world_w07_stopping()));
+    assert_eq!(
+        view.selected_run().map(|run| run.run_id.clone()),
+        Some("run-w07".to_string()),
+        "stopping a run never loses the selection"
+    );
+    let rows = frame_text(&mut view);
+    assert!(
+        panel_rows(&rows, "factory: world-run-7")
+            .iter()
+            .any(|row| row.contains("— stopping")),
+        "the stopped run's panel reads stopping"
+    );
+    // A paused run offers the resume complement first: walk to w09
+    // (two up from w07) and resume it.
+    for _ in 0..2 {
+        let _ = view.handle_key("up", &kb());
+    }
+    assert_eq!(
+        view.selected_run().map(|run| run.run_id.clone()),
+        Some("run-w09".to_string())
+    );
+    let _ = view.handle_key("enter", &kb());
+    let rows = frame_text(&mut view);
+    let joined = rows.join("\n");
+    assert!(joined.contains("actions: world-run-9"), "{joined}");
+    assert!(joined.contains("▸ Resume the run"), "{joined}");
+    assert!(joined.contains("Stop the run"), "{joined}");
+    assert_eq!(
+        view.handle_key("enter", &kb()),
+        FactoryViewAction::Resume {
+            run_id: "run-w09".to_string()
+        }
+    );
+    // The action rows stay honest across a fold: reopen w09's rows
+    // (paused, resume tracked), fold the world where w09 already
+    // resumed — resume is no longer offered, the tracked action clamps
+    // to stop, and Enter runs stop, never a stale resume.
+    let mut view = FactoryView::new(parse_factory_runs(&world_response()), 400);
+    for _ in 0..5 {
+        let _ = view.handle_key("down", &kb());
+    }
+    assert_eq!(
+        view.selected_run().map(|run| run.run_id.clone()),
+        Some("run-w09".to_string())
+    );
+    let _ = view.handle_key("enter", &kb());
+    view.apply_runs(parse_factory_runs(&world_w09_resumed()));
+    let rows = frame_text(&mut view);
+    let joined = rows.join("\n");
+    assert!(
+        joined.contains("actions: world-run-9"),
+        "the rows stay open on the run: {joined}"
+    );
+    assert!(
+        !joined.contains("Resume the run"),
+        "the clamped rows offer only what the run still offers: {joined}"
+    );
+    assert!(joined.contains("▸ Stop the run"), "{joined}");
+    assert_eq!(
+        view.handle_key("enter", &kb()),
+        FactoryViewAction::Stop {
+            run_id: "run-w09".to_string()
+        },
+        "the confirmation runs the offered action, never a stale resume"
+    );
+    // A done-with-residents run keeps its stop (the residents
+    // teardown): w11 sits two up from w09.
+    let mut view = FactoryView::new(parse_factory_runs(&world_response()), 400);
+    for _ in 0..3 {
+        let _ = view.handle_key("down", &kb());
+    }
+    assert_eq!(
+        view.selected_run().map(|run| run.run_id.clone()),
+        Some("run-w11".to_string())
+    );
+    let _ = view.handle_key("enter", &kb());
+    let rows = frame_text(&mut view);
+    let joined = rows.join("\n");
+    assert!(joined.contains("actions: world-run-11"), "{joined}");
+    assert!(
+        !joined.contains("Resume the run"),
+        "a done run never offers resume: {joined}"
+    );
+    assert!(joined.contains("▸ Stop the run"), "{joined}");
+    assert_eq!(
+        view.handle_key("enter", &kb()),
+        FactoryViewAction::Stop {
+            run_id: "run-w11".to_string()
+        }
+    );
+    // A terminal run offers nothing.
+    let _ = view.handle_key("up", &kb());
+    let _ = view.handle_key("up", &kb());
+    assert_eq!(
+        view.selected_run().map(|run| run.run_id.clone()),
+        Some("run-w13".to_string())
+    );
+    assert_eq!(view.handle_key("enter", &kb()), FactoryViewAction::None);
+    assert!(
+        !frame_text(&mut view).join("\n").contains("actions: "),
+        "a terminal run opens no action rows"
+    );
+}
+
+/// Rapid-change churn (the serialized fold discipline at scale): one
+/// busy tick settles runs in quick succession, bursts new runs in,
+/// resumes, and stops residents — the folded page stays coherent: the
+/// markers light exactly on the runs whose shape changed (never the
+/// new runs, never the untouched), the selection tracks the same run
+/// through the burst, a selected run that vanishes hands back to the
+/// head, and every keypress between folds resolves against the folded
+/// batch (no dropped key, no stale-index action).
+#[test]
+fn rapid_churn_keeps_the_folded_page_coherent() {
+    let mut view = FactoryView::new(parse_factory_runs(&world_response()), 400);
+    for _ in 0..7 {
+        let _ = view.handle_key("down", &kb());
+    }
+    assert_eq!(
+        view.selected_run().map(|run| run.run_id.clone()),
+        Some("run-w07".to_string())
+    );
+    // The busy tick: a five-run burst folds in on top while four runs
+    // change shape underneath.
+    assert!(view.apply_runs(parse_factory_runs(&world_churn_tick())));
+    assert_eq!(
+        view.selected_run().map(|run| run.run_id.clone()),
+        Some("run-w07".to_string()),
+        "the selection tracks the same run through the burst"
+    );
+    assert_eq!(view.selected, 12, "five new runs folded in on top");
+    // Exactly the four changed runs light the marker — the burst's new
+    // runs paint none, the untouched runs none.
+    let rows = frame_text(&mut view);
+    let marked: Vec<&String> = rows
+        .iter()
+        .filter(|row| row.contains("● changed"))
+        .collect();
+    assert_eq!(marked.len(), 4, "exactly the changed runs: {marked:?}");
+    for name in ["world-run-2", "world-run-9", "world-run-11", "world-run-12"] {
+        assert!(
+            marked.iter().any(|row| row.contains(name)),
+            "{name}'s panel carries the changed marker: {marked:?}"
+        );
+    }
+    for name in [
+        "world-run-19",
+        "world-run-15",
+        "world-run-5",
+        "world-run-14",
+    ] {
+        assert!(
+            !marked.iter().any(|row| row.contains(name)),
+            "{name} never carries a marker: {marked:?}"
+        );
+    }
+    // The page stays coherent: the burst's panels render, the focused
+    // panel paints, the hint paints.
+    let joined = rows.join("\n");
+    assert!(joined.contains("factory: world-run-19"), "{joined}");
+    assert!(
+        joined.contains("▸ factory: world-run-7 — running"),
+        "{joined}"
+    );
+    assert!(joined.contains("Enter actions"), "{joined}");
+    // The focused run vanishes mid-orchestration: the selection hands
+    // back to the head, and the very next keypress resolves against
+    // the folded batch — never a stale index.
+    let mut vanished = world_churn_tick();
+    vanished["runs"]
+        .as_array_mut()
+        .expect("runs")
+        .retain(|run| run["runId"] != json!("run-w07"));
+    view.apply_runs(parse_factory_runs(&vanished));
+    assert_eq!(
+        view.selected_run().map(|run| run.run_id.clone()),
+        Some("run-w19".to_string()),
+        "the vanished run hands the selection back to the head"
+    );
+    let _ = view.handle_key("enter", &kb());
+    assert!(
+        frame_text(&mut view)
+            .join("\n")
+            .contains("actions: world-run-19"),
+        "the keypress after the fold opens the head's rows"
+    );
+    assert_eq!(
+        view.handle_key("enter", &kb()),
+        FactoryViewAction::Stop {
+            run_id: "run-w19".to_string()
+        }
+    );
+    // Interleaved folds never drop a key: a walk with a fold between
+    // every press lands exactly where an unfolded walk would.
+    let mut view = FactoryView::new(parse_factory_runs(&world_churn_tick()), 400);
+    for _ in 0..3 {
+        let _ = view.handle_key("down", &kb());
+        let _ = view.apply_runs(parse_factory_runs(&world_churn_tick()));
+    }
+    assert_eq!(
+        view.selected_run().map(|run| run.run_id.clone()),
+        Some("run-w16".to_string()),
+        "every keypress resolved against the folded batch"
     );
 }

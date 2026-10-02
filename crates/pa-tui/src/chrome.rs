@@ -153,10 +153,11 @@ pub struct ActivityDock {
     /// kernel registry only): finished runs never inflate the indicator
     /// — they stay as rows inside the bash view.
     pub bash_running: usize,
-    /// Factory runs actively live right now (running, stopping, or
-    /// paused — the current session's kernel registry only): terminal
-    /// runs never inflate the indicator, exactly like the bash group's
-    /// running-only count.
+    /// Factory runs actively live right now (a live state — running,
+    /// stopping, or paused — or a terminal run whose children are still
+    /// in flight, the residents teardown; the current session's kernel
+    /// registry only): fully terminal runs never inflate the indicator,
+    /// exactly like the bash group's running-only count.
     pub factory_runs: usize,
     /// The active goal's dock label — `Pursuing goal (12m 05s)`-style,
     /// the elapsed-time form (the operator's 2026-09-24 directive: the

@@ -83,7 +83,7 @@ impl super::SessionUi {
 
     /// One key press while the view is open: the view resolves the key;
     /// stop/resume ride the daemon lane (bounded, with the outcome
-    /// reported), the mermaid copy rides the clipboard, and Esc closes.
+    /// reported), and Esc closes.
     pub(crate) async fn handle_factory_view_key(
         &mut self,
         key: crossterm::event::KeyEvent,
@@ -114,12 +114,6 @@ impl super::SessionUi {
             }
             Some(FactoryViewAction::Resume { run_id }) => {
                 self.factory_control(view, "resume", run_id).await?;
-            }
-            Some(FactoryViewAction::CopyMermaid { source }) => {
-                match crate::clipboard::copy_to_clipboard(&source, &mut self.osc_sink) {
-                    Ok(()) => self.toast("Copied the run's Mermaid diagram to the clipboard", view),
-                    Err(message) => self.error_row(&message, view),
-                }
             }
         }
         Ok(())

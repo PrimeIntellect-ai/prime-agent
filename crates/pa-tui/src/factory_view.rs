@@ -1,10 +1,12 @@
 //! The `/factory` view: one panel per live factory run — the machine
-//! diagram with live highlighting, the run's state, the instances running
-//! and queued, the budget consumed, and the milestone tail, with the
-//! orchestration keys (stop/resume) and the copy-mermaid action. The
-//! panels read NEWEST-FIRST like a live activity feed (a run created
-//! after an existing one renders above it), and the page opens with the
-//! newest run selected.
+//! diagram with live highlighting, the run's state, the instances
+//! running and queued, the budget consumed, and the milestone tail — on
+//! the activity pages' picker keyset (arrows + Enter + Esc): the arrows
+//! move the run selection over the NEWEST-FIRST feed (a run created
+//! after an existing one renders above it, and the page opens with the
+//! newest run selected), Enter opens the selected run's in-page action
+//! rows (stop/resume — the heartbeats picker's drill-in shape), and Esc
+//! backs out of the open action rows or closes the page.
 //!
 //! The view is pure presentation and selection: the session UI owns the
 //! refresh cadence (the run's collect cycle: a bounded watch on the
@@ -19,12 +21,7 @@
 //! how many agents run at the node, how many queue behind them) — its
 //! outgoing transitions as connector rows underneath (joins rendered
 //! once, back edges marked), active nodes bright, pending nodes dim, and
-//! the last-fired edges marked. The same graph model emits genuine
-//! Mermaid source (a `flowchart TD` with the same occupancy-carrying
-//! labels, `classDef active` styling and `linkStyle` marks on the
-//! last-fired edges) for the copy action — pasteable to GitHub or
-//! mermaid.live, rendering the same highlighting and the same stage
-//! occupancy.
+//! the last-fired edges marked.
 
 use serde_json::Value;
 
@@ -111,6 +108,48 @@ impl FactoryRunSnapshot {
             })
             .map(|state| state.id.clone())
             .collect()
+    }
+
+    /// Whether the run still holds running children (admitted residents,
+    /// or any in-flight instance a terminal state can carry — a `done`
+    /// run whose residents still run stays actionable).
+    #[must_use]
+    pub fn children_in_flight(&self) -> bool {
+        self.usage.as_ref().is_some_and(|usage| usage.running > 0)
+    }
+
+    /// Whether the run is LIVE in the dock/page sense: a live state
+    /// (running/stopping/paused), or children still in flight — the
+    /// kernel's own unscoped-list liveness rule (`state in live_states
+    /// or running > 0`): a `done`/`failed` run whose resident children
+    /// still run keeps its panel, its dock count, and its stop control
+    /// while any child runs, and a fully terminal run offers nothing.
+    #[must_use]
+    pub fn is_live(&self) -> bool {
+        matches!(
+            self.state.as_deref(),
+            Some("running" | "stopping" | "paused")
+        ) || self.children_in_flight()
+    }
+}
+
+/// One run-level action the page offers on a live run (the heartbeats
+/// picker's action-row grammar): the stop that tears the run and its
+/// children down, and the pause complement's resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactoryAction {
+    Stop,
+    Resume,
+}
+
+impl FactoryAction {
+    /// The action row's label.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stop => "Stop the run",
+            Self::Resume => "Resume the run",
+        }
     }
 }
 
@@ -270,15 +309,31 @@ pub enum FactoryViewAction {
     Resume {
         run_id: String,
     },
-    /// Copy the selected run's Mermaid source.
-    CopyMermaid {
-        source: String,
-    },
     Close,
 }
 
-/// The `/factory` view's state: the parsed run panels, the selection, and
-/// the hysteresis bookkeeping.
+/// The page's mode: the run feed, or the selected run's open action rows
+/// (the heartbeats picker's list/detail drill-in shape, one level — the
+/// feed stays mounted behind the action rows; there is no separate detail
+/// page to paint).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Mode {
+    /// The run feed: the arrows walk the run selection.
+    Feed,
+    /// The open run's action rows: the arrows walk the offered actions.
+    /// The tracked action rides by IDENTITY, not index — a fold may
+    /// change the run's state (and with it the offered set) while the
+    /// rows are open, and a tracked index would silently rename the
+    /// selection to a different action (the feed's same-run lesson, one
+    /// level up).
+    Actions {
+        run_id: String,
+        action: FactoryAction,
+    },
+}
+
+/// The `/factory` view's state: the parsed run panels, the selection, the
+/// open action rows, and the hysteresis bookkeeping.
 #[derive(Debug)]
 pub struct FactoryView {
     runs: Vec<FactoryRunSnapshot>,
@@ -287,6 +342,7 @@ pub struct FactoryView {
     /// repaint spam — one marker per notice-worthy change).
     recent_change: Vec<bool>,
     selected: usize,
+    mode: Mode,
     error: Option<String>,
     viewport_rows: usize,
 }
@@ -303,9 +359,33 @@ impl FactoryView {
             runs,
             recent_change,
             selected: 0,
+            mode: Mode::Feed,
             error: None,
             viewport_rows,
         }
+    }
+
+    /// The actions the page offers on one run (the heartbeats picker's
+    /// `availableActions` grammar): the pause complement first — resume
+    /// on a paused run — then stop, exactly while the run is live (a
+    /// `done` run with residents still in flight keeps its stop; a
+    /// fully terminal run offers nothing). The offered set is derived
+    /// from the run's CURRENT snapshot everywhere — the render, the
+    /// arrow walk, the Enter confirmation — so a fold's state change
+    /// can never leave a stale action offered.
+    #[must_use]
+    pub fn available_actions(run: &FactoryRunSnapshot) -> Vec<FactoryAction> {
+        let mut actions = Vec::with_capacity(2);
+        if run.run_id.is_empty() {
+            return actions;
+        }
+        if run.state.as_deref() == Some("paused") {
+            actions.push(FactoryAction::Resume);
+        }
+        if run.is_live() {
+            actions.push(FactoryAction::Stop);
+        }
+        actions
     }
 
     /// Mount the view from the poll cache (the open path's builder): the
@@ -361,6 +441,31 @@ impl FactoryView {
                 .unwrap_or(0),
             None => 0,
         };
+        // The open action rows ride the same fold discipline as the
+        // feed's selection: a run that left the batch closes the rows,
+        // and a state change under them re-reads the offered set — a
+        // paused run that stopped mid-menu no longer offers resume,
+        // and the tracked action clamps to what the run still offers
+        // (never a stale target: the rows confirm against the folded
+        // snapshot, not the one they opened on).
+        if let Mode::Actions { run_id, action } = self.mode.clone() {
+            let offered = self
+                .runs
+                .iter()
+                .find(|run| run.run_id == run_id)
+                .map(Self::available_actions)
+                .unwrap_or_default();
+            match offered.first().copied() {
+                None => self.mode = Mode::Feed,
+                Some(first) if !offered.contains(&action) => {
+                    self.mode = Mode::Actions {
+                        run_id,
+                        action: first,
+                    };
+                }
+                Some(_) => {}
+            }
+        }
         changed
     }
 
@@ -378,51 +483,112 @@ impl FactoryView {
         self.error = error.map(|text| crate::menu_panel::scrub_controls(&text));
     }
 
-    /// One key press: j/k (or the arrow keys) move the selection, s stops
-    /// the selected run, r resumes it, m copies its Mermaid source, and
-    /// Esc/Ctrl+C close the view.
+    /// One key press on the activity pages' picker keyset (arrows +
+    /// Enter + Esc — the heartbeats/bash pages' family): the arrows
+    /// move the selection (the feed's run, or the open action rows'
+    /// action), Enter opens the selected run's action rows or runs the
+    /// selected action, and Esc/ctrl+c back out of the open action rows
+    /// or close the page. Every binding reads the keybinding manager
+    /// (`tui.select.up`/`down`/`confirm`/`cancel`), so a user's remap
+    /// reaches this page exactly like its siblings.
     #[must_use]
-    pub fn handle_key(&mut self, key: &str, _kb: &KeybindingsManager) -> FactoryViewAction {
-        match key {
-            // `key_event_to_id` reports the Escape key as "escape"; "esc"
-            // stays accepted for the callers that already normalize.
-            "escape" | "esc" | "ctrl+c" => return FactoryViewAction::Close,
-            "down" | "j" | "tab" => {
-                if !self.runs.is_empty() {
-                    self.selected = (self.selected + 1).min(self.runs.len() - 1);
-                }
+    pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> FactoryViewAction {
+        if key == "ctrl+c" || kb.matches(key, "tui.select.cancel") {
+            // Esc backs out of the open action rows before it closes
+            // the page — the drill-in's back, on the one close key the
+            // page carries (the keyset stays arrows + Enter + Esc).
+            if self.mode != Mode::Feed {
+                self.mode = Mode::Feed;
+                return FactoryViewAction::None;
             }
-            "up" | "k" | "shift+tab" => {
-                self.selected = self.selected.saturating_sub(1);
-            }
-            "s" => {
-                if let Some(run) = self.selected_run() {
-                    if !run.run_id.is_empty() {
-                        return FactoryViewAction::Stop {
-                            run_id: run.run_id.clone(),
-                        };
-                    }
-                }
-            }
-            "r" => {
-                if let Some(run) = self.selected_run() {
-                    if run.state.as_deref() == Some("paused") && !run.run_id.is_empty() {
-                        return FactoryViewAction::Resume {
-                            run_id: run.run_id.clone(),
-                        };
-                    }
-                }
-            }
-            "m" => {
-                if let Some(run) = self.selected_run() {
-                    return FactoryViewAction::CopyMermaid {
-                        source: diagram::mermaid_source(run),
-                    };
-                }
-            }
-            _ => {}
+            return FactoryViewAction::Close;
+        }
+        if kb.matches(key, "tui.select.up") || kb.matches(key, "tui.select.down") {
+            let delta: isize = if kb.matches(key, "tui.select.up") {
+                -1
+            } else {
+                1
+            };
+            self.move_selection(delta);
+            return FactoryViewAction::None;
+        }
+        if kb.matches(key, "tui.select.confirm") {
+            return self.confirm_selection();
         }
         FactoryViewAction::None
+    }
+
+    /// One arrow step: the feed walks the run selection (newest-first —
+    /// down the feed reads OLDER), the open action rows walk their
+    /// offered set. A run that left the batch under open rows closes
+    /// them (the fold's own hand-back, reached from the key path too).
+    fn move_selection(&mut self, delta: isize) {
+        match self.mode.clone() {
+            Mode::Feed => {
+                if self.runs.is_empty() {
+                    return;
+                }
+                let next = (self.selected as isize + delta).clamp(0, self.runs.len() as isize - 1)
+                    as usize;
+                self.selected = next;
+            }
+            Mode::Actions { run_id, action } => {
+                let Some(run) = self.runs.iter().find(|run| run.run_id == run_id) else {
+                    self.mode = Mode::Feed;
+                    return;
+                };
+                let actions = Self::available_actions(run);
+                let Some(current) = actions.iter().position(|candidate| *candidate == action)
+                else {
+                    return;
+                };
+                let next = (current as isize + delta).clamp(0, actions.len() as isize - 1) as usize;
+                self.mode = Mode::Actions {
+                    run_id,
+                    action: actions[next],
+                };
+            }
+        }
+    }
+
+    /// Enter: the feed opens the selected run's action rows (when the
+    /// run offers any — a terminal run answers nothing), the open rows
+    /// run the selected action and return to the feed. The
+    /// confirmation re-resolves the run and its offered set against
+    /// the CURRENT batch — a fold may have changed the run's state, or
+    /// dropped the run, while the rows were open — so the action lands
+    /// on the folded truth, never a stale target.
+    fn confirm_selection(&mut self) -> FactoryViewAction {
+        match self.mode.clone() {
+            Mode::Feed => {
+                if let Some(run) = self.selected_run() {
+                    if let Some(action) = Self::available_actions(run).first().copied() {
+                        self.mode = Mode::Actions {
+                            run_id: run.run_id.clone(),
+                            action,
+                        };
+                    }
+                }
+                FactoryViewAction::None
+            }
+            Mode::Actions { run_id, action } => {
+                let offered = self
+                    .runs
+                    .iter()
+                    .find(|run| run.run_id == run_id)
+                    .map(Self::available_actions)
+                    .unwrap_or_default();
+                self.mode = Mode::Feed;
+                if offered.contains(&action) {
+                    match action {
+                        FactoryAction::Stop => FactoryViewAction::Stop { run_id },
+                        FactoryAction::Resume => FactoryViewAction::Resume { run_id },
+                    }
+                } else {
+                    FactoryViewAction::None
+                }
+            }
+        }
     }
 
     /// Render the view: one panel per live run (the machine diagram with
@@ -456,10 +622,12 @@ impl FactoryView {
             self.render_panel(theme, width, run, index, &mut panels);
             panel_ranges.push((panel_start, panels.len()));
         }
-        // The chrome area: the error line from the last failed refresh and
-        // the trailing key hint. The chrome always renders — the hint is
-        // the view's only key legend.
-        let mut chrome_rows = 2usize;
+        // The chrome area: the open action rows, the error line from the
+        // last failed refresh, and the trailing key hint. The chrome
+        // always renders — the hint is the view's only key legend, and
+        // the action rows are the page's only action surface.
+        let action_rows = self.action_block(theme);
+        let mut chrome_rows = 2 + action_rows.len();
         if self.error.is_some() {
             chrome_rows += 2;
         }
@@ -467,17 +635,26 @@ impl FactoryView {
         // renders more rows than the viewport asked for. A tall view
         // windows over the panel area: the leading window keeps the top
         // of the feed (the newest panels — the oldest panels drop
-        // first), and when the selected run's panel falls below it the
-        // window slides to the selection (a stop/resume target never
-        // hides behind the budget); the chrome stays pinned at the end
-        // either way.
+        // first), and when the focused run's panel falls below it the
+        // window slides to it (the focused run is the actionable one —
+        // the feed's selection, or the run whose action rows are
+        // open — so a stop/resume target never hides behind the
+        // budget); the chrome stays pinned at the end either way.
+        let focus = match &self.mode {
+            Mode::Actions { run_id, .. } => self
+                .runs
+                .iter()
+                .position(|run| &run.run_id == run_id)
+                .unwrap_or(self.selected),
+            Mode::Feed => self.selected,
+        };
         let budget = self.viewport_rows.max(1);
         let panel_budget = budget.saturating_sub(chrome_rows);
         if panels.len() > panel_budget {
             let mut start = 0;
-            if let Some((selected_start, _)) = panel_ranges.get(self.selected) {
-                if *selected_start >= panel_budget {
-                    start = *selected_start;
+            if let Some((focus_start, _)) = panel_ranges.get(focus) {
+                if *focus_start >= panel_budget {
+                    start = *focus_start;
                 }
             }
             if start > 0 {
@@ -486,6 +663,7 @@ impl FactoryView {
             panels.truncate(panel_budget);
         }
         let mut rows = panels;
+        rows.extend(action_rows);
         if let Some(error) = &self.error {
             rows.push(vec![Span::raw("")]);
             rows.push(vec![
@@ -494,21 +672,11 @@ impl FactoryView {
             ]);
         }
         rows.push(vec![Span::raw("")]);
-        rows.push(vec![
-            Span::raw("  "),
-            theme.fg_span(
-                ThemeColor::Dim,
-                format!(
-                    "{} select · {} stop · {} resume · {} copy mermaid · {} close",
-                    format_key_text("j/k"),
-                    format_key_text("s"),
-                    format_key_text("r"),
-                    format_key_text("m"),
-                    format_key_text("esc"),
-                ),
-            ),
-        ]);
-        let _ = kb;
+        let hint = match self.mode {
+            Mode::Feed => Self::feed_hint(kb),
+            Mode::Actions { .. } => Self::actions_hint(kb),
+        };
+        rows.push(vec![Span::raw("  "), theme.fg_span(ThemeColor::Dim, hint)]);
         // A degenerate budget (a sub-chrome viewport on a short terminal)
         // tail-clips: the hint is the chrome's last row and always survives.
         if rows.len() > budget {
@@ -517,6 +685,73 @@ impl FactoryView {
         rows.into_iter()
             .map(|row| truncate_line(&row, width, ""))
             .collect()
+    }
+
+    /// The feed's bottom hint line (the heartbeats/bash pages' grammar):
+    /// the arrows move, Enter opens the selected run's action rows, Esc
+    /// closes.
+    fn feed_hint(kb: &KeybindingsManager) -> String {
+        let key = |binding: &str, fallback: &str| {
+            kb.first_key(binding)
+                .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
+        };
+        format!(
+            "{}/{} move \u{b7} {} actions \u{b7} {} close",
+            key("tui.select.up", "\u{2191}"),
+            key("tui.select.down", "\u{2193}"),
+            key("tui.select.confirm", "Enter"),
+            key("tui.select.cancel", "Esc"),
+        )
+    }
+
+    /// The open action rows' hint line: the arrows walk the actions,
+    /// Enter runs the tracked one, Esc backs out to the feed.
+    fn actions_hint(kb: &KeybindingsManager) -> String {
+        let key = |binding: &str, fallback: &str| {
+            kb.first_key(binding)
+                .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
+        };
+        format!(
+            "{}/{} action \u{b7} {} run \u{b7} {} back",
+            key("tui.select.up", "\u{2191}"),
+            key("tui.select.down", "\u{2193}"),
+            key("tui.select.confirm", "Enter"),
+            key("tui.select.cancel", "Esc"),
+        )
+    }
+
+    /// The open action rows (the heartbeats picker's drill-in, one
+    /// level): a blank, a header naming the run, one row per offered
+    /// action with the tracked one marked. The block rides the
+    /// trailing chrome — the panel window's budget keeps it and the
+    /// hint painted together.
+    fn action_block(&self, theme: &Theme) -> Vec<Line> {
+        let Mode::Actions { run_id, action } = &self.mode else {
+            return Vec::new();
+        };
+        let Some(run) = self.runs.iter().find(|run| &run.run_id == run_id) else {
+            return Vec::new();
+        };
+        let mut rows = vec![vec![Span::raw("")]];
+        let mut header: Line = vec![Span::raw("  ")];
+        header.push(theme.fg_span(ThemeColor::ToolTitle, "actions: "));
+        header.push(theme.fg_span(ThemeColor::Text, run.display_name()));
+        rows.push(header);
+        for offered in Self::available_actions(run) {
+            let tracked = offered == *action;
+            let mut row: Line = vec![Span::raw("  ")];
+            row.push(Span::raw(if tracked { "▸ " } else { "  " }));
+            row.push(theme.fg_span(
+                if tracked {
+                    ThemeColor::Text
+                } else {
+                    ThemeColor::Muted
+                },
+                offered.label().to_string(),
+            ));
+            rows.push(row);
+        }
+        rows
     }
 
     /// One run panel: the header (name, state, changed marker), the stats

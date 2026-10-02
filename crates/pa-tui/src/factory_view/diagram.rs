@@ -1,12 +1,11 @@
 //! The `/factory` view's diagram model: the snapshot shapes (states,
 //! transitions, live nodes, usage — including each stage's agent
-//! occupancy counts), the status glyphs and colors, the compact guard
-//! rendering, and the Mermaid emitter. One graph model feeds both the
-//! ASCII diagram and the Mermaid source, so the in-terminal
-//! highlighting, the per-stage occupancy labels, and the pasteable
-//! highlighting are the same statement. Every daemon-provided string
-//! the model keeps scrubs its control bytes at the parse seam
-//! (`scrubbed`): wire text can never drive the terminal.
+//! occupancy counts), the status glyphs and colors, and the compact
+//! guard rendering. One graph model feeds the ASCII diagram, so the
+//! in-terminal highlighting and the per-stage occupancy labels are the
+//! same statement. Every daemon-provided string the model keeps scrubs
+//! its control bytes at the parse seam (`scrubbed`): wire text can
+//! never drive the terminal.
 
 use serde_json::Value;
 
@@ -19,8 +18,8 @@ use crate::theme::ThemeColor;
 /// labels, statuses, and errors — none of them may carry a control byte
 /// into a styled span (an OSC sequence in that text could otherwise
 /// drive the terminal, e.g. overwrite the operator's clipboard via
-/// OSC 52). The scrub lands at this parse seam, so the ASCII diagram
-/// and the Mermaid emitter share terminal-safe text.
+/// OSC 52). The scrub lands at this parse seam, so every diagram row
+/// paints terminal-safe text.
 fn scrubbed(text: &str) -> String {
     crate::menu_panel::scrub_controls(text)
 }
@@ -259,7 +258,7 @@ impl FactoryNodeState {
 
     /// The stage's occupancy label — `3 run · 2 queued` — when agents
     /// sit at this stage; a stage at rest carries no fragment. The
-    /// ASCII row and the Mermaid label render the same statement.
+    /// ASCII row renders the stage's live headcount.
     #[must_use]
     pub fn occupancy_label(&self) -> String {
         let running = self.running_agents();
@@ -410,143 +409,4 @@ pub fn format_guard(when: &Value) -> Option<String> {
         // `verdictexists`).
         None => Some(format!("{output}{path} {op}")),
     }
-}
-
-/// Mermaid-safe text: labels and the header comment interpolate
-/// runtime-provided strings (state ids, guard fields, run names), so the
-/// characters that would terminate a label or a comment — the edge-label
-/// delimiter `|`, the node-label quote `"`, and line breaks — neutralize
-/// to lookalike glyphs: the copied source stays one valid diagram, never
-/// injected syntax.
-fn mermaid_safe(text: &str) -> String {
-    text.chars()
-        .map(|character| match character {
-            '|' => '¦',
-            '"' => '″',
-            '\n' | '\r' => ' ',
-            other => other,
-        })
-        .collect()
-}
-
-/// The Mermaid source for one run: a `flowchart TD` with the same graph
-/// model as the ASCII diagram, `classDef` styling matching the terminal
-/// diagram's highlighting (`active` bright for the in-flight nodes,
-/// `pending` dim for the queued ones), and `linkStyle` marks on the
-/// last-fired edges — pasteable to GitHub or mermaid.live, rendering the
-/// same highlighting.
-///
-/// Node ids are index-based (`s0`, `s1`, ...) with the machine's state ids
-/// as labels, so any valid state id renders verbatim; the labels carry the
-/// stage's agent occupancy (`reviewing (3 run · 2 queued)`) so a pasted
-/// diagram shows stage occupancy, not just state; join edges render
-/// dotted (one per source) with the join label.
-#[must_use]
-pub fn mermaid_source(run: &super::FactoryRunSnapshot) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    let spec_id = mermaid_safe(&run.spec_id);
-    let header = match (&run.name, run.state.as_deref()) {
-        (Some(name), Some(state)) => {
-            format!("%% factory: {} — {state}", mermaid_safe(name))
-        }
-        (Some(name), None) => format!("%% factory: {}", mermaid_safe(name)),
-        (None, Some(state)) => format!("%% factory: {spec_id} — {state}"),
-        (None, None) => format!("%% factory spec: {spec_id}"),
-    };
-    lines.push(header);
-    lines.push("flowchart TD".to_string());
-    // Node declarations: index ids, label carries the state id, the
-    // entry marker, and the stage's agent occupancy — a stage at rest
-    // keeps its plain label.
-    for (index, state) in run.states.iter().enumerate() {
-        let occupancy = run
-            .nodes
-            .get(&state.id)
-            .map(FactoryNodeState::occupancy_label)
-            .filter(|label| !label.is_empty())
-            .map(|label| format!(" ({label})"))
-            .unwrap_or_default();
-        let label = if state.entry {
-            format!("{}*{occupancy}", mermaid_safe(&state.id))
-        } else {
-            format!("{}{occupancy}", mermaid_safe(&state.id))
-        };
-        lines.push(format!("    s{index}[\"{label}\"]"));
-    }
-    // Edge declarations in machine order; join edges render per source,
-    // dotted, with the join label.
-    let mut edge_index = 0usize;
-    let mut fired_edges: Vec<usize> = Vec::new();
-    for transition in &run.transitions {
-        let label = match (&transition.when, transition.from.len() > 1) {
-            (Some(guard), true) => format!("join: {}", mermaid_safe(guard)),
-            (Some(guard), false) => mermaid_safe(guard),
-            (None, true) => "join".to_string(),
-            (None, false) => "settled".to_string(),
-        };
-        let fired = run.last_fired.iter().any(|edge| edge.matches(transition));
-        for source in &transition.from {
-            let Some(source_index) = run.states.iter().position(|state| &state.id == source) else {
-                continue;
-            };
-            let Some(target_index) = run
-                .states
-                .iter()
-                .position(|state| state.id == transition.to)
-            else {
-                continue;
-            };
-            let arrow = if transition.from.len() > 1 {
-                "-.->"
-            } else {
-                "-->"
-            };
-            lines.push(format!(
-                "    s{source_index} {arrow}|{label}| s{target_index}"
-            ));
-            if fired {
-                fired_edges.push(edge_index);
-            }
-            edge_index += 1;
-        }
-    }
-    // The class definitions: `active` is the diagram's bright class,
-    // `pending` its dim queued class (the terminal diagram's dim `pending`
-    // glyph — queued nodes never paint bright).
-    lines.push(
-        "    classDef active fill:#16a34a,stroke:#15803d,stroke-width:3px,color:#f8fafc"
-            .to_string(),
-    );
-    lines.push(
-        "    classDef pending fill:#1e293b,stroke:#475569,stroke-width:1px,color:#cbd5e1"
-            .to_string(),
-    );
-    lines.push(
-        "    classDef done fill:#475569,stroke:#64748b,stroke-width:1px,color:#e2e8f0".to_string(),
-    );
-    lines.push(
-        "    classDef error fill:#b91c1c,stroke:#dc2626,stroke-width:2px,color:#fee2e2".to_string(),
-    );
-    // Class assignments from the live overlay: the node's live activity
-    // paints `active` (a multi-entry state with an in-flight earlier
-    // entry stays bright even when the newest entry settled), queued
-    // dim, errors red, everything settled done.
-    for (index, state) in run.states.iter().enumerate() {
-        let class = match run.nodes.get(&state.id) {
-            Some(node) if node.is_active() => "active",
-            Some(node) if node.status == "pending" => "pending",
-            Some(node) if node.status == "error" => "error",
-            Some(_) => "done",
-            None => continue,
-        };
-        lines.push(format!("    class s{index} {class}"));
-    }
-    // The last-fired edge marks (linkStyle indexes count every emitted
-    // edge, including join legs).
-    for index in fired_edges {
-        lines.push(format!(
-            "    linkStyle {index} stroke:#16a34a,stroke-width:3px"
-        ));
-    }
-    lines.join("\n")
 }
