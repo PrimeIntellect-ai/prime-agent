@@ -74,6 +74,11 @@ NODE_LIFECYCLE_DEFAULT = "task"
 NODE_RETRIES_DEFAULT = 0
 STATE_ENTRY_DEFAULT = False
 STATE_MAX_ENTRIES_DEFAULT = 1
+#: An inline subagent ``name`` labels the spawned children; the host caps
+#: subagent session names at 64 characters (the same limit the generated
+#: label stays under), so a longer configured name is rejected at write
+#: time instead of failing every spawn admission.
+SUBAGENT_NAME_MAX_LENGTH = 64
 
 _NODE_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 
@@ -226,6 +231,12 @@ def _validate_state_fields(
             value = subagent.get(key)
             if value is not None and (not isinstance(value, str) or not value.strip()):
                 errors.append(f"{noun} {ref} inline subagent {key} must be a non-empty string when provided")
+        configured_name = subagent.get("name")
+        if isinstance(configured_name, str) and len(configured_name.strip()) > SUBAGENT_NAME_MAX_LENGTH:
+            errors.append(
+                f"{noun} {ref} inline subagent name must be at most "
+                f"{SUBAGENT_NAME_MAX_LENGTH} characters, got {len(configured_name.strip())}"
+            )
     else:
         errors.append(
             f"{noun} {ref} requires a subagent: a harness subagent id/title string "
@@ -450,10 +461,25 @@ def validate_factory_machine(machine: Any) -> list[str]:
             seen_ids.add(state_id)
             states_by_id[state_id] = state
 
+    # Configured inline subagent names label the spawned children verbatim,
+    # so two states sharing one name would collide on the supervisor's
+    # unique sibling-name requirement at spawn time; reject the duplicate at
+    # write time instead (the same reason duplicate state ids are rejected).
+    seen_subagent_names: dict[str, str] = {}
     for state_id, state in states_by_id.items():
         _validate_state_fields(
             state, run_budget=run_budget, states_by_id=states_by_id, noun="state", errors=errors
         )
+        subagent = state.get("subagent")
+        if isinstance(subagent, dict) and _is_nonempty_str(subagent.get("name")):
+            configured_name = subagent["name"].strip()
+            if configured_name in seen_subagent_names:
+                errors.append(
+                    f"state {state_id} subagent name {configured_name!r} is already configured "
+                    f"by state {seen_subagent_names[configured_name]!r}"
+                )
+            else:
+                seen_subagent_names[configured_name] = state_id
         if "entry" in state and not isinstance(state.get("entry"), bool):
             errors.append(f"state {state_id} entry must be a boolean")
         if "max_entries" in state and not (
@@ -929,6 +955,31 @@ def _child_name(run_id: str, state_id: str, instance_index: int, attempt: int) -
     return "-".join(parts)
 
 
+def _spawn_label(
+    configured: str | None, run_id: str, state_id: str, instance_index: int, attempt: int
+) -> str:
+    """Sibling label for one spawned instance: the state's configured inline
+    subagent ``name`` when it has one, else the generated label.
+
+    The configured name is used verbatim for the state's first instance on
+    its first attempt (agents message the child by exactly this label); the
+    SAME disambiguation suffixes as the generated label -- ``i<n>`` for
+    later instances (re-entry, foreach fan-out), ``a<n>`` for retries --
+    keep every admission unique: the supervisor rejects duplicate sibling
+    names, and one state's settled children stay registered for the
+    run's life, so a re-entering state (``max_entries`` > 1) would collide
+    with its own earlier child on a verbatim name.
+    """
+    if configured is None:
+        return _child_name(run_id, state_id, instance_index, attempt)
+    parts = [configured]
+    if instance_index > 0:
+        parts.append(f"i{instance_index}")
+    if attempt > 1:
+        parts.append(f"a{attempt}")
+    return "-".join(parts)
+
+
 def _parse_json_output(answer: str, output_name: str) -> tuple[Any, str | None]:
     """Extract one named JSON output from an upstream answer.
 
@@ -1110,6 +1161,7 @@ class _StateRun:
     spec: dict[str, Any]  # canonical state spec
     position: int  # stable list position for deterministic ordering
     prompt_template: str | None = None
+    name: str | None = None  # configured inline subagent name; labels children
     model: str | None = None
     thinking: str | None = None
     max_entries: int = STATE_MAX_ENTRIES_DEFAULT
@@ -1419,20 +1471,24 @@ class FactoryExecutor:
 
     def _resolve_subagents(
         self, harness: Any, canonical: dict[str, Any]
-    ) -> tuple[dict[str, tuple[str, str | None, str | None]], list[str]]:
+    ) -> tuple[dict[str, tuple[str, str | None, str | None, str | None]], list[str]]:
         """Resolve every state's subagent reference; collect ALL failures.
 
         A string reference is a harness subagent entry id or title: its
         content is the prompt template and ``metadata.model``/``metadata.thinking``
-        carry optional spawn settings. An inline object uses its own fields.
+        carry optional spawn settings. An inline object uses its own fields;
+        its ``name`` (stripped the way the host strips spawn names) labels
+        the spawned children.
         """
-        resolved: dict[str, tuple[str, str | None, str | None]] = {}
+        resolved: dict[str, tuple[str, str | None, str | None, str | None]] = {}
         errors: list[str] = []
         for state_spec in canonical["states"]:
             state_id = state_spec["id"]
             reference = state_spec["subagent"]
             if isinstance(reference, dict):
                 prompt = reference.get("prompt")
+                raw_name = reference.get("name")
+                name = raw_name.strip() if isinstance(raw_name, str) else None
                 model = reference.get("model")
                 thinking = reference.get("thinking")
             else:
@@ -1443,6 +1499,7 @@ class FactoryExecutor:
                     errors.append(f"state {state_id!r} references unknown subagent {reference!r}")
                     continue
                 prompt = entry.content
+                name = None
                 metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
                 model = metadata.get("model")
                 thinking = metadata.get("thinking")
@@ -1453,7 +1510,7 @@ class FactoryExecutor:
             if settings_error is not None:
                 errors.append(f"state {state_id!r} {settings_error}")
                 continue
-            resolved[state_id] = (prompt, model, thinking)
+            resolved[state_id] = (prompt, name or None, model, thinking)
         return resolved, errors
 
     def _create_run(
@@ -1479,12 +1536,13 @@ class FactoryExecutor:
         for position, state_spec in enumerate(canonical["states"]):
             position_of[state_spec["id"]] = position
             state_id = state_spec["id"]
-            prompt, model, thinking = resolved.get(state_id, (None, None, None))
+            prompt, name, model, thinking = resolved.get(state_id, (None, None, None, None))
             run.states[state_id] = _StateRun(
                 state_id=state_id,
                 spec=state_spec,
                 position=position,
                 prompt_template=prompt,
+                name=name,
                 model=model,
                 thinking=thinking,
                 max_entries=state_spec.get("max_entries", STATE_MAX_ENTRIES_DEFAULT),
@@ -1944,7 +2002,7 @@ class FactoryExecutor:
         from . import spawn
 
         instance.attempt += 1
-        child_name = _child_name(run.run_id, state.state_id, instance.index, instance.attempt)
+        child_name = _spawn_label(state.name, run.run_id, state.state_id, instance.index, instance.attempt)
         try:
             handle = await spawn(
                 instance.prompt, name=child_name, model=state.model, thinking=state.thinking
@@ -2695,9 +2753,9 @@ The factory is opt-in: it ships disabled, and the user turns it on with
 `/factory on` (`/factory off` disables it again, `/factory status` reports
 it; the persisted setting is `factory.enabled` in the agent dir's
 settings.json). While it is disabled, every `rlm.factory` call except
-`help()` — run, status, stop, resume, and the graph/watch views — plus
-every factory harness write (`create_factory` and updates of factory
-entries) refuses with one clean error:
+`help()` — run, status, stop, and resume — plus every factory harness
+write (`create_factory` and updates of factory entries) refuses with one
+clean error:
 "the factory is disabled; run /factory on to enable it". `help()` answers
 while disabled, so this guide stays readable before opting in.
 
@@ -2795,7 +2853,11 @@ bind.
   inputs. A state's `subagent` is a harness subagent entry id or title (its
   content is the prompt template; `metadata.model`/`metadata.thinking` are
   spawn settings) or an inline `{"prompt": ...}` object with optional
-  `name`/`model`/`thinking`.
+  `name`/`model`/`thinking`. The optional `name` labels the spawned
+  children (at most 64 characters, unique across the machine's states):
+  the first instance is named exactly `name` — the label to message the
+  child by — and re-entries, foreach fan-out, and retries disambiguate
+  with the same `-i<n>`/`-a<n>` suffixes the generated labels use.
 - **Ports**: inputs and outputs of type `text` or `json`. An input binds
   `"from": "<state_id>.<output_name>"`; types must match, duplicates are
   rejected, and nothing can read from a resident. Bound values render into
@@ -2915,7 +2977,7 @@ rlm.harness.create_factory(
 )
 ```
 
-## Run, watch, steer
+## Run and steer
 
 ```python
 result = await rlm.factory.run("pr-manager")
@@ -2930,16 +2992,11 @@ status["events"]   # trailing ledger: spawned, settled, answer_captured,
                    # transition_fired, node_error, milestone, ...
 status["usage"]    # spawns, settled, tool_uses, max_parallel, max_children, running,
                     # transitions_fired
-
-snapshot = await rlm.factory.watch(result["run_id"], 30)
-# Blocks until the run's state/instance shape changes or the timeout
-# elapses (capped at 60s), then returns the same fused snapshot as graph()
-# plus "changed": whether a change or the deadline ended the wait.
-
-runs = await rlm.factory.graph()                   # every live run, oldest first
-live = await rlm.factory.graph(result["run_id"])   # one run: structure + live state
-spec = await rlm.factory.graph("pr-manager")       # a spec id: static structure
 ```
+
+The live monitoring views (`graph()` and a bounded `watch()`) arrive
+with the stacked live-view PR; `status()` covers the run state, node
+detail, and the event ledger until then.
 
 - `run` re-validates the spec and resolves every subagent reference first,
   reporting all failures in one `ValueError` and starting nothing on any
@@ -2978,9 +3035,9 @@ spec = await rlm.factory.graph("pr-manager")       # a spec id: static structure
   block or one short line — and let the full answer live in the child's
   session.
 - Run registries live in kernel memory: a kernel restart loses `status`
-  and `graph` for old runs, but the children keep running under the
-  supervisor (`rlm.list_subagents` sees them). Stop runs before
-  restarting, or delete the children by hand afterwards.
+  for old runs, but the children keep running under the supervisor
+  (`rlm.list_subagents` sees them). Stop runs before restarting, or
+  delete the children by hand afterwards.
 - Residents outlive their run; stop the run (or tear down the session) to
   retire them. Prefer `rlm.factory.stop(run_id)` over deleting a factory
   child by hand — the executor claims and cancels children itself, and a

@@ -32,6 +32,12 @@ races) plus the accepted review findings from both:
 - long state ids disambiguate their spawn names with a digest, so two
   states sharing a 20-character prefix never collide on the supervisor's
   unique sibling-name requirement;
+- a configured inline subagent name labels the spawned children verbatim
+  (the first instance), with the generated label's -i<n>/-a<n> suffixes on
+  re-entry, foreach fan-out, and retries; over-length names and names
+  duplicated across states are rejected at write time (Macroscope review
+  finding: the name was dropped, so children always got the generated
+  label);
 - milestone notices go to the host as validated "factory.progress"
   payloads exactly once per kind per run, and a dead bridge leaves the
   milestone in the ledger instead of wedging the run.
@@ -42,6 +48,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 import unittest
 from pathlib import Path
@@ -56,10 +63,12 @@ from rlm.factory import (
     BACKOFF_MAX_ATTEMPTS,
     EVENT_WINDOW,
     POLL_TIMEOUT_MS,
+    SUBAGENT_NAME_MAX_LENGTH,
     FactoryExecutor,
     _child_name,
     _guard_passes,
     _parse_json_output,
+    _spawn_label,
     canonicalize_factory_spec,
     compile_factory_dag,
     topological_order,
@@ -249,6 +258,17 @@ class ValidateFactorySpecTest(unittest.TestCase):
             self.assertEqual(
                 errors, [f"node a inline subagent {key} must be a non-empty string when provided"], key
             )
+
+        # The dag form compiles to machine form first, so the name rules
+        # (length, cross-state uniqueness) apply to nodes too.
+        dag_duplicate = {
+            "nodes": [
+                node("a", subagent={"prompt": "p", "name": "w"}),
+                node("b", subagent={"prompt": "p", "name": "w"}, depends_on=["a"]),
+            ]
+        }
+        errors = validate_factory_spec(dag_duplicate)
+        self.assertEqual(errors, ["state b subagent name 'w' is already configured by state 'a'"])
 
     def test_lifecycle(self) -> None:
         for good in ("task", "resident"):
@@ -1190,6 +1210,49 @@ class ValidateFactoryMachineTest(unittest.TestCase):
         }
         self.assertEqual(validate_factory_machine(inline_ok), [])
 
+    def test_inline_subagent_name_length_and_uniqueness(self) -> None:
+        # The configured name labels spawned children, and the host caps
+        # subagent session names at 64 characters: reject an over-length
+        # name at write time (a persistable factory must be spawnable)
+        # instead of failing every spawn admission.
+        too_long = {
+            "states": [state("a", entry=True, subagent={"prompt": "p", "name": "x" * (SUBAGENT_NAME_MAX_LENGTH + 1)})],
+            "transitions": [],
+        }
+        self.assertEqual(
+            validate_factory_machine(too_long),
+            [
+                f"state a inline subagent name must be at most {SUBAGENT_NAME_MAX_LENGTH} characters, "
+                f"got {SUBAGENT_NAME_MAX_LENGTH + 1}"
+            ],
+        )
+
+        # Two states configured with one name would collide on the
+        # supervisor's unique sibling-name requirement at spawn time: reject
+        # the duplicate at write time, like duplicate state ids.
+        duplicate = {
+            "states": [
+                {"id": "a", "entry": True, "subagent": {"prompt": "p", "name": "reviewer"}},
+                {"id": "b", "subagent": {"prompt": "p", "name": "reviewer"}},
+            ],
+            "transitions": [{"from": "a", "to": "b"}],
+        }
+        self.assertEqual(
+            validate_factory_machine(duplicate),
+            ["state b subagent name 'reviewer' is already configured by state 'a'"],
+        )
+        # Distinct configured names are fine, and string references never
+        # carry a name.
+        distinct = {
+            "states": [
+                {"id": "a", "entry": True, "subagent": {"prompt": "p", "name": "reviewer"}},
+                {"id": "b", "subagent": {"prompt": "p", "name": "fixer"}},
+                {"id": "c", "subagent": "worker"},
+            ],
+            "transitions": [{"from": "a", "to": "b"}, {"from": "b", "to": "c"}],
+        }
+        self.assertEqual(validate_factory_machine(distinct), [])
+
     def test_wait_states_are_gated_until_the_communication_series(self) -> None:
         # The rlm.watch.* host handlers do not exist on this stack, so wait
         # blocks are rejected outright (machine form and dag form alike).
@@ -2046,6 +2109,35 @@ class ChildNameTest(unittest.TestCase):
         self.assertTrue(_child_name("r", "collect", 0, 2).endswith("-a2"))
 
 
+class SpawnLabelTest(unittest.TestCase):
+    """The configured inline subagent name labels spawned children.
+
+    The first instance of a state spawns with the configured name verbatim
+    (the label agents message the child by); later instances and retries
+    keep the generated label's -i<n>/-a<n> suffixes, because one state's
+    settled children stay registered for the run's life and the supervisor
+    rejects duplicate sibling names. (Macroscope review finding: the name
+    was dropped, so every child got the generated label.)
+    """
+
+    def test_configured_name_labels_the_first_instance_verbatim(self) -> None:
+        self.assertEqual(_spawn_label("reviewer", "0123456789abcdef", "reviewing", 0, 1), "reviewer")
+
+    def test_configured_name_keeps_the_generated_suffixes_when_disambiguating(self) -> None:
+        self.assertEqual(_spawn_label("reviewer", "r", "reviewing", 1, 1), "reviewer-i1")
+        self.assertEqual(_spawn_label("reviewer", "r", "reviewing", 0, 2), "reviewer-a2")
+        self.assertEqual(_spawn_label("reviewer", "r", "reviewing", 2, 3), "reviewer-i2-a3")
+        self.assertNotEqual(
+            _spawn_label("reviewer", "r", "reviewing", 0, 1), _spawn_label("reviewer", "r", "reviewing", 1, 1)
+        )
+
+    def test_absent_configured_name_falls_back_to_the_generated_label(self) -> None:
+        self.assertEqual(
+            _spawn_label(None, "0123456789abcdef", "collect", 0, 1),
+            _child_name("0123456789abcdef", "collect", 0, 1),
+        )
+
+
 class FactoryHelpTest(unittest.TestCase):
     """rlm.factory.help(): the embedded authoring reference (PR #3199).
 
@@ -2068,7 +2160,7 @@ class FactoryHelpTest(unittest.TestCase):
             "## Store the spec",
             "## Authoring reference",
             "## Dag form",
-            "## Run, watch, steer",
+            "## Run and steer",
             "## Safety",
         ):
             self.assertIn(heading, doc)
@@ -2105,13 +2197,9 @@ class FactoryHelpTest(unittest.TestCase):
         self.assertIn("`stop(run_id)` cancels every running child of the run (idempotent)", flat)
         self.assertIn("`resume(run_id)` continues a paused run and raises on a non-paused one", flat)
 
-        # The run/status/stop/resume/graph/watch snippet, as the agent types it.
+        # The run/status snippet, as the agent types it.
         self.assertIn('result = await rlm.factory.run("pr-manager")', doc)
         self.assertIn('status = await rlm.factory.status(result["run_id"])', doc)
-        self.assertIn('snapshot = await rlm.factory.watch(result["run_id"], 30)', doc)
-        self.assertIn("runs = await rlm.factory.graph()", doc)
-        self.assertIn('live = await rlm.factory.graph(result["run_id"])', doc)
-        self.assertIn('spec = await rlm.factory.graph("pr-manager")', doc)
 
         # The worked examples bound their emitted payloads — captured answers
         # are capped previews (~160-200 chars), so an unbounded json payload
@@ -2119,6 +2207,35 @@ class FactoryHelpTest(unittest.TestCase):
         self.assertIn('findings": ["at most three one-line findings"]', doc)
         self.assertIn("capped at the eight most relevant", doc)
         self.assertIn("an unbounded payload truncates at the cap and fails to bind", flat)
+
+        # The configured inline subagent name contract.
+        self.assertIn("The optional `name` labels the spawned children", flat)
+        self.assertIn("the first instance is named exactly `name`", flat)
+        self.assertIn("unique across the machine's states", flat)
+
+    def test_help_advertises_only_calls_the_namespace_has(self) -> None:
+        # The guide and the namespace MUST agree exactly: every dotted
+        # `rlm.factory.<call>(...)` example the guide teaches must exist as
+        # an attribute on the namespace, or an agent following the returned
+        # reference hits an AttributeError (Macroscope review finding: the
+        # guide advertised watch()/graph() that the namespace did not carry;
+        # they arrive with the stacked live-view PR).
+        doc = rlm_module.rlm.factory.help()
+        flat = " ".join(doc.split())
+        advertised = sorted(set(re.findall(r"rlm\.factory\.(\w+)\(", doc)))
+        namespace = rlm_module.rlm.factory
+        missing = [name for name in advertised if not hasattr(namespace, name)]
+        self.assertEqual(missing, [])
+        # The core calls stay advertised (dotted examples) and the whole
+        # namespace surface stays implemented.
+        for name in ("run", "status", "stop"):
+            self.assertIn(name, advertised)
+        for name in ("run", "status", "stop", "resume", "help"):
+            self.assertTrue(hasattr(namespace, name), name)
+        # The not-yet-shipped views are named as roadmap prose, never as
+        # call examples.
+        self.assertNotRegex(doc, r"rlm\.factory\.(graph|watch)\(")
+        self.assertIn("(`graph()` and a bounded `watch()`) arrive with the stacked live-view PR", flat)
 
 
 # ---------------------------------------------------------------------------
@@ -2267,11 +2384,23 @@ class GatedSleep:
         await self.release.wait()
 
 
+def _node_of_name(name: str) -> str:
+    """The factory node a spawn name belongs to.
+
+    Generated labels are "sw-<node id>-<run>-..."; a state with a
+    configured inline subagent name spawns children named by it verbatim,
+    so such a name keys the node by the whole string.
+    """
+    parts = name.split("-")
+    return parts[1] if parts[0] == "sw" and len(parts) > 2 else name
+
+
 class FakeHost:
     """Deterministic async host_request fake that routes by request type.
 
-    Child names carry the node id as their second dash-separated part, so
-    node ids in these tests never contain "-". Collect outcomes are
+    Child names carry the node id as their second dash-separated part (or
+    are a state's configured inline subagent name verbatim), so node ids
+    in these tests never contain "-". Collect outcomes are
     scripted per child id first (``child_outcomes``), then per node id
     (``outcomes``); a "running" outcome never settles. ``rate_limit_first``
     / ``rate_limit_forever`` make spawn admissions for a node fail with a
@@ -2312,7 +2441,7 @@ class FakeHost:
         return [payload for kind, payload in self.calls if kind == request_type]
 
     def spawn_calls(self, node_id: str) -> list[dict[str, Any]]:
-        return [p for p in self.calls_of("rlm.run") if p["kwargs"]["name"].split("-")[1] == node_id]
+        return [p for p in self.calls_of("rlm.run") if _node_of_name(p["kwargs"]["name"]) == node_id]
 
     def deleted_targets(self) -> list[str]:
         return [p["target"] for p in self.calls_of("rlm.delete_subagent")]
@@ -2362,12 +2491,12 @@ class FakeHost:
             # Count this node's prior admission calls before recording the
             # current one, so rate_limit_first<n> fails exactly the first n.
             name = payload["kwargs"]["name"]
-            node_id = name.split("-")[1]
+            node_id = _node_of_name(name)
             attempted = len(
                 [
                     p
                     for kind, p in self.calls
-                    if kind == "rlm.run" and p["kwargs"]["name"].split("-")[1] == node_id
+                    if kind == "rlm.run" and _node_of_name(p["kwargs"]["name"]) == node_id
                 ]
             )
             self.calls.append((request_type, payload))
@@ -2761,6 +2890,98 @@ class FactoryExecutorTest(_ExecutorTestCase):
             self.assertEqual(spawn[0]["prompt"], "Template by title.")
             self.assertEqual(spawn[0]["kwargs"]["model"], "pi/test-model")
             self.assertEqual(spawn[0]["kwargs"]["thinking"], "low")
+
+    @async_test
+    async def test_inline_subagent_name_labels_the_spawned_child(self) -> None:
+        # Macroscope review finding: the inline subagent name was dropped by
+        # _resolve_subagents, so the child spawned with the generated label
+        # instead of the configured name agents message the child by. The
+        # name rides through run creation to the spawn call, and the spawned
+        # event's ledger entry carries the same label.
+        self.store_factory(
+            {
+                "run": {"failure_policy": "continue"},
+                "nodes": [
+                    {"id": "a", "subagent": {"prompt": "Do the review.", "name": "reviewer"}},
+                ],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(
+            [p["kwargs"]["name"] for p in self.host.calls_of("rlm.run")],
+            ["reviewer"],
+        )
+        self.assertEqual(
+            [event["name"] for event in self.all_events_of(result, "spawned")],
+            ["reviewer"],
+        )
+
+    @async_test
+    async def test_inline_subagent_name_disambiguates_reentry_and_foreach(self) -> None:
+        # One state's settled children stay registered for the run's life,
+        # and the supervisor rejects duplicate sibling names, so re-entry
+        # (max_entries > 1) and foreach fan-out keep the configured prefix
+        # with the same -i<n> suffix the generated labels use.
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue"},
+                "states": [
+                    {
+                        "id": "loop",
+                        "entry": True,
+                        "subagent": {"prompt": "Work.", "name": "worker"},
+                        "max_entries": 2,
+                    },
+                ],
+                "transitions": [{"from": "loop", "to": "loop"}],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(
+            [p["kwargs"]["name"] for p in self.host.calls_of("rlm.run")],
+            ["worker", "worker-i1"],
+        )
+
+        self.host.outcomes["src"] = {
+            "status": "done",
+            "answer": 'Here.\n```json\n{"items": ["one", "two"]}\n```',
+        }
+        self.host.calls.clear()
+        self.host.children.clear()
+        self.host.counter = 0
+        self.store_factory(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 8},
+                "nodes": [
+                    {"id": "src", "subagent": "worker", "outputs": [{"name": "items", "type": "json"}]},
+                    {
+                        "id": "fan",
+                        "subagent": {"prompt": "Expand item {items}.", "name": "expander"},
+                        "depends_on": ["src"],
+                        "inputs": [{"name": "items", "type": "json", "from": "src.items"}],
+                        "foreach": {"over": "items", "max": 4},
+                    },
+                ],
+            },
+            spec_id="fan",
+        )
+        result = await self.start("fan")
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        # The first foreach instance keeps the configured name; the second
+        # disambiguates with the instance suffix.
+        self.assertEqual(
+            [
+                p["kwargs"]["name"]
+                for p in self.host.calls_of("rlm.run")
+                if p["kwargs"]["name"].startswith("expander")
+            ],
+            ["expander", "expander-i1"],
+        )
 
     @async_test
     async def test_run_starts_ready_nodes_and_reports_counts(self) -> None:
