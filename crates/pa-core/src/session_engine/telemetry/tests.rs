@@ -1753,3 +1753,37 @@ fn a_contended_state_lock_fails_the_disable_cleanly() {
         "the installation id survives the bumps"
     );
 }
+
+/// Any failure in the disable's state steps fails the command with the
+/// settings untouched: an unwritable telemetry-state directory (the lock
+/// cannot even be taken) leaves `telemetry.enabled` exactly as it was
+/// and the epoch unmoved - never a saved opt-out whose zero-event window
+/// the worker could not see.
+#[test]
+#[cfg(unix)]
+fn a_failed_state_step_fails_the_disable_without_saving() {
+    use std::os::unix::fs::PermissionsExt;
+    let _env = CleanTelemetryEnv::default();
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let mut settings = crate::settings::SettingsManager::create(dir.path(), &agent_dir);
+    super::set_telemetry_enabled_text(&mut settings, &agent_dir, true).unwrap();
+    pa_telemetry::install_id(&agent_dir).unwrap();
+    assert_eq!(pa_telemetry::read_off_epoch(&agent_dir), 0);
+
+    // The state directory turns unwritable mid-session.
+    std::fs::set_permissions(&agent_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    let mut disabling = crate::settings::SettingsManager::create(dir.path(), &agent_dir);
+    assert!(
+        super::set_telemetry_enabled_text(&mut disabling, &agent_dir, false).is_err(),
+        "the disable fails instead of half-landing"
+    );
+
+    // Nothing changed: the settings still say on, the epoch never moved.
+    std::fs::set_permissions(&agent_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        crate::settings::SettingsManager::create(dir.path(), &agent_dir).get_telemetry_enabled()
+    );
+    assert_eq!(pa_telemetry::read_off_epoch(&agent_dir), 0);
+}

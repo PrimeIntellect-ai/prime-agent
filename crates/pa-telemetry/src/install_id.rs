@@ -383,21 +383,26 @@ fn read_off_epoch_state(path: &Path) -> Option<OffEpochState> {
 
 /// Record a telemetry-disabling write: bump the persisted off-epoch so
 /// the recording seams (this process or another) sever facts that span
-/// the opt-out. Best-effort: a filesystem failure keeps the previous
-/// epoch — the live per-event opt-out check still guards the off period.
-/// Callers that can race on the bump serialize it (the settings-locked
-/// command funnel in pa-core takes the directory lock); the epoch is a
-/// monotonic counter and a lost increment is a missed flap.
-pub fn bump_off_epoch(agent_dir: &Path) {
+/// the opt-out. Callers that can race on the bump serialize it (the
+/// settings-locked command funnel in pa-core takes the directory lock);
+/// the epoch is a monotonic counter and a lost increment is a missed
+/// flap, so every failure propagates: the caller must fail the command
+/// before saving an opt-out whose zero-event window the worker could
+/// not see.
+///
+/// # Errors
+///
+/// Returns an error when the installation id cannot be created or the
+/// bumped state cannot be published; the state file is unchanged when
+/// that happens (the publication is an exclusive temp file renamed over
+/// the state).
+pub fn bump_off_epoch(agent_dir: &Path) -> Result<()> {
     let path = agent_dir.join(STATE_FILE);
     // Preserve the installation id: the state file is the identity store,
     // and losing it would disable telemetry outright.
     let installation_id = match read_off_epoch_state(&path) {
         Some(state) => state.installation_id,
-        None => match install_id(agent_dir) {
-            Ok(existing) => existing,
-            Err(_) => return,
-        },
+        None => install_id(agent_dir)?,
     };
     let next = read_off_epoch_state(&path).map_or(0, |state| state.off_epoch) + 1;
     let state = OffEpochState {
@@ -405,18 +410,20 @@ pub fn bump_off_epoch(agent_dir: &Path) {
         installation_id,
         off_epoch: next,
     };
-    let Ok(payload) = serde_json::to_vec_pretty(&state) else {
-        return;
-    };
+    let payload = serde_json::to_vec_pretty(&state)?;
     // Same publication path as the id itself: an exclusive 0600 temp file
     // atomically renamed over the state, so the id's privacy contract
     // survives the bump.
     let dir = path.parent().unwrap_or(Path::new("."));
     let temp = dir.join(format!(".{}-{}", STATE_FILE, uuid::Uuid::new_v4().simple()));
-    if create_exclusive(&temp, &payload)
-        .and_then(|()| crate::rename_onto(&temp, &path))
-        .is_err()
-    {
+    let bump = create_exclusive(&temp, &payload).and_then(|()| crate::rename_onto(&temp, &path));
+    if bump.is_err() {
         remove_quietly(&temp);
     }
+    bump.map_err(|error| {
+        anyhow::Error::new(error).context(format!(
+            "bump the telemetry off epoch at {}",
+            path.display()
+        ))
+    })
 }

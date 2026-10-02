@@ -130,14 +130,16 @@ pub fn set_telemetry_enabled_text(
     std::fs::create_dir_all(agent_dir)?;
     let state_path = agent_dir.join("telemetry.json");
     let _state_lock = acquire_telemetry_state_lock(&state_path)?;
-    settings.set_telemetry_enabled(enabled)?;
+    // The epoch moves BEFORE the settings save: a disable whose bump
+    // fails (unwritable state, broken install id) fails the command with
+    // the settings untouched — never a saved opt-out whose zero-event
+    // window the worker could not see. A failed save after a bump is the
+    // conservative direction: an epoch that moved without a saved
+    // opt-out only severs the current run's facts.
     if !enabled {
-        // The persisted off-epoch bumps on every successful disable: the
-        // recording seams (this process or another — the worker's) sever
-        // facts that span the opt-out even when no telemetry event fires
-        // inside the off window.
-        pa_telemetry::bump_off_epoch(agent_dir);
+        pa_telemetry::bump_off_epoch(agent_dir)?;
     }
+    settings.set_telemetry_enabled(enabled)?;
     let switch = telemetry_switch(&settings.reopen());
     let requested = if enabled { "on" } else { "off" };
     let headline = if switch.enabled() == enabled {
