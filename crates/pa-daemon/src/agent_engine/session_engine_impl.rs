@@ -1007,10 +1007,6 @@ impl SessionEngine for AgentSessionEngine {
                 child_script: identity.child_script,
             };
             children.set_identity(parent);
-            let reseed = Arc::clone(children);
-            self.runtime.spawn(async move {
-                reseed.reseed_from_ledger().await;
-            });
         }
         Ok(())
     }
