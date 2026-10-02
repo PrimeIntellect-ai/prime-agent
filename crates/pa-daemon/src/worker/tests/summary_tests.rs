@@ -72,7 +72,7 @@ fn summary_lifecycle_is_message_based() {
     assert_eq!(
         session_summary(
             &empty, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false
+            /*quota_parked=*/ false, /*subagents_running=*/ false
         )
         .lifecycle,
         "draft"
@@ -82,7 +82,7 @@ fn summary_lifecycle_is_message_based() {
     assert_eq!(
         session_summary(
             &subagent, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false
+            /*quota_parked=*/ false, /*subagents_running=*/ false
         )
         .lifecycle,
         "live"
@@ -99,7 +99,7 @@ fn summary_lifecycle_is_message_based() {
     assert!(
         session_summary(
             &busy, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false
+            /*quota_parked=*/ false, /*subagents_running=*/ false
         )
         .is_running_tools
     );
@@ -107,7 +107,7 @@ fn summary_lifecycle_is_message_based() {
     assert!(
         !session_summary(
             &busy, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false
+            /*quota_parked=*/ false, /*subagents_running=*/ false
         )
         .is_running_tools
     );
@@ -116,7 +116,7 @@ fn summary_lifecycle_is_message_based() {
     assert!(
         !session_summary(
             &busy, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false
+            /*quota_parked=*/ false, /*subagents_running=*/ false
         )
         .is_running_tools
     );
@@ -124,7 +124,8 @@ fn summary_lifecycle_is_message_based() {
     // `session.isBashRunning`).
     assert_eq!(
         session_summary(
-            &busy, "default", None, None, /*bash_running=*/ true, /*quota_parked=*/ false
+            &busy, "default", None, None, /*bash_running=*/ true,
+            /*quota_parked=*/ false, /*subagents_running=*/ false
         )
         .is_bash_running,
         Some(true)
@@ -133,7 +134,7 @@ fn summary_lifecycle_is_message_based() {
     assert_eq!(
         session_summary(
             &busy, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false
+            /*quota_parked=*/ false, /*subagents_running=*/ false
         )
         .lifecycle,
         "live"
@@ -157,12 +158,50 @@ fn summary_lifecycle_is_message_based() {
             None,
             None,
             /*bash_running=*/ false,
-            /*quota_parked=*/ false
+            /*quota_parked=*/ false,
+            /*subagents_running=*/ false
         )
         .lifecycle,
         "live"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A session whose own turn ended keeps reporting `working` while any of
+/// its subagents runs (each child counts its own descendants the same
+/// way), so every roster surface classifies it running; with no running
+/// subagents it is idle again. Its own-work flag stays its own.
+#[test]
+fn running_subagents_keep_an_idle_session_working() {
+    let core = SessionCore::test_core(None, "/tmp".to_string());
+    let summary = |subagents_running| {
+        serde_json::to_value(session_summary(
+            &core,
+            "default",
+            None,
+            None,
+            /*bash_running=*/ false,
+            /*quota_parked=*/ false,
+            subagents_running,
+        ))
+        .unwrap()
+    };
+    let classify =
+        |summary: &Value| pa_types::daemon::agent_roster::classify_summary_value(summary, false);
+    let waiting = summary(true);
+    assert_eq!(waiting["activity"], "working");
+    assert_eq!(waiting["hasRunningSubagents"], true);
+    assert_eq!(waiting["isSessionActive"], false);
+    assert_eq!(
+        classify(&waiting),
+        pa_types::daemon::agent_roster::AgentRosterStatus::Running
+    );
+    let done = summary(false);
+    assert_eq!(done["activity"], "idle");
+    assert_eq!(
+        classify(&done),
+        pa_types::daemon::agent_roster::AgentRosterStatus::Idle
+    );
 }
 
 /// The live row's `usage` is the whole-file own-usage fold the saved
@@ -223,6 +262,7 @@ fn live_summary_usage_is_the_catalog_fold() {
     let core = SessionCore::test_core(Some(store), "/tmp".to_string());
     let summary = session_summary(
         &core, "default", None, None, /*bash_running=*/ false, /*quota_parked=*/ false,
+        /*subagents_running=*/ false,
     );
     // The live row equals the saved row, whole-object.
     let catalog = crate::session_store::read_session_info(&path)
@@ -269,6 +309,7 @@ fn pathless_summary_usage_folds_the_in_memory_entries() {
     let core = SessionCore::test_core(Some(store), "/tmp".to_string());
     let summary = session_summary(
         &core, "default", None, None, /*bash_running=*/ false, /*quota_parked=*/ false,
+        /*subagents_running=*/ false,
     );
     assert_eq!(
         json!(summary.usage),

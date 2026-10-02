@@ -453,6 +453,13 @@ pub trait SessionEngine: Send + Sync {
         false
     }
 
+    /// True while any RLM child this session spawned is still running
+    /// (each child counts its own descendants the same way). Scripted
+    /// harness engines spawn no children.
+    fn has_running_subagents(&self) -> bool {
+        false
+    }
+
     /// Apply a live model switch (the daemon `set_model` command, TS
     /// `session.setModel`): the selection merges over the current one and
     /// a built session's agent and provider stream follow the new model on

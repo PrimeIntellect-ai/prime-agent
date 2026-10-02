@@ -105,6 +105,7 @@ pub fn target_for(os: &str, arch: &str) -> Option<&'static str> {
         ("macos", "x86_64") => Some("x86_64-apple-darwin"),
         ("linux", "x86_64") => Some("x86_64-unknown-linux-gnu"),
         ("linux", "aarch64") => Some("aarch64-unknown-linux-gnu"),
+        ("windows", "x86_64") => Some("x86_64-pc-windows-msvc"),
         _ => None,
     }
 }
@@ -118,13 +119,23 @@ pub fn target_for(os: &str, arch: &str) -> Option<&'static str> {
 pub fn current_target() -> Result<&'static str> {
     target_for(std::env::consts::OS, std::env::consts::ARCH).ok_or_else(|| {
         anyhow!(
-            "no rust build is published for {} {} (the continuous matrix \
-             builds aarch64-apple-darwin, x86_64-apple-darwin, \
-             aarch64-unknown-linux-gnu, and x86_64-unknown-linux-gnu)",
-            std::env::consts::OS,
-            std::env::consts::ARCH
+            "{}",
+            no_build_message(std::env::consts::OS, std::env::consts::ARCH)
         )
     })
+}
+
+/// The refusal `--check` prints for one platform pair: the machine plus the
+/// full published matrix, so an unsupported machine sees exactly what the
+/// channel builds (the same message install-rust.sh's uname arm dies with).
+#[must_use]
+pub fn no_build_message(os: &str, arch: &str) -> String {
+    format!(
+        "no rust build is published for {os} {arch} (the release channel \
+         builds aarch64-apple-darwin, x86_64-apple-darwin, \
+         aarch64-unknown-linux-gnu, x86_64-unknown-linux-gnu, and \
+         x86_64-pc-windows-msvc)"
+    )
 }
 
 /// The commit a running version's `-continuous.<sha>` stamp names — the
@@ -290,7 +301,37 @@ async fn execute_script(
     channel: Option<&'static str>,
     output: InstallerOutput,
 ) -> std::result::Result<(), UpdateFailure> {
-    let mut command = tokio::process::Command::new("/bin/sh");
+    // The interpreter: the trusted absolute /bin/sh on unix (never
+    // PATH-resolved, so a poisoned PATH cannot substitute the interpreter
+    // that runs the installer with the inherited credentials); on Windows
+    // the kernel shell resolver's TRUSTED Git Bash roots - hardcoded
+    // install-dir literals, never PATH and never `where bash.exe` (the
+    // get_shell_config fallback that serves the kernel shell would let a
+    // repo-controlled PATH place the interpreter that receives the
+    // inherited GITHUB_TOKEN; the funnel must not use it).
+    #[cfg(windows)]
+    let shell = {
+        match crate::platform::shell::resolve_kernel_bash_shell(None) {
+            Some(path) => path,
+            None => {
+                return Err(UpdateFailure {
+                    // No shellPath guidance here: the funnel, like its unix
+                    // side (the hardcoded /bin/sh), resolves only the trusted
+                    // roots - the settings key serves the kernel shell, not
+                    // this privileged execution (the promise would lie).
+                    message: "could not run the installer: no Git Bash found at \
+                              the trusted install roots \
+                              (C:\\Program Files\\Git\\bin\\bash.exe); install \
+                              Git for Windows (https://git-scm.com/download/win) \
+                              to update from this machine"
+                        .to_string(),
+                });
+            }
+        }
+    };
+    #[cfg(not(windows))]
+    let shell = "/bin/sh";
+    let mut command = tokio::process::Command::new(shell);
     command.arg(script).env(ENV_PREFIX, prefix);
     // The requested channel wins; otherwise the update stays on the channel
     // the install marker records (the fetched script's own default is the
@@ -380,7 +421,14 @@ fn output_tail(captured: &std::process::Output) -> Option<String> {
 /// `bin/prime-agent` (still present until the takeover's uninstall) never
 /// matches, so the probe can never report its version.
 async fn launcher_version(prefix: &Path) -> Option<String> {
-    for name in ["prime-agent", "prime-agent-rust"] {
+    // The launcher names: the .cmd twin on Windows (the sh-script launcher
+    // cannot be exec'd by CreateProcess; Rust runs .cmd through cmd.exe),
+    // the sh launcher pair on unix (the pre-takeover name second).
+    #[cfg(windows)]
+    const LAUNCHER_NAMES: [&str; 2] = ["prime-agent.cmd", "prime-agent"];
+    #[cfg(not(windows))]
+    const LAUNCHER_NAMES: [&str; 2] = ["prime-agent", "prime-agent-rust"];
+    for name in LAUNCHER_NAMES {
         let launcher = prefix.join("bin").join(name);
         if !launcher.is_file() {
             continue;
@@ -409,6 +457,36 @@ async fn launcher_version(prefix: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The platform map `prime-agent update --check` names on every
+    /// supported platform pair (the same set install-rust.sh's uname case
+    /// resolves): the Windows pair ships the MSVC target, and the refusal
+    /// covers every other pair with the full matrix in the message.
+    #[test]
+    fn target_for_covers_the_published_matrix() {
+        assert_eq!(target_for("macos", "aarch64"), Some("aarch64-apple-darwin"));
+        assert_eq!(target_for("macos", "x86_64"), Some("x86_64-apple-darwin"));
+        assert_eq!(
+            target_for("linux", "x86_64"),
+            Some("x86_64-unknown-linux-gnu")
+        );
+        assert_eq!(
+            target_for("linux", "aarch64"),
+            Some("aarch64-unknown-linux-gnu")
+        );
+        assert_eq!(
+            target_for("windows", "x86_64"),
+            Some("x86_64-pc-windows-msvc")
+        );
+        // The unsupported pairs refuse; the message names the machine and
+        // the full matrix (the Windows build included, so a refused
+        // Windows-adjacent machine sees the MSVC target it needs).
+        assert_eq!(target_for("windows", "aarch64"), None);
+        assert_eq!(target_for("freebsd", "x86_64"), None);
+        let message = no_build_message("windows", "aarch64");
+        assert!(message.contains("windows aarch64"), "{message}");
+        assert!(message.contains("x86_64-pc-windows-msvc"), "{message}");
+    }
 
     /// The installed-marker channel read: a beta install's update must
     /// stay on beta (the marker the installer writes at publish carries
@@ -616,7 +694,7 @@ echo "installed: 9.9.8-continuous.fedcba9876543210"
     }
 
     #[test]
-    fn the_target_matrix_covers_the_continuous_builds() {
+    fn the_target_matrix_covers_the_published_builds() {
         assert_eq!(target_for("macos", "aarch64"), Some("aarch64-apple-darwin"));
         assert_eq!(target_for("macos", "x86_64"), Some("x86_64-apple-darwin"));
         assert_eq!(
@@ -627,7 +705,15 @@ echo "installed: 9.9.8-continuous.fedcba9876543210"
             target_for("linux", "aarch64"),
             Some("aarch64-unknown-linux-gnu")
         );
-        assert_eq!(target_for("windows", "x86_64"), None);
+        // The Windows pair ships the MSVC build (the release channel's
+        // fifth target since the windows ship).
+        assert_eq!(
+            target_for("windows", "x86_64"),
+            Some("x86_64-pc-windows-msvc")
+        );
+        // Windows ARM64 (the only unsupported Windows shape) and every
+        // other OS refuse.
+        assert_eq!(target_for("windows", "aarch64"), None);
         assert!(
             current_target().is_ok(),
             "the test matrix runs on a supported platform"

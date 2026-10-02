@@ -32,7 +32,8 @@ pub const SCHEMA_VERSION: u64 = 2;
 pub const ERROR_MESSAGE_POLICY_REVISION: u64 = 1;
 
 /// The error-classifier revision (`classifier_revision` on `agent error`).
-pub const ERROR_CLASSIFIER_REVISION: u64 = 1;
+/// Bumped to 2 when the `stream_drop` subtype/code joined the vocabulary.
+pub const ERROR_CLASSIFIER_REVISION: u64 = 2;
 
 // ---------------------------------------------------------------------------
 // Rule kinds
@@ -210,6 +211,7 @@ pub const ERROR_SUBTYPES: &[&str] = &[
     "provider_unavailable",
     "refusal",
     "malformed_response",
+    "stream_drop",
     "context_limit",
     "configuration_error",
     "filesystem_error",
@@ -251,6 +253,7 @@ pub const ERROR_CODES: &[&str] = &[
     "content_filter",
     "safety",
     "malformed_response",
+    "stream_drop",
     "context_length_exceeded",
     "context_window_exceeded",
     "ENOENT",
