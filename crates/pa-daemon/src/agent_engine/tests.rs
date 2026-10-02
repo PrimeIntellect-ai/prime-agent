@@ -61,11 +61,11 @@ fn write_compaction_settings(dir: &std::path::Path, reserve_tokens: u64) {
 /// `.cargo/config.toml`) back off for one test that asserts telemetry
 /// wiring, restoring it on drop. Debug builds have no network sink, so the
 /// opted-in test still sends nothing (its callers are ignored in release
-/// builds, which have one); serialized so concurrent opt-ins
-/// never interleave their restores.
+/// builds, which have one); serialized through the crate-wide
+/// `test_support::TELEMETRY_ENV_MUTEX` so the opt-ins and the supervisor
+/// tests' env scrub never interleave their restores.
 pub(crate) fn telemetry_opt_in() -> TelemetryOptIn {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let guard = LOCK
+    let guard = crate::test_support::TELEMETRY_ENV_MUTEX
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let previous = std::env::var_os("DO_NOT_TRACK");

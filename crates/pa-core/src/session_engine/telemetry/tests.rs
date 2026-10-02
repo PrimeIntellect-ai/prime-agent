@@ -1668,6 +1668,49 @@ async fn a_zero_event_opt_out_flap_never_reports_the_spanning_tool() {
     assert_eq!(ended["run_count"], serde_json::json!(0));
 }
 
+/// `end()` is the last recording seam: a run still open across a
+/// zero-event opt-out flap (no telemetry event fired inside the window,
+/// and the re-enable already landed) severs at session close instead of
+/// finalizing with the off window's span.
+#[tokio::test]
+async fn end_severs_a_run_stale_across_a_zero_event_flap() {
+    let _env = CleanTelemetryEnv::default();
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let mut settings = crate::settings::SettingsManager::create(dir.path(), &agent_dir);
+    super::set_telemetry_enabled_text(&mut settings, &agent_dir, true).unwrap();
+    let switch = telemetry_enabled_switch(dir.path(), &agent_dir);
+    let fixture = fixture_with_switch_raw(switch);
+
+    // A run opens while telemetry is on.
+    fixture.clock.set(1_000);
+    emit(&fixture, AgentEvent::AgentStart);
+    fixture.clock.set(1_050);
+    emit(&fixture, AgentEvent::TurnStart);
+
+    // The zero-event flap: off and back on with no event in between.
+    super::set_telemetry_enabled_text(&mut settings, &agent_dir, false).unwrap();
+    super::set_telemetry_enabled_text(&mut settings, &agent_dir, true).unwrap();
+
+    // The session ends while telemetry is on again. The run opened
+    // before the off epoch moved, so it never finalizes.
+    fixture.clock.set(1_400);
+    let telemetry = SessionTelemetry::detached(
+        fixture.client.clone(),
+        fixture.state.clone(),
+        "interactive".to_string(),
+    );
+    telemetry.end().await.unwrap();
+
+    let runs = event_properties(&fixture.mock, "agent run completed").await;
+    assert!(
+        runs.is_empty(),
+        "end() severs the stale run: the off window's span never reports"
+    );
+    let ended = &event_properties(&fixture.mock, "agent session ended").await[0];
+    assert_eq!(ended["run_count"], serde_json::json!(0));
+}
+
 /// The off-epoch bump is lock-serialized and id-preserving: concurrent
 /// disabling writes each land exactly one increment, the installation id
 /// survives every bump, and the state file keeps its private mode.

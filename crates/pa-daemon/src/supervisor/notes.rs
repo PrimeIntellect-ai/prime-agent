@@ -33,9 +33,27 @@ fn send_daemon_event_summary(client: &pa_telemetry::TelemetryClient, counts: &Da
 }
 
 impl Supervisor {
+    /// The daemon's live recording gate: the same env-then-settings
+    /// resolution the client's delivery pass and the session seams apply,
+    /// asked per event, so a `/telemetry` flip lands without a restart.
+    /// Daemon events count and fire only while it is on — an opt-out
+    /// window's events never ride a later summary or incident after a
+    /// re-enable.
+    fn telemetry_recording_on(&self) -> bool {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let switch = pa_core::session_engine::telemetry::telemetry_enabled_switch(
+            &cwd,
+            &self.options.agent_dir,
+        );
+        (switch.enabled)()
+    }
+
     /// Emit the `daemon event` adoption signal for a session-archive sweep
     /// (best-effort, non-blocking; no-op when the daemon is opted out).
     pub(crate) fn note_sessions_archived(&self, count: usize) {
+        if !self.telemetry_recording_on() {
+            return;
+        }
         if let Some(client) = &*self.telemetry.lock().unwrap() {
             pa_core::session_engine::telemetry::track_sessions_archived(client, count);
         }
@@ -49,6 +67,9 @@ impl Supervisor {
         if count == 0 {
             return;
         }
+        if !self.telemetry_recording_on() {
+            return;
+        }
         if let Some(client) = &*self.telemetry.lock().unwrap() {
             pa_core::session_engine::telemetry::track_worker_children_closed(client, count);
         }
@@ -57,6 +78,9 @@ impl Supervisor {
     /// Emit the live-catalog warm-up settle's `daemon event` (schema v1,
     /// kind `catalog_refresh`): the served model count, primitives only.
     pub(super) fn note_catalog_refresh(&self, count: usize) {
+        if !self.telemetry_recording_on() {
+            return;
+        }
         if let Some(client) = &*self.telemetry.lock().unwrap() {
             pa_core::session_engine::telemetry::track_catalog_refresh(client, count);
         }
@@ -66,6 +90,9 @@ impl Supervisor {
     /// kind `deleted_child_usage_captured`): source + count, primitives
     /// only.
     pub(crate) fn note_deleted_child_usage_captured(&self, source: &str, count: usize) {
+        if !self.telemetry_recording_on() {
+            return;
+        }
         if let Some(client) = &*self.telemetry.lock().unwrap() {
             pa_core::session_engine::telemetry::track_deleted_child_usage_captured(
                 client, source, count,
@@ -101,6 +128,11 @@ impl Supervisor {
     /// Apply one count; once the window is an hour old, send the summary
     /// and start a new window.
     fn count_daemon_event(&self, update: impl FnOnce(&mut DaemonEventCounts)) {
+        if !self.telemetry_recording_on() {
+            // Count only while telemetry is on, so an opt-out window's
+            // events never ride the next summary after a re-enable.
+            return;
+        }
         let Some(client) = self.telemetry.lock().unwrap().clone() else {
             return;
         };
@@ -151,6 +183,9 @@ impl Supervisor {
     /// The abort supervision's declaration event (`daemon event` schema v1,
     /// kind `compaction_abort_declared`): one count, never session payload.
     pub(crate) fn note_compaction_abort_declared(&self) {
+        if !self.telemetry_recording_on() {
+            return;
+        }
         if let Some(client) = &*self.telemetry.lock().unwrap() {
             pa_core::session_engine::telemetry::track_compaction_abort_declared(client);
         }

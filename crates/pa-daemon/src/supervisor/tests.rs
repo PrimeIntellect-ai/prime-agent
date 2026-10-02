@@ -1,5 +1,54 @@
 use super::*;
 
+/// The cargo test config sets `DO_NOT_TRACK=1`; the daemon's live
+/// recording gate reads it (env before settings). Tests that exercise
+/// gated daemon-event paths hold this guard while the three override
+/// vars are scrubbed, and restore them after. The env is process-wide,
+/// so these tests serialize through the crate-wide
+/// `test_support::TELEMETRY_ENV_MUTEX` (shared with `agent_engine`'s
+/// `telemetry_opt_in`) while they hold it.
+const TELEMETRY_ENV_VARS: [&str; 3] = ["DO_NOT_TRACK", "PI_OFFLINE", "PRIME_AGENT_TELEMETRY"];
+
+struct CleanTelemetryEnv {
+    saved: Vec<(&'static str, Option<String>)>,
+    _env_lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Default for CleanTelemetryEnv {
+    fn default() -> Self {
+        // Held first: the vars may not be touched while another env test
+        // runs.
+        let env_lock = crate::test_support::TELEMETRY_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let saved = TELEMETRY_ENV_VARS
+            .iter()
+            .map(|var| {
+                let value = std::env::var(var).ok();
+                std::env::remove_var(var);
+                (*var, value)
+            })
+            .collect();
+        Self {
+            saved,
+            _env_lock: env_lock,
+        }
+    }
+}
+
+impl Drop for CleanTelemetryEnv {
+    fn drop(&mut self) {
+        // The manual drop runs before the field drops: the restore lands
+        // while the env lock is still held.
+        for (var, value) in self.saved.drain(..) {
+            match value {
+                Some(value) => std::env::set_var(var, value),
+                None => std::env::remove_var(var),
+            }
+        }
+    }
+}
+
 /// The crash-path failure count: spawn-dies-fast churn accumulates to
 /// the give-up cap (the storm's counter could never grow while
 /// relaunch-spawns kept resetting it); a child that lived past the
@@ -1783,6 +1832,7 @@ async fn a_ledger_child_wake_joins_an_already_hosting_resident() {
 /// current window (the window is under an hour, so no count sent it yet).
 #[tokio::test]
 async fn the_exit_flush_sends_the_partial_daemon_event_summary() {
+    let _env = CleanTelemetryEnv::default();
     let dir = tempfile::TempDir::new().unwrap();
     let supervisor = Supervisor::new(SupervisorOptions {
         socket_path: dir.path().join("daemon.sock"),
@@ -1808,5 +1858,42 @@ async fn the_exit_flush_sends_the_partial_daemon_event_summary() {
     assert_eq!(
         events[0].properties.get("attach_count"),
         Some(&Value::from(2))
+    );
+}
+
+/// The daemon's live gate counts only while telemetry is on: events
+/// that fire during a settings opt-out window never ride the summary
+/// after a re-enable. The counters skip while off (they are not
+/// severed), so the on-period count before the window still reports.
+#[tokio::test]
+async fn off_window_daemon_events_never_count_into_the_summary() {
+    let _env = CleanTelemetryEnv::default();
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let mut settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
+    settings.set_telemetry_enabled(false).unwrap();
+    let supervisor = Supervisor::new(SupervisorOptions {
+        socket_path: dir.path().join("daemon.sock"),
+        agent_dir: agent_dir.clone(),
+    })
+    .expect("supervisor");
+    let mock = Arc::new(pa_telemetry::MockSink::new());
+    let mut config = pa_telemetry::TelemetryClientConfig::new("install-1");
+    config.sinks = vec![mock.clone() as Arc<dyn pa_telemetry::TelemetrySink>];
+    *supervisor.telemetry.lock().unwrap() =
+        Some(pa_telemetry::TelemetryClient::spawn(config).unwrap());
+    // Off: the event skips, so nothing counts.
+    supervisor.note_daemon_event("attach", None);
+    settings.set_telemetry_enabled(true).unwrap();
+    // Back on: the event counts again.
+    supervisor.note_daemon_event("attach", None);
+    supervisor.flush_telemetry_on_exit().await;
+    let events = mock.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].name, "daemon event");
+    assert_eq!(
+        events[0].properties.get("attach_count"),
+        Some(&Value::from(1)),
+        "the off-window attach never counts"
     );
 }

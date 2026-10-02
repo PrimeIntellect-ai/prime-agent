@@ -624,7 +624,9 @@ impl SessionTelemetry {
     /// Finalize any active run, emit `agent session ended`, and flush.
     /// The host calls this at session close (TUI exit, worker shutdown,
     /// kill); the `ended` flag makes a second close path a no-op, matching
-    /// the TS single `registerDisposeCallback` firing.
+    /// the TS single `registerDisposeCallback` firing. A run still open
+    /// across an opt-out severs before the finalize, so an off window's
+    /// run never reports after a re-enable.
     ///
     /// # Errors
     ///
@@ -639,6 +641,14 @@ impl SessionTelemetry {
         }
         {
             let mut state = self.state.lock().expect("telemetry state poisoned");
+            // Session close is the last recording seam: a run still open
+            // across an opt-out (off now, or a zero-event flap that came
+            // back on) severs here instead of finalizing after the
+            // re-enable.
+            if !recording_on(&state) {
+                sever_off_period_run(&mut state);
+            }
+            sever_if_stale_run(&mut state);
             finalize_run(&self.client, &self.execution_mode, &mut state);
         }
         let mut properties = self.session_properties();
