@@ -1971,7 +1971,6 @@ migrated_old_layout=""
 on_exit() {
   # The renderer stops first, so the restore notes print below its frame.
   ui_stop
-  rm -rf "$dl"
   # Restores FIRST, lock release LAST: a second installer must not be able
   # to publish into share_dir while this one still restores state — the
   # restore would delete that fresh payload (cross-installer data loss).
@@ -2022,6 +2021,7 @@ on_exit() {
   if [ "$WINDOWS" = "yes" ]; then
     rm -rf "${PREFIX}/share/.prime-agent-install.lock.d"
   fi
+  rm -rf "$dl"
 }
 trap on_exit EXIT
 
