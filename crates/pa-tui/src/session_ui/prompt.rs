@@ -338,7 +338,8 @@ impl SessionUi {
     /// `restorePromptStashOnOpen`'s gate) restores only an auto
     /// restore-on-open head, while the manual `app.prompt.stash` key
     /// restores whatever draft the session holds — a manual stash never
-    /// lands on an open or a switch, only on its own key.
+    /// lands on an open or a switch, only on its own key or after the
+    /// next admitted send (TS `promptStashToRestore`).
     pub(super) fn restore_prompt_stash_if_editor_empty(
         &mut self,
         view: &mut AgentView,
@@ -765,6 +766,13 @@ impl SessionUi {
                 .collect();
         self.input_submission_generation += 1;
         let generation = self.input_submission_generation;
+        self.prompt_stash_to_restore = self
+            .prompt_stash
+            .lock()
+            .expect("prompt stash store poisoned")
+            .for_session(&self.stash_session_id)
+            .stash
+            .clone();
         self.order_prompt_request(
             text.to_string(),
             behavior,
@@ -986,6 +994,23 @@ impl SessionUi {
                     self.turn_active = true;
                     self.start_loader(view);
                     self.dirty = true;
+                }
+                // TS `onSubmit`'s finally: the current submit's admitted prompt
+                // restores the stash head it captured, if that is still the head.
+                if note.generation == self.input_submission_generation {
+                    if let Some(captured) = self.prompt_stash_to_restore.take() {
+                        let head_unchanged = self
+                            .prompt_stash
+                            .lock()
+                            .expect("prompt stash store poisoned")
+                            .for_session(&self.stash_session_id)
+                            .stash
+                            .as_ref()
+                            == Some(&captured);
+                        if head_unchanged {
+                            self.restore_prompt_stash_if_editor_empty(view, false);
+                        }
+                    }
                 }
                 Ok(())
             }
