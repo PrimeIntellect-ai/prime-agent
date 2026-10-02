@@ -852,7 +852,9 @@ async fn engine_sessions_emit_the_timeline_only_when_the_flag_is_on() {
 
 /// A provider seam that invokes the payload hook once with the TS
 /// `PAYLOAD` fixture, then settles with a zero-usage message (the pin is
-/// the capture, not the turn).
+/// the capture, not the turn). Unix-only like its callers: the capture
+/// the payload tests prove is Unix-only by the confidentiality design.
+#[cfg(unix)]
 fn payload_calling_provider() -> StreamFn {
     Arc::new(move |model, _context, options| {
         Box::pin(async move {

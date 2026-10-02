@@ -34,6 +34,8 @@ mod supervision;
 #[cfg(test)]
 mod handshake_tests;
 #[cfg(test)]
+mod spawn_record_tests;
+#[cfg(test)]
 mod tests;
 
 // STABLE_LIFETIME_MS is read only by this facade's in-file test modules (via the module's
@@ -87,7 +89,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use crate::backpressure::RouteAdmission;
 use crate::descriptor::{
     create_command_payload, load_descriptors, persist_supervisor_config, persist_worker,
-    PersistedSupervisorConfig, SUPERVISOR_CONFIG_FILE_NAME,
+    persist_worker_at, PersistedSupervisorConfig, TempSync, SUPERVISOR_CONFIG_FILE_NAME,
 };
 use crate::engine::EngineModelSelection;
 use crate::framing::{write_frame, PrivateFrameReader, DEFAULT_PRIVATE_FRAME_LIMITS};
@@ -129,6 +131,12 @@ pub struct Supervisor {
     /// never unlinked by this process. `None` until `run` binds (named
     /// pipes keep `None`: there is no file to stat).
     bound_socket_identity: std::sync::Mutex<Option<socket::SocketIdentity>>,
+    /// The per-supervisor launch-probe budget override: `None` rides the
+    /// process-wide env seam (`PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS`),
+    /// a pinned budget keeps a launch oracle's probe immediate without
+    /// mutating that env var (a set value would leak into every
+    /// parallel test's launch).
+    worker_connect_budget: std::sync::Mutex<Option<Duration>>,
     /// The durable session-binding table (the stale-active-id rebind
     /// surface): every active id the supervisor has routed stays
     /// addressable through its session's durable identity, so a client
@@ -295,6 +303,7 @@ impl Supervisor {
             options,
             descriptor_dir,
             bound_socket_identity: std::sync::Mutex::new(None),
+            worker_connect_budget: std::sync::Mutex::new(None),
             session_bindings: crate::session_bindings::SessionBindingTable::new(),
             opening_files: std::sync::Mutex::new(std::collections::HashMap::new()),
             telemetry: std::sync::Mutex::new(None),

@@ -89,6 +89,7 @@ fn ps_process_start_id(pid: u32) -> Option<String> {
 /// (TS `getWindowsProcessStartId`); a recycled pid has a different
 /// creation time, so the identity check is exact.
 #[cfg(windows)]
+#[must_use]
 pub fn process_start_id(pid: u32) -> Option<String> {
     if pid == 0 {
         return None;
@@ -169,17 +170,24 @@ pub fn process_executable_path(_pid: u32) -> Option<std::path::PathBuf> {
 /// Windows: `QueryFullProcessImageNameW` under the same query access the
 /// identity ladder uses.
 #[cfg(windows)]
+#[must_use]
 pub fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
     if pid == 0 {
         return None;
     }
     let handle = winapi::open_process(winapi::PROCESS_QUERY_LIMITED_INFORMATION, pid)?;
     let mut buffer = [0u16; 1024];
+    // The buffer is a fixed [u16; 1024]: the length never exceeds u32.
+    #[allow(clippy::cast_possible_truncation)]
     let mut size = buffer.len() as u32;
     // Writes the process image path into `buffer` (at most `size` wide
     // chars, NUL-terminated); a 0 return means the query failed. The
     // hand-declared `winapi` wrappers are safe fns, so no `unsafe` here.
-    let written = winapi::query_full_process_image_name(handle, buffer.as_mut_ptr(), &mut size);
+    let written = winapi::query_full_process_image_name(
+        handle,
+        buffer.as_mut_ptr(),
+        std::ptr::from_mut(&mut size),
+    );
     winapi::close_handle(handle);
     if written == 0 {
         return None;
@@ -489,7 +497,7 @@ mod winapi {
 
     impl FileTime {
         fn ticks(self) -> u64 {
-            (self.dwHighDateTime as u64) << 32 | self.dwLowDateTime as u64
+            (u64::from(self.dwHighDateTime)) << 32 | u64::from(self.dwLowDateTime)
         }
     }
 
@@ -542,8 +550,15 @@ mod winapi {
         let mut exit = FileTime::default();
         let mut kernel = FileTime::default();
         let mut user = FileTime::default();
-        let ok =
-            unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) };
+        let ok = unsafe {
+            GetProcessTimes(
+                handle,
+                std::ptr::from_mut(&mut creation),
+                std::ptr::from_mut(&mut exit),
+                std::ptr::from_mut(&mut kernel),
+                std::ptr::from_mut(&mut user),
+            )
+        };
         (ok != 0).then(|| creation.ticks())
     }
 
@@ -557,7 +572,7 @@ mod winapi {
             return unsafe { GetLastError() } == ERROR_ACCESS_DENIED;
         };
         let mut exit_code = 0;
-        let ok = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+        let ok = unsafe { GetExitCodeProcess(handle, std::ptr::from_mut(&mut exit_code)) };
         close_handle(handle);
         ok != 0 && exit_code == STILL_ACTIVE
     }

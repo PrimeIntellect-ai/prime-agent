@@ -14,6 +14,7 @@ mod abort_idle_race;
 mod broadcast;
 mod burst;
 mod feed;
+mod interleave;
 mod park;
 mod queue;
 

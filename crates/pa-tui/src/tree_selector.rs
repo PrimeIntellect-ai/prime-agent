@@ -3,6 +3,7 @@
 //! (TS `TreeSelectorComponent` + interactive-mode's navigate flow).
 
 use crate::keybindings::KeybindingsManager;
+use crate::search_input::SearchInput;
 use crate::theme::{Theme, ThemeColor};
 use crate::tree_list::{FilterMode, TreeList, TreeListAction};
 use crate::tree_nodes::{build_tree, TreeNode};
@@ -35,12 +36,20 @@ pub enum TreeSelectorAction {
 enum Mode {
     /// The tree list.
     Tree,
-    /// The label input for one entry (TS `LabelInput`).
-    LabelInput { entry_id: String, input: String },
+    /// The label input for one entry (TS `LabelInput`): the search
+    /// input holds the draft, so its full edit grammar (Backspace,
+    /// Delete, the word/line kills) owns the non-intercepted keys.
+    LabelInput {
+        entry_id: String,
+        input: SearchInput,
+    },
     /// "Summarize branch?" (the TS three-option selector).
     Summarize { target_id: String, selected: usize },
     /// Custom summarization instructions (the TS inline editor).
-    CustomPrompt { target_id: String, input: String },
+    CustomPrompt {
+        target_id: String,
+        input: SearchInput,
+    },
 }
 
 /// The summarize options, in order.
@@ -105,6 +114,17 @@ impl TreeSelector {
             .update_node_label(entry_id, label.map(str::to_string), "");
     }
 
+    /// One bracketed paste (TS routes the raw data to the open input):
+    /// the label and custom-prompt inputs take it, the tree search
+    /// appends it, and the summarize choice list consumes it.
+    pub fn paste(&mut self, text: &str) {
+        match &mut self.mode {
+            Mode::Tree => self.list.paste(text),
+            Mode::LabelInput { input, .. } | Mode::CustomPrompt { input, .. } => input.paste(text),
+            Mode::Summarize { .. } => {}
+        }
+    }
+
     /// Handle one key id; the emitted action carries the caller's work.
     pub fn handle_key(&mut self, kb: &KeybindingsManager, id: &str) -> TreeSelectorAction {
         match &mut self.mode {
@@ -127,18 +147,20 @@ impl TreeSelector {
                 }
                 TreeListAction::Cancel => TreeSelectorAction::Cancel,
                 TreeListAction::EditLabel(entry_id) => {
+                    // TS `LabelInput` seeds the input with the current label
+                    // (`setValue`, which leaves the caret at 0); the port's
+                    // prefill puts it at the end.
                     let current = self.list.label_of(&entry_id).unwrap_or_default();
-                    self.mode = Mode::LabelInput {
-                        entry_id,
-                        input: current,
-                    };
+                    let mut input = SearchInput::new();
+                    input.prefill(&current);
+                    self.mode = Mode::LabelInput { entry_id, input };
                     TreeSelectorAction::None
                 }
                 TreeListAction::None => TreeSelectorAction::None,
             },
             Mode::LabelInput { entry_id, input } => {
                 if kb.matches(id, "tui.select.confirm") {
-                    let label = input.trim().to_string();
+                    let label = input.value().trim().to_string();
                     let label = (!label.is_empty()).then_some(label);
                     let action = TreeSelectorAction::LabelChange {
                         entry_id: entry_id.clone(),
@@ -149,13 +171,9 @@ impl TreeSelector {
                 } else if kb.matches(id, "tui.select.cancel") {
                     self.mode = Mode::Tree;
                     TreeSelectorAction::None
-                } else if kb.matches(id, "tui.editor.deleteCharBackward") {
-                    input.pop();
-                    TreeSelectorAction::None
-                } else if let Some(ch) = printable(id) {
-                    input.push(ch);
-                    TreeSelectorAction::None
                 } else {
+                    // TS `LabelInput.handleInput`: every other key id goes whole to the input.
+                    input.handle_key(id, kb);
                     TreeSelectorAction::None
                 }
             }
@@ -187,7 +205,7 @@ impl TreeSelector {
                             let target_id = target_id.clone();
                             self.mode = Mode::CustomPrompt {
                                 target_id,
-                                input: String::new(),
+                                input: SearchInput::new(),
                             };
                             TreeSelectorAction::None
                         }
@@ -208,7 +226,7 @@ impl TreeSelector {
             }
             Mode::CustomPrompt { target_id, input } => {
                 if kb.matches(id, "tui.select.confirm") {
-                    let instructions = input.trim().to_string();
+                    let instructions = input.value().trim().to_string();
                     let target_id = target_id.clone();
                     self.mode = Mode::Tree;
                     TreeSelectorAction::Navigate {
@@ -224,13 +242,10 @@ impl TreeSelector {
                         selected: 2,
                     };
                     TreeSelectorAction::None
-                } else if kb.matches(id, "tui.editor.deleteCharBackward") {
-                    input.pop();
-                    TreeSelectorAction::None
-                } else if let Some(ch) = printable(id) {
-                    input.push(ch);
-                    TreeSelectorAction::None
                 } else {
+                    // TS's custom-prompt editor (`ExtensionEditorComponent`) takes
+                    // every other key id whole.
+                    input.handle_key(id, kb);
                     TreeSelectorAction::None
                 }
             }
@@ -338,12 +353,7 @@ impl TreeSelector {
                             width,
                             "",
                         ));
-                        let row = if input.is_empty() {
-                            vec![crate::Span::raw("  ")]
-                        } else {
-                            vec![crate::Span::raw(format!("  {input}"))]
-                        };
-                        lines.push(truncate_line(&row, width, ""));
+                        lines.push(input_row(theme, width, input));
                         lines.push(truncate_line(
                             &vec![theme
                                 .fg_span(ThemeColor::Muted, input_pane_hint(kb, "save", "cancel"))],
@@ -362,12 +372,7 @@ impl TreeSelector {
                     width,
                     "",
                 ));
-                let row = if input.is_empty() {
-                    vec![crate::Span::raw("  ")]
-                } else {
-                    vec![crate::Span::raw(format!("  {input}"))]
-                };
-                lines.push(truncate_line(&row, width, ""));
+                lines.push(input_row(theme, width, input));
                 lines.push(truncate_line(
                     &vec![theme.fg_span(ThemeColor::Muted, input_pane_hint(kb, "save", "cancel"))],
                     width,
@@ -401,6 +406,20 @@ fn input_pane_hint(kb: &KeybindingsManager, confirm_action: &str, cancel_action:
     format!("  {segments}")
 }
 
+/// The input panes' field row (TS `LabelInput.render`): the two-space
+/// indent, then `Input.render` at the remaining width with its caret.
+fn input_row(theme: &Theme, width: usize, input: &SearchInput) -> Line {
+    let mut row = vec![crate::Span::raw("  ")];
+    row.extend(crate::menu_panel::input_render(
+        theme,
+        width.saturating_sub(2),
+        input.value(),
+        input.cursor(),
+        /*focused*/ true,
+    ));
+    truncate_line(&row, width, "")
+}
+
 /// Render the summarize choice list (the three TS options; row one is
 /// "No summary").
 fn render_choice(
@@ -431,13 +450,6 @@ fn render_choice(
         "",
     ));
     lines
-}
-
-/// One key id's printable character, when it is one (search/input typing).
-fn printable(id: &str) -> Option<char> {
-    let mut chars = id.chars();
-    let c = chars.next()?;
-    (chars.next().is_none() && !c.is_control()).then_some(c)
 }
 
 #[cfg(test)]
@@ -580,6 +592,169 @@ mod tests {
         let text = frame_text(&sel.render(&theme, 120, &kb));
         assert!(text.contains("  Enter select\n"), "{text}");
         assert!(!text.contains("Esc back"), "{text}");
+    }
+
+    /// Every non-intercepted key reaches the label input: the typed
+    /// space lands, ctrl+w deletes the trailing word, ctrl+u clears the
+    /// draft.
+    #[test]
+    fn label_input_edits_through_the_full_key_grammar() {
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let kb = KeybindingsManager::new();
+        let mut sel = selector();
+        sel.handle_key(&kb, "shift+l");
+        for key in ["a", "b", "space", "c", "d"] {
+            sel.handle_key(&kb, key);
+        }
+        let text = frame_text(&sel.render(&theme, 120, &kb));
+        assert!(text.contains("ab cd"), "the typed space lands: {text}");
+        sel.handle_key(&kb, "ctrl+w");
+        let text = frame_text(&sel.render(&theme, 120, &kb));
+        assert!(
+            text.contains("ab "),
+            "ctrl+w deletes the trailing word: {text}"
+        );
+        // The cleared draft saves as the label's removal (TS
+        // `onSubmit`'s empty-label arm — the frame's hint rows would
+        // swallow a plain substring check, so the action carries the
+        // proof).
+        sel.handle_key(&kb, "ctrl+u");
+        let action = sel.handle_key(&kb, "enter");
+        assert_eq!(
+            action,
+            TreeSelectorAction::LabelChange {
+                entry_id: "n0".to_string(),
+                label: None,
+            },
+            "ctrl+u clears the label"
+        );
+        // The save hands a typed draft out (TS `onSubmit`).
+        sel.handle_key(&kb, "shift+l");
+        sel.handle_key(&kb, "x");
+        let action = sel.handle_key(&kb, "enter");
+        assert_eq!(
+            action,
+            TreeSelectorAction::LabelChange {
+                entry_id: "n0".to_string(),
+                label: Some("x".to_string()),
+            }
+        );
+    }
+
+    /// TS's custom-prompt editor (the `ExtensionEditorComponent`) hands
+    /// every non-intercepted key to the full editor grammar.
+    #[test]
+    fn custom_prompt_edits_through_the_full_key_grammar() {
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let kb = KeybindingsManager::new();
+        let mut sel = selector();
+        // Enter opens the summarize choice; its third option opens the
+        // custom-prompt editor.
+        sel.handle_key(&kb, "enter");
+        sel.handle_key(&kb, "down");
+        sel.handle_key(&kb, "down");
+        sel.handle_key(&kb, "enter");
+        for key in ["s", "u", "m", "space", "i", "t"] {
+            sel.handle_key(&kb, key);
+        }
+        let text = frame_text(&sel.render(&theme, 120, &kb));
+        assert!(text.contains("sum it"), "the typed space lands: {text}");
+        sel.handle_key(&kb, "ctrl+w");
+        let text = frame_text(&sel.render(&theme, 120, &kb));
+        assert!(
+            text.contains("sum "),
+            "ctrl+w deletes the trailing word: {text}"
+        );
+        // Enter submits the trimmed instructions (TS `onSubmit`).
+        let action = sel.handle_key(&kb, "enter");
+        assert_eq!(
+            action,
+            TreeSelectorAction::Navigate {
+                target_id: "n0".to_string(),
+                summarize: true,
+                custom_instructions: Some("sum".to_string()),
+            }
+        );
+        // The cancel arm keeps its ladder: escape returns to the choice,
+        // and Enter on the choice re-opens the editor with an empty draft
+        // (TS's cancelled editor loops back to the choice — the frame's
+        // hint rows would swallow a plain substring check, so the
+        // submitted instructions carry the proof).
+        let mut sel = selector();
+        sel.handle_key(&kb, "enter");
+        sel.handle_key(&kb, "down");
+        sel.handle_key(&kb, "down");
+        sel.handle_key(&kb, "enter");
+        for key in ["o", "l", "d"] {
+            sel.handle_key(&kb, key);
+        }
+        sel.handle_key(&kb, "escape");
+        sel.handle_key(&kb, "enter");
+        sel.handle_key(&kb, "b");
+        let action = sel.handle_key(&kb, "enter");
+        assert_eq!(
+            action,
+            TreeSelectorAction::Navigate {
+                target_id: "n0".to_string(),
+                summarize: true,
+                custom_instructions: Some("b".to_string()),
+            },
+            "the reopened editor starts empty, so the draft is exactly the new keystroke"
+        );
+    }
+
+    /// A paste lands in the active input (TS routes the raw data to the
+    /// open `Input`): the label editor takes it, the tree search appends
+    /// it, and the summarize choice list consumes it.
+    #[test]
+    fn a_paste_reaches_the_open_input() {
+        let kb = KeybindingsManager::new();
+        // The label input.
+        let mut sel = selector();
+        sel.handle_key(&kb, "shift+l");
+        sel.paste("renamed");
+        let value = match &sel.mode {
+            Mode::LabelInput { input, .. } => input.value().to_string(),
+            _ => panic!("the label input stays open"),
+        };
+        assert_eq!(value, "renamed");
+        sel.handle_key(&kb, "escape");
+        // The tree search appends it.
+        sel.paste("chain");
+        assert_eq!(sel.list.search_query(), "chain");
+        // The summarize choice list consumes it (a fresh selector, the
+        // search-filtered list above has no confirm target).
+        let mut sel = selector();
+        sel.handle_key(&kb, "enter");
+        assert!(matches!(sel.mode, Mode::Summarize { .. }));
+        sel.paste("ignored");
+        assert_eq!(sel.list.search_query(), "");
+    }
+
+    /// The label pane draws its caret at the cursor (TS `Input.render`'s
+    /// reversed cell): two lefts after "abc" put it on the "b".
+    #[test]
+    fn label_input_draws_the_caret_at_the_cursor() {
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let kb = KeybindingsManager::new();
+        let mut sel = selector();
+        sel.handle_key(&kb, "shift+l");
+        for key in ["a", "b", "c", "left", "left"] {
+            sel.handle_key(&kb, key);
+        }
+        let frame = sel.render(&theme, 120, &kb);
+        let is_caret = |span: &crate::Span| {
+            span.style
+                .add_modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        };
+        let row = frame
+            .iter()
+            .find(|line| line.iter().any(is_caret))
+            .expect("the label row draws a caret");
+        let at = row.iter().position(is_caret).expect("the caret cell");
+        let before: String = row[..at].iter().map(|span| span.content.as_str()).collect();
+        assert_eq!((before.as_str(), row[at].content.as_str()), ("  a", "b"));
     }
 
     /// The `get_session_tree` wire payload of a linear chain of user
