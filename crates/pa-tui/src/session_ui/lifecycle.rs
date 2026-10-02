@@ -165,7 +165,6 @@ impl SessionUi {
             compaction_abort_notes,
             prompt_orders: orders_tx,
             input_submission_generation: 0,
-            prompt_stash_to_restore: None,
             prompt_in_flight: 0,
             transcript_stale: false,
             telemetry: options.telemetry.clone(),

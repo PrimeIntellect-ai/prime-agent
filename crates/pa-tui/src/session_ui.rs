@@ -464,9 +464,6 @@ pub(crate) struct SessionUi {
     /// submit bumps it, and a failed one's draft-restore right dies under
     /// any newer submit.
     input_submission_generation: u64,
-    /// The stash head captured by the current-generation submit (TS
-    /// `promptStashToRestore`): its admitted outcome restores it.
-    prompt_stash_to_restore: Option<PromptStash>,
     /// Armed prompt round trips (one per spawned request): the headless
     /// idle and exit gates treat an in-flight submit as busy — the inline
     /// submit held those gates by blocking the loop until the ack landed.
