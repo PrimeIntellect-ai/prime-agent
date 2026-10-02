@@ -46,6 +46,7 @@ races) plus the accepted review findings from both:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -1253,6 +1254,59 @@ class ValidateFactoryMachineTest(unittest.TestCase):
         }
         self.assertEqual(validate_factory_machine(distinct), [])
 
+        # A name another state's name can suffix onto (Macroscope review
+        # finding: foo's later instances spawn foo-i1, so a state configured
+        # foo-i1 collides at spawn time) is rejected at write time, in
+        # either order; the attempt chain form is caught too.
+        shadowing = {
+            "states": [
+                {"id": "a", "entry": True, "subagent": {"prompt": "p", "name": "foo"}},
+                {"id": "b", "subagent": {"prompt": "p", "name": "foo-i1"}},
+            ],
+            "transitions": [{"from": "a", "to": "b"}],
+        }
+        errors = validate_factory_machine(shadowing)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("collides with the suffixed spawn labels of state 'a'", errors[0])
+        self.assertIn("re-entry, foreach, and retries name children 'foo'-i<n> and 'foo'-a<n>", errors[0])
+        # Reversed declaration order: the CURRENT state's name generates the
+        # suffixed labels, and the message must attribute them to it, not to
+        # the earlier state (Cursor review finding).
+        reversed_shadowing = {
+            "states": [
+                {"id": "a", "entry": True, "subagent": {"prompt": "p", "name": "foo-i1"}},
+                {"id": "b", "subagent": {"prompt": "p", "name": "foo"}},
+            ],
+            "transitions": [{"from": "a", "to": "b"}],
+        }
+        errors = validate_factory_machine(reversed_shadowing)
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(
+            errors[0],
+            "state b subagent name 'foo' suffixed by re-entry, foreach, and retries "
+            "('foo'-i<n>, 'foo'-a<n>) collides with state 'a' (configured 'foo-i1')",
+        )
+        for shadowed_name in ("foo-a2", "foo-i1-a2", "foo-i9"):
+            machine = {
+                "states": [
+                    {"id": "a", "entry": True, "subagent": {"prompt": "p", "name": "foo"}},
+                    {"id": "b", "subagent": {"prompt": "p", "name": shadowed_name}},
+                ],
+                "transitions": [{"from": "a", "to": "b"}],
+            }
+            self.assertEqual(len(validate_factory_machine(machine)), 1, shadowed_name)
+        # The never-generated -i0/-a1 do not shadow, and unrelated names pass.
+        no_shadow = {
+            "states": [
+                {"id": "a", "entry": True, "subagent": {"prompt": "p", "name": "foo"}},
+                {"id": "b", "subagent": {"prompt": "p", "name": "foo-i0"}},
+                {"id": "c", "subagent": {"prompt": "p", "name": "foo-a1"}},
+                {"id": "d", "subagent": {"prompt": "p", "name": "bar-i1"}},
+            ],
+            "transitions": [{"from": "a", "to": "b"}, {"from": "b", "to": "c"}, {"from": "c", "to": "d"}],
+        }
+        self.assertEqual(validate_factory_machine(no_shadow), [])
+
     def test_wait_states_are_gated_until_the_communication_series(self) -> None:
         # The rlm.watch.* host handlers do not exist on this stack, so wait
         # blocks are rejected outright (machine form and dag form alike).
@@ -2169,6 +2223,32 @@ class SpawnLabelTest(unittest.TestCase):
             _child_name("0123456789abcdef", "collect", 0, 1),
         )
 
+    def test_suffixed_labels_stay_within_the_host_cap(self) -> None:
+        # A configured name at the 64-character cap still fits its first
+        # instance; a suffixed admission that would pass the cap shrinks
+        # its base with a digest of the full name, like the generated
+        # labels do (Macroscope and Cursor review findings: the overflow
+        # would fail every later spawn admission).
+        long_name = "x" * SUBAGENT_NAME_MAX_LENGTH
+        self.assertEqual(_spawn_label(long_name, "r", "a", 0, 1), long_name)
+        second = _spawn_label(long_name, "r", "a", 1, 1)
+        self.assertLessEqual(len(second), SUBAGENT_NAME_MAX_LENGTH)
+        self.assertTrue(second.endswith("-i1"))
+        self.assertIn(hashlib.sha256(long_name.encode("utf-8")).hexdigest()[:16], second)
+        # Truncation alone could collide (two long names sharing the
+        # prefix): the digest keeps them distinct.
+        sharing_prefix = "x" * (SUBAGENT_NAME_MAX_LENGTH - 1) + "y"
+        other = _spawn_label(sharing_prefix, "r", "a", 1, 1)
+        self.assertNotEqual(second, other)
+        self.assertLessEqual(len(other), SUBAGENT_NAME_MAX_LENGTH)
+        # Retry suffixes and both suffixes together fit as well.
+        for instance_index, attempt in ((0, 2), (9, 12), (1000000, 99)):
+            self.assertLessEqual(
+                len(_spawn_label(long_name, "r", "a", instance_index, attempt)),
+                SUBAGENT_NAME_MAX_LENGTH,
+                (instance_index, attempt),
+            )
+
 
 class FactoryHelpTest(unittest.TestCase):
     """rlm.factory.help(): the embedded authoring reference (PR #3199).
@@ -2244,6 +2324,7 @@ class FactoryHelpTest(unittest.TestCase):
         self.assertIn("The optional `name` labels the spawned children", flat)
         self.assertIn("the first instance is named exactly `name`", flat)
         self.assertIn("unique across the machine's states", flat)
+        self.assertIn("a name another state's name can suffix onto, `foo` vs `foo-i1`, is rejected at write time", flat)
 
     def test_help_advertises_only_calls_the_namespace_has(self) -> None:
         # The guide and the namespace MUST agree exactly: every dotted
