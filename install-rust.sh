@@ -113,8 +113,8 @@
 # Config (env with defaults):
 #   PRIME_AGENT_DOWNLOAD_BASE_URL  the R2-backed download base (default:
 #                                  the official domain, the same base the
-#                                  release pipeline renders into the
-#                                  published copy of this script); any
+#                                  published copy of this script and
+#                                  pa-core's updater default to); any
 #                                  other base serves EVERY download, the
 #                                  release archives included (mirrors, tests)
 #   PRIME_AGENT_RELEASE_CHANNEL   stable | beta (default: stable)
@@ -154,11 +154,14 @@
 # prerequisite and exits.
 set -eu
 
-# The publish-rendered defaults: the release pipeline copies this script
-# to <base>/install.sh with DOWNLOAD_BASE_URL_DEFAULT set to
-# vars.R2_PUBLIC_BASE_URL, and to <base>/install-beta.sh with the channel
-# default set to beta — the repo-file default IS the official domain, so
-# the raw repo copy installs out of the box too.
+# The defaults: DOWNLOAD_BASE_URL_DEFAULT is the one definition of the
+# official base — the release pipeline publishes it unchanged (and refuses
+# a bucket whose public address differs), and pa-core's
+# DEFAULT_DOWNLOAD_BASE_URL is pinned to it by a test, so the installer and
+# the updater agree on which base's archives come from the GitHub release.
+# The pipeline copies this script to <base>/install.sh and to
+# <base>/install-beta.sh with the channel default set to beta; the raw repo
+# copy installs out of the box too.
 DOWNLOAD_BASE_URL_DEFAULT="https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev"
 RELEASE_CHANNEL_DEFAULT="stable"
 BASE_URL="${PRIME_AGENT_DOWNLOAD_BASE_URL:-$DOWNLOAD_BASE_URL_DEFAULT}"

@@ -609,3 +609,100 @@ fn zero_artifacts_fail_loudly_instead_of_verifying_nothing() {
         "the normalize gate must name the missing artifacts"
     );
 }
+
+/// The publish step's guard (its script before the first upload) plus its
+/// `render_installer` function, writing into `cwd` instead of `/tmp`.
+fn publish_guard_and_render() -> String {
+    let steps = promote_steps();
+    let run = steps[step_position(&steps, "Publish the R2 channel")]
+        .run
+        .clone()
+        .expect("the publish step carries a run script");
+    let guard = run
+        .split("RELEASE_PREFIX=")
+        .next()
+        .expect("the publish step uploads under RELEASE_PREFIX");
+    let mut render = String::new();
+    let mut inside = false;
+    for line in run.lines() {
+        inside = inside || line.trim() == "render_installer() {";
+        if inside {
+            render.push_str(&line.replace("/tmp/", "./"));
+            render.push('\n');
+            if line.trim() == "}" {
+                break;
+            }
+        }
+    }
+    assert!(
+        !render.is_empty(),
+        "the publish step defines render_installer"
+    );
+    format!("{guard}\n{render}\nrender_installer stable\nrender_installer beta\n")
+}
+
+/// The official download base has ONE definition, install-rust.sh's
+/// `DOWNLOAD_BASE_URL_DEFAULT`: pa-core's `DEFAULT_DOWNLOAD_BASE_URL`
+/// equals it, the publish serves it unchanged in both rendered installers,
+/// and a bucket whose public address differs refuses to publish before
+/// anything is uploaded. The installer and the updater then agree on which
+/// base's archives come from the GitHub release.
+#[test]
+fn the_official_download_base_has_one_definition() {
+    let official = pa_core::update::installer::DEFAULT_DOWNLOAD_BASE_URL;
+    let installer =
+        fs::read_to_string(repo_root().join("install-rust.sh")).expect("read install-rust.sh");
+    let default_line = format!("DOWNLOAD_BASE_URL_DEFAULT=\"{official}\"");
+    assert!(
+        installer.lines().any(|line| line == default_line),
+        "install-rust.sh's DOWNLOAD_BASE_URL_DEFAULT must equal pa-core's DEFAULT_DOWNLOAD_BASE_URL"
+    );
+    let script = publish_guard_and_render();
+    let publish = |public_base: &str| {
+        let cwd = tempfile::tempdir().expect("scratch dir");
+        fs::create_dir_all(cwd.path().join("verification-source")).expect("create checkout");
+        fs::write(
+            cwd.path().join("verification-source/install-rust.sh"),
+            &installer,
+        )
+        .expect("copy the installer");
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .current_dir(cwd.path())
+            .env("R2_BUCKET", "bucket")
+            .env("R2_ENDPOINT_URL", "https://r2.example.com")
+            .env("R2_PUBLIC_BASE_URL", public_base)
+            .output()
+            .expect("bash executes the publish guard");
+        (cwd, output)
+    };
+
+    for public_base in [official.to_string(), format!("{official}/")] {
+        let (cwd, output) = publish(&public_base);
+        assert_success(&output, "publish the R2 channel");
+        for channel in ["stable", "beta"] {
+            let rendered = fs::read_to_string(cwd.path().join(format!("install-{channel}.sh")))
+                .expect("read the rendered installer");
+            let expected = installer.replace(
+                "\nRELEASE_CHANNEL_DEFAULT=\"stable\"\n",
+                &format!("\nRELEASE_CHANNEL_DEFAULT={channel}\n"),
+            );
+            assert_eq!(
+                rendered, expected,
+                "the {channel} render must change only the channel default"
+            );
+        }
+    }
+
+    let (cwd, output) = publish("https://pub-another-bucket.r2.dev");
+    let output = assert_failure(&output, "publish the R2 channel");
+    assert!(
+        output.contains("vars.R2_PUBLIC_BASE_URL"),
+        "the refusal must name the mismatched variable: {output}"
+    );
+    assert!(
+        !cwd.path().join("install-stable.sh").exists(),
+        "a mismatched bucket must refuse before rendering anything"
+    );
+}

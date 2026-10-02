@@ -776,9 +776,18 @@ jobs:
           set -euo pipefail
           test -n "$R2_BUCKET"
           test -n "$R2_ENDPOINT_URL"
-          test -n "$R2_PUBLIC_BASE_URL"
-          INSTALL_BASE_URL="${R2_PUBLIC_BASE_URL%/}"
+          # THE OFFICIAL BASE has one definition: the repo installer's
+          # DOWNLOAD_BASE_URL_DEFAULT (pa-core's DEFAULT_DOWNLOAD_BASE_URL
+          # is pinned to it by release_workflow.rs). The installer and the
+          # updater both send that base's archives to the GitHub release,
+          # so the publish never rewrites it; a bucket whose public address
+          # (vars.R2_PUBLIC_BASE_URL) is anything else refuses to publish.
+          INSTALL_BASE_URL="$(sed -n 's|^DOWNLOAD_BASE_URL_DEFAULT="\(.*\)"$|\1|p' verification-source/install-rust.sh)"
           test -n "$INSTALL_BASE_URL"
+          if [ "${R2_PUBLIC_BASE_URL%/}" != "$INSTALL_BASE_URL" ]; then
+            echo "::error::vars.R2_PUBLIC_BASE_URL (${R2_PUBLIC_BASE_URL}) is not install-rust.sh's DOWNLOAD_BASE_URL_DEFAULT (${INSTALL_BASE_URL}); change both with pa-core's DEFAULT_DOWNLOAD_BASE_URL" >&2
+            exit 1
+          fi
 
           RELEASE_PREFIX="releases/${RELEASE_VERSION}"
           for artifact in release-out/prime-agent-*.tar.gz; do
@@ -792,18 +801,16 @@ jobs:
             --content-type text/plain \
             --cache-control 'public, max-age=31536000, immutable'
 
-          # The rendered installer pair: the repo file's defaults ARE the
-          # official domain, so the publish render only stamps the build's
-          # R2 base + channel default into the served copies. Both renders
-          # publish on every cut (TS parity: a changed installer ships with
-          # whichever channel publishes, so the served scripts never go
-          # stale between releases).
+          # The rendered installer pair: the repo file's download base IS
+          # the official one, so the publish render only stamps the channel
+          # default into the served copies. Both renders publish on every
+          # cut (TS parity: a changed installer ships with whichever channel
+          # publishes, so the served scripts never go stale between
+          # releases).
           render_installer() {
             channel="$1"
-            sed -e "s|^DOWNLOAD_BASE_URL_DEFAULT=.*|DOWNLOAD_BASE_URL_DEFAULT=\"${INSTALL_BASE_URL}\"|" \
-                -e "s|^RELEASE_CHANNEL_DEFAULT=.*|RELEASE_CHANNEL_DEFAULT=${channel}|" \
+            sed -e "s|^RELEASE_CHANNEL_DEFAULT=.*|RELEASE_CHANNEL_DEFAULT=${channel}|" \
                 "verification-source/install-rust.sh" > "/tmp/install-${channel}.sh"
-            grep -q "^DOWNLOAD_BASE_URL_DEFAULT=\"${INSTALL_BASE_URL}\"" "/tmp/install-${channel}.sh"
             grep -q "^RELEASE_CHANNEL_DEFAULT=${channel}$" "/tmp/install-${channel}.sh"
           }
 

@@ -30,7 +30,8 @@ pub const ENV_RELEASE_CHANNEL: &str = "PRIME_AGENT_RELEASE_CHANNEL";
 /// The installer's download-base knob (the bucket holding the channel
 /// manifests and release archives).
 pub const ENV_DOWNLOAD_BASE_URL: &str = "PRIME_AGENT_DOWNLOAD_BASE_URL";
-/// `install-rust.sh`'s `DOWNLOAD_BASE_URL_DEFAULT`: where the channel
+/// `install-rust.sh`'s `DOWNLOAD_BASE_URL_DEFAULT` (that line is the
+/// definition; `release_workflow.rs` pins this copy to it): where the channel
 /// manifests (`latest.json`, `beta.json`) are published.
 pub const DEFAULT_DOWNLOAD_BASE_URL: &str = "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev";
 
