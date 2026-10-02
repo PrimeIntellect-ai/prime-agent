@@ -1082,6 +1082,12 @@ impl AgentSessionEngine {
                 ),
                 execution_mode: create_resources.execution_mode.clone(),
                 now: None,
+                telemetry_enabled: Some(
+                    pa_core::session_engine::telemetry::telemetry_enabled_switch(
+                        &self.cwd(),
+                        &self.config.agent_dir,
+                    ),
+                ),
             }
         });
         // Bound before the awaited build: the purge-clone binding must not

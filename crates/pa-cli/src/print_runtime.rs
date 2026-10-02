@@ -561,6 +561,12 @@ async fn build_headless_engine_with(
             client: pa_core::session_engine::telemetry::build_client(&settings, &config.agent_dir),
             execution_mode: Some(execution_mode.to_string()),
             now: None,
+            telemetry_enabled: Some(
+                pa_core::session_engine::telemetry::telemetry_enabled_switch(
+                    &config.cwd,
+                    &config.agent_dir,
+                ),
+            ),
         }
     });
     // TS `sdk.ts` seeds the Agent's queue modes from the settings manager

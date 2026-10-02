@@ -84,6 +84,12 @@ pub struct TelemetryWiring {
     /// Injectable clock (millis since epoch); defaults to system time.
     /// Tests pass a controlled clock to assert duration math.
     pub now: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
+    /// The live opt-out switch the recording seams consult: while it
+    /// answers false, neither the run state machine nor the session
+    /// counters record (the client already drops captures), so a later
+    /// enable never sends what happened while telemetry was off. `None`
+    /// is always on (tests and one-shot paths).
+    pub telemetry_enabled: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 /// Installed session telemetry: the event subscription plus the in-memory
@@ -130,7 +136,20 @@ pub(crate) struct TelemetryState {
     totals: SessionTotals,
     active_run: Option<ActiveRun>,
     tool_starts: HashMap<String, u64>,
+    /// The live opt-out switch from the wiring: while it answers false,
+    /// [`handle_event`] and the out-of-band note seams record nothing.
+    telemetry_enabled: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     now: Arc<dyn Fn() -> u64 + Send + Sync>,
+}
+
+/// Is recording on right now? `None` (tests, one-shot paths) is always
+/// on; a set switch answers live. Called from under the state lock, so
+/// the switch itself must never lock the telemetry state.
+fn recording_on(state: &TelemetryState) -> bool {
+    state
+        .telemetry_enabled
+        .as_ref()
+        .is_none_or(|telemetry_enabled| telemetry_enabled())
 }
 
 #[derive(Default)]
@@ -268,6 +287,12 @@ struct ToolCategoryStats {
 #[derive(Default)]
 pub struct SessionCounters {
     inner: Mutex<CounterValues>,
+    /// The live opt-out switch, installed by
+    /// [`install_session_telemetry`]. While it answers false the
+    /// counters stop recording, so a later enable never sends what
+    /// happened while telemetry was off (the TUI counters' rule). `None`
+    /// (the default, used by tests and one-shot paths) is always on.
+    telemetry_enabled: std::sync::OnceLock<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 #[derive(Default)]
@@ -289,13 +314,30 @@ struct CounterValues {
 }
 
 impl SessionCounters {
-    fn with<R>(&self, update: impl FnOnce(&mut CounterValues) -> R) -> R {
+    /// Install the live opt-out switch. Called once by
+    /// [`install_session_telemetry`] before the agent subscription
+    /// registers, so no event can count before the switch is in place.
+    /// A second call is ignored (the first switch wins).
+    pub fn set_telemetry_enabled(&self, telemetry_enabled: Arc<dyn Fn() -> bool + Send + Sync>) {
+        let _ = self.telemetry_enabled.set(telemetry_enabled);
+    }
+
+    /// Count only while telemetry is on, so turning it on later never
+    /// sends what happened while it was off.
+    fn with(&self, update: impl FnOnce(&mut CounterValues)) {
+        if self
+            .telemetry_enabled
+            .get()
+            .is_some_and(|telemetry_enabled| !telemetry_enabled())
+        {
+            return;
+        }
         update(
             &mut self
                 .inner
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
+        );
     }
 
     /// An MCP connector call (the server name never uploads).
@@ -388,8 +430,14 @@ pub async fn install_session_telemetry(
         totals: SessionTotals::default(),
         active_run: None,
         tool_starts: HashMap::new(),
+        telemetry_enabled: wiring.telemetry_enabled.clone(),
         now,
     }));
+    // The counters stop recording on the same live switch, before the
+    // subscription registers: nothing counts while telemetry is off.
+    if let Some(telemetry_enabled) = wiring.telemetry_enabled.clone() {
+        counters.set_telemetry_enabled(telemetry_enabled);
+    }
 
     let subscriber_state = Arc::clone(&state);
     let subscriber_client = client.clone();
@@ -442,6 +490,9 @@ impl SessionTelemetry {
     /// Panics if the telemetry state mutex is poisoned.
     pub fn note_compaction(&self, duration_ms: Option<u64>) {
         let mut state = self.state.lock().expect("telemetry state poisoned");
+        if !recording_on(&state) {
+            return;
+        }
         if let Some(run) = state.active_run.as_mut() {
             run.compaction_count += 1;
             run.compaction_duration_ms += duration_ms.unwrap_or(0);
@@ -462,6 +513,9 @@ impl SessionTelemetry {
     /// Panics if the telemetry state mutex is poisoned.
     pub fn note_auto_retry_event(&self, event: &AutoRetryEvent) {
         let mut state = self.state.lock().expect("telemetry state poisoned");
+        if !recording_on(&state) {
+            return;
+        }
         let Some(run) = state.active_run.as_mut() else {
             return;
         };
@@ -623,6 +677,14 @@ fn handle_event(
     event: AgentEvent,
 ) {
     let mut state = state.lock().expect("telemetry state poisoned");
+    // While telemetry is off, record nothing: the facts of the off
+    // period never enter the aggregates, so a later enable cannot send
+    // them. The switch answers from a short-lived cache (see
+    // [`telemetry_enabled_switch`]), so the per-event check stays off
+    // the streaming hot path.
+    if !recording_on(&state) {
+        return;
+    }
     let now = (state.now)();
     match event {
         AgentEvent::AgentStart => {
@@ -1035,6 +1097,35 @@ fn stop_reason(last_assistant: Option<&AssistantMessage>) -> &'static str {
 /// [`telemetry_switch`] re-read before every delivery pass. Never fails: a
 /// broken install id falls back to a no-op client (TS parity: capture
 /// disables itself when the installation identity cannot be created).
+/// The recording seams' live opt-out switch: the same env-then-settings
+/// resolution the delivery pass applies ([`telemetry_switch`]), so the
+/// run state machine and the session counters stop recording exactly
+/// when the client stops sending. The answer is cached briefly (the
+/// state machine consults it per event, and streaming deltas are many)
+/// and re-resolves on its own.
+#[must_use]
+pub fn telemetry_enabled_switch(
+    cwd: &std::path::Path,
+    agent_dir: &std::path::Path,
+) -> Arc<dyn Fn() -> bool + Send + Sync> {
+    const SWITCH_CACHE_MS: std::time::Duration = std::time::Duration::from_millis(250);
+    let settings = crate::settings::SettingsManager::create(cwd, agent_dir);
+    let cache = Mutex::new(None::<(std::time::Instant, bool)>);
+    Arc::new(move || {
+        let mut cached = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fresh = cached
+            .as_ref()
+            .is_some_and(|(resolved_at, _)| resolved_at.elapsed() < SWITCH_CACHE_MS);
+        if !fresh {
+            let enabled = telemetry_switch(&settings.reopen()).enabled();
+            *cached = Some((std::time::Instant::now(), enabled));
+        }
+        cached.as_ref().is_some_and(|(_, enabled)| *enabled)
+    })
+}
+
 pub fn build_client(
     settings: &crate::settings::SettingsManager,
     agent_dir: &std::path::Path,

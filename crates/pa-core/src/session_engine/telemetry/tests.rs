@@ -61,6 +61,7 @@ fn fixture_with_clock(clock: TestClock) -> Fixture {
         totals: SessionTotals::default(),
         active_run: None,
         tool_starts: HashMap::new(),
+        telemetry_enabled: None,
         now,
     }));
     Fixture {
@@ -1125,4 +1126,155 @@ async fn legacy_events_reach_the_analytics_endpoint_in_the_ts_shape() {
         serde_json::to_string_pretty(&bodies).unwrap(),
     )
     .unwrap();
+}
+
+/// A fixture whose recording seams consult a live switch the test flips:
+/// the same shape [`install_session_telemetry`] installs from the wiring.
+fn fixture_with_switch(telemetry_enabled: Arc<dyn Fn() -> bool + Send + Sync>) -> Fixture {
+    let mock = std::sync::Arc::new(MockSink::new());
+    let client = client_for(&mock);
+    let clock = TestClock::default();
+    let now: Arc<dyn Fn() -> u64 + Send + Sync> = {
+        let millis = clock.millis.clone();
+        Arc::new(move || millis.load(std::sync::atomic::Ordering::Relaxed))
+    };
+    let state = Arc::new(Mutex::new(TelemetryState {
+        session_id: "0197d0a0-8f5c-7f2a-b0e3-2d7e0d2b3b1a".to_string(),
+        started_at: 1_000,
+        totals: SessionTotals::default(),
+        active_run: None,
+        tool_starts: HashMap::new(),
+        telemetry_enabled: Some(telemetry_enabled),
+        now,
+    }));
+    Fixture {
+        client,
+        state,
+        clock,
+        mock,
+    }
+}
+
+/// The TUI counters' rule, ported to the session surface: while telemetry
+/// is off nothing counts, so turning it on later never sends what
+/// happened while it was off.
+#[tokio::test]
+async fn off_period_session_counters_never_count() {
+    let on = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let switch: Arc<dyn Fn() -> bool + Send + Sync> = {
+        let on = Arc::clone(&on);
+        Arc::new(move || on.load(std::sync::atomic::Ordering::Relaxed))
+    };
+    let fixture = fixture_with_switch(Arc::clone(&switch));
+    let counters = Arc::new(SessionCounters::default());
+    counters.set_telemetry_enabled(Arc::clone(&switch));
+    let mut telemetry = SessionTelemetry::detached(
+        fixture.client.clone(),
+        fixture.state.clone(),
+        "interactive".to_string(),
+    );
+    telemetry.counters = Arc::clone(&counters);
+
+    // Off: a skill use, a connector use, a feature outcome, and a child
+    // usage row all record nothing.
+    telemetry.note_skill_used();
+    counters.note_mcp_connector_use();
+    telemetry.note_feature_outcome("goal", "completed", Some("create"));
+    telemetry.note_child_usage_attributed(50_208, 2_929, 0, 0, 0.008_995_7);
+
+    // On: the same seams record again.
+    on.store(true, std::sync::atomic::Ordering::Relaxed);
+    telemetry.note_skill_used();
+    telemetry.note_skill_used();
+
+    telemetry.end().await.unwrap();
+    let ended = &event_properties(&fixture.mock, "agent session ended").await[0];
+    assert_eq!(ended["skill_use_count"], serde_json::json!(2));
+    assert_eq!(
+        ended["mcp_connector_use_count"],
+        serde_json::json!(0),
+        "the off-period connector use never counted"
+    );
+    assert_eq!(
+        ended["rlm_child_usage_count"],
+        serde_json::json!(0),
+        "the off-period child usage never counted"
+    );
+    assert_eq!(
+        ended["rlm_child_input_tokens"],
+        serde_json::json!(0),
+        "the off-period child tokens never counted"
+    );
+    let feature_keys: Vec<_> = ended
+        .keys()
+        .filter(|key| key.starts_with("feature_"))
+        .collect();
+    assert!(
+        feature_keys.is_empty(),
+        "the off-period feature outcome never counted"
+    );
+}
+
+/// The run state machine stops recording while telemetry is off: a run
+/// that happened in the off period never reports, and a later enable
+/// sends only what the on period recorded.
+#[tokio::test]
+async fn off_period_run_facts_never_send() {
+    let on = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let switch: Arc<dyn Fn() -> bool + Send + Sync> = {
+        let on = Arc::clone(&on);
+        Arc::new(move || on.load(std::sync::atomic::Ordering::Relaxed))
+    };
+    let fixture = fixture_with_switch(switch);
+    let assistant = assistant_message();
+
+    // A whole run while off: start, a turn, a tool call, and its end.
+    fixture.clock.set(1_000);
+    emit(&fixture, AgentEvent::AgentStart);
+    emit(&fixture, AgentEvent::TurnStart);
+    let (tool_start, tool_end) = tool_execution_event("bash", false);
+    emit(&fixture, tool_start);
+    emit(&fixture, tool_end);
+    fixture.clock.set(1_100);
+    emit(&fixture, message_end_event(assistant.clone()));
+    emit(
+        &fixture,
+        AgentEvent::AgentEnd {
+            messages: Vec::new(),
+        },
+    );
+
+    // On again: the next run records normally.
+    on.store(true, std::sync::atomic::Ordering::Relaxed);
+    fixture.clock.set(2_000);
+    emit(&fixture, AgentEvent::AgentStart);
+    fixture.clock.set(2_050);
+    emit(&fixture, AgentEvent::TurnStart);
+    fixture.clock.set(2_100);
+    emit(&fixture, message_end_event(assistant.clone()));
+    fixture.clock.set(2_150);
+    emit(
+        &fixture,
+        AgentEvent::AgentEnd {
+            messages: Vec::new(),
+        },
+    );
+
+    fixture.clock.set(2_200);
+    let telemetry = SessionTelemetry::detached(
+        fixture.client.clone(),
+        fixture.state.clone(),
+        "interactive".to_string(),
+    );
+    telemetry.end().await.unwrap();
+
+    // One run completed: the on-period run. The off-period run never
+    // existed, and its tool call never entered the session totals.
+    let runs = event_properties(&fixture.mock, "agent run completed").await;
+    assert_eq!(runs.len(), 1, "only the on-period run reports");
+    assert_eq!(runs[0]["turn_count"], serde_json::json!(1));
+    assert_eq!(runs[0]["input_tokens"], serde_json::json!(100));
+    let ended = &event_properties(&fixture.mock, "agent session ended").await[0];
+    assert_eq!(ended["run_count"], serde_json::json!(1));
+    assert_eq!(ended["tool_call_count"], serde_json::json!(0));
 }

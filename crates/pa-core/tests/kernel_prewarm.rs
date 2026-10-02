@@ -183,6 +183,7 @@ async fn prewarmed_kernel_lands_compaction_notice_without_tool_use() {
             client: client.clone(),
             execution_mode: Some("test".to_string()),
             now: None,
+            telemetry_enabled: None,
         }),
         prewarm_ipython_kernel: Some(true),
         ..Default::default()
@@ -276,6 +277,7 @@ async fn subagent_sessions_stay_lazy_despite_the_prewarm_flag() {
             client: client.clone(),
             execution_mode: Some("test".to_string()),
             now: None,
+            telemetry_enabled: None,
         }),
         rlm_depth: Some(1),
         prewarm_ipython_kernel: Some(true),

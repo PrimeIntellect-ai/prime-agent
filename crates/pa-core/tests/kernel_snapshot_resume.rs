@@ -243,6 +243,7 @@ impl Fixture {
                 client: self.client.clone(),
                 execution_mode: Some("test".to_string()),
                 now: None,
+                telemetry_enabled: None,
             }),
             ..Default::default()
         }
