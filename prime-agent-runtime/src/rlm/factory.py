@@ -1766,35 +1766,56 @@ class FactoryExecutor:
             src_id, _, src_output = source.partition(".")
             source_state = run.states.get(src_id)
             latest = source_state.latest_settle() if source_state is not None else None
-            if latest is None:
+            value: Any = None
+            failure: str | None = None
+            if latest is not None:
+                # One settled source classifies into a captured value or a
+                # binding failure. An errored settle, a port whose JSON
+                # capture failed, and a declared port the settle captured
+                # no value for are all no-value conditions of a source
+                # that HAS settled -- the dependent sees none of them as a
+                # value.
+                if latest.status == "error":
+                    failure = f"input {name!r} from state {src_id!r} is unavailable (latest settle status 'error')"
+                else:
+                    outputs = latest.outputs or {}
+                    output_errors = latest.output_errors or {}
+                    if src_output in output_errors:
+                        failure = f"input {name!r}: {output_errors[src_output]}"
+                    elif src_output not in outputs:
+                        failure = f"input {name!r} from state {src_id!r} has no captured output {src_output!r}"
+                    else:
+                        value = outputs[src_output]
+            if latest is None or failure is not None:
                 if inp.get("optional"):
-                    # Optional inputs bind a null sentinel when their source
-                    # never settled, so loop states can re-enter before their
-                    # upstream partner has run (a compiled dag never sets
-                    # optional: its input edges are transitions, so the
-                    # wait-for-the-source semantics stay V1-exact). The
-                    # foreach.over input is the one optional that cannot
-                    # bind a sentinel: expansion would hit "did not resolve
-                    # its over input" -- a hard failure where the required
-                    # form only waits -- so an unsettled optional over
-                    # expands to zero items (the same done-with-no-instances
-                    # path as a settled empty list) and a later re-entry
-                    # binds the real list.
+                    # Optional inputs bind a null sentinel whenever their
+                    # source offers no value -- never settled, errored
+                    # settle, or a settled source that captured nothing
+                    # for the port -- so loop states can re-enter before
+                    # their upstream partner has run and after it failed
+                    # or produced nothing usable (a compiled dag never
+                    # sets optional: its input edges are transitions, so
+                    # the wait-for-the-source semantics stay V1-exact).
+                    # Only a REQUIRED input over a settled-but-valueless
+                    # source fails the dependent: the guard-less
+                    # transition still fires from the error settle, and
+                    # the authoring reference pins the required form as
+                    # the failing one. The foreach.over input is the one
+                    # optional that cannot bind a sentinel: expansion
+                    # would hit "did not resolve its over input" -- a
+                    # hard failure where the required form only waits --
+                    # so a value-less optional over expands to zero items
+                    # (the same done-with-no-instances path as a settled
+                    # empty list) and a later re-entry binds the real
+                    # list.
                     if foreach is not None and foreach.get("over") == name:
                         items = []
                         continue
                     values[name] = "null" if port_type == "json" else "None"
                     continue
-                return None, None  # wait for the source's first settle
-            if latest.status == "error":
-                return None, f"input {name!r} from state {src_id!r} is unavailable (latest settle status 'error')"
-            outputs = latest.outputs or {}
-            output_errors = latest.output_errors or {}
-            if src_output in output_errors:
-                return None, f"input {name!r}: {output_errors[src_output]}"
-            if src_output not in outputs:
-                return None, f"input {name!r} from state {src_id!r} has no captured output {src_output!r}"
-            value = outputs[src_output]
+                if latest is None:
+                    return None, None  # wait for the source's first settle
+                return None, failure
             if port_type == "text":
                 values[name] = value if isinstance(value, str) else json.dumps(value)
                 continue
@@ -2647,8 +2668,13 @@ bind.
   rejected, and nothing can read from a resident. Bound values render into
   `{input_name}` placeholders (one pass; inputs without a placeholder are
   appended in a trailing `## Inputs` section). A required input whose source
-  has not settled yet keeps the entry pending; `"optional": true` binds a
-  null sentinel instead. A required self-input is rejected at validation —
+  has not settled yet keeps the entry pending; over a settled source that
+  offers no value (an errored settle, a port the settle captured no value
+  for, or a JSON capture failure) it fails the dependent entry, while
+  `"optional": true` binds a null sentinel in every no-value case (a
+  source that offers no value is not a value, so the dependent that
+  declared the input optional proceeds). A required self-input is
+  rejected at validation —
   `state X input 'name' cannot require itself: mark the self-input optional
   - a required one can never bind on the state's first entry` — while an
   optional self-input is the designed self-loop form (first entry binds
@@ -2666,7 +2692,9 @@ bind.
   `contains` a non-empty list, `exists` no value, and a missing or
   unparseable port fails every op except `exists`. A failed settle still
   fires guard-less transitions, so dependents under `continue` run; their
-  required input over the failed source then fails the dependent entry.
+  required input over the failed source then fails the dependent entry,
+  while an optional input over the failed source binds the null sentinel
+  and the dependent proceeds.
 - **Cycles are legal**: there is no acyclicity requirement — self-loops and
   back edges validate. The one rule is an entry state somewhere; a dag
   whose every node depends on another compiles to no entry states and is

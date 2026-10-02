@@ -4294,6 +4294,284 @@ class FactoryExecutorTest(unittest.TestCase):
         self.assertEqual(status["usage"]["transitions_fired"], 3)
 
     @async_test
+    async def test_machine_optional_input_over_an_errored_source_binds_the_null_sentinel(self) -> None:
+        # Review finding (PR #3199): an optional input bound the null
+        # sentinel only while its source had NO settle. Once the source
+        # settled with an error, _prepare_entry still failed the dependent
+        # entry ("... unavailable (latest settle status 'error')"), so one
+        # failed fixer iteration killed the review/fix loop that the
+        # optional input exists to enable. An errored settle is not a
+        # value: the optional input binds the sentinel exactly like the
+        # never-settled case and the dependent re-enters.
+        self.host.child_outcomes["child-1"] = {"status": "done", "answer": "GO"}
+        self.host.child_outcomes["child-2"] = {
+            "status": "done",
+            "answer": '```json\n{"verdict": {"approved": false, "findings": ["AUDIT-A1"]}}\n```',
+        }
+        self.host.child_outcomes["child-3"] = {"status": "error", "error": "fixer exploded"}
+        self.host.child_outcomes["child-4"] = {
+            "status": "done",
+            "answer": '```json\n{"verdict": {"approved": true, "findings": []}}\n```',
+        }
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 4},
+                "states": [
+                    {"id": "seed", "entry": True, "subagent": "worker", "outputs": [{"name": "go", "type": "text"}]},
+                    {
+                        "id": "rev",
+                        "subagent": "worker",
+                        "inputs": [
+                            {"name": "go", "type": "text", "from": "seed.go"},
+                            {"name": "fix", "type": "json", "from": "fixer.fix", "optional": True},
+                        ],
+                        "outputs": [{"name": "verdict", "type": "json"}],
+                        "max_entries": 4,
+                    },
+                    {
+                        "id": "fixer",
+                        "subagent": "worker",
+                        "inputs": [{"name": "verdict", "type": "json", "from": "rev.verdict"}],
+                        "outputs": [{"name": "fix", "type": "json"}],
+                        "max_entries": 2,
+                    },
+                ],
+                "transitions": [
+                    {"from": "seed", "to": "rev"},
+                    {"from": "rev", "to": "fixer", "when": {"output": "verdict", "path": "approved", "op": "eq", "value": False}},
+                    {"from": "fixer", "to": "rev"},
+                ],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        # The fixer failed, so the continue-policy run still reports
+        # failed -- but the reviewer RE-ENTERED and completed instead of
+        # dying at input binding over the errored source.
+        self.assertEqual(status["state"], "failed")
+        rev = self.state_report(status, "rev")
+        self.assertEqual(rev["entries_used"], 2)
+        self.assertEqual([entry["status"] for entry in rev["entries"]], ["done", "done"])
+        self.assertNotIn("error", rev)
+        fixer = self.state_report(status, "fixer")
+        self.assertEqual(fixer["entries_used"], 1)
+        self.assertEqual(fixer["error"], "fixer exploded")
+        # Round 1 bound the sentinel (the fixer had not settled); round 2
+        # bound the sentinel AGAIN over the errored settle.
+        rev_prompts = [call["prompt"] for call in self.host.spawn_calls("rev")]
+        self.assertEqual(len(rev_prompts), 2)
+        self.assertIn("- fix: null", rev_prompts[0])
+        self.assertIn("- fix: null", rev_prompts[1])
+        self.assertEqual(len(self.host.spawn_calls("fixer")), 1)
+
+    @async_test
+    async def test_machine_optional_foreach_over_an_errored_source_expands_empty(self) -> None:
+        # The errored-settle sentinel carries to the optional foreach.over
+        # input: an errored source expands to zero items, the same
+        # done-with-no-instances path as the never-settled optional over --
+        # the entry proceeds instead of failing at binding.
+        self.host.outcomes["src"] = {"status": "error", "error": "src exploded"}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 4},
+                "states": [
+                    {"id": "seed", "entry": True, "subagent": "worker"},
+                    {
+                        "id": "fan",
+                        "subagent": {"prompt": "Process item {items}."},
+                        "inputs": [{"name": "items", "type": "json", "from": "src.items", "optional": True}],
+                        "foreach": {"over": "items", "max": 4},
+                        "max_entries": 2,
+                    },
+                    {
+                        "id": "src",
+                        "subagent": "worker",
+                        "outputs": [{"name": "items", "type": "json"}],
+                        "max_entries": 1,
+                    },
+                ],
+                "transitions": [
+                    {"from": "seed", "to": "fan"},
+                    {"from": "fan", "to": "src"},
+                    {"from": "src", "to": "fan"},
+                ],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "failed")
+        # Round 1: src never settled -> empty expansion. Round 2: src
+        # settled with an ERROR -> empty expansion again, never a spawn
+        # and never a binding failure on the fan entries.
+        fan = self.state_report(status, "fan")
+        self.assertEqual(fan["entries_used"], 2)
+        self.assertEqual([entry["status"] for entry in fan["entries"]], ["done", "done"])
+        self.assertNotIn("error", fan)
+        self.assertEqual(self.host.spawn_calls("fan"), [])
+        self.assertEqual(
+            [e for e in self.all_events_of(result, "node_error") if e.get("node") == "fan"],
+            [],
+        )
+        self.assertEqual(
+            [e["detail"] for e in self.all_events_of(result, "node_ready") if e.get("node") == "fan"],
+            ["foreach expanded to zero items; nothing to run"] * 2,
+        )
+
+    @async_test
+    async def test_machine_required_input_over_an_errored_source_fails_the_dependent_entry(self) -> None:
+        # The boundary the authoring reference pins: "their required input
+        # over the failed source then fails the dependent entry". Only the
+        # optional form binds the sentinel; a required input over an
+        # errored source is a hard binding failure (binding failures never
+        # retry), so the dependent fails without ever spawning.
+        self.host.outcomes["src"] = {"status": "error", "error": "src exploded"}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 4},
+                "states": [
+                    {"id": "seed", "entry": True, "subagent": "worker"},
+                    {
+                        "id": "src",
+                        "subagent": "worker",
+                        "outputs": [{"name": "items", "type": "json"}],
+                        "max_entries": 1,
+                    },
+                    {
+                        "id": "dep",
+                        "subagent": "worker",
+                        "inputs": [{"name": "items", "type": "json", "from": "src.items"}],
+                        "max_entries": 1,
+                    },
+                ],
+                "transitions": [
+                    {"from": "seed", "to": "src"},
+                    {"from": "src", "to": "dep"},
+                ],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "failed")
+        dep = self.state_report(status, "dep")
+        self.assertEqual(dep["entries_used"], 1)
+        self.assertEqual([entry["status"] for entry in dep["entries"]], ["error"])
+        self.assertIn(
+            "input 'items' from state 'src' is unavailable (latest settle status 'error')",
+            dep["entries"][0]["error"],
+        )
+        self.assertEqual(self.host.spawn_calls("dep"), [])
+
+    @async_test
+    async def test_machine_optional_input_over_a_settled_source_with_no_captured_value_binds_the_null_sentinel(self) -> None:
+        # Review finding (PR #3199), second no-value condition: the source
+        # settled done but captured no value for the declared port (an
+        # empty answer). The optional dependent proceeds on the null
+        # sentinel; only the required dependent over the same valueless
+        # settle fails its entry.
+        self.host.outcomes["src"] = {"status": "done", "answer": ""}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 4},
+                "states": [
+                    {"id": "seed", "entry": True, "subagent": "worker"},
+                    {
+                        "id": "src",
+                        "subagent": "worker",
+                        "outputs": [{"name": "go", "type": "text"}],
+                        "max_entries": 1,
+                    },
+                    {
+                        "id": "opt",
+                        "subagent": {"prompt": "Proceed."},
+                        "inputs": [{"name": "go", "type": "text", "from": "src.go", "optional": True}],
+                        "max_entries": 1,
+                    },
+                    {
+                        "id": "req",
+                        "subagent": {"prompt": "Proceed."},
+                        "inputs": [{"name": "go", "type": "text", "from": "src.go"}],
+                        "max_entries": 1,
+                    },
+                ],
+                "transitions": [
+                    {"from": "seed", "to": "src"},
+                    {"from": "src", "to": "opt"},
+                    {"from": "src", "to": "req"},
+                ],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "failed")
+        opt = self.state_report(status, "opt")
+        self.assertEqual(opt["entries_used"], 1)
+        self.assertEqual([entry["status"] for entry in opt["entries"]], ["done"])
+        self.assertIn("- go: None", self.host.spawn_calls("opt")[0]["prompt"])
+        req = self.state_report(status, "req")
+        self.assertEqual(req["entries_used"], 1)
+        self.assertEqual([entry["status"] for entry in req["entries"]], ["error"])
+        self.assertIn(
+            "input 'go' from state 'src' has no captured output 'go'",
+            req["entries"][0]["error"],
+        )
+        self.assertEqual(self.host.spawn_calls("req"), [])
+
+    @async_test
+    async def test_machine_optional_input_over_a_failed_json_capture_binds_the_null_sentinel(self) -> None:
+        # Review finding (PR #3199), third no-value condition: the source
+        # settled done, declared a json port, but its answer never parsed
+        # for that port (a JSON capture failure recorded on the settle).
+        # The optional dependent proceeds on the null sentinel; only the
+        # required dependent over the same failed capture fails its entry.
+        self.host.outcomes["src"] = {"status": "done", "answer": "no json here"}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 4},
+                "states": [
+                    {"id": "seed", "entry": True, "subagent": "worker"},
+                    {
+                        "id": "src",
+                        "subagent": "worker",
+                        "outputs": [{"name": "data", "type": "json"}],
+                        "max_entries": 1,
+                    },
+                    {
+                        "id": "opt",
+                        "subagent": {"prompt": "Proceed."},
+                        "inputs": [{"name": "data", "type": "json", "from": "src.data", "optional": True}],
+                        "max_entries": 1,
+                    },
+                    {
+                        "id": "req",
+                        "subagent": {"prompt": "Proceed."},
+                        "inputs": [{"name": "data", "type": "json", "from": "src.data"}],
+                        "max_entries": 1,
+                    },
+                ],
+                "transitions": [
+                    {"from": "seed", "to": "src"},
+                    {"from": "src", "to": "opt"},
+                    {"from": "src", "to": "req"},
+                ],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "failed")
+        opt = self.state_report(status, "opt")
+        self.assertEqual(opt["entries_used"], 1)
+        self.assertEqual([entry["status"] for entry in opt["entries"]], ["done"])
+        self.assertIn("- data: null", self.host.spawn_calls("opt")[0]["prompt"])
+        req = self.state_report(status, "req")
+        self.assertEqual(req["entries_used"], 1)
+        self.assertEqual([entry["status"] for entry in req["entries"]], ["error"])
+        self.assertIn(
+            "input 'data': no JSON object containing output 'data' in the upstream answer",
+            req["entries"][0]["error"],
+        )
+        self.assertEqual(self.host.spawn_calls("req"), [])
+
+    @async_test
     async def test_resident_node_spawns_stays_alive_and_stops(self) -> None:
         self.host.outcomes["watcher"] = {"status": "running"}
         self.store_factory(
