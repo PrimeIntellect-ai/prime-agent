@@ -12,6 +12,38 @@ use pa_telemetry::{MockSink, TelemetryClient, TelemetryClientConfig};
 
 use super::*;
 
+/// Tests that resolve the env-gated switch need the three override vars
+/// cleared (the Cargo test config sets `DO_NOT_TRACK`); restore after.
+struct CleanTelemetryEnv {
+    saved: Vec<(&'static str, Option<String>)>,
+}
+
+impl Default for CleanTelemetryEnv {
+    fn default() -> Self {
+        const VARS: [&str; 3] = ["DO_NOT_TRACK", "PI_OFFLINE", "PRIME_AGENT_TELEMETRY"];
+        let saved = VARS
+            .iter()
+            .map(|var| {
+                let value = std::env::var(var).ok();
+                std::env::remove_var(var);
+                (*var, value)
+            })
+            .collect();
+        Self { saved }
+    }
+}
+
+impl Drop for CleanTelemetryEnv {
+    fn drop(&mut self) {
+        for (var, value) in self.saved.drain(..) {
+            match value {
+                Some(value) => std::env::set_var(var, value),
+                None => std::env::remove_var(var),
+            }
+        }
+    }
+}
+
 /// Controllable clock: tests move it between emits.
 #[derive(Clone, Default)]
 struct TestClock {
@@ -1277,4 +1309,107 @@ async fn off_period_run_facts_never_send() {
     let ended = &event_properties(&fixture.mock, "agent session ended").await[0];
     assert_eq!(ended["run_count"], serde_json::json!(1));
     assert_eq!(ended["tool_call_count"], serde_json::json!(0));
+}
+
+/// The recording switch resolves live: a mid-session opt-out (or
+/// re-enable) applies on the very next ask, with no cached answer
+/// spanning the flip. Regression for the cached-switch finding: a TTL
+/// kept recording through a quick off/on flap.
+#[test]
+fn recording_switch_flips_immediately_with_the_settings() {
+    let _env = CleanTelemetryEnv::default();
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let mut settings = crate::settings::SettingsManager::create(dir.path(), &agent_dir);
+    settings.set_telemetry_enabled(true).unwrap();
+    let switch = telemetry_enabled_switch(dir.path(), &agent_dir);
+    assert!(switch(), "on in settings records");
+
+    // The off lands without a cache window: nothing the seams ask
+    // after the flip may still see the pre-flip answer.
+    settings.set_telemetry_enabled(false).unwrap();
+    assert!(!switch(), "the off applies immediately");
+
+    // The re-enable lands the same way.
+    settings.set_telemetry_enabled(true).unwrap();
+    assert!(switch(), "the on applies immediately too");
+}
+
+/// A run active when telemetry goes off is severed, not merged: its
+/// `AgentEnd` and the next run's `AgentStart` happen in the off period,
+/// and the next on-period run starts clean with only its own facts.
+#[tokio::test]
+async fn a_run_active_when_telemetry_turns_off_is_severed_not_merged() {
+    let on = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let switch: Arc<dyn Fn() -> bool + Send + Sync> = {
+        let on = Arc::clone(&on);
+        Arc::new(move || on.load(std::sync::atomic::Ordering::Relaxed))
+    };
+    let fixture = fixture_with_switch(switch);
+    let assistant = assistant_message();
+
+    // Run 1 starts while on: one turn, one tool call in flight.
+    fixture.clock.set(1_000);
+    emit(&fixture, AgentEvent::AgentStart);
+    fixture.clock.set(1_050);
+    emit(&fixture, AgentEvent::TurnStart);
+    let (tool_start, _tool_end) = tool_execution_event("bash", false);
+    emit(&fixture, tool_start);
+    fixture.clock.set(1_100);
+    emit(&fixture, message_end_event(assistant.clone()));
+
+    // Telemetry goes off: run 1's tool end, its end, and the next
+    // run's start all happen in the off period.
+    on.store(false, std::sync::atomic::Ordering::Relaxed);
+    fixture.clock.set(1_200);
+    let (_tool_start2, tool_end) = tool_execution_event("bash", false);
+    emit(&fixture, tool_end);
+    emit(
+        &fixture,
+        AgentEvent::AgentEnd {
+            messages: Vec::new(),
+        },
+    );
+    fixture.clock.set(1_300);
+    emit(&fixture, AgentEvent::AgentStart);
+
+    // Back on: the next run reports only its own window.
+    on.store(true, std::sync::atomic::Ordering::Relaxed);
+    fixture.clock.set(2_000);
+    emit(&fixture, AgentEvent::AgentStart);
+    fixture.clock.set(2_050);
+    emit(&fixture, AgentEvent::TurnStart);
+    fixture.clock.set(2_100);
+    emit(&fixture, message_end_event(assistant.clone()));
+    fixture.clock.set(2_150);
+    emit(
+        &fixture,
+        AgentEvent::AgentEnd {
+            messages: Vec::new(),
+        },
+    );
+
+    fixture.clock.set(2_200);
+    let telemetry = SessionTelemetry::detached(
+        fixture.client.clone(),
+        fixture.state.clone(),
+        "interactive".to_string(),
+    );
+    telemetry.end().await.unwrap();
+
+    let runs = event_properties(&fixture.mock, "agent run completed").await;
+    assert_eq!(runs.len(), 1, "only the on-period run reports");
+    assert_eq!(runs[0]["turn_count"], serde_json::json!(1));
+    assert_eq!(
+        runs[0]["duration_ms"],
+        serde_json::json!(150),
+        "the severed run never merges: the duration stays in run 2's window"
+    );
+    let ended = &event_properties(&fixture.mock, "agent session ended").await[0];
+    assert_eq!(ended["run_count"], serde_json::json!(1));
+    assert_eq!(
+        ended["tool_call_count"],
+        serde_json::json!(0),
+        "the off-period tool end never counts"
+    );
 }

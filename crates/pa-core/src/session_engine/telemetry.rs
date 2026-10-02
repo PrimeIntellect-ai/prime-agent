@@ -513,12 +513,19 @@ impl SessionTelemetry {
     /// Panics if the telemetry state mutex is poisoned.
     pub fn note_auto_retry_event(&self, event: &AutoRetryEvent) {
         let mut state = self.state.lock().expect("telemetry state poisoned");
-        if !recording_on(&state) {
-            return;
-        }
+        let recording = recording_on(&state);
         let Some(run) = state.active_run.as_mut() else {
             return;
         };
+        if !recording {
+            // While off nothing counts, and the retry linkage severs:
+            // a pending retry never continues an on-period run across
+            // an off period (only the `End` bookkeeping applies).
+            if matches!(event, AutoRetryEvent::End { .. }) {
+                run.retry_pending = false;
+            }
+            return;
+        }
         match event {
             AutoRetryEvent::Start {
                 delay_ms, reason, ..
@@ -677,17 +684,19 @@ fn handle_event(
     event: AgentEvent,
 ) {
     let mut state = state.lock().expect("telemetry state poisoned");
-    // While telemetry is off, record nothing: the facts of the off
-    // period never enter the aggregates, so a later enable cannot send
-    // them. The switch answers from a short-lived cache (see
-    // [`telemetry_enabled_switch`]), so the per-event check stays off
-    // the streaming hot path.
-    if !recording_on(&state) {
-        return;
-    }
     let now = (state.now)();
     match event {
         AgentEvent::AgentStart => {
+            if !recording_on(&state) {
+                // While off no run lives: drop the pending one without
+                // emitting (nothing it recorded past the off point
+                // counts) and keep the in-flight tables clean, so a
+                // later enable never merges the next run into an
+                // off-period one.
+                state.active_run = None;
+                state.tool_starts.clear();
+                return;
+            }
             // A retried attempt continues its turn's run (TS keeps one run
             // across `auto_retry_start`: `activeRun ??= ...`).
             if let Some(run) = state.active_run.as_mut().filter(|run| run.retry_pending) {
@@ -746,6 +755,9 @@ fn handle_event(
             });
         }
         AgentEvent::MessageStart { message } => {
+            if !recording_on(&state) {
+                return;
+            }
             if message.role() == "user" {
                 state.totals.prompt_count += 1;
                 // A prompt-run's user message lands right after
@@ -754,6 +766,9 @@ fn handle_event(
             }
         }
         AgentEvent::TurnStart => {
+            if !recording_on(&state) {
+                return;
+            }
             if let Some(run) = state.active_run.as_mut() {
                 if run.first_turn_started_at.is_none() {
                     run.first_turn_started_at = Some(now);
@@ -766,6 +781,9 @@ fn handle_event(
             assistant_message_event,
             ..
         } => {
+            if state.active_run.is_some() && !recording_on(&state) {
+                return;
+            }
             if state.active_run.is_some() {
                 // A continuation-run's first event is a model event (no
                 // user message ever lands inside it): the retry/goal
@@ -821,6 +839,9 @@ fn handle_event(
             }
         }
         AgentEvent::MessageEnd { message } => {
+            if !recording_on(&state) {
+                return;
+            }
             if let pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::Assistant(
                 assistant,
             )) = message
@@ -862,6 +883,9 @@ fn handle_event(
             }
         }
         AgentEvent::ToolExecutionStart { tool_call_id, .. } => {
+            if !recording_on(&state) {
+                return;
+            }
             state.tool_starts.insert(tool_call_id, now);
         }
         AgentEvent::ToolExecutionEnd {
@@ -871,6 +895,12 @@ fn handle_event(
             ..
         } => {
             let started_at = state.tool_starts.remove(&tool_call_id);
+            if !recording_on(&state) {
+                // The in-flight entry pops either way (a start recorded
+                // while on never leaks into a later on-period end), but
+                // nothing counts.
+                return;
+            }
             let duration_ms = started_at.map_or(0, |start| now.saturating_sub(start));
             let category = ToolCategory::from_tool_name(&tool_name);
             if let Some(run) = state.active_run.as_mut() {
@@ -887,6 +917,15 @@ fn handle_event(
             }
         }
         AgentEvent::AgentEnd { .. } => {
+            if !recording_on(&state) {
+                // The off period severs the run: discard it silently.
+                // Its completed event never fires, so a later enable
+                // cannot send its facts, and the next on-period run
+                // starts clean instead of absorbing this one.
+                state.active_run = None;
+                state.tool_starts.clear();
+                return;
+            }
             if let Some(run) = state.active_run.as_mut() {
                 run.ended = true;
                 run.ended_at = Some(now);
@@ -1097,35 +1136,6 @@ fn stop_reason(last_assistant: Option<&AssistantMessage>) -> &'static str {
 /// [`telemetry_switch`] re-read before every delivery pass. Never fails: a
 /// broken install id falls back to a no-op client (TS parity: capture
 /// disables itself when the installation identity cannot be created).
-/// The recording seams' live opt-out switch: the same env-then-settings
-/// resolution the delivery pass applies ([`telemetry_switch`]), so the
-/// run state machine and the session counters stop recording exactly
-/// when the client stops sending. The answer is cached briefly (the
-/// state machine consults it per event, and streaming deltas are many)
-/// and re-resolves on its own.
-#[must_use]
-pub fn telemetry_enabled_switch(
-    cwd: &std::path::Path,
-    agent_dir: &std::path::Path,
-) -> Arc<dyn Fn() -> bool + Send + Sync> {
-    const SWITCH_CACHE_MS: std::time::Duration = std::time::Duration::from_millis(250);
-    let settings = crate::settings::SettingsManager::create(cwd, agent_dir);
-    let cache = Mutex::new(None::<(std::time::Instant, bool)>);
-    Arc::new(move || {
-        let mut cached = cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let fresh = cached
-            .as_ref()
-            .is_some_and(|(resolved_at, _)| resolved_at.elapsed() < SWITCH_CACHE_MS);
-        if !fresh {
-            let enabled = telemetry_switch(&settings.reopen()).enabled();
-            *cached = Some((std::time::Instant::now(), enabled));
-        }
-        cached.as_ref().is_some_and(|(_, enabled)| *enabled)
-    })
-}
-
 pub fn build_client(
     settings: &crate::settings::SettingsManager,
     agent_dir: &std::path::Path,
@@ -1167,6 +1177,20 @@ pub fn build_client(
         tracing::warn!(error = %error, "telemetry worker unavailable; events will drop");
         TelemetryClient::inert()
     })
+}
+
+/// The recording seams' live opt-out switch: the same env-then-settings
+/// resolution the delivery pass applies ([`telemetry_switch`]), resolved
+/// live on every ask. No cached answer may span a mid-session opt-out:
+/// an off (or an on) applies to the recording seams the moment the
+/// settings do, exactly like the client's delivery gate.
+#[must_use]
+pub fn telemetry_enabled_switch(
+    cwd: &std::path::Path,
+    agent_dir: &std::path::Path,
+) -> Arc<dyn Fn() -> bool + Send + Sync> {
+    let settings = crate::settings::SettingsManager::create(cwd, agent_dir);
+    Arc::new(move || telemetry_switch(&settings.reopen()).enabled())
 }
 
 fn uuid() -> String {
