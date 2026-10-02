@@ -129,7 +129,7 @@ impl std::fmt::Debug for BlockingPipeClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BlockingPipeClient")
             .field("name", &self.name)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

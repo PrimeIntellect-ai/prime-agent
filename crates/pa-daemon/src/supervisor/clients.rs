@@ -1089,10 +1089,15 @@ impl Supervisor {
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     use crate::supervisor::SupervisorOptions;
+    #[cfg(unix)]
     use pa_types::platform::transport::TransportStream;
+    #[cfg(unix)]
     use serde_json::json;
+    #[cfg(unix)]
     use std::sync::Arc;
     use std::time::Duration;
 

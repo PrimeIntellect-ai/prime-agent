@@ -767,6 +767,8 @@ fn fork_startup_selection_reports_the_ts_contracts() {
     );
 }
 
+// The tilde selector expands a unix HOME path.
+#[cfg(unix)]
 #[test]
 fn fork_startup_selection_expands_a_tilde_selector() {
     // The resume selector's convention: a leading `~` resolves against
