@@ -395,6 +395,41 @@ async fn a_worker_leaving_inside_the_settle_grace_keeps_the_verdict() {
         .is_some_and(|content| content.contains("the child final answer")));
 }
 
+/// A cancelled run's watcher settle leaves the display `running`, so a
+/// restart relists the child as `error` instead of `completed`.
+#[tokio::test]
+async fn a_cancelled_child_keeps_its_display_running_through_the_watcher_settle() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 500, FakeKill::Success, FakeChild::Healthy)
+            .await;
+    let (hook_tx, mut hook_rx) = mpsc::unbounded_channel();
+    sessions.set_settle_hook(Arc::new(move || {
+        let _ = hook_tx.send(());
+    }));
+    let handle = spawn_child(&sessions).await;
+    let display_file = Path::new(&handle.session_dir).join("rlm-subagent.json");
+    std::fs::write(
+        &display_file,
+        json!({ "type": "rlm_subagent", "childId": handle.rlm_child_id,
+                "sessionDir": handle.session_dir, "status": "running" })
+        .to_string(),
+    )
+    .unwrap();
+    sessions.notify_turn_done();
+    assert!(sessions.cancel_child_run(&handle.rlm_child_id).await);
+    // One settle hook from the cancel, one from the watcher's settle tail.
+    for _ in 0..2 {
+        tokio::time::timeout(Duration::from_secs(10), hook_rx.recv())
+            .await
+            .expect("both settle hooks fire")
+            .expect("hook channel open");
+    }
+    let display = crate::rlm_ledger::read_rlm_subagent_display(Path::new(&handle.session_dir))
+        .expect("display entry stays readable");
+    assert_eq!(display.status, "running");
+}
+
 /// The `follow_up` carries exactly the TS failure row (`createRlmChildFailureMessage`).
 fn assert_failure_row(follow_up: &Value, child_id: &str, error: &str) {
     let custom = &follow_up["customMessage"];
