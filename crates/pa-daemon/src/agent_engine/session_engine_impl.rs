@@ -625,6 +625,12 @@ impl SessionEngine for AgentSessionEngine {
         AgentSessionEngine::is_quota_parked(self)
     }
 
+    fn has_running_subagents(&self) -> bool {
+        self.children
+            .as_ref()
+            .is_some_and(|children| children.has_running_children())
+    }
+
     /// `compact` over the hosted pa-core session: the session summarizes
     /// its own branch, persists the entry on its in-memory store, and
     /// rebuilds the loop context; the worker persists the durable entry.

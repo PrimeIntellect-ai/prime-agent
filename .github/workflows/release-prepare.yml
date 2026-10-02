@@ -233,8 +233,9 @@ jobs:
              PR's squash-merge commit via the GitHub API (the release-bot App; no
              user PAT, no local tags).
           2. `release.yml` (tag-triggered, unchanged) validates tag == Cargo.toml,
-             builds the 4-target matrix, and `promote` waits for the protected
-             `release` environment approval - **the approval is the publish**.
+             builds the 5-target matrix (the windows MSVC build included), and
+             `promote` waits for the protected `release` environment approval -
+             **the approval is the publish**.
           3. On approval: assets + SHA256SUMS + SBOMs + SLSA provenance +
              `latest.json` land on the `{tag}` GitHub release; the in-app updater
              (`latest.json`) picks it up, and the curl install lands with the

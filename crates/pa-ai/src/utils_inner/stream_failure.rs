@@ -32,6 +32,10 @@ pub enum StreamFailureKind {
     Permission,
     InvalidRequest,
     MalformedResponse,
+    /// The provider ended the response stream without its terminal marker:
+    /// mid-block, no stop signal, no error frame (the connection just
+    /// ends). Transient by nature — the same request can be re-issued.
+    StreamDrop,
     Unknown,
 }
 
@@ -524,6 +528,10 @@ const KIND_MESSAGES: &[(StreamFailureKind, &str)] = &[
         StreamFailureKind::PaymentRequired,
         "Provider requires payment",
     ),
+    (
+        StreamFailureKind::StreamDrop,
+        "Provider dropped the response stream",
+    ),
     (StreamFailureKind::Unknown, "Provider stream failed"),
 ];
 
@@ -659,6 +667,49 @@ pub fn stream_failure_from_stop_reason(
         }
     };
     StreamFailureError { message, info }
+}
+
+/// Which content block a dropped stream was inside when the provider ended
+/// it (the disclosure detail names what the turn was mid-way through).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenStreamBlock {
+    Thinking,
+    Text,
+    ToolCall,
+    /// No content block had opened yet (the stream died before any).
+    None,
+}
+
+/// Failure for a stream the provider ended without its terminal marker:
+/// the connection closed mid-block with no stop signal and no error frame
+/// (the silent drop class: the turn would otherwise settle as a completed
+/// message with no error anywhere). Retryable by nature — the auto-retry
+/// arms re-issue the same request — and disclosed as the `stream_drop`
+/// class when the retries exhaust.
+#[must_use]
+pub(crate) fn stream_drop_failure(open_block: OpenStreamBlock) -> StreamFailureError {
+    let detail = match open_block {
+        OpenStreamBlock::Thinking => {
+            "the stream ended inside a thinking block before the stop signal"
+        }
+        OpenStreamBlock::Text => "the stream ended inside a text block before the stop signal",
+        OpenStreamBlock::ToolCall => {
+            "the stream ended inside a tool-call block before the stop signal"
+        }
+        OpenStreamBlock::None => "the stream ended before any response content or stop signal",
+    };
+    let info = StreamFailureInfo {
+        kind: StreamFailureKind::StreamDrop,
+        provider_error_type: Some("stream_drop".to_string()),
+        status: None,
+        request_id: None,
+        retry_after_ms: None,
+        raw: None,
+    };
+    StreamFailureError {
+        message: stream_failure_message(&info, Some(detail)),
+        info,
+    }
 }
 
 const MAX_RAW_LENGTH: usize = 2000;
