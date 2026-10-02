@@ -1093,8 +1093,11 @@ fn select_headless_session(options: &RunOptions) -> Result<HeadlessSession, Stri
         };
     }
     if options.session.continue_recent {
+        // Absolute like the resume arm (TS `setSessionFile` resolves it).
         if let Some(path) = find_most_recent_session_for_cwd(&session_dir, cwd) {
-            return Ok(HeadlessSession::Open(path));
+            return Ok(HeadlessSession::Open(
+                std::path::absolute(&path).map_err(|error| error.to_string())?,
+            ));
         }
     }
     Ok(HeadlessSession::Fresh)
