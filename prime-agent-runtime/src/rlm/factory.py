@@ -3007,9 +3007,9 @@ detail, and the event ledger until then.
   call spelled out — a paused run does not need polling to be noticed.
 - `stop(run_id)` cancels every running child of the run (idempotent);
   `resume(run_id)` continues a paused run and raises on a non-paused one.
-- The activity lane the daemon and TUI speak is camelCase on the wire
-  (`runId`, `specId`, `timeoutMs`); the kernel API here
-  (`rlm.factory.*`) is snake_case.
+- The activity lane the daemon and TUI speak arrives with the stacked
+  live-view PR, camelCase on the wire (`runId`, `specId`, `timeoutMs`);
+  the kernel API here (`rlm.factory.*`) is snake_case.
 
 ## Discovering machines
 
