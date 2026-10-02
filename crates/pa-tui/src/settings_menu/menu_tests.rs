@@ -393,6 +393,29 @@ fn arrows_no_op_on_submenu_rows() {
     assert!(text.iter().any(|row| row.contains("Thinking Level")));
 }
 
+/// A caret-only key in the search field keeps the filtered selection
+/// (the config selector's re-filter rule: the filter re-runs only when
+/// the query changed), so the row Space would activate stays the one
+/// under the cursor.
+#[test]
+fn a_caret_move_keeps_the_filtered_selection() {
+    let mut menu = menu();
+    // "mo" leaves two rows (steering-mode, follow-up-mode).
+    for key in ["m", "o"] {
+        menu.handle_key(key, &kb());
+    }
+    assert!(menu.tabs[menu.tab].filtered.len() >= 2);
+    menu.handle_key("down", &kb());
+    let selected = menu.tabs[menu.tab].selected;
+    assert!(selected > 0);
+    // A caret move edits nothing: the selection stays on the row.
+    menu.handle_key("ctrl+left", &kb());
+    assert_eq!(
+        menu.tabs[menu.tab].selected, selected,
+        "a caret-only key keeps the selection"
+    );
+}
+
 #[test]
 fn digits_type_into_an_active_query() {
     let mut menu = menu();

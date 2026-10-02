@@ -493,8 +493,14 @@ impl SettingsMenu {
         // above; every other key id goes whole to the active tab's search
         // input.
         let tab = self.active_mut();
+        let previous = tab.search.value().to_string();
         tab.search.handle_key(key, kb);
-        self.apply_filter();
+        // The filter re-runs only when the query changed (the config
+        // selector's rule): a caret-only key keeps the selection.
+        let changed = tab.search.value() != previous;
+        if changed {
+            self.apply_filter();
+        }
         SettingsMenuAction::None
     }
 
