@@ -352,12 +352,7 @@ impl TreeSelector {
                             width,
                             "",
                         ));
-                        let row = if input.value().is_empty() {
-                            vec![crate::Span::raw("  ")]
-                        } else {
-                            vec![crate::Span::raw(format!("  {}", input.value()))]
-                        };
-                        lines.push(truncate_line(&row, width, ""));
+                        lines.push(input_row(theme, width, input));
                         lines.push(truncate_line(
                             &vec![theme
                                 .fg_span(ThemeColor::Muted, input_pane_hint(kb, "save", "cancel"))],
@@ -376,12 +371,7 @@ impl TreeSelector {
                     width,
                     "",
                 ));
-                let row = if input.value().is_empty() {
-                    vec![crate::Span::raw("  ")]
-                } else {
-                    vec![crate::Span::raw(format!("  {}", input.value()))]
-                };
-                lines.push(truncate_line(&row, width, ""));
+                lines.push(input_row(theme, width, input));
                 lines.push(truncate_line(
                     &vec![theme.fg_span(ThemeColor::Muted, input_pane_hint(kb, "save", "cancel"))],
                     width,
@@ -413,6 +403,20 @@ fn input_pane_hint(kb: &KeybindingsManager, confirm_action: &str, cancel_action:
     .collect::<Vec<String>>()
     .join("  ");
     format!("  {segments}")
+}
+
+/// The input panes' field row (TS `LabelInput.render`): the two-space
+/// indent, then `Input.render` at the remaining width with its caret.
+fn input_row(theme: &Theme, width: usize, input: &SearchInput) -> Line {
+    let mut row = vec![crate::Span::raw("  ")];
+    row.extend(crate::menu_panel::input_render(
+        theme,
+        width.saturating_sub(2),
+        input.value(),
+        input.cursor(),
+        /*focused*/ true,
+    ));
+    truncate_line(&row, width, "")
 }
 
 /// Render the summarize choice list (the three TS options; row one is
@@ -701,6 +705,32 @@ mod tests {
             },
             "the reopened editor starts empty, so the draft is exactly the new keystroke"
         );
+    }
+
+    /// The label pane draws its caret at the cursor (TS `Input.render`'s
+    /// reversed cell): two lefts after "abc" put it on the "b".
+    #[test]
+    fn label_input_draws_the_caret_at_the_cursor() {
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let kb = KeybindingsManager::new();
+        let mut sel = selector();
+        sel.handle_key(&kb, "shift+l");
+        for key in ["a", "b", "c", "left", "left"] {
+            sel.handle_key(&kb, key);
+        }
+        let frame = sel.render(&theme, 120, &kb);
+        let is_caret = |span: &crate::Span| {
+            span.style
+                .add_modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        };
+        let row = frame
+            .iter()
+            .find(|line| line.iter().any(is_caret))
+            .expect("the label row draws a caret");
+        let at = row.iter().position(is_caret).expect("the caret cell");
+        let before: String = row[..at].iter().map(|span| span.content.as_str()).collect();
+        assert_eq!((before.as_str(), row[at].content.as_str()), ("  a", "b"));
     }
 
     /// The `get_session_tree` wire payload of a linear chain of user

@@ -391,7 +391,13 @@ pub(crate) fn search_field_plain_row(
 
 /// One input render (TS `Input.render`): prompt, the visible slice with the
 /// caret (a reversed cell) at the cursor, and trailing padding.
-fn input_render(theme: &Theme, width: usize, value: &str, cursor: usize, focused: bool) -> Line {
+pub(crate) fn input_render(
+    theme: &Theme,
+    width: usize,
+    value: &str,
+    cursor: usize,
+    focused: bool,
+) -> Line {
     let _ = theme;
     let available_width = width.saturating_sub(FIELD_PROMPT.len());
     if available_width == 0 {
