@@ -13,10 +13,10 @@
 #
 # THE CHANNEL (install-rust.sh parity): the channel pointer (<base>/stable
 # or <base>/beta) gives the version, the channel manifest (<base>/latest.json
-# or <base>/beta.json) gives this platform's artifact row, and the versioned
-# release prefix serves the tarball plus its SHA256SUMS; the checksum is
-# verified before anything is published. NO GITHUB SURFACE anywhere in the
-# user path.
+# or <base>/beta.json) gives this platform's artifact row, and the tarball
+# plus its SHA256SUMS come from the official base's public GitHub release
+# of tag v<version> (any other base serves its own releases/v<version>
+# layout); the checksum is verified before anything is published.
 #
 # NO TYPESCRIPT TAKEOVER STEPS: the TypeScript product never shipped a
 # Windows build, so there is no TS daemon, native install, or npm package
@@ -184,8 +184,18 @@ if (-not $versionPin) {
     Write-Host "pinned ${version}: installing from the versioned release prefix (the channel naming contract names the row)"
 }
 
-# --- the tarball + SHA256SUMS from the versioned release prefix ----------------
-$releasePrefix = "releases/v$version"
+# --- the tarball + SHA256SUMS: the official rule (install-rust.sh and
+# --- pa-core's archive_url parity) — the official base's archives come from
+# --- the public GitHub release of tag v<version> (the bucket's r2.dev
+# --- address throttles large downloads from datacenter IPs); any other
+# --- base (a mirror, a test bucket) serves its own releases/v<version>
+# --- layout. The small channel files above stay on the base either way. ------
+$baseTrimmed = $baseUrl.TrimEnd('/')
+if ($baseTrimmed -eq $DownloadBaseUrlDefault.TrimEnd('/')) {
+    $releaseBase = "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v$version"
+} else {
+    $releaseBase = "$baseTrimmed/releases/v$version"
+}
 $download = Join-Path ([IO.Path]::GetTempPath()) ("prime-agent-download-{0}" -f [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $download | Out-Null
 $script:primeAgentInstallScratch = $download
@@ -196,16 +206,16 @@ $script:primeAgentInstallScratch = $download
 $tarball = Join-Path $download $expectedFile
 $sumsPath = Join-Path $download 'SHA256SUMS'
 try {
-    Invoke-WebRequest -Uri "$baseUrl/$releasePrefix/$expectedFile" -OutFile $tarball
-    Invoke-WebRequest -Uri "$baseUrl/$releasePrefix/SHA256SUMS" -OutFile $sumsPath
+    Invoke-WebRequest -Uri "$releaseBase/$expectedFile" -OutFile $tarball
+    Invoke-WebRequest -Uri "$releaseBase/SHA256SUMS" -OutFile $sumsPath
 } catch {
-    Fail "could not download $expectedFile from $baseUrl/$releasePrefix/: $($_.Exception.Message)"
+    Fail "could not download $expectedFile from $releaseBase/: $($_.Exception.Message)"
 }
 
 # --- verify the checksum (the release prefix's sums, cross-checked with the
 # --- manifest's row: two independent reads of the same digest) ------------------
 $sumsLine = Get-Content -LiteralPath $sumsPath | Where-Object { $_ -match "  $expectedFile$" } | Select-Object -First 1
-if (-not $sumsLine) { Fail "SHA256SUMS in $releasePrefix has no line for $expectedFile" }
+if (-not $sumsLine) { Fail "SHA256SUMS at $releaseBase has no line for $expectedFile" }
 $sumsSha = ($sumsLine -split '\s+')[0]
 if (-not $versionPin -and $sumsSha -ne $row.sha256) { Fail "checksum mismatch between the channel manifest and SHA256SUMS for ${expectedFile}: the channel is inconsistent" }
 $actualSha = (Get-FileHash -LiteralPath $tarball -Algorithm SHA256).Hash.ToLower()

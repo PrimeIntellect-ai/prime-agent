@@ -196,4 +196,16 @@ fn install_ps1_carries_the_windows_contract() {
         text.contains("install-rust.sh channel"),
         "the ps1 writes the funnel-readable install marker"
     );
+    // The official-base routing (install-rust.sh and pa-core's archive_url
+    // parity): the official base's tarball + SHA256SUMS come from the
+    // public GitHub release of tag v<version>; any other base serves the
+    // releases/v<version> layout. The two published installers must agree.
+    assert!(
+        text.contains("$baseUrl.TrimEnd('/')"),
+        "the ps1 trims trailing slashes before the official-base compare"
+    );
+    assert!(
+        text.contains("https://github.com/PrimeIntellect-ai/prime-agent/releases/download"),
+        "the ps1 routes the official base's archives to the GitHub release"
+    );
 }
