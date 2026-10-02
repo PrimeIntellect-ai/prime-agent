@@ -473,10 +473,30 @@ def validate_factory_machine(machine: Any) -> list[str]:
         subagent = state.get("subagent")
         if isinstance(subagent, dict) and _is_nonempty_str(subagent.get("name")):
             configured_name = subagent["name"].strip()
+            shadowing = next(
+                (
+                    seen
+                    for seen in seen_subagent_names
+                    if _suffixed_spawn_form(seen, configured_name)
+                    or _suffixed_spawn_form(configured_name, seen)
+                ),
+                None,
+            )
             if configured_name in seen_subagent_names:
                 errors.append(
                     f"state {state_id} subagent name {configured_name!r} is already configured "
                     f"by state {seen_subagent_names[configured_name]!r}"
+                )
+            elif shadowing is not None:
+                # One state's suffixed labels are another state's verbatim
+                # name (foo vs foo-i1): the supervisor would reject the
+                # duplicate sibling name at spawn time, so reject the
+                # shadowing name at write time.
+                errors.append(
+                    f"state {state_id} subagent name {configured_name!r} collides with the "
+                    f"suffixed spawn labels of state {seen_subagent_names[shadowing]!r} "
+                    f"(configured {shadowing!r}): re-entry, foreach, and retries name children "
+                    f"{shadowing!r}-i<n> and {shadowing!r}-a<n>"
                 )
             else:
                 seen_subagent_names[configured_name] = state_id
@@ -969,15 +989,50 @@ def _spawn_label(
     names, and one state's settled children stay registered for the
     run's life, so a re-entering state (``max_entries`` > 1) would collide
     with its own earlier child on a verbatim name.
+
+    A suffixed label never exceeds the host's 64-character spawn-name cap:
+    an overflowing base shrinks to a digest-suffixed token of the full
+    name, exactly like the generated label's state-id token.
     """
     if configured is None:
         return _child_name(run_id, state_id, instance_index, attempt)
-    parts = [configured]
-    if instance_index > 0:
-        parts.append(f"i{instance_index}")
+    suffix_parts = [f"i{instance_index}"] if instance_index > 0 else []
     if attempt > 1:
-        parts.append(f"a{attempt}")
-    return "-".join(parts)
+        suffix_parts.append(f"a{attempt}")
+    suffix = "".join(f"-{part}" for part in suffix_parts)
+    base = configured
+    if len(base) + len(suffix) > SUBAGENT_NAME_MAX_LENGTH:
+        # The host caps spawn names at 64 characters, so a suffixed label
+        # that would exceed it shrinks its base first -- and a bare
+        # truncation could collide (two long configured names sharing the
+        # truncated prefix), so the base keeps a digest of the full name
+        # exactly like the generated label's state-id token: distinct
+        # names stay distinct, and every admission fits the cap.
+        digest = hashlib.sha256(base.encode("utf-8")).hexdigest()[:16]
+        room = max(SUBAGENT_NAME_MAX_LENGTH - len(suffix) - len(digest) - 1, 0)
+        base = f"{base[:room]}-{digest}"
+    return base + suffix
+
+
+def _suffixed_spawn_form(base: str, candidate: str) -> bool:
+    """True when ``candidate`` is a spawn label ``base`` can produce.
+
+    A state configured as ``base`` names its later children ``base-i<n>``
+    (re-entry, foreach fan-out) and ``base-a<n>`` (retries, ``n`` >= 2);
+    the never-generated ``-i0`` and ``-a1`` do not count, so a candidate
+    carrying them cannot collide and stays valid.
+    """
+    if not candidate.startswith(base + "-"):
+        return False
+    remainder = candidate[len(base) + 1 :]
+    for part in remainder.split("-"):
+        if len(part) < 2 or part[0] not in "ia" or not part[1:].isdigit():
+            return False
+        if part[0] == "i" and int(part[1:]) < 1:
+            return False
+        if part[0] == "a" and int(part[1:]) < 2:
+            return False
+    return True
 
 
 def _parse_json_output(answer: str, output_name: str) -> tuple[Any, str | None]:
@@ -2854,10 +2909,14 @@ bind.
   content is the prompt template; `metadata.model`/`metadata.thinking` are
   spawn settings) or an inline `{"prompt": ...}` object with optional
   `name`/`model`/`thinking`. The optional `name` labels the spawned
-  children (at most 64 characters, unique across the machine's states):
-  the first instance is named exactly `name` — the label to message the
-  child by — and re-entries, foreach fan-out, and retries disambiguate
-  with the same `-i<n>`/`-a<n>` suffixes the generated labels use.
+  children (at most 64 characters, unique across the machine's states —
+  a name another state's name can suffix onto, `foo` vs `foo-i1`, is
+  rejected at write time): the first instance is named exactly `name` —
+  the label to message the child by — and re-entries, foreach fan-out,
+  and retries disambiguate with the same `-i<n>`/`-a<n>` suffixes the
+  generated labels use; a suffixed label that would pass the host's
+  64-character cap shrinks its base with a digest of the full name, like
+  the generated labels do.
 - **Ports**: inputs and outputs of type `text` or `json`. An input binds
   `"from": "<state_id>.<output_name>"`; types must match, duplicates are
   rejected, and nothing can read from a resident. Bound values render into
