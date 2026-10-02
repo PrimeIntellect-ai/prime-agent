@@ -103,6 +103,15 @@ use crate::types::{AgentConnectionState, SessionActionSnapshot};
 
 pub struct Worker {
     pub(crate) config: WorkerConfig,
+    /// The bind-time filesystem identity of this worker's own socket file
+    /// (TS daemon-mode captures `socketIdentity` in the listen callback,
+    /// daemon-mode.ts:718): the exit cleanups pass it as the unlink's
+    /// expected identity, so a file REPLACED at the path after this bind -
+    /// a successor worker the supervisor relaunches on the same
+    /// deterministic path - is never unlinked by this process (the
+    /// D-state-survivor late-exit edge). `None` until `serve` binds
+    /// (named pipes keep `None`: there is no file to stat).
+    pub(crate) bound_socket_identity: std::sync::Mutex<Option<crate::socket::SocketIdentity>>,
     /// Supervisor self-registration handle; `None` for standalone workers.
     registration: Option<RegistrationHandle>,
     /// Live connections authenticated as the supervisor role. A non-zero
@@ -793,6 +802,7 @@ impl Worker {
         );
         Worker {
             config,
+            bound_socket_identity: std::sync::Mutex::new(None),
             registration,
             supervisor_claims,
             core,
@@ -854,10 +864,13 @@ impl Worker {
         // A graceful exit owns its socket file: remove it now so a respawn
         // does not wait out the stale-socket path (a killed worker cannot
         // clean up, but its killer relaunches through
-        // `prepare_socket_path`).
+        // `prepare_socket_path`). The bind-time identity (captured in
+        // `serve`) is the unlink's expected identity, so a REPLACED file
+        // at the path - a successor worker's live socket - survives this
+        // exit (TS daemon-mode.ts:1078-1080).
         crate::socket::cleanup_socket_path(
             &self.config.socket_path,
-            crate::socket::socket_identity(&self.config.socket_path),
+            self.bound_socket_identity.lock().unwrap().clone(),
         );
         std::process::exit(0)
     }
