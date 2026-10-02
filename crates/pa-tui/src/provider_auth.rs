@@ -327,6 +327,21 @@ impl ProviderAuthSelector {
             .map(|index| self.providers[*index].clone())
     }
 
+    /// One bracketed paste (TS routes the raw data to the open input):
+    /// the API-key prompt takes it, the provider search filters with it.
+    pub fn paste(&mut self, text: &str) {
+        match &mut self.mode {
+            Mode::Prompt { input, .. } => input.paste(text),
+            Mode::List => {
+                let previous = self.search.value().to_string();
+                self.search.paste(text);
+                if self.search.value() != previous {
+                    self.refilter();
+                }
+            }
+        }
+    }
+
     /// One key id (TS `handleInput`).
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> AuthSelectorAction {
         if key == "ctrl+c" {
@@ -682,6 +697,34 @@ mod tests {
         selector.handle_key("l", &kb());
         selector.handle_key("right", &kb());
         assert_eq!(selector.search.value(), "l");
+    }
+
+    /// A paste in the list filters the providers (the search takes it).
+    #[test]
+    fn a_paste_filters_the_provider_list() {
+        let mut selector =
+            ProviderAuthSelector::new(AuthSelectorKind::Login, vec![openai(), anthropic()]);
+        selector.paste("open");
+        assert_eq!(selector.search.value(), "open");
+        assert_eq!(selector.filtered.len(), 1);
+    }
+
+    /// A paste lands in the API-key prompt (the key reaches the auth
+    /// field, not the hidden composer behind).
+    #[test]
+    fn a_paste_types_into_the_api_key_prompt() {
+        let mut selector = ProviderAuthSelector::new(AuthSelectorKind::Login, vec![openai()]);
+        assert_eq!(
+            selector.handle_key("enter", &kb()),
+            AuthSelectorAction::None
+        );
+        selector.paste("sk-secret");
+        match selector.handle_key("enter", &kb()) {
+            AuthSelectorAction::Login { api_key, .. } => {
+                assert_eq!(api_key.as_deref(), Some("sk-secret"));
+            }
+            other => panic!("expected a login submit, got {other:?}"),
+        }
     }
 
     #[test]

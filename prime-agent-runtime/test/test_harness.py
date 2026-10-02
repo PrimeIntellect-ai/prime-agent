@@ -12,6 +12,36 @@ from rlm import harness as package_harness
 from rlm import rlm as callable_rlm
 from rlm.harness import HarnessState, get_harness_state
 
+# The agent-dir override setUpModule installs: an isolated dir whose
+# settings.json carries the factory opt-in setting.
+_factory_gate_dir: tempfile.TemporaryDirectory | None = None
+_previous_agent_dir: str | None = None
+
+
+def setUpModule() -> None:
+    # The factory opt-in gate refuses every factory write while the
+    # `factory.enabled` setting is off (the default); the harness CRUD tests
+    # exercise the write paths with the setting on, written in the real
+    # settings.json shape the daemon writes. The gate's own refusal pins
+    # live in test_factory.py.
+    global _factory_gate_dir, _previous_agent_dir
+    _factory_gate_dir = tempfile.TemporaryDirectory(prefix="harness_test_agent_dir_")
+    settings = Path(_factory_gate_dir.name) / "settings.json"
+    settings.write_text('{"factory": {"enabled": true}}', encoding="utf-8")
+    _previous_agent_dir = os.environ.get("PRIME_AGENT_CODING_AGENT_DIR")
+    os.environ["PRIME_AGENT_CODING_AGENT_DIR"] = _factory_gate_dir.name
+
+
+def tearDownModule() -> None:
+    global _factory_gate_dir
+    if _previous_agent_dir is None:
+        os.environ.pop("PRIME_AGENT_CODING_AGENT_DIR", None)
+    else:
+        os.environ["PRIME_AGENT_CODING_AGENT_DIR"] = _previous_agent_dir
+    if _factory_gate_dir is not None:
+        _factory_gate_dir.cleanup()
+        _factory_gate_dir = None
+
 PYTHON_REFERENCE = {
     "type": "python",
     "import": "agent_skills.example",
