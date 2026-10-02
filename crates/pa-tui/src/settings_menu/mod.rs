@@ -489,16 +489,44 @@ impl SettingsMenu {
         if kb.matches(key, "tui.select.cancel") || key == "ctrl+c" {
             return SettingsMenuAction::Cancel;
         }
-        // TS sanitizes the input (a bare space types nothing) and every
-        // printable key edits the active tab's search field.
-        if let [character] = key.chars().collect::<Vec<char>>()[..] {
-            if !character.is_control() {
-                let tab = self.active_mut();
-                tab.search.handle_key(key, kb);
-                self.apply_filter();
-            }
+        // TS `SettingsList.handleInput`: Space stays the row activation
+        // above; every other key id goes whole to the active tab's search
+        // input.
+        let tab = self.active_mut();
+        let previous = tab.search.value().to_string();
+        tab.search.handle_key(key, kb);
+        // The filter re-runs only when the query changed (the config
+        // selector's rule): a caret-only key keeps the selection.
+        let changed = tab.search.value() != previous;
+        if changed {
+            self.apply_filter();
         }
         SettingsMenuAction::None
+    }
+
+    /// One bracketed paste into the active tab's search field (TS routes
+    /// the raw paste data to the `Input`): the sanitize strips the spaces
+    /// (Space stays the row activation), and the filter re-runs when the
+    /// query changed.
+    pub fn paste(&mut self, text: &str) {
+        // The submenu owns the frame while open (its key dispatch takes
+        // every key first): a paste never edits the hidden parent list.
+        if self.sub.is_some() {
+            return;
+        }
+        // An empty row set carries no tabs (the menu renders its empty
+        // state): nothing to paste into.
+        if self.tabs.is_empty() {
+            return;
+        }
+        let sanitized = text.replace(' ', "");
+        let tab = self.active_mut();
+        let previous = tab.search.value().to_string();
+        tab.search.paste(&sanitized);
+        let changed = tab.search.value() != previous;
+        if changed {
+            self.apply_filter();
+        }
     }
 
     /// Enter/Space on the selection (TS `activateItem`): submenus open;
