@@ -29,10 +29,11 @@ pub(crate) use layout::{expand_home, resolve_writable_kernel_venv_dir};
 pub use layout::{kernel_venv_dir, kernel_venv_python};
 pub use probe::invalidate_runtime_probe_cache;
 #[cfg(test)]
-use probe::{
-    clear_in_process_probe_memo_for_tests, installed_package_dir, installed_rlm_dir,
-    lock_probe_memo, runtime_probe_key,
-};
+use probe::{installed_rlm_dir, lock_probe_memo, runtime_probe_key};
+// The memo-clear helper and the live-probe package-dir walk exist only behind
+// the unix tests (see their gates in probe.rs and tests.rs).
+#[cfg(all(test, unix))]
+use probe::{clear_in_process_probe_memo_for_tests, installed_package_dir};
 pub(crate) use probe::{
     has_prime_agent_runtime, missing_python_skill_import_labels, missing_rlm_extra_import_labels,
 };

@@ -33,12 +33,19 @@ from pathlib import Path
 from bundle_catalog import validate_bundled_catalog_dir
 # The release platform alias the archive name carries (TS parity; the update
 # flow's channel manifest requires alias-named archives).
-from assemble_artifacts import TARGET_ALIASES, RUNTIME_EXCLUDED_NAMES, RUNTIME_EXCLUDED_SUFFIXES
+from assemble_artifacts import (
+    TARGET_ALIASES,
+    RUNTIME_EXCLUDED_NAMES,
+    RUNTIME_EXCLUDED_SUFFIXES,
+    binary_name_for_target,
+)
 
 # Must mirror STAGED_ENTRIES in assemble_artifacts.py and §5 of the design doc.
 # Never add a root-level install.sh: it is what lets a TypeScript 0.9.8
 # updater install the archive (release.yml's promote job refuses it).
 # Continuous builds additionally stage the package.json version manifest.
+# The binary entry is the target's name (`prime-agent.exe` on the MSVC
+# Windows target), resolved in `main` via `binary_name_for_target`.
 EXPECTED_TOP_LEVEL = {
     "prime-agent",
     "prime-agent-runtime",
@@ -94,7 +101,9 @@ def main() -> int:
         fail("--sha (the continuous stamp) and --expect-package-json "
              "(the restamped release shape) are mutually exclusive")
 
-    expected_top_level = EXPECTED_TOP_LEVEL | (
+    binary_name = binary_name_for_target(args.target)
+    expected_top_level = (EXPECTED_TOP_LEVEL - {"prime-agent"}) | {binary_name}
+    expected_top_level |= (
         CONTINUOUS_EXTRA_TOP_LEVEL if (args.sha or args.expect_package_json)
         else set()
     )
@@ -175,9 +184,9 @@ def main() -> int:
                      f"{args.expect_package_json!r}")
             if not str(stamped.get("commit", "")).strip():
                 fail("the restamped package.json lost its commit provenance")
-        binary = scratch / "prime-agent"
+        binary = scratch / binary_name
         if not os.access(binary, os.X_OK):
-            fail("staged prime-agent is not executable")
+            fail(f"staged {binary_name} is not executable")
         if entries[archive_name]["executableSha256"] != sha256_file(binary):
             fail("executableSha256 in manifest.json does not match the staged binary")
         env = {k: v for k, v in os.environ.items() if k != "PI_PACKAGE_DIR"}

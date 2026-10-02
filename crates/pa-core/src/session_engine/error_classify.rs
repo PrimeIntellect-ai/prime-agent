@@ -56,6 +56,10 @@ pub const ERROR_DIAGNOSTICS: &[(&str, &str)] = &[
         "Provider returned a malformed response.",
     ),
     (
+        "stream_drop",
+        "The provider ended the response stream without a stop signal.",
+    ),
+    (
         "context_limit",
         "The request exceeded the model context limit.",
     ),
@@ -140,6 +144,7 @@ const CODE_SUBTYPES: &[(&str, &str)] = &[
     ("content_filter", "refusal"),
     ("safety", "refusal"),
     ("malformed_response", "malformed_response"),
+    ("stream_drop", "stream_drop"),
     ("context_length_exceeded", "context_limit"),
     ("context_window_exceeded", "context_limit"),
     ("ECONNRESET", "network_error"),
@@ -172,7 +177,7 @@ fn subtype_category(subtype: &str) -> &'static str {
         | "credential_expired"
         | "authentication_rejected" => "authentication",
         "quota_exceeded" | "rate_limited" => "rate_limit",
-        "network_error" => "network",
+        "network_error" | "stream_drop" => "network",
         "timeout" => "timeout",
         "provider_unavailable" => "provider_unavailable",
         "context_limit" => "context_limit",
@@ -189,6 +194,7 @@ fn subtype_retryable(subtype: &str) -> bool {
         "quota_exceeded"
             | "rate_limited"
             | "network_error"
+            | "stream_drop"
             | "timeout"
             | "provider_unavailable"
             | "malformed_response"
@@ -402,6 +408,37 @@ mod tests {
         assert!(near_miss.safe_message.is_none());
         assert_eq!(near_miss.classification_source, "unknown");
         assert_eq!(near_miss.subtype, "unknown");
+    }
+
+    #[test]
+    fn stream_drop_messages_classify_as_the_stream_drop_category() {
+        // The provider's drop disclosure (pa-ai `stream_drop_failure`):
+        // every block detail names the same class.
+        let classification = classify(
+            "Provider dropped the response stream (stream_drop): the stream ended inside a thinking block before the stop signal"
+        );
+        assert_eq!(classification.subtype, "stream_drop");
+        assert_eq!(classification.category, "network");
+        assert_eq!(classification.code, Some("stream_drop"));
+        assert_eq!(classification.classification_source, "typed_error");
+        assert!(classification.retryable);
+        // The raw message never uploads; the fixed diagnostic rides.
+        assert!(classification.safe_message.is_none());
+        assert_eq!(
+            classification.diagnostic,
+            "The provider ended the response stream without a stop signal."
+        );
+        assert!(pa_telemetry::ERROR_SUBTYPES.contains(&classification.subtype));
+        assert!(
+            pa_telemetry::ERROR_CODES.contains(&classification.code.unwrap()),
+            "the code token stays inside the catalog's safe vocabulary"
+        );
+        // The empty-stream variant classifies identically.
+        let empty = classify(
+            "Provider dropped the response stream (stream_drop): the stream ended before any response content or stop signal"
+        );
+        assert_eq!(empty.subtype, "stream_drop");
+        assert!(empty.retryable);
     }
 
     #[test]
