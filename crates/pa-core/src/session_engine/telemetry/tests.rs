@@ -14,14 +14,23 @@ use super::*;
 
 /// Tests that resolve the env-gated switch need the three override vars
 /// cleared (the Cargo test config sets `DO_NOT_TRACK`); restore after.
+/// The env is process-wide, so these tests (and the packages env tests)
+/// serialize through the shared env lock while they hold it.
+const TELEMETRY_ENV_VARS: [&str; 3] = ["DO_NOT_TRACK", "PI_OFFLINE", "PRIME_AGENT_TELEMETRY"];
+
 struct CleanTelemetryEnv {
     saved: Vec<(&'static str, Option<String>)>,
+    _env_lock: std::sync::MutexGuard<'static, ()>,
 }
 
 impl Default for CleanTelemetryEnv {
     fn default() -> Self {
-        const VARS: [&str; 3] = ["DO_NOT_TRACK", "PI_OFFLINE", "PRIME_AGENT_TELEMETRY"];
-        let saved = VARS
+        // Held first: the vars may not be touched while another env test
+        // runs.
+        let env_lock = crate::packages::test_support::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let saved = TELEMETRY_ENV_VARS
             .iter()
             .map(|var| {
                 let value = std::env::var(var).ok();
@@ -29,12 +38,17 @@ impl Default for CleanTelemetryEnv {
                 (*var, value)
             })
             .collect();
-        Self { saved }
+        Self {
+            saved,
+            _env_lock: env_lock,
+        }
     }
 }
 
 impl Drop for CleanTelemetryEnv {
     fn drop(&mut self) {
+        // The manual drop runs before the field drops: the restore lands
+        // while the env lock is still held.
         for (var, value) in self.saved.drain(..) {
             match value {
                 Some(value) => std::env::set_var(var, value),
@@ -1755,14 +1769,13 @@ fn a_contended_state_lock_fails_the_disable_cleanly() {
 }
 
 /// Any failure in the disable's state steps fails the command with the
-/// settings untouched: an unwritable telemetry-state directory (the lock
-/// cannot even be taken) leaves `telemetry.enabled` exactly as it was
-/// and the epoch unmoved - never a saved opt-out whose zero-event window
-/// the worker could not see.
+/// settings untouched: a state file the bump cannot publish over (a
+/// directory squatting the path - root ignores permission bits, so this
+/// is the failure that works for every user) leaves
+/// `telemetry.enabled` exactly as it was and the epoch unmoved - never
+/// a saved opt-out whose zero-event window the worker could not see.
 #[test]
-#[cfg(unix)]
 fn a_failed_state_step_fails_the_disable_without_saving() {
-    use std::os::unix::fs::PermissionsExt;
     let _env = CleanTelemetryEnv::default();
     let dir = tempfile::tempdir().unwrap();
     let agent_dir = dir.path().join("agent");
@@ -1771,8 +1784,10 @@ fn a_failed_state_step_fails_the_disable_without_saving() {
     pa_telemetry::install_id(&agent_dir).unwrap();
     assert_eq!(pa_telemetry::read_off_epoch(&agent_dir), 0);
 
-    // The state directory turns unwritable mid-session.
-    std::fs::set_permissions(&agent_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    // The state path turns unpublishable mid-session: no create or
+    // rename can land on a directory, for any user.
+    std::fs::remove_file(agent_dir.join("telemetry.json")).unwrap();
+    std::fs::create_dir(agent_dir.join("telemetry.json")).unwrap();
 
     let mut disabling = crate::settings::SettingsManager::create(dir.path(), &agent_dir);
     assert!(
@@ -1781,7 +1796,6 @@ fn a_failed_state_step_fails_the_disable_without_saving() {
     );
 
     // Nothing changed: the settings still say on, the epoch never moved.
-    std::fs::set_permissions(&agent_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert!(
         crate::settings::SettingsManager::create(dir.path(), &agent_dir).get_telemetry_enabled()
     );
