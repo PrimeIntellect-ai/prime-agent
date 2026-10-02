@@ -389,8 +389,12 @@ async fn a_known_resident_registration_writes_nothing_to_disk() {
     // The spawn-time record, exactly as the launch writes it (the TS
     // `persistWorker` call shape: the atomic rename, no fsync), from the
     // same descriptor value the resident is about to own.
-    crate::descriptor::persist_worker_unsynced(&descriptor_path, &descriptor)
-        .expect("the spawn record lands");
+    crate::descriptor::persist_worker_at(
+        &descriptor_path,
+        &descriptor,
+        crate::descriptor::TempSync::Unsynced,
+    )
+    .expect("the spawn record lands");
     let spawn_record = std::fs::read(&descriptor_path).expect("the spawn record is on disk");
     let resident =
         ResidentWorker::new("w-regskip".to_string(), descriptor, descriptor_path.clone());
@@ -496,14 +500,14 @@ async fn a_relaunch_spawn_record_serves_the_durable_persist() {
     );
     supervisor.registry.insert(Arc::clone(&resident)).await;
 
-    let _ = crate::descriptor::atomic_write_probe::take();
+    let _ = crate::descriptor::atomic_write_probe::take_under(&descriptor_path);
     let outcome = supervisor.relaunch_worker(&resident).await;
     std::env::remove_var("PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS");
     assert!(
         outcome.is_err(),
         "no live worker: the relaunch fails at the probe, after the spawn record served"
     );
-    let writes = crate::descriptor::atomic_write_probe::take();
+    let writes = crate::descriptor::atomic_write_probe::take_under(&descriptor_path);
     let spawn_records: Vec<_> = writes
         .iter()
         .filter(|(path, _)| path == &descriptor_path)
@@ -553,14 +557,14 @@ async fn a_fresh_create_spawn_record_keeps_the_unsynced_shape() {
         rest: Map::default(),
     };
 
-    let _ = crate::descriptor::atomic_write_probe::take();
+    let _ = crate::descriptor::atomic_write_probe::take_under(&supervisor.descriptor_dir);
     let outcome = supervisor.launch_worker(&create, None).await;
     std::env::remove_var("PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS");
     assert!(
         outcome.is_err(),
         "no live worker: the fresh launch fails at the probe"
     );
-    let writes = crate::descriptor::atomic_write_probe::take();
+    let writes = crate::descriptor::atomic_write_probe::take_under(&supervisor.descriptor_dir);
     let spawn_records: Vec<_> = writes
         .iter()
         .filter(|(path, _)| path.starts_with(&supervisor.descriptor_dir))

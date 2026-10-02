@@ -295,9 +295,18 @@ pub(crate) mod atomic_write_probe {
             .push((path.to_path_buf(), sync));
     }
 
-    /// Drain the recorded writes.
-    pub(crate) fn take() -> Vec<(PathBuf, TempSync)> {
-        std::mem::take(&mut *RECORDED.lock().expect("atomic write probe"))
+    /// Drain the recorded writes under one root (an oracle's descriptor
+    /// path or its directory), leaving every other record in place:
+    /// cargo runs tests in parallel, so a process-wide drain would
+    /// steal a parallel oracle's records and fail its durability
+    /// assertions.
+    pub(crate) fn take_under(root: &std::path::Path) -> Vec<(PathBuf, TempSync)> {
+        let mut recorded = RECORDED.lock().expect("atomic write probe");
+        let (under, rest): (Vec<_>, Vec<_>) = recorded
+            .drain(..)
+            .partition(|(path, _)| path.starts_with(root));
+        *recorded = rest;
+        under
     }
 }
 
@@ -310,26 +319,6 @@ pub(crate) mod atomic_write_probe {
 /// atomic write to `path` fails.
 pub fn persist_worker(path: &Path, descriptor: &WorkerDescriptor) -> Result<()> {
     persist_worker_at(path, descriptor, TempSync::Synced)
-}
-
-/// Persist the spawn-time worker record in the TS `persistWorker` call
-/// shape: the same atomic rename and `updated_at` stamp, without the
-/// pre-rename fsync (TS's descriptor writes never request the fsync
-/// option). This is the FRESH-CREATE shape only: the transient
-/// `Starting` record it replaces is the launch's own state, and the
-/// create-completion persist (`launch_worker`'s post-create write)
-/// re-establishes the durable write as the metadata-survival barrier.
-/// Every relaunch keeps the synced persist — it REPLACES an
-/// established, already-durable descriptor, and a torn unsynced
-/// replacement would lose the recovery journal pointer and the durable
-/// create command the next boot's revival replays.
-///
-/// # Errors
-///
-/// Returns an error when the descriptor cannot be serialized or the
-/// atomic write to `path` fails.
-pub fn persist_worker_unsynced(path: &Path, descriptor: &WorkerDescriptor) -> Result<()> {
-    persist_worker_at(path, descriptor, TempSync::Unsynced)
 }
 
 /// The one persist body behind both durability classes: the same fresh
@@ -515,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn persist_worker_unsynced_stamps_and_round_trips() {
+    fn persist_worker_at_unsynced_stamps_and_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("w.json");
         let descriptor: WorkerDescriptor = serde_json::from_value(json!({
@@ -534,7 +523,7 @@ mod tests {
             "consecutiveFailures": 0,
         }))
         .expect("descriptor");
-        persist_worker_unsynced(&path, &descriptor).expect("persist");
+        persist_worker_at(&path, &descriptor, TempSync::Unsynced).expect("persist");
         let persisted: WorkerDescriptor =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).expect("parse");
         // The spawn record carries the same content the durable persist
