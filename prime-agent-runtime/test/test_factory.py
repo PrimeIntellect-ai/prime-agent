@@ -234,6 +234,20 @@ class ValidateFactorySpecTest(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("thinking must be a non-empty string", errors[0])
 
+        # Whitespace-only values are rejected at write time: runtime
+        # resolution strips them (_resolve_subagents /
+        # _validate_spawn_settings), so a whitespace-only field is a
+        # persistable factory that can never spawn.
+        whitespace_prompt = {"nodes": [node("a", subagent={"prompt": "  \t "})]}
+        errors = validate_factory_spec(whitespace_prompt)
+        self.assertEqual(errors, ["node a inline subagent requires a non-empty prompt"])
+        for key in ("name", "model", "thinking"):
+            whitespace_field = {"nodes": [node("a", subagent={"prompt": "p", key: "  \t "})]}
+            errors = validate_factory_spec(whitespace_field)
+            self.assertEqual(
+                errors, [f"node a inline subagent {key} must be a non-empty string when provided"], key
+            )
+
     def test_lifecycle(self) -> None:
         for good in ("task", "resident"):
             self.assertEqual(validate_factory_spec({"nodes": [node("a", lifecycle=good)]}), [])
@@ -289,6 +303,14 @@ class ValidateFactorySpecTest(unittest.TestCase):
         for bad in (0, -1, 10_001, 1.5, "5", True):
             errors = validate_factory_spec({"run": {"max_transitions": bad}, "nodes": [node("a")]})
             self.assertEqual(errors, ["run max_transitions must be a positive integer no greater than 10000"], bad)
+
+    def test_run_max_children(self) -> None:
+        # The run-wide child budget: total admissions over the run's life.
+        for good in (1, 40, 1_000_000):
+            self.assertEqual(validate_factory_spec({"run": {"max_children": good}, "nodes": [node("a")]}), [])
+        for bad in (0, -1, 1_000_001, 1.5, "5", True):
+            errors = validate_factory_spec({"run": {"max_children": bad}, "nodes": [node("a")]})
+            self.assertEqual(errors, ["run max_children must be a positive integer no greater than 1000000"], bad)
 
     def test_node_failure_policy(self) -> None:
         for good in ("fail_fast", "continue", "escalate"):
@@ -362,6 +384,10 @@ class ValidateFactorySpecTest(unittest.TestCase):
         self.assertEqual(
             validate_factory_spec({"run": {"max_transitions": None}, "nodes": [node("a")]}),
             ["run max_transitions must be a positive integer no greater than 10000"],
+        )
+        self.assertEqual(
+            validate_factory_spec({"run": {"max_children": None}, "nodes": [node("a")]}),
+            ["run max_children must be a positive integer no greater than 1000000"],
         )
         self.assertEqual(
             validate_factory_spec({"run": {"budget_ms": None}, "nodes": [node("a")]}),
@@ -733,7 +759,12 @@ class CanonicalizeFactorySpecTest(unittest.TestCase):
         self.assertEqual(
             canonicalize_factory_spec(dag),
             {
-                "run": {"failure_policy": "escalate", "max_parallel": 8, "max_transitions": 10},
+                "run": {
+                    "failure_policy": "escalate",
+                    "max_parallel": 8,
+                    "max_transitions": 10,
+                    "max_children": 10_000,
+                },
                 "states": [
                     {
                         "id": "a",
@@ -751,7 +782,13 @@ class CanonicalizeFactorySpecTest(unittest.TestCase):
 
     def test_preserves_explicit_values(self) -> None:
         dag = {
-            "run": {"budget_ms": 5000, "failure_policy": "continue", "max_parallel": 2, "max_transitions": 7},
+            "run": {
+                "budget_ms": 5000,
+                "failure_policy": "continue",
+                "max_parallel": 2,
+                "max_transitions": 7,
+                "max_children": 5,
+            },
             "nodes": [
                 {
                     "id": "a",
@@ -768,7 +805,13 @@ class CanonicalizeFactorySpecTest(unittest.TestCase):
         self.assertEqual(
             canonicalize_factory_spec(dag),
             {
-                "run": {"failure_policy": "continue", "max_parallel": 2, "max_transitions": 7, "budget_ms": 5000},
+                "run": {
+                    "failure_policy": "continue",
+                    "max_parallel": 2,
+                    "max_transitions": 7,
+                    "max_children": 5,
+                    "budget_ms": 5000,
+                },
                 "states": [
                     {
                         "id": "a",
@@ -830,7 +873,13 @@ class CanonicalizeFactorySpecTest(unittest.TestCase):
         self.assertEqual(
             canonicalize_factory_spec(machine),
             {
-                "run": {"failure_policy": "continue", "max_parallel": 2, "max_transitions": 20, "budget_ms": 5000},
+                "run": {
+                    "failure_policy": "continue",
+                    "max_parallel": 2,
+                    "max_transitions": 20,
+                    "max_children": 10_000,
+                    "budget_ms": 5000,
+                },
                 "states": [
                     {
                         "id": "seed",
@@ -1117,6 +1166,21 @@ class ValidateFactoryMachineTest(unittest.TestCase):
         errors = validate_factory_machine(bad_model)
         self.assertEqual(len(errors), 1)
         self.assertIn("model must be a non-empty string", errors[0])
+
+        # Whitespace-only inline fields are write-time invalid in machine
+        # form too (the shared state validation strips like the runtime
+        # resolvers do), so no persistable machine can be unspawnable.
+        whitespace = {
+            "states": [state("a", entry=True, subagent={"prompt": "  ", "model": " \t "})],
+            "transitions": [],
+        }
+        self.assertEqual(
+            validate_factory_machine(whitespace),
+            [
+                "state a inline subagent requires a non-empty prompt",
+                "state a inline subagent model must be a non-empty string when provided",
+            ],
+        )
 
         inline_ok = {
             "states": [state("a", entry=True, subagent={"prompt": "Do work.", "name": "w", "thinking": "high"})],
@@ -3212,6 +3276,108 @@ class FactoryExecutorTest(unittest.TestCase):
         self.assertEqual(final["state"], "done")
         self.assertEqual(self.node_status(final, "c")["status"], "done")
         self.assertEqual(self.host.notice_kinds(), ["budget_exceeded", "finished"])
+
+    @async_test
+    async def test_run_max_children_pauses_at_admission_then_resume_completes(self) -> None:
+        # Macroscope finding: foreach.max bounds per-entry expansion,
+        # max_transitions bounds transitions, and max_parallel bounds
+        # concurrency — nothing bounded TOTAL admissions over the run's
+        # life. run.max_children is that budget: enforced before each
+        # admission (run()'s own phase included), pause once at the
+        # boundary, resume continues past it (explicit operator decision).
+        self.store_factory(
+            {
+                "run": {"failure_policy": "continue", "max_children": 2},
+                "nodes": [
+                    {"id": "a", "subagent": "worker"},
+                    {"id": "b", "subagent": "worker"},
+                    {"id": "c", "subagent": "worker"},
+                ],
+            }
+        )
+        result = await self.start()
+        # run()'s admission phase admits a and b; c's spawn is refused.
+        self.assertEqual(result["started"], ["a", "b"])
+        self.assertEqual(len(self.host.calls_of("rlm.run")), 2)
+        status = await rlm_module.rlm.factory.status(result["run_id"])
+        self.assertEqual(status["state"], "paused")
+        # its OWN milestone kind, distinct from the run-budget pause
+        self.assertIn("max_children_exceeded", self.host.notice_kinds())
+        self.assertNotIn("budget_exceeded", self.host.notice_kinds())
+        milestone = next(
+            event for event in self.events_of(status, "milestone") if event["milestone"] == "max_children_exceeded"
+        )
+        self.assertIn("run max_children 2 exceeded after 2 children", milestone["detail"])
+        self.assertIn("no new spawns", milestone["detail"])
+        self.assertIn("resume with await rlm.factory.resume", milestone["detail"])
+        self.assertEqual(self.executor._runs[result["run_id"]].pause_reason, "max_children exceeded")
+        self.assertEqual(status["usage"]["spawns"], 2)
+        self.assertEqual(status["usage"]["max_children"], 2)
+        # c was prepared but never admitted: entry running, instance pending.
+        c_report = self.node_status(status, "c")
+        self.assertEqual(c_report["status"], "running")
+        self.assertEqual(c_report["instances"][0]["status"], "pending")
+        self.assertEqual(self.host.spawn_calls("c"), [])
+        # resume is the explicit operator decision: c runs, no second pause
+        await rlm_module.rlm.factory.resume(result["run_id"])
+        final = await self.settle(result)
+        self.assertEqual(final["state"], "done")
+        self.assertEqual(self.node_status(final, "c")["status"], "done")
+        self.assertEqual(final["usage"]["spawns"], 3)
+        self.assertEqual(self.host.notice_kinds(), ["max_children_exceeded", "finished"])
+
+    @async_test
+    async def test_foreach_children_count_against_the_run_max_children_budget(self) -> None:
+        # The finding's scenario, pinned: nothing bounded the total
+        # children of repeated foreach expansion (10,000 transitions x
+        # foreach.max 256 = 2.56M admissions with no run budget). foreach
+        # expansions count against run.max_children: the run pauses
+        # mid-expansion with the exact error, and resume finishes the
+        # expansion exactly once past it.
+        self.host.outcomes["src"] = {
+            "status": "done",
+            "answer": '```json\n{"items": ["w", "x", "y", "z"]}\n```',
+        }
+        self.store_factory(
+            {
+                "run": {"failure_policy": "continue", "max_children": 2, "max_parallel": 8},
+                "nodes": [
+                    {"id": "src", "subagent": "worker", "outputs": [{"name": "items", "type": "json"}]},
+                    {
+                        "id": "fan",
+                        "subagent": {"prompt": "Expand item {items}."},
+                        "depends_on": ["src"],
+                        "inputs": [{"name": "items", "type": "json", "from": "src.items"}],
+                        "foreach": {"over": "items", "max": 256},
+                    },
+                ],
+            }
+        )
+        result = await self.start()
+        paused = await self.settle(result)
+        # src plus fan instance 0 hit the budget; the remaining fan
+        # instances wait: the executor refuses their spawns, it never
+        # wedges and never spends them.
+        self.assertEqual(paused["state"], "paused")
+        self.assertIn("max_children_exceeded", self.host.notice_kinds())
+        self.assertEqual(self.executor._runs[result["run_id"]].pause_reason, "max_children exceeded")
+        self.assertEqual(paused["usage"]["spawns"], 2)
+        fan = self.node_status(paused, "fan")
+        self.assertEqual(len(fan["instances"]), 4)
+        self.assertEqual([instance["status"] for instance in fan["instances"]], ["running", "pending", "pending", "pending"])
+        self.assertEqual(len(self.host.spawn_calls("fan")), 1)
+        # resume finishes the expansion: all four fan children run, no
+        # second child-budget pause fires.
+        await rlm_module.rlm.factory.resume(result["run_id"])
+        final = await self.settle(result)
+        self.assertEqual(final["state"], "done")
+        self.assertEqual(self.node_status(final, "fan")["status"], "done")
+        self.assertEqual(final["usage"]["spawns"], 5)
+        self.assertEqual(
+            sorted(call["prompt"] for call in self.host.spawn_calls("fan")),
+            ["Expand item w.", "Expand item x.", "Expand item y.", "Expand item z."],
+        )
+        self.assertEqual(self.host.notice_kinds(), ["max_children_exceeded", "finished"])
 
 
     # -- stop and rate limits -------------------------------------------------------------

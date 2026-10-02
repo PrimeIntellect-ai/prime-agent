@@ -58,9 +58,11 @@ MAX_PARALLEL_MAX = 64
 FOREACH_MAX_MIN = 1
 FOREACH_MAX_MAX = 256
 MAX_TRANSITIONS_CAP = 10_000
+MAX_CHILDREN_CAP = 1_000_000
 TRANSITIONS_PER_STATE_DEFAULT = 10
 RUN_FAILURE_POLICY_DEFAULT = "escalate"
 RUN_MAX_PARALLEL_DEFAULT = 8
+RUN_MAX_CHILDREN_DEFAULT = 10_000
 NODE_LIFECYCLE_DEFAULT = "task"
 NODE_RETRIES_DEFAULT = 0
 STATE_ENTRY_DEFAULT = False
@@ -168,6 +170,11 @@ def _validate_run_fields(run: Any, errors: list[str]) -> int | None:
         _is_positive_int(max_transitions) and max_transitions <= MAX_TRANSITIONS_CAP
     ):
         errors.append(f"run max_transitions must be a positive integer no greater than {MAX_TRANSITIONS_CAP}")
+    max_children = run.get("max_children")
+    if "max_children" in run and not (
+        _is_positive_int(max_children) and max_children <= MAX_CHILDREN_CAP
+    ):
+        errors.append(f"run max_children must be a positive integer no greater than {MAX_CHILDREN_CAP}")
     return run_budget
 
 
@@ -203,11 +210,14 @@ def _validate_state_fields(
     if _is_nonempty_str(subagent):
         pass  # Harness subagent entry id or title; resolved at run time.
     elif isinstance(subagent, dict):
-        if not _is_nonempty_str(subagent.get("prompt")):
+        # Runtime resolution strips these fields (_resolve_subagents /
+        # _validate_spawn_settings), so whitespace-only values are rejected
+        # here too: a persistable factory must be spawnable.
+        if not isinstance(subagent.get("prompt"), str) or not subagent.get("prompt").strip():
             errors.append(f"{noun} {ref} inline subagent requires a non-empty prompt")
         for key in ("name", "model", "thinking"):
             value = subagent.get(key)
-            if value is not None and not _is_nonempty_str(value):
+            if value is not None and (not isinstance(value, str) or not value.strip()):
                 errors.append(f"{noun} {ref} inline subagent {key} must be a non-empty string when provided")
     else:
         errors.append(
@@ -676,9 +686,10 @@ def _canonicalize_machine(machine: dict[str, Any]) -> dict[str, Any]:
     """Apply defaults to a validated machine and normalize it into a clean dict.
 
     Defaults: run failure_policy 'escalate', run max_parallel 8, run
-    max_transitions 10 per state capped at 10000, state entry False, state
-    max_entries 1, state lifecycle 'task', state retries 0, state
-    failure_policy copied from the run policy, and transition on 'settled'.
+    max_transitions 10 per state capped at 10000, run max_children 10000,
+    state entry False, state max_entries 1, state lifecycle 'task', state
+    retries 0, state failure_policy copied from the run policy, and
+    transition on 'settled'.
     """
     run_in = machine.get("run") if isinstance(machine.get("run"), dict) else {}
     run_policy = run_in.get("failure_policy", RUN_FAILURE_POLICY_DEFAULT)
@@ -690,6 +701,7 @@ def _canonicalize_machine(machine: dict[str, Any]) -> dict[str, Any]:
             "max_transitions",
             min(TRANSITIONS_PER_STATE_DEFAULT * states_count, MAX_TRANSITIONS_CAP),
         ),
+        "max_children": run_in.get("max_children", RUN_MAX_CHILDREN_DEFAULT),
     }
     if "budget_ms" in run_in:
         run["budget_ms"] = run_in["budget_ms"]
@@ -1126,7 +1138,9 @@ class FactoryRun:
     started_at: float = 0.0
     max_parallel: int = RUN_MAX_PARALLEL_DEFAULT
     max_transitions: int = MAX_TRANSITIONS_CAP
+    max_children: int = RUN_MAX_CHILDREN_DEFAULT
     max_transitions_reported: bool = False
+    max_children_reported: bool = False
     run_budget_ms: int | None = None
     budget_reported: bool = False
     pause_reason: str | None = None
@@ -1314,6 +1328,7 @@ class FactoryExecutor:
                 "settled": run.settle_count,
                 "tool_uses": run.tool_use_total,
                 "max_parallel": run.max_parallel,
+                "max_children": run.max_children,
                 "running": self._running_instance_count(run),
                 "transitions_fired": run.transitions_fired,
             },
@@ -1447,6 +1462,7 @@ class FactoryExecutor:
             started_at=self._now_fn(),
             max_parallel=run_spec["max_parallel"],
             max_transitions=run_spec["max_transitions"],
+            max_children=run_spec["max_children"],
             run_budget_ms=run_spec.get("budget_ms"),
         )
         position_of: dict[str, int] = {}
@@ -1656,7 +1672,11 @@ class FactoryExecutor:
         The run budget is enforced BEFORE each admission (this phase runs
         from run() and resume() too, not only the control loop): a slow
         initial admission must not keep launching instances after
-        run_budget_ms expired. Admission is also skipped while a
+        run_budget_ms expired. The run-wide child budget (max_children:
+        every admission over the run's life, foreach expansions and retry
+        re-spawns included) is enforced the same way — the next admission
+        over it pauses the run instead of launching the child.
+        Admission is also skipped while a
         rate-limit backoff deadline is outstanding. Returns the state ids
         that had at least one instance admitted here.
         """
@@ -1674,6 +1694,9 @@ class FactoryExecutor:
                 break
             pair = self._next_pending_instance(run)
             if pair is None:
+                break
+            if self._children_budget_exceeded(run):
+                await self._pause_for_children(run)
                 break
             state, entry, instance = pair
             outcome = await self._admit(run, state, entry, instance, allow_backoff=allow_backoff)
@@ -1714,6 +1737,31 @@ class FactoryExecutor:
             "budget_exceeded",
             f"run budget_ms {run.run_budget_ms} exceeded after {int(elapsed_ms)}ms; no new spawns; "
             f"resume with await rlm.factory.resume('{run.run_id}')",
+        )
+
+    def _children_budget_exceeded(self, run: FactoryRun) -> bool:
+        if run.max_children_reported:
+            return False
+        return run.spawn_count >= run.max_children
+
+    async def _pause_for_children(self, run: FactoryRun) -> None:
+        """Pause the run at the child-budget boundary (milestone fires once).
+
+        max_children is the TOTAL-admission budget over the run's life:
+        spawn_count counts every admission, foreach expansions and retry
+        re-spawns included (max_parallel bounds concurrency only, and
+        max_transitions bounds transitions — neither bounds children).
+        Children already in flight keep running. Resuming after the
+        milestone is an explicit operator decision, so no further
+        child-budget pauses fire (max_children_reported)."""
+        run.state = "paused"
+        run.pause_reason = "max_children exceeded"
+        run.max_children_reported = True
+        await self._milestone(
+            run,
+            "max_children_exceeded",
+            f"run max_children {run.max_children} exceeded after {run.spawn_count} children; "
+            f"no new spawns; resume with await rlm.factory.resume('{run.run_id}')",
         )
 
     async def _prepare_ready_entries(self, run: FactoryRun) -> None:
@@ -2709,8 +2757,13 @@ bind.
   (stop the run to retire it).
 - **Bounds and policies**: `run.max_parallel` (1..64, default 8) is the
   run's global budget of simultaneously running instances — not a
-  per-node limit. `run.max_transitions` (default 10 per state, capped at
-  10,000) pauses the run once at the boundary, mid-settle; `resume`
+  per-node limit. `run.max_children` (default 10,000, capped at
+  1,000,000) is the run's global budget of total admissions over its
+  life — foreach expansions and retry re-spawns included (neither
+  `max_parallel` nor `max_transitions` bounds children); reaching it
+  pauses the run once, and `resume` continues past it as an explicit
+  operator decision. `run.max_transitions` (default 10 per state, capped
+  at 10,000) pauses the run once at the boundary, mid-settle; `resume`
   continues after the transitions that already fired without re-firing
   them. `run.budget_ms` pauses the run once when exceeded (in-flight
   children keep running). Per state: `max_entries` (default 1), `retries`
@@ -2790,7 +2843,8 @@ status["nodes"]    # per state: status, entries_used/max_entries, instances,
                    # latest answer_preview, error
 status["events"]   # trailing ledger: spawned, settled, answer_captured,
                    # transition_fired, node_error, milestone, ...
-status["usage"]    # spawns, settled, tool_uses, running, transitions_fired
+status["usage"]    # spawns, settled, tool_uses, max_parallel, max_children, running,
+                    # transitions_fired
 
 snapshot = await rlm.factory.watch(result["run_id"], 30)
 # Blocks until the run's state/instance shape changes or the timeout
@@ -2805,10 +2859,10 @@ spec = await rlm.factory.graph("pr-manager")       # a spec id: static structure
 - `run` re-validates the spec and resolves every subagent reference first,
   reporting all failures in one `ValueError` and starting nothing on any
   failure; `name=` labels the run in status and the TUI.
-- Pause and failure notices (escalate, budget, max_transitions, failed,
-  finished) arrive as quiet notices in the conversation once per kind per
-  run, the pause notices with the resume call spelled out — a paused run
-  does not need polling to be noticed.
+- Pause and failure notices (escalate, budget, max_transitions,
+  max_children, failed, finished) arrive as quiet notices in the
+  conversation once per kind per run, the pause notices with the resume
+  call spelled out — a paused run does not need polling to be noticed.
 - `stop(run_id)` cancels every running child of the run (idempotent);
   `resume(run_id)` continues a paused run and raises on a non-paused one.
 - The activity lane the daemon and TUI speak is camelCase on the wire
@@ -2831,7 +2885,8 @@ spec = await rlm.factory.graph("pr-manager")       # a spec id: static structure
 ## Safety
 
 - Every state spawns real children that spend budget. Bound loops with
-  `max_entries` and `max_transitions`; the default `escalate` policy pauses
+  `max_entries`, `max_transitions`, and `run.max_children` (total
+  admissions); the default `escalate` policy pauses
   instead of failing, so read `status` (or the notice) before resuming.
 - Captured answers are capped previews (about 160 characters) and outputs
   bind from them: keep declared outputs compact — a small fenced json
