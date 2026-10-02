@@ -1553,6 +1553,17 @@ const TUI_EVENTS: &[EventRule] = &[
             ),
         ],
     },
+    // A settled ipython cell that rendered as bash: its executed bash()
+    // line share and command count, never command text.
+    EventRule {
+        name: "tui ipython bash rendered",
+        since: 2,
+        properties: &[
+            ("bash_lines", required(count())),
+            ("cell_lines", required(count())),
+            ("count", required(count())),
+        ],
+    },
 ];
 
 /// The update-flow events (v1): `update completed` plus the per-phase
