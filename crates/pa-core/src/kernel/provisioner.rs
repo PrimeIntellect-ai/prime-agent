@@ -145,8 +145,9 @@ pub struct IpythonKernelProvisionerOptions {
     pub on_bootstrap_result: Option<KernelBootstrapResultHandler>,
 }
 
-/// Why and how long the last startup failed, kept so `ensure()` callers see
-/// the full cause instead of a bare "kernel startup failed".
+/// Why and how long one startup failed, published through the shared startup
+/// watch so every joined `ensure()` caller sees the same cause and duration
+/// instead of a bare "kernel startup failed".
 #[derive(Clone)]
 struct StartupFailure {
     /// Full error chain (`{:#}` formatting).
@@ -154,16 +155,15 @@ struct StartupFailure {
     duration_ms: u64,
 }
 
+type StartupResult = Result<ReplKernelManager, StartupFailure>;
+
 struct ProvisionerState {
     manager: Option<ReplKernelManager>,
-    /// The memoized startup: a task that settles by setting `manager`
-    /// (success) or clearing itself (failure).
-    startup: Option<tokio::task::JoinHandle<()>>,
+    /// Shared result of the in-flight boot. Joined callers retain its manager
+    /// even when a concurrent stop takes the provisioner's live owner.
+    startup: Option<tokio::sync::watch::Receiver<Option<StartupResult>>>,
     startup_listeners: Vec<KernelBootstrapProgressHandler>,
     last_startup_message: Option<String>,
-    /// The most recent startup failure; surfaced by `ensure()` until a new
-    /// start succeeds, so joining callers get the real cause and duration.
-    last_startup_failure: Option<StartupFailure>,
     last_restore: Option<RestoreResult>,
     disposed: bool,
     /// Snapshot policy of the dispose that aborted a startup, honored by
@@ -174,8 +174,8 @@ struct ProvisionerState {
     /// before reading that snapshot back, so the two kernels never race
     /// over the same on-disk file. The receiver yields `true` once the
     /// recorded stop settles (a settled stop awaits instantly; a dead
-    /// sender errs and unblocks the same way); each stop supersedes the
-    /// previous.
+    /// sender errs and unblocks the same way); each stop's gate also
+    /// waits for the previous stop's gate.
     pending_stop: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
@@ -207,7 +207,6 @@ impl IpythonKernelProvisioner {
                     startup: None,
                     startup_listeners: Vec::new(),
                     last_startup_message: None,
-                    last_startup_failure: None,
                     last_restore: None,
                     disposed: false,
                     dispose_snapshot: true,
@@ -261,6 +260,13 @@ impl IpythonKernelProvisioner {
     /// Returns an error when the abort signal is already cancelled or fires
     /// during the wait, when the provisioner was disposed, or when the kernel
     /// startup fails (all joined callers see the same failure).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared startup watch settles without publishing a
+    /// result; the publisher always sends the result before clearing the
+    /// memo, so this is a construction invariant rather than a runtime
+    /// path.
     pub async fn ensure(
         &self,
         on_progress: Option<KernelBootstrapProgressHandler>,
@@ -274,13 +280,11 @@ impl IpythonKernelProvisioner {
         // The guard is strictly scoped to this decision block: a
         // conditionally-dropped non-Send MutexGuard would make ensure()
         // non-Send.
-        let decision = {
+        let mut startup = {
             let mut state = self.lock_state();
             if state.disposed {
                 return Err(anyhow!("Kernel provisioner disposed"));
             }
-            // Only a terminally dead kernel drops the memo; a repairing
-            // manager (idle/starting) recovers itself.
             if let Some(manager) = &state.manager {
                 if manager.is_defunct() {
                     state.manager = None;
@@ -290,58 +294,90 @@ impl IpythonKernelProvisioner {
             if let Some(manager) = state.manager.clone() {
                 return Ok(manager);
             }
-            state.startup.is_some()
-        };
-        if decision {
-            return self.settled_manager(signal).await;
-        }
-        {
-            let mut state = self.lock_state();
             if let Some(progress) = &on_progress {
                 if let Some(message) = state.last_startup_message.as_deref() {
                     progress(message);
                 }
                 state.startup_listeners.push(progress.clone());
             }
-        }
-        let task = tokio::spawn(run_startup(Arc::clone(&self.inner), on_progress));
-        self.lock_state().startup = Some(task);
-        let _ = self.wait_for_startup_task(signal.clone()).await;
-        self.settled_manager(signal).await
-    }
-
-    /// After the memoized startup task handle: on abort the task keeps
-    /// running for other callers, mirroring the TS race-with-abort.
-    async fn wait_for_startup_task(&self, signal: Option<AbortSignal>) -> anyhow::Result<()> {
-        let Some(task) = self.lock_state().startup.take() else {
-            return Ok(());
+            if let Some(startup) = &state.startup {
+                startup.clone()
+            } else {
+                let (done_tx, done_rx) = tokio::sync::watch::channel(None);
+                let inner = Arc::clone(&self.inner);
+                let pending_stop = state.pending_stop.clone();
+                let startup_progress = on_progress.clone();
+                let memo = done_rx.clone();
+                tokio::spawn(async move {
+                    let boot =
+                        tokio::spawn(run_startup(inner.clone(), startup_progress, pending_stop));
+                    let result = match boot.await {
+                        Ok(result) => result,
+                        Err(error) => {
+                            // A panicked boot never reached run_startup's own
+                            // settle block, so clear the listener state here:
+                            // the next ensure() must boot fresh (self-heal).
+                            let mut state = inner
+                                .state
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            state.startup_listeners.clear();
+                            state.last_startup_message = None;
+                            Err(StartupFailure {
+                                message: format!("kernel startup task failed: {error}"),
+                                duration_ms: 0,
+                            })
+                        }
+                    };
+                    // Publish the completed result before clearing the memo:
+                    // joined waiters keep the manager even if stop takes it.
+                    let _ = done_tx.send(Some(result));
+                    let mut state = inner
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    // A defunct manager may already have been replaced by a
+                    // newer boot; only clear the memo if it is still ours.
+                    if state
+                        .startup
+                        .as_ref()
+                        .is_some_and(|current| current.same_channel(&memo))
+                    {
+                        state.startup = None;
+                    }
+                });
+                state.startup = Some(done_rx.clone());
+                done_rx
+            }
         };
-        race_startup(task, signal).await
-    }
-
-    /// After the memoized startup settles, return the manager it produced —
-    /// or its error when it failed and nothing superseded it.
-    fn settled_manager(
-        &self,
-        signal: Option<AbortSignal>,
-    ) -> impl std::future::Future<Output = anyhow::Result<ReplKernelManager>> {
-        if let Some(signal) = signal {
+        // Aborting one waiter leaves the shared startup alive for other
+        // callers, like TS raceWithAbort(managerPromise, signal).
+        let wait = async { startup.wait_for(Option::is_some).await };
+        let completion = match &signal {
+            Some(signal) => tokio::select! {
+                result = wait => result,
+                () = signal.cancelled() => return Err(anyhow!("Python execution aborted")),
+            },
+            None => wait.await,
+        };
+        if let Some(signal) = &signal {
             if signal.is_aborted() {
-                return std::future::ready(Err(anyhow!("Python execution aborted")));
+                return Err(anyhow!("Python execution aborted"));
             }
         }
-        let state = self.lock_state();
-        std::future::ready(match state.manager.clone() {
-            Some(manager) => Ok(manager),
-            None => match state.last_startup_failure.clone() {
-                Some(failure) => Err(anyhow!(
-                    "kernel startup failed after {}ms: {}",
-                    failure.duration_ms,
-                    failure.message
-                )),
-                None => Err(anyhow!("kernel startup failed")),
-            },
-        })
+        completion.map_err(|error| anyhow!("kernel startup task closed: {error}"))?;
+        let settled = startup
+            .borrow()
+            .clone()
+            .expect("settled startup has a result");
+        match settled {
+            Ok(manager) => Ok(manager),
+            Err(failure) => Err(anyhow!(
+                "kernel startup failed after {}ms: {}",
+                failure.duration_ms,
+                failure.message
+            )),
+        }
     }
 
     /// Remove live variables above the snapshot's per-variable size limit.
@@ -376,23 +412,27 @@ impl IpythonKernelProvisioner {
     /// and the next `ensure()` boots fresh.
     pub async fn stop_kernel(&self, options: Option<KernelShutdownOptions>) {
         let snapshot = options.is_none_or(|o| o.snapshot);
-        let (manager, startup) = {
+        let (manager, startup, stop_tx, previous_stop) = {
             let mut state = self.lock_state();
             state.dispose_snapshot = snapshot;
-            (state.manager.take(), state.startup.take())
+            let manager = state.manager.take();
+            let startup = state.startup.clone();
+            if manager.is_none() && startup.is_none() {
+                return;
+            }
+            // Publish the predecessor gate while holding the same lock used by
+            // ensure() to select its startup; no revival can miss this stop.
+            let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+            let previous_stop = state.pending_stop.replace(stop_rx);
+            (manager, startup, stop_tx, previous_stop)
         };
-        if manager.is_none() && startup.is_none() {
-            return;
-        }
         let inner = Arc::clone(&self.inner);
-        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-        self.lock_state().pending_stop = Some(stop_rx);
         let stop = tokio::spawn(async move {
             let manager = if let Some(manager) = manager {
                 Some(manager)
             } else {
-                if let Some(startup) = startup {
-                    let _ = startup.await;
+                if let Some(mut startup) = startup {
+                    let _ = startup.wait_for(Option::is_some).await;
                 }
                 inner
                     .state
@@ -409,6 +449,12 @@ impl IpythonKernelProvisioner {
                     })
                     .await;
             }
+            // Concurrent stops can join the same boot and only one of them
+            // takes its manager, so this gate also waits for the earlier
+            // stop's shutdown before a revival may read the snapshot.
+            if let Some(mut previous_stop) = previous_stop {
+                let _ = previous_stop.wait_for(|done| *done).await;
+            }
             let _ = stop_tx.send(true);
         });
         let _ = stop.await;
@@ -416,16 +462,17 @@ impl IpythonKernelProvisioner {
 
     pub async fn dispose(&self, options: Option<KernelShutdownOptions>) {
         let snapshot = options.is_none_or(|o| o.snapshot);
-        {
+        let mut startup = {
             let mut state = self.lock_state();
             state.dispose_snapshot = snapshot;
             state.disposed = true;
-        }
-        self.inner.dispose_signal.abort();
-        let manager = {
-            let mut state = self.lock_state();
-            state.manager.take()
+            state.startup.clone()
         };
+        self.inner.dispose_signal.abort();
+        if let Some(startup) = &mut startup {
+            let _ = startup.wait_for(Option::is_some).await;
+        }
+        let manager = self.lock_state().manager.take();
         if let Some(manager) = manager {
             let _ = manager
                 .shutdown(KernelShutdownOptions {
@@ -517,14 +564,15 @@ fn startup_failure_is_retryable(error: &anyhow::Error) -> bool {
 async fn run_startup(
     inner: Arc<ProvisionerInner>,
     on_progress: Option<KernelBootstrapProgressHandler>,
-) {
+    pending_stop: Option<tokio::sync::watch::Receiver<bool>>,
+) -> StartupResult {
     let started = std::time::Instant::now();
     let budget = std::time::Duration::from_millis(resolve_startup_budget_ms());
     let mut remaining_retries = resolve_startup_retries();
     let mut attempt: u32 = 0;
     let outcome = loop {
         attempt += 1;
-        match start_kernel(&inner, on_progress.as_ref()).await {
+        match start_kernel(&inner, on_progress.as_ref(), pending_stop.clone()).await {
             Ok(manager) => break Ok(manager),
             Err(error) => {
                 if inner
@@ -559,58 +607,39 @@ async fn run_startup(
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.startup = None;
         state.startup_listeners.clear();
         state.last_startup_message = None;
-        if let Err(error) = &outcome {
-            state.manager = None;
-            state.last_startup_failure = Some(StartupFailure {
-                message: format!("{error:#}"),
-                duration_ms,
-            });
-        }
         (outcome.is_ok() && state.disposed, state.dispose_snapshot)
     };
-    if let Ok(manager) = outcome {
-        if raced_dispose {
-            // A dispose raced the boot: the kernel must not be parked
-            // in — or outlive — a disposed provisioner. TS startKernel
-            // runs the whole boot on a dispose-linked abort and its
-            // catch tears the kernel down with the dispose's snapshot
-            // policy; the Rust boot completes and the teardown follows
-            // here with the same policy.
-            let _ = manager
-                .shutdown(KernelShutdownOptions {
-                    snapshot: dispose_snapshot,
-                    drain_host_requests: true,
-                })
-                .await;
-            return;
-        }
-        let mut state = inner
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.last_startup_failure = None;
-        state.manager = Some(manager);
-    }
-}
-
-async fn race_startup(
-    task: tokio::task::JoinHandle<()>,
-    signal: Option<AbortSignal>,
-) -> anyhow::Result<()> {
-    match signal {
-        None => {
-            let _ = task.await;
-            Ok(())
-        }
-        Some(signal) => {
-            tokio::select! {
-                _ = task => Ok(()),
-                () = signal.cancelled() => Err(anyhow!("Kernel startup aborted")),
+    match outcome {
+        Ok(manager) => {
+            if raced_dispose {
+                // A dispose raced the boot: tear the kernel down with the
+                // dispose's snapshot policy (TS startKernel's catch) and
+                // reject with its abort error instead of handing joined
+                // callers a manager that is already dead.
+                let _ = manager
+                    .shutdown(KernelShutdownOptions {
+                        snapshot: dispose_snapshot,
+                        drain_host_requests: true,
+                    })
+                    .await;
+                return Err(StartupFailure {
+                    message: "Kernel provisioner disposed during startup".to_string(),
+                    duration_ms,
+                });
             }
+            let mut state = inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.manager = Some(manager.clone());
+            Ok(manager)
         }
+        Err(error) => Err(StartupFailure {
+            message: format!("{error:#}"),
+            duration_ms,
+        }),
     }
 }
 
@@ -621,6 +650,7 @@ async fn race_startup(
 async fn start_kernel(
     inner: &Arc<ProvisionerInner>,
     on_progress: Option<&KernelBootstrapProgressHandler>,
+    pending_stop: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> anyhow::Result<ReplKernelManager> {
     let started = std::time::Instant::now();
     let cold = !inner
@@ -628,7 +658,7 @@ async fn start_kernel(
         .snapshot_dir
         .as_ref()
         .is_some_and(|dir| snapshot_path_in(dir).exists());
-    let result = start_kernel_impl(inner, on_progress).await;
+    let result = start_kernel_impl(inner, on_progress, pending_stop).await;
     if let Some(report) = &inner.options.on_bootstrap_result {
         report(KernelBootstrapStats {
             cold,
@@ -646,6 +676,7 @@ async fn start_kernel(
 async fn start_kernel_impl(
     inner: &Arc<ProvisionerInner>,
     on_progress: Option<&KernelBootstrapProgressHandler>,
+    mut pending_stop: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> anyhow::Result<ReplKernelManager> {
     let options = &inner.options;
     let cwd = inner.cwd.clone();
@@ -655,16 +686,17 @@ async fn start_kernel_impl(
     let permit_dispose_signal = dispose_signal.clone();
     // Wait for this provisioner's own in-flight stop_kernel() — and its
     // final snapshot flush — before reading that snapshot back (TS #2483's
-    // `pendingStop` gate; a completed stop awaits instantly and each stop
-    // supersedes the previous). `ready_gate` stays the cross-provisioner
+    // `pendingStop` gate; a completed stop awaits instantly and the latest
+    // stop's gate also covers the earlier ones). `ready_gate` stays the cross-provisioner
     // /reload arm.
-    let stop_gate = inner
-        .state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .pending_stop
-        .clone();
-    if let Some(mut stop_gate) = stop_gate {
+    if let Some(stop_gate) = &mut pending_stop {
+        if !*stop_gate.borrow() {
+            emit_startup_progress(
+                inner,
+                on_progress,
+                "Waiting for the previous kernel to stop...",
+            );
+        }
         let _ = stop_gate.wait_for(|done| *done).await;
     }
     // Wait for a previous provisioner (e.g. on /reload) to finish disposing —

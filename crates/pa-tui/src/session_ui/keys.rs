@@ -1084,13 +1084,11 @@ impl SessionUi {
         // TS `CustomEditor.handleInput`'s move-below-prompt hook
         // (`onMoveBelowPrompt` -> `focusSubagentSummary`): Down at the end
         // of the prompt — no autocomplete open, no history browse, the
-        // cursor at the last line's end — hands the focus to the subagent
-        // summary line when it is selectable; every other Down falls
-        // through to the editor's cursor motion (a non-selectable line
-        // never takes it). TS `SubagentSummaryLine.isSelectable()` grants
-        // the grab only when subagents exist — the dock's other groups
-        // keep their `app.subagents.focus` shortcut, so the prompt's
-        // arrows stay the input-history recall in every session shape.
+        // cursor at the last line's end — hands the focus to the activity
+        // dock in every session shape, all-zero counts included; every
+        // other Down falls through to the editor's cursor motion. Only the
+        // tray override (the armed exit hint, the streaming follow-up
+        // hint) keeps the editor's Down.
         if view
             .editor
             .keybindings()

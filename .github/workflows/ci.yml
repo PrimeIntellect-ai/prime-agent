@@ -6,7 +6,7 @@
 # --all-targets -- -D warnings, cargo test --workspace) on the pinned
 # toolchain (1.98.1) and runner image the continuous/release builds use:
 #
-#   push to main/rust — every merge is a push. continuous.yml proves the
+#   push to main — every merge is a push. continuous.yml proves the
 #   release binaries link; THIS workflow proves the tip's test/bench/example
 #   targets compile (`cargo check --workspace --all-targets`) and the test
 #   suites pass (the test suite sharded below; the count is the SHARD_COUNT
@@ -164,9 +164,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; toolchain pinned below
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; the SHA selects the toolchain
         with:
-          toolchain: "1.98.1"
           components: rustfmt
       - run: cargo fmt --all --check
 
@@ -179,9 +178,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; toolchain pinned below
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; the SHA selects the toolchain
         with:
-          toolchain: "1.98.1"
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -229,20 +227,19 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; toolchain pinned below
-        with:
-          toolchain: "1.98.1"
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; the SHA selects the toolchain
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cache-on-failure: true
-          # One shared dependency cache for all legs: every shard compiles
-          # the same dependency set, so per-shard keys held 8x ~500 MB per
-          # ref and evicted the release-build caches (the repo sits at the
-          # 10 GB Actions-cache quota; the shards were 83% of it). Parallel
-          # legs race on the single entry and only the first save sticks,
-          # which is fine: the content is the pruned dependency tree.
+          # One shared dependency cache for all legs: per-shard keys held
+          # 8x ~500 MB per ref and evicted the release-build caches (the
+          # repo sits at the 10 GB Actions-cache quota; the shards were 83%
+          # of it). The shards' dev-dependencies differ, and whichever leg
+          # saves first defines the shared entry, so other legs get a
+          # partial hit and compile the rest. Slower hits, no correctness
+          # issue.
           shared-key: test-shards
-      - name: Install uv (the kernel tests bootstrap the Python kernel venv with it)
+      - name: Install uv (the kernel venv bootstrap below uses it)
         run: |
           python3 -m pip install --user uv
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"

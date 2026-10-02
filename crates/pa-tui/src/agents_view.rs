@@ -473,6 +473,10 @@ struct AgentsViewMode {
     /// user move cancels the wait. A scoped view never lists the anchor
     /// (the scope root is excluded), so the first-row default stands there.
     anchor_selection_pending: bool,
+    /// The selection a cleared search returns to: the row selected when
+    /// the query went non-empty. A move while searching drops it, so the
+    /// clear keeps the user's pick.
+    search_return: Option<(String, SelectionKey)>,
     /// First ctrl+c shows the exit hint; the second exits.
     exit_armed: bool,
     /// The double-Ctrl+C force-quit guard (the run's shared instance is
@@ -635,6 +639,7 @@ impl AgentsViewMode {
             selected_identity,
             selected_key,
             anchor_selection_pending,
+            search_return: None,
             exit_armed: false,
             exit_guard: crate::exit_guard::ExitGuard::new(),
             pulse: 0,

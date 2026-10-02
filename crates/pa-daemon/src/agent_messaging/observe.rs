@@ -231,7 +231,8 @@ pub(super) fn summaries_from_roster(
             // A resident session's family status is the busy verdict
             // (`activity === "working" || isSessionActive`) split into
             // `running`/`idle`; `inactive` names only rows with no
-            // resident session.
+            // resident session. A session whose subagents still run
+            // reports `activity: "working"`, so it counts as running.
             let status = if !has_live_session {
                 AgentFamilyStatus::Inactive
             } else if session.get("activity").and_then(Value::as_str) == Some("working")

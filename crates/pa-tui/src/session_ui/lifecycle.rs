@@ -355,6 +355,16 @@ impl SessionUi {
         {
             self.client.drop_direct();
         }
+        // The primary interactive connection sends its Herdr pane identity
+        // with attach so an env-less session (e.g. cron-created) can adopt
+        // it (adopt-if-absent, never rebind — the daemon owns that rule);
+        // a client outside a Herdr pane sends nothing (the wire keeps its
+        // tip shape).
+        let client_env = {
+            let env =
+                pa_types::daemon::herdr_env::collect_client_env(|key| std::env::var(key).ok());
+            (!env.is_empty()).then_some(env)
+        };
         let attach_command = |session_id: &str| DaemonCommand::Attach {
             id: None,
             active_session_id: session_id.to_string(),
@@ -372,7 +382,7 @@ impl SessionUi {
             resume_cursor: None,
             telemetry_disabled: self.telemetry_disabled.filter(|disabled| *disabled),
             recovery_config: None,
-            env: None,
+            env: client_env.clone(),
             launch_env: None,
             rest: Map::default(),
         };

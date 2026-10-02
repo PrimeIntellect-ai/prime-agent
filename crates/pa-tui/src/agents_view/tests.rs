@@ -22,6 +22,7 @@ mod render_pulse;
 mod reply;
 mod running_lines;
 mod saved_catalog;
+mod search_selection;
 mod selection_churn;
 
 /// One idle row under test plus a holder row that keeps the selection,
