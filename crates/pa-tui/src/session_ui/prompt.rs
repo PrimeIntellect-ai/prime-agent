@@ -47,6 +47,9 @@ pub(crate) struct PromptSubmitNote {
     /// the attachments rehydratable even after the editor cleared and the
     /// registry could evict them.
     pub(crate) stashed_images: Vec<(u64, LoadedImage)>,
+    /// The stash head this submit captured (TS `promptStashToRestore`): its
+    /// admitted outcome restores it if it is still the head.
+    pub(crate) stash_to_restore: Option<PromptStash>,
     /// Whether the turn was already active at submit time (the
     /// queued-input telemetry's lane gate; the inline path read the same
     /// flag after its await, which nothing could move while the loop was
@@ -89,6 +92,7 @@ pub(crate) struct PromptOrder {
     pub(crate) behavior: SubmitBehavior,
     pub(crate) images: Option<serde_json::Value>,
     pub(crate) stashed_images: Vec<(u64, LoadedImage)>,
+    pub(crate) stash_to_restore: Option<PromptStash>,
     pub(crate) turn_was_active: bool,
     pub(crate) expected_turn_end: u64,
     pub(crate) generation: u64,
@@ -338,7 +342,8 @@ impl SessionUi {
     /// `restorePromptStashOnOpen`'s gate) restores only an auto
     /// restore-on-open head, while the manual `app.prompt.stash` key
     /// restores whatever draft the session holds — a manual stash never
-    /// lands on an open or a switch, only on its own key.
+    /// lands on an open or a switch, only on its own key or after the
+    /// next admitted send (TS `promptStashToRestore`).
     pub(super) fn restore_prompt_stash_if_editor_empty(
         &mut self,
         view: &mut AgentView,
@@ -765,11 +770,19 @@ impl SessionUi {
                 .collect();
         self.input_submission_generation += 1;
         let generation = self.input_submission_generation;
+        let stash_to_restore = self
+            .prompt_stash
+            .lock()
+            .expect("prompt stash store poisoned")
+            .for_session(&self.stash_session_id)
+            .stash
+            .clone();
         self.order_prompt_request(
             text.to_string(),
             behavior,
             images,
             stashed_images,
+            stash_to_restore,
             true,
             generation,
         );
@@ -787,12 +800,14 @@ impl SessionUi {
     /// one-rebind budget: the first attempt may re-attach and replay on
     /// the unknown-session refusal, a replay may not rebind again (the
     /// replay is the second and last attempt).
+    #[allow(clippy::too_many_arguments)]
     fn order_prompt_request(
         &mut self,
         text: String,
         behavior: SubmitBehavior,
         images: Option<serde_json::Value>,
         stashed_images: Vec<(u64, LoadedImage)>,
+        stash_to_restore: Option<PromptStash>,
         rebind_available: bool,
         generation: u64,
     ) {
@@ -813,6 +828,7 @@ impl SessionUi {
             behavior,
             images,
             stashed_images,
+            stash_to_restore,
             turn_was_active,
             expected_turn_end,
             generation,
@@ -877,6 +893,7 @@ impl SessionUi {
                 behavior: order.behavior,
                 images: order.images,
                 stashed_images: order.stashed_images,
+                stash_to_restore: order.stash_to_restore,
                 turn_was_active: order.turn_was_active,
                 expected_turn_end: order.expected_turn_end,
                 generation: order.generation,
@@ -987,6 +1004,23 @@ impl SessionUi {
                     self.start_loader(view);
                     self.dirty = true;
                 }
+                // TS `onSubmit`'s finally: the current submit's admitted prompt
+                // restores the stash head it captured, if that is still the head.
+                if note.generation == self.input_submission_generation {
+                    if let Some(captured) = note.stash_to_restore {
+                        let head_unchanged = self
+                            .prompt_stash
+                            .lock()
+                            .expect("prompt stash store poisoned")
+                            .for_session(&self.stash_session_id)
+                            .stash
+                            .as_ref()
+                            == Some(&captured);
+                        if head_unchanged {
+                            self.restore_prompt_stash_if_editor_empty(view, false);
+                        }
+                    }
+                }
                 Ok(())
             }
             Err(error) => {
@@ -1031,6 +1065,7 @@ impl SessionUi {
                             note.behavior,
                             note.images.clone(),
                             note.stashed_images.clone(),
+                            note.stash_to_restore.clone(),
                             false,
                             note.generation,
                         );

@@ -29,8 +29,18 @@ pub struct HeartbeatJob {
 
 impl HeartbeatJob {
     /// The job's status word, `active` or `paused`.
-    pub(super) fn is_active(&self) -> bool {
+    pub(crate) fn is_active(&self) -> bool {
         self.status == "active"
+    }
+
+    /// Whether this job belongs to the session: its durable session
+    /// matches, or its live session does (TS `scopeHeartbeatsToSession`'s
+    /// own-session arms). An empty id is no session identity: neither
+    /// arm matches on one.
+    pub(crate) fn in_session(&self, active_session_id: Option<&str>, session_id: &str) -> bool {
+        (!session_id.is_empty() && self.session_id == session_id)
+            || active_session_id
+                .is_some_and(|active| !active.is_empty() && self.active_session_id == active)
     }
 
     /// Whether an agent created this job (TS source label test).
@@ -121,15 +131,13 @@ pub fn scope_heartbeats(
     session_id: Option<&str>,
     child_active_session_ids: &[String],
 ) -> Vec<HeartbeatEntry> {
-    let Some(session_id) = session_id.filter(|id| !id.is_empty()) else {
+    let Some(session_id) = session_id else {
         return Vec::new();
     };
     entries
         .into_iter()
         .filter(|entry| {
-            entry.job.session_id == session_id
-                || (active_session_id.is_some()
-                    && entry.job.active_session_id == active_session_id.unwrap_or_default())
+            entry.job.in_session(active_session_id, session_id)
                 || child_active_session_ids.contains(&entry.job.active_session_id)
         })
         .collect()
