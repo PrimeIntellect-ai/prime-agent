@@ -101,10 +101,7 @@ fn a_matching_selection_still_moves_to_the_top_hit() {
 }
 
 /// The editor's word-delete binding (TS `Editor.handleInput`'s
-/// `deleteWordBackward`, ctrl+w) deletes the query's trailing word —
-/// the single-character decode dropped the multi-character id (the
-/// #3309 class), so a multi-word query could only be corrected one
-/// backspace at a time.
+/// `deleteWordBackward`, ctrl+w) deletes the query's trailing word.
 #[test]
 fn ctrl_w_deletes_the_query_s_trailing_word() {
     let mut mode = fresh_mode(search_roster());

@@ -709,10 +709,8 @@ mod tests {
     }
 
     /// TS `ConfigSelectorComponent.handleInput`'s final arm hands every
-    /// non-intercepted key to the search `Input`, whose edit bindings
-    /// (ctrl+w, ctrl+u) dispatch on their multi-character key ids — a
-    /// single-character gate here drops each one, so a mistyped word in
-    /// the filter can only be corrected one backspace at a time.
+    /// non-intercepted key to the search `Input`, so the word and line
+    /// kills (ctrl+w, ctrl+u) edit the filter.
     #[test]
     fn word_and_line_edits_reach_the_filter() {
         let mut selector = ConfigSelector::new(rows());
@@ -749,7 +747,7 @@ mod tests {
 
     /// The no-match edge state recovers through the same grammar: a
     /// garbage query that empties the list backspaces away, and the rows
-    /// return (the #3309 operator sequence, this surface's shape).
+    /// return.
     #[test]
     fn the_no_match_state_recovers_through_backspace() {
         let mut selector = ConfigSelector::new(rows());
@@ -868,9 +866,8 @@ mod keybind_tests {
     }
 
     /// A rebound `tui.editor.deleteCharBackward` moves with the table
-    /// (TS the search `Input`'s binding): the pre-fix hard-coded
-    /// backspace kept deleting on the freed key while the remapped key
-    /// never reached the filter.
+    /// (TS the search `Input`'s binding): the remapped key edits the
+    /// filter and the freed key no longer deletes.
     #[test]
     fn a_remapped_backspace_binding_edits_the_filter() {
         let mut selector = selector();

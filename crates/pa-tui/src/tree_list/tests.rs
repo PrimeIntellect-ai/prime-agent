@@ -243,8 +243,7 @@ fn named_key_ids_never_join_the_search_query() {
 }
 
 /// The space key id types a space (TS appends the raw 0x20; the port
-/// receives the `space` id, which the raw gate appended as the literal
-/// "space").
+/// receives the `space` id).
 #[test]
 fn the_space_key_id_types_a_space() {
     let flat = vec![

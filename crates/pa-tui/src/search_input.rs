@@ -457,10 +457,7 @@ mod tests {
     /// The `space` key id types a space: TS `Input.handleInput`'s
     /// regular-character arm reads the RAW space byte (0x20, printable),
     /// while this port receives TS's `space` key id, so the same printable
-    /// decode that maps it back feeds the value — a gate on the id's own
-    /// characters ("space" is five of them) dropped every typed space in
-    /// the pickers that mount this input (the #3309 class, the sub-input
-    /// half).
+    /// decode that maps it back feeds the value.
     #[test]
     fn the_space_key_id_types_a_space() {
         let mut input = typed("a");

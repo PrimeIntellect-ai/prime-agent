@@ -136,8 +136,9 @@ impl TreeSelector {
                 }
                 TreeListAction::Cancel => TreeSelectorAction::Cancel,
                 TreeListAction::EditLabel(entry_id) => {
-                    // TS `LabelInput` seeds the input with the current label; the
-                    // caret starts at its end.
+                    // TS `LabelInput` seeds the input with the current label
+                    // (`setValue`, which leaves the caret at 0); the port's
+                    // prefill puts it at the end.
                     let current = self.list.label_of(&entry_id).unwrap_or_default();
                     let mut input = SearchInput::new();
                     input.prefill(&current);

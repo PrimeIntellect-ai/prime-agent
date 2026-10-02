@@ -389,8 +389,8 @@ pub(crate) fn search_field_plain_row(
     line
 }
 
-/// One input render (TS `Input.render`): prompt, the visible slice with the
-/// caret (a reversed cell) at the cursor, and trailing padding.
+/// One input render (TS `Input.render`): the visible slice of the value with
+/// the caret (a reversed cell) at the cursor. Callers draw the prompt.
 pub(crate) fn input_render(
     theme: &Theme,
     width: usize,

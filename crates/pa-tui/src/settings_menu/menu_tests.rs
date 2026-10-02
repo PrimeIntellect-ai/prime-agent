@@ -550,9 +550,7 @@ fn opening_into_a_setting_keeps_the_top_bar_and_the_padding() {
 /// The search field takes the WHOLE key id (TS `Input.handleInput`, the
 /// `SettingsList.handleInput` final arm): Backspace deletes the query.
 /// After garbage filters the list to the no-match row, backspacing it
-/// away must return the settings rows — the port's single-character
-/// gate dropped every multi-character key id ("backspace" first), so the
-/// menu stranded on its empty state with the field uncorrectable.
+/// away returns the settings rows.
 #[test]
 fn backspace_edits_the_search_query() {
     let mut menu = menu();
